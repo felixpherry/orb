@@ -1,20 +1,22 @@
 //! The frontend loop: wait for input or pane activity, apply it, draw once.
 //!
-//! Terminal input and the pane's background threads all feed one channel. The
-//! loop sleeps until something arrives, handles everything pending, and then
-//! draws a single frame, so there is no fixed tick and bursts of output cost
-//! one redraw. While attached, input goes straight to the pane's child; only
+//! Terminal input, the pane's background threads, and the actors' state
+//! changes all feed one channel. The loop sleeps until something arrives,
+//! handles everything pending, and then draws a single frame, so there is no
+//! fixed tick and bursts of output cost one redraw. While attached, input goes straight to the pane's child; only
 //! the keys bound in [`keymap`] become intents.
 
 use std::ffi::OsString;
 use std::io::{self, Write};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Instant;
 
 use error_stack::{Report, ResultExt};
-use orb_domain::feat::sessions::child_env::child_env;
-use orb_domain::{AppState, Command, Focus, IntentHandler};
+use kameo::prelude::ActorRef;
+use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
+use orb_domain::{AppState, Command, Focus, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
@@ -30,24 +32,52 @@ use crate::outer_terminal;
 #[error(debug)]
 pub struct TuiRunError;
 
-/// Run orb's TUI until the user quits. Attached sessions run with an
-/// environment derived from `parent_env`. The terminal is restored on exit and
-/// on panic.
-///
-/// # Errors
-///
-/// Returns [`TuiRunError`] if drawing a frame or reading a terminal event fails.
-pub fn run(parent_env: Vec<(OsString, OsString)>) -> Result<(), Report<TuiRunError>> {
-    let env = child_env(parent_env);
-    ratatui::run(|terminal| -> io::Result<()> {
-        outer_terminal::enable(terminal.backend_mut())?;
-        outer_terminal::install_panic_hook();
+/// orb's TUI. Created before the actors so they can wake its loop.
+pub struct Frontend {
+    tx: Sender<LoopEvent>,
+    rx: Receiver<LoopEvent>,
+}
+
+impl Default for Frontend {
+    fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        let result = App::new(env, tx).run(terminal, &rx);
-        let restored = outer_terminal::disable(terminal.backend_mut());
-        result.and(restored)
-    })
-    .change_context(TuiRunError)
+        Self { tx, rx }
+    }
+}
+
+impl Frontend {
+    /// Wakes the loop to redraw after an actor changed the state.
+    pub fn waker(&self) -> Wake {
+        let tx = self.tx.clone();
+        Arc::new(move || {
+            let _ = tx.send(LoopEvent::StateChanged);
+        })
+    }
+
+    /// Runs orb's TUI until the user quits. Session commands go to
+    /// `sessions`; attached sessions run with `claude_env`. The terminal is
+    /// restored on exit and on panic.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuiRunError`] if drawing a frame or reading a terminal event
+    /// fails.
+    pub fn run(
+        self,
+        state: State,
+        sessions: ActorRef<SessionsActor>,
+        claude_env: Vec<(OsString, OsString)>,
+    ) -> Result<(), Report<TuiRunError>> {
+        let Self { tx, rx } = self;
+        ratatui::run(|terminal| -> io::Result<()> {
+            outer_terminal::enable(terminal.backend_mut())?;
+            outer_terminal::install_panic_hook();
+            let result = App::new(state, sessions, claude_env, tx).run(terminal, &rx);
+            let restored = outer_terminal::disable(terminal.backend_mut());
+            result.and(restored)
+        })
+        .change_context(TuiRunError)
+    }
 }
 
 /// Something that wakes the loop.
@@ -55,10 +85,13 @@ enum LoopEvent {
     Input(Event),
     InputFailed(io::Error),
     Pane(PaneEvent),
+    /// An actor changed the state.
+    StateChanged,
 }
 
 struct App {
-    state: AppState,
+    state: State,
+    sessions: ActorRef<SessionsActor>,
     pane: Option<Pane>,
     /// Shown in place of the pane when it couldn't start.
     status: Option<String>,
@@ -71,9 +104,15 @@ struct App {
 }
 
 impl App {
-    fn new(env: Vec<(OsString, OsString)>, tx: Sender<LoopEvent>) -> Self {
+    fn new(
+        state: State,
+        sessions: ActorRef<SessionsActor>,
+        env: Vec<(OsString, OsString)>,
+        tx: Sender<LoopEvent>,
+    ) -> Self {
         Self {
-            state: AppState::default(),
+            state,
+            sessions,
             pane: None,
             status: None,
             env,
@@ -94,13 +133,13 @@ impl App {
             terminal.draw(|frame| {
                 render(
                     frame,
-                    &self.state,
+                    &self.state.read(),
                     self.pane.as_ref(),
                     self.status.as_deref(),
                 );
             })?;
             self.mirror_cursor_style(terminal.backend_mut())?;
-            if self.state.should_quit {
+            if self.state.read().should_quit {
                 return Ok(());
             }
             let first = match self.pane.as_ref().and_then(Pane::sync_deadline) {
@@ -129,7 +168,7 @@ impl App {
     fn attached_pane(&self) -> Option<&Pane> {
         self.pane
             .as_ref()
-            .filter(|_| self.state.focus == Focus::Attached)
+            .filter(|_| self.state.read().focus == Focus::Attached)
     }
 
     fn handle<W>(&mut self, event: LoopEvent, out: &mut W) -> io::Result<()>
@@ -138,9 +177,11 @@ impl App {
     {
         match event {
             LoopEvent::Input(Event::Key(key)) if key.kind != KeyEventKind::Release => {
-                match keymap::route(key, self.state.focus) {
+                let focus = self.state.read().focus;
+                match keymap::route(key, focus) {
                     Route::Intent(intent) => {
-                        for command in IntentHandler::handle(&intent, &mut self.state) {
+                        let commands = IntentHandler::handle(&intent, &mut self.state.write());
+                        for command in commands {
                             self.execute(&command, out)?;
                         }
                     }
@@ -173,13 +214,13 @@ impl App {
                 }
             }
             // Resize and the rest: the next iteration lays out and redraws.
-            LoopEvent::Input(_) | LoopEvent::Pane(PaneEvent::Output) => {}
+            LoopEvent::Input(_) | LoopEvent::Pane(PaneEvent::Output) | LoopEvent::StateChanged => {}
             LoopEvent::InputFailed(error) => return Err(error),
             LoopEvent::Pane(PaneEvent::Clipboard(text)) => {
                 outer_terminal::copy_to_clipboard(out, &text)?;
             }
             LoopEvent::Pane(PaneEvent::Exited) => {
-                self.state.focus = Focus::Preview;
+                self.state.write().focus = Focus::Preview;
                 self.leave_pane(out)?;
             }
         }
@@ -210,7 +251,7 @@ impl App {
                         }
                         Err(_) => {
                             self.status = Some("couldn't start claude attach".to_owned());
-                            self.state.focus = Focus::Preview;
+                            self.state.write().focus = Focus::Preview;
                             return Ok(());
                         }
                     }
@@ -226,7 +267,17 @@ impl App {
                 }
                 self.leave_pane(out)
             }
-            Command::CreateSession | Command::RefreshSessions => Ok(()),
+            Command::CreateSession => {
+                let _ = self.sessions.tell(sessions_actor::CreateSession).try_send();
+                Ok(())
+            }
+            Command::RefreshSessions => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::RefreshSessions)
+                    .try_send();
+                Ok(())
+            }
         }
     }
 

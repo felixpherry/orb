@@ -5,4 +5,4 @@ mod keymap;
 mod outer_terminal;
 mod run;
 
-pub use run::{TuiRunError, run};
+pub use run::{Frontend, TuiRunError};
