@@ -4,4 +4,5 @@
 //! tracks which threads exist, what each is doing, and which one is selected.
 
 pub mod state;
+pub mod store;
 pub mod validator;
