@@ -31,5 +31,13 @@ Entries are added or amended **only with human approval**.
 
 ---
 
-- (keybinds) Plain `q` quits orb.
+- (keybinds) Plain `q` in Normal mode quits orb.
 - (keybinds) orb has no `:` command line.
+- (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
+- (pane) orb redraws when input, PTY output, or child exit wakes the loop; there is no fixed tick or frame throttle.
+- (pane) While attached, keys, paste, mouse, and focus events are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
+- (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
+- (pane) orb captures the mouse only while attached and forwards the child's OSC 52 clipboard writes to its outer terminal.
+- (cli) `orb -- <cmd…>` sets the command the terminal pane runs.
+- (keybinds) `⏎` in Normal mode attaches to the terminal pane; without a pane command it does nothing.
+- (keybinds) While attached, every key goes to the child except `<C-\>`, which returns to Normal mode.
