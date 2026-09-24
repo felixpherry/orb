@@ -24,8 +24,12 @@ pub(crate) fn route(key: KeyEvent, focus: Focus) -> Route {
             (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Route::Intent(Intent::Detach),
             _ => Route::Forward,
         },
-        Focus::Normal => match (key.code, key.modifiers) {
+        Focus::Sidebar => match (key.code, key.modifiers) {
             (KeyCode::Char('q'), KeyModifiers::NONE) => Route::Intent(Intent::Quit),
+            (KeyCode::Enter, KeyModifiers::NONE) => Route::Intent(Intent::Attach),
+            _ => Route::Ignore,
+        },
+        Focus::Preview => match (key.code, key.modifiers) {
             (KeyCode::Enter, KeyModifiers::NONE) => Route::Intent(Intent::Attach),
             _ => Route::Ignore,
         },
@@ -82,12 +86,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn enter_attaches_in_normal_focus() {
+    fn enter_attaches_in_sidebar_focus() {
         // Given a plain Enter press.
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
 
-        // When routing it in Normal focus.
-        let routed = route(key, Focus::Normal);
+        // When routing it in Sidebar focus.
+        let routed = route(key, Focus::Sidebar);
 
         // Then it attaches.
         assert_eq!(routed, Route::Intent(Intent::Attach), "Enter should attach");
@@ -98,8 +102,8 @@ mod tests {
         // Given a plain `q` press.
         let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
 
-        // When routing it in Normal focus.
-        let routed = route(key, Focus::Normal);
+        // When routing it in Sidebar focus.
+        let routed = route(key, Focus::Sidebar);
 
         // Then it quits.
         assert_eq!(routed, Route::Intent(Intent::Quit), "plain q should quit");
@@ -111,15 +115,15 @@ mod tests {
     #[case(KeyCode::Char('x'), KeyModifiers::NONE)]
     #[case(KeyCode::Esc, KeyModifiers::NONE)]
     #[case(KeyCode::Char('\\'), KeyModifiers::CONTROL)]
-    fn other_keys_are_ignored_in_normal_focus(
+    fn other_keys_are_ignored_in_sidebar_focus(
         #[case] code: KeyCode,
         #[case] modifiers: KeyModifiers,
     ) {
-        // Given a key that isn't bound in Normal focus.
+        // Given a key that isn't bound in Sidebar focus.
         let key = KeyEvent::new(code, modifiers);
 
-        // When routing it in Normal focus.
-        let routed = route(key, Focus::Normal);
+        // When routing it in Sidebar focus.
+        let routed = route(key, Focus::Sidebar);
 
         // Then nothing happens.
         assert_eq!(

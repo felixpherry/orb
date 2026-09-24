@@ -6,9 +6,17 @@ publish.workspace = true
 
 [dependencies]
 wherror = { workspace = true }
+error-stack = { workspace = true }
+tokio = { workspace = true }
+kameo = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
