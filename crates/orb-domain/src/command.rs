@@ -1,11 +1,18 @@
-//! Commands: work the [`IntentHandler`](crate::IntentHandler) asks the frontend
-//! loop to carry out after it has updated [`AppState`](crate::AppState).
+//! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
+//! has updated [`AppState`](crate::AppState). Pane commands are carried out by
+//! the frontend loop; session commands go to the sessions actor.
 
-/// Something the frontend loop must do in response to an intent.
+use crate::feat::sessions::state::AttachTarget;
+
+/// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Start (or refocus) the terminal pane and send it input.
-    Attach,
+    /// Show the target's session in the terminal pane and send it input.
+    Attach(AttachTarget),
     /// Stop sending input to the terminal pane.
     Detach,
+    /// Start a new Claude session.
+    CreateSession,
+    /// Poll the sessions' statuses now instead of waiting for the next tick.
+    RefreshSessions,
 }

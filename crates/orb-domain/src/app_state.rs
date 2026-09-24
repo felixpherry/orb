@@ -1,15 +1,18 @@
-//! Shared application state: written by the [`IntentHandler`](crate::IntentHandler),
-//! read by the renderer.
+//! Shared application state: written by the [`IntentHandler`](crate::IntentHandler)
+//! and the actors, read by the renderer.
 
-use std::ffi::OsString;
+use crate::feat::sessions::state::Sessions;
 
-/// Which side receives the user's keys.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Which part of orb receives the user's keys. Ordered so it can key the
+/// which-key scopes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Focus {
-    /// Keys drive orb itself.
+    /// Keys move through the sidebar's threads.
     #[default]
-    Normal,
-    /// Keys go to the terminal pane's child.
+    Sidebar,
+    /// Keys act on the selected thread's preview on the right.
+    Preview,
+    /// Keys go to the attached Claude session.
     Attached,
 }
 
@@ -20,6 +23,6 @@ pub struct AppState {
     pub should_quit: bool,
     /// Where the user's keys currently go.
     pub focus: Focus,
-    /// The command the terminal pane runs; empty when orb has no pane command.
-    pub pane_argv: Vec<OsString>,
+    /// orb's projects and their Claude sessions.
+    pub sessions: Sessions,
 }

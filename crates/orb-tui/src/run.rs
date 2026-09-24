@@ -8,7 +8,6 @@
 
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Instant;
@@ -31,28 +30,20 @@ use crate::outer_terminal;
 #[error(debug)]
 pub struct TuiRunError;
 
-/// Run orb's TUI until the user quits. `pane_argv` is what the terminal pane
-/// runs (empty for no pane); the child starts in `cwd` with an environment
-/// derived from `parent_env`. The terminal is restored on exit and on panic.
+/// Run orb's TUI until the user quits. Attached sessions run with an
+/// environment derived from `parent_env`. The terminal is restored on exit and
+/// on panic.
 ///
 /// # Errors
 ///
 /// Returns [`TuiRunError`] if drawing a frame or reading a terminal event fails.
-pub fn run(
-    pane_argv: Vec<OsString>,
-    cwd: PathBuf,
-    parent_env: Vec<(OsString, OsString)>,
-) -> Result<(), Report<TuiRunError>> {
-    let pane_command = PaneCommand {
-        argv: pane_argv.clone(),
-        cwd,
-        env: child_env(parent_env),
-    };
+pub fn run(parent_env: Vec<(OsString, OsString)>) -> Result<(), Report<TuiRunError>> {
+    let env = child_env(parent_env);
     ratatui::run(|terminal| -> io::Result<()> {
         outer_terminal::enable(terminal.backend_mut())?;
         outer_terminal::install_panic_hook();
         let (tx, rx) = mpsc::channel();
-        let result = App::new(pane_argv, pane_command, tx).run(terminal, &rx);
+        let result = App::new(env, tx).run(terminal, &rx);
         let restored = outer_terminal::disable(terminal.backend_mut());
         result.and(restored)
     })
@@ -71,7 +62,8 @@ struct App {
     pane: Option<Pane>,
     /// Shown in place of the pane when it couldn't start.
     status: Option<String>,
-    pane_command: PaneCommand,
+    /// The environment attached sessions run with.
+    env: Vec<(OsString, OsString)>,
     tx: Sender<LoopEvent>,
     pane_area: Rect,
     /// The cursor style last sent to the outer terminal.
@@ -79,15 +71,12 @@ struct App {
 }
 
 impl App {
-    fn new(pane_argv: Vec<OsString>, pane_command: PaneCommand, tx: Sender<LoopEvent>) -> Self {
+    fn new(env: Vec<(OsString, OsString)>, tx: Sender<LoopEvent>) -> Self {
         Self {
-            state: AppState {
-                pane_argv,
-                ..AppState::default()
-            },
+            state: AppState::default(),
             pane: None,
             status: None,
-            pane_command,
+            env,
             tx,
             pane_area: Rect::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
@@ -190,7 +179,7 @@ impl App {
                 outer_terminal::copy_to_clipboard(out, &text)?;
             }
             LoopEvent::Pane(PaneEvent::Exited) => {
-                self.state.focus = Focus::Normal;
+                self.state.focus = Focus::Preview;
                 self.leave_pane(out)?;
             }
         }
@@ -202,24 +191,26 @@ impl App {
         W: Write,
     {
         match command {
-            Command::Attach => {
+            Command::Attach(target) => {
                 if self.pane.as_ref().is_none_or(Pane::has_exited) {
                     let tx = self.tx.clone();
-                    let spawned = Pane::spawn(
-                        &self.pane_command,
-                        PaneSize::from(self.pane_area),
-                        move |event| {
+                    let command = PaneCommand {
+                        argv: target.argv.clone(),
+                        cwd: target.cwd.clone(),
+                        env: self.env.clone(),
+                    };
+                    let spawned =
+                        Pane::spawn(&command, PaneSize::from(self.pane_area), move |event| {
                             let _ = tx.send(LoopEvent::Pane(event));
-                        },
-                    );
+                        });
                     match spawned {
                         Ok(pane) => {
                             self.pane = Some(pane);
                             self.status = None;
                         }
                         Err(_) => {
-                            self.status = Some(format!("couldn't start {}", self.command_line()));
-                            self.state.focus = Focus::Normal;
+                            self.status = Some("couldn't start claude attach".to_owned());
+                            self.state.focus = Focus::Preview;
                             return Ok(());
                         }
                     }
@@ -235,6 +226,7 @@ impl App {
                 }
                 self.leave_pane(out)
             }
+            Command::CreateSession | Command::RefreshSessions => Ok(()),
         }
     }
 
@@ -261,15 +253,6 @@ impl App {
         }
         self.cursor_style = style;
         outer_terminal::set_cursor_style(out, style)
-    }
-
-    fn command_line(&self) -> String {
-        self.state
-            .pane_argv
-            .iter()
-            .map(|arg| arg.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ")
     }
 }
 
@@ -316,8 +299,7 @@ fn render(frame: &mut Frame, state: &AppState, pane: Option<&Pane>, status: Opti
     }
     let mode = match state.focus {
         Focus::Attached => "ATTACHED   <C-\\> back",
-        Focus::Normal if state.pane_argv.is_empty() => "NORMAL   q quit",
-        Focus::Normal => "NORMAL   ⏎ attach · q quit",
+        Focus::Sidebar | Focus::Preview => "NORMAL   ⏎ attach · q quit",
     };
     frame.render_widget(mode, mode_line);
 }
@@ -333,7 +315,7 @@ mod tests {
 
     #[rstest::rstest]
     fn mode_line_shows_normal_on_last_row() {
-        // Given a 40x5 test terminal and orb in Normal focus.
+        // Given a 40x5 test terminal and orb in Sidebar focus.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(40, 5));
         let state = AppState::default();
 
@@ -350,11 +332,10 @@ mod tests {
 
     #[rstest::rstest]
     fn mode_line_shows_attached_while_attached() {
-        // Given a 40x5 test terminal and orb attached to its pane.
+        // Given a 40x5 test terminal and orb attached to a session.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(40, 5));
         let state = AppState {
             focus: Focus::Attached,
-            pane_argv: vec!["cat".into()],
             ..AppState::default()
         };
 

@@ -1,27 +1,32 @@
-//! Checks whether the user can attach to the terminal pane.
+//! Checks whether the user can attach to the selected thread's session.
 
 use wherror::Error;
 
 use crate::AppState;
+use crate::feat::sessions::state::ThreadStatus;
 
-/// Why attaching to the terminal pane can't proceed.
+/// Why attaching can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum AttachError {
-    /// orb was started without `-- <cmd…>`.
-    NoPaneCommand,
+    /// No thread is selected.
+    NoSelection,
+    /// Claude no longer knows the selected thread's session.
+    Gone,
 }
 
-/// Allow attaching only when orb has a command for the pane to run.
+/// Allow attaching only to a selected thread whose session still exists.
 ///
 /// # Errors
 ///
-/// Returns [`AttachError::NoPaneCommand`] if orb was started without a pane command.
+/// Returns [`AttachError::NoSelection`] without a selected thread, and
+/// [`AttachError::Gone`] if the selected thread's session is gone.
 pub fn validate_attach(state: &AppState) -> Result<(), AttachError> {
-    if state.pane_argv.is_empty() {
-        return Err(AttachError::NoPaneCommand);
+    match state.sessions.selected_thread() {
+        None => Err(AttachError::NoSelection),
+        Some(thread) if thread.status == ThreadStatus::Gone => Err(AttachError::Gone),
+        Some(_) => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -30,33 +35,18 @@ mod tests {
     use crate::AppState;
 
     #[rstest::rstest]
-    fn attach_rejected_without_pane_command() {
-        // Given orb started without a pane command.
+    fn attach_rejected_without_selection() {
+        // Given no selected thread.
         let state = AppState::default();
 
         // When validating attach.
         let result = validate_attach(&state);
 
-        // Then validation fails with NoPaneCommand.
+        // Then validation fails with NoSelection.
         assert_eq!(
             result,
-            Err(AttachError::NoPaneCommand),
-            "attach needs a pane command"
+            Err(AttachError::NoSelection),
+            "attach needs a selected thread"
         );
-    }
-
-    #[rstest::rstest]
-    fn attach_allowed_with_pane_command() {
-        // Given orb started with `-- cat`.
-        let state = AppState {
-            pane_argv: vec!["cat".into()],
-            ..AppState::default()
-        };
-
-        // When validating attach.
-        let result = validate_attach(&state);
-
-        // Then validation passes.
-        assert_eq!(result, Ok(()), "a pane command allows attach");
     }
 }

@@ -11,6 +11,8 @@ ratatui = { workspace = true }
 wherror = { workspace = true }
 error-stack = { workspace = true }
 base64 = { workspace = true }
+kameo = { workspace = true }
+ratatui-which-key = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
