@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Instant;
 
 use error_stack::{Report, ResultExt};
+use orb_domain::feat::sessions::child_env::child_env;
 use orb_domain::{AppState, Command, Focus, IntentHandler};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::crossterm::cursor::SetCursorStyle;
@@ -21,7 +22,6 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::{DefaultTerminal, Frame};
 use wherror::Error;
 
-use crate::child_env::child_env;
 use crate::keymap::{self, Route};
 use crate::outer_terminal;
 

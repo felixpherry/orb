@@ -1,4 +1,5 @@
-//! The environment the terminal pane's child runs with.
+//! The environment every process orb starts runs with: the terminal pane's
+//! child and every `claude` call.
 //!
 //! The child inherits orb's environment minus two groups of variables: the ones
 //! that would make it think it runs inside a Claude session, and the ones that
@@ -62,7 +63,7 @@ const TERMINAL_PREFIXES: [&str; 10] = [
 
 /// The child's environment: `parent` without Claude session and outer-terminal
 /// variables, plus orb's terminal identity.
-pub(crate) fn child_env<I>(parent: I) -> Vec<(OsString, OsString)>
+pub fn child_env<I>(parent: I) -> Vec<(OsString, OsString)>
 where
     I: IntoIterator<Item = (OsString, OsString)>,
 {
