@@ -2,30 +2,35 @@
 //!
 //! Terminal input, the pane's background threads, and the actors' state
 //! changes all feed one channel. The loop sleeps until something arrives,
-//! handles everything pending, and then draws a single frame, so there is no
-//! fixed tick and bursts of output cost one redraw. While attached, input goes straight to the pane's child; only
-//! the keys bound in [`keymap`] become intents.
+//! handles everything pending, and then draws a single frame, so bursts of
+//! output cost one redraw. The only tick is once a second while a thread is
+//! working, so its elapsed time counts up.
+//!
+//! Each thread gets its own `claude attach` pane; selecting another thread
+//! drops it (the session keeps running). While attached, input goes straight
+//! to Claude; otherwise keys go through the [`keymap`].
 
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
 use kameo::prelude::ActorRef;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
-use orb_domain::{AppState, Command, Focus, IntentHandler, State, Wake};
+use orb_domain::feat::sessions::state::ThreadId;
+use orb_domain::{Command, Focus, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
+use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::{DefaultTerminal, Frame};
+use ratatui::layout::Rect;
 use wherror::Error;
 
-use crate::keymap::{self, Route};
-use crate::outer_terminal;
+use crate::keymap::{self, Keys, Route};
+use crate::{outer_terminal, render};
 
 /// The frontend loop failed to draw a frame or read a terminal event.
 #[derive(Debug, Error)]
@@ -89,14 +94,21 @@ enum LoopEvent {
     StateChanged,
 }
 
+/// A running `claude attach` and the thread it belongs to.
+struct AttachedPane {
+    thread: ThreadId,
+    pane: Pane,
+}
+
 struct App {
     state: State,
     sessions: ActorRef<SessionsActor>,
-    pane: Option<Pane>,
-    /// Shown in place of the pane when it couldn't start.
-    status: Option<String>,
+    keys: Keys,
+    pane: Option<AttachedPane>,
+    /// Shown under the preview header when `claude attach` couldn't start.
+    pane_error: Option<String>,
     /// The environment attached sessions run with.
-    env: Vec<(OsString, OsString)>,
+    claude_env: Vec<(OsString, OsString)>,
     tx: Sender<LoopEvent>,
     pane_area: Rect,
     /// The cursor style last sent to the outer terminal.
@@ -107,15 +119,17 @@ impl App {
     fn new(
         state: State,
         sessions: ActorRef<SessionsActor>,
-        env: Vec<(OsString, OsString)>,
+        claude_env: Vec<(OsString, OsString)>,
         tx: Sender<LoopEvent>,
     ) -> Self {
+        let focus = state.read().focus;
         Self {
             state,
             sessions,
+            keys: Keys::new(keymap::keymap(), focus),
             pane: None,
-            status: None,
-            env,
+            pane_error: None,
+            claude_env,
             tx,
             pane_area: Rect::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
@@ -125,24 +139,36 @@ impl App {
     fn run(mut self, terminal: &mut DefaultTerminal, rx: &Receiver<LoopEvent>) -> io::Result<()> {
         spawn_input_thread(self.tx.clone())?;
         loop {
-            let [pane_area, _] = layout(terminal.size()?.into());
+            let [_, pane_area, _] = render::layout(terminal.size()?.into());
             self.pane_area = pane_area;
-            if let Some(pane) = &mut self.pane {
-                pane.resize(PaneSize::from(pane_area));
+            if let Some(attached) = &mut self.pane {
+                attached.pane.resize(PaneSize::from(pane_area));
             }
+            let now = SystemTime::now();
             terminal.draw(|frame| {
-                render(
+                let state = self.state.read();
+                let pane = self
+                    .pane
+                    .as_ref()
+                    .filter(|attached| {
+                        Some(attached.thread) == state.sessions.selected
+                            && !attached.pane.has_exited()
+                    })
+                    .map(|attached| &attached.pane);
+                render::render(
                     frame,
-                    &self.state.read(),
-                    self.pane.as_ref(),
-                    self.status.as_deref(),
+                    &state,
+                    pane,
+                    self.pane_error.as_deref(),
+                    &self.keys,
+                    now,
                 );
             })?;
             self.mirror_cursor_style(terminal.backend_mut())?;
             if self.state.read().should_quit {
                 return Ok(());
             }
-            let first = match self.pane.as_ref().and_then(Pane::sync_deadline) {
+            let first = match self.deadline() {
                 Some(deadline) => {
                     match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                         Ok(event) => Some(event),
@@ -158,16 +184,31 @@ impl App {
             for event in first.into_iter().chain(rx.try_iter()) {
                 self.handle(event, terminal.backend_mut())?;
             }
-            if let Some(pane) = &self.pane {
-                pane.flush_expired_sync(Instant::now());
+            self.reconcile(terminal.backend_mut())?;
+            if let Some(attached) = &self.pane {
+                attached.pane.flush_expired_sync(Instant::now());
             }
         }
+    }
+
+    /// When the loop must wake without an event: the pane's synchronized
+    /// update times out, or a second passes while a thread is working so its
+    /// elapsed time ticks.
+    fn deadline(&self) -> Option<Instant> {
+        let tick = (self.state.read().sessions.working_count() > 0)
+            .then(|| Instant::now() + Duration::from_secs(1));
+        let sync = self
+            .pane
+            .as_ref()
+            .and_then(|attached| attached.pane.sync_deadline());
+        tick.into_iter().chain(sync).min()
     }
 
     /// The pane that receives input: present, and the user is attached to it.
     fn attached_pane(&self) -> Option<&Pane> {
         self.pane
             .as_ref()
+            .map(|attached| &attached.pane)
             .filter(|_| self.state.read().focus == Focus::Attached)
     }
 
@@ -178,19 +219,29 @@ impl App {
         match event {
             LoopEvent::Input(Event::Key(key)) if key.kind != KeyEventKind::Release => {
                 let focus = self.state.read().focus;
-                match keymap::route(key, focus) {
-                    Route::Intent(intent) => {
-                        let commands = IntentHandler::handle(&intent, &mut self.state.write());
-                        for command in commands {
-                            self.execute(&command, out)?;
+                let intent = match focus {
+                    Focus::Attached => match keymap::attached_route(key) {
+                        Route::Intent(intent) => Some(intent),
+                        Route::Forward => {
+                            if let Some(pane) = self.attached_pane() {
+                                pane.key(&key);
+                            }
+                            None
                         }
-                    }
-                    Route::Forward => {
-                        if let Some(pane) = self.attached_pane() {
-                            pane.key(&key);
+                    },
+                    Focus::Sidebar | Focus::Preview => {
+                        // Focus also changes outside intents (the pane exits).
+                        if *self.keys.scope() != focus {
+                            self.keys.set_scope(focus);
                         }
+                        keymap::press(&mut self.keys, key)
                     }
-                    Route::Ignore => {}
+                };
+                if let Some(intent) = intent {
+                    let commands = IntentHandler::handle(&intent, &mut self.state.write());
+                    for command in &commands {
+                        self.execute(command, out)?;
+                    }
                 }
             }
             LoopEvent::Input(Event::Paste(text)) => {
@@ -220,8 +271,16 @@ impl App {
                 outer_terminal::copy_to_clipboard(out, &text)?;
             }
             LoopEvent::Pane(PaneEvent::Exited) => {
-                self.state.write().focus = Focus::Preview;
-                self.leave_pane(out)?;
+                // A pane dropped for another thread reports its exit too;
+                // only the current pane's exit leaves the session.
+                if self
+                    .pane
+                    .as_ref()
+                    .is_some_and(|attached| attached.pane.has_exited())
+                {
+                    self.state.write().focus = Focus::Preview;
+                    self.leave_pane(out)?;
+                }
             }
         }
         Ok(())
@@ -233,12 +292,15 @@ impl App {
     {
         match command {
             Command::Attach(target) => {
-                if self.pane.as_ref().is_none_or(Pane::has_exited) {
+                let reusable = self.pane.as_ref().is_some_and(|attached| {
+                    attached.thread == target.thread && !attached.pane.has_exited()
+                });
+                if !reusable {
                     let tx = self.tx.clone();
                     let command = PaneCommand {
                         argv: target.argv.clone(),
                         cwd: target.cwd.clone(),
-                        env: self.env.clone(),
+                        env: self.claude_env.clone(),
                     };
                     let spawned =
                         Pane::spawn(&command, PaneSize::from(self.pane_area), move |event| {
@@ -246,24 +308,27 @@ impl App {
                         });
                     match spawned {
                         Ok(pane) => {
-                            self.pane = Some(pane);
-                            self.status = None;
+                            self.pane = Some(AttachedPane {
+                                thread: target.thread,
+                                pane,
+                            });
+                            self.pane_error = None;
                         }
                         Err(_) => {
-                            self.status = Some("couldn't start claude attach".to_owned());
+                            self.pane_error = Some("couldn't start claude attach".to_owned());
                             self.state.write().focus = Focus::Preview;
                             return Ok(());
                         }
                     }
                 }
-                if let Some(pane) = &self.pane {
-                    pane.focus(true);
+                if let Some(attached) = &self.pane {
+                    attached.pane.focus(true);
                 }
                 outer_terminal::set_mouse_capture(out, true)
             }
             Command::Detach => {
-                if let Some(pane) = &self.pane {
-                    pane.focus(false);
+                if let Some(attached) = &self.pane {
+                    attached.pane.focus(false);
                 }
                 self.leave_pane(out)
             }
@@ -279,6 +344,32 @@ impl App {
                 Ok(())
             }
         }
+    }
+
+    /// Drops the pane once another thread is selected: that kills its
+    /// `claude attach`, and the session keeps running. If the selection moved
+    /// while attached (a new session was selected), orb leaves the pane.
+    fn reconcile<W>(&mut self, out: &mut W) -> io::Result<()>
+    where
+        W: Write,
+    {
+        let (selected, focus) = {
+            let state = self.state.read();
+            (state.sessions.selected, state.focus)
+        };
+        if self
+            .pane
+            .as_ref()
+            .is_none_or(|attached| Some(attached.thread) == selected)
+        {
+            return Ok(());
+        }
+        self.pane = None;
+        if focus == Focus::Attached {
+            self.state.write().focus = Focus::Preview;
+            self.leave_pane(out)?;
+        }
+        Ok(())
     }
 
     /// Gives the mouse and the cursor shape back to orb.
@@ -327,80 +418,4 @@ fn spawn_input_thread(tx: Sender<LoopEvent>) -> io::Result<()> {
             }
         })
         .map(drop)
-}
-
-/// Splits the screen into the pane and the mode line on the bottom row.
-fn layout(area: Rect) -> [Rect; 2] {
-    Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area)
-}
-
-/// Draws the pane (or why it couldn't start) and the mode line.
-fn render(frame: &mut Frame, state: &AppState, pane: Option<&Pane>, status: Option<&str>) {
-    let [pane_area, mode_line] = layout(frame.area());
-    match (pane, status) {
-        (Some(pane), _) => {
-            if let Some(cursor) = pane.render(pane_area, frame.buffer_mut())
-                && state.focus == Focus::Attached
-            {
-                frame.set_cursor_position(cursor);
-            }
-        }
-        (None, Some(status)) => frame.render_widget(status, pane_area),
-        (None, None) => {}
-    }
-    let mode = match state.focus {
-        Focus::Attached => "ATTACHED   <C-\\> back",
-        Focus::Sidebar | Focus::Preview => "NORMAL   ⏎ attach · q quit",
-    };
-    frame.render_widget(mode, mode_line);
-}
-
-#[cfg(test)]
-mod tests {
-    use orb_domain::{AppState, Focus};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    use ratatui::buffer::Cell;
-
-    use super::render;
-
-    #[rstest::rstest]
-    fn mode_line_shows_normal_on_last_row() {
-        // Given a 40x5 test terminal and orb in Sidebar focus.
-        let Ok(mut terminal) = Terminal::new(TestBackend::new(40, 5));
-        let state = AppState::default();
-
-        // When drawing a frame.
-        let Ok(_) = terminal.draw(|frame| render(frame, &state, None, None));
-
-        // Then the bottom row is the mode line.
-        let buffer = terminal.backend().buffer();
-        let last_row: String = (0..buffer.area.width)
-            .filter_map(|x| buffer.cell((x, buffer.area.height - 1)).map(Cell::symbol))
-            .collect();
-        assert!(last_row.starts_with("NORMAL"), "last row was '{last_row}'");
-    }
-
-    #[rstest::rstest]
-    fn mode_line_shows_attached_while_attached() {
-        // Given a 40x5 test terminal and orb attached to a session.
-        let Ok(mut terminal) = Terminal::new(TestBackend::new(40, 5));
-        let state = AppState {
-            focus: Focus::Attached,
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let Ok(_) = terminal.draw(|frame| render(frame, &state, None, None));
-
-        // Then the mode line says so.
-        let buffer = terminal.backend().buffer();
-        let last_row: String = (0..buffer.area.width)
-            .filter_map(|x| buffer.cell((x, buffer.area.height - 1)).map(Cell::symbol))
-            .collect();
-        assert!(
-            last_row.starts_with("ATTACHED"),
-            "last row was '{last_row}'"
-        );
-    }
 }

@@ -3,6 +3,8 @@
 
 mod keymap;
 mod outer_terminal;
+mod render;
 mod run;
+mod sidebar;
 
 pub use run::{Frontend, TuiRunError};
