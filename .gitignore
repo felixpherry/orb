@@ -1,0 +1,9 @@
+.plans/
+target/
+.env
+*.log
+*.lcov
+*.bak
+debt.json
+flamegraph*.svg
+perf.*
