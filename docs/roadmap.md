@@ -2,6 +2,7 @@
 
 > Approved 2026-09-24. Each milestone is planned in its own session: run `/plan` for "Milestone N" and point it at this file plus [`research.md`](research.md).
 > This file is the product + engineering source of truth for **why** and **what**. `research.md` holds the verified external facts (versions, CLI flags, file formats) the decisions rest on.
+> At the end of milestone N, write the **MN** group of *Record updates* (bottom of this file) into `.agents/RECORD.md`. Don't skip this.
 
 ## Problem
 
@@ -58,15 +59,16 @@ Status icons: `●` working (with elapsed time) · `◐` needs approval · `?` n
 
 | Focus | Keys |
 |---|---|
-| Sidebar | `j`/`k` next/prev thread — preview follows instantly · `<C-l>` focus preview · `⏎` attach · `␣n` new draft · `:` command line |
+| Sidebar | `j`/`k` next/prev thread — preview follows instantly · `<C-l>` focus preview · `⏎` attach · `␣n` new draft · `q` quit orb |
 | Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach |
 | Picker | typing filters · `<C-j>`/`<C-k>` next/prev item (focus stays in the filter input) · `⏎` pick · `Esc` cancel |
 | Attached | **every** key → Claude, except `<C-\>` → back to orb |
 
+- Keys not listed here are defined by the user in that milestone's `/plan`. Agents don't invent bindings.
 - No `h`/`l` in the sidebar; no `i` binding. Window moves are `<C-h>`/`<C-l>`, like neovim.
 - `<C-\>` (single key, configurable) was chosen over nvim's `<C-\><C-n>`. Esc must reach Claude (it interrupts turns / is vim-mode Esc).
 - After `<C-\>`: the right side switches to the **same thread's transcript preview**, focus stays right. The attach process stays alive until another thread is selected, so `⏎` re-enters instantly.
-- Leader chords show a which-key popup. `:` command line hosts commands like `:settle`, `:branch <name>`, `:q`.
+- Leader chords show a which-key popup. `q` quits orb; sessions keep running. There is no `:` command line (backlog).
 
 ### Preview behavior
 
@@ -172,7 +174,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Copy from jinn: `[workspace.lints]` block (root `Cargo.toml`), `.cargo/config.toml` (`RSTEST_TIMEOUT = "10"`), `.debtmap.toml`, `justfile` recipes `check`/`test`/`lint`/`clippy`/`fmt`/`fmt-fix`/`lint-testattr`/`commit` (drop sandcastle/npm/fossil/plugin recipes).
 - `AGENTS.md`: the generic-Rust parts of jinn's `AGENTS.md` (see "AGENTS.md port" below). Point it at `docs/roadmap.md` and `docs/research.md`.
 - `.agents/RECORD.md`: jinn's header (format rules, templates, absence, editing) with no entries.
-- Empty ratatui app that quits on `:q`.
+- Empty ratatui app that quits on `q`.
 
 **AGENTS.md port** (from `~/dev/jinn/AGENTS.md`):
 - Keep: §2 error handling (`wherror` + `error_stack::Report`, errors colocated), trait usage + service wrapper, module system, block scoping; §4 tests (one behavior per test, Given/When/Then, rstest, async tests); §5 docs; §8 misc.
@@ -194,8 +196,8 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - `SessionHost` trait + Claude-supervisor impl: create (`claude --bg -n …`), poll `agents --json --all`, attach, stop, rm.
 - SQLite store at `~/.orb/userdata/state.sqlite` (projects, threads ↔ Claude short id + sessionId, title, cwd/worktree, branch, settle fields, last-visited).
 - Sidebar project → thread with status icons + elapsed time.
-- Attach in the right area; `<C-h>`/`<C-l>`; `<C-\>` flow; which-key; minimal `:` line.
-- Temporary `:new` starting a session in cwd (replaced by M5/M7).
+- Attach in the right area; `<C-h>`/`<C-l>`; `<C-\>` flow; which-key.
+- A temporary way to start a session in cwd (key chosen by the user; replaced by M5/M7).
 - Open questions: mapping `status`/`waitingFor`/`state` → icons (see research.md); per-turn elapsed source (status transition vs transcript last user timestamp); poll interval.
 
 ### 3. Transcript preview
@@ -210,7 +212,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 
 ### 4. Settle lifecycle
 - Pinned / Active / Settled; manual settle/un-settle/pin; activity un-settles; 3-day auto-settle; manual un-settle blocks auto-settle until activity; last-visited → completed-unseen.
-- Open questions: ordering within Active (T3 uses an `unsettled_at` re-entry stamp + `active_order_key`).
+- Open questions: keys for settle / un-settle / pin (user defines); ordering within Active (T3 uses an `unsettled_at` re-entry stamp + `active_order_key`).
 
 ### 5. Projects & picker
 - Port `jinn-selection-widget` + `<C-j>`/`<C-k>`; recency order → fuzzy score when typing.
@@ -223,7 +225,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Previous-worktree reuse (T3: most recently updated non-archived thread in the project with a different worktree).
 - Branch switch: reuse a worktree already on that branch, else checkout in the thread's worktree; refused while the session is running.
 - Rename `orb/<hex>` → `orb/<slug>` after the first turn using Claude's session title.
-- Open questions: Claude's workspace-trust dialog per new worktree dir — does trusting `~/.orb/worktrees` cover children?
+- Open questions: Claude's workspace-trust dialog per new worktree dir — does trusting `~/.orb/worktrees` cover children?; how branch switching is triggered (user defines keys; was `:branch <name>`)
 
 ### 7. Drafts
 - `␣n` → project picker → `✎` draft → form (workspace, base branch, model, permission) with pickers; per-project last-used defaults + global fallback; Start → worktree → `claude --bg -n <name> [--model] [--permission-mode]` idle → attach; drafts persist.
@@ -233,7 +235,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Open questions: floating size flags for "full screen"; whether `focus-pane-id` switches tabs or needs `go-to-tab-by-id` first.
 
 ### Backlog
-PR status via `gh` + settle on merge · snooze · undo · notifications · quick-reply box (hidden attach + paste) · copy mode over the attached pane · remappable keys · project favicons (`ratatui-image`, zellij 0.45 supports kitty graphics) · Claude hooks for instant state · subagent transcript expansion · full-screen zoom of the attached pane · Codex behind `SessionHost`.
+PR status via `gh` + settle on merge · snooze · undo · notifications · quick-reply box (hidden attach + paste) · copy mode over the attached pane · remappable keys · project favicons (`ratatui-image`, zellij 0.45 supports kitty graphics) · Claude hooks for instant state · subagent transcript expansion · full-screen zoom of the attached pane · Codex behind `SessionHost` · `:` command line.
 
 ## Risks
 
@@ -283,21 +285,47 @@ PR status via `gh` + settle on merge · snooze · undo · notifications · quick
 
 ## Record updates
 
-Written to `.agents/RECORD.md` at the end of the milestone that makes each true.
+At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verbatim (after confirming each entry is true). Groups already written are marked *(written)*.
 
-- (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
+### M0 (written)
+
+- (keybinds) Plain `q` quits orb.
+- (keybinds) orb has no `:` command line.
+
+### M2
+
 - (identity) orb supports Claude Code as its only provider.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands routed to `kameo` actors.
 - (sessions) Claude Code's background supervisor (`claude --bg`) hosts every session; quitting orb does not stop sessions.
 - (sessions) Session status is read by polling `claude agents --json --all`.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.
-- (preview) The preview renders the selected thread from its Claude transcript JSONL as navigable blocks, without spawning a process.
 - (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview.
 - (keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move within the focused area, `⏎` attaches, and `<Space>` is the leader.
-- (picker) The picker is ported from jinn's `jinn-selection-widget`; it lists by recency until filter text is typed, then by fuzzy score, and `<C-j>`/`<C-k>` move the selection.
+  - *Confirm against the user's M2 key decisions before writing.*
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
+
+### M3
+
+- (preview) The preview renders the selected thread from its Claude transcript JSONL as navigable blocks, without spawning a process.
+
+### M4
+
+- (sidebar) Threads appear in Pinned, Active, and Settled sections; activity un-settles a thread and idle threads auto-settle after 3 days.
+
+### M5
+
+- (picker) The picker is ported from jinn's `jinn-selection-widget`; it lists by recency until filter text is typed, then by fuzzy score, and `<C-j>`/`<C-k>` move the selection.
+
+### M6
+
+- (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`.
+
+### M7
+
 - (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session and attaches.
 - (drafts) Draft settings default to the project's last-used values, falling back to the last-used model and permission for new projects.
-- (sidebar) Threads appear in Pinned, Active, and Settled sections; activity un-settles a thread and idle threads auto-settle after 3 days.
+
+### M8
+
 - (zellij) Tool handoff opens shell, lazygit, and nvim as named floating zellij panes (`orb:<thread>:<tool>`) in the thread's worktree, focusing an existing pane of the same name instead of creating a duplicate.

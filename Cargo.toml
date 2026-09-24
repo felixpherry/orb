@@ -1,0 +1,117 @@
+[package]
+name = "orb"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[workspace]
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+orb-tui = { workspace = true }
+error-stack = { workspace = true }
+
+[workspace.dependencies]
+orb-term = { path = "crates/orb-term" }
+orb-domain = { path = "crates/orb-domain" }
+orb-tui = { path = "crates/orb-tui" }
+wherror = "2.4"
+error-stack = "0.8"
+ratatui = "0.30.2"
+rstest = "0.27"
+
+[lints]
+workspace = true
+
+[workspace.lints.rust]
+missing_docs = "allow"
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+struct_excessive_bools = "allow"
+wildcard_imports = "allow"
+match_wildcard_for_single_variants = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+float_cmp = "allow"
+implicit_hasher = "allow"
+single_match = "allow"
+single_match_else = "allow"
+min_ident_chars = "allow"
+rest_pat_in_fully_bound_structs = "allow"
+
+allow_attributes = "warn"
+allow_attributes_without_reason = "deny"
+as_underscore = "deny"
+clone_on_ref_ptr = "allow"
+create_dir = "deny"
+dbg_macro = "warn"
+else_if_without_else = "warn"
+empty_drop = "warn"
+empty_enum_variants_with_brackets = "deny"
+empty_structs_with_brackets = "deny"
+error_impl_error = "deny"
+exit = "deny"
+expect_used = "warn"
+field_scoped_visibility_modifiers = "warn"
+filetype_is_file = "warn"
+float_cmp_const = "deny"
+get_unwrap = "deny"
+if_then_some_else_none = "warn"
+impl_trait_in_params = "deny"
+integer_division = "allow"
+large_include_file = "deny"
+let_underscore_must_use = "allow"
+lossy_float_literal = "deny"
+map_err_ignore = "deny"
+map_with_unused_argument_over_ranges = "warn"
+missing_assert_message = "warn"
+missing_docs_in_private_items = "allow"
+mixed_read_write_in_expression = "warn"
+multiple_unsafe_ops_per_block = "deny"
+mutex_atomic = "deny"
+mutex_integer = "deny"
+needless_raw_strings = "allow"
+needless_raw_string_hashes = "allow"
+non_zero_suggestions = "deny"
+too_many_arguments = "allow"
+panic = "warn"
+panic_in_result_fn = "deny"
+partial_pub_fields = "deny"
+pathbuf_init_then_push = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+pub_with_shorthand = "allow"
+rc_buffer = "warn"
+rc_mutex = "deny"
+redundant_test_prefix = "deny"
+redundant_type_annotations = "deny"
+renamed_function_params = "warn"
+return_and_then = "warn"
+same_name_method = "warn"
+str_to_string = "warn"
+string_add = "warn"
+string_slice = "deny"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
+unneeded_field_pattern = "warn"
+unreachable = "warn"
+unused_result_ok = "warn"
+unused_trait_names = "allow"
+unwrap_in_result = "deny"
+use_debug = "warn"
+verbose_file_reads = "warn"
+
+indexing_slicing = "deny"
