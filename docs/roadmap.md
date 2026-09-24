@@ -314,7 +314,7 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 - (keybinds) `⏎` in Normal mode attaches to the terminal pane; without a pane command it does nothing.
 - (keybinds) While attached, every key goes to the child except `<C-\>`, which returns to Normal mode.
 
-### M2
+### M2 (written)
 
 **Remove**
 - ``(cli) `orb -- <cmd…>` sets the command the terminal pane runs.``

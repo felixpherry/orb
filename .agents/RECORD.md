@@ -31,13 +31,23 @@ Entries are added or amended **only with human approval**.
 
 ---
 
-- (keybinds) Plain `q` in Normal mode quits orb.
+- (keybinds) Plain `q` in the sidebar quits orb.
 - (keybinds) orb has no `:` command line.
 - (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
-- (pane) orb redraws when input, PTY output, or child exit wakes the loop; there is no fixed tick or frame throttle.
+- (pane) orb redraws when input, PTY output, child exit, or an actor's state change wakes the loop, and once a second while a thread is working; there is no other tick or frame throttle.
 - (pane) While attached, keys, paste, mouse, and focus events are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb captures the mouse only while attached and forwards the child's OSC 52 clipboard writes to its outer terminal.
-- (cli) `orb -- <cmd…>` sets the command the terminal pane runs.
-- (keybinds) `⏎` in Normal mode attaches to the terminal pane; without a pane command it does nothing.
-- (keybinds) While attached, every key goes to the child except `<C-\>`, which returns to Normal mode.
+- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview.
+- (identity) orb supports Claude Code as its only provider.
+- (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
+- (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
+- (sessions) Claude Code's background supervisor (`claude --bg`) hosts every session; quitting orb does not stop sessions.
+- (sessions) Session status is read by polling `claude agents --json --all` every second while a thread is busy or waiting or orb is attached, and every 5 seconds otherwise.
+- (sessions) A thread's elapsed time counts from when orb first saw its turn running.
+- (sessions) A thread's title is its transcript's latest `ai-title`, else its first prompt, else "New thread".
+- (sidebar) The sidebar lists only sessions orb started, grouped by project.
+- (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.
+- (keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
+- (keybinds) `␣n` starts a Claude session in orb's working directory.
+- (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
