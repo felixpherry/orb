@@ -67,7 +67,7 @@
 
 Common line fields: `uuid`, `parentUuid` (tree — rewinds/edits branch it), `sessionId`, `timestamp`, `cwd`, `gitBranch`, `isSidechain`, `version`, `entrypoint`; assistant lines add `requestId`, `effort`.
 
-Path escaping: `/` and `.` → `-` (e.g. `-Users-felixpherry-dev-orb`). Prefer globbing `~/.claude/projects/*/<sessionId>.jsonl` once and storing the path.
+Path escaping: every non-alphanumeric char → `-` (e.g. `-Users-felixpherry-dev-orb`; see §7). Prefer globbing `~/.claude/projects/*/<sessionId>.jsonl` once and storing the path.
 
 ## 3. T3 Code (product reference)
 
@@ -165,3 +165,54 @@ Tags: **probe** = PTY byte capture on this machine · **bundle** = read from Cla
 - **portable-pty 0.9:** cwd defaults to `$HOME`; `take_writer` works once; dropping the writer sends `\n` + ^D to the child. **[verified: source]**
 - **terminput 0.5.15:** kitty mode encodes unmodified Enter/Tab/Backspace as CSI u; legacy mode ignores DECCKM; its `KittyFlags` bits are shifted. **[verified: source + probe]**
 - **crossterm 0.29:** legacy `0x1C` parses as Ctrl+`4` (`src/event/sys/unix/parse.rs:110`). **[verified: source]**
+
+## 7. Sessions (verified 2026-09-24, Claude Code 2.1.281)
+
+Tags as in §6; **source** for libraries = read from the crate source in `~/.cargo/registry`.
+
+### `claude --bg`
+- In a trusted dir it prints `Starting background service…`, then `backgrounded · <id> · <name> (idle — send a prompt to start)` with `-n <name>`, or `backgrounded · <id> (idle — send a prompt to start)` without. Takes ~1.2 s. Without `-n`, `name` is the short id. **[verified]**
+- In an untrusted dir it refuses with "Workspace not trusted. Run `claude` in … once and accept the trust prompt" (§6). **[verified]**
+
+### `claude agents --json --all`
+- ~175 ms wall, ~120 ms CPU per call — polling every 1 s costs ~12% of a core. **[verified]**
+- Record shapes (running background, stopped background, interactive):
+  ```json
+  {"pid":960,"id":"28bf38e2","cwd":"/Users/felixpherry/dev/orb","kind":"background","startedAt":1790233098717,
+   "sessionId":"28bf38e2-8929-4841-b907-f87d5d469a10","name":"orb-m2-probe","status":"idle","state":"blocked"}
+  {"id":"28bf38e2","cwd":"…","kind":"background","startedAt":1790233097892,"sessionId":"…","name":"orb-m2-probe","state":"stopped"}
+  {"pid":63163,"kind":"interactive","startedAt":1790143927372,"name":"itemku-frontend-next-v2-18","status":"waiting","waitingFor":"dialog open"}
+  ```
+  **[verified]**
+- A prompted turn shows `busy`/`working` within ~1 s of Enter, then `idle`/`done`. **[verified]**
+- After `claude rm <id>` the record is gone. **[verified]**
+- `startedAt` is the session start, not the turn start. Interactive records have no `id`. **[verified]**
+
+### Transcripts
+- A prompt typed through `claude attach` into an idle session leaves `name` as the short id (watched ≥15 s). The transcript gets the `user` line and `ai-title` lines. **[verified]**
+- A prompt-less session has **no transcript file**. **[verified]**
+- Path: `<claude_dir>/projects/<escaped cwd>/<sessionId>.jsonl`. Every non-alphanumeric ASCII char of the cwd becomes `-` (18/18 existing dirs, e.g. `/Users/felixpherry/.t3/worktrees/x` → `-Users-felixpherry--t3-worktrees-x`). `claude_dir` is `$CLAUDE_CONFIG_DIR`, else `~/.claude`. **[verified]**
+- Line shapes relevant to titles (40 real transcripts) **[verified]**:
+  - Prompts: `{"type":"user","message":{"content":"<string>"}}`, or `content: [{"type":"text","text":…}, {"type":"image",…}]`.
+  - Tool results: `content: [{"type":"tool_result",…}]`.
+  - `isMeta: true` lines carry skill bodies / image metadata.
+  - Non-prompt user strings start with `<command-message>`, `<command-name>`, `<local-command-…>`, `<bash-input>`, `<bash-stdout>`, or `<task-notification>`, or are `[Request interrupted by user]`.
+- `{"type":"ai-title","aiTitle":"…"}` appears several times per transcript; the first may be prompt-derived, the latest is the generated title. **[verified]**
+
+### Env
+- `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` / the `disableAgentView` setting disables `claude agents`, `--bg`, and the daemon — never set it. **[verified: bundle]**
+
+### T3 sources (commit f5ef0dd)
+- Title: the truncated first message at send (`ChatView.tsx:8289–8305`), replaced by the generated title (`threadTitles.ts` `canReplaceThreadTitle`, `ProviderCommandReactor.ts:971`).
+- Elapsed: the adapter stamps `turn.startedAt` when it emits `turn.started` (`ClaudeAdapter.ts:3402`); the sidebar counts from `turn.startedAt ?? turn.requestedAt ?? session.updatedAt` (`Sidebar.logic.ts:992`).
+
+### Libraries
+- **kameo 0.22.2** **[verified: source]**:
+  - `Actor::spawn` uses a **bounded mailbox of 64**; `tell(..).try_send()` fails when it's full. `spawn_with_mailbox(args, mailbox::unbounded())` avoids that.
+  - `tell(..).try_send()` is sync (`Result<(), SendError<M>>`); `ask(..).await` returns the reply.
+  - `spawn*` needs a tokio runtime context (`Runtime::enter()` guard).
+- **ratatui-which-key 0.14.0** **[verified: source]**:
+  - Built on ratatui 0.30 / crossterm 0.29 (orb's versions); LGPL-3.0; jinn uses it.
+  - Leader is Space by default; key strings `<c-x>`, `<enter>`, `<esc>`, `<leader>`, plain chars.
+  - `WhichKeyState::handle_key` matches with crossterm `KeyEvent ==`, which compares `code, modifiers, kind, state`. Kitty repeats (`KeyEventKind::Repeat`) or `state` bits never match a binding, so feed `KeyEvent::new(key.code, key.modifiers)`.
+- **rusqlite 0.40** with `default-features = false` links the system SQLite (as jinn does). **[verified: source]**

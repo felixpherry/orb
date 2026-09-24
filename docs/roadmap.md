@@ -169,6 +169,11 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Mouse | Forward all child-requested mouse events (SGR) while attached; capture only while attached; forward OSC 52 | Wheel only — capture without clicks. None — no scrolling. |
 | Key encoder | `terminput` + `terminput-crossterm`, with orb fixes (flag mapping, legacy Enter/Tab/Backspace under kitty, DECCKM arrows) | Porting alacritty's encoder (~420 lines); own encoder. |
 | Event loop | std threads + one mpsc channel; drain-then-draw, no tick or throttle; attached input written straight to the PTY | tokio/kameo pane actor — per-key hop (a jinn lag source). |
+| Actor plumbing | tokio + kameo 0.22, std-`RwLock` `State`, one `SessionsActor`; the frontend `tell`s commands straight to it (unbounded mailbox, `try_send`); the pane stays in the loop | Full jinn port (MessageBus + kanal Bridge + tcaps + `ActorDeps` + root supervisor) — hundreds of lines for one actor. No actors — conflicts with AGENTS.md §3. Add the bus when a second actor needs broadcast events. |
+| Poll cadence | 1 s while a thread is busy/waiting or orb is attached, else 5 s; immediate poll after create/attach/detach | Fixed 1 s — ~120 ms CPU per call ≈ 12% of a core all day. Fixed 2 s — elapsed would jump. |
+| Elapsed source | orb stamps `turn_started_at` when a poll first sees the turn in progress; persisted so a relaunch mid-turn keeps it (T3 stamps `turn.startedAt` the same way) | Transcript prompt timestamp — pulls more of M3 forward. `~/.claude/jobs/<id>/timeline.jsonl` — unofficial supervisor internals. |
+| Thread title | Transcript: latest `ai-title` > first real prompt (first line) > "New thread" (T3's rule) | `agents --json` `name` — stays the short id when the prompt is typed through `claude attach`. `-n <name>` — meaningless fixed names. |
+| Store abstraction | `Store` wraps `rusqlite::Connection` directly; tests use `Connection::open_in_memory()` | A store trait — one implementation; in-memory SQLite is a cheap real test backend. |
 
 ## Milestones
 
@@ -202,12 +207,12 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - SQLite store at `~/.orb/userdata/state.sqlite` (projects, threads ↔ Claude short id + sessionId, title, cwd/worktree, branch, settle fields, last-visited).
 - Sidebar project → thread with status icons + elapsed time.
 - Attach in the right area; `<C-h>`/`<C-l>`; `<C-\>` flow; which-key.
-- A temporary way to start a session in cwd (key chosen by the user; replaced by M5/M7).
-- Open questions: mapping `status`/`waitingFor`/`state` → icons (see research.md); per-turn elapsed source (status transition vs transcript last user timestamp); poll interval.
+- `␣n` starts a session in orb's cwd (temporary; M5/M7 replace it).
+- Transcript locator + byte-offset tailer for thread titles (moved from M3).
+- Resolved in M2's plan: status mapping — `busy` → `●` working; `waiting` on a permission prompt / sandbox request / worker request → `◐` approve; any other `waiting` → `?` input; `state: failed` → `✗`; `status` present otherwise → idle (blank); no `status` → `■` stopped; an orb thread missing from `agents --json` → `✗` gone. Elapsed source — orb stamps the turn start when a poll first sees it in progress, keeps it through `waiting`, clears it when the turn ends, and persists it. Poll cadence — 1 s while a thread is busy/waiting or orb is attached, else 5 s, plus an immediate poll after create/attach/detach (see Decisions).
 
 ### 3. Transcript preview
-- Locate `~/.claude/projects/*/<sessionId>.jsonl` once; store path.
-- Incremental tail by byte offset; buffer partial trailing line.
+- Reuse M2's transcript locator and byte-offset tailer; extend it to every line type.
 - Lenient decode: known line types, `#[serde(other)]` catch-all; bad line → warn + skip, never abort.
 - Rebuild: merge lines sharing `message.id`; pair `tool_result` ↔ `tool_use` by `tool_use_id`; follow `parentUuid` from the newest leaf (rewinds create branches — file order ≠ conversation order); hide bookkeeping lines.
 - Render with `ratatui-markdown` (crates.io); virtualized rendering + per-block line cache keyed by width (jinn's `line_count_cache.rs`); block navigation, fold, yank, follow-tail.
@@ -311,15 +316,28 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 
 ### M2
 
-- (identity) orb supports Claude Code as its only provider.
-- (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands routed to `kameo` actors.
-- (sessions) Claude Code's background supervisor (`claude --bg`) hosts every session; quitting orb does not stop sessions.
-- (sessions) Session status is read by polling `claude agents --json --all`.
-- (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.
-- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview.
-- (keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move within the focused area, `⏎` attaches, and `<Space>` is the leader.
-  - *Confirm against the user's M2 key decisions before writing.*
-- (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
+**Remove**
+- ``(cli) `orb -- <cmd…>` sets the command the terminal pane runs.``
+- ``(keybinds) `⏎` in Normal mode attaches to the terminal pane; without a pane command it does nothing.``
+
+**Amend**
+- ``(keybinds) Plain `q` in Normal mode quits orb.`` → ``(keybinds) Plain `q` in the sidebar quits orb.``
+- ``(keybinds) While attached, every key goes to the child except `<C-\>`, which returns to Normal mode.`` → ``(keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview.``
+- ``(pane) orb redraws when input, PTY output, or child exit wakes the loop; there is no fixed tick or frame throttle.`` → ``(pane) orb redraws when input, PTY output, child exit, or an actor's state change wakes the loop, and once a second while a thread is working; there is no other tick or frame throttle.``
+
+**Add**
+- `(identity) orb supports Claude Code as its only provider.`
+- ``(arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.``
+- ``(arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.``
+- ``(sessions) Claude Code's background supervisor (`claude --bg`) hosts every session; quitting orb does not stop sessions.``
+- ``(sessions) Session status is read by polling `claude agents --json --all` every second while a thread is busy or waiting or orb is attached, and every 5 seconds otherwise.``
+- `(sessions) A thread's elapsed time counts from when orb first saw its turn running.`
+- ``(sessions) A thread's title is its transcript's latest `ai-title`, else its first prompt, else "New thread".``
+- `(sidebar) The sidebar lists only sessions orb started, grouped by project.`
+- ``(pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.``
+- ``(keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.``
+- ``(keybinds) `␣n` starts a Claude session in orb's working directory.``
+- ``(paths) orb persists its state to `~/.orb/userdata/state.sqlite`.``
 
 ### M3
 
