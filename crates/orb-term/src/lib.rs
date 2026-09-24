@@ -2,3 +2,4 @@
 //! with a key encoder and a ratatui renderer. Filled in by milestone 1.
 
 mod encode;
+mod render;
