@@ -24,6 +24,11 @@ wherror = "2.4"
 error-stack = "0.8"
 ratatui = "0.30.2"
 rstest = "0.27"
+alacritty_terminal = { version = "0.26", default-features = false }
+portable-pty = "0.9"
+terminput = "0.5"
+terminput-crossterm = "0.4"
+base64 = "0.22"
 
 [lints]
 workspace = true

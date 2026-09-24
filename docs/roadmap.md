@@ -155,7 +155,7 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Session hosting | Claude's background supervisor (`--bg`, `attach`, `agents --json`) | orb-hosted PTYs — quitting orb kills agents, unofficial state files. orb daemon + client (tmux model) — biggest build. Kept as `SessionHost` fallback. |
 | State source | Poll `claude agents --json --all` (~1 s, ~160 ms/call) | Screen-scraping (claude-squad/ccmanager style) — breaks on TUI changes. Hooks — backlog, for instant updates. |
 | Preview | Transcript JSONL → blocks | Attach on hover — `claude attach` takes ~200 ms to first byte; `j` spam would spawn processes. `claude logs` snapshot — not block-navigable. |
-| Emulator | `alacritty_terminal` + own renderer | `vt100` + `tui-term` — no query replies, no DEC 2026, upstream abandoned; jinn needed workarounds. `wezterm-term` — not a stable crates.io lib. libghostty-vt — `!Send`, Zig FFI, too young. Image/graphics support not needed (Claude doesn't draw images). |
+| Emulator | `alacritty_terminal` + own renderer | `vt100` + `tui-term` — no query replies, no DEC 2026, upstream abandoned; jinn needed workarounds. `wezterm-term` — not a stable crates.io lib. libghostty-vt — `!Send`, Zig FFI, too young. Image/graphics support not needed (Claude falls back when its graphics query goes unanswered). |
 | Typing | Natively in attached Claude (Claude's own vim `editorMode`) | orb composer — loses Claude's `/`, `@`, skill pickers. |
 | Leave-Claude key | `<C-\>` | `<C-\><C-n>` — awkward. Esc — Claude needs it. `Ctrl g` — zellij. Alt/Option — paneru. Cmd — zellij. |
 | Worktrees | orb runs `git worktree add` (T3 layout) | Claude `-w` — no control of path/branch, reuse is awkward. jinn shell templates — config burden, loses T3 UX. |
@@ -164,6 +164,11 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Persistence | SQLite + plain migrations | T3-style event sourcing — overkill. |
 | Providers | Claude Code only | Codex etc. — later behind `SessionHost`. |
 | T3 import | Projects only | Threads too — T3 threads carry T3's injected system prompt; ~5 unsettled threads not worth it. |
+| Terminal identity under `claude attach` | Child env strips outer-terminal vars and sets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1` → Claude pushes kitty keys and syncs every frame | Legacy keys + `ESC CR` Shift+Enter — loses Esc/Alt disambiguation. Inherited env — caps depend on how orb was launched. `kitty`/`ghostty`/`iTerm.app`/`tmux` names — notification/graphics/wrapping side effects. |
+| XTVERSION | Not answered | Raw-byte scanner — no observed effect under attach. |
+| Mouse | Forward all child-requested mouse events (SGR) while attached; capture only while attached; forward OSC 52 | Wheel only — capture without clicks. None — no scrolling. |
+| Key encoder | `terminput` + `terminput-crossterm`, with orb fixes (flag mapping, legacy Enter/Tab/Backspace under kitty, DECCKM arrows) | Porting alacritty's encoder (~420 lines); own encoder. |
+| Event loop | std threads + one mpsc channel; drain-then-draw, no tick or throttle; attached input written straight to the PTY | tokio/kameo pane actor — per-key hop (a jinn lag source). |
 
 ## Milestones
 
@@ -185,12 +190,12 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 ### 1. Terminal pane (`orb-term`) — riskiest first
 - portable-pty + `alacritty_terminal`; renderer drawing the grid into a ratatui buffer (cell-by-cell like jinn's `terminal_tab.rs`).
 - Key encoder: kitty keyboard protocol when the child enabled it, legacy otherwise; Shift+Enter, Shift+Tab (BackTab), bracketed paste, SGR mouse wheel, focus in/out (`CSI I`/`CSI O`).
-- Answer startup queries (DA1, XTVERSION, kitty `CSI ? u`, DECRQM 2026) via alacritty's `PtyWrite` events.
+- Answer startup queries (DA1, kitty `CSI ? u`, DECRQM 2026) via alacritty's `PtyWrite` events; XTVERSION is not answered (see Decisions).
 - Resize propagation; event-driven redraw on PTY output.
 - Scrub `CLAUDE*` env vars (list in research.md) before spawning.
 - `<C-\>` intercepted before forwarding.
 - Verify Ctrl+H ≠ Backspace through zellij (kitty keyboard protocol on in orb's outer terminal).
-- Open questions: exact `alacritty_terminal` version/API; whether to set `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`; mouse forwarding scope.
+- Resolved in M1's plan: `alacritty_terminal` 0.26; `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1` is set; the mouse is forwarded in full while attached (see Decisions).
 
 ### 2. Sessions & sidebar
 - `SessionHost` trait + Claude-supervisor impl: create (`claude --bg -n …`), poll `agents --json --all`, attach, stop, rm.
