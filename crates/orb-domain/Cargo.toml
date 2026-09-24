@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[dependencies]
+wherror = { workspace = true }
+
 [dev-dependencies]
 rstest = { workspace = true }
 

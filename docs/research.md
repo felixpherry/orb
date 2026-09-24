@@ -51,7 +51,7 @@
 ### Claude's own keys (avoid collisions)
 - Option/Alt: `Alt+B/F/D/Y` (word nav/delete/paste-cycle), `Option+P` model, `Option+T` thinking, `Option+O` fast mode, `Alt+M`/`Alt+V` (Windows). `Ctrl+W` delete-back-to-whitespace. `Shift+Tab` cycle permission modes. `Ctrl+O` transcript. `Esc` interrupt / vim NORMAL. `←` on empty prompt → agent view. **[docs: code.claude.com/docs/en/interactive-mode]**
 - Vim editor mode: `/config` → Editor mode, or `"editorMode": "vim"` in settings; `vimInsertModeRemaps` e.g. `{"jj": "<Esc>"}`. The user's settings already contain `editorMode`. **[docs/verified]**
-- Claude doesn't render images inline (only pastes them into prompts), so the emulator needs no graphics support. **[docs]**
+- Claude probes kitty graphics (plain `claude`) and has `CLAUDE_CODE_FORCE_TERMINAL_IMAGES`; unanswered probes fall back, so orb's emulator needs no graphics support. **[verified: probe + bundle]**
 
 ## 2. Transcript JSONL — `~/.claude/projects/<escaped-cwd>/<sessionId>.jsonl`
 
@@ -126,3 +126,42 @@ Source: https://github.com/pingdotgg/t3code (commit f5ef0dd). Local data: `~/.t3
 - zellij CLI used by M8: `zellij action new-pane [--floating] [--name] [--cwd] [--width/--height] -- <cmd>` (returns pane id), `zellij action list-panes --json [-a]`, `zellij action focus-pane-id <id>`, `go-to-tab-by-id`. **[verified: `--help`]**
 - Tools: nvim, lazygit, yazi, gh installed; `$EDITOR` unset in non-interactive shells (fall back to `nvim`).
 - Related tool the user runs: `cwt` (worktree manager TUI) — opens duplicate zellij panes on re-entry; orb must de-dupe.
+
+## 6. Terminal pane (verified 2026-09-24, Claude Code 2.1.281, alacritty_terminal 0.26.0)
+
+Tags: **probe** = PTY byte capture on this machine · **bundle** = read from Claude's JS bundle · **source** = read from the crate source in `~/.cargo/registry`.
+
+### `claude attach`
+- It sends only `CSI > 0 q` + DA1 `CSI c` after the first frame. Sometimes a second round follows: `CSI ? 2026 $ p` + DA1. **[verified: probe]**
+- It never blocks on replies, and replies don't change its behaviour. Caps are computed from the **attach client's env** at connect. **[verified: probe]**
+- Kitty keys are on iff the terminal name is in `iTerm.app, kitty, WezTerm, ghostty, tmux, windows-terminal, WarpTerminal`. The name comes from `TERM_PROGRAM`, else `TERM` (`xterm-kitty` → kitty, `xterm-ghostty` → ghostty), else `KITTY_WINDOW_ID` → kitty. **[verified: bundle + probe]**
+  - When on it sends `CSI < u`, `CSI > 5 u` (`> 1 u` when session/client versions differ), and `CSI > 4 ; 2 m`. **[verified: probe]**
+  - There is no kitty-specific env var. **[verified: bundle]**
+- `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1` wraps every attach frame in `?2026h/l` **[verified: probe]**; it is ignored under `TMUX` **[verified: bundle]**.
+- DECSTBM scroll regions are used only with sync on and none of `TMUX`, `ZELLIJ`, JetBrains, xterm.js, `WT_SESSION`. **[verified: bundle]**
+- Attach mode sets: `?1049h ?1000h ?1002h ?1003h ?1006h ?2004h ?2031h ?1004h`. **[verified: probe]**
+- `Ctrl+Z` (0x1a) exits attach with code 0 in ~0.5 s; the session keeps running. **[verified: probe]**
+- Mouse knobs: `CLAUDE_CODE_DISABLE_MOUSE`, `CLAUDE_CODE_DISABLE_MOUSE_CLICKS` (keeps scroll). **[verified: bundle]**
+
+### Plain `claude`
+- Round 1: `CSI > 0 q`, `CSI ? u`, DA1. **[verified: probe]**
+- Round 2 runs only if XTVERSION was answered and `TERM_PROGRAM` isn't `Apple_Terminal`: `CSI ? 2026 $ p`, a kitty graphics query (`ESC _ G i=31,s=1,v=1,a=q,t=d,f=24;AAAA ESC \`), `CSI 16 t`, `CSI ? 1016 $ p`, DA1. **[verified: probe + bundle]**
+- Each round waits up to 2000 ms for the DA1 sentinel. **[verified: bundle]**
+- It sends the kitty push after a `CSI ? 0 u` reply. **[verified: probe]**
+
+### Environment
+- Extra session env vars seen in a Claude-spawned shell: `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_EFFORT`, `CLAUDE_AGENT_SDK_VERSION`. **[verified]** The bundle also reads `CLAUDE_CODE_SESSION_KIND` (`bg` = worker). **[verified: bundle]**
+- `claude --bg` refuses in an untrusted dir: "Workspace not trusted. Run `claude` in … once and accept the trust prompt". **[verified]**
+- `agents --json` records: stopped/done background records have no `pid`/`status`; interactive records have no `id` and do have `waitingFor`. **[verified]**
+
+### Libraries
+- **alacritty_terminal 0.26** **[verified: source + probe]**:
+  - doesn't parse XTVERSION
+  - answers `CSI ? u` only with `Config.kitty_keyboard = true`
+  - answers DECRQM 2026 with `;2`; doesn't handle `?2031`
+  - its sync timeout must be fired by the caller (`Processor::sync_timeout().sync_timeout()` + `stop_sync`)
+  - `ColorRequest`/`TextAreaSizeRequest` need caller replies
+  - `tty::new` can't remove env vars and exits the process on a failed resize ioctl
+- **portable-pty 0.9:** cwd defaults to `$HOME`; `take_writer` works once; dropping the writer sends `\n` + ^D to the child. **[verified: source]**
+- **terminput 0.5.15:** kitty mode encodes unmodified Enter/Tab/Backspace as CSI u; legacy mode ignores DECCKM; its `KittyFlags` bits are shifted. **[verified: source + probe]**
+- **crossterm 0.29:** legacy `0x1C` parses as Ctrl+`4` (`src/event/sys/unix/parse.rs:110`). **[verified: source]**
