@@ -8,4 +8,5 @@ pub mod claude_supervisor;
 pub mod session_host;
 pub mod state;
 pub mod store;
+pub mod transcript;
 pub mod validator;
