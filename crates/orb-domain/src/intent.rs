@@ -6,4 +6,8 @@
 pub enum Intent {
     /// Quit orb.
     Quit,
+    /// Attach to the terminal pane.
+    Attach,
+    /// Return from the terminal pane to orb.
+    Detach,
 }
