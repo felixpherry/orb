@@ -320,6 +320,13 @@ impl SessionsActor {
             transcript_offset: 0,
             created_at: now,
             turn_started_at: None,
+            branch: None,
+            pinned_at: None,
+            settled_override: None,
+            settled_at: None,
+            unsettled_at: None,
+            last_activity_at: now,
+            last_visited_at: now,
         };
         let thread = thread(&self.services.session_host, &row);
         self.rows.push(row);
@@ -328,7 +335,7 @@ impl SessionsActor {
 }
 
 /// Brings a saved thread up to date with its record: the session id, the
-/// turn stamp, and the title from any new transcript lines.
+/// turn stamp, and the title and branch from any new transcript lines.
 fn update_row(
     row: &mut ThreadRow,
     record: Option<&SessionRecord>,
@@ -361,10 +368,12 @@ fn update_row(
             row.transcript_offset,
             row.title.clone(),
             row.custom_title.clone(),
+            row.branch.clone(),
         )
     {
         row.title = scan.title;
         row.custom_title = scan.custom_title;
+        row.branch = scan.branch;
         row.transcript_offset = scan.offset;
     }
 }
@@ -465,6 +474,11 @@ mod tests {
     struct FakeHost {
         list: Mutex<Result<Vec<SessionRecord>, String>>,
         create: Result<String, String>,
+        remove: Result<(), String>,
+        /// The sessions `stop` was called on, in order.
+        stopped: Mutex<Vec<String>>,
+        /// The sessions `remove` was called on, in order.
+        removed: Mutex<Vec<String>>,
     }
 
     impl FakeHost {
@@ -472,6 +486,9 @@ mod tests {
             Arc::new(Self {
                 list: Mutex::new(Ok(records)),
                 create: Err("no create scripted".to_owned()),
+                remove: Ok(()),
+                stopped: Mutex::default(),
+                removed: Mutex::default(),
             })
         }
 
@@ -479,6 +496,9 @@ mod tests {
             Arc::new(Self {
                 list: Mutex::new(Ok(Vec::new())),
                 create: create.map(str::to_owned).map_err(str::to_owned),
+                remove: Ok(()),
+                stopped: Mutex::default(),
+                removed: Mutex::default(),
             })
         }
 
@@ -504,6 +524,24 @@ mod tests {
             self.list
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .map_err(|reason| Report::new(SessionHostError).attach(reason))
+        }
+
+        async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
+            self.stopped
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(short_id.to_owned());
+            Ok(())
+        }
+
+        async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
+            self.removed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(short_id.to_owned());
+            self.remove
                 .clone()
                 .map_err(|reason| Report::new(SessionHostError).attach(reason))
         }
