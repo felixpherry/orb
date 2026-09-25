@@ -46,7 +46,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) Session status is read by polling `claude agents --json --all` every second while a thread is busy or waiting or orb is attached, and every 5 seconds otherwise.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
 - (sessions) A thread's title is its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
-- (sidebar) The sidebar lists only sessions orb started, grouped by project.
+- (sidebar) The sidebar lists only sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.
 - (keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` starts a Claude session in orb's working directory.
@@ -57,3 +57,11 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In the preview, `j`/`k` move between blocks, `<C-d>`/`<C-u>` move half a page, `gg`/`G` jump to the top/bottom, `za`/`<Tab>` fold or unfold a block, and `y` yanks its raw text.
 - (preview) Yanked text goes to the outer terminal's clipboard via OSC 52.
 - (pane) orb draws the Claude pane only while attached; otherwise the right-hand area shows the selected thread's preview.
+- (sidebar) Pinned threads come first, then Active threads, then a collapsible Settled shelf at the bottom of the sidebar.
+- (sidebar) A thread shows ✓ Completed when its latest turn ended after the user last selected it.
+- (settle) Any new turn, approval request, or input request un-settles a thread.
+- (settle) An unpinned thread auto-settles after 3 days without turn activity, unless the user un-settled it since that activity or orb is attached to it.
+- (settle) Settling a thread stops its Claude session (`claude stop`); attaching resumes it.
+- (sessions) Deleting a thread runs `claude rm` and removes it from orb; its transcript stays in Claude's projects directory.
+- (keybinds) In the sidebar, `p` pins or unpins the selected thread, `ss` settles or un-settles it, and `xx` deletes it.
+- (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled thread closes the shelf.

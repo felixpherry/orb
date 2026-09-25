@@ -378,7 +378,7 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 - `(preview) Yanked text goes to the outer terminal's clipboard via OSC 52.`
 - `(pane) orb draws the Claude pane only while attached; otherwise the right-hand area shows the selected thread's preview.`
 
-### M4
+### M4 (written)
 
 **Amend**
 - ``(sidebar) The sidebar lists only sessions orb started, grouped by project.`` → `(sidebar) The sidebar lists only sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.`

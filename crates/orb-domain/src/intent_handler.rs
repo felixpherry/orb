@@ -358,6 +358,21 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn attach_to_a_settled_thread_returns_attach() {
+        // Given a selected settled thread whose session was stopped.
+        let mut state = state_with(vec![settled(1)], 1);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the loop attaches to it, which resumes the stopped session.
+        assert!(
+            matches!(commands.first(), Some(Command::Attach(target)) if target.thread == ThreadId(1)),
+            "Attach on a settled, stopped thread should attach to it"
+        );
+    }
+
+    #[rstest::rstest]
     fn attach_to_gone_thread_leaves_focus_unchanged() {
         // Given a selected thread whose session is gone.
         let mut state = state_with(vec![thread(1, ThreadStatus::Gone)], 1);
