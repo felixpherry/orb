@@ -2,9 +2,10 @@
 //!
 //! Pinned threads come first, then active ones, each a three-line card: the
 //! project's badge and name with the thread's status (or the time since its
-//! last turn), the title, and the branch. Settled threads fold into a shelf at
-//! the bottom, drawn as one-line rows while it's open. The sidebar scrolls to
-//! keep the selection in view.
+//! last turn), the title, and the branch. A blank line separates the cards,
+//! and the selected one is drawn in a rounded outline. Settled threads fold
+//! into a shelf at the bottom, drawn as one-line rows while it's open. The
+//! sidebar scrolls to keep the selection in view.
 
 use std::time::{Duration, SystemTime};
 
@@ -13,7 +14,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Widget};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// How far the sidebar is scrolled, kept between frames.
@@ -24,8 +25,8 @@ pub(crate) struct SidebarScroll {
 }
 
 /// Draws the sidebar into `area`, with a border on its right edge, scrolled
-/// so the cursor's row is in view. Returns the y of the selected row's first
-/// line when it's on screen.
+/// so the cursor's row is in view. Returns the y of the selected row's top
+/// line (a card's outline) when it's on screen.
 pub(crate) fn render(
     sessions: &Sessions,
     now: SystemTime,
@@ -37,12 +38,14 @@ pub(crate) fn render(
     let inner = block.inner(area);
     block.render(area, buf);
     let rows = sessions.sidebar();
-    // Each row with its top line in the list. Blank lines above the shelf
+    // Each row with its top line in the list. A list of cards opens with a
+    // blank line for the first card's outline. Blank lines above the shelf
     // header keep the shelf at the bottom while the list is short.
     let (placed, total) = {
-        let content = rows.iter().map(height).fold(0, u16::saturating_add);
+        let lead = u16::from(matches!(rows.first(), Some(SidebarRow::Card { .. })));
+        let content = rows.iter().map(height).fold(lead, u16::saturating_add);
         let gap = inner.height.saturating_sub(content);
-        let mut top = 0_u16;
+        let mut top = lead;
         let placed: Vec<(SidebarRow<'_>, u16)> = rows
             .into_iter()
             .map(|row| {
@@ -59,7 +62,7 @@ pub(crate) fn render(
     let selected = placed
         .iter()
         .find(|(row, _)| Some(row.item()) == sessions.cursor)
-        .map(|(row, top)| (*top, height(row)));
+        .map(|(row, top)| extent(row, *top));
     if let Some((top, rows)) = selected {
         scroll.offset = scroll
             .offset
@@ -90,30 +93,66 @@ pub(crate) fn render(
         .map(|top| inner.y + top - scroll.offset)
 }
 
-/// How many lines a row takes: 3 for a card, 1 otherwise.
+/// How many lines a row takes: a card's 3 and the blank line below it, else 1.
 fn height(row: &SidebarRow<'_>) -> u16 {
     match row {
-        SidebarRow::Card { .. } => 3,
+        SidebarRow::Card { .. } => 4,
         SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } => 1,
     }
 }
 
-/// One row, with the selection background behind it and a cell of padding on
-/// each side.
-fn render_row(row: &SidebarRow<'_>, selected: bool, now: SystemTime, area: Rect, buf: &mut Buffer) {
-    if selected {
-        buf.set_style(area, Style::new().bg(SELECTED));
-    }
-    let area = area.inner(Margin::new(1, 0));
+/// The top line and height a row fills when selected: a card's outline takes
+/// the blank lines above and below it.
+fn extent(row: &SidebarRow<'_>, top: u16) -> (u16, u16) {
     match row {
-        SidebarRow::Card { project, thread } => render_card(project, thread, now, area, buf),
+        SidebarRow::Card { .. } => (top.saturating_sub(1), 5),
+        SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } => (top, 1),
+    }
+}
+
+/// One row, a cell short of the sidebar's border. Its text sits two cells in,
+/// inside the selected card's outline and a cell of padding.
+fn render_row(row: &SidebarRow<'_>, selected: bool, now: SystemTime, area: Rect, buf: &mut Buffer) {
+    let area = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let text = area.inner(Margin::new(2, 0));
+    match row {
+        SidebarRow::Card { project, thread } => {
+            if selected {
+                render_outline(area, buf);
+            }
+            render_card(project, thread, now, text, buf);
+        }
         SidebarRow::ShelfHeader { count, open } => {
-            Line::styled(shelf_label(*count, *open), Style::new().fg(GRAY)).render(area, buf);
+            if selected {
+                buf.set_style(area.inner(Margin::new(1, 0)), Style::new().bg(SELECTED));
+            }
+            Line::styled(shelf_label(*count, *open), Style::new().fg(GRAY)).render(text, buf);
         }
         SidebarRow::Settled { project, thread } => {
-            render_settled(project, thread, selected, now, area, buf);
+            if selected {
+                buf.set_style(area.inner(Margin::new(1, 0)), Style::new().bg(SELECTED));
+            }
+            render_settled(project, thread, selected, now, text, buf);
         }
     }
+}
+
+/// The selected card's rounded outline, over the blank lines around `card`,
+/// with the selection background inside it.
+fn render_outline(card: Rect, buf: &mut Buffer) {
+    let outline = Rect {
+        y: card.y.saturating_sub(1),
+        height: 5,
+        ..card
+    };
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(OUTLINE))
+        .render(outline, buf);
+    buf.set_style(outline.inner(Margin::new(1, 1)), Style::new().bg(SELECTED));
 }
 
 /// The badge, project, pin marker and status; the title; the branch and ✳.
@@ -356,6 +395,8 @@ const DARK_GRAY: Color = Color::Rgb(0x73, 0x73, 0x73);
 const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
 /// Behind the selected row.
 const SELECTED: Color = Color::Rgb(0x26, 0x26, 0x26);
+/// The selected card's outline (neutral-600).
+const OUTLINE: Color = Color::Rgb(0x52, 0x52, 0x52);
 
 #[cfg(test)]
 mod tests {
@@ -368,7 +409,8 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        SELECTED, SKY, SidebarScroll, ago_label, badge_colour, monogram, render, working_label,
+        OUTLINE, SELECTED, SKY, SidebarScroll, ago_label, badge_colour, monogram, render,
+        working_label,
     };
 
     fn at(secs: u64) -> SystemTime {
@@ -497,13 +539,13 @@ mod tests {
         let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
 
         // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 3);
+        let buf = draw(&sessions, at(1000), 5);
 
         // Then its card's first line says how long it has been working.
-        let heading = line(&buf, 0);
+        let heading = line(&buf, 1);
         assert!(heading.contains("● Working 2m"), "line was '{heading}'");
         // And the status is sky.
-        let dot = (0..32).find_map(|x| buf.cell((x, 0)).filter(|cell| cell.symbol() == "●"));
+        let dot = (0..32).find_map(|x| buf.cell((x, 1)).filter(|cell| cell.symbol() == "●"));
         assert_eq!(dot.map(|cell| cell.fg), Some(SKY), "the ● colour");
     }
 
@@ -513,7 +555,7 @@ mod tests {
         let sessions = sessions(vec![thread(1, ThreadStatus::NeedsApproval)]);
 
         // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(1000), 3), 0);
+        let heading = line(&draw(&sessions, at(1000), 5), 1);
 
         // Then its card says it's pending approval.
         assert!(
@@ -528,7 +570,7 @@ mod tests {
         let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
 
         // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(10_800), 3), 0);
+        let heading = line(&draw(&sessions, at(10_800), 5), 1);
 
         // Then its card shows the time since.
         assert!(heading.contains(" 3h"), "line was '{heading}'");
@@ -543,7 +585,7 @@ mod tests {
         }]);
 
         // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(1000), 3), 0);
+        let heading = line(&draw(&sessions, at(1000), 5), 1);
 
         // Then its card says the turn completed.
         assert!(heading.contains("✓ Completed"), "line was '{heading}'");
@@ -558,7 +600,7 @@ mod tests {
         }]);
 
         // When rendering the sidebar.
-        let title = line(&draw(&sessions, at(1000), 3), 1);
+        let title = line(&draw(&sessions, at(1000), 5), 2);
 
         // Then its card says "New thread".
         assert!(title.contains("New thread"), "line was '{title}'");
@@ -573,14 +615,14 @@ mod tests {
         }]);
 
         // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 3);
+        let buf = draw(&sessions, at(1000), 5);
 
         // Then the card's third line starts with the branch.
-        let footer = line(&buf, 2);
-        assert!(footer.starts_with(" main"), "line was '{footer}'");
-        // And ends with ✳ before the padding and the border.
+        let footer = line(&buf, 3);
+        assert!(footer.starts_with("  main"), "line was '{footer}'");
+        // And ends with ✳ before the outline's padding and column.
         assert_eq!(
-            buf.cell((29, 2)).map(Cell::symbol),
+            buf.cell((27, 3)).map(Cell::symbol),
             Some("✳"),
             "line was '{footer}'"
         );
@@ -595,7 +637,7 @@ mod tests {
         }]);
 
         // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(1000), 3), 0);
+        let heading = line(&draw(&sessions, at(1000), 5), 1);
 
         // Then its project name carries the pin.
         assert!(heading.contains("orb ⚑"), "line was '{heading}'");
@@ -663,13 +705,58 @@ mod tests {
         let buf = draw(&sessions, at(1000), 5);
 
         // Then all three of its lines have the selection background.
-        let backgrounds: Vec<_> = (0..3)
-            .map(|y| buf.cell((0, y)).map(|cell| cell.bg))
+        let backgrounds: Vec<_> = (1..4)
+            .map(|y| buf.cell((1, y)).map(|cell| cell.bg))
             .collect();
         assert_eq!(
             backgrounds,
             vec![Some(SELECTED); 3],
             "the card's left padding"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selected_card_has_a_rounded_outline() {
+        // Given a selected thread.
+        let sessions = Sessions {
+            cursor: Some(SidebarItem::Thread(ThreadId(1))),
+            ..sessions(vec![thread(1, ThreadStatus::Idle)])
+        };
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 5);
+
+        // Then its card sits in a rounded outline in the outline colour.
+        let corners: Vec<_> = [(0, 0), (29, 0), (0, 4), (29, 4)]
+            .into_iter()
+            .map(|at| buf.cell(at).map(|cell| (cell.symbol().to_owned(), cell.fg)))
+            .collect();
+        assert_eq!(
+            corners,
+            ["╭", "╮", "╰", "╯"]
+                .map(|corner| Some((corner.to_owned(), OUTLINE)))
+                .to_vec(),
+            "lines were {:#?}",
+            lines(&buf)
+        );
+    }
+
+    #[rstest::rstest]
+    fn unselected_card_has_no_outline() {
+        // Given a thread that isn't selected.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 5);
+
+        // Then the lines around its card are blank.
+        let around = [line(&buf, 0), line(&buf, 4)];
+        assert!(
+            around
+                .iter()
+                .all(|line| line.trim_end_matches('│').trim().is_empty()),
+            "lines were {:#?}",
+            lines(&buf)
         );
     }
 
