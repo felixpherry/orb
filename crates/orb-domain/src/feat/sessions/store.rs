@@ -1,7 +1,7 @@
 //! orb's saved projects and threads, kept in SQLite across launches.
 //!
 //! For each project it keeps the directory orb started sessions in. For each
-//! thread it keeps the Claude ids, the title, how far the transcript has been
+//! thread it keeps the Claude ids, the titles, how far the transcript has been
 //! read, and when the running turn started. The schema grows through an ordered
 //! list of migrations. Times are milliseconds since the Unix epoch.
 
@@ -36,7 +36,10 @@ pub struct ThreadRow {
     pub short_id: String,
     /// The Claude session id, once a poll has seen it.
     pub session_id: Option<String>,
+    /// Claude's latest generated title, else the first prompt.
     pub title: Option<String>,
+    /// The latest title the user gave with `/rename`.
+    pub custom_title: Option<String>,
     pub cwd: PathBuf,
     /// The transcript file, once it has been found.
     pub transcript_path: Option<PathBuf>,
@@ -63,7 +66,8 @@ pub struct Store {
 }
 
 /// Schema migrations in order: entry `i` moves `user_version` from `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE projects (
       id INTEGER PRIMARY KEY, root TEXT NOT NULL UNIQUE, title TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE threads (
@@ -71,7 +75,9 @@ const MIGRATIONS: &[&str] = &["
       short_id TEXT NOT NULL UNIQUE, session_id TEXT, title TEXT, cwd TEXT NOT NULL,
       transcript_path TEXT, transcript_offset INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL, turn_started_at INTEGER);
-"];
+",
+    "ALTER TABLE threads ADD COLUMN custom_title TEXT;",
+];
 
 impl Store {
     /// Opens the database at `path`, creating it and its directories if needed,
@@ -128,7 +134,7 @@ impl Store {
         let threads = self
             .query(
                 "SELECT id, project_id, short_id, session_id, title, cwd, transcript_path,
-                        transcript_offset, created_at, turn_started_at
+                        transcript_offset, created_at, turn_started_at, custom_title
                  FROM threads ORDER BY created_at DESC, id DESC",
                 thread_row,
             )
@@ -185,7 +191,7 @@ impl Store {
             .attach("failed to save the thread")
     }
 
-    /// Updates what polling learns about a thread: its session id, title,
+    /// Updates what polling learns about a thread: its session id, titles,
     /// transcript position, and turn start.
     ///
     /// # Errors
@@ -197,7 +203,7 @@ impl Store {
         self.conn
             .execute(
                 "UPDATE threads SET session_id = ?2, title = ?3, transcript_path = ?4,
-                        transcript_offset = ?5, turn_started_at = ?6
+                        transcript_offset = ?5, turn_started_at = ?6, custom_title = ?7
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -206,6 +212,7 @@ impl Store {
                     transcript_path,
                     row.transcript_offset,
                     row.turn_started_at,
+                    row.custom_title,
                 ],
             )
             .change_context(StoreError)
@@ -280,6 +287,7 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         short_id: row.get(2)?,
         session_id: row.get(3)?,
         title: row.get(4)?,
+        custom_title: row.get(10)?,
         cwd: PathBuf::from(row.get::<_, String>(5)?),
         transcript_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
         transcript_offset: row.get(7)?,
@@ -336,6 +344,37 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn migrating_a_v1_database_adds_the_custom_title_column() -> Result<(), Report<StoreError>> {
+        // Given a database at schema version 1.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        {
+            let v1 = MIGRATIONS
+                .first()
+                .ok_or_else(|| Report::new(StoreError).attach("no v1 migration"))?;
+            let conn = Connection::open(&path).change_context(StoreError)?;
+            conn.execute_batch(v1).change_context(StoreError)?;
+            conn.pragma_update(None, "user_version", 1)
+                .change_context(StoreError)?;
+        }
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then it's at version 2 with a custom_title column.
+        let has_column = Connection::open(&path)
+            .change_context(StoreError)?
+            .prepare("SELECT custom_title FROM threads")
+            .is_ok();
+        assert_eq!(
+            (user_version(&path)?, has_column),
+            (2, true),
+            "migration v2 should add threads.custom_title"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn reopening_a_migrated_database_keeps_its_schema_version() -> Result<(), Report<StoreError>> {
         // Given a database that was already migrated.
         let dir = tempfile::tempdir().change_context(StoreError)?;
@@ -375,6 +414,7 @@ mod tests {
             short_id: "28bf38e2".to_owned(),
             session_id: None,
             title: None,
+            custom_title: None,
             cwd: PathBuf::from("/tmp/orb"),
             transcript_path: None,
             transcript_offset: 0,
@@ -406,13 +446,14 @@ mod tests {
         let project_id = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
         let thread_id = store.insert_thread(&new_thread(project_id))?;
 
-        // When saving its session id, title, transcript cursor, and turn start.
+        // When saving its session id, titles, transcript cursor, and turn start.
         let updated = ThreadRow {
             id: thread_id,
             project_id,
             short_id: "28bf38e2".to_owned(),
             session_id: Some("5f0c1c1e-session".to_owned()),
             title: Some("Fix the sidebar".to_owned()),
+            custom_title: Some("sidebar".to_owned()),
             cwd: PathBuf::from("/tmp/orb"),
             transcript_path: Some(PathBuf::from(
                 "/tmp/claude/projects/-tmp-orb/5f0c1c1e.jsonl",

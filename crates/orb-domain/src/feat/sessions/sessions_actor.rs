@@ -314,6 +314,7 @@ impl SessionsActor {
             short_id: short_id.to_owned(),
             session_id: None,
             title: None,
+            custom_title: None,
             cwd: self.launch_dir.clone(),
             transcript_path: None,
             transcript_offset: 0,
@@ -355,9 +356,15 @@ fn update_row(
         row.transcript_path = locate(claude_dir, &row.cwd, session_id);
     }
     if let Some(path) = &row.transcript_path
-        && let Ok(scan) = scan_title(path, row.transcript_offset, row.title.clone())
+        && let Ok(scan) = scan_title(
+            path,
+            row.transcript_offset,
+            row.title.clone(),
+            row.custom_title.clone(),
+        )
     {
         row.title = scan.title;
+        row.custom_title = scan.custom_title;
         row.transcript_offset = scan.offset;
     }
 }
@@ -366,13 +373,19 @@ fn update_row(
 /// Returns whether anything visible changed.
 fn show(thread: &mut Thread, row: &ThreadRow, status: ThreadStatus) -> bool {
     let turn_started_at = row.turn_started_at.map(from_ms);
+    let title = display_title(row);
     let changed = thread.status != status
-        || thread.title != row.title
+        || thread.title != title
         || thread.turn_started_at != turn_started_at;
     thread.status = status;
-    thread.title.clone_from(&row.title);
+    thread.title = title;
     thread.turn_started_at = turn_started_at;
     changed
+}
+
+/// The title the sidebar shows: the user's `/rename`, else the transcript's.
+fn display_title(row: &ThreadRow) -> Option<String> {
+    row.custom_title.clone().or_else(|| row.title.clone())
 }
 
 /// The one-line reason a session host failure carries.
@@ -387,7 +400,7 @@ fn reason(report: &Report<SessionHostError>) -> String {
 fn thread(host: &SessionHostService, row: &ThreadRow) -> Thread {
     Thread {
         id: row.id,
-        title: row.title.clone(),
+        title: display_title(row),
         cwd: row.cwd.clone(),
         status: ThreadStatus::Unknown,
         turn_started_at: row.turn_started_at.map(from_ms),
@@ -969,6 +982,48 @@ mod tests {
             title.as_deref(),
             Some("Fix the sidebar"),
             "the first prompt should title the thread"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn poll_titles_a_thread_with_its_custom_title() -> Result<(), Report<StoreError>> {
+        // Given a thread whose transcript has a prompt, an ai-title, then a `/rename`.
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(LAUNCH_DIR), "s1");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"content\":\"Fix the sidebar\"}}\n",
+                "{\"type\":\"ai-title\",\"aiTitle\":\"Sidebar fix\"}\n",
+                "{\"type\":\"custom-title\",\"customTitle\":\"orb-m1\"}\n",
+            ),
+        )
+        .change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![SessionRecord {
+            session_id: Some("s1".to_owned()),
+            ..record("aa", ThreadStatus::Idle)
+        }]);
+        let (mut actor, state) = start(store, &host, claude_dir.path());
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the thread is titled with the custom title.
+        let title = state
+            .read()
+            .sessions
+            .threads()
+            .find(|thread| thread.id == id)
+            .and_then(|thread| thread.title.clone());
+        assert_eq!(
+            title.as_deref(),
+            Some("orb-m1"),
+            "`/rename` should beat the ai-title"
         );
         Ok(())
     }

@@ -2,8 +2,9 @@
 //!
 //! Claude appends one JSON object per line to `<sessionId>.jsonl` under its
 //! projects directory. orb reads only the lines added since its last look, so
-//! each line is parsed once, and titles a thread by Claude's latest generated
-//! title, else the first real prompt.
+//! each line is parsed once, and titles a thread by the latest title the user
+//! gave with `/rename`, else Claude's latest generated title, else the first
+//! real prompt.
 
 use std::{
     fs::{self, File},
@@ -49,29 +50,29 @@ pub fn locate(claude_dir: &Path, cwd: &Path, session_id: &str) -> Option<PathBuf
         .find(|path| path.is_file())
 }
 
-/// The title after a scan, and how far the transcript has been read.
+/// The complete lines appended to a transcript since an offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TitleScan {
-    pub title: Option<String>,
-    /// Bytes read so far; pass it to the next scan.
+pub struct NewLines {
+    /// The new complete lines (lossy UTF-8), each ending in `\n`.
+    pub text: String,
+    /// Bytes read so far; pass it to the next read.
     pub offset: u64,
+    /// The file was shorter than the offset, so it was read from the start.
+    pub restarted: bool,
 }
 
-/// Reads the complete lines added to the transcript since `offset` and
-/// updates `title` from them.
+/// Reads the complete lines added to the transcript since `offset`.
 ///
-/// A trailing line without its newline is left for the next scan. A file
+/// A trailing line without its newline is left for the next read. A file
 /// shorter than `offset` was replaced, so it's read again from the start.
 ///
 /// # Errors
 ///
 /// Returns an error if the transcript can't be opened or read.
-pub fn scan_title(path: &Path, offset: u64, title: Option<String>) -> io::Result<TitleScan> {
+pub fn read_new_lines(path: &Path, offset: u64) -> io::Result<NewLines> {
     let mut file = File::open(path)?;
-    let start = match file.metadata()?.len() {
-        len if len < offset => 0,
-        _ => offset,
-    };
+    let restarted = file.metadata()?.len() < offset;
+    let start = if restarted { 0 } else { offset };
     #[expect(
         clippy::verbose_file_reads,
         reason = "reads from the saved offset; `fs::read` would re-read the whole transcript"
@@ -87,33 +88,74 @@ pub fn scan_title(path: &Path, offset: u64, title: Option<String>) -> io::Result
         bytes.truncate(complete);
         bytes
     };
-    Ok(TitleScan {
-        title: String::from_utf8_lossy(&bytes)
-            .lines()
-            .fold(title, next_title),
+    Ok(NewLines {
+        text: String::from_utf8_lossy(&bytes).into_owned(),
         offset: start + bytes.len() as u64,
+        restarted,
     })
 }
 
-/// The title after one transcript line.
-fn next_title(title: Option<String>, line: &str) -> Option<String> {
-    if !line.contains(r#""type":"user""#) && !line.contains(r#""type":"ai-title""#) {
-        return title;
+/// The titles after a scan, and how far the transcript has been read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleScan {
+    /// Claude's latest generated title, else the first prompt.
+    pub title: Option<String>,
+    /// The latest title the user gave with `/rename`.
+    pub custom_title: Option<String>,
+    /// Bytes read so far; pass it to the next scan.
+    pub offset: u64,
+}
+
+/// Reads the complete lines added to the transcript since `offset` and
+/// updates `title` and `custom_title` from them.
+///
+/// # Errors
+///
+/// Returns an error if the transcript can't be opened or read.
+pub fn scan_title(
+    path: &Path,
+    offset: u64,
+    title: Option<String>,
+    custom_title: Option<String>,
+) -> io::Result<TitleScan> {
+    let new = read_new_lines(path, offset)?;
+    let (title, custom_title) = new.text.lines().fold((title, custom_title), next_title);
+    Ok(TitleScan {
+        title,
+        custom_title,
+        offset: new.offset,
+    })
+}
+
+/// The titles after one transcript line.
+fn next_title(
+    (title, custom_title): (Option<String>, Option<String>),
+    line: &str,
+) -> (Option<String>, Option<String>) {
+    if !line.contains(r#""type":"user""#)
+        && !line.contains(r#""type":"ai-title""#)
+        && !line.contains(r#""type":"custom-title""#)
+    {
+        return (title, custom_title);
     }
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return title;
+        return (title, custom_title);
     };
     match value.get("type").and_then(Value::as_str) {
-        Some("ai-title") => value
-            .get("aiTitle")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|ai_title| !ai_title.is_empty())
-            .map(str::to_owned)
-            .or(title),
-        Some("user") if title.is_none() => prompt(&value),
-        _ => title,
+        Some("ai-title") => (text_field(&value, "aiTitle").or(title), custom_title),
+        Some("custom-title") => (title, text_field(&value, "customTitle").or(custom_title)),
+        Some("user") if title.is_none() => (prompt(&value), custom_title),
+        _ => (title, custom_title),
     }
+}
+
+/// A line's string field, trimmed, or `None` if it's missing or blank.
+fn text_field(line: &Value, key: &str) -> Option<String> {
+    line.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }
 
 /// The first line of a prompt the user typed, or `None` for anything else
@@ -154,7 +196,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{TitleScan, locate, scan_title, transcript_path};
+    use super::{NewLines, TitleScan, locate, read_new_lines, scan_title, transcript_path};
 
     const PROMPT: &str = r#"{"type":"user","message":{"role":"user","content":"Fix the parser\nIt drops the last line"}}"#;
 
@@ -167,7 +209,7 @@ mod tests {
     fn title_of(lines: &[&str]) -> io::Result<Option<String>> {
         let dir = tempdir()?;
         let path = write_transcript(dir.path(), lines)?;
-        Ok(scan_title(&path, 0, None)?.title)
+        Ok(scan_title(&path, 0, None, None)?.title)
     }
 
     #[rstest::rstest]
@@ -255,6 +297,31 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn custom_title_after_an_ai_title_is_kept_beside_it() -> io::Result<()> {
+        // Given a prompt, a generated title, then a `/rename`.
+        let dir = tempdir()?;
+        let path = write_transcript(
+            dir.path(),
+            &[
+                PROMPT,
+                r#"{"type":"ai-title","aiTitle":"Parser fix"}"#,
+                r#"{"type":"custom-title","customTitle":" orb-m1 ","sessionId":"s1"}"#,
+            ],
+        )?;
+
+        // When scanning it.
+        let scan = scan_title(&path, 0, None, None)?;
+
+        // Then the custom title is set and the title is still the generated one.
+        assert_eq!(
+            (scan.title.as_deref(), scan.custom_title.as_deref()),
+            (Some("Parser fix"), Some("orb-m1")),
+            "`/rename` should be kept apart from the ai-title"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn later_prompt_keeps_the_existing_title() -> io::Result<()> {
         // Given a titled thread whose transcript gains another prompt.
         let dir = tempdir()?;
@@ -264,7 +331,7 @@ mod tests {
         )?;
 
         // When scanning the new prompt.
-        let scan = scan_title(&path, 0, Some("Fix the parser".to_owned()))?;
+        let scan = scan_title(&path, 0, Some("Fix the parser".to_owned()), None)?;
 
         // Then the title is unchanged.
         assert_eq!(
@@ -324,13 +391,14 @@ mod tests {
         fs::write(&path, format!("{PROMPT}\n{{\"type\":\"ai-title\",\"aiT"))?;
 
         // When scanning it.
-        let scan = scan_title(&path, 0, None)?;
+        let scan = scan_title(&path, 0, None, None)?;
 
         // Then only the complete line was read.
         assert_eq!(
             scan,
             TitleScan {
                 title: Some("Fix the parser".to_owned()),
+                custom_title: None,
                 offset: PROMPT.len() as u64 + 1
             },
             "the offset should stop after the last newline"
@@ -344,20 +412,21 @@ mod tests {
         let dir = tempdir()?;
         let path = dir.path().join("session.jsonl");
         fs::write(&path, format!("{PROMPT}\n{{\"type\":\"ai-title\",\"aiT"))?;
-        let first = scan_title(&path, 0, None)?;
+        let first = scan_title(&path, 0, None, None)?;
         OpenOptions::new()
             .append(true)
             .open(&path)?
             .write_all(b"itle\":\"Parser fix\"}\n")?;
 
         // When scanning again from the first scan's offset.
-        let scan = scan_title(&path, first.offset, first.title)?;
+        let scan = scan_title(&path, first.offset, first.title, None)?;
 
         // Then the completed line applied and the offset reached the file end.
         assert_eq!(
             scan,
             TitleScan {
                 title: Some("Parser fix".to_owned()),
+                custom_title: None,
                 offset: fs::metadata(&path)?.len()
             },
             "the completed line should be parsed once"
@@ -387,14 +456,37 @@ mod tests {
         let path = write_transcript(dir.path(), &[PROMPT])?;
 
         // When scanning from that offset.
-        let scan = scan_title(&path, 10_000, None)?;
+        let scan = scan_title(&path, 10_000, None, None)?;
 
         // Then the whole file was read again.
         assert_eq!(
             scan,
             TitleScan {
                 title: Some("Fix the parser".to_owned()),
+                custom_title: None,
                 offset: fs::metadata(&path)?.len()
+            },
+            "a replaced file should be read from the start"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn read_new_lines_restarts_on_a_file_shorter_than_the_offset() -> io::Result<()> {
+        // Given a transcript shorter than the saved offset (the file was replaced).
+        let dir = tempdir()?;
+        let path = write_transcript(dir.path(), &[PROMPT])?;
+
+        // When reading from that offset.
+        let new = read_new_lines(&path, 10_000)?;
+
+        // Then it restarted and read the whole file.
+        assert_eq!(
+            new,
+            NewLines {
+                text: format!("{PROMPT}\n"),
+                offset: fs::metadata(&path)?.len(),
+                restarted: true,
             },
             "a replaced file should be read from the start"
         );
