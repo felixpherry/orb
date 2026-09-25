@@ -1,9 +1,10 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
 //! has updated [`AppState`](crate::AppState). Pane commands and `Yank` are
-//! carried out by the frontend loop; session commands go to the sessions
-//! actor; `ShowPreview` goes to the preview actor.
+//! carried out by the frontend loop; session commands (create, refresh, pin,
+//! settle, delete, visit) go to the sessions actor; `ShowPreview` goes to the
+//! preview actor.
 
-use crate::feat::sessions::state::AttachTarget;
+use crate::feat::sessions::state::{AttachTarget, ThreadId};
 
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,4 +22,16 @@ pub enum Command {
     ShowPreview,
     /// Copy text to the clipboard.
     Yank(String),
+    /// Pin the thread to the top of the sidebar.
+    Pin(ThreadId),
+    /// Unpin the thread.
+    Unpin(ThreadId),
+    /// Move the thread to the Settled shelf and stop its session.
+    Settle(ThreadId),
+    /// Bring the thread back from the Settled shelf and keep it active.
+    Unsettle(ThreadId),
+    /// Delete the thread and its Claude session.
+    Delete(ThreadId),
+    /// The user is looking at the thread now.
+    Visit(ThreadId),
 }

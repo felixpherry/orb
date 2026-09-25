@@ -209,6 +209,7 @@ mod tests {
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::SystemTime;
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -218,7 +219,7 @@ mod tests {
     use crate::common::State;
     use crate::feat::preview::block::{Block, BlockId};
     use crate::feat::sessions::state::{
-        Project, ProjectId, Sessions, Thread, ThreadId, ThreadStatus,
+        Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
     /// A transcript line holding one prompt.
@@ -239,6 +240,12 @@ mod tests {
             status: ThreadStatus::Idle,
             turn_started_at: None,
             attach_argv: vec![],
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            last_activity_at: SystemTime::UNIX_EPOCH,
+            unseen: false,
         }
     }
 
@@ -252,7 +259,7 @@ mod tests {
                     root: "/work/demo".into(),
                     threads,
                 }],
-                selected: Some(ThreadId(selected)),
+                cursor: Some(SidebarItem::Thread(ThreadId(selected))),
                 ..Sessions::default()
             },
             ..AppState::default()
@@ -343,7 +350,7 @@ mod tests {
         }
 
         // When the selection moves to thread 2 and the actor refreshes.
-        state.write().sessions.select_next();
+        state.write().sessions.cursor = Some(SidebarItem::Thread(ThreadId(2)));
         actor.refresh();
 
         // Then the view follows from the top with every block folded.
@@ -371,7 +378,7 @@ mod tests {
         actor.refresh();
 
         // When the selection moves to thread 2 and the actor refreshes.
-        state.write().sessions.select_next();
+        state.write().sessions.cursor = Some(SidebarItem::Thread(ThreadId(2)));
         actor.refresh();
 
         // Then thread 2's blocks are shown.
@@ -393,12 +400,12 @@ mod tests {
         let state = state_with(vec![thread(1, Some(a.clone())), thread(2, Some(b))], 1);
         let mut actor = start(&state);
         actor.refresh();
-        state.write().sessions.select_next();
+        state.write().sessions.cursor = Some(SidebarItem::Thread(ThreadId(2)));
         actor.refresh();
         fs::remove_file(&a)?;
 
         // When the selection moves back to thread 1 and the actor refreshes.
-        state.write().sessions.select_prev();
+        state.write().sessions.cursor = Some(SidebarItem::Thread(ThreadId(1)));
         actor.refresh();
 
         // Then thread 1's cached blocks are shown.
@@ -438,7 +445,7 @@ mod tests {
         actor.refresh();
 
         // When nothing is selected and the actor refreshes.
-        state.write().sessions.selected = None;
+        state.write().sessions.cursor = None;
         actor.refresh();
 
         // Then the preview shows nothing.

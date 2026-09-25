@@ -102,7 +102,7 @@ mod tests {
 
     use orb_domain::feat::preview::state::Preview;
     use orb_domain::feat::sessions::state::{
-        Project, ProjectId, Sessions, Thread, ThreadId, ThreadStatus,
+        Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::{AppState, Focus};
     use orb_term::{Pane, PaneCommand, PaneSize};
@@ -126,6 +126,12 @@ mod tests {
             status,
             turn_started_at: None,
             attach_argv: vec![],
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            last_activity_at: SystemTime::UNIX_EPOCH,
+            unseen: false,
         }
     }
 
@@ -210,7 +216,7 @@ mod tests {
         AppState {
             focus,
             sessions: Sessions {
-                selected: Some(ThreadId(1)),
+                cursor: Some(SidebarItem::Thread(ThreadId(1))),
                 ..sessions(vec![thread(1, ThreadStatus::Idle)])
             },
             ..AppState::default()
@@ -239,7 +245,7 @@ mod tests {
         // Given a selected thread whose transcript has no blocks yet.
         let state = AppState {
             sessions: Sessions {
-                selected: Some(ThreadId(1)),
+                cursor: Some(SidebarItem::Thread(ThreadId(1))),
                 ..sessions(vec![thread(1, ThreadStatus::Idle)])
             },
             preview: Preview {

@@ -38,7 +38,7 @@ pub(crate) fn render(sessions: &Sessions, now: SystemTime, area: Rect, buf: &mut
             Row::Project(project) => render_project(project, area, buf),
             Row::Thread(thread) => {
                 render_thread(thread, now, area, buf);
-                if sessions.selected == Some(thread.id) {
+                if sessions.selected_id() == Some(thread.id) {
                     buf.set_style(area, Style::new().add_modifier(Modifier::REVERSED));
                 }
             }
@@ -148,6 +148,12 @@ mod tests {
             status,
             turn_started_at: Some(at(866)),
             attach_argv: vec![],
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            last_activity_at: SystemTime::UNIX_EPOCH,
+            unseen: false,
         }
     }
 
