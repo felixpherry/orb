@@ -18,7 +18,7 @@ T3 Code (pingdotgg/t3code, a GUI for coding agents) makes it very, very easy to 
 - **Sessions are hosted by Claude's own background supervisor** (`claude --bg`). orb reads status by polling `claude agents --json --all`. Sessions survive quitting orb.
 - **Preview**: the right side renders the selected thread's Claude transcript JSONL as jinn-style navigable blocks. Instant; spawns no process.
 - **Attach**: `⏎` runs the real `claude attach <id>` in a PTY, emulated by `alacritty_terminal`, rendered in the right-hand area. Because it's the real Claude TUI, every native command works (`/status`, `/context`, `/mcp`, `/config`, permission dialogs, Claude's vim mode, skills, pickers). `<C-\>` returns to orb.
-- **From T3 Code (product/UX)**: sidebar (projects → threads, status, elapsed time), drafts that hold setup only, worktree layout, settle rules.
+- **From T3 Code (product/UX)**: sidebar (thread cards across projects, status, elapsed time), drafts that hold setup only, worktree layout, settle rules.
 - **From jinn (`~/dev/jinn`)**: architecture and coding conventions, telescope-style picker (`jinn-selection-widget`), block-style chat view, keymap + which-key popup.
 - **Tools** (shell, lazygit, nvim) open as zellij floating panes in the thread's worktree — replacing T3's integrated terminal and "Open in VS Code" button — with de-duplication.
 
@@ -39,33 +39,38 @@ Deliberately **not** built, because native Claude already does them inside the a
 Sidebar on the left, preview (or attached Claude) on the right, mode line at the bottom.
 
 ```
-┌─ orb ───────────────────────┬─────────────────────────────────────────┐
-│ ▾ orb              ~/dev/orb│ Fix sidebar pills · orb/fix-pills · opus│
-│ ▸ ● Fix sidebar pills  2m14s│┃ you     make the pills show elapsed time│
-│   ◐ Refactor keymap  approve│  claude  I'll start with sidebar.rs…    │
-│   ✓ Worktree reuse       new│  ▸ Read  crates/orb-tui/src/sidebar.rs  │
-│   ✎ draft                   │  ▸ Edit  sidebar.rs  +12 −3             │
-│ ▾ jinn            ~/dev/jinn│  claude  Done — pills tick every 1s.    │
-│   ● Compaction fix       45s│                                         │
-│ ─ Settled (127) ──────────  │                                         │
-├─────────────────────────────┴─────────────────────────────────────────┤
-│ NORMAL   ⏎ attach · ␣ leader                               3 running  │
-└───────────────────────────────────────────────────────────────────────┘
+┌─ orb ─────────────────────────┬────────────────────────────────────────┐
+│ OB orb           ● Working 2m │ Plan Settle Lifecycle · main · opus    │
+│ Plan Settle Lifecycle         │ ┃ you     make the cards look like T3  │
+│ main                        ✳ │   claude  I'll start with sidebar.rs…  │
+│ PU paneru ⚑                3h │   ▸ Read  crates/orb-tui/src/sidebar.rs│
+│ Fix pane resize               │   ▸ Edit  sidebar.rs  +48 −12          │
+│ main                        ✳ │   claude  Done — cards match T3.       │
+│ OB orb            ✓ Completed │                                        │
+│ Worktree reuse                │                                        │
+│ orb/worktree-reuse          ✳ │                                        │
+│                               │                                        │
+│ ▸ Settled (127)               │                                        │
+├───────────────────────────────┴────────────────────────────────────────┤
+│ NORMAL   ⏎ attach · ␣ leader                                 1 working │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-Status icons: `●` working (with elapsed time) · `◐` needs approval · `?` needs input · `✓` completed-unseen · `✗` failed · `■` stopped · `✎` draft.
+- The sidebar is one T3-style list across projects. Each thread is a 3-line card: a two-letter monogram badge (colour hashed from the project name) + project + status or time since last activity, then the title, then the branch + the Claude logo `✳` (Claude orange). `⚑` marks a pin. The selected card gets a subtle background, and the sidebar scrolls to keep it in view.
+- The Settled shelf sits at the bottom: `▸ Settled (N)` collapsed, `▾ Settled` open, where each settled thread is a slim one-line row (`OB Fix compaction        2d`).
+- Status (T3's labels and colours): `● Working 2m` (sky) · `◐ Pending Approval` (amber) · `? Awaiting Input` (indigo) · `✓ Completed` (emerald; the turn ended while the user was on another thread) · `✗ Failed` / `✗ Gone` (red) · `■ Stopped` · otherwise the time since last activity (`now`/`5m`/`3h`/`2d`) · `✎` draft (M7).
 
 ### Keys
 
 | Focus | Keys |
 |---|---|
-| Sidebar | `j`/`k` next/prev thread — preview follows instantly · `<C-l>` focus preview · `⏎` attach · `␣n` new draft · `q` quit orb |
+| Sidebar | `j`/`k` next/prev thread — preview follows instantly · `<C-l>` focus preview · `⏎` attach · `p` pin/unpin · `ss` settle/un-settle · `xx` delete · on the Settled header: `⏎` open/close, `l` open, `h` close (`h` on a settled thread in the open shelf also closes it) · `␣n` new draft · `q` quit orb |
 | Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach |
 | Picker | typing filters · `<C-j>`/`<C-k>` next/prev item (focus stays in the filter input) · `⏎` pick · `Esc` cancel |
 | Attached | **every** key → Claude, except `<C-\>` → back to orb |
 
 - Keys not listed here are defined by the user in that milestone's `/plan`. Agents don't invent bindings.
-- No `h`/`l` in the sidebar; no `i` binding. Window moves are `<C-h>`/`<C-l>`, like neovim.
+- `h`/`l` in the sidebar only close/open the Settled shelf; no `i` binding. Window moves are `<C-h>`/`<C-l>`, like neovim.
 - `<C-\>` (single key, configurable) was chosen over nvim's `<C-\><C-n>`. Esc must reach Claude (it interrupts turns / is vim-mode Esc).
 - After `<C-\>`: the right side switches to the **same thread's transcript preview**, focus stays right. The attach process stays alive until another thread is selected, so `⏎` re-enters instantly.
 - Leader chords show a which-key popup. `q` quits orb; sessions keep running. There is no `:` command line (backlog).
@@ -96,12 +101,16 @@ There is no orb-owned prompt composer (rejected: it would lose Claude's pickers/
 
 ### Sidebar & settle lifecycle (T3 semantics, MVP subset)
 
-- Sections: **Pinned**, **Active**, **Settled** (collapsible shelf).
-- Manual settle / un-settle / pin.
-- Activity (new prompt, session starts running, approval/input requested) **un-settles** automatically.
-- Idle threads **auto-settle after 3 days**.
+- Sections, in one list across projects: **Pinned** (newest pin first), **Active** (newest of created or un-settled first), **Settled** (collapsible shelf at the bottom, most recently settled first). Only the shelf has a visible header. A selected settled thread stays visible while the shelf is collapsed.
+- Manual settle / un-settle / pin (`ss`, `p`). `ss` and `xx` act on the second key: the first shows jinn's yellow banner (" Press s again to settle "), or a red one when the action would be refused (" Can't settle while Claude is working ").
+- A manual settle is refused while a turn is running or waiting on the user, and removes the pin. Pinning a settled thread un-settles it.
+- Activity (a turn running, approval/input requested) **un-settles** automatically.
+- Unpinned idle threads **auto-settle after 3 days**. "Idle" counts from the last turn end orb saw, else the thread's creation. **Pinned threads are exempt**, and so is the thread orb is attached to.
 - A **manual un-settle** blocks auto-settle until the next real activity (T3's `settled_override = 'active'`).
-- "Completed-unseen" = latest turn completed after the user last viewed the thread (orb tracks last-visited per thread).
+- **Settling stops the Claude session** (`claude stop`), for manual and auto settles. `⏎` on a settled or stopped thread resumes it (`claude attach` resumes a stopped session).
+- **Delete** (`xx`) runs `claude rm` on any thread, running or not, then removes orb's row; the transcript stays. If `rm` fails, the thread stays and the reason shows. A `✗` gone thread is removed without running `rm`.
+- **Selection**: after a settle or a delete, the selection moves to the next thread below, else the one above (a settle with no card left selects the Settled header). Un-settle and pin keep the selection.
+- "Completed-unseen" = latest turn ended after the user last selected the thread (selecting counts as viewing; being selected when the turn ends counts as seeing it).
 - Status priority when several apply: approval > input > working > failed > completed-unseen > idle.
 
 ### Tool handoff (zellij)
@@ -181,6 +190,15 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Thinking | Hide empty thinking (1273/1367 are `""`); non-empty thinking is a folded block `za` opens | Show empty ones — nothing to expand. Hide all — loses real content. |
 | Preview liveness | `PreviewActor` checks the selected transcript's size every 500 ms, reads only appended lines, wakes the loop only when blocks changed; caches the 4 most recent threads | The sessions poll cadence (1 s / 5 s) — needs actor-to-actor messaging (no bus yet). The `notify` crate — a new dependency, and FSEvents coalescing adds latency. |
 | Yank | `Command::Yank(text)` → the frontend writes OSC 52 via `outer_terminal::copy_to_clipboard` (works through zellij, M1); a tool block copies its summary line plus output, others their raw text | `arboard` (jinn) — a new dependency. Output-only or input-only for tool blocks. |
+| Sidebar layout | T3's flat list across projects; each thread is a 3-line card (badge + project + status or time · title · branch + `✳`); no visible Pinned/Active labels (`⚑` marks a pin), only a Settled shelf header | Project headers with threads grouped under them (the old mockup) — not T3. Pinned-first inside each project — drops the Pinned section. Visible section headers — T3 doesn't have them. |
+| Sidebar ordering | Pinned by `pinned_at` desc; Active by `max(created_at, unsettled_at)` desc (T3's keyless rule); Settled by `settled_at` desc; ties go to the higher id | Most recent activity first — rows jump while a thread works, breaking `j`/`k` muscle memory. T3's `pin_order_key`/`active_order_key` — fractional keys written only by mouse drag. |
+| Pinned + auto-settle | Pinned threads never auto-settle — a pin means "keep this in view" | T3's rule — its policy never checks `pinnedAt`, so it auto-settles and unpins pinned threads. |
+| Last activity | The last turn end orb saw, else `created_at`; stamped when a poll sees a turn stop being in progress. A turn run entirely while orb is closed is missed; the next one orb sees un-settles the thread anyway | Transcript mtime — bookkeeping writes (titles, mode lines) would count as activity and could un-settle a thread. |
+| Stop on settle | Manual and auto settles run `claude stop` on an idle session; `⏎` (`claude attach`) resumes a stopped one. Auto-settle skips the thread orb is attached to. Stops are awaited on the `SessionsActor` after its state write | Keeping sessions running — ~300–480 MB each. Resume on un-settle — attach already resumes. Spawned stop tasks — more plumbing for ~0.7 s. |
+| Settle/delete confirm | which-key sequences `ss`/`xx`: while the first key is pending, the renderer draws jinn's banner instead of the popup — yellow when the action will run, red when the handler's own validator refuses it | An AppState prompt flag + `Intent::NoOp` for unmapped keys — new state for what which-key already tracks (accepted cost: the cancelling key is swallowed, so `x` then `j` doesn't move). A separate banner check — two rules that could drift. |
+| Delete | `xx` runs `claude rm` on any thread, running or not, then deletes orb's row; the transcript stays. On failure the thread stays and the reason shows; a `✗` gone thread skips `rm` | Refusing while working — the confirm already guards it. Soft delete (`deleted_at`) — nothing would read it. Always removing the row — a live session would keep running unseen, because orb lists only sessions it started. |
+| Branch source | The latest non-empty `gitBranch` on transcript `user` lines, found by the existing title scan and stored in `threads.branch` | Reading `.git/HEAD` each poll — worktree/detached-HEAD parsing that M6 owns. |
+| Visits | Selecting a thread stamps `last_visited_at` (`Command::Visit`), and each poll marks the selected thread seen; unseen = `last_activity_at > last_visited_at` | Stamping only on polls — `✓` would linger up to 5 s on a selected thread, and a short visit wouldn't count. |
 
 ## Milestones
 
@@ -229,7 +247,8 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 
 ### 4. Settle lifecycle
 - Pinned / Active / Settled; manual settle/un-settle/pin; activity un-settles; 3-day auto-settle; manual un-settle blocks auto-settle until activity; last-visited → completed-unseen.
-- Open questions: keys for settle / un-settle / pin (user defines); ordering within Active (T3 uses an `unsettled_at` re-entry stamp + `active_order_key`).
+- T3-style sidebar: one list of cards across projects (monogram badge, project, status or time, title, branch, `✳`) in T3's truecolor palette, a Settled shelf at the bottom, and scrolling. Delete (`claude rm`); settling stops the session (`claude stop`). Branch from the transcript's latest `gitBranch`.
+- Resolved in M4's plan: keys — `p` pin/unpin, `ss` settle/un-settle, `xx` delete, and `⏎`/`l`/`h` on the Settled header (see Keys); Active order — `max(created_at, unsettled_at)` desc, T3's keyless rule, with no drag order keys (see Decisions).
 
 ### 5. Projects & picker
 - Port `jinn-selection-widget` + `<C-j>`/`<C-k>`; recency order → fuzzy score when typing.
@@ -252,7 +271,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Open questions: floating size flags for "full screen"; whether `focus-pane-id` switches tabs or needs `go-to-tab-by-id` first.
 
 ### Backlog
-PR status via `gh` + settle on merge · snooze · undo · notifications · quick-reply box (hidden attach + paste) · copy mode over the attached pane · remappable keys · project favicons (`ratatui-image`, zellij 0.45 supports kitty graphics) · Claude hooks for instant state · subagent transcript expansion · full-screen zoom of the attached pane · Codex behind `SessionHost` · `:` command line.
+PR status via `gh` + settle on merge · snooze · undo · project filter (T3's project scope) · drag reorder of pinned/active threads (T3's `pin_order_key`/`active_order_key`) · notifications · quick-reply box (hidden attach + paste) · copy mode over the attached pane · remappable keys · project favicons (`ratatui-image`, zellij 0.45 supports kitty graphics) · Claude hooks for instant state · subagent transcript expansion · full-screen zoom of the attached pane · Codex behind `SessionHost` · `:` command line.
 
 ## Risks
 
@@ -361,7 +380,18 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 
 ### M4
 
-- (sidebar) Threads appear in Pinned, Active, and Settled sections; activity un-settles a thread and idle threads auto-settle after 3 days.
+**Amend**
+- ``(sidebar) The sidebar lists only sessions orb started, grouped by project.`` → `(sidebar) The sidebar lists only sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.`
+
+**Add**
+- `(sidebar) Pinned threads come first, then Active threads, then a collapsible Settled shelf at the bottom of the sidebar.`
+- `(sidebar) A thread shows ✓ Completed when its latest turn ended after the user last selected it.`
+- `(settle) Any new turn, approval request, or input request un-settles a thread.`
+- `(settle) An unpinned thread auto-settles after 3 days without turn activity, unless the user un-settled it since that activity or orb is attached to it.`
+- ``(settle) Settling a thread stops its Claude session (`claude stop`); attaching resumes it.``
+- ``(sessions) Deleting a thread runs `claude rm` and removes it from orb; its transcript stays in Claude's projects directory.``
+- ``(keybinds) In the sidebar, `p` pins or unpins the selected thread, `ss` settles or un-settles it, and `xx` deletes it.``
+- ``(keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled thread closes the shelf.``
 
 ### M5
 

@@ -265,3 +265,62 @@ Sample: 207 main transcripts and 67 subagent files under `~/.claude/projects` on
 - **ratatui-core** `Buffer::set_stringn` drops graphemes containing control characters, so `\t` and ESC vanish; replace tabs with spaces first. **[verified: source]**
 - **ratatui 0.30** `Paragraph::line_count(width)` needs the `unstable-rendered-line-info` feature. **[verified: source]**
 - **serde_json** `Map` is a sorted `BTreeMap` unless the `preserve_order` feature is on (then `indexmap`; 2.14 is already in orb's `Cargo.lock`). **[verified: source]**
+
+## 9. Settle lifecycle (verified 2026-09-25, Claude Code 2.1.282; T3 f5ef0dd)
+
+T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913e7b8a5df30ffc` (paths relative to the repo). CLI facts were checked on this machine with two probe sessions, removed afterwards. Tags as in §6.
+
+### T3 sidebar layout (`apps/web/src/components/Sidebar.tsx`) **[verified: source]**
+- Sections span all projects; each row names its project. Render order: pinned, active, (snoozed), then the settled header and its rows.
+- "Pinned"/"Active" labels are zero-height except while dragging; only the settled shelf has a visible header.
+- The settled header reads `Settled (N)` collapsed and `Settled` expanded, and starts collapsed. While collapsed, the open thread's settled row still renders.
+- Card: favicon/monogram + project name + status slot (the status pill, else a relative time), then the title, then the branch + provider icon.
+- Slim settled row: dimmed favicon + title + settled-time label.
+- A card's time label is the time since `latestUserMessageAt ?? updatedAt` (`threadTimeLabel`); a settled row's is the time since its settled timestamp (`settledTimeLabel`).
+
+### T3 ordering (`packages/client-runtime/src/state/threadSort.ts`) **[verified: source]**
+- Active: threads without an `activeOrderKey` come first, by `max(createdAt, unsettledAt)` desc (`activeThreadAnchorTimestampMs`), so an un-settled thread re-enters at the top.
+- Pinned: keyed threads by `pinOrderKey`, then keyless threads by `createdAt` desc; ties by id.
+- Settled: by the settled timestamp desc (`resolveSettledThreadTimestamp`).
+- `activeOrderKey`/`pinOrderKey` are fractional keys written only by drag reordering.
+
+### T3 settle rules (`apps/server/src/orchestration/{ThreadSettlementPolicy,decider,projector}.ts`) **[verified: source]**
+- **Manual settle:** rejected while running or waiting. Writes override `settled`, `settled_at = now`, `unsettled_at = null`, and unpins (and unsnoozes).
+- **User un-settle:** override `active`, `settled_at = null`; `unsettled_at = now`, kept if the override was already `active`.
+- **Activity** (a user turn, the session starting/running, an approval or input request): only when the override is non-null — override → null, `settled_at = null`; `unsettled_at = now` if it was settled, kept if `active`.
+- **Pin:** `pinned_at = now`, kept if already pinned. On a settled thread it also un-settles with reason user.
+- **Auto-settle:** when the last activity is older than 3 days, the override is null, nothing is running or pending. Writes `settled_at` = the last-activity time. The policy never checks `pinnedAt`, so T3 auto-settles (and so unpins) pinned threads.
+- T3 stores no settle origin (manual vs auto).
+
+### T3 visits (`apps/web/src/components/ChatView.tsx`, `apps/web/src/uiStateStore.ts`) **[verified: source]**
+- `markThreadVisited` stamps `lastVisitedAt` while the thread's chat view is mounted.
+- Completed-unseen = `latestTurn.completedAt > lastVisitedAt` (client-side, §3).
+
+### T3 project monogram (`apps/web/src/projectIdentity.ts`) **[verified: source]**
+- `words` = runs of letters/digits (after NFKC). `first` = the first glyph of the first word.
+- `second` = the first digit after the first glyph of the first word; else, with 2+ words, the first glyph of the last word; else the last glyph of the first word.
+- Upper-cased, first 2 glyphs. No words → `"PR"`.
+- Colour: `seed = lowercase(trimmed name) || "project"`; `index = fold(0, |i, cp| (i * 31 + cp) % 18)` over code points, into gray red orange amber yellow lime green emerald teal cyan sky blue indigo violet purple fuchsia pink rose.
+- The tile's text is `<colour>-400` on a 14% background of the same colour.
+- Worked examples: `orb` → `OB`, rose (17); `paneru` → `PU`, fuchsia (15) — both match the user's T3 screenshot.
+
+### T3 time labels **[verified: source]**
+- Working duration (`Sidebar.logic.ts` `formatWorkingDurationLabel`): `<60 s → "Ns"`, `<60 min → "Nm"`, else `"Hh Mm"`.
+- Relative (`timestampFormat.ts` `formatRelativeTime` + `Sidebar.tsx` `compactSidebarTimeLabel`): `<60 s` or negative → `"now"`, `<60 min → "Nm"`, `<24 h → "Nh"`, else `"Nd"`.
+
+### T3 status pills (`Sidebar.logic.ts` `resolveThreadStatusPill`) **[verified: source]**
+- Pending Approval: amber-300. Awaiting Input: indigo-300. Working: sky-300. Completed: emerald-300 (dark-mode classes).
+
+### `claude` 2.1.282 **[verified]**
+- `claude stop <id>`: ~0.73 s, prints `stopped <id>`. The record then has `state: "stopped"` and no `pid`/`status`; the conversation is kept. Help: "resume it later with `claude attach <id>`".
+- `claude attach <id>` on a stopped session resumes it: a new pid, the same `id` and `sessionId`, `status: "idle"`, first byte after ~0.2 s.
+- `claude rm <id>`: ~0.68 s, prints `removed <id>`. It works on a live session (kills it) and removes the record; the transcript under `~/.claude/projects/` stays. Help: "Delete a background session and its worktree. Unlike `stop`, works on already-exited sessions."
+
+### Libraries
+- **ratatui-which-key 0.14** (`src/state.rs`) **[verified: source]**:
+  - `WhichKeyState` has `pub current_sequence: Vec<K>`.
+  - `handle_key` pushes the key, then: a `Branch` stays pending (`active = true`); a `Leaf` returns its action and clears; no match dismisses the sequence and returns `None` (no catch-all handlers).
+  - Backspace pops one pending key.
+
+### Transcript `gitBranch` **[verified]**
+- Present on `user` and `assistant` lines. An empty string means "no branch". The preview already takes the latest non-empty value (`Conversation::branch`).
