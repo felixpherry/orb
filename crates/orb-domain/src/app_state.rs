@@ -1,6 +1,7 @@
 //! Shared application state: written by the [`IntentHandler`](crate::IntentHandler)
 //! and the actors, read by the renderer.
 
+use crate::feat::preview::state::Preview;
 use crate::feat::sessions::state::Sessions;
 
 /// Which part of orb receives the user's keys. Ordered so it can key the
@@ -25,4 +26,6 @@ pub struct AppState {
     pub focus: Focus,
     /// orb's projects and their Claude sessions.
     pub sessions: Sessions,
+    /// The selected thread's transcript preview.
+    pub preview: Preview,
 }

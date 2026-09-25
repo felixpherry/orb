@@ -343,6 +343,7 @@ impl App {
                     .try_send();
                 Ok(())
             }
+            Command::ShowPreview | Command::Yank(_) => Ok(()),
         }
     }
 

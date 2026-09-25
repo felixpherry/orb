@@ -8,3 +8,5 @@
 
 pub mod block;
 pub mod conversation;
+pub mod state;
+pub mod validator;
