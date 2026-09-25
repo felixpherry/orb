@@ -172,8 +172,15 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Actor plumbing | tokio + kameo 0.22, std-`RwLock` `State`, one `SessionsActor`; the frontend `tell`s commands straight to it (unbounded mailbox, `try_send`); the pane stays in the loop | Full jinn port (MessageBus + kanal Bridge + tcaps + `ActorDeps` + root supervisor) — hundreds of lines for one actor. No actors — conflicts with AGENTS.md §3. Add the bus when a second actor needs broadcast events. |
 | Poll cadence | 1 s while a thread is busy/waiting or orb is attached, else 5 s; immediate poll after create/attach/detach | Fixed 1 s — ~120 ms CPU per call ≈ 12% of a core all day. Fixed 2 s — elapsed would jump. |
 | Elapsed source | orb stamps `turn_started_at` when a poll first sees the turn in progress; persisted so a relaunch mid-turn keeps it (T3 stamps `turn.startedAt` the same way) | Transcript prompt timestamp — pulls more of M3 forward. `~/.claude/jobs/<id>/timeline.jsonl` — unofficial supervisor internals. |
-| Thread title | Transcript: latest `ai-title` > first real prompt (first line) > "New thread" (T3's rule) | `agents --json` `name` — stays the short id when the prompt is typed through `claude attach`. `-n <name>` — meaningless fixed names. |
+| Thread title | Transcript: latest `custom-title` (`/rename`, M3; its own column so a later `ai-title` can't override it) > latest `ai-title` > first real prompt (first line) > "New thread" (T3's rule) | `agents --json` `name` — stays the short id when the prompt is typed through `claude attach`. `-n <name>` — meaningless fixed names. |
 | Store abstraction | `Store` wraps `rusqlite::Connection` directly; tests use `Connection::open_in_memory()` | A store trait — one implementation; in-memory SQLite is a cheap real test backend. |
+| Markdown renderer | `tui-markdown` 0.3.9 — builds on ratatui-core 0.1 (ratatui 0.30's core, one ratatui-core in `cargo tree`); syntect highlighting | `ratatui-markdown` — every release requires ratatui `^0.29` (two ratatui type universes). Vendoring jinn's patched `ratatui-markdown` — a vendored crate in orb. `daat-locus-md` — unknown third-party 0.30 fork without jinn's fixes. |
+| Preview view state | `AppState.preview` holds the cursor (`None` = following the tail), row offset, and open folds (written by the `IntentHandler` through plain domain functions) plus a layout snapshot (viewport rows, per-block heights) the frontend writes after each draw | Frontend-local `ListState`-style state with preview keys applied in orb-tui — a second bypass of the `IntentHandler` after the attached pane. Block-boundary scrolling — a block taller than the viewport couldn't be read. |
+| Transcript branch rule | Newest uuid line → walk `parentUuid`; add lines sharing an included `message.id` and tool results paired by `tool_use_id`; missing parent → previous line; repeated uuid → first copy; `logicalParentUuid` at `compact_boundary` | Naive `parentUuid` walk — drops parallel tool calls (16/44 files). `last-prompt.leafUuid` — lags 1–9 lines in 6/44 files. |
+| Compaction | Continue across `compact_boundary` via `logicalParentUuid` with a "Conversation compacted" divider (full history) | Stop at the boundary — the preview is where you read history; attached Claude already shows the compacted state. |
+| Thinking | Hide empty thinking (1273/1367 are `""`); non-empty thinking is a folded block `za` opens | Show empty ones — nothing to expand. Hide all — loses real content. |
+| Preview liveness | `PreviewActor` checks the selected transcript's size every 500 ms, reads only appended lines, wakes the loop only when blocks changed; caches the 4 most recent threads | The sessions poll cadence (1 s / 5 s) — needs actor-to-actor messaging (no bus yet). The `notify` crate — a new dependency, and FSEvents coalescing adds latency. |
+| Yank | `Command::Yank(text)` → the frontend writes OSC 52 via `outer_terminal::copy_to_clipboard` (works through zellij, M1); a tool block copies its summary line plus output, others their raw text | `arboard` (jinn) — a new dependency. Output-only or input-only for tool blocks. |
 
 ## Milestones
 
@@ -214,11 +221,11 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 ### 3. Transcript preview
 - Reuse M2's transcript locator and byte-offset tailer; extend it to every line type.
 - Lenient decode: known line types, `#[serde(other)]` catch-all; bad line → warn + skip, never abort.
-- Rebuild: merge lines sharing `message.id`; pair `tool_result` ↔ `tool_use` by `tool_use_id`; follow `parentUuid` from the newest leaf (rewinds create branches — file order ≠ conversation order); hide bookkeeping lines.
-- Render with `ratatui-markdown` (crates.io); virtualized rendering + per-block line cache keyed by width (jinn's `line_count_cache.rs`); block navigation, fold, yank, follow-tail.
-- Parse only the selected thread; cache a few recent.
+- Rebuild: start at the newest line with a uuid and walk back along `parentUuid` (rewinds create branches — file order ≠ conversation order); add every line sharing an included `message.id` and every `tool_result` paired by `tool_use_id` (parallel tool calls point at their own `tool_use`); at a `compact_boundary` continue via `logicalParentUuid`; a missing parent continues at the previous line; a repeated uuid keeps its first copy; hide bookkeeping lines.
+- Render with `tui-markdown` 0.3.9 (crates.io; `ratatui-markdown` needs ratatui 0.29); virtualized rendering + per-block line cache keyed by width (jinn's `line_count_cache.rs`); block navigation, fold, yank, follow-tail.
+- Parse only the selected thread; cache the 4 most recent; the `PreviewActor` checks the selected transcript every 500 ms.
 - Tests: anonymized real transcript fixtures.
-- Open questions: thinking-block display (content may be redacted); subagent sidechains (backlog).
+- Resolved in M3's plan: thinking — empty thinking is hidden, non-empty thinking is a folded block; compaction — the preview continues across `compact_boundary` with a "Conversation compacted" divider; yank — `y` sends the block's raw text through OSC 52; `/rename` titles — `custom-title` beats `ai-title`, stored in its own column; subagent sidechains stay in the backlog (see Decisions).
 
 ### 4. Settle lifecycle
 - Pinned / Active / Settled; manual settle/un-settle/pin; activity un-settles; 3-day auto-settle; manual un-settle blocks auto-settle until activity; last-visited → completed-unseen.
@@ -341,7 +348,16 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 
 ### M3
 
-- (preview) The preview renders the selected thread from its Claude transcript JSONL as navigable blocks, without spawning a process.
+**Amend**
+- ``(sessions) A thread's title is its transcript's latest `ai-title`, else its first prompt, else "New thread".`` → ``(sessions) A thread's title is its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".``
+
+**Add**
+- `(preview) The preview renders the selected thread from its Claude transcript JSONL as navigable blocks, without spawning a process.`
+- `(preview) The preview shows only the transcript's newest branch and continues across compaction boundaries.`
+- `(preview) The preview reads new transcript lines within half a second and follows the tail while scrolled to the bottom.`
+- ``(keybinds) In the preview, `j`/`k` move between blocks, `<C-d>`/`<C-u>` move half a page, `gg`/`G` jump to the top/bottom, `za`/`<Tab>` fold or unfold a block, and `y` yanks its raw text.``
+- `(preview) Yanked text goes to the outer terminal's clipboard via OSC 52.`
+- `(pane) orb draws the Claude pane only while attached; otherwise the right-hand area shows the selected thread's preview.`
 
 ### M4
 

@@ -113,7 +113,7 @@ Source: https://github.com/pingdotgg/t3code (commit f5ef0dd). Local data: `~/.t3
 | Picker | `crates/jinn-selection-widget` (`PickerItem`, `SelectionState<T>`, SkimMatcherV2) |
 | Sidebar | `crates/jinn-domain/src/feat/ui/sidebar/` (`section_trait.rs`, `sessions/render/entry_line.rs`) |
 | Chat log blocks | `crates/jinn-domain/src/feat/ui/chat_log/` (`visual_item.rs`, `line_count_cache.rs`, `markdown.rs`, `tool_call.rs`, `tool_result.rs`, `thinking.rs`, `user.rs`, `assistant.rs`) |
-| Markdown | `ratatui-markdown` (crates.io, MIT/Apache; jinn vendors a patched copy in `vendor/`) |
+| Markdown | `ratatui-markdown` (crates.io, MIT/Apache; jinn vendors a patched copy in `vendor/`). orb uses `tui-markdown` 0.3.9 instead (§8). |
 | PTY / emulator | `crates/jinn-domain/src/feat/interactive_term/` (`pty_session.rs`, `screen_task.rs`, `emulator.rs`, `query_responder.rs`, `settle.rs::encode_key_event`), `crates/jinn-tui/src/render/terminal_tab.rs` — **known gaps**: legacy-only key encoding (Shift+Enter lost), no BackTab, paste/mouse not forwarded, ~150 ms output latency |
 | External editor suspend | `crates/jinn-tui/src/suspend.rs` |
 | SQLite migrations / DAO | `crates/jinn-session-schema` (`migrate.rs`), `crates/jinn-domain/build.rs` (daow compile-time SQL check), `feat/session/session_store/sqlite.rs` |
@@ -216,3 +216,52 @@ Tags as in §6; **source** for libraries = read from the crate source in `~/.car
   - Leader is Space by default; key strings `<c-x>`, `<enter>`, `<esc>`, `<leader>`, plain chars.
   - `WhichKeyState::handle_key` matches with crossterm `KeyEvent ==`, which compares `code, modifiers, kind, state`. Kitty repeats (`KeyEventKind::Repeat`) or `state` bits never match a binding, so feed `KeyEvent::new(key.code, key.modifiers)`.
 - **rusqlite 0.40** with `default-features = false` links the system SQLite (as jinn does). **[verified: source]**
+
+## 8. Transcript preview (verified 2026-09-25, Claude Code 2.1.282)
+
+Sample: 207 main transcripts and 67 subagent files under `~/.claude/projects` on this machine. Tags as in §6.
+
+### Transcript lines
+- **Which lines carry a uuid.** Only `user`, `assistant`, `attachment`, and `system` lines have `uuid`/`parentUuid`. `ai-title`, `custom-title`, `last-prompt`, `mode`, `permission-mode`, `file-history-snapshot`, `file-history-delta`, `queue-operation`, `atis-latch`, `cost-state`, `agent-name`, `pr-link`, `worktree-state`, `relocated`, and `summary` have neither. **[verified]**
+- **Parent links.** **[verified]**
+  - `parentUuid` points at the previous uuid line in 10396/10466 cases.
+  - Parallel tool results point at their own `tool_use` line (`parentUuid == sourceToolAssistantUUID`, 1698/1698), so a plain `parentUuid` walk drops calls (16/44 sampled files). Example: `32 tool_use A → 33 tool_use B (p=32) → 34 result B (p=33) → 35 result A (p=32) → 36 attachment (p=35)`.
+  - One file has a parent that isn't in the file (a naive walk loses 73 lines). One file re-appends 563 lines with already-used uuids (the copies are identical or differ only in `promptId`/`gitBranch`).
+- **Forks.** Real forks are rare (4/207 files), e.g. the same prompt sent twice, or a second prompt under the same parent. **[verified]**
+- **Newest leaf.** It is the last line with a uuid. `last-prompt.leafUuid` lags 1–9 lines in 6/44 files. **[verified]**
+- **Assistant lines.** **[verified]**
+  - Each line holds one content block: `thinking` (keys `type, thinking, signature`), `text`, or `tool_use {id, name, input}`.
+  - Lines of one API message share `message.id`, and only tool-result user lines appear between them.
+  - `model: "<synthetic>"` lines are either API errors (`isApiErrorMessage: true`, e.g. `"API Error: Connection lost mid-response…"`) or `"No response requested."`.
+  - 1273 of 1367 thinking blocks are `"thinking":""`.
+- **User lines.** `message.content` is a string or a list of `text` / `image` / `tool_result` blocks. A `tool_result.content` is a string or a list of `text` / `image` / `tool_reference` blocks, and `is_error` may be missing. **[verified]**
+- **`toolUseResult`.** **[verified]**
+  - Edit: `structuredPatch: [{oldStart, oldLines, newStart, newLines, lines: [" ctx", "-old", "+new"]}]`.
+  - Write: `{type: "create" | "update", filePath, content, structuredPatch}`; a create has `structuredPatch: []`.
+  - On errors it's the string `"Error: …"`.
+- **Non-prompt user text.** **[verified]**
+  - `isMeta: true` lines.
+  - `<command-message>…<command-name>/x</command-name>…<command-args>…</command-args>`.
+  - `<local-command-caveat>`, `<local-command-stdout>`, `<task-notification>`, `<bash-input>`, `<bash-stdout>`/`<bash-stderr>`.
+  - `[Request interrupted by user]` and `[Request interrupted by user for tool use]`.
+- **Queued prompts.** Prompts typed mid-turn are `attachment` lines with `attachment: {type: "queued_command", commandMode: "prompt" | "task-notification", prompt: <string | blocks>}`, not `user` lines. **[verified]**
+- **System subtypes seen.** `turn_duration`, `away_summary`, `local_command` (`content` = `<local-command-stdout>…`), `informational` (`content`, `level`), `api_error` (`level: "error"`, `error{message,…}`, `retryAttempt`, `maxRetries`). The binary knows 50+ subtypes. **[verified: data + bundle]**
+- **Compaction.** `{type: "system", subtype: "compact_boundary", content: "Conversation compacted", parentUuid: null, logicalParentUuid: <uuid>}`, followed by a user line with `isCompactSummary: true`. No compacted transcript exists on this machine. **[verified: bundle only]**
+- **No sidechain lines** appear in main transcripts. **[verified]**
+- **Sizes.** Median 653 KB / 179 lines; max 20.2 MB / 1957 lines; longest line 1.69 MB (base64 images). No file ended without a newline. **[verified]**
+
+### Titles
+- `/rename` writes `{"type":"custom-title","customTitle":"…","sessionId":"…"}` (no uuid). It is re-appended: the renamed transcript b2fe33f2 has 7 `custom-title` lines (`orb-m1`) and no `ai-title` lines. Because `ai-title` lines keep coming in other transcripts, a custom title only wins if it's kept apart from the `ai-title`/prompt title. **[verified]**
+
+### Libraries
+- **`ratatui-markdown`** requires ratatui `^0.29` in every release (checked through 0.3.6), so it can't share types with orb's ratatui 0.30.2. **[verified: source]**
+- **`tui-markdown` 0.3.9** (joshka) **[verified: source + scratch build]**:
+  - Builds on `ratatui-core` 0.1 (default features off), which is ratatui 0.30's core; with ratatui 0.30.2, `cargo tree -i ratatui-core` shows one version (0.1.2).
+  - Pulls `syntect` 5.3 with default features (builds the oniguruma C library), `pulldown-cmark` 0.13, and `ansi-to-tui` 8.
+  - `tui_markdown::from_str(&'a str) -> ratatui_core::text::Text<'a>` borrows its input; caching needs an owned copy (`Span` content `.into_owned()`).
+  - Output keeps `# ` heading markers and ```` ```lang ```` fence lines, visible and styled.
+  - Release timing: the first call ~7.5 ms (syntect loads its syntax set lazily); later calls ~0.8 ms for a 260-line document with 20 code blocks.
+- **ratatui-which-key 0.14** parses `"G"` as `KeyEvent::new(KeyCode::Char('G'), KeyModifiers::empty())`, while kitty/crossterm report Shift+g as `Char('G')` + `SHIFT`; drop SHIFT for chars before matching. `"gg"`, `"za"`, `"<tab>"`, `"<c-d>"`, `"<c-u>"` are supported sequences and names. **[verified: source]**
+- **ratatui-core** `Buffer::set_stringn` drops graphemes containing control characters, so `\t` and ESC vanish; replace tabs with spaces first. **[verified: source]**
+- **ratatui 0.30** `Paragraph::line_count(width)` needs the `unstable-rendered-line-info` feature. **[verified: source]**
+- **serde_json** `Map` is a sorted `BTreeMap` unless the `preserve_order` feature is on (then `indexmap`; 2.14 is already in orb's `Cargo.lock`). **[verified: source]**
