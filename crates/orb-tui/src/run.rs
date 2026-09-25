@@ -160,7 +160,7 @@ impl App {
                     .pane
                     .as_ref()
                     .filter(|attached| {
-                        Some(attached.thread) == state.sessions.selected
+                        Some(attached.thread) == state.sessions.selected_id()
                             && !attached.pane.has_exited()
                     })
                     .map(|attached| &attached.pane);
@@ -364,6 +364,12 @@ impl App {
                 Ok(())
             }
             Command::Yank(text) => outer_terminal::copy_to_clipboard(out, text),
+            Command::Pin(_)
+            | Command::Unpin(_)
+            | Command::Settle(_)
+            | Command::Unsettle(_)
+            | Command::Delete(_)
+            | Command::Visit(_) => Ok(()),
         }
     }
 
@@ -376,7 +382,7 @@ impl App {
     {
         let (selected, focus) = {
             let state = self.state.read();
-            (state.sessions.selected, state.focus)
+            (state.sessions.selected_id(), state.focus)
         };
         if self
             .pane

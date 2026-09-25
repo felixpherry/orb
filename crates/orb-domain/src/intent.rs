@@ -8,9 +8,9 @@ use std::fmt;
 pub enum Intent {
     /// Quit orb; sessions keep running.
     Quit,
-    /// Select the thread below.
+    /// Move the sidebar's cursor to the row below.
     SelectNext,
-    /// Select the thread above.
+    /// Move the sidebar's cursor to the row above.
     SelectPrev,
     /// Move the keys to the selected thread's preview.
     FocusPreview,
@@ -38,6 +38,16 @@ pub enum Intent {
     ToggleFold,
     /// Copy the preview's cursor block to the clipboard.
     Yank,
+    /// Pin or unpin the selected thread.
+    TogglePin,
+    /// Settle or un-settle the selected thread.
+    ToggleSettle,
+    /// Delete the selected thread and its Claude session.
+    DeleteThread,
+    /// Show the Settled shelf's threads.
+    OpenShelf,
+    /// Hide the Settled shelf's threads.
+    CloseShelf,
 }
 
 /// The label the which-key popup shows for the intent.
@@ -60,6 +70,11 @@ impl fmt::Display for Intent {
             Self::Bottom => "bottom",
             Self::ToggleFold => "fold",
             Self::Yank => "yank",
+            Self::TogglePin => "pin",
+            Self::ToggleSettle => "settle",
+            Self::DeleteThread => "delete",
+            Self::OpenShelf => "open settled",
+            Self::CloseShelf => "close settled",
         })
     }
 }

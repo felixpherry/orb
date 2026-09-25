@@ -2,8 +2,11 @@
 
 use crate::feat::pane::validator::validate_attach;
 use crate::feat::preview::validator::{validate_toggle_fold, validate_yank};
-use crate::feat::sessions::state::AttachTarget;
-use crate::feat::sessions::validator::validate_new_session;
+use crate::feat::sessions::state::{AttachTarget, SidebarItem};
+use crate::feat::sessions::validator::{
+    validate_close_shelf, validate_delete, validate_new_session, validate_open_shelf,
+    validate_toggle_pin, validate_toggle_settle,
+};
 use crate::{AppState, Command, Focus, Intent};
 
 /// Applies each [`Intent`] to [`AppState`] in one match block.
@@ -12,6 +15,10 @@ pub struct IntentHandler;
 impl IntentHandler {
     /// Apply `intent` to `state` and return the commands that must follow.
     /// An intent that fails validation changes nothing.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per intent keeps every input decision in one match"
+    )]
     pub fn handle(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         match intent {
             Intent::Quit => {
@@ -20,11 +27,11 @@ impl IntentHandler {
             }
             Intent::SelectNext => {
                 state.sessions.select_next();
-                vec![Command::ShowPreview]
+                with_visit(state, vec![Command::ShowPreview])
             }
             Intent::SelectPrev => {
                 state.sessions.select_prev();
-                vec![Command::ShowPreview]
+                with_visit(state, vec![Command::ShowPreview])
             }
             Intent::FocusPreview => {
                 state.focus = Focus::Preview;
@@ -32,6 +39,14 @@ impl IntentHandler {
             }
             Intent::FocusSidebar => {
                 state.focus = Focus::Sidebar;
+                vec![]
+            }
+            Intent::Attach if state.sessions.cursor == Some(SidebarItem::SettledShelf) => {
+                if state.sessions.shelf_open {
+                    state.sessions.close_shelf();
+                } else {
+                    state.sessions.open_shelf();
+                }
                 vec![]
             }
             Intent::Attach => match (validate_attach(state), state.sessions.selected_thread()) {
@@ -92,16 +107,70 @@ impl IntentHandler {
                 (Ok(()), Some(block)) => vec![Command::Yank(block.raw_text())],
                 _ => vec![],
             },
+            Intent::OpenShelf => match validate_open_shelf(state) {
+                Ok(()) => {
+                    state.sessions.open_shelf();
+                    vec![]
+                }
+                Err(_) => vec![],
+            },
+            Intent::CloseShelf => match validate_close_shelf(state) {
+                Ok(()) => {
+                    state.sessions.close_shelf();
+                    vec![Command::ShowPreview]
+                }
+                Err(_) => vec![],
+            },
+            Intent::TogglePin => {
+                match (validate_toggle_pin(state), state.sessions.selected_thread()) {
+                    (Ok(()), Some(thread)) => match thread.pinned_at {
+                        Some(_) => vec![Command::Unpin(thread.id)],
+                        None => vec![Command::Pin(thread.id)],
+                    },
+                    _ => vec![],
+                }
+            }
+            Intent::ToggleSettle => {
+                match (
+                    validate_toggle_settle(state),
+                    state.sessions.selected_thread(),
+                ) {
+                    (Ok(()), Some(thread)) if thread.settled_at.is_some() => {
+                        vec![Command::Unsettle(thread.id)]
+                    }
+                    (Ok(()), Some(thread)) => {
+                        let id = thread.id;
+                        state.sessions.cursor = state.sessions.card_neighbour(id);
+                        with_visit(state, vec![Command::Settle(id), Command::ShowPreview])
+                    }
+                    _ => vec![],
+                }
+            }
+            Intent::DeleteThread => match (validate_delete(state), state.sessions.selected_id()) {
+                (Ok(()), Some(id)) => {
+                    state.sessions.cursor = state.sessions.row_neighbour(id);
+                    with_visit(state, vec![Command::Delete(id), Command::ShowPreview])
+                }
+                _ => vec![],
+            },
         }
     }
 }
 
+/// `commands`, then a visit to the thread under the cursor, if any.
+fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
+    commands.extend(state.sessions.selected_id().map(Command::Visit));
+    commands
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime};
+
     use crate::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
     use crate::feat::preview::state::{Preview, PreviewLayout};
     use crate::feat::sessions::state::{
-        AttachTarget, Project, ProjectId, Sessions, Thread, ThreadId, ThreadStatus,
+        AttachTarget, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
@@ -114,11 +183,30 @@ mod tests {
             status,
             turn_started_at: None,
             attach_argv: vec!["claude".into(), "attach".into(), format!("t{id}").into()],
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            last_activity_at: SystemTime::UNIX_EPOCH,
+            unseen: false,
         }
     }
 
-    /// One project holding `threads`, with thread `selected` selected.
-    fn state_with(threads: Vec<Thread>, selected: i64) -> AppState {
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    /// Thread `id`, settled at second `id`.
+    fn settled(id: i64) -> Thread {
+        Thread {
+            settled_at: Some(at(id.unsigned_abs())),
+            ..thread(id, ThreadStatus::Stopped)
+        }
+    }
+
+    /// One project holding `threads`, with the sidebar's cursor on `cursor`.
+    /// Unsettled threads with equal times list the higher id first.
+    fn state_at(threads: Vec<Thread>, cursor: SidebarItem) -> AppState {
         AppState {
             sessions: Sessions {
                 projects: vec![Project {
@@ -127,11 +215,16 @@ mod tests {
                     root: "/work".into(),
                     threads,
                 }],
-                selected: Some(ThreadId(selected)),
+                cursor: Some(cursor),
                 ..Sessions::default()
             },
             ..AppState::default()
         }
+    }
+
+    /// One project holding `threads`, with thread `selected` selected.
+    fn state_with(threads: Vec<Thread>, selected: i64) -> AppState {
+        state_at(threads, SidebarItem::Thread(ThreadId(selected)))
     }
 
     /// A preview showing one block of `kind`, followed.
@@ -172,10 +265,10 @@ mod tests {
 
     #[rstest::rstest]
     fn select_next_on_last_thread_keeps_selection() {
-        // Given threads 1 and 2 with the last one selected.
+        // Given threads 2 and 1 in sidebar order, with the last one selected.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
-            2,
+            1,
         );
 
         // When handling SelectNext.
@@ -183,18 +276,18 @@ mod tests {
 
         // Then the selection stays on the last thread.
         assert_eq!(
-            state.sessions.selected,
-            Some(ThreadId(2)),
+            state.sessions.selected_id(),
+            Some(ThreadId(1)),
             "SelectNext should not wrap past the last thread"
         );
     }
 
     #[rstest::rstest]
     fn select_prev_on_first_thread_keeps_selection() {
-        // Given threads 1 and 2 with the first one selected.
+        // Given threads 2 and 1 in sidebar order, with the first one selected.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
-            1,
+            2,
         );
 
         // When handling SelectPrev.
@@ -202,8 +295,8 @@ mod tests {
 
         // Then the selection stays on the first thread.
         assert_eq!(
-            state.sessions.selected,
-            Some(ThreadId(1)),
+            state.sessions.selected_id(),
+            Some(ThreadId(2)),
             "SelectPrev should not wrap past the first thread"
         );
     }
@@ -396,9 +489,8 @@ mod tests {
         let commands = IntentHandler::handle(&intent, &mut state);
 
         // Then the preview actor is asked to show the selection.
-        assert_eq!(
-            commands,
-            vec![Command::ShowPreview],
+        assert!(
+            commands.contains(&Command::ShowPreview),
             "{intent:?} should return ShowPreview"
         );
     }
@@ -520,5 +612,272 @@ mod tests {
 
         // Then nothing is copied.
         assert!(commands.is_empty(), "Yank needs a block to copy");
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn enter_on_the_shelf_toggles_it(#[case] open: bool) {
+        // Given the cursor on the Settled header, with the shelf `open`.
+        let mut state = state_at(vec![settled(1)], SidebarItem::SettledShelf);
+        state.sessions.shelf_open = open;
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the shelf flipped.
+        assert_eq!(
+            state.sessions.shelf_open, !open,
+            "⏎ on the header should toggle the shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_the_shelf_returns_no_commands() {
+        // Given the cursor on the Settled header.
+        let mut state = state_at(vec![settled(1)], SidebarItem::SettledShelf);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then nothing attaches.
+        assert!(commands.is_empty(), "⏎ on the header shouldn't attach");
+    }
+
+    #[rstest::rstest]
+    fn l_on_the_shelf_opens_it() {
+        // Given the cursor on the collapsed Settled header.
+        let mut state = state_at(vec![settled(1)], SidebarItem::SettledShelf);
+
+        // When handling OpenShelf.
+        IntentHandler::handle(&Intent::OpenShelf, &mut state);
+
+        // Then the shelf is open.
+        assert!(
+            state.sessions.shelf_open,
+            "l on the header should open the shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_a_settled_thread_closes_the_shelf_and_selects_it() {
+        // Given the shelf open and the cursor on settled thread 1.
+        let mut state = state_with(vec![settled(1)], 1);
+        state.sessions.shelf_open = true;
+
+        // When handling CloseShelf.
+        IntentHandler::handle(&Intent::CloseShelf, &mut state);
+
+        // Then the shelf is closed with its header selected.
+        assert_eq!(
+            (state.sessions.shelf_open, state.sessions.cursor),
+            (false, Some(SidebarItem::SettledShelf)),
+            "h in the shelf should close it onto its header"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_an_active_card_does_nothing() {
+        // Given the shelf open and the cursor on active thread 1.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle), settled(2)], 1);
+        state.sessions.shelf_open = true;
+
+        // When handling CloseShelf.
+        IntentHandler::handle(&Intent::CloseShelf, &mut state);
+
+        // Then the shelf and cursor are unchanged.
+        assert_eq!(
+            (state.sessions.shelf_open, state.sessions.cursor),
+            (true, Some(SidebarItem::Thread(ThreadId(1)))),
+            "h on a card should do nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_returns_the_settle_command() {
+        // Given threads 2 and 1 in sidebar order, with thread 2 selected.
+        let mut state = state_with(
+            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+            2,
+        );
+
+        // When handling ToggleSettle.
+        let commands = IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the sessions actor is asked to settle thread 2.
+        assert!(
+            commands.contains(&Command::Settle(ThreadId(2))),
+            "ToggleSettle should return Settle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_selects_the_next_card_below() {
+        // Given threads 3, 2 and 1 in sidebar order, with thread 2 selected.
+        let mut state = state_with(
+            vec![
+                thread(1, ThreadStatus::Idle),
+                thread(2, ThreadStatus::Idle),
+                thread(3, ThreadStatus::Idle),
+            ],
+            2,
+        );
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the card below is selected.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Thread(ThreadId(1))),
+            "settle should select the next card below"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settling_the_last_card_selects_the_card_above() {
+        // Given threads 2 and 1 in sidebar order, with thread 1 selected.
+        let mut state = state_with(
+            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+            1,
+        );
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the card above is selected.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Thread(ThreadId(2))),
+            "settling the last card should select the one above"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settling_the_only_card_selects_the_shelf() {
+        // Given one thread, selected.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the shelf header the settle creates is selected.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::SettledShelf),
+            "settling the only card should select the shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_on_a_settled_thread_returns_unsettle() {
+        // Given a selected settled thread.
+        let mut state = state_with(vec![settled(1)], 1);
+
+        // When handling ToggleSettle.
+        let commands = IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the sessions actor is asked to un-settle it.
+        assert_eq!(
+            commands,
+            vec![Command::Unsettle(ThreadId(1))],
+            "ToggleSettle on a settled thread should return Unsettle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_on_a_settled_thread_keeps_the_cursor() {
+        // Given a selected settled thread.
+        let mut state = state_with(vec![settled(1)], 1);
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the cursor stays on it.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Thread(ThreadId(1))),
+            "un-settle should keep the cursor on the thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_pin_on_a_pinned_thread_returns_unpin() {
+        // Given a selected pinned thread.
+        let mut state = state_with(
+            vec![Thread {
+                pinned_at: Some(at(1)),
+                ..thread(1, ThreadStatus::Idle)
+            }],
+            1,
+        );
+
+        // When handling TogglePin.
+        let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
+
+        // Then the sessions actor is asked to unpin it.
+        assert_eq!(
+            commands,
+            vec![Command::Unpin(ThreadId(1))],
+            "TogglePin on a pinned thread should return Unpin"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_returns_the_delete_command() {
+        // Given one thread, selected.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling DeleteThread.
+        let commands = IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then the sessions actor is asked to delete it.
+        assert!(
+            commands.contains(&Command::Delete(ThreadId(1))),
+            "DeleteThread should return Delete"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_selects_the_next_row_below() {
+        // Given cards 2 and 1, then the open shelf holding thread 3, with card
+        // 1 selected.
+        let mut state = state_with(
+            vec![
+                thread(1, ThreadStatus::Idle),
+                thread(2, ThreadStatus::Idle),
+                settled(3),
+            ],
+            1,
+        );
+        state.sessions.shelf_open = true;
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then the settled thread below, past the header, is selected.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Thread(ThreadId(3))),
+            "delete should select the next thread row below"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_next_returns_visit() {
+        // Given threads 2 and 1 in sidebar order, with thread 2 selected.
+        let mut state = state_with(
+            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+            2,
+        );
+
+        // When handling SelectNext.
+        let commands = IntentHandler::handle(&Intent::SelectNext, &mut state);
+
+        // Then the newly selected thread is visited.
+        assert!(
+            commands.contains(&Command::Visit(ThreadId(1))),
+            "SelectNext should visit the thread it lands on"
+        );
     }
 }

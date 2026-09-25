@@ -17,8 +17,8 @@ use kameo::prelude::{Actor, ActorRef, Context, Message, Reply, Spawn};
 use tokio::sync::Notify;
 
 use super::session_host::{SessionHostError, SessionHostService, SessionRecord};
-use super::state::{Project, ProjectId, Thread, ThreadStatus};
-use super::store::{NewThread, Store, ThreadRow};
+use super::state::{Project, ProjectId, SidebarItem, Thread, ThreadStatus};
+use super::store::{NewThread, SettledOverride, Store, ThreadRow};
 use super::transcript::{locate, scan_title};
 use crate::Focus;
 use crate::common::{Services, State, Wake};
@@ -170,8 +170,11 @@ impl SessionsActor {
             let mut app = state.write();
             let sessions = &mut app.sessions;
             sessions.projects = projects;
-            let first = sessions.threads().next().map(|thread| thread.id);
-            sessions.selected = first;
+            let first = sessions
+                .threads()
+                .next()
+                .map(|thread| SidebarItem::Thread(thread.id));
+            sessions.cursor = first;
             sessions.error = error;
         }
         wake();
@@ -263,7 +266,7 @@ impl SessionsActor {
             sessions.starting = false;
             match created {
                 Ok((project_id, thread)) => {
-                    sessions.selected = Some(thread.id);
+                    sessions.cursor = Some(SidebarItem::Thread(thread.id));
                     sessions.error = None;
                     match sessions
                         .projects
@@ -417,6 +420,15 @@ fn thread(host: &SessionHostService, row: &ThreadRow) -> Thread {
         status: ThreadStatus::Unknown,
         turn_started_at: row.turn_started_at.map(from_ms),
         attach_argv: host.attach_argv(&row.short_id),
+        branch: row.branch.clone(),
+        pinned_at: row.pinned_at.map(from_ms),
+        settled_at: row
+            .settled_at
+            .filter(|_| row.settled_override == Some(SettledOverride::Settled))
+            .map(from_ms),
+        active_since: from_ms(row.created_at.max(row.unsettled_at.unwrap_or(0))),
+        last_activity_at: from_ms(row.last_activity_at),
+        unseen: row.last_activity_at > row.last_visited_at,
     }
 }
 
@@ -921,7 +933,7 @@ mod tests {
 
         // Then the new thread is selected.
         assert_eq!(
-            state.read().sessions.selected,
+            state.read().sessions.selected_id(),
             Some(saved(&actor.store, "bb")?.id),
             "the new thread should be selected"
         );
@@ -1170,7 +1182,7 @@ mod tests {
 
         // Then the newest thread is selected.
         assert_eq!(
-            state.read().sessions.selected,
+            state.read().sessions.selected_id(),
             Some(newest),
             "the first thread in the sidebar should be selected"
         );

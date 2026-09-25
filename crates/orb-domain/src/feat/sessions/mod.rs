@@ -1,7 +1,9 @@
-//! Sessions — the Claude sessions orb started, grouped by project.
+//! Sessions — the Claude sessions orb started, in one list across projects.
 //!
 //! Each thread in the sidebar is one background Claude session. This feature
 //! tracks which threads exist, what each is doing, and which one is selected.
+//! The user can pin a thread to the top, settle it onto the Settled shelf
+//! (which stops its session), or delete it.
 
 pub mod child_env;
 pub mod claude_supervisor;

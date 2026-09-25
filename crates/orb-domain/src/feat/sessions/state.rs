@@ -1,5 +1,7 @@
-//! The sidebar's contents: projects, their threads, and the selection.
+//! The sidebar's contents: projects, their threads, the sidebar's order, and
+//! its cursor.
 
+use std::cmp::Reverse;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -55,6 +57,18 @@ pub struct Thread {
     pub turn_started_at: Option<SystemTime>,
     /// The command that attaches to the session.
     pub attach_argv: Vec<OsString>,
+    /// The git branch the transcript last named.
+    pub branch: Option<String>,
+    /// When the thread was pinned; `None` = not pinned.
+    pub pinned_at: Option<SystemTime>,
+    /// When the thread was settled; `None` = not settled.
+    pub settled_at: Option<SystemTime>,
+    /// Sorts Active: the later of its creation and its latest un-settle.
+    pub active_since: SystemTime,
+    /// When orb last saw a turn end, else when the thread was created.
+    pub last_activity_at: SystemTime,
+    /// A turn ended after the user last selected the thread.
+    pub unseen: bool,
 }
 
 /// A directory orb started sessions in.
@@ -67,16 +81,61 @@ pub struct Project {
     pub threads: Vec<Thread>,
 }
 
-/// orb's projects and threads, and which thread is selected.
+/// A row the sidebar's cursor can rest on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarItem {
+    Thread(ThreadId),
+    /// The Settled shelf's header.
+    SettledShelf,
+}
+
+/// One sidebar row, in display order.
+#[derive(Debug, Clone, Copy)]
+pub enum SidebarRow<'a> {
+    /// A pinned or active thread, drawn as a card.
+    Card {
+        project: &'a Project,
+        thread: &'a Thread,
+    },
+    /// The Settled shelf's header.
+    ShelfHeader {
+        /// How many threads are settled.
+        count: usize,
+        open: bool,
+    },
+    /// A settled thread, drawn as a one-line row.
+    Settled {
+        project: &'a Project,
+        thread: &'a Thread,
+    },
+}
+
+impl SidebarRow<'_> {
+    /// What the cursor rests on when it is on this row.
+    pub fn item(&self) -> SidebarItem {
+        match self {
+            Self::Card { thread, .. } | Self::Settled { thread, .. } => {
+                SidebarItem::Thread(thread.id)
+            }
+            Self::ShelfHeader { .. } => SidebarItem::SettledShelf,
+        }
+    }
+}
+
+/// orb's projects and threads, and where the sidebar's cursor is.
 ///
 /// Written by the sessions actor (projects, `error`, `starting` when a create
-/// ends, the selection after a create) and by the intent handler (the
-/// selection on `j`/`k`, `starting` when a create begins).
+/// ends, the cursor after a restore or a create) and by the intent handler
+/// (the cursor on navigation, settle and delete, `shelf_open`, `starting` when
+/// a create begins).
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
     pub projects: Vec<Project>,
-    pub selected: Option<ThreadId>,
+    /// What the sidebar's cursor is on.
+    pub cursor: Option<SidebarItem>,
+    /// The Settled shelf shows its threads. Written only by the intent handler.
+    pub shelf_open: bool,
     /// A new session is being created.
     pub starting: bool,
     /// The latest `claude` failure; cleared by the next success.
@@ -91,42 +150,111 @@ impl Sessions {
             .flat_map(|project| project.threads.iter())
     }
 
-    /// The selected thread, if it still exists.
+    /// The sidebar's rows: pinned cards (newest pin first), active cards
+    /// (newest created or un-settled first), then, if anything is settled, the
+    /// shelf header and the settled rows (newest settle first). A collapsed
+    /// shelf still lists the cursor's settled thread. Ties go to the higher id.
+    pub fn sidebar(&self) -> Vec<SidebarRow<'_>> {
+        let (mut settled, live): (Vec<_>, Vec<_>) = self
+            .projects
+            .iter()
+            .flat_map(|project| project.threads.iter().map(move |thread| (project, thread)))
+            .partition(|(_, thread)| thread.settled_at.is_some());
+        let (mut pinned, mut active): (Vec<_>, Vec<_>) = live
+            .into_iter()
+            .partition(|(_, thread)| thread.pinned_at.is_some());
+        pinned.sort_by_key(|(_, thread)| Reverse((thread.pinned_at, thread.id.0)));
+        active.sort_by_key(|(_, thread)| Reverse((thread.active_since, thread.id.0)));
+        settled.sort_by_key(|(_, thread)| Reverse((thread.settled_at, thread.id.0)));
+        let mut rows: Vec<SidebarRow<'_>> = pinned
+            .into_iter()
+            .chain(active)
+            .map(|(project, thread)| SidebarRow::Card { project, thread })
+            .collect();
+        if !settled.is_empty() {
+            rows.push(SidebarRow::ShelfHeader {
+                count: settled.len(),
+                open: self.shelf_open,
+            });
+            rows.extend(
+                settled
+                    .into_iter()
+                    .filter(|(_, thread)| {
+                        self.shelf_open || self.cursor == Some(SidebarItem::Thread(thread.id))
+                    })
+                    .map(|(project, thread)| SidebarRow::Settled { project, thread }),
+            );
+        }
+        rows
+    }
+
+    /// The thread under the cursor, if it still exists.
     pub fn selected_thread(&self) -> Option<&Thread> {
-        self.threads()
-            .find(|thread| Some(thread.id) == self.selected)
+        match self.cursor {
+            Some(SidebarItem::Thread(id)) => self.threads().find(|thread| thread.id == id),
+            _ => None,
+        }
     }
 
-    /// Select the thread below the selected one; stays put on the last thread.
-    /// Without a selection, selects the first thread.
+    /// The id of the thread under the cursor, if it still exists.
+    pub fn selected_id(&self) -> Option<ThreadId> {
+        self.selected_thread().map(|thread| thread.id)
+    }
+
+    /// Move the cursor to the row below; stays put on the last row. Without a
+    /// cursor, or with one on a row that's gone, selects the first row.
     pub fn select_next(&mut self) {
-        let next = match self.selected_thread() {
-            None => self.threads().next(),
-            Some(current) => self
-                .threads()
-                .skip_while(|thread| thread.id != current.id)
-                .nth(1),
-        }
-        .map(|thread| thread.id);
-        if next.is_some() {
-            self.selected = next;
+        let items = self.items();
+        let next = match self.position(&items) {
+            None => items.first(),
+            Some(at) => items.get(at + 1),
+        };
+        if let Some(&next) = next {
+            self.cursor = Some(next);
         }
     }
 
-    /// Select the thread above the selected one; stays put on the first thread.
-    /// Without a selection, selects the first thread.
+    /// Move the cursor to the row above; stays put on the first row. Without a
+    /// cursor, or with one on a row that's gone, selects the first row.
     pub fn select_prev(&mut self) {
-        let prev = match self.selected_thread() {
-            None => self.threads().next(),
-            Some(current) => self
-                .threads()
-                .take_while(|thread| thread.id != current.id)
-                .last(),
+        let items = self.items();
+        let prev = match self.position(&items) {
+            None => items.first(),
+            Some(at) => at.checked_sub(1).and_then(|at| items.get(at)),
+        };
+        if let Some(&prev) = prev {
+            self.cursor = Some(prev);
         }
-        .map(|thread| thread.id);
-        if prev.is_some() {
-            self.selected = prev;
-        }
+    }
+
+    /// Where the cursor goes when thread `id` is settled: the next card below,
+    /// else the nearest card above, else the shelf header the settle creates.
+    pub fn card_neighbour(&self, id: ThreadId) -> Option<SidebarItem> {
+        self.neighbour(id, |row| matches!(row, SidebarRow::Card { .. }))
+            .or(Some(SidebarItem::SettledShelf))
+    }
+
+    /// Where the cursor goes when thread `id` is deleted: the next thread row
+    /// below, else the nearest one above, else the shelf header if another
+    /// thread is settled.
+    pub fn row_neighbour(&self, id: ThreadId) -> Option<SidebarItem> {
+        self.neighbour(id, |row| !matches!(row, SidebarRow::ShelfHeader { .. }))
+            .or_else(|| {
+                self.threads()
+                    .any(|thread| thread.id != id && thread.settled_at.is_some())
+                    .then_some(SidebarItem::SettledShelf)
+            })
+    }
+
+    /// Show the Settled shelf's threads.
+    pub fn open_shelf(&mut self) {
+        self.shelf_open = true;
+    }
+
+    /// Hide the Settled shelf's threads and put the cursor on its header.
+    pub fn close_shelf(&mut self) {
+        self.shelf_open = false;
+        self.cursor = Some(SidebarItem::SettledShelf);
     }
 
     /// How many threads are running a turn right now.
@@ -140,6 +268,37 @@ impl Sessions {
     pub fn any_in_progress(&self) -> bool {
         self.threads().any(|thread| thread.status.in_progress())
     }
+
+    /// What each sidebar row's cursor rests on, in display order.
+    fn items(&self) -> Vec<SidebarItem> {
+        self.sidebar().iter().map(SidebarRow::item).collect()
+    }
+
+    /// Where the cursor is in `items`, if it's on one of them.
+    fn position(&self, items: &[SidebarItem]) -> Option<usize> {
+        let cursor = self.cursor?;
+        items.iter().position(|&item| item == cursor)
+    }
+
+    /// The first row after thread `id` that `fits`, else the nearest one
+    /// before it.
+    fn neighbour<F>(&self, id: ThreadId, fits: F) -> Option<SidebarItem>
+    where
+        F: Fn(&SidebarRow<'_>) -> bool,
+    {
+        let rows = self.sidebar();
+        let at = rows
+            .iter()
+            .position(|row| row.item() == SidebarItem::Thread(id))
+            .unwrap_or(rows.len());
+        let (before, after) = rows.split_at(at);
+        after
+            .iter()
+            .skip(1)
+            .find(|row| fits(row))
+            .or_else(|| before.iter().rev().find(|row| fits(row)))
+            .map(SidebarRow::item)
+    }
 }
 
 /// What the frontend needs to attach to a thread's session.
@@ -152,7 +311,15 @@ pub struct AttachTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{Project, ProjectId, Sessions, Thread, ThreadId, ThreadStatus};
+    use std::time::{Duration, SystemTime};
+
+    use super::{
+        Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+    };
+
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
 
     fn thread(id: i64) -> Thread {
         Thread {
@@ -163,6 +330,36 @@ mod tests {
             status: ThreadStatus::Idle,
             turn_started_at: None,
             attach_argv: vec![],
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            last_activity_at: SystemTime::UNIX_EPOCH,
+            unseen: false,
+        }
+    }
+
+    /// Thread `id`, active since second `secs`.
+    fn active(id: i64, secs: u64) -> Thread {
+        Thread {
+            active_since: at(secs),
+            ..thread(id)
+        }
+    }
+
+    /// Thread `id`, pinned at second `secs`.
+    fn pinned(id: i64, secs: u64) -> Thread {
+        Thread {
+            pinned_at: Some(at(secs)),
+            ..thread(id)
+        }
+    }
+
+    /// Thread `id`, settled at second `secs`.
+    fn settled(id: i64, secs: u64) -> Thread {
+        Thread {
+            settled_at: Some(at(secs)),
+            ..thread(id)
         }
     }
 
@@ -175,26 +372,184 @@ mod tests {
         }
     }
 
+    /// One project holding `threads`, with the cursor on `cursor`.
+    fn sessions(threads: Vec<Thread>, cursor: Option<SidebarItem>) -> Sessions {
+        Sessions {
+            projects: vec![project(1, threads)],
+            cursor,
+            ..Sessions::default()
+        }
+    }
+
+    /// What each sidebar row's cursor rests on, in display order.
+    fn items(sessions: &Sessions) -> Vec<SidebarItem> {
+        sessions.sidebar().iter().map(SidebarRow::item).collect()
+    }
+
+    fn on(id: i64) -> SidebarItem {
+        SidebarItem::Thread(ThreadId(id))
+    }
+
     #[rstest::rstest]
-    fn select_next_from_last_thread_of_a_project_selects_first_of_the_next() {
-        // Given project A with threads 1, 2 and project B with thread 3, and thread 2 selected.
+    fn sidebar_orders_pinned_by_newest_pin() {
+        // Given threads 1 and 2 pinned at 10 s and 20 s, and thread 3 active
+        // since 30 s.
+        let sessions = sessions(vec![pinned(1, 10), pinned(2, 20), active(3, 30)], None);
+
+        // When listing the sidebar.
+        let items = items(&sessions);
+
+        // Then the newest pin comes first, and the pins come before the active
+        // thread.
+        assert_eq!(
+            items,
+            vec![on(2), on(1), on(3)],
+            "pinned cards should lead, newest pin first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn sidebar_orders_active_by_newest_created_or_unsettled() {
+        // Given old thread 1 un-settled at 50 s, and newer thread 2 created at
+        // 20 s.
+        let sessions = sessions(vec![active(1, 50), active(2, 20)], None);
+
+        // When listing the sidebar.
+        let items = items(&sessions);
+
+        // Then the un-settled thread comes first.
+        assert_eq!(
+            items,
+            vec![on(1), on(2)],
+            "active cards should list the newest created or un-settled first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn sidebar_orders_settled_by_newest_settle() {
+        // Given threads settled at 10 s, 30 s and 20 s, with the shelf open.
+        let sessions = Sessions {
+            shelf_open: true,
+            ..sessions(vec![settled(1, 10), settled(2, 30), settled(3, 20)], None)
+        };
+
+        // When listing the sidebar.
+        let items = items(&sessions);
+
+        // Then the header leads the settled rows, newest settle first.
+        assert_eq!(
+            items,
+            vec![SidebarItem::SettledShelf, on(2), on(3), on(1)],
+            "settled rows should list the newest settle first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn collapsed_shelf_hides_settled_threads() {
+        // Given two settled threads and the shelf collapsed.
+        let sessions = sessions(vec![settled(1, 10), settled(2, 20)], None);
+
+        // When listing the sidebar.
+        let items = items(&sessions);
+
+        // Then only the header shows.
+        assert_eq!(
+            items,
+            vec![SidebarItem::SettledShelf],
+            "a collapsed shelf should show only its header"
+        );
+    }
+
+    #[rstest::rstest]
+    fn collapsed_shelf_keeps_the_selected_settled_thread() {
+        // Given two settled threads, the shelf collapsed, and the cursor on
+        // thread 1.
+        let sessions = sessions(vec![settled(1, 10), settled(2, 20)], Some(on(1)));
+
+        // When listing the sidebar.
+        let items = items(&sessions);
+
+        // Then the header and the selected thread show.
+        assert_eq!(
+            items,
+            vec![SidebarItem::SettledShelf, on(1)],
+            "a collapsed shelf should keep the cursor's settled thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn sidebar_has_no_header_without_settled_threads() {
+        // Given two active threads.
+        let sessions = sessions(vec![active(1, 10), active(2, 20)], None);
+
+        // When listing the sidebar.
+        let items = items(&sessions);
+
+        // Then only their cards show.
+        assert_eq!(
+            items,
+            vec![on(2), on(1)],
+            "without settled threads there should be no shelf header"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_next_from_the_last_card_selects_the_shelf() {
+        // Given an active thread 1, selected, and a settled thread 2.
+        let mut sessions = sessions(vec![active(1, 10), settled(2, 20)], Some(on(1)));
+
+        // When selecting the next row.
+        sessions.select_next();
+
+        // Then the shelf header is selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(SidebarItem::SettledShelf),
+            "next after the last card should be the shelf header"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_next_on_a_collapsed_shelf_stays() {
+        // Given an active thread, a settled thread, and the cursor on the
+        // collapsed shelf's header.
+        let mut sessions = sessions(
+            vec![active(1, 10), settled(2, 20)],
+            Some(SidebarItem::SettledShelf),
+        );
+
+        // When selecting the next row.
+        sessions.select_next();
+
+        // Then the header stays selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(SidebarItem::SettledShelf),
+            "the collapsed shelf's header is the last row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_next_lands_on_a_thread_across_projects() {
+        // Given project 1 with threads active since 30 s and 10 s, project 2
+        // with one active since 20 s, and the newest selected.
         let mut sessions = Sessions {
             projects: vec![
-                project(1, vec![thread(1), thread(2)]),
-                project(2, vec![thread(3)]),
+                project(1, vec![active(3, 30), active(1, 10)]),
+                project(2, vec![active(2, 20)]),
             ],
-            selected: Some(ThreadId(2)),
+            cursor: Some(on(3)),
             ..Sessions::default()
         };
 
-        // When selecting the next thread.
+        // When selecting the next row.
         sessions.select_next();
 
-        // Then project B's first thread is selected.
+        // Then project 2's thread is selected, not project 1's older one.
         assert_eq!(
-            sessions.selected,
-            Some(ThreadId(3)),
-            "next after A's last thread should be B's first"
+            sessions.cursor,
+            Some(on(2)),
+            "the sidebar should be one list across projects"
         );
     }
 }

@@ -309,6 +309,8 @@ fn markdown(markdown: &str) -> Text<'static> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use orb_domain::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
     use orb_domain::feat::preview::state::{Preview, PreviewLayout};
     use orb_domain::feat::sessions::state::{Thread, ThreadId, ThreadStatus};
@@ -328,6 +330,12 @@ mod tests {
             status: ThreadStatus::Idle,
             turn_started_at: None,
             attach_argv: vec![],
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            last_activity_at: SystemTime::UNIX_EPOCH,
+            unseen: false,
         }
     }
 
