@@ -4,9 +4,17 @@
 //! the session host: every second while a turn is underway or orb is attached,
 //! every five seconds otherwise, and right away when asked. Each poll maps the
 //! host's records onto the threads, stamps when a turn starts, reads new
-//! transcript lines for titles, and saves what changed. It also starts new
-//! sessions in orb's launch directory.
+//! transcript lines for titles and branches, and saves what changed. It also
+//! starts new sessions in orb's launch directory.
+//!
+//! It keeps each thread's place in the sidebar: pinning, settling onto the
+//! Settled shelf (which stops the session), un-settling, and deleting. A turn
+//! un-settles its thread, and a thread idle for three days settles itself
+//! unless it is pinned, was just un-settled, or orb is attached to it. A turn
+//! that ends while the user is on another thread shows as unseen until they
+//! select it.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -17,7 +25,9 @@ use kameo::prelude::{Actor, ActorRef, Context, Message, Reply, Spawn};
 use tokio::sync::Notify;
 
 use super::session_host::{SessionHostError, SessionHostService, SessionRecord};
-use super::state::{Project, ProjectId, SidebarItem, Thread, ThreadStatus};
+use super::state::{
+    Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+};
 use super::store::{NewThread, SettledOverride, Store, ThreadRow};
 use super::transcript::{locate, scan_title};
 use crate::Focus;
@@ -27,6 +37,10 @@ use crate::common::{Services, State, Wake};
 const FAST_POLL: Duration = Duration::from_secs(1);
 /// How long to wait between polls otherwise.
 const SLOW_POLL: Duration = Duration::from_secs(5);
+/// How long an unpinned thread stays idle before it settles itself, in ms.
+const AUTO_SETTLE_AFTER: i64 = 3 * 24 * 60 * 60 * 1000;
+/// The error shown when orb's store can't be written.
+const SAVE_FAILED: &str = "couldn't save orb's state";
 
 /// What the sessions actor needs to start.
 pub struct SessionsActorDeps {
@@ -42,8 +56,9 @@ pub struct SessionsActorDeps {
 }
 
 /// Owns [`Sessions`](super::state::Sessions): the projects, the threads'
-/// statuses and titles, and the latest `claude` error. The intent handler also
-/// moves the selection and marks a create as starting.
+/// statuses, titles, pins and settles, and the latest `claude` error. The
+/// intent handler also moves the cursor, opens and closes the shelf, and marks
+/// a create as starting.
 pub struct SessionsActor {
     services: Services,
     state: State,
@@ -72,6 +87,30 @@ pub struct CreateSession;
 /// Poll now instead of waiting for the next tick.
 #[derive(Debug)]
 pub struct RefreshSessions;
+
+/// Pin a thread to the top of the sidebar, un-settling it if needed.
+#[derive(Debug)]
+pub struct Pin(pub ThreadId);
+
+/// Unpin a thread.
+#[derive(Debug)]
+pub struct Unpin(pub ThreadId);
+
+/// Settle a thread onto the Settled shelf and stop its session.
+#[derive(Debug)]
+pub struct Settle(pub ThreadId);
+
+/// Take a thread off the Settled shelf and keep it active until its next turn.
+#[derive(Debug)]
+pub struct Unsettle(pub ThreadId);
+
+/// Delete a thread's session and forget the thread.
+#[derive(Debug)]
+pub struct Delete(pub ThreadId);
+
+/// The user selected a thread, so its latest turn is seen.
+#[derive(Debug)]
+pub struct Visit(pub ThreadId);
 
 /// Spawns the sessions actor with a mailbox that never refuses a message.
 /// Must be called inside a tokio runtime.
@@ -133,9 +172,77 @@ impl Message<RefreshSessions> for SessionsActor {
     }
 }
 
+impl Message<Pin> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(&mut self, Pin(id): Pin, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.pin(id);
+    }
+}
+
+impl Message<Unpin> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        Unpin(id): Unpin,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.unpin(id);
+    }
+}
+
+impl Message<Settle> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        Settle(id): Settle,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.settle(id).await;
+    }
+}
+
+impl Message<Unsettle> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        Unsettle(id): Unsettle,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.unsettle(id);
+    }
+}
+
+impl Message<Delete> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        Delete(id): Delete,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.delete(id).await;
+    }
+}
+
+impl Message<Visit> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        Visit(id): Visit,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.visit(id);
+    }
+}
+
 impl SessionsActor {
-    /// Shows the saved projects and threads, newest thread first, and selects
-    /// the first thread.
+    /// Shows the saved projects and threads, and selects the sidebar's first
+    /// row.
     fn restore(deps: SessionsActorDeps) -> Self {
         let SessionsActorDeps {
             services,
@@ -159,7 +266,7 @@ impl SessionsActor {
                 threads: rows
                     .iter()
                     .filter(|row| row.project_id == project.id)
-                    .map(|row| thread(&services.session_host, row))
+                    .map(|row| unpolled(&services.session_host, row))
                     .collect(),
                 id: project.id,
                 title: project.title,
@@ -170,11 +277,7 @@ impl SessionsActor {
             let mut app = state.write();
             let sessions = &mut app.sessions;
             sessions.projects = projects;
-            let first = sessions
-                .threads()
-                .next()
-                .map(|thread| SidebarItem::Thread(thread.id));
-            sessions.cursor = first;
+            sessions.cursor = sessions.sidebar().first().map(SidebarRow::item);
             sessions.error = error;
         }
         wake();
@@ -194,11 +297,14 @@ impl SessionsActor {
     /// long to wait before the next poll.
     async fn poll(&mut self) -> Duration {
         match self.services.session_host.list().await {
-            Ok(records) => self.apply(&records),
-            Err(report) => {
-                self.state.write().sessions.error = Some(reason(&report));
-                (self.wake)();
+            Ok(records) => {
+                // ponytail: stops run in order (~0.7 s each); only a first
+                // launch that auto-settles many threads waits long.
+                for short_id in self.apply(&records) {
+                    self.stop(&short_id).await;
+                }
             }
+            Err(report) => self.fail(&report),
         }
         let app = self.state.read();
         if app.sessions.any_in_progress() || app.focus == Focus::Attached {
@@ -208,11 +314,17 @@ impl SessionsActor {
         }
     }
 
-    /// Updates every saved thread from its record and transcript, saves the
-    /// ones that changed, then shows them all in one write.
-    fn apply(&mut self, records: &[SessionRecord]) {
+    /// Updates every saved thread from its record and transcript, follows its
+    /// settle lifecycle, saves the ones that changed, then shows them all in
+    /// one write. Returns the sessions that auto-settled and should stop.
+    fn apply(&mut self, records: &[SessionRecord]) -> Vec<String> {
         let now = now_ms();
+        let (cursor, attached) = {
+            let app = self.state.read();
+            (app.sessions.cursor, app.focus == Focus::Attached)
+        };
         let mut statuses = Vec::with_capacity(self.rows.len());
+        let mut to_stop = Vec::new();
         let mut error = None;
         for row in &mut self.rows {
             // `--all` can list a stale stopped record next to the live one.
@@ -224,9 +336,14 @@ impl SessionsActor {
                 });
             let status = record.map_or(ThreadStatus::Gone, |record| record.status);
             let before = row.clone();
+            let was_in_progress = row.turn_started_at.is_some();
             update_row(row, record, status, now, &self.claude_dir);
+            let selected = cursor == Some(SidebarItem::Thread(row.id));
+            if follow_activity(row, status, was_in_progress, selected, attached, now) {
+                to_stop.push(row.short_id.clone());
+            }
             if *row != before && self.store.save_thread(row).is_err() {
-                error = Some("couldn't save orb's state".to_owned());
+                error = Some(SAVE_FAILED.to_owned());
             }
             statuses.push(status);
         }
@@ -236,12 +353,7 @@ impl SessionsActor {
             let mut changed = sessions.error != error;
             sessions.error = error;
             for (row, status) in self.rows.iter().zip(statuses) {
-                if let Some(thread) = sessions
-                    .projects
-                    .iter_mut()
-                    .flat_map(|project| &mut project.threads)
-                    .find(|thread| thread.id == row.id)
-                {
+                if let Some(thread) = thread_mut(sessions, row.id) {
                     changed |= show(thread, row, status);
                 }
             }
@@ -250,6 +362,7 @@ impl SessionsActor {
         if changed {
             (self.wake)();
         }
+        to_stop
     }
 
     /// Starts a session in the launch directory, saves it, and shows it
@@ -331,10 +444,203 @@ impl SessionsActor {
             last_activity_at: now,
             last_visited_at: now,
         };
-        let thread = thread(&self.services.session_host, &row);
+        let thread = unpolled(&self.services.session_host, &row);
         self.rows.push(row);
         Ok((project_id, thread))
     }
+
+    /// Pins a thread; pinning a settled thread un-settles it.
+    fn pin(&mut self, id: ThreadId) {
+        self.edit(id, |row, now| {
+            row.pinned_at = row.pinned_at.or(Some(now));
+            if row.settled_override == Some(SettledOverride::Settled) {
+                unsettle_row(row, now);
+            }
+        });
+    }
+
+    fn unpin(&mut self, id: ThreadId) {
+        self.edit(id, |row, _| row.pinned_at = None);
+    }
+
+    /// Settles a thread that isn't mid-turn, then stops its session if it's
+    /// idle. A turn that started after the key press wins.
+    async fn settle(&mut self, id: ThreadId) {
+        let (Some(short_id), Some(status)) = (self.short_id(id), self.status(id)) else {
+            return;
+        };
+        if status.in_progress() {
+            return;
+        }
+        self.edit(id, settle_row);
+        if status == ThreadStatus::Idle {
+            // ponytail: stop runs on the actor (~0.7 s); spawn it if triage feels laggy.
+            self.stop(&short_id).await;
+        }
+    }
+
+    fn unsettle(&mut self, id: ThreadId) {
+        self.edit(id, unsettle_row);
+    }
+
+    /// Marks a thread's latest turn seen.
+    fn visit(&mut self, id: ThreadId) {
+        self.edit(id, |row, now| row.last_visited_at = now);
+    }
+
+    /// Removes a thread's session, then forgets the thread. A session Claude
+    /// no longer knows isn't removed first. If the removal fails, the thread
+    /// stays and the reason shows.
+    async fn delete(&mut self, id: ThreadId) {
+        let (Some(short_id), Some(status)) = (self.short_id(id), self.status(id)) else {
+            return;
+        };
+        if status != ThreadStatus::Gone
+            && let Err(report) = self.services.session_host.remove(&short_id).await
+        {
+            self.fail(&report);
+            return;
+        }
+        let deleted = self.store.delete_thread(id);
+        self.rows.retain(|row| row.id != id);
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            for project in &mut sessions.projects {
+                project.threads.retain(|thread| thread.id != id);
+            }
+            if deleted.is_err() {
+                sessions.error = Some(SAVE_FAILED.to_owned());
+            }
+        }
+        (self.wake)();
+    }
+
+    /// Changes thread `id`'s saved row with `change` (given the time now),
+    /// then saves and shows it. Does nothing if the thread is gone.
+    fn edit<F>(&mut self, id: ThreadId, change: F)
+    where
+        F: FnOnce(&mut ThreadRow, i64),
+    {
+        let Some(row) = self.rows.iter_mut().find(|row| row.id == id) else {
+            return;
+        };
+        change(row, now_ms());
+        let saved = self.store.save_thread(row);
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            if saved.is_err() {
+                sessions.error = Some(SAVE_FAILED.to_owned());
+            }
+            if let Some(thread) = thread_mut(sessions, id) {
+                let status = thread.status;
+                show(thread, row, status);
+            }
+        }
+        (self.wake)();
+    }
+
+    /// Stops a session, showing why if it can't.
+    async fn stop(&mut self, short_id: &str) {
+        if let Err(report) = self.services.session_host.stop(short_id).await {
+            self.fail(&report);
+        }
+    }
+
+    /// Shows a `claude` failure in the mode line.
+    fn fail(&self, report: &Report<SessionHostError>) {
+        self.state.write().sessions.error = Some(reason(report));
+        (self.wake)();
+    }
+
+    /// The session id `claude --bg` gave thread `id`.
+    fn short_id(&self, id: ThreadId) -> Option<String> {
+        self.rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.short_id.clone())
+    }
+
+    /// What thread `id`'s session was doing at the last poll.
+    fn status(&self, id: ThreadId) -> Option<ThreadStatus> {
+        self.state
+            .read()
+            .sessions
+            .threads()
+            .find(|thread| thread.id == id)
+            .map(|thread| thread.status)
+    }
+}
+
+/// Follows a polled row's settle lifecycle, given its `status` now and
+/// whether a turn was underway before this poll:
+/// - a turn that ended is the thread's latest activity;
+/// - a turn underway un-settles the thread and ends its kept-active mark;
+/// - an unpinned thread idle for [`AUTO_SETTLE_AFTER`] settles, unless it is
+///   kept active or orb is attached to it;
+/// - the selected thread's latest turn is seen.
+///
+/// Returns whether it auto-settled with an idle session to stop.
+fn follow_activity(
+    row: &mut ThreadRow,
+    status: ThreadStatus,
+    was_in_progress: bool,
+    selected: bool,
+    attached: bool,
+    now: i64,
+) -> bool {
+    if was_in_progress && !status.in_progress() {
+        row.last_activity_at = now;
+    }
+    if status.in_progress()
+        && let Some(settled_override) = row.settled_override
+    {
+        if settled_override == SettledOverride::Settled {
+            row.unsettled_at = Some(now);
+        }
+        row.settled_override = None;
+        row.settled_at = None;
+    }
+    let auto_settle = row.settled_override.is_none()
+        && row.pinned_at.is_none()
+        && !status.in_progress()
+        && !(selected && attached)
+        && now.saturating_sub(row.last_activity_at) >= AUTO_SETTLE_AFTER;
+    if auto_settle {
+        settle_row(row, row.last_activity_at);
+    }
+    if selected && row.last_activity_at > row.last_visited_at {
+        row.last_visited_at = now;
+    }
+    auto_settle && status == ThreadStatus::Idle
+}
+
+/// Settles `row` onto the shelf as of `at`, unpinning it.
+fn settle_row(row: &mut ThreadRow, at: i64) {
+    row.settled_override = Some(SettledOverride::Settled);
+    row.settled_at = Some(at);
+    row.unsettled_at = None;
+    row.pinned_at = None;
+}
+
+/// Un-settles `row` and keeps it active until its next turn activity. It
+/// re-enters Active at `now` unless it was already kept active.
+fn unsettle_row(row: &mut ThreadRow, now: i64) {
+    if row.settled_override != Some(SettledOverride::Active) {
+        row.unsettled_at = Some(now);
+    }
+    row.settled_override = Some(SettledOverride::Active);
+    row.settled_at = None;
+}
+
+/// The shown thread with id `id`.
+fn thread_mut(sessions: &mut Sessions, id: ThreadId) -> Option<&mut Thread> {
+    sessions
+        .projects
+        .iter_mut()
+        .flat_map(|project| &mut project.threads)
+        .find(|thread| thread.id == id)
 }
 
 /// Brings a saved thread up to date with its record: the session id, the
@@ -381,19 +687,12 @@ fn update_row(
     }
 }
 
-/// Shows a saved thread's title, turn stamp, and transcript, and `status`,
-/// on `thread`. Returns whether anything visible changed.
+/// Shows a saved thread and `status` on `thread`. Returns whether anything
+/// visible changed.
 fn show(thread: &mut Thread, row: &ThreadRow, status: ThreadStatus) -> bool {
-    let turn_started_at = row.turn_started_at.map(from_ms);
-    let title = display_title(row);
-    let changed = thread.status != status
-        || thread.title != title
-        || thread.turn_started_at != turn_started_at
-        || thread.transcript != row.transcript_path;
-    thread.status = status;
-    thread.title = title;
-    thread.turn_started_at = turn_started_at;
-    thread.transcript.clone_from(&row.transcript_path);
+    let shown = self::thread(row, status, thread.attach_argv.clone());
+    let changed = *thread != shown;
+    *thread = shown;
     changed
 }
 
@@ -410,16 +709,16 @@ fn reason(report: &Report<SessionHostError>) -> String {
         .unwrap_or_else(|| "claude failed".to_owned())
 }
 
-/// How a saved thread looks before its first poll.
-fn thread(host: &SessionHostService, row: &ThreadRow) -> Thread {
+/// How a saved thread looks with `status`, attached to with `attach_argv`.
+fn thread(row: &ThreadRow, status: ThreadStatus, attach_argv: Vec<OsString>) -> Thread {
     Thread {
         id: row.id,
         title: display_title(row),
         cwd: row.cwd.clone(),
         transcript: row.transcript_path.clone(),
-        status: ThreadStatus::Unknown,
+        status,
         turn_started_at: row.turn_started_at.map(from_ms),
-        attach_argv: host.attach_argv(&row.short_id),
+        attach_argv,
         branch: row.branch.clone(),
         pinned_at: row.pinned_at.map(from_ms),
         settled_at: row
@@ -430,6 +729,11 @@ fn thread(host: &SessionHostService, row: &ThreadRow) -> Thread {
         last_activity_at: from_ms(row.last_activity_at),
         unseen: row.last_activity_at > row.last_visited_at,
     }
+}
+
+/// How a saved thread looks before its first poll.
+fn unpolled(host: &SessionHostService, row: &ThreadRow) -> Thread {
+    thread(row, ThreadStatus::Unknown, host.attach_argv(&row.short_id))
 }
 
 /// A project's title: its directory's name, else the whole path.
@@ -469,18 +773,20 @@ mod tests {
     use async_trait::async_trait;
     use error_stack::{Report, ResultExt};
 
-    use super::{FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps};
+    use super::{FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps, now_ms};
     use crate::Focus;
     use crate::common::{Services, State};
     use crate::feat::sessions::session_host::{
         CreatedSession, SessionHost, SessionHostError, SessionHostService, SessionRecord,
     };
-    use crate::feat::sessions::state::{ThreadId, ThreadStatus};
-    use crate::feat::sessions::store::{NewThread, Store, StoreError, ThreadRow};
+    use crate::feat::sessions::state::{SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus};
+    use crate::feat::sessions::store::{NewThread, SettledOverride, Store, StoreError, ThreadRow};
     use crate::feat::sessions::transcript::transcript_path;
 
     const LAUNCH_DIR: &str = "/tmp/orb";
     const NO_CLAUDE_DIR: &str = "/nonexistent/claude";
+    const HOUR_MS: i64 = 60 * 60 * 1000;
+    const DAY_MS: i64 = 24 * HOUR_MS;
 
     /// A session host whose answers the test scripts.
     struct FakeHost {
@@ -494,24 +800,47 @@ mod tests {
     }
 
     impl FakeHost {
-        fn listing(records: Vec<SessionRecord>) -> Arc<Self> {
-            Arc::new(Self {
+        /// Lists `records`; stops and removes succeed.
+        fn answering(records: Vec<SessionRecord>) -> Self {
+            Self {
                 list: Mutex::new(Ok(records)),
                 create: Err("no create scripted".to_owned()),
                 remove: Ok(()),
                 stopped: Mutex::default(),
                 removed: Mutex::default(),
-            })
+            }
+        }
+
+        fn listing(records: Vec<SessionRecord>) -> Arc<Self> {
+            Arc::new(Self::answering(records))
         }
 
         fn creating(create: Result<&str, &str>) -> Arc<Self> {
             Arc::new(Self {
-                list: Mutex::new(Ok(Vec::new())),
                 create: create.map(str::to_owned).map_err(str::to_owned),
-                remove: Ok(()),
-                stopped: Mutex::default(),
-                removed: Mutex::default(),
+                ..Self::answering(Vec::new())
             })
+        }
+
+        fn refusing_remove(records: Vec<SessionRecord>, reason: &str) -> Arc<Self> {
+            Arc::new(Self {
+                remove: Err(reason.to_owned()),
+                ..Self::answering(records)
+            })
+        }
+
+        fn stopped(&self) -> Vec<String> {
+            self.stopped
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        fn removed(&self) -> Vec<String> {
+            self.removed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
         }
 
         fn set_list(&self, list: Result<Vec<SessionRecord>, String>) {
@@ -571,17 +900,35 @@ mod tests {
         }
     }
 
-    /// A store holding one thread in the launch directory's project.
+    /// A store holding one thread in the launch directory's project, created
+    /// an hour ago.
     fn store_with_thread(short_id: &str) -> Result<(Store, ThreadId), Report<StoreError>> {
         let store = Store::open_in_memory()?;
+        let id = add_thread(&store, short_id, now_ms() - HOUR_MS)?;
+        Ok((store, id))
+    }
+
+    /// Saves a thread created at `created_at` in the launch directory's project.
+    fn add_thread(
+        store: &Store,
+        short_id: &str,
+        created_at: i64,
+    ) -> Result<ThreadId, Report<StoreError>> {
         let project_id = store.upsert_project(Path::new(LAUNCH_DIR), "orb", 0)?;
-        let id = store.insert_thread(&NewThread {
+        store.insert_thread(&NewThread {
             project_id,
             short_id: short_id.to_owned(),
             cwd: PathBuf::from(LAUNCH_DIR),
-            created_at: 0,
-        })?;
-        Ok((store, id))
+            created_at,
+        })
+    }
+
+    /// Saves `change` over the saved row of the thread `short_id`.
+    fn resave<F>(store: &Store, short_id: &str, change: F) -> Result<(), Report<StoreError>>
+    where
+        F: FnOnce(ThreadRow) -> ThreadRow,
+    {
+        store.save_thread(&change(saved(store, short_id)?))
     }
 
     /// The saved row of the thread `short_id`.
@@ -608,6 +955,16 @@ mod tests {
             wake: Arc::new(|| {}),
         });
         (actor, state)
+    }
+
+    /// The thread `id` as the sidebar shows it.
+    fn shown(state: &State, id: ThreadId) -> Option<Thread> {
+        state
+            .read()
+            .sessions
+            .threads()
+            .find(|thread| thread.id == id)
+            .cloned()
     }
 
     fn status_of(state: &State, id: ThreadId) -> Option<ThreadStatus> {
@@ -1158,20 +1515,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn restore_selects_the_first_thread() -> Result<(), Report<StoreError>> {
-        // Given two saved threads, created at 10 and 20.
+    fn restore_selects_the_first_sidebar_item() -> Result<(), Report<StoreError>> {
+        // Given an old pinned thread and a newer unpinned one.
         let store = Store::open_in_memory()?;
-        let project_id = store.upsert_project(Path::new(LAUNCH_DIR), "orb", 0)?;
-        let insert = |short_id: &str, created_at| {
-            store.insert_thread(&NewThread {
-                project_id,
-                short_id: short_id.to_owned(),
-                cwd: PathBuf::from(LAUNCH_DIR),
-                created_at,
-            })
-        };
-        insert("old", 10)?;
-        let newest = insert("new", 20)?;
+        let pinned = add_thread(&store, "old", 10)?;
+        add_thread(&store, "new", 20)?;
+        resave(&store, "old", |row| ThreadRow {
+            pinned_at: Some(30),
+            ..row
+        })?;
 
         // When the actor starts.
         let (_actor, state) = start(
@@ -1180,11 +1532,11 @@ mod tests {
             Path::new(NO_CLAUDE_DIR),
         );
 
-        // Then the newest thread is selected.
+        // Then the pinned thread, first in the sidebar, is selected.
         assert_eq!(
-            state.read().sessions.selected_id(),
-            Some(newest),
-            "the first thread in the sidebar should be selected"
+            state.read().sessions.cursor,
+            Some(SidebarItem::Thread(pinned)),
+            "the sidebar's first row should be selected"
         );
         Ok(())
     }
@@ -1219,6 +1571,616 @@ mod tests {
             (row.transcript_path, row.transcript_offset, row.title),
             (None, 0, Some("Fix the sidebar".to_owned())),
             "a new session reads its own transcript from the start"
+        );
+        Ok(())
+    }
+
+    /// Makes the thread `short_id` idle since four days ago; returns that time.
+    fn idle_for_four_days(store: &Store, short_id: &str) -> Result<i64, Report<StoreError>> {
+        let since = now_ms() - 4 * DAY_MS;
+        resave(store, short_id, |row| ThreadRow {
+            last_activity_at: since,
+            last_visited_at: since,
+            ..row
+        })?;
+        Ok(since)
+    }
+
+    /// Settles the saved thread `short_id` an hour ago.
+    fn settled_an_hour_ago(store: &Store, short_id: &str) -> Result<(), Report<StoreError>> {
+        resave(store, short_id, |row| ThreadRow {
+            settled_override: Some(SettledOverride::Settled),
+            settled_at: Some(now_ms() - HOUR_MS),
+            ..row
+        })
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_marks_the_thread_settled() -> Result<(), Report<StoreError>> {
+        // Given an idle thread.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When settling it.
+        actor.settle(id).await;
+
+        // Then it shows settled and is saved settled.
+        let settled = (
+            shown(&state, id)
+                .and_then(|thread| thread.settled_at)
+                .is_some(),
+            saved(&actor.store, "aa")?.settled_at.is_some(),
+        );
+        assert_eq!(
+            settled,
+            (true, true),
+            "a settled thread should show and be saved as settled"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_stops_an_idle_session() -> Result<(), Report<StoreError>> {
+        // Given an idle thread.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When settling it.
+        actor.settle(id).await;
+
+        // Then its session is stopped.
+        assert_eq!(
+            host.stopped(),
+            vec!["aa".to_owned()],
+            "settling should stop the idle session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_unpins_the_thread() -> Result<(), Report<StoreError>> {
+        // Given a pinned idle thread.
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            pinned_at: Some(now_ms() - HOUR_MS),
+            ..row
+        })?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When settling it.
+        actor.settle(id).await;
+
+        // Then it is no longer pinned.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.pinned_at),
+            Some(None),
+            "a settle should remove the pin"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_of_a_working_thread_is_ignored() -> Result<(), Report<StoreError>> {
+        // Given a thread a poll saw working.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When a settle arrives.
+        actor.settle(id).await;
+
+        // Then the thread stays active and its session keeps running.
+        let ignored = (
+            shown(&state, id).map(|thread| thread.settled_at),
+            host.stopped(),
+        );
+        assert_eq!(
+            ignored,
+            (Some(None), Vec::<String>::new()),
+            "a turn underway should win over the settle"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn unsettle_keeps_the_thread_active() -> Result<(), Report<StoreError>> {
+        // Given a settled thread.
+        let (store, id) = store_with_thread("aa")?;
+        settled_an_hour_ago(&store, "aa")?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When un-settling it.
+        actor.unsettle(id);
+
+        // Then it is saved kept active and not settled.
+        let row = saved(&actor.store, "aa")?;
+        assert_eq!(
+            (row.settled_override, row.settled_at),
+            (Some(SettledOverride::Active), None),
+            "an un-settle should keep the thread active"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn unsettle_moves_the_thread_to_the_top_of_active() -> Result<(), Report<StoreError>> {
+        // Given an older settled thread and a newer active one.
+        let store = Store::open_in_memory()?;
+        let old = add_thread(&store, "aa", now_ms() - 2 * HOUR_MS)?;
+        add_thread(&store, "bb", now_ms() - HOUR_MS)?;
+        settled_an_hour_ago(&store, "aa")?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When un-settling the older one.
+        actor.unsettle(old);
+
+        // Then it is the first card.
+        let first = state
+            .read()
+            .sessions
+            .sidebar()
+            .first()
+            .map(SidebarRow::item);
+        assert_eq!(
+            first,
+            Some(SidebarItem::Thread(old)),
+            "an un-settled thread re-enters Active at the top"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pin_on_a_settled_thread_unsettles_it() -> Result<(), Report<StoreError>> {
+        // Given a settled thread.
+        let (store, id) = store_with_thread("aa")?;
+        settled_an_hour_ago(&store, "aa")?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When pinning it.
+        actor.pin(id);
+
+        // Then it is pinned and no longer settled.
+        let pinned = shown(&state, id)
+            .map(|thread| (thread.pinned_at.is_some(), thread.settled_at.is_none()));
+        assert_eq!(
+            pinned,
+            Some((true, true)),
+            "pinning should bring a settled thread back as a pin"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn working_poll_unsettles_a_settled_thread() -> Result<(), Report<StoreError>> {
+        // Given a settled thread whose session starts a turn.
+        let (store, id) = store_with_thread("aa")?;
+        settled_an_hour_ago(&store, "aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then it is no longer settled.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.settled_at),
+            Some(None),
+            "turn activity should un-settle the thread"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn working_poll_clears_a_kept_active_mark() -> Result<(), Report<StoreError>> {
+        // Given a kept-active thread whose session starts a turn.
+        let (store, _) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            settled_override: Some(SettledOverride::Active),
+            ..row
+        })?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the mark is cleared.
+        assert_eq!(
+            saved(&actor.store, "aa")?.settled_override,
+            None,
+            "turn activity should let auto-settle apply again"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn idle_for_three_days_auto_settles() -> Result<(), Report<StoreError>> {
+        // Given a thread idle for four days.
+        let (store, _) = store_with_thread("aa")?;
+        let since = idle_for_four_days(&store, "aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then it is settled as of its last activity.
+        let row = saved(&actor.store, "aa")?;
+        assert_eq!(
+            (row.settled_override, row.settled_at),
+            (Some(SettledOverride::Settled), Some(since)),
+            "a long-idle thread should settle as of its last activity"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn auto_settle_stops_the_session() -> Result<(), Report<StoreError>> {
+        // Given a thread idle for four days.
+        let (store, _) = store_with_thread("aa")?;
+        idle_for_four_days(&store, "aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then its session is stopped.
+        assert_eq!(
+            host.stopped(),
+            vec!["aa".to_owned()],
+            "an auto-settle should stop the idle session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pinned_thread_never_auto_settles() -> Result<(), Report<StoreError>> {
+        // Given a pinned thread idle for four days.
+        let (store, id) = store_with_thread("aa")?;
+        idle_for_four_days(&store, "aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            pinned_at: Some(now_ms() - 5 * DAY_MS),
+            ..row
+        })?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then it stays active.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.settled_at),
+            Some(None),
+            "a pin keeps the thread in view"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn kept_active_thread_never_auto_settles() -> Result<(), Report<StoreError>> {
+        // Given a kept-active thread idle for four days.
+        let (store, id) = store_with_thread("aa")?;
+        idle_for_four_days(&store, "aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            settled_override: Some(SettledOverride::Active),
+            ..row
+        })?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then it stays active.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.settled_at),
+            Some(None),
+            "an un-settle holds until the next turn activity"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn attached_thread_never_auto_settles() -> Result<(), Report<StoreError>> {
+        // Given orb attached to a thread idle for four days.
+        let (store, id) = store_with_thread("aa")?;
+        idle_for_four_days(&store, "aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        {
+            let mut app = state.write();
+            app.sessions.cursor = Some(SidebarItem::Thread(id));
+            app.focus = Focus::Attached;
+        }
+
+        // When polling.
+        actor.poll().await;
+
+        // Then it stays active.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.settled_at),
+            Some(None),
+            "stopping the attached session would kill orb's pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_on_an_unselected_thread_is_unseen() -> Result<(), Report<StoreError>> {
+        // Given a working thread while another thread is selected.
+        let (store, id) = store_with_thread("aa")?;
+        let other = add_thread(&store, "bb", now_ms() - HOUR_MS)?;
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Working),
+            record("bb", ThreadStatus::Idle),
+        ]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.cursor = Some(SidebarItem::Thread(other));
+        actor.poll().await;
+
+        // When a poll sees its turn end.
+        host.set_list(Ok(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Idle),
+        ]));
+        actor.poll().await;
+
+        // Then it is unseen.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.unseen),
+            Some(true),
+            "a turn that ended elsewhere should wait to be seen"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_on_the_selected_thread_is_seen() -> Result<(), Report<StoreError>> {
+        // Given the selected thread working.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.cursor = Some(SidebarItem::Thread(id));
+        actor.poll().await;
+
+        // When a poll sees its turn end.
+        host.set_list(Ok(vec![record("aa", ThreadStatus::Idle)]));
+        actor.poll().await;
+
+        // Then it is seen.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.unseen),
+            Some(false),
+            "being on the thread when its turn ends counts as seeing it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_stamps_last_activity() -> Result<(), Report<StoreError>> {
+        // Given a thread a poll saw working.
+        let (store, _) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        let before = now_ms();
+
+        // When a poll sees its turn end.
+        host.set_list(Ok(vec![record("aa", ThreadStatus::Idle)]));
+        actor.poll().await;
+
+        // Then its last activity is the turn's end.
+        assert!(
+            saved(&actor.store, "aa")?.last_activity_at >= before,
+            "the turn end should be the thread's last activity"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn visit_marks_the_thread_seen() -> Result<(), Report<StoreError>> {
+        // Given a thread whose last turn ended after it was last selected.
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            last_activity_at: now_ms() - 60_000,
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When the user visits it.
+        actor.visit(id);
+
+        // Then it is seen.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.unseen),
+            Some(false),
+            "selecting a thread should see its latest turn"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_removes_the_session() -> Result<(), Report<StoreError>> {
+        // Given an idle thread.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete(id).await;
+
+        // Then its session is removed.
+        assert_eq!(
+            host.removed(),
+            vec!["aa".to_owned()],
+            "deleting should remove the Claude session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_removes_the_thread() -> Result<(), Report<StoreError>> {
+        // Given an idle thread.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete(id).await;
+
+        // Then it is neither shown nor saved.
+        let kept = (
+            shown(&state, id).is_some(),
+            actor.store.load()?.1.iter().any(|row| row.id == id),
+        );
+        assert_eq!(kept, (false, false), "a deleted thread should be forgotten");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_remove_keeps_the_thread() -> Result<(), Report<StoreError>> {
+        // Given an idle thread whose session can't be removed.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete(id).await;
+
+        // Then it is still shown.
+        assert!(
+            shown(&state, id).is_some(),
+            "a session that wasn't removed would keep running unseen"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_remove_shows_the_reason() -> Result<(), Report<StoreError>> {
+        // Given an idle thread whose session can't be removed.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete(id).await;
+
+        // Then the reason is the error.
+        assert_eq!(
+            state.read().sessions.error.as_deref(),
+            Some("rm: busy"),
+            "the mode line should show why the delete failed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_gone_thread_skips_remove() -> Result<(), Report<StoreError>> {
+        // Given a thread Claude no longer knows.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete(id).await;
+
+        // Then nothing is removed.
+        assert!(
+            host.removed().is_empty(),
+            "there is no session left to remove"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_gone_thread_forgets_it() -> Result<(), Report<StoreError>> {
+        // Given a thread Claude no longer knows.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete(id).await;
+
+        // Then it is no longer shown.
+        assert!(
+            shown(&state, id).is_none(),
+            "a gone thread should be deleted directly"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn poll_shows_the_transcript_branch() -> Result<(), Report<StoreError>> {
+        // Given a thread whose transcript's prompt names a branch.
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(LAUNCH_DIR), "s1");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"gitBranch\":\"main\",\"message\":{\"content\":\"Fix it\"}}\n",
+        )
+        .change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![SessionRecord {
+            session_id: Some("s1".to_owned()),
+            ..record("aa", ThreadStatus::Idle)
+        }]);
+        let (mut actor, state) = start(store, &host, claude_dir.path());
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the thread shows the branch.
+        assert_eq!(
+            shown(&state, id).and_then(|thread| thread.branch),
+            Some("main".to_owned()),
+            "the transcript's branch should show on the thread"
         );
         Ok(())
     }
