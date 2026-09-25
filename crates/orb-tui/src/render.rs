@@ -1,22 +1,27 @@
 //! Draws a frame: the sidebar on the left, the attached session or the
 //! selected thread's preview on the right, the mode line at the bottom, and the
-//! which-key popup on top while a key sequence is pending.
+//! which-key popup on top while a key sequence is pending. While `s` or `x`
+//! waits for its repeat, a banner above the selected thread says what the
+//! repeat will do instead of the popup.
 
 use std::time::SystemTime;
 
 use orb_domain::feat::preview::state::PreviewLayout;
+use orb_domain::feat::sessions::state::SidebarItem;
+use orb_domain::feat::sessions::validator::{ToggleSettleError, validate_toggle_settle};
 use orb_domain::{AppState, Focus};
 use orb_term::Pane;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use ratatui_which_key::WhichKey;
 
-use crate::keymap::Keys;
+use crate::keymap::{self, Keys};
 use crate::preview::{self, PreviewCache};
-use crate::sidebar;
+use crate::sidebar::{self, SidebarScroll};
 
 /// Splits the screen into `[sidebar, right side, mode line]`.
 pub(crate) fn layout(area: Rect) -> [Rect; 3] {
@@ -31,6 +36,10 @@ pub(crate) fn layout(area: Rect) -> [Rect; 3] {
 /// one running; it's drawn only while attached, and otherwise the right side
 /// shows the selected thread's preview, with `pane_error` saying why the
 /// session couldn't start. Returns the preview's layout when it was drawn.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the frame's inputs and the two frontend view states it updates"
+)]
 pub(crate) fn render(
     frame: &mut Frame,
     state: &AppState,
@@ -39,9 +48,16 @@ pub(crate) fn render(
     keys: &Keys,
     now: SystemTime,
     cache: &mut PreviewCache,
+    scroll: &mut SidebarScroll,
 ) -> Option<PreviewLayout> {
     let [sidebar_area, right, mode_line] = layout(frame.area());
-    sidebar::render(&state.sessions, now, sidebar_area, frame.buffer_mut());
+    let selected_y = sidebar::render(
+        &state.sessions,
+        now,
+        sidebar_area,
+        frame.buffer_mut(),
+        scroll,
+    );
     let preview_layout = match (pane, state.focus) {
         (Some(pane), Focus::Attached) => {
             if let Some(cursor) = pane.render(right, frame.buffer_mut()) {
@@ -59,17 +75,71 @@ pub(crate) fn render(
                 cache,
             )),
             None => {
-                Line::raw("␣n new session").render(right, frame.buffer_mut());
+                let hint = match state.sessions.cursor {
+                    Some(SidebarItem::SettledShelf) => shelf_hint(state),
+                    _ => "␣n new session".to_owned(),
+                };
+                Line::raw(hint).render(right, frame.buffer_mut());
                 None
             }
         },
     };
     render_mode_line(state, mode_line, frame.buffer_mut());
-    // ratatui-which-key divides by the height inside the popup's borders.
-    if frame.area().height > 2 {
-        WhichKey::new().render(frame.buffer_mut(), keys);
+    match keymap::pending_confirm(keys) {
+        Some(confirm) => {
+            if let Some(y) = selected_y {
+                render_banner(state, confirm, y, frame.buffer_mut());
+            }
+        }
+        // ratatui-which-key divides by the height inside the popup's borders.
+        None if frame.area().height > 2 => WhichKey::new().render(frame.buffer_mut(), keys),
+        None => {}
     }
     preview_layout
+}
+
+/// What `⏎` does on the Settled header: `▸ Settled (N) · ⏎ open`, or
+/// `▾ Settled · ⏎ close` while the shelf is open.
+fn shelf_hint(state: &AppState) -> String {
+    let sessions = &state.sessions;
+    let count = sessions
+        .threads()
+        .filter(|thread| thread.settled_at.is_some())
+        .count();
+    let action = if sessions.shelf_open { "close" } else { "open" };
+    format!(
+        "{} · ⏎ {action}",
+        sidebar::shelf_label(count, sessions.shelf_open)
+    )
+}
+
+/// jinn's confirm banner, on the line above the selected row (the row itself
+/// at the top), against the frame's right edge: yellow when repeating
+/// `confirm` will act, red when it would be refused.
+fn render_banner(state: &AppState, confirm: char, selected_y: u16, buf: &mut Buffer) {
+    let Some(thread) = state.sessions.selected_thread() else {
+        return;
+    };
+    let (text, colour) = match (confirm, validate_toggle_settle(state)) {
+        ('x', _) => (" Press x again to delete ", Color::Yellow),
+        (_, Ok(())) if thread.settled_at.is_some() => {
+            (" Press s again to un-settle ", Color::Yellow)
+        }
+        (_, Ok(())) => (" Press s again to settle ", Color::Yellow),
+        (_, Err(ToggleSettleError::InProgress)) => {
+            (" Can't settle while Claude is working ", Color::Red)
+        }
+        (_, Err(ToggleSettleError::NoThread)) => return,
+    };
+    let banner = Line::styled(text, Style::new().fg(Color::Black).bg(colour));
+    let area = buf.area;
+    let width = u16::try_from(banner.width())
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    banner.render(
+        Rect::new(area.right() - width, selected_y.saturating_sub(1), width, 1),
+        buf,
+    );
 }
 
 /// The mode and its keys on the left; on the right, a session being started,
@@ -116,6 +186,7 @@ mod tests {
 
     use crate::keymap::{Keys, keymap, press};
     use crate::preview::PreviewCache;
+    use crate::sidebar::SidebarScroll;
 
     fn thread(id: i64, status: ThreadStatus) -> Thread {
         Thread {
@@ -149,17 +220,22 @@ mod tests {
 
     /// Draws `state` on an 80x8 screen.
     fn draw(state: &AppState) -> Buffer {
+        draw_with(state, &Keys::new(keymap(), Focus::Sidebar))
+    }
+
+    /// Draws `state` on an 80x8 screen with `keys` pending.
+    fn draw_with(state: &AppState, keys: &Keys) -> Buffer {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-        let keys = Keys::new(keymap(), Focus::Sidebar);
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
                 state,
                 None,
                 None,
-                &keys,
+                keys,
                 SystemTime::UNIX_EPOCH,
                 &mut PreviewCache::default(),
+                &mut SidebarScroll::default(),
             );
         });
         terminal.backend().buffer().clone()
@@ -204,6 +280,7 @@ mod tests {
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &mut PreviewCache::default(),
+                &mut SidebarScroll::default(),
             );
         });
         let buffer = terminal.backend().buffer();
@@ -233,6 +310,16 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The keymap in Sidebar focus with `c` pressed once.
+    fn pending(c: char) -> Keys {
+        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        press(
+            &mut keys,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
+        keys
     }
 
     fn mode_line(buffer: &Buffer) -> String {
@@ -368,6 +455,7 @@ mod tests {
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &mut PreviewCache::default(),
+                &mut SidebarScroll::default(),
             );
         });
 
@@ -376,6 +464,83 @@ mod tests {
         assert!(
             mode_line.starts_with("NORMAL"),
             "mode line was '{mode_line}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pending_s_shows_the_settle_banner() {
+        // Given an idle selected thread and `s` pressed once.
+        let state = selected(Focus::Sidebar);
+
+        // When drawing a frame.
+        let buffer = draw_with(&state, &pending('s'));
+
+        // Then the banner asks for the second `s`.
+        let screen = text(&buffer, buffer.area);
+        assert!(
+            screen.contains(" Press s again to settle "),
+            "screen was '{screen}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pending_s_on_a_working_thread_shows_the_refusal() {
+        // Given a Working selected thread and `s` pressed once.
+        let state = AppState {
+            sessions: Sessions {
+                cursor: Some(SidebarItem::Thread(ThreadId(1))),
+                ..sessions(vec![thread(1, ThreadStatus::Working)])
+            },
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let buffer = draw_with(&state, &pending('s'));
+
+        // Then the banner says the settle would be refused.
+        let screen = text(&buffer, buffer.area);
+        assert!(
+            screen.contains(" Can't settle while Claude is working "),
+            "screen was '{screen}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pending_s_hides_the_which_key_popup() {
+        // Given an idle selected thread and `s` pressed once.
+        let state = selected(Focus::Sidebar);
+
+        // When drawing a frame.
+        let buffer = draw_with(&state, &pending('s'));
+
+        // Then no popup border is drawn.
+        let screen = text(&buffer, buffer.area);
+        assert!(!screen.contains('┌'), "screen was '{screen}'");
+    }
+
+    #[rstest::rstest]
+    fn shelf_header_selected_shows_the_open_hint() {
+        // Given a collapsed shelf with one settled thread, its header selected.
+        let state = AppState {
+            sessions: Sessions {
+                cursor: Some(SidebarItem::SettledShelf),
+                ..sessions(vec![Thread {
+                    settled_at: Some(SystemTime::UNIX_EPOCH),
+                    ..thread(1, ThreadStatus::Stopped)
+                }])
+            },
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the right side says ⏎ opens the shelf.
+        let [_, right, _] = layout(buffer.area);
+        let right = text(&buffer, right);
+        assert!(
+            right.contains("▸ Settled (1) · ⏎ open"),
+            "right side was '{right}'"
         );
     }
 

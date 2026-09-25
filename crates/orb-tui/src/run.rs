@@ -32,6 +32,7 @@ use wherror::Error;
 
 use crate::keymap::{self, Keys, Route};
 use crate::preview::PreviewCache;
+use crate::sidebar::SidebarScroll;
 use crate::{outer_terminal, render};
 
 /// The frontend loop failed to draw a frame or read a terminal event.
@@ -118,6 +119,7 @@ struct App {
     /// The cursor style last sent to the outer terminal.
     cursor_style: SetCursorStyle,
     preview_cache: PreviewCache,
+    sidebar_scroll: SidebarScroll,
 }
 
 impl App {
@@ -141,6 +143,7 @@ impl App {
             pane_area: Rect::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
             preview_cache: PreviewCache::default(),
+            sidebar_scroll: SidebarScroll::default(),
         }
     }
 
@@ -172,6 +175,7 @@ impl App {
                     &self.keys,
                     now,
                     &mut self.preview_cache,
+                    &mut self.sidebar_scroll,
                 );
             })?;
             // Navigation scrolls by what was just drawn.
@@ -364,12 +368,30 @@ impl App {
                 Ok(())
             }
             Command::Yank(text) => outer_terminal::copy_to_clipboard(out, text),
-            Command::Pin(_)
-            | Command::Unpin(_)
-            | Command::Settle(_)
-            | Command::Unsettle(_)
-            | Command::Delete(_)
-            | Command::Visit(_) => Ok(()),
+            Command::Pin(id) => {
+                let _ = self.sessions.tell(sessions_actor::Pin(*id)).try_send();
+                Ok(())
+            }
+            Command::Unpin(id) => {
+                let _ = self.sessions.tell(sessions_actor::Unpin(*id)).try_send();
+                Ok(())
+            }
+            Command::Settle(id) => {
+                let _ = self.sessions.tell(sessions_actor::Settle(*id)).try_send();
+                Ok(())
+            }
+            Command::Unsettle(id) => {
+                let _ = self.sessions.tell(sessions_actor::Unsettle(*id)).try_send();
+                Ok(())
+            }
+            Command::Delete(id) => {
+                let _ = self.sessions.tell(sessions_actor::Delete(*id)).try_send();
+                Ok(())
+            }
+            Command::Visit(id) => {
+                let _ = self.sessions.tell(sessions_actor::Visit(*id)).try_send();
+                Ok(())
+            }
         }
     }
 

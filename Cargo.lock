@@ -1194,6 +1194,7 @@ dependencies = [
  "ratatui-which-key",
  "rstest 0.27.0",
  "tui-markdown",
+ "unicode-segmentation",
  "wherror",
 ]
 
