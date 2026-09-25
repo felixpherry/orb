@@ -346,7 +346,7 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 - ``(keybinds) `␣n` starts a Claude session in orb's working directory.``
 - ``(paths) orb persists its state to `~/.orb/userdata/state.sqlite`.``
 
-### M3
+### M3 (written)
 
 **Amend**
 - ``(sessions) A thread's title is its transcript's latest `ai-title`, else its first prompt, else "New thread".`` → ``(sessions) A thread's title is its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".``
