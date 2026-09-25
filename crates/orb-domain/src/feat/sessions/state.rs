@@ -43,7 +43,7 @@ impl ThreadStatus {
 }
 
 /// One Claude session orb started.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thread {
     pub id: ThreadId,
     /// `None` until the transcript names the thread.
