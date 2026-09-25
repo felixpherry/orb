@@ -45,9 +45,15 @@ Entries are added or amended **only with human approval**.
 - (sessions) Claude Code's background supervisor (`claude --bg`) hosts every session; quitting orb does not stop sessions.
 - (sessions) Session status is read by polling `claude agents --json --all` every second while a thread is busy or waiting or orb is attached, and every 5 seconds otherwise.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
-- (sessions) A thread's title is its transcript's latest `ai-title`, else its first prompt, else "New thread".
+- (sessions) A thread's title is its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
 - (sidebar) The sidebar lists only sessions orb started, grouped by project.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.
 - (keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` starts a Claude session in orb's working directory.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
+- (preview) The preview renders the selected thread from its Claude transcript JSONL as navigable blocks, without spawning a process.
+- (preview) The preview shows only the transcript's newest branch and continues across compaction boundaries.
+- (preview) The preview reads new transcript lines within half a second and follows the tail while scrolled to the bottom.
+- (keybinds) In the preview, `j`/`k` move between blocks, `<C-d>`/`<C-u>` move half a page, `gg`/`G` jump to the top/bottom, `za`/`<Tab>` fold or unfold a block, and `y` yanks its raw text.
+- (preview) Yanked text goes to the outer terminal's clipboard via OSC 52.
+- (pane) orb draws the Claude pane only while attached; otherwise the right-hand area shows the selected thread's preview.
