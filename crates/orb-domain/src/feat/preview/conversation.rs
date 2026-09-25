@@ -56,6 +56,9 @@ struct RawMessage {
     content: Option<Content>,
 }
 
+// ponytail: untagged buffers each content value (base64 images included)
+// before matching; the largest local transcript (20 MB) loads in ~7 ms. Swap
+// in a visitor `Deserialize` (`visit_str` / `visit_seq`) if loads get slow.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Content {
