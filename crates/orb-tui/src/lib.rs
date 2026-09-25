@@ -3,6 +3,7 @@
 
 mod keymap;
 mod outer_terminal;
+mod preview;
 mod render;
 mod run;
 mod sidebar;

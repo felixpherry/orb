@@ -31,6 +31,7 @@ use ratatui::layout::Rect;
 use wherror::Error;
 
 use crate::keymap::{self, Keys, Route};
+use crate::preview::PreviewCache;
 use crate::{outer_terminal, render};
 
 /// The frontend loop failed to draw a frame or read a terminal event.
@@ -116,6 +117,7 @@ struct App {
     pane_area: Rect,
     /// The cursor style last sent to the outer terminal.
     cursor_style: SetCursorStyle,
+    preview_cache: PreviewCache,
 }
 
 impl App {
@@ -138,6 +140,7 @@ impl App {
             tx,
             pane_area: Rect::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
+            preview_cache: PreviewCache::default(),
         }
     }
 
@@ -150,6 +153,7 @@ impl App {
                 attached.pane.resize(PaneSize::from(pane_area));
             }
             let now = SystemTime::now();
+            let mut preview_layout = None;
             terminal.draw(|frame| {
                 let state = self.state.read();
                 let pane = self
@@ -160,15 +164,22 @@ impl App {
                             && !attached.pane.has_exited()
                     })
                     .map(|attached| &attached.pane);
-                render::render(
+                preview_layout = render::render(
                     frame,
                     &state,
                     pane,
                     self.pane_error.as_deref(),
                     &self.keys,
                     now,
+                    &mut self.preview_cache,
                 );
             })?;
+            // Navigation scrolls by what was just drawn.
+            if let Some(layout) = preview_layout
+                && self.state.read().preview.layout != layout
+            {
+                self.state.write().preview.layout = layout;
+            }
             self.mirror_cursor_style(terminal.backend_mut())?;
             if self.state.read().should_quit {
                 return Ok(());
@@ -352,7 +363,7 @@ impl App {
                 let _ = self.preview.tell(preview_actor::ShowPreview).try_send();
                 Ok(())
             }
-            Command::Yank(_) => Ok(()),
+            Command::Yank(text) => outer_terminal::copy_to_clipboard(out, text),
         }
     }
 
