@@ -17,6 +17,7 @@ pub(crate) enum KeyCategory {
     General,
     Navigation,
     Sessions,
+    Threads,
     Preview,
 }
 
@@ -26,6 +27,7 @@ impl fmt::Display for KeyCategory {
             Self::General => "general",
             Self::Navigation => "navigation",
             Self::Sessions => "sessions",
+            Self::Threads => "threads",
             Self::Preview => "preview",
         })
     }
@@ -35,6 +37,10 @@ impl fmt::Display for KeyCategory {
 pub(crate) type Keys = WhichKeyState<KeyEvent, Focus, Intent, KeyCategory>;
 
 /// The sidebar and preview bindings, scoped by focus.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one binding per key keeps the whole keymap in one place"
+)]
 pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
     let mut keymap = Keymap::new();
     keymap
@@ -64,6 +70,31 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
             Focus::Sidebar,
         )
         .bind("q", Intent::Quit, KeyCategory::General, Focus::Sidebar)
+        .bind("p", Intent::TogglePin, KeyCategory::Threads, Focus::Sidebar)
+        .bind(
+            "ss",
+            Intent::ToggleSettle,
+            KeyCategory::Threads,
+            Focus::Sidebar,
+        )
+        .bind(
+            "xx",
+            Intent::DeleteThread,
+            KeyCategory::Threads,
+            Focus::Sidebar,
+        )
+        .bind(
+            "l",
+            Intent::OpenShelf,
+            KeyCategory::Navigation,
+            Focus::Sidebar,
+        )
+        .bind(
+            "h",
+            Intent::CloseShelf,
+            KeyCategory::Navigation,
+            Focus::Sidebar,
+        )
         .bind(
             "<leader>n",
             Intent::NewSession,
@@ -141,6 +172,24 @@ pub(crate) fn press(keys: &mut Keys, key: KeyEvent) -> Option<Intent> {
         _ => key.modifiers,
     };
     keys.handle_key(KeyEvent::new(key.code, modifiers))
+}
+
+/// The sidebar key waiting for its repeat: the `s` of `ss` or the `x` of
+/// `xx`.
+pub(crate) fn pending_confirm(keys: &Keys) -> Option<char> {
+    match (keys.scope(), keys.current_sequence.as_slice()) {
+        (
+            Focus::Sidebar,
+            [
+                KeyEvent {
+                    code: KeyCode::Char(c @ ('s' | 'x')),
+                    modifiers,
+                    ..
+                },
+            ],
+        ) if modifiers.is_empty() => Some(*c),
+        _ => None,
+    }
 }
 
 /// Where a key goes while attached.
@@ -224,6 +273,9 @@ mod tests {
     #[case(ctrl('l'), Intent::FocusPreview)]
     #[case(key(KeyCode::Enter), Intent::Attach)]
     #[case(key(KeyCode::Char('q')), Intent::Quit)]
+    #[case(key(KeyCode::Char('p')), Intent::TogglePin)]
+    #[case(key(KeyCode::Char('l')), Intent::OpenShelf)]
+    #[case(key(KeyCode::Char('h')), Intent::CloseShelf)]
     fn sidebar_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
         let mut keys = Keys::new(keymap(), Focus::Sidebar);
@@ -271,6 +323,45 @@ mod tests {
             Some(&expected),
             "the key for {expected} in the preview"
         );
+    }
+
+    #[rstest::rstest]
+    fn s_then_s_toggles_settle() {
+        // Given `s` already pressed in Sidebar focus.
+        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        press(&mut keys, key(KeyCode::Char('s')));
+
+        // When pressing `s` again.
+        let intent = press(&mut keys, key(KeyCode::Char('s')));
+
+        // Then it settles or un-settles the thread.
+        assert_eq!(intent, Some(Intent::ToggleSettle), "ss should settle");
+    }
+
+    #[rstest::rstest]
+    fn x_then_x_deletes() {
+        // Given `x` already pressed in Sidebar focus.
+        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        press(&mut keys, key(KeyCode::Char('x')));
+
+        // When pressing `x` again.
+        let intent = press(&mut keys, key(KeyCode::Char('x')));
+
+        // Then it deletes the thread.
+        assert_eq!(intent, Some(Intent::DeleteThread), "xx should delete");
+    }
+
+    #[rstest::rstest]
+    fn s_then_j_does_nothing() {
+        // Given the keymap in Sidebar focus.
+        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+
+        // When pressing `s` then `j`.
+        let intents =
+            [KeyCode::Char('s'), KeyCode::Char('j')].map(|code| press(&mut keys, key(code)));
+
+        // Then neither key yields an intent.
+        assert_eq!(intents, [None, None], "j should cancel the pending s");
     }
 
     #[rstest::rstest]
