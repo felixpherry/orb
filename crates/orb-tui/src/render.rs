@@ -141,6 +141,7 @@ mod tests {
             id: ThreadId(id),
             title: Some("Fix the bug".to_owned()),
             cwd: "/Users/me/dev/orb".into(),
+            transcript: None,
             status,
             turn_started_at: None,
             attach_argv: vec![],

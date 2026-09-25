@@ -369,17 +369,19 @@ fn update_row(
     }
 }
 
-/// Shows a saved thread's title and turn stamp, and `status`, on `thread`.
-/// Returns whether anything visible changed.
+/// Shows a saved thread's title, turn stamp, and transcript, and `status`,
+/// on `thread`. Returns whether anything visible changed.
 fn show(thread: &mut Thread, row: &ThreadRow, status: ThreadStatus) -> bool {
     let turn_started_at = row.turn_started_at.map(from_ms);
     let title = display_title(row);
     let changed = thread.status != status
         || thread.title != title
-        || thread.turn_started_at != turn_started_at;
+        || thread.turn_started_at != turn_started_at
+        || thread.transcript != row.transcript_path;
     thread.status = status;
     thread.title = title;
     thread.turn_started_at = turn_started_at;
+    thread.transcript.clone_from(&row.transcript_path);
     changed
 }
 
@@ -402,6 +404,7 @@ fn thread(host: &SessionHostService, row: &ThreadRow) -> Thread {
         id: row.id,
         title: display_title(row),
         cwd: row.cwd.clone(),
+        transcript: row.transcript_path.clone(),
         status: ThreadStatus::Unknown,
         turn_started_at: row.turn_started_at.map(from_ms),
         attach_argv: host.attach_argv(&row.short_id),
@@ -1024,6 +1027,40 @@ mod tests {
             title.as_deref(),
             Some("orb-m1"),
             "`/rename` should beat the ai-title"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn poll_shows_the_located_transcript_on_the_thread() -> Result<(), Report<StoreError>> {
+        // Given a thread whose session has a transcript.
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(LAUNCH_DIR), "s1");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(&path, "").change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![SessionRecord {
+            session_id: Some("s1".to_owned()),
+            ..record("aa", ThreadStatus::Idle)
+        }]);
+        let (mut actor, state) = start(store, &host, claude_dir.path());
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the thread carries the transcript's path.
+        let transcript = state
+            .read()
+            .sessions
+            .threads()
+            .find(|thread| thread.id == id)
+            .and_then(|thread| thread.transcript.clone());
+        assert_eq!(
+            transcript,
+            Some(path),
+            "a located transcript should be shown on its thread"
         );
         Ok(())
     }

@@ -48,6 +48,8 @@ pub struct Thread {
     pub title: Option<String>,
     /// Where the session runs.
     pub cwd: PathBuf,
+    /// The session's Claude transcript, once located.
+    pub transcript: Option<PathBuf>,
     pub status: ThreadStatus,
     /// When orb first saw the current turn running; `None` between turns.
     pub turn_started_at: Option<SystemTime>,
@@ -157,6 +159,7 @@ mod tests {
             id: ThreadId(id),
             title: None,
             cwd: "/tmp".into(),
+            transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
             attach_argv: vec![],

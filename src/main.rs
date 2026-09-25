@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use error_stack::{Report, ResultExt};
+use orb_domain::feat::preview::preview_actor::{PreviewActorDeps, spawn_preview_actor};
 use orb_domain::feat::sessions::child_env::child_env;
 use orb_domain::feat::sessions::claude_supervisor::ClaudeSupervisor;
 use orb_domain::feat::sessions::session_host::SessionHostService;
@@ -43,7 +44,11 @@ fn main() -> Result<(), Report<OrbError>> {
         launch_dir,
         wake: frontend.waker(),
     });
+    let preview = spawn_preview_actor(PreviewActorDeps {
+        state: state.clone(),
+        wake: frontend.waker(),
+    });
     frontend
-        .run(state, sessions, claude_env)
+        .run(state, sessions, preview, claude_env)
         .change_context(OrbError)
 }

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
 use kameo::prelude::ActorRef;
+use orb_domain::feat::preview::preview_actor::{self, PreviewActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
 use orb_domain::{Command, Focus, IntentHandler, State, Wake};
@@ -60,8 +61,8 @@ impl Frontend {
     }
 
     /// Runs orb's TUI until the user quits. Session commands go to
-    /// `sessions`; attached sessions run with `claude_env`. The terminal is
-    /// restored on exit and on panic.
+    /// `sessions` and preview commands to `preview`; attached sessions run
+    /// with `claude_env`. The terminal is restored on exit and on panic.
     ///
     /// # Errors
     ///
@@ -71,13 +72,14 @@ impl Frontend {
         self,
         state: State,
         sessions: ActorRef<SessionsActor>,
+        preview: ActorRef<PreviewActor>,
         claude_env: Vec<(OsString, OsString)>,
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx } = self;
         ratatui::run(|terminal| -> io::Result<()> {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook();
-            let result = App::new(state, sessions, claude_env, tx).run(terminal, &rx);
+            let result = App::new(state, sessions, preview, claude_env, tx).run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
             result.and(restored)
         })
@@ -103,6 +105,7 @@ struct AttachedPane {
 struct App {
     state: State,
     sessions: ActorRef<SessionsActor>,
+    preview: ActorRef<PreviewActor>,
     keys: Keys,
     pane: Option<AttachedPane>,
     /// Shown under the preview header when `claude attach` couldn't start.
@@ -119,6 +122,7 @@ impl App {
     fn new(
         state: State,
         sessions: ActorRef<SessionsActor>,
+        preview: ActorRef<PreviewActor>,
         claude_env: Vec<(OsString, OsString)>,
         tx: Sender<LoopEvent>,
     ) -> Self {
@@ -126,6 +130,7 @@ impl App {
         Self {
             state,
             sessions,
+            preview,
             keys: Keys::new(keymap::keymap(), focus),
             pane: None,
             pane_error: None,
@@ -343,7 +348,11 @@ impl App {
                     .try_send();
                 Ok(())
             }
-            Command::ShowPreview | Command::Yank(_) => Ok(()),
+            Command::ShowPreview => {
+                let _ = self.preview.tell(preview_actor::ShowPreview).try_send();
+                Ok(())
+            }
+            Command::Yank(_) => Ok(()),
         }
     }
 
