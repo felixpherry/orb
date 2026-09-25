@@ -1,9 +1,11 @@
 //! orb's saved projects and threads, kept in SQLite across launches.
 //!
 //! For each project it keeps the directory orb started sessions in. For each
-//! thread it keeps the Claude ids, the titles, how far the transcript has been
-//! read, and when the running turn started. The schema grows through an ordered
-//! list of migrations. Times are milliseconds since the Unix epoch.
+//! thread it keeps the Claude ids, the titles, the git branch, how far the
+//! transcript has been read, when the running turn started, whether it is
+//! pinned or settled, and when it last had activity and was last visited. The
+//! schema grows through an ordered list of migrations. Times are milliseconds
+//! since the Unix epoch.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +50,46 @@ pub struct ThreadRow {
     pub created_at: i64,
     /// When orb first saw the current turn running; `None` between turns.
     pub turn_started_at: Option<i64>,
+    /// The git branch the transcript last named.
+    pub branch: Option<String>,
+    /// When the user pinned the thread; `None` = not pinned.
+    pub pinned_at: Option<i64>,
+    /// Whether the thread is settled or kept active; `None` = neither.
+    pub settled_override: Option<SettledOverride>,
+    /// When the thread was settled.
+    pub settled_at: Option<i64>,
+    /// When the thread was last un-settled.
+    pub unsettled_at: Option<i64>,
+    /// When orb last saw a turn end, else when the thread was created.
+    pub last_activity_at: i64,
+    /// When the user last selected the thread.
+    pub last_visited_at: i64,
+}
+
+/// A thread's settle state as set by the user, auto-settle, or activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettledOverride {
+    /// Settled onto the shelf.
+    Settled,
+    /// Un-settled by the user; auto-settle waits for the next turn activity.
+    Active,
+}
+
+impl SettledOverride {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+            Self::Active => "active",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "settled" => Some(Self::Settled),
+            "active" => Some(Self::Active),
+            _ => None,
+        }
+    }
 }
 
 /// A thread that was just created and isn't saved yet.
@@ -77,6 +119,16 @@ const MIGRATIONS: &[&str] = &[
       created_at INTEGER NOT NULL, turn_started_at INTEGER);
 ",
     "ALTER TABLE threads ADD COLUMN custom_title TEXT;",
+    "
+    ALTER TABLE threads ADD COLUMN branch TEXT;
+    ALTER TABLE threads ADD COLUMN pinned_at INTEGER;
+    ALTER TABLE threads ADD COLUMN settled_override TEXT;
+    ALTER TABLE threads ADD COLUMN settled_at INTEGER;
+    ALTER TABLE threads ADD COLUMN unsettled_at INTEGER;
+    ALTER TABLE threads ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE threads ADD COLUMN last_visited_at INTEGER NOT NULL DEFAULT 0;
+    UPDATE threads SET last_activity_at = created_at, last_visited_at = created_at;
+",
 ];
 
 impl Store {
@@ -134,7 +186,9 @@ impl Store {
         let threads = self
             .query(
                 "SELECT id, project_id, short_id, session_id, title, cwd, transcript_path,
-                        transcript_offset, created_at, turn_started_at, custom_title
+                        transcript_offset, created_at, turn_started_at, custom_title,
+                        branch, pinned_at, settled_override, settled_at, unsettled_at,
+                        last_activity_at, last_visited_at
                  FROM threads ORDER BY created_at DESC, id DESC",
                 thread_row,
             )
@@ -167,7 +221,7 @@ impl Store {
             .attach("failed to save the project")
     }
 
-    /// Saves a new thread.
+    /// Saves a new thread, last active and last visited when it was created.
     ///
     /// # Errors
     ///
@@ -176,8 +230,9 @@ impl Store {
     pub fn insert_thread(&self, row: &NewThread) -> Result<ThreadId, Report<StoreError>> {
         self.conn
             .query_row(
-                "INSERT INTO threads (project_id, short_id, cwd, created_at)
-                 VALUES (?1, ?2, ?3, ?4) RETURNING id",
+                "INSERT INTO threads
+                   (project_id, short_id, cwd, created_at, last_activity_at, last_visited_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?4) RETURNING id",
                 params![
                     row.project_id.0,
                     row.short_id,
@@ -191,8 +246,9 @@ impl Store {
             .attach("failed to save the thread")
     }
 
-    /// Updates what polling learns about a thread: its session id, titles,
-    /// transcript position, and turn start.
+    /// Updates everything about a thread that changes after it's created: its
+    /// session id, titles, branch, transcript position, turn start, pin and
+    /// settle state, and activity and visit stamps.
     ///
     /// # Errors
     ///
@@ -203,7 +259,9 @@ impl Store {
         self.conn
             .execute(
                 "UPDATE threads SET session_id = ?2, title = ?3, transcript_path = ?4,
-                        transcript_offset = ?5, turn_started_at = ?6, custom_title = ?7
+                        transcript_offset = ?5, turn_started_at = ?6, custom_title = ?7,
+                        branch = ?8, pinned_at = ?9, settled_override = ?10, settled_at = ?11,
+                        unsettled_at = ?12, last_activity_at = ?13, last_visited_at = ?14
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -213,10 +271,30 @@ impl Store {
                     row.transcript_offset,
                     row.turn_started_at,
                     row.custom_title,
+                    row.branch,
+                    row.pinned_at,
+                    row.settled_override.map(SettledOverride::as_str),
+                    row.settled_at,
+                    row.unsettled_at,
+                    row.last_activity_at,
+                    row.last_visited_at,
                 ],
             )
             .change_context(StoreError)
             .attach("failed to update the thread")?;
+        Ok(())
+    }
+
+    /// Deletes a thread. Its project stays.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be written.
+    pub fn delete_thread(&self, id: ThreadId) -> Result<(), Report<StoreError>> {
+        self.conn
+            .execute("DELETE FROM threads WHERE id = ?1", params![id.0])
+            .change_context(StoreError)
+            .attach("failed to delete the thread")?;
         Ok(())
     }
 
@@ -293,6 +371,16 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         transcript_offset: row.get(7)?,
         created_at: row.get(8)?,
         turn_started_at: row.get(9)?,
+        branch: row.get(11)?,
+        pinned_at: row.get(12)?,
+        settled_override: row
+            .get::<_, Option<String>>(13)?
+            .as_deref()
+            .and_then(SettledOverride::parse),
+        settled_at: row.get(14)?,
+        unsettled_at: row.get(15)?,
+        last_activity_at: row.get(16)?,
+        last_visited_at: row.get(17)?,
     })
 }
 
@@ -307,7 +395,7 @@ mod tests {
     use error_stack::{Report, ResultExt};
     use rusqlite::Connection;
 
-    use super::{MIGRATIONS, NewThread, ProjectId, Store, StoreError, ThreadRow};
+    use super::{MIGRATIONS, NewThread, ProjectId, SettledOverride, Store, StoreError, ThreadRow};
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
         Connection::open(path)
@@ -361,15 +449,54 @@ mod tests {
         // When opening the store.
         drop(Store::open(&path)?);
 
-        // Then it's at version 2 with a custom_title column.
+        // Then it's at the latest version with a custom_title column.
         let has_column = Connection::open(&path)
             .change_context(StoreError)?
             .prepare("SELECT custom_title FROM threads")
             .is_ok();
         assert_eq!(
             (user_version(&path)?, has_column),
-            (2, true),
+            (MIGRATIONS.len(), true),
             "migration v2 should add threads.custom_title"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_a_v2_database_seeds_activity_and_visit_from_created_at()
+    -> Result<(), Report<StoreError>> {
+        // Given a database at schema version 2 holding a thread created at 1 s.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        {
+            let conn = Connection::open(&path).change_context(StoreError)?;
+            for sql in MIGRATIONS
+                .get(..2)
+                .ok_or_else(|| Report::new(StoreError).attach("no v2 migrations"))?
+            {
+                conn.execute_batch(sql).change_context(StoreError)?;
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
+                 INSERT INTO threads (project_id, short_id, cwd, created_at)
+                 VALUES (1, '28bf38e2', '/tmp/orb', 1000);
+                 PRAGMA user_version = 2;",
+            )
+            .change_context(StoreError)?;
+        }
+
+        // When opening the store and loading.
+        let (_, threads) = Store::open(&path)?.load()?;
+
+        // Then it's at the latest version and both stamps are the creation time.
+        let stamps: Vec<(i64, i64)> = threads
+            .iter()
+            .map(|row| (row.last_activity_at, row.last_visited_at))
+            .collect();
+        assert_eq!(
+            (user_version(&path)?, stamps),
+            (MIGRATIONS.len(), vec![(1_000, 1_000)]),
+            "migration v3 should seed last activity and last visit from created_at"
         );
         Ok(())
     }
@@ -420,6 +547,13 @@ mod tests {
             transcript_offset: 0,
             created_at: 1_000,
             turn_started_at: None,
+            branch: None,
+            pinned_at: None,
+            settled_override: None,
+            settled_at: None,
+            unsettled_at: None,
+            last_activity_at: 1_000,
+            last_visited_at: 1_000,
         };
         assert_eq!(threads, vec![expected], "the saved thread should load back");
         Ok(())
@@ -461,12 +595,93 @@ mod tests {
             transcript_offset: 4_096,
             created_at: 1_000,
             turn_started_at: Some(2_000),
+            branch: None,
+            pinned_at: None,
+            settled_override: None,
+            settled_at: None,
+            unsettled_at: None,
+            last_activity_at: 1_000,
+            last_visited_at: 1_000,
         };
         store.save_thread(&updated)?;
 
         // Then loading returns the updated values.
         let (_, threads) = store.load()?;
         assert_eq!(threads, vec![updated], "the updates should load back");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(SettledOverride::Settled)]
+    #[case(SettledOverride::Active)]
+    fn settle_fields_load_back_after_saving(
+        #[case] settled_override: SettledOverride,
+    ) -> Result<(), Report<StoreError>> {
+        // Given a store with one thread.
+        let store = Store::open_in_memory()?;
+        let project_id = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
+        store.insert_thread(&new_thread(project_id))?;
+        let inserted = store
+            .load()?
+            .1
+            .pop()
+            .ok_or_else(|| Report::new(StoreError).attach("the thread wasn't saved"))?;
+
+        // When saving its branch, pin, settle state, and stamps.
+        let updated = ThreadRow {
+            branch: Some("main".to_owned()),
+            pinned_at: Some(2_000),
+            settled_override: Some(settled_override),
+            settled_at: Some(3_000),
+            unsettled_at: Some(1_500),
+            last_activity_at: 2_500,
+            last_visited_at: 2_600,
+            ..inserted
+        };
+        store.save_thread(&updated)?;
+
+        // Then loading returns them.
+        let (_, threads) = store.load()?;
+        assert_eq!(threads, vec![updated], "the settle fields should load back");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn deleted_thread_is_gone_after_reload() -> Result<(), Report<StoreError>> {
+        // Given a store with one thread.
+        let store = Store::open_in_memory()?;
+        let project_id = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
+        let thread_id = store.insert_thread(&new_thread(project_id))?;
+
+        // When deleting it.
+        store.delete_thread(thread_id)?;
+
+        // Then loading no longer returns it.
+        let (_, threads) = store.load()?;
+        assert!(threads.is_empty(), "the deleted thread should not load");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn inserted_thread_starts_seen_and_active_at_creation() -> Result<(), Report<StoreError>> {
+        // Given a store with a project.
+        let store = Store::open_in_memory()?;
+        let project_id = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
+
+        // When inserting a thread created at 1 s.
+        store.insert_thread(&new_thread(project_id))?;
+
+        // Then its last activity and last visit are its creation time.
+        let (_, threads) = store.load()?;
+        let stamps: Vec<(i64, i64)> = threads
+            .iter()
+            .map(|row| (row.last_activity_at, row.last_visited_at))
+            .collect();
+        assert_eq!(
+            stamps,
+            vec![(1_000, 1_000)],
+            "a new thread should start seen and active at its creation"
+        );
         Ok(())
     }
 

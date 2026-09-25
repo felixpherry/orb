@@ -1,10 +1,12 @@
 //! Claude Code's background supervisor as orb's session host.
 //!
 //! `claude --bg` starts an idle session, `claude agents --json --all` reports
-//! what every session is doing, and `claude attach <id>` attaches to one. Every
-//! `claude` process runs with orb's child environment and no stdin, and is
-//! killed if it outlives its time limit. When `claude` fails, the first line it
-//! printed becomes the reason.
+//! what every session is doing, `claude stop <id>` stops one and keeps its
+//! conversation, `claude rm <id>` deletes one, and `claude attach <id>`
+//! attaches to one, resuming it if it was stopped. Every `claude` process runs
+//! with orb's child environment and no stdin, and is killed if it outlives its
+//! time limit. When `claude` fails, the first line it printed becomes the
+//! reason.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -22,6 +24,8 @@ use super::state::ThreadStatus;
 
 const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `claude stop` and `claude rm` may take.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `waitingFor` values that mean Claude waits for an approval.
 const APPROVALS: [&str; 3] = ["permission prompt", "sandbox request", "worker request"];
@@ -75,6 +79,21 @@ impl SessionHost for ClaudeSupervisor {
         let command = self.claude(&["agents", "--json", "--all"]);
         let text = run(command, "claude agents", LIST_TIMEOUT).await?;
         parse_agents(&text)
+    }
+
+    async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
+        run(
+            self.claude(&["stop", short_id]),
+            "claude stop",
+            STOP_TIMEOUT,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
+        run(self.claude(&["rm", short_id]), "claude rm", STOP_TIMEOUT).await?;
+        Ok(())
     }
 
     fn attach_argv(&self, short_id: &str) -> Vec<OsString> {

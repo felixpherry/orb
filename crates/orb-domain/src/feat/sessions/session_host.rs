@@ -1,5 +1,5 @@
-//! Where Claude sessions run: starting one, listing what each is doing, and
-//! the command that attaches to one.
+//! Where Claude sessions run: starting one, listing what each is doing,
+//! stopping or deleting one, and the command that attaches to one.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -53,6 +53,20 @@ pub trait SessionHost: Send + Sync {
     /// Returns an error if the host can't be asked or its answer can't be read.
     async fn list(&self) -> Result<Vec<SessionRecord>, Report<SessionHostError>>;
 
+    /// Stops the session and keeps its conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the host refuses or fails to stop the session.
+    async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>>;
+
+    /// Deletes the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the host refuses or fails to delete the session.
+    async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>>;
+
     /// The command that attaches a terminal to the session.
     fn attach_argv(&self, short_id: &str) -> Vec<OsString>;
 }
@@ -84,6 +98,24 @@ impl SessionHostService {
     /// Returns an error if the host can't be asked or its answer can't be read.
     pub async fn list(&self) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
         self.host.list().await
+    }
+
+    /// Stops the session and keeps its conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the host refuses or fails to stop the session.
+    pub async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
+        self.host.stop(short_id).await
+    }
+
+    /// Deletes the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the host refuses or fails to delete the session.
+    pub async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
+        self.host.remove(short_id).await
     }
 
     /// The command that attaches a terminal to the session.

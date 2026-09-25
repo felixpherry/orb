@@ -4,7 +4,7 @@
 //! projects directory. orb reads only the lines added since its last look, so
 //! each line is parsed once, and titles a thread by the latest title the user
 //! gave with `/rename`, else Claude's latest generated title, else the first
-//! real prompt.
+//! real prompt. The same pass notes the git branch the latest prompt ran on.
 
 use std::{
     fs::{self, File},
@@ -95,19 +95,22 @@ pub fn read_new_lines(path: &Path, offset: u64) -> io::Result<NewLines> {
     })
 }
 
-/// The titles after a scan, and how far the transcript has been read.
+/// The titles and branch after a scan, and how far the transcript has been
+/// read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TitleScan {
     /// Claude's latest generated title, else the first prompt.
     pub title: Option<String>,
     /// The latest title the user gave with `/rename`.
     pub custom_title: Option<String>,
+    /// The git branch the latest user line named.
+    pub branch: Option<String>,
     /// Bytes read so far; pass it to the next scan.
     pub offset: u64,
 }
 
 /// Reads the complete lines added to the transcript since `offset` and
-/// updates `title` and `custom_title` from them.
+/// updates `title`, `custom_title`, and `branch` from them.
 ///
 /// # Errors
 ///
@@ -117,35 +120,52 @@ pub fn scan_title(
     offset: u64,
     title: Option<String>,
     custom_title: Option<String>,
+    branch: Option<String>,
 ) -> io::Result<TitleScan> {
     let new = read_new_lines(path, offset)?;
-    let (title, custom_title) = new.text.lines().fold((title, custom_title), next_title);
+    let (title, custom_title, branch) = new
+        .text
+        .lines()
+        .fold((title, custom_title, branch), next_title);
     Ok(TitleScan {
         title,
         custom_title,
+        branch,
         offset: new.offset,
     })
 }
 
-/// The titles after one transcript line.
+/// The titles and branch after one transcript line.
 fn next_title(
-    (title, custom_title): (Option<String>, Option<String>),
+    (title, custom_title, branch): (Option<String>, Option<String>, Option<String>),
     line: &str,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<String>) {
     if !line.contains(r#""type":"user""#)
         && !line.contains(r#""type":"ai-title""#)
         && !line.contains(r#""type":"custom-title""#)
     {
-        return (title, custom_title);
+        return (title, custom_title, branch);
     }
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return (title, custom_title);
+        return (title, custom_title, branch);
     };
     match value.get("type").and_then(Value::as_str) {
-        Some("ai-title") => (text_field(&value, "aiTitle").or(title), custom_title),
-        Some("custom-title") => (title, text_field(&value, "customTitle").or(custom_title)),
-        Some("user") if title.is_none() => (prompt(&value), custom_title),
-        _ => (title, custom_title),
+        Some("ai-title") => (
+            text_field(&value, "aiTitle").or(title),
+            custom_title,
+            branch,
+        ),
+        Some("custom-title") => (
+            title,
+            text_field(&value, "customTitle").or(custom_title),
+            branch,
+        ),
+        Some("user") => (
+            title.or_else(|| prompt(&value)),
+            custom_title,
+            text_field(&value, "gitBranch").or(branch),
+        ),
+        _ => (title, custom_title, branch),
     }
 }
 
@@ -209,7 +229,7 @@ mod tests {
     fn title_of(lines: &[&str]) -> io::Result<Option<String>> {
         let dir = tempdir()?;
         let path = write_transcript(dir.path(), lines)?;
-        Ok(scan_title(&path, 0, None, None)?.title)
+        Ok(scan_title(&path, 0, None, None, None)?.title)
     }
 
     #[rstest::rstest]
@@ -310,7 +330,7 @@ mod tests {
         )?;
 
         // When scanning it.
-        let scan = scan_title(&path, 0, None, None)?;
+        let scan = scan_title(&path, 0, None, None, None)?;
 
         // Then the custom title is set and the title is still the generated one.
         assert_eq!(
@@ -331,13 +351,58 @@ mod tests {
         )?;
 
         // When scanning the new prompt.
-        let scan = scan_title(&path, 0, Some("Fix the parser".to_owned()), None)?;
+        let scan = scan_title(&path, 0, Some("Fix the parser".to_owned()), None, None)?;
 
         // Then the title is unchanged.
         assert_eq!(
             scan.title.as_deref(),
             Some("Fix the parser"),
             "later prompts don't retitle"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn scan_takes_the_latest_git_branch() -> io::Result<()> {
+        // Given two prompts that ran on different branches.
+        let dir = tempdir()?;
+        let path = write_transcript(
+            dir.path(),
+            &[
+                r#"{"type":"user","gitBranch":"main","message":{"content":"Fix the parser"}}"#,
+                r#"{"type":"user","gitBranch":"fix/parser","message":{"content":"Now add tests"}}"#,
+            ],
+        )?;
+
+        // When scanning them.
+        let scan = scan_title(&path, 0, None, None, None)?;
+
+        // Then the branch is the one the latest prompt named.
+        assert_eq!(
+            scan.branch.as_deref(),
+            Some("fix/parser"),
+            "the latest gitBranch should win"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn scan_ignores_an_empty_git_branch() -> io::Result<()> {
+        // Given a thread on `main` whose transcript gains a prompt with no branch.
+        let dir = tempdir()?;
+        let path = write_transcript(
+            dir.path(),
+            &[r#"{"type":"user","gitBranch":"","message":{"content":"Now add tests"}}"#],
+        )?;
+
+        // When scanning the new prompt.
+        let scan = scan_title(&path, 0, None, None, Some("main".to_owned()))?;
+
+        // Then the branch is still `main`.
+        assert_eq!(
+            scan.branch.as_deref(),
+            Some("main"),
+            "an empty gitBranch means no branch, not a change"
         );
         Ok(())
     }
@@ -391,7 +456,7 @@ mod tests {
         fs::write(&path, format!("{PROMPT}\n{{\"type\":\"ai-title\",\"aiT"))?;
 
         // When scanning it.
-        let scan = scan_title(&path, 0, None, None)?;
+        let scan = scan_title(&path, 0, None, None, None)?;
 
         // Then only the complete line was read.
         assert_eq!(
@@ -399,6 +464,7 @@ mod tests {
             TitleScan {
                 title: Some("Fix the parser".to_owned()),
                 custom_title: None,
+                branch: None,
                 offset: PROMPT.len() as u64 + 1
             },
             "the offset should stop after the last newline"
@@ -412,14 +478,14 @@ mod tests {
         let dir = tempdir()?;
         let path = dir.path().join("session.jsonl");
         fs::write(&path, format!("{PROMPT}\n{{\"type\":\"ai-title\",\"aiT"))?;
-        let first = scan_title(&path, 0, None, None)?;
+        let first = scan_title(&path, 0, None, None, None)?;
         OpenOptions::new()
             .append(true)
             .open(&path)?
             .write_all(b"itle\":\"Parser fix\"}\n")?;
 
         // When scanning again from the first scan's offset.
-        let scan = scan_title(&path, first.offset, first.title, None)?;
+        let scan = scan_title(&path, first.offset, first.title, None, None)?;
 
         // Then the completed line applied and the offset reached the file end.
         assert_eq!(
@@ -427,6 +493,7 @@ mod tests {
             TitleScan {
                 title: Some("Parser fix".to_owned()),
                 custom_title: None,
+                branch: None,
                 offset: fs::metadata(&path)?.len()
             },
             "the completed line should be parsed once"
@@ -456,7 +523,7 @@ mod tests {
         let path = write_transcript(dir.path(), &[PROMPT])?;
 
         // When scanning from that offset.
-        let scan = scan_title(&path, 10_000, None, None)?;
+        let scan = scan_title(&path, 10_000, None, None, None)?;
 
         // Then the whole file was read again.
         assert_eq!(
@@ -464,6 +531,7 @@ mod tests {
             TitleScan {
                 title: Some("Fix the parser".to_owned()),
                 custom_title: None,
+                branch: None,
                 offset: fs::metadata(&path)?.len()
             },
             "a replaced file should be read from the start"
