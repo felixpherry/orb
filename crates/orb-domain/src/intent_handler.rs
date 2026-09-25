@@ -110,6 +110,7 @@ mod tests {
             id: ThreadId(id),
             title: None,
             cwd: format!("/work/{id}").into(),
+            transcript: None,
             status,
             turn_started_at: None,
             attach_argv: vec!["claude".into(), "attach".into(), format!("t{id}").into()],
