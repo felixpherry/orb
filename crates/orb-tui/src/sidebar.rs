@@ -101,7 +101,7 @@ fn label(thread: &Thread, now: SystemTime) -> String {
 
 /// How long the thread's turn has been running at `now`; 0 without a stamp
 /// or when the clock went backwards.
-pub(crate) fn elapsed_label(thread: &Thread, now: SystemTime) -> String {
+fn elapsed_label(thread: &Thread, now: SystemTime) -> String {
     let elapsed = thread
         .turn_started_at
         .and_then(|started| now.duration_since(started).ok())

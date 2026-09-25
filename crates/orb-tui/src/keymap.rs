@@ -17,6 +17,7 @@ pub(crate) enum KeyCategory {
     General,
     Navigation,
     Sessions,
+    Preview,
 }
 
 impl fmt::Display for KeyCategory {
@@ -25,6 +26,7 @@ impl fmt::Display for KeyCategory {
             Self::General => "general",
             Self::Navigation => "navigation",
             Self::Sessions => "sessions",
+            Self::Preview => "preview",
         })
     }
 }
@@ -85,6 +87,45 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
             Intent::NewSession,
             KeyCategory::Sessions,
             Focus::Preview,
+        )
+        .bind(
+            "j",
+            Intent::NextBlock,
+            KeyCategory::Navigation,
+            Focus::Preview,
+        )
+        .bind(
+            "k",
+            Intent::PrevBlock,
+            KeyCategory::Navigation,
+            Focus::Preview,
+        )
+        .bind(
+            "<c-d>",
+            Intent::HalfPageDown,
+            KeyCategory::Navigation,
+            Focus::Preview,
+        )
+        .bind(
+            "<c-u>",
+            Intent::HalfPageUp,
+            KeyCategory::Navigation,
+            Focus::Preview,
+        )
+        .bind("gg", Intent::Top, KeyCategory::Navigation, Focus::Preview)
+        .bind("G", Intent::Bottom, KeyCategory::Navigation, Focus::Preview)
+        .bind("y", Intent::Yank, KeyCategory::Preview, Focus::Preview)
+        .bind(
+            "za",
+            Intent::ToggleFold,
+            KeyCategory::Preview,
+            Focus::Preview,
+        )
+        .bind(
+            "<tab>",
+            Intent::ToggleFold,
+            KeyCategory::Preview,
+            Focus::Preview,
         );
     keymap
 }
@@ -93,7 +134,13 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
 pub(crate) fn press(keys: &mut Keys, key: KeyEvent) -> Option<Intent> {
     // Bindings compare the whole event: a held key (`Repeat`) or one carrying
     // lock-state bits would never match, so keep only the code and modifiers.
-    keys.handle_key(KeyEvent::new(key.code, key.modifiers))
+    // A shifted character already carries its case (`G`), and the bindings
+    // name it without SHIFT.
+    let modifiers = match key.code {
+        KeyCode::Char(_) => key.modifiers - KeyModifiers::SHIFT,
+        _ => key.modifiers,
+    };
+    keys.handle_key(KeyEvent::new(key.code, modifiers))
 }
 
 /// Where a key goes while attached.
@@ -124,6 +171,10 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     #[rstest::rstest]
@@ -170,10 +221,7 @@ mod tests {
     #[rstest::rstest]
     #[case(key(KeyCode::Char('j')), Intent::SelectNext)]
     #[case(key(KeyCode::Char('k')), Intent::SelectPrev)]
-    #[case(
-        KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
-        Intent::FocusPreview
-    )]
+    #[case(ctrl('l'), Intent::FocusPreview)]
     #[case(key(KeyCode::Enter), Intent::Attach)]
     #[case(key(KeyCode::Char('q')), Intent::Quit)]
     fn sidebar_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
@@ -192,17 +240,30 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case(vec![ctrl('h')], Intent::FocusSidebar)]
+    #[case(vec![key(KeyCode::Enter)], Intent::Attach)]
+    #[case(vec![key(KeyCode::Char('j'))], Intent::NextBlock)]
+    #[case(vec![key(KeyCode::Char('k'))], Intent::PrevBlock)]
+    #[case(vec![ctrl('d')], Intent::HalfPageDown)]
+    #[case(vec![ctrl('u')], Intent::HalfPageUp)]
+    #[case(vec![key(KeyCode::Char('g')), key(KeyCode::Char('g'))], Intent::Top)]
     #[case(
-        KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
-        Intent::FocusSidebar
+        vec![KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)],
+        Intent::Bottom
     )]
-    #[case(key(KeyCode::Enter), Intent::Attach)]
-    fn preview_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
+    #[case(vec![key(KeyCode::Char('y'))], Intent::Yank)]
+    #[case(vec![key(KeyCode::Char('z')), key(KeyCode::Char('a'))], Intent::ToggleFold)]
+    #[case(vec![key(KeyCode::Tab)], Intent::ToggleFold)]
+    fn preview_keys_map_to_their_intents(#[case] pressed: Vec<KeyEvent>, #[case] expected: Intent) {
         // Given the keymap in Preview focus.
         let mut keys = Keys::new(keymap(), Focus::Preview);
 
-        // When pressing the key.
-        let intent = press(&mut keys, pressed);
+        // When pressing the keys in order (Shift+G as kitty reports it).
+        let intent = pressed
+            .into_iter()
+            .map(|pressed| press(&mut keys, pressed))
+            .last()
+            .flatten();
 
         // Then it yields its intent.
         assert_eq!(
