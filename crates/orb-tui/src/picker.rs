@@ -188,6 +188,10 @@ fn render_item(item: &PickerItem, matches: &Matches, area: Rect, buf: &mut Buffe
                 .chain(highlight(name, &matches.name, Style::new()));
             Line::from_iter(row).render(area, buf);
         }
+        PickerItem::Workspace(choice) => {
+            Line::from_iter(highlight(&choice.label(), &matches.name, Style::new()))
+                .render(area, buf);
+        }
     }
 }
 

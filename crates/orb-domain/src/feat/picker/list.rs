@@ -20,6 +20,38 @@ pub enum PickerItem {
     },
     /// A subdirectory, matched on its name.
     Directory { name: String },
+    /// Where a thread's session could run, matched on its label.
+    Workspace(WorkspaceChoice),
+}
+
+/// A row of the workspace picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceChoice {
+    /// Stay where the thread is: the root checkout, or a worktree.
+    Current { worktree: bool },
+    /// A new worktree of the project.
+    NewWorktree,
+    /// The project's previous worktree, and its branch if known.
+    Previous {
+        path: PathBuf,
+        branch: Option<String>,
+    },
+}
+
+impl WorkspaceChoice {
+    /// The row's text.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Current { worktree: false } => "Current checkout".to_owned(),
+            Self::Current { worktree: true } => "Current worktree".to_owned(),
+            Self::NewWorktree => "New worktree".to_owned(),
+            Self::Previous {
+                branch: Some(branch),
+                ..
+            } => format!("Previous worktree ({branch})"),
+            Self::Previous { branch: None, .. } => "Previous worktree".to_owned(),
+        }
+    }
 }
 
 /// Where the filter matched a shown item: byte offsets into its title (or
@@ -225,6 +257,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
             (format!("{title}\n{}", root.display()), Some(title.len()))
         }
         PickerItem::Directory { name } => (name.clone(), None),
+        PickerItem::Workspace(choice) => (choice.label(), None),
     };
     let bytes: Vec<usize> = label.char_indices().map(|(at, _)| at).collect();
     let mut total = 0;
@@ -285,6 +318,7 @@ mod tests {
             .map(|(item, _)| match item {
                 PickerItem::Directory { name } => name.clone(),
                 PickerItem::Project { title, .. } => title.clone(),
+                PickerItem::Workspace(choice) => choice.label(),
             })
             .collect()
     }
@@ -342,7 +376,7 @@ mod tests {
             .shown()
             .filter_map(|(item, _)| match item {
                 PickerItem::Project { id, .. } => Some(*id),
-                PickerItem::Directory { .. } => None,
+                PickerItem::Directory { .. } | PickerItem::Workspace(_) => None,
             })
             .collect();
         assert_eq!(

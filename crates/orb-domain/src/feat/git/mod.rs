@@ -5,4 +5,5 @@
 
 pub mod git_cli;
 pub mod git_service;
+pub mod validator;
 pub mod worktree;
