@@ -13,6 +13,11 @@
 //! made for a start that failed is removed again, and an orb worktree no
 //! thread uses after a move is removed unless it has changes.
 //!
+//! When Claude refuses to start in a directory it hasn't been trusted in, the
+//! start waits: the actor asks the frontend for an interactive `claude` there
+//! (in the worktrees root for a worktree, so one trust covers them all), and
+//! tries the start once more when asked. A second refusal fails the start.
+//!
 //! It keeps each thread's place in the sidebar: pinning, settling onto the
 //! Settled shelf (which stops the session), un-settling, and deleting. A turn
 //! un-settles its thread, and a thread idle for three days settles itself
@@ -30,7 +35,9 @@ use kameo::mailbox;
 use kameo::prelude::{Actor, ActorRef, Context, Message, Reply, Spawn};
 use tokio::sync::Notify;
 
-use super::session_host::{SessionHostError, SessionHostService, SessionRecord};
+use super::session_host::{
+    SessionHostError, SessionHostService, SessionRecord, WorkspaceUntrusted,
+};
 use super::state::{
     Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
 };
@@ -40,7 +47,7 @@ use crate::Focus;
 use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
 use crate::feat::git::git_service::GitError;
-use crate::feat::git::worktree::{hex, is_orb_worktree, new_worktree_path};
+use crate::feat::git::worktree::{hex, is_orb_worktree, new_worktree_path, trust_dir};
 
 /// How long to wait between polls while a turn is underway or orb is attached.
 const FAST_POLL: Duration = Duration::from_secs(1);
@@ -69,7 +76,8 @@ pub struct SessionsActorDeps {
 }
 
 /// Owns [`Sessions`](super::state::Sessions): the projects, the threads'
-/// statuses, titles, pins and settles, and the latest `claude` error. The
+/// statuses, titles, pins and settles, the latest `claude` error, and the
+/// directory a start waits to be trusted in. The
 /// intent handler also moves the cursor, opens and closes the shelf, and marks
 /// a create as starting.
 pub struct SessionsActor {
@@ -83,6 +91,8 @@ pub struct SessionsActor {
     poke: Arc<Notify>,
     /// The saved threads, as last written to the store.
     rows: Vec<ThreadRow>,
+    /// The start waiting for the user to trust its directory.
+    pending: Option<PendingStart>,
 }
 
 /// Poll the session host now.
@@ -107,6 +117,11 @@ pub struct MoveThread {
     pub thread: ThreadId,
     pub to: Workspace,
 }
+
+/// Try the start that waits for trust once more, now that the user had the
+/// chance to trust its directory.
+#[derive(Debug)]
+pub struct RetryStart;
 
 /// Add a directory as a project.
 #[derive(Debug)]
@@ -224,6 +239,18 @@ impl Message<MoveThread> for SessionsActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.move_thread(thread, to).await;
+    }
+}
+
+impl Message<RetryStart> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: RetryStart,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.retry_start().await;
     }
 }
 
@@ -370,6 +397,7 @@ impl SessionsActor {
             wake,
             poke: Arc::default(),
             rows,
+            pending: None,
         }
     }
 
@@ -453,19 +481,33 @@ impl SessionsActor {
     /// Starts a session in the project's directory, saves it, and shows it
     /// selected at the top of the project.
     async fn create(&mut self, project: ProjectId, root: &Path) {
-        self.start(PendingStart {
-            kind: StartKind::Create { project },
-            cwd: root.to_owned(),
-            made: None,
-        })
+        self.start(
+            PendingStart {
+                kind: StartKind::Create { project },
+                cwd: root.to_owned(),
+                made: None,
+            },
+            true,
+        )
         .await;
     }
 
-    /// Starts a session for `pending` and finishes what it was for. If it
-    /// fails, the reason shows and a worktree made for it is removed.
-    async fn start(&mut self, pending: PendingStart) {
+    /// Starts a session for `pending` and finishes what it was for. If Claude
+    /// hasn't been trusted in its directory and `allow_trust`, the start waits
+    /// for the user to trust it. If it fails, the reason shows and a worktree
+    /// made for it is removed.
+    async fn start(&mut self, pending: PendingStart, allow_trust: bool) {
+        let created = self.services.session_host.create(&pending.cwd).await;
+        if let Err(report) = &created
+            && allow_trust
+            && report.contains::<WorkspaceUntrusted>()
+        {
+            let dir = trust_dir(&self.worktrees_root, &pending.cwd);
+            self.pending = Some(pending);
+            self.state.write().sessions.trust = Some(dir);
+            return (self.wake)();
+        }
         let PendingStart { kind, cwd, made } = pending;
-        let created = self.services.session_host.create(&cwd).await;
         match (created, kind) {
             (Ok(created), StartKind::Create { project }) => {
                 let thread = self.save_new(project, &cwd, &created.short_id);
@@ -494,6 +536,15 @@ impl SessionsActor {
                 self.end_start(Err(reason(&report)));
             }
         }
+    }
+
+    /// Tries the start waiting for trust once more; a second refusal fails it.
+    async fn retry_start(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.state.write().sessions.trust = None;
+        self.start(pending, false).await;
     }
 
     /// Shows a thread just created in the project selected at its top.
@@ -533,7 +584,7 @@ impl SessionsActor {
     /// starts the thread's session there.
     async fn move_thread(&mut self, id: ThreadId, to: Workspace) {
         match self.prepare_move(id, to).await {
-            Ok(pending) => self.start(pending).await,
+            Ok(pending) => self.start(pending, true).await,
             Err(error) => self.end_start(Err(error)),
         }
     }
@@ -1108,6 +1159,7 @@ mod tests {
     use crate::feat::git::worktree::hex_branch;
     use crate::feat::sessions::session_host::{
         CreatedSession, SessionHost, SessionHostError, SessionHostService, SessionRecord,
+        WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
         ProjectId, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
@@ -1118,6 +1170,8 @@ mod tests {
     const PROJECT_ROOT: &str = "/tmp/orb";
     const NO_CLAUDE_DIR: &str = "/nonexistent/claude";
     const WORKTREES_ROOT: &str = "/nonexistent/worktrees";
+    const UNTRUSTED: &str =
+        "Workspace not trusted. Run `claude` in /tmp/orb once and accept the trust prompt";
     const HOUR_MS: i64 = 60 * 60 * 1000;
     const DAY_MS: i64 = 24 * HOUR_MS;
 
@@ -1132,6 +1186,9 @@ mod tests {
         removed: Mutex<Vec<String>>,
         /// The directories `create` was called in, in order.
         created_in: Mutex<Vec<PathBuf>>,
+        /// How many more creates refuse an untrusted directory before
+        /// `create` answers.
+        untrusted: Mutex<u32>,
     }
 
     impl FakeHost {
@@ -1144,6 +1201,7 @@ mod tests {
                 stopped: Mutex::default(),
                 removed: Mutex::default(),
                 created_in: Mutex::default(),
+                untrusted: Mutex::default(),
             }
         }
 
@@ -1162,6 +1220,16 @@ mod tests {
         fn moving(create: Result<&str, &str>) -> Arc<Self> {
             Arc::new(Self {
                 create: create.map(str::to_owned).map_err(str::to_owned),
+                ..Self::answering(vec![record("aa", ThreadStatus::Idle)])
+            })
+        }
+
+        /// Lists the thread `aa` idle, refuses the first `times` creates as
+        /// untrusted, then answers with `create`.
+        fn untrusted(times: u32, create: Result<&str, &str>) -> Arc<Self> {
+            Arc::new(Self {
+                create: create.map(str::to_owned).map_err(str::to_owned),
+                untrusted: Mutex::new(times),
                 ..Self::answering(vec![record("aa", ThreadStatus::Idle)])
             })
         }
@@ -1210,6 +1278,18 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(cwd.to_owned());
+            {
+                let mut untrusted = self
+                    .untrusted
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if *untrusted > 0 {
+                    *untrusted -= 1;
+                    return Err(Report::new(SessionHostError)
+                        .attach_opaque(WorkspaceUntrusted)
+                        .attach(UNTRUSTED.to_owned()));
+                }
+            }
             self.create
                 .clone()
                 .map(|short_id| CreatedSession { short_id })
@@ -1482,6 +1562,10 @@ mod tests {
 
     fn error_of(state: &State) -> Option<String> {
         state.read().sessions.error.clone()
+    }
+
+    fn trust_of(state: &State) -> Option<PathBuf> {
+        state.read().sessions.trust.clone()
     }
 
     /// The thread `id` as the sidebar shows it.
@@ -3246,6 +3330,158 @@ mod tests {
             (row.id, row.cwd),
             (id, existing.path().to_owned()),
             "the move should survive a relaunch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn untrusted_create_asks_for_trust_in_the_directory() -> Result<(), Report<StoreError>> {
+        // Given claude refusing the project's untrusted root.
+        let store = Store::open_in_memory()?;
+        let project = orb_project(&store)?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When creating a session there.
+        actor.create(project, Path::new(PROJECT_ROOT)).await;
+
+        // Then the start waits for the root to be trusted.
+        assert_eq!(
+            trust_of(&state),
+            Some(PathBuf::from(PROJECT_ROOT)),
+            "the project's root should be offered for trust"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn untrusted_worktree_asks_for_trust_in_the_worktrees_root()
+    -> Result<(), Report<StoreError>> {
+        // Given claude refusing a new, untrusted worktree.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving a thread to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then the start waits for the worktrees root to be trusted.
+        assert_eq!(
+            trust_of(&state),
+            Some(PathBuf::from(WORKTREES_ROOT)),
+            "one trust of the worktrees root should cover every worktree"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn untrusted_move_keeps_the_new_worktree() -> Result<(), Report<StoreError>> {
+        // Given claude refusing a new, untrusted worktree.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving a thread to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then the worktree is only added, not removed.
+        let removed = git
+            .calls()
+            .into_iter()
+            .any(|call| matches!(call, GitCall::RemoveWorktree { .. }));
+        assert!(!removed, "the worktree should wait for the retry");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn retry_after_trust_starts_the_session() -> Result<(), Report<StoreError>> {
+        // Given a create waiting for its directory to be trusted.
+        let store = Store::open_in_memory()?;
+        let project = orb_project(&store)?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.create(project, Path::new(PROJECT_ROOT)).await;
+
+        // When retrying the start after the user trusted it.
+        actor.retry_start().await;
+
+        // Then the new thread shows.
+        assert_eq!(
+            state.read().sessions.threads().count(),
+            1,
+            "the retried start should add the thread"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn retry_refused_again_shows_the_error() -> Result<(), Report<StoreError>> {
+        // Given a create waiting for trust, and the directory still untrusted.
+        let store = Store::open_in_memory()?;
+        let project = orb_project(&store)?;
+        let host = FakeHost::untrusted(2, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.create(project, Path::new(PROJECT_ROOT)).await;
+
+        // When retrying the start.
+        actor.retry_start().await;
+
+        // Then claude's refusal shows.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some(UNTRUSTED),
+            "a second refusal should fail the start with its reason"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn retry_refused_again_removes_the_new_worktree() -> Result<(), Report<StoreError>> {
+        // Given a move to a new worktree waiting for trust, still untrusted.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::untrusted(2, Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // When retrying the start.
+        actor.retry_start().await;
+
+        // Then the worktree orb made is force-removed.
+        let (path, _branch) = git
+            .added()
+            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
+        assert!(
+            git.calls()
+                .contains(&GitCall::RemoveWorktree { path, force: true }),
+            "a failed retry should remove the worktree made for it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn retry_refused_again_does_not_ask_for_trust() -> Result<(), Report<StoreError>> {
+        // Given a create waiting for trust, and the directory still untrusted.
+        let store = Store::open_in_memory()?;
+        let project = orb_project(&store)?;
+        let host = FakeHost::untrusted(2, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.create(project, Path::new(PROJECT_ROOT)).await;
+
+        // When retrying the start.
+        actor.retry_start().await;
+
+        // Then no trust is asked for again.
+        assert_eq!(
+            trust_of(&state),
+            None,
+            "a retry should never reopen the trust prompt"
         );
         Ok(())
     }
