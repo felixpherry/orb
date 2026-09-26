@@ -8,9 +8,9 @@
 //!
 //! Each thread gets its own `claude attach` pane; selecting another thread
 //! drops it (the session keeps running). While attached, input goes straight
-//! to Claude; otherwise keys go through the [`keymap`]. The loop itself reads
-//! the directory picker's listings and the branch picker's refs, and hands
-//! tools to zellij, since each takes milliseconds.
+//! to Claude; otherwise keys go through the resize keys, then the [`keymap`].
+//! The loop itself reads the directory picker's listings and the branch
+//! picker's refs, and hands tools to zellij, since each takes milliseconds.
 //!
 //! When a session start waits for the user to trust a directory, the pane
 //! runs an interactive `claude` there instead. Leaving it, by its exit or
@@ -33,7 +33,6 @@ use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::preview::preview_actor::{self, PreviewActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
-use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::zellij::zellij_service::{NOT_IN_ZELLIJ, ZellijService, zellij_reason};
 use orb_domain::{Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
@@ -221,13 +220,14 @@ impl App {
     fn run(mut self, terminal: &mut DefaultTerminal, rx: &Receiver<LoopEvent>) -> io::Result<()> {
         spawn_input_thread(self.tx.clone())?;
         loop {
-            let [_, pane_area, _] = render::layout(terminal.size()?.into());
+            let [_, pane_area, _] =
+                render::layout(terminal.size()?.into(), &self.state.read().sidebar);
             self.pane_area = pane_area;
             if let Some(attached) = &mut self.pane {
                 attached.pane.resize(PaneSize::from(pane_area));
             }
             let now = SystemTime::now();
-            let mut drawn = (None, SidebarLayout::default(), None);
+            let mut drawn = (None, None, None);
             terminal.draw(|frame| {
                 let state = self.state.read();
                 let pane = self
@@ -257,8 +257,10 @@ impl App {
             {
                 self.state.write().preview.layout = layout;
             }
-            if self.state.read().sidebar.layout != sidebar_layout {
-                self.state.write().sidebar.layout = sidebar_layout;
+            if let Some(layout) = sidebar_layout
+                && self.state.read().sidebar.layout != layout
+            {
+                self.state.write().sidebar.layout = layout;
             }
             if let Some(page) = picker_page
                 && self
@@ -338,15 +340,23 @@ impl App {
                             None
                         }
                     },
-                    Focus::Sidebar | Focus::Preview => {
-                        // Focus and the selection also change outside
-                        // intents (the pane exits, a draft starts).
-                        let scope = Scope::new(focus, Selection::of(&self.state.read().sessions));
-                        if *self.keys.scope() != scope {
-                            self.keys.set_scope(scope);
+                    Focus::Sidebar | Focus::Preview => match keymap::layout_route(key) {
+                        Some(intent) => {
+                            // A resize ends any key sequence in progress.
+                            self.keys.dismiss();
+                            Some(intent)
                         }
-                        keymap::press(&mut self.keys, key)
-                    }
+                        None => {
+                            // Focus and the selection also change outside
+                            // intents (the pane exits, a draft starts).
+                            let scope =
+                                Scope::new(focus, Selection::of(&self.state.read().sessions));
+                            if *self.keys.scope() != scope {
+                                self.keys.set_scope(scope);
+                            }
+                            keymap::press(&mut self.keys, key)
+                        }
+                    },
                     Focus::Picker => keymap::picker_route(key),
                 };
                 if let Some(intent) = intent {
@@ -595,6 +605,10 @@ impl App {
             }
             Command::Visit(id) => {
                 let _ = self.sessions.tell(sessions_actor::Visit(*id)).try_send();
+                Ok(())
+            }
+            Command::SaveUi => {
+                let _ = self.sessions.tell(sessions_actor::SaveUi).try_send();
                 Ok(())
             }
         }

@@ -1,6 +1,7 @@
 //! Draws a frame: the sidebar on the left, the attached session, the selected
 //! thread's preview or the selected draft's form on the right, the mode line at
 //! the bottom, and the which-key popup on top while a key sequence is pending.
+//! While the sidebar is hidden, the right side takes the full width.
 //! While `s` or `x` waits for its repeat, a banner above the selected row says
 //! what the repeat will do instead of the popup. An open picker is drawn over
 //! everything but the mode line, with neither the popup nor the banner.
@@ -12,7 +13,7 @@ use std::time::SystemTime;
 use orb_domain::feat::preview::state::PreviewLayout;
 use orb_domain::feat::sessions::state::SidebarItem;
 use orb_domain::feat::sessions::validator::{ToggleSettleError, validate_toggle_settle};
-use orb_domain::feat::sidebar::state::SidebarLayout;
+use orb_domain::feat::sidebar::state::{SidebarLayout, SidebarView};
 use orb_domain::{AppState, Focus};
 use orb_term::Pane;
 use ratatui::Frame;
@@ -33,12 +34,14 @@ use crate::sidebar::{self, SidebarScroll};
 /// `bg`).
 const BACKGROUND: Color = Color::Rgb(0x22, 0x24, 0x36);
 
-/// Splits the screen into `[sidebar, right side, mode line]`.
-pub(crate) fn layout(area: Rect) -> [Rect; 3] {
+/// Splits the screen into `[sidebar, right side, mode line]`, the sidebar
+/// `sidebar.width` columns wide, or none while it's hidden.
+pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
     let [body, mode_line] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+    let width = if sidebar.hidden { 0 } else { sidebar.width };
     let [sidebar, right] =
-        Layout::horizontal([Constraint::Length(32), Constraint::Fill(1)]).areas(body);
+        Layout::horizontal([Constraint::Length(width), Constraint::Fill(1)]).areas(body);
     [sidebar, right, mode_line]
 }
 
@@ -46,7 +49,8 @@ pub(crate) fn layout(area: Rect) -> [Rect; 3] {
 /// one running; it's drawn only while attached, and otherwise the right side
 /// shows the selected thread's preview, with `pane_error` saying why the
 /// session couldn't start. Returns the preview's layout when it was drawn,
-/// the sidebar's layout, and how many rows the picker fits when it's open.
+/// the sidebar's layout unless it's hidden, and how many rows the picker fits
+/// when it's open.
 #[expect(
     clippy::too_many_arguments,
     reason = "the frame's inputs and the three frontend view states it updates"
@@ -61,15 +65,20 @@ pub(crate) fn render(
     cache: &mut PreviewCache,
     scroll: &mut SidebarScroll,
     picker_scroll: &mut PickerScroll,
-) -> (Option<PreviewLayout>, SidebarLayout, Option<usize>) {
-    let [sidebar_area, right, mode_line] = layout(frame.area());
-    let (selected_y, sidebar_layout) = sidebar::render(
-        &state.sessions,
-        now,
-        sidebar_area,
-        frame.buffer_mut(),
-        scroll,
-    );
+) -> (Option<PreviewLayout>, Option<SidebarLayout>, Option<usize>) {
+    let [sidebar_area, right, mode_line] = layout(frame.area(), &state.sidebar);
+    let (selected_y, sidebar_layout) = if state.sidebar.hidden {
+        (None, None)
+    } else {
+        let (selected_y, sidebar_layout) = sidebar::render(
+            &state.sessions,
+            now,
+            sidebar_area,
+            frame.buffer_mut(),
+            scroll,
+        );
+        (selected_y, Some(sidebar_layout))
+    };
     let preview_layout = match (pane, state.focus) {
         (Some(pane), Focus::Attached) => {
             if let Some(cursor) = pane.render(right, frame.buffer_mut()) {
@@ -187,15 +196,15 @@ fn render_banner(state: &AppState, confirm: char, selected_y: u16, buf: &mut Buf
     );
 }
 
-/// The mode and its keys on the left (`DRAFT` while a draft is selected); on
-/// the right, a session being started, else the latest `claude` failure, else
-/// how many threads are working. A right side too long for the line is cut
-/// at its end, two cells after the keys.
+/// The mode's name on the left (`DRAFT` while a draft is selected); on the
+/// right, a session being started, else the latest `claude` failure, else how
+/// many threads are working. A right side too long for the line is cut at its
+/// end, two cells after the name.
 fn render_mode_line(state: &AppState, area: Rect, buf: &mut Buffer) {
     let mode = match (state.focus, state.sessions.selected_draft()) {
-        (Focus::Attached, _) => "ATTACHED   <C-\\> back",
-        (Focus::Sidebar | Focus::Preview, Some(_)) => "DRAFT   ⏎ start · ␣ leader",
-        (Focus::Sidebar | Focus::Preview, None) => "NORMAL   ⏎ attach · ␣ leader",
+        (Focus::Attached, _) => "ATTACHED",
+        (Focus::Sidebar | Focus::Preview, Some(_)) => "DRAFT",
+        (Focus::Sidebar | Focus::Preview, None) => "NORMAL",
         (Focus::Picker, _) => "PICKER",
     };
     let sessions = &state.sessions;
@@ -229,6 +238,7 @@ mod tests {
         Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
         ThreadStatus,
     };
+    use orb_domain::feat::sidebar::state::SidebarView;
     use orb_domain::{AppState, Focus};
     use orb_term::{Pane, PaneCommand, PaneSize};
     use ratatui::Terminal;
@@ -329,7 +339,7 @@ mod tests {
     /// thread; returns the right side's text.
     fn right_side_with_pane(state: &AppState, pane: &Pane) -> String {
         let buffer = draw_with_pane(state, pane);
-        let [_, right, _] = layout(buffer.area);
+        let [_, right, _] = layout(buffer.area, &SidebarView::default());
         text(&buffer, right)
     }
 
@@ -391,7 +401,7 @@ mod tests {
     }
 
     fn right_side(buffer: &Buffer) -> String {
-        let [_, right, _] = layout(buffer.area);
+        let [_, right, _] = layout(buffer.area, &SidebarView::default());
         text(buffer, right)
     }
 
@@ -418,7 +428,7 @@ mod tests {
     }
 
     fn mode_line(buffer: &Buffer) -> String {
-        let [_, _, mode_line] = layout(buffer.area);
+        let [_, _, mode_line] = layout(buffer.area, &SidebarView::default());
         text(buffer, mode_line)
     }
 
@@ -441,7 +451,7 @@ mod tests {
         let buffer = draw(&state);
 
         // Then the right side offers to attach (cut at the 48-column edge).
-        let [_, right, _] = layout(buffer.area);
+        let [_, right, _] = layout(buffer.area, &SidebarView::default());
         let right = text(&buffer, right);
         assert!(
             right.contains("No messages yet · ⏎ attach"),
@@ -495,7 +505,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn long_claude_error_is_cut_after_the_mode_keys() {
+    fn long_claude_error_is_cut_after_the_mode_name() {
         // Given a `claude` error wider than the 80-column mode line.
         let state = AppState {
             sessions: Sessions {
@@ -512,10 +522,10 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the mode's keys stay whole, and the error starts two cells on.
+        // Then the mode's name stays whole, and the error starts two cells on.
         let mode_line = mode_line(&buffer);
         assert!(
-            mode_line.starts_with("NORMAL   ⏎ attach · ␣ leader  Workspace not trusted"),
+            mode_line.starts_with("NORMAL  Workspace not trusted"),
             "mode line was '{mode_line}'"
         );
     }
@@ -528,12 +538,9 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the mode line starts with the mode.
+        // Then the mode line shows only the mode's name.
         let mode_line = mode_line(&buffer);
-        assert!(
-            mode_line.starts_with("NORMAL"),
-            "mode line was '{mode_line}'"
-        );
+        assert_eq!(mode_line.trim_end(), "NORMAL", "the mode line");
     }
 
     #[rstest::rstest]
@@ -547,12 +554,9 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the mode line says so.
+        // Then the mode line shows only the mode's name.
         let mode_line = mode_line(&buffer);
-        assert!(
-            mode_line.starts_with("ATTACHED"),
-            "mode line was '{mode_line}'"
-        );
+        assert_eq!(mode_line.trim_end(), "ATTACHED", "the mode line");
     }
 
     #[rstest::rstest]
@@ -589,7 +593,7 @@ mod tests {
         let buffer = pane.as_ref().map(|pane| draw_with_pane(&state, pane));
 
         // Then the pane's first cell has orb's background.
-        let [_, right, _] = layout(Rect::new(0, 0, 80, 8));
+        let [_, right, _] = layout(Rect::new(0, 0, 80, 8), &SidebarView::default());
         let bg = buffer.and_then(|buffer| buffer.cell((right.x, right.y)).map(|cell| cell.bg));
         assert_eq!(bg, Some(BACKGROUND), "the pane's background");
     }
@@ -606,12 +610,9 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the mode line says so.
+        // Then the mode line shows only the mode's name.
         let mode_line = mode_line(&buffer);
-        assert!(
-            mode_line.starts_with("PICKER"),
-            "mode line was '{mode_line}'"
-        );
+        assert_eq!(mode_line.trim_end(), "PICKER", "the mode line");
     }
 
     #[rstest::rstest]
@@ -717,7 +718,7 @@ mod tests {
         let buffer = draw(&state);
 
         // Then the right side says ⏎ opens the shelf.
-        let [_, right, _] = layout(buffer.area);
+        let [_, right, _] = layout(buffer.area, &SidebarView::default());
         let right = text(&buffer, right);
         assert!(
             right.contains("▸ Settled (1) · ⏎ open"),
@@ -807,12 +808,9 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the mode line says ⏎ starts it.
+        // Then the mode line shows only the mode's name.
         let mode_line = mode_line(&buffer);
-        assert!(
-            mode_line.starts_with("DRAFT   ⏎ start · ␣ leader"),
-            "mode line was '{mode_line}'"
-        );
+        assert_eq!(mode_line.trim_end(), "DRAFT", "the mode line on a draft");
     }
 
     #[rstest::rstest]
@@ -829,6 +827,89 @@ mod tests {
             screen.contains(" Press x again to discard "),
             "screen was '{screen}'"
         );
+    }
+
+    #[rstest::rstest]
+    fn hidden_sidebar_gives_the_right_side_the_whole_body() {
+        // Given a hidden sidebar on an 80x8 screen.
+        let sidebar = SidebarView {
+            hidden: true,
+            ..SidebarView::default()
+        };
+
+        // When laying the screen out.
+        let [_, right, _] = layout(Rect::new(0, 0, 80, 8), &sidebar);
+
+        // Then the right side is everything above the mode line.
+        assert_eq!(right, Rect::new(0, 0, 80, 7), "the right side's area");
+    }
+
+    #[rstest::rstest]
+    fn sidebar_takes_its_width() {
+        // Given a 40-column sidebar.
+        let sidebar = SidebarView {
+            width: 40,
+            ..SidebarView::default()
+        };
+
+        // When laying an 80x8 screen out.
+        let [sidebar_area, _, _] = layout(Rect::new(0, 0, 80, 8), &sidebar);
+
+        // Then the sidebar is 40 columns wide.
+        assert_eq!(sidebar_area.width, 40, "the sidebar's width");
+    }
+
+    /// `state` with the sidebar hidden.
+    fn hidden(state: AppState) -> AppState {
+        AppState {
+            sidebar: SidebarView {
+                hidden: true,
+                ..SidebarView::default()
+            },
+            ..state
+        }
+    }
+
+    #[rstest::rstest]
+    fn hidden_sidebar_draws_the_right_side_from_the_left_edge() {
+        // Given orb's draft selected with the sidebar hidden.
+        let state = hidden(drafted(Focus::Preview));
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the draft's form starts in the first column.
+        let screen = text(&buffer, buffer.area);
+        assert!(
+            screen.starts_with("New thread · OB orb"),
+            "screen was '{screen}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hidden_sidebar_returns_no_layout() {
+        // Given a selected thread with the sidebar hidden.
+        let state = hidden(selected(Focus::Preview));
+
+        // When drawing a frame.
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
+        let mut sidebar_layout = None;
+        let Ok(_) = terminal.draw(|frame| {
+            (_, sidebar_layout, _) = render(
+                frame,
+                &state,
+                None,
+                None,
+                &Keys::new(keymap(), Scope::Preview),
+                SystemTime::UNIX_EPOCH,
+                &mut PreviewCache::default(),
+                &mut SidebarScroll::default(),
+                &mut PickerScroll::default(),
+            );
+        });
+
+        // Then there's no sidebar layout to replace the last drawn one.
+        assert_eq!(sidebar_layout, None, "a hidden sidebar isn't laid out");
     }
 
     #[rstest::rstest]

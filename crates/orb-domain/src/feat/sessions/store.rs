@@ -6,8 +6,9 @@
 //! transcript has been read, when the running turn started, whether it is
 //! pinned or settled, when it last had activity and was last visited, and the
 //! model and permission mode its session started with. For each project's
-//! draft it keeps the session setup the user picked. The schema grows through
-//! an ordered list of migrations. Times are milliseconds since the Unix epoch.
+//! draft it keeps the session setup the user picked. It also keeps the
+//! sidebar's width and project filter. The schema grows through an ordered
+//! list of migrations. Times are milliseconds since the Unix epoch.
 
 use std::path::{Path, PathBuf};
 
@@ -166,6 +167,15 @@ pub struct LastUsed {
     pub permission_mode: Option<String>,
 }
 
+/// How the user last left orb's layout; `None` = never set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Ui {
+    /// The sidebar's width in columns.
+    pub sidebar_width: Option<u16>,
+    /// The project the sidebar is filtered to.
+    pub project_filter: Option<ProjectId>,
+}
+
 /// Everything [`Store::load`] returns: projects, threads, and drafts.
 pub type Saved = (Vec<ProjectRow>, Vec<ThreadRow>, Vec<DraftRow>);
 
@@ -210,6 +220,13 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE projects ADD COLUMN last_used_at INTEGER;
     ALTER TABLE threads ADD COLUMN model TEXT;
     ALTER TABLE threads ADD COLUMN permission_mode TEXT;
+",
+    "
+    ALTER TABLE projects ADD COLUMN removed_at INTEGER;
+    CREATE TABLE ui (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      sidebar_width INTEGER,
+      project_filter INTEGER REFERENCES projects(id));
 ",
 ];
 
@@ -517,6 +534,43 @@ impl Store {
         Ok(())
     }
 
+    /// How the user last left orb's layout; defaults if never saved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be read.
+    pub fn ui(&self) -> Result<Ui, Report<StoreError>> {
+        self.conn
+            .query_row(
+                "SELECT sidebar_width, project_filter FROM ui WHERE id = 1",
+                [],
+                ui_row,
+            )
+            .optional()
+            .map(Option::unwrap_or_default)
+            .change_context(StoreError)
+            .attach("failed to read the layout settings")
+    }
+
+    /// Saves how the user left orb's layout, replacing what was saved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the filtered project doesn't exist or the database
+    /// can't be written.
+    pub fn save_ui(&self, ui: &Ui) -> Result<(), Report<StoreError>> {
+        self.conn
+            .execute(
+                "INSERT INTO ui (id, sidebar_width, project_filter) VALUES (1, ?1, ?2)
+                 ON CONFLICT (id) DO UPDATE SET sidebar_width = excluded.sidebar_width,
+                                                project_filter = excluded.project_filter",
+                params![ui.sidebar_width, ui.project_filter.map(|project| project.0)],
+            )
+            .change_context(StoreError)
+            .attach("failed to save the layout settings")?;
+        Ok(())
+    }
+
     fn query<T, F>(&self, sql: &str, map: F) -> Result<Vec<T>, Report<StoreError>>
     where
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
@@ -627,6 +681,16 @@ fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
     })
 }
 
+/// The layout settings; a width beyond `u16` loads as the nearest bound.
+fn ui_row(row: &Row<'_>) -> rusqlite::Result<Ui> {
+    Ok(Ui {
+        sidebar_width: row
+            .get::<_, Option<i64>>(0)?
+            .map(|width| u16::try_from(width.max(0)).unwrap_or(u16::MAX)),
+        project_filter: row.get::<_, Option<i64>>(1)?.map(ProjectId),
+    })
+}
+
 /// A project's last-used settings; an unknown workspace loads as local.
 fn last_used_row(row: &Row<'_>) -> rusqlite::Result<LastUsed> {
     Ok(LastUsed {
@@ -653,7 +717,7 @@ mod tests {
 
     use super::{
         DraftRow, DraftWorkspace, LastUsed, LastWorkspace, MIGRATIONS, NewThread, ProjectId,
-        SettledOverride, Store, StoreError, ThreadRow,
+        SettledOverride, Store, StoreError, ThreadRow, Ui,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -849,6 +913,56 @@ mod tests {
             (user_version(&path)?, short_ids, has_schema),
             (MIGRATIONS.len(), vec!["28bf38e2".to_owned()], true),
             "migration v5 should keep threads and add drafts and last-used columns"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_a_v5_database_adds_ui_and_removed_at() -> Result<(), Report<StoreError>> {
+        // Given a database at schema version 5 holding a project, a thread and
+        // a draft.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        {
+            let conn = Connection::open(&path).change_context(StoreError)?;
+            for sql in MIGRATIONS
+                .get(..5)
+                .ok_or_else(|| Report::new(StoreError).attach("no v5 migrations"))?
+            {
+                conn.execute_batch(sql).change_context(StoreError)?;
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
+                 INSERT INTO threads (project_id, short_id, cwd, created_at)
+                 VALUES (1, '28bf38e2', '/tmp/orb', 1000);
+                 INSERT INTO drafts (project_id, workspace, created_at) VALUES (1, 'local', 2000);
+                 PRAGMA user_version = 5;",
+            )
+            .change_context(StoreError)?;
+        }
+
+        // When opening the store.
+        let (projects, threads, drafts) = Store::open(&path)?.load()?;
+
+        // Then it's at the latest version, every row survives, and the ui
+        // table and removed_at column exist.
+        let conn = Connection::open(&path).change_context(StoreError)?;
+        let has_schema = [
+            "SELECT id, sidebar_width, project_filter FROM ui",
+            "SELECT removed_at FROM projects",
+        ]
+        .iter()
+        .all(|sql| conn.prepare(sql).is_ok());
+        assert_eq!(
+            (
+                user_version(&path)?,
+                projects.len(),
+                threads.len(),
+                drafts.len(),
+                has_schema
+            ),
+            (MIGRATIONS.len(), 1, 1, 1, true),
+            "migration v6 should keep every row and add ui and projects.removed_at"
         );
         Ok(())
     }
@@ -1220,6 +1334,58 @@ mod tests {
             Some(used("opus")),
             "the most recently used project should win"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saved_ui_reads_back() -> Result<(), Report<StoreError>> {
+        // Given a store with a project.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+
+        // When saving a 40-column sidebar filtered to the project.
+        let ui = Ui {
+            sidebar_width: Some(40),
+            project_filter: Some(project_id),
+        };
+        store.save_ui(&ui)?;
+
+        // Then the layout settings are those.
+        assert_eq!(store.ui()?, ui, "the saved layout should read back");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saving_ui_again_replaces_it() -> Result<(), Report<StoreError>> {
+        // Given a store whose sidebar was saved 40 columns wide.
+        let store = Store::open_in_memory()?;
+        store.save_ui(&Ui {
+            sidebar_width: Some(40),
+            project_filter: None,
+        })?;
+
+        // When saving it 28 columns wide.
+        let ui = Ui {
+            sidebar_width: Some(28),
+            project_filter: None,
+        };
+        store.save_ui(&ui)?;
+
+        // Then the second save is what reads back.
+        assert_eq!(store.ui()?, ui, "the latest layout should replace the old");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn unsaved_ui_is_the_default() -> Result<(), Report<StoreError>> {
+        // Given a fresh store.
+        let store = Store::open_in_memory()?;
+
+        // When reading the layout settings.
+        let ui = store.ui()?;
+
+        // Then nothing is set.
+        assert_eq!(ui, Ui::default(), "a fresh store has no layout settings");
         Ok(())
     }
 
