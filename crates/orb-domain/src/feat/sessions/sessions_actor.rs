@@ -40,6 +40,8 @@
 //! that ends while the user is on another thread shows as unseen until they
 //! select it. A thread being deleted is hidden from the sidebar until its
 //! session is removed; if the removal fails, it shows again.
+//!
+//! It restores the sidebar's saved width at start, and saves it when asked.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -59,7 +61,7 @@ use super::state::{
     ThreadStatus,
 };
 use super::store::{
-    DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, ThreadRow,
+    DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, ThreadRow, Ui,
 };
 use super::transcript::{locate, scan_title};
 use crate::Focus;
@@ -70,6 +72,7 @@ use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{
     hex, hex_branch, is_orb_worktree, new_worktree_path, previous_worktree, slug,
 };
+use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
 
 /// How long to wait between polls while a turn is underway or orb is attached.
 const FAST_POLL: Duration = Duration::from_secs(1);
@@ -100,9 +103,10 @@ pub struct SessionsActorDeps {
 /// Owns [`Sessions`](super::state::Sessions): the projects and their drafts,
 /// the threads' statuses, titles, pins and settles, the latest `claude` error,
 /// the directory a start waits to be trusted in, and the started thread the
-/// frontend should attach to. The intent handler also moves the cursor, opens
-/// and closes the shelf, marks a start as starting, and edits a draft's fields
-/// before asking for them to be saved.
+/// frontend should attach to. It also restores the sidebar's width. The
+/// intent handler also moves the cursor, opens and closes the shelf, marks a
+/// start as starting, edits a draft's fields before asking for them to be
+/// saved, and resizes the sidebar before asking for its width to be saved.
 pub struct SessionsActor {
     services: Services,
     state: State,
@@ -210,6 +214,10 @@ pub struct Delete(pub ThreadId);
 /// The user selected a thread, so its latest turn is seen.
 #[derive(Debug)]
 pub struct Visit(pub ThreadId);
+
+/// Save the sidebar's width as it now is in the app state.
+#[derive(Debug)]
+pub struct SaveUi;
 
 /// A session start in flight: what it is for, where it runs, the branch
 /// checked out there when known, the worktree orb made for it, if any, and
@@ -493,9 +501,18 @@ impl Message<Visit> for SessionsActor {
     }
 }
 
+impl Message<SaveUi> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(&mut self, _msg: SaveUi, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.save_ui();
+    }
+}
+
 impl SessionsActor {
-    /// Shows the saved projects, threads and drafts, and selects the sidebar's
-    /// first row. Each draft learns what git says about it.
+    /// Shows the saved projects, threads and drafts, selects the sidebar's
+    /// first row, and sizes the sidebar as it was saved, kept within its
+    /// bounds. Each draft learns what git says about it.
     fn restore(deps: SessionsActorDeps) -> Self {
         let SessionsActorDeps {
             services,
@@ -532,8 +549,14 @@ impl SessionsActor {
                 created_at: from_ms(project.created_at),
             })
             .collect();
+        let width = store
+            .ui()
+            .ok()
+            .and_then(|ui| ui.sidebar_width)
+            .map_or(DEFAULT_WIDTH, clamp_width);
         {
             let mut app = state.write();
+            app.sidebar.width = width;
             let sessions = &mut app.sessions;
             sessions.projects = projects;
             sessions.cursor = sessions.sidebar().first().map(SidebarRow::item);
@@ -1408,6 +1431,18 @@ impl SessionsActor {
         (self.wake)();
     }
 
+    /// Saves the sidebar's width, showing why if it can't.
+    fn save_ui(&self) {
+        let ui = Ui {
+            sidebar_width: Some(self.state.read().sidebar.width),
+            project_filter: None,
+        };
+        if self.store.save_ui(&ui).is_err() {
+            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+            (self.wake)();
+        }
+    }
+
     /// Changes thread `id`'s saved row with `change` (given the time now),
     /// then saves and shows it. Does nothing if the thread is gone.
     fn edit<F>(&mut self, id: ThreadId, change: F)
@@ -1821,7 +1856,8 @@ mod tests {
         Draft, DraftWorkspace, ProjectId, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::store::{
-        DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, StoreError, ThreadRow,
+        DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, StoreError,
+        ThreadRow, Ui,
     };
     use crate::feat::sessions::transcript::transcript_path;
 
@@ -4461,6 +4497,88 @@ mod tests {
             state.read().sessions.cursor,
             Some(SidebarItem::Thread(pinned)),
             "the sidebar's first row should be selected"
+        );
+        Ok(())
+    }
+
+    /// A store whose sidebar was saved `width` columns wide.
+    fn store_with_width(width: u16) -> Result<Store, Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        store.save_ui(&Ui {
+            sidebar_width: Some(width),
+            project_filter: None,
+        })?;
+        Ok(store)
+    }
+
+    #[rstest::rstest]
+    fn restore_applies_the_saved_sidebar_width() -> Result<(), Report<StoreError>> {
+        // Given a sidebar saved 40 columns wide.
+        let store = store_with_width(40)?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the sidebar is 40 columns wide.
+        assert_eq!(
+            state.read().sidebar.width,
+            40,
+            "the saved width should be restored"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(10, 24)]
+    #[case(200, 80)]
+    fn restore_keeps_a_saved_sidebar_width_within_its_bounds(
+        #[case] saved: u16,
+        #[case] expected: u16,
+    ) -> Result<(), Report<StoreError>> {
+        // Given a sidebar saved outside 24–80 columns (a hand-edited store).
+        let store = store_with_width(saved)?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the sidebar is at the nearest bound.
+        assert_eq!(
+            state.read().sidebar.width,
+            expected,
+            "a saved width of {saved} should be clamped"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn save_ui_saves_the_sidebar_width() -> Result<(), Report<StoreError>> {
+        // Given the actor on a fresh store and a sidebar resized to 44 columns.
+        let (actor, state) = start(
+            Store::open_in_memory()?,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+        state.write().sidebar.width = 44;
+
+        // When saving the layout.
+        actor.save_ui();
+
+        // Then the store holds the 44-column width and no filter.
+        assert_eq!(
+            actor.store.ui()?,
+            Ui {
+                sidebar_width: Some(44),
+                project_filter: None,
+            },
+            "SaveUi should save the sidebar's width"
         );
         Ok(())
     }

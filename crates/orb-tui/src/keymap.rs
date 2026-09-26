@@ -6,9 +6,10 @@
 //! leader and shows a popup. A key that does nothing for the selection isn't
 //! bound there (the preview's block keys on a draft, `␣m`/`␣a` on a thread,
 //! `␣w`/`␣b` and the tool keys `␣t`/`␣g`/`␣v` with nothing selected), so the
-//! popups don't offer it. While attached, every key goes to Claude except
-//! `<C-\>`. An open picker takes typed characters as filter text and has its
-//! own fixed keys.
+//! popups don't offer it. `<C-Right>`/`<C-Left>` resize the focused side
+//! outside which-key, which can't name them. While attached, every key goes
+//! to Claude except `<C-\>`. An open picker takes typed characters as filter
+//! text and has its own fixed keys.
 
 use std::fmt;
 
@@ -184,6 +185,21 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             );
     }
+    for scope in [
+        Scope::Sidebar,
+        Scope::SidebarDraft,
+        Scope::SidebarEmpty,
+        Scope::Preview,
+        Scope::DraftForm,
+        Scope::PreviewEmpty,
+    ] {
+        keymap.bind(
+            "<leader>e",
+            Intent::ToggleSidebar,
+            KeyCategory::Navigation,
+            scope,
+        );
+    }
     keymap
         .bind(
             "j",
@@ -325,6 +341,16 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
     }
 }
 
+/// The resize `key` asks for in the sidebar or preview: `<C-Right>` widens
+/// the focused side and `<C-Left>` narrows it. `None` for any other key.
+pub(crate) fn layout_route(key: KeyEvent) -> Option<Intent> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Right, KeyModifiers::CONTROL) => Some(Intent::WidenFocused),
+        (KeyCode::Left, KeyModifiers::CONTROL) => Some(Intent::NarrowFocused),
+        _ => None,
+    }
+}
+
 /// What `key` does in an open picker; `None` when it does nothing.
 pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
@@ -357,7 +383,8 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     use super::{
-        Keys, Route, Scope, Selection, attached_route, keymap, pending_confirm, picker_route, press,
+        Keys, Route, Scope, Selection, attached_route, keymap, layout_route, pending_confirm,
+        picker_route, press,
     };
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -583,6 +610,64 @@ mod tests {
             Some(&expected),
             "the key for {expected} in {scope:?}"
         );
+    }
+
+    #[rstest::rstest]
+    fn leader_e_toggles_the_sidebar(
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarDraft,
+            Scope::SidebarEmpty,
+            Scope::Preview,
+            Scope::DraftForm,
+            Scope::PreviewEmpty
+        )]
+        scope: Scope,
+    ) {
+        // Given Space already pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `e`.
+        let intent = press(&mut keys, key(KeyCode::Char('e')));
+
+        // Then it hides or shows the sidebar.
+        assert_eq!(
+            intent,
+            Some(Intent::ToggleSidebar),
+            "␣e should toggle the sidebar in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(KeyCode::Right, Intent::WidenFocused)]
+    #[case(KeyCode::Left, Intent::NarrowFocused)]
+    fn ctrl_arrows_resize_the_focused_side(#[case] code: KeyCode, #[case] expected: Intent) {
+        // Given Ctrl with an arrow.
+        let pressed = KeyEvent::new(code, KeyModifiers::CONTROL);
+
+        // When routing it in the sidebar or preview.
+        let intent = layout_route(pressed);
+
+        // Then it resizes.
+        assert_eq!(intent, Some(expected), "<C-{code}> should resize");
+    }
+
+    #[rstest::rstest]
+    #[case(key(KeyCode::Right))]
+    #[case(key(KeyCode::Left))]
+    #[case(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL))]
+    #[case(ctrl('h'))]
+    #[case(ctrl('l'))]
+    #[case(key(KeyCode::Char('j')))]
+    fn other_keys_do_not_resize(#[case] pressed: KeyEvent) {
+        // Given a key other than Ctrl+Left/Right.
+
+        // When routing it in the sidebar or preview.
+        let intent = layout_route(pressed);
+
+        // Then it's left to the keymap.
+        assert_eq!(intent, None, "{pressed:?} shouldn't resize");
     }
 
     #[rstest::rstest]

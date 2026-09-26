@@ -2,8 +2,9 @@
 //! has updated [`AppState`](crate::AppState). Pane commands, `Yank`,
 //! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
 //! frontend loop; session commands (drafts, add project, move to another
-//! workspace, switch branch, refresh, pin, settle, delete, visit) go to the
-//! sessions actor; `ShowPreview` goes to the preview actor.
+//! workspace, switch branch, refresh, pin, settle, delete, visit, save the
+//! sidebar's width) go to the sessions actor; `ShowPreview` goes to the
+//! preview actor.
 
 use std::path::PathBuf;
 
@@ -75,6 +76,8 @@ pub enum Command {
     Delete(ThreadId),
     /// The user is looking at the thread now.
     Visit(ThreadId),
+    /// Save the sidebar's width as it now is in the app state.
+    SaveUi,
 }
 
 /// Where a thread's session runs.

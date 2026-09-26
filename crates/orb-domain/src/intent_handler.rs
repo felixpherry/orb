@@ -22,6 +22,7 @@ use crate::feat::sessions::validator::{
     validate_close_shelf, validate_delete, validate_open_shelf, validate_pick_setting,
     validate_start_draft, validate_toggle_pin, validate_toggle_settle,
 };
+use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_resize};
 use crate::feat::zellij::validator::validate_open_tool;
 use crate::{AppState, Command, Focus, Intent};
 
@@ -71,9 +72,34 @@ impl IntentHandler {
                 state.focus = Focus::Preview;
                 vec![]
             }
-            Intent::FocusSidebar => {
-                state.focus = Focus::Sidebar;
+            Intent::FocusSidebar => match validate_focus_sidebar(state) {
+                Ok(()) => {
+                    state.focus = Focus::Sidebar;
+                    vec![]
+                }
+                Err(_) => vec![],
+            },
+            Intent::ToggleSidebar => {
+                if state.sidebar.hidden {
+                    state.sidebar.hidden = false;
+                    state.focus = Focus::Sidebar;
+                } else {
+                    state.sidebar.hidden = true;
+                    if state.focus == Focus::Sidebar {
+                        state.focus = Focus::Preview;
+                    }
+                }
                 vec![]
+            }
+            Intent::WidenFocused | Intent::NarrowFocused => {
+                // Widening the right side narrows the sidebar.
+                let changed = match (validate_resize(state), state.focus, intent) {
+                    (Ok(()), Focus::Sidebar, Intent::WidenFocused)
+                    | (Ok(()), Focus::Preview, Intent::NarrowFocused) => state.sidebar.widen(),
+                    (Ok(()), Focus::Sidebar | Focus::Preview, _) => state.sidebar.narrow(),
+                    _ => false,
+                };
+                changed.then_some(Command::SaveUi).into_iter().collect()
             }
             Intent::Attach if state.sessions.cursor == Some(SidebarItem::SettledShelf) => {
                 if state.sessions.shelf_open {
@@ -719,6 +745,7 @@ mod tests {
         AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, SidebarRow,
         Thread, ThreadId, ThreadStatus,
     };
+    use crate::feat::sidebar::state::SidebarView;
     use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
@@ -946,6 +973,187 @@ mod tests {
 
         // Then the focus moved to `to`.
         assert_eq!(state.focus, to, "{intent:?} should focus {to:?}");
+    }
+
+    /// orb focused on `focus`, with the sidebar `width` columns wide and
+    /// `hidden` or not.
+    fn laid_out(focus: Focus, width: u16, hidden: bool) -> AppState {
+        AppState {
+            focus,
+            sidebar: SidebarView {
+                width,
+                hidden,
+                ..SidebarView::default()
+            },
+            ..AppState::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Sidebar)]
+    #[case(Focus::Preview)]
+    fn toggle_sidebar_hides_a_shown_sidebar(#[case] focus: Focus) {
+        // Given a shown sidebar.
+        let mut state = laid_out(focus, 32, false);
+
+        // When handling ToggleSidebar.
+        IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
+
+        // Then the sidebar is hidden.
+        assert!(state.sidebar.hidden, "␣e should hide the sidebar");
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Sidebar)]
+    #[case(Focus::Preview)]
+    fn hiding_the_sidebar_focuses_the_right_side(#[case] focus: Focus) {
+        // Given a shown sidebar, with `focus` focused.
+        let mut state = laid_out(focus, 32, false);
+
+        // When handling ToggleSidebar.
+        IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
+
+        // Then the right side has the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Preview,
+            "hiding from {focus:?} should focus the right side"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_sidebar_shows_a_hidden_sidebar() {
+        // Given a hidden sidebar.
+        let mut state = laid_out(Focus::Preview, 32, true);
+
+        // When handling ToggleSidebar.
+        IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
+
+        // Then the sidebar is shown.
+        assert!(!state.sidebar.hidden, "␣e should show the sidebar again");
+    }
+
+    #[rstest::rstest]
+    fn showing_the_sidebar_focuses_it() {
+        // Given a hidden sidebar, with the preview focused.
+        let mut state = laid_out(Focus::Preview, 32, true);
+
+        // When handling ToggleSidebar.
+        IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
+
+        // Then the sidebar has the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Sidebar,
+            "showing the sidebar should focus it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_sidebar_while_hidden_keeps_the_preview_focused() {
+        // Given a hidden sidebar, with the preview focused.
+        let mut state = laid_out(Focus::Preview, 32, true);
+
+        // When handling FocusSidebar (`<C-h>`).
+        IntentHandler::handle(&Intent::FocusSidebar, &mut state);
+
+        // Then the preview keeps the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Preview,
+            "<C-h> should do nothing while the sidebar is hidden"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::WidenFocused, Focus::Sidebar, 36)]
+    #[case(Intent::NarrowFocused, Focus::Sidebar, 28)]
+    #[case(Intent::WidenFocused, Focus::Preview, 28)]
+    #[case(Intent::NarrowFocused, Focus::Preview, 36)]
+    fn resize_moves_the_sidebars_edge_a_step(
+        #[case] intent: Intent,
+        #[case] focus: Focus,
+        #[case] expected: u16,
+    ) {
+        // Given a 32-column sidebar, with `focus` focused.
+        let mut state = laid_out(focus, 32, false);
+
+        // When handling the resize.
+        IntentHandler::handle(&intent, &mut state);
+
+        // Then the sidebar is 4 columns wider or narrower.
+        assert_eq!(
+            state.sidebar.width, expected,
+            "{intent:?} in {focus:?} should make the sidebar {expected} wide"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_returns_save_ui() {
+        // Given a 32-column sidebar, focused.
+        let mut state = laid_out(Focus::Sidebar, 32, false);
+
+        // When widening it.
+        let commands = IntentHandler::handle(&Intent::WidenFocused, &mut state);
+
+        // Then the new width is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveUi],
+            "a resize should save the width"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::NarrowFocused, Focus::Sidebar, 24)]
+    #[case(Intent::WidenFocused, Focus::Preview, 24)]
+    #[case(Intent::WidenFocused, Focus::Sidebar, 80)]
+    #[case(Intent::NarrowFocused, Focus::Preview, 80)]
+    fn resize_stops_at_the_sidebars_bounds(
+        #[case] intent: Intent,
+        #[case] focus: Focus,
+        #[case] width: u16,
+    ) {
+        // Given a sidebar already at a bound.
+        let mut state = laid_out(focus, width, false);
+
+        // When resizing it past the bound.
+        IntentHandler::handle(&intent, &mut state);
+
+        // Then it stays at the bound.
+        assert_eq!(
+            state.sidebar.width, width,
+            "{intent:?} in {focus:?} should stop at {width}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_at_a_bound_returns_no_commands() {
+        // Given a sidebar at its 80-column maximum, focused.
+        let mut state = laid_out(Focus::Sidebar, 80, false);
+
+        // When widening it.
+        let commands = IntentHandler::handle(&Intent::WidenFocused, &mut state);
+
+        // Then nothing is saved.
+        assert!(commands.is_empty(), "an unchanged width isn't saved");
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::WidenFocused)]
+    #[case(Intent::NarrowFocused)]
+    fn resize_while_hidden_keeps_the_width(#[case] intent: Intent) {
+        // Given a hidden 32-column sidebar, with the preview focused.
+        let mut state = laid_out(Focus::Preview, 32, true);
+
+        // When handling the resize.
+        IntentHandler::handle(&intent, &mut state);
+
+        // Then the width is unchanged.
+        assert_eq!(
+            state.sidebar.width, 32,
+            "{intent:?} should do nothing while the sidebar is hidden"
+        );
     }
 
     #[rstest::rstest]

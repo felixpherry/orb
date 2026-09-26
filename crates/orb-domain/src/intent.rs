@@ -26,6 +26,13 @@ pub enum Intent {
     FocusPreview,
     /// Move the keys to the sidebar.
     FocusSidebar,
+    /// Hide the sidebar, giving the right side the full width, or show it
+    /// again.
+    ToggleSidebar,
+    /// Widen the focused side: the sidebar, or the right side.
+    WidenFocused,
+    /// Narrow the focused side: the sidebar, or the right side.
+    NarrowFocused,
     /// Attach to the selected thread's session, or start the selected draft.
     Attach,
     /// Return from the attached session to its preview.
@@ -107,6 +114,9 @@ impl fmt::Display for Intent {
             Self::SelectPrev => "previous thread",
             Self::FocusPreview => "focus preview",
             Self::FocusSidebar => "focus sidebar",
+            Self::ToggleSidebar => "sidebar",
+            Self::WidenFocused => "widen",
+            Self::NarrowFocused => "narrow",
             Self::Attach => "attach",
             Self::Detach => "back to orb",
             Self::NewSession => "new session",
