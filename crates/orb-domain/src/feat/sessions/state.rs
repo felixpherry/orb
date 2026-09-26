@@ -119,6 +119,8 @@ pub struct Project {
     pub threads: Vec<Thread>,
     /// The project's draft; a project has at most one.
     pub draft: Option<Draft>,
+    /// Removed from `␣n` and the project filter; its threads stay.
+    pub removed: bool,
 }
 
 /// A row the sidebar's cursor can rest on.
@@ -173,12 +175,12 @@ impl SidebarRow<'_> {
 /// orb's projects, threads and drafts, and where the sidebar's cursor is.
 ///
 /// Written by the sessions actor (projects and their drafts, `error`,
-/// `starting` when a start ends, `trust`, `attach`, the cursor after a
-/// restore or when a still-selected draft becomes a thread, removing a
-/// thread from `deleting`) and by the intent handler (the cursor on
+/// `starting` when a start ends, `trust`, `attach`, the cursor and `filter`
+/// after a restore, the cursor when a still-selected draft becomes a thread,
+/// removing a thread from `deleting`) and by the intent handler (the cursor on
 /// navigation, settle and delete, `shelf_open`, `starting` when a start
 /// begins, a draft's fields when the user picks them, adding a thread to
-/// `deleting`). The frontend loop takes `attach`.
+/// `deleting`, `filter`). The frontend loop takes `attach`.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
@@ -199,13 +201,20 @@ pub struct Sessions {
     /// Threads hidden while their `claude rm` runs. The intent handler
     /// inserts; the sessions actor removes.
     pub deleting: HashSet<ThreadId>,
+    /// The project the sidebar is filtered to; `None` = all projects.
+    pub filter: Option<ProjectId>,
 }
 
 impl Sessions {
-    /// The projects, most recently active first: by their threads' latest
-    /// activity, else when they were added. Ties go by title, then id.
+    /// The projects not removed, most recently active first: by their
+    /// threads' latest activity, else when they were added. Ties go by title,
+    /// then id.
     pub fn projects_by_recency(&self) -> Vec<&Project> {
-        let mut projects: Vec<&Project> = self.projects.iter().collect();
+        let mut projects: Vec<&Project> = self
+            .projects
+            .iter()
+            .filter(|project| !project.removed)
+            .collect();
         projects.sort_by_key(|&project| {
             let latest = project
                 .threads
@@ -230,16 +239,15 @@ impl Sessions {
     /// anything is settled, the shelf header and the settled rows (newest
     /// settle first). A collapsed shelf still lists the cursor's settled
     /// thread. Ties go to the higher id. Threads being deleted aren't listed.
+    /// While a project filter is set, only that project's rows are.
     pub fn sidebar(&self) -> Vec<SidebarRow<'_>> {
         let mut drafts: Vec<_> = self
-            .projects
-            .iter()
+            .listed_projects()
             .filter_map(|project| project.draft.as_ref().map(|draft| (project, draft)))
             .collect();
         drafts.sort_by_key(|(project, draft)| Reverse((draft.created_at, project.id.0)));
         let (mut settled, live): (Vec<_>, Vec<_>) = self
-            .projects
-            .iter()
+            .listed_projects()
             .flat_map(|project| project.threads.iter().map(move |thread| (project, thread)))
             .filter(|(_, thread)| !self.deleting.contains(&thread.id))
             .partition(|(_, thread)| thread.settled_at.is_some());
@@ -403,12 +411,24 @@ impl Sessions {
     pub fn row_neighbour(&self, item: SidebarItem) -> Option<SidebarItem> {
         self.neighbour(item, |row| !matches!(row, SidebarRow::ShelfHeader { .. }))
             .or_else(|| {
-                self.shown_threads()
+                self.listed_projects()
+                    .flat_map(|project| project.threads.iter())
+                    .filter(|thread| !self.deleting.contains(&thread.id))
                     .any(|thread| {
                         SidebarItem::Thread(thread.id) != item && thread.settled_at.is_some()
                     })
                     .then_some(SidebarItem::SettledShelf)
             })
+    }
+
+    /// Filters the sidebar to `filter`'s project, or to all projects; a
+    /// cursor on a row no longer listed moves to the first row.
+    pub fn filter_to(&mut self, filter: Option<ProjectId>) {
+        self.filter = filter;
+        let items = self.items();
+        if self.position(&items).is_none() {
+            self.cursor = items.first().copied();
+        }
     }
 
     /// Show the Settled shelf's threads.
@@ -434,6 +454,13 @@ impl Sessions {
     pub fn any_in_progress(&self) -> bool {
         self.shown_threads()
             .any(|thread| thread.status.in_progress())
+    }
+
+    /// The projects the filter lets the sidebar list.
+    fn listed_projects(&self) -> impl Iterator<Item = &Project> {
+        self.projects
+            .iter()
+            .filter(|project| self.filter.is_none_or(|filter| filter == project.id))
     }
 
     /// Every thread but those being deleted.
@@ -582,6 +609,7 @@ mod tests {
             title: format!("project-{id}"),
             root: "/tmp".into(),
             created_at: SystemTime::UNIX_EPOCH,
+            removed: false,
             draft: None,
             threads,
         }
@@ -1208,5 +1236,175 @@ mod tests {
 
         // Then none is.
         assert!(!busy, "a thread being deleted shouldn't keep the poll fast");
+    }
+
+    #[rstest::rstest]
+    fn projects_by_recency_skips_removed_projects() {
+        // Given projects 1 and 2, with 2 removed.
+        let sessions = Sessions {
+            projects: vec![
+                project(1, vec![]),
+                Project {
+                    removed: true,
+                    ..project(2, vec![])
+                },
+            ],
+            ..Sessions::default()
+        };
+
+        // When ordering the projects by recency.
+        let ids = by_recency(&sessions);
+
+        // Then only project 1 is listed.
+        assert_eq!(ids, vec![1], "a removed project shouldn't be listed");
+    }
+
+    /// Project 1 with a draft, card 1 and settled thread 2, and project 2
+    /// with a draft, card 3 and settled thread 4, the shelf open, filtered to
+    /// `filter`.
+    fn two_projects(filter: Option<i64>) -> Sessions {
+        let [first, second] = [(1, 1, 2), (2, 3, 4)].map(|(id, card, settled_id)| Project {
+            threads: vec![thread(card), settled(settled_id, 10)],
+            ..drafted(id, 0)
+        });
+        Sessions {
+            projects: vec![first, second],
+            shelf_open: true,
+            filter: filter.map(ProjectId),
+            ..Sessions::default()
+        }
+    }
+
+    #[rstest::rstest]
+    fn filtered_sidebar_lists_only_that_projects_rows() {
+        // Given two projects, filtered to project 2.
+        let sessions = two_projects(Some(2));
+
+        // When listing the sidebar.
+        let rows = items(&sessions);
+
+        // Then only project 2's draft, card, shelf and settled thread show.
+        assert_eq!(
+            rows,
+            vec![on_draft(2), on(3), SidebarItem::SettledShelf, on(4)],
+            "the filter should keep only project 2's rows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn unfiltered_sidebar_lists_every_project() {
+        // Given two projects and no filter.
+        let sessions = two_projects(None);
+
+        // When listing the sidebar.
+        let rows = items(&sessions);
+
+        // Then both projects' rows show.
+        assert_eq!(
+            rows,
+            vec![
+                on_draft(2),
+                on_draft(1),
+                on(3),
+                on(1),
+                SidebarItem::SettledShelf,
+                on(4),
+                on(2),
+            ],
+            "no filter should list every project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filtered_shelf_counts_only_that_projects_settled_threads() {
+        // Given two projects with a settled thread each, filtered to project 1.
+        let sessions = two_projects(Some(1));
+
+        // When listing the sidebar.
+        let count = sessions.sidebar().iter().find_map(|row| match row {
+            SidebarRow::ShelfHeader { count, .. } => Some(*count),
+            _ => None,
+        });
+
+        // Then the shelf counts one thread.
+        assert_eq!(count, Some(1), "the shelf should count project 1's only");
+    }
+
+    #[rstest::rstest]
+    fn filter_to_moves_a_hidden_cursor_to_the_first_row() {
+        // Given two projects and the cursor on project 1's card.
+        let mut sessions = Sessions {
+            cursor: Some(on(1)),
+            ..two_projects(None)
+        };
+
+        // When filtering to project 2.
+        sessions.filter_to(Some(ProjectId(2)));
+
+        // Then the cursor is on project 2's draft, the first row.
+        assert_eq!(
+            sessions.cursor,
+            Some(on_draft(2)),
+            "a cursor the filter hides should move to the first row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filter_to_keeps_a_listed_cursor() {
+        // Given two projects and the cursor on project 2's card.
+        let mut sessions = Sessions {
+            cursor: Some(on(3)),
+            ..two_projects(None)
+        };
+
+        // When filtering to project 2.
+        sessions.filter_to(Some(ProjectId(2)));
+
+        // Then the cursor stays on the card.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(3)),
+            "a cursor the filter keeps should stay"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filter_to_an_empty_project_leaves_no_cursor() {
+        // Given project 1 with a card, empty project 2, and the cursor on the
+        // card.
+        let mut sessions = Sessions {
+            projects: vec![project(1, vec![thread(1)]), project(2, vec![])],
+            cursor: Some(on(1)),
+            ..Sessions::default()
+        };
+
+        // When filtering to project 2.
+        sessions.filter_to(Some(ProjectId(2)));
+
+        // Then nothing is selected.
+        assert_eq!(sessions.cursor, None, "an empty sidebar has no cursor");
+    }
+
+    #[rstest::rstest]
+    fn row_neighbour_skips_a_shelf_the_filter_hides() {
+        // Given project 1 with only card 1, project 2 with only settled
+        // thread 2, filtered to project 1.
+        let sessions = Sessions {
+            projects: vec![
+                project(1, vec![thread(1)]),
+                project(2, vec![settled(2, 10)]),
+            ],
+            filter: Some(ProjectId(1)),
+            ..Sessions::default()
+        };
+
+        // When finding where the cursor goes after deleting card 1.
+        let next = sessions.row_neighbour(on(1));
+
+        // Then nothing is left to select.
+        assert_eq!(
+            next, None,
+            "another project's settled thread shouldn't offer a hidden shelf"
+        );
     }
 }

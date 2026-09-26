@@ -11,7 +11,7 @@
 use std::time::SystemTime;
 
 use orb_domain::feat::preview::state::PreviewLayout;
-use orb_domain::feat::sessions::state::SidebarItem;
+use orb_domain::feat::sessions::state::{SidebarItem, SidebarRow};
 use orb_domain::feat::sessions::validator::{ToggleSettleError, validate_toggle_settle};
 use orb_domain::feat::sidebar::state::{SidebarLayout, SidebarView};
 use orb_domain::{AppState, Focus};
@@ -157,9 +157,13 @@ pub(crate) fn render(
 fn shelf_hint(state: &AppState) -> String {
     let sessions = &state.sessions;
     let count = sessions
-        .threads()
-        .filter(|thread| thread.settled_at.is_some())
-        .count();
+        .sidebar()
+        .iter()
+        .find_map(|row| match row {
+            SidebarRow::ShelfHeader { count, .. } => Some(*count),
+            _ => None,
+        })
+        .unwrap_or_default();
     let action = if sessions.shelf_open { "close" } else { "open" };
     format!(
         "{} · ⏎ {action}",
@@ -285,6 +289,7 @@ mod tests {
                 title: "orb".to_owned(),
                 root: "/Users/me/dev/orb".into(),
                 created_at: SystemTime::UNIX_EPOCH,
+                removed: false,
                 draft: None,
                 threads,
             }],
@@ -724,6 +729,47 @@ mod tests {
         let buffer = draw(&state);
 
         // Then the right side says ⏎ opens the shelf.
+        let [_, right, _] = layout(buffer.area, &SidebarView::default());
+        let right = text(&buffer, right);
+        assert!(
+            right.contains("▸ Settled (1) · ⏎ open"),
+            "right side was '{right}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn shelf_hint_counts_only_the_filtered_projects_threads() {
+        // Given orb's settled thread 1 and web's settled thread 2, filtered to
+        // orb, with the shelf header selected.
+        let state = AppState {
+            sessions: {
+                let mut sessions = sessions(vec![Thread {
+                    settled_at: Some(SystemTime::UNIX_EPOCH),
+                    ..thread(1, ThreadStatus::Stopped)
+                }]);
+                sessions.projects.push(Project {
+                    id: ProjectId(2),
+                    title: "web".to_owned(),
+                    root: "/Users/me/dev/web".into(),
+                    created_at: SystemTime::UNIX_EPOCH,
+                    removed: false,
+                    draft: None,
+                    threads: vec![Thread {
+                        settled_at: Some(SystemTime::UNIX_EPOCH),
+                        ..thread(2, ThreadStatus::Stopped)
+                    }],
+                });
+                sessions.filter = Some(ProjectId(1));
+                sessions.cursor = Some(SidebarItem::SettledShelf);
+                sessions
+            },
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the hint counts orb's one settled thread.
         let [_, right, _] = layout(buffer.area, &SidebarView::default());
         let right = text(&buffer, right);
         assert!(

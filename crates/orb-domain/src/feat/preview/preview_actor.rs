@@ -258,6 +258,7 @@ mod tests {
                     title: "demo".into(),
                     root: "/work/demo".into(),
                     created_at: SystemTime::UNIX_EPOCH,
+                    removed: false,
                     draft: None,
                     threads,
                 }],

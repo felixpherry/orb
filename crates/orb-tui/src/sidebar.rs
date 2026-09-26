@@ -8,7 +8,8 @@
 //! line left empty. A blank line separates the cards,
 //! and the selected one is drawn in a rounded outline. Settled threads fold
 //! into a shelf at the bottom, drawn as one-line rows while it's open. The
-//! sidebar scrolls to keep the selection in view.
+//! sidebar scrolls to keep the selection in view. While it's filtered to a
+//! project, a line naming the project heads the list.
 
 use std::time::{Duration, SystemTime};
 
@@ -28,9 +29,10 @@ pub(crate) struct SidebarScroll {
     offset: u16,
 }
 
-/// Draws the sidebar into `area`, with a border on its right edge, scrolled
-/// so the cursor's row is in view. Returns the y of the selected row's top
-/// line (a card's outline) when it's on screen, and the list's layout.
+/// Draws the sidebar into `area`, with a border on its right edge, under the
+/// filtered project's header if there is one, scrolled so the cursor's row is
+/// in view. Returns the y of the selected row's top line (a card's outline)
+/// when it's on screen, and the list's layout.
 pub(crate) fn render(
     sessions: &Sessions,
     now: SystemTime,
@@ -41,6 +43,18 @@ pub(crate) fn render(
     let block = Block::new().borders(Borders::RIGHT);
     let inner = block.inner(area);
     block.render(area, buf);
+    let filtered = sessions
+        .filter
+        .and_then(|id| sessions.projects.iter().find(|project| project.id == id));
+    let inner = match filtered {
+        Some(project) => {
+            let [header, list] =
+                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+            render_header(project, header, buf);
+            list
+        }
+        None => inner,
+    };
     let rows = sessions.sidebar();
     let layout = SidebarLayout {
         rows: inner.height,
@@ -103,6 +117,21 @@ pub(crate) fn render(
         .filter(|top| (scroll.offset..scroll.offset.saturating_add(inner.height)).contains(top))
         .map(|top| inner.y + top - scroll.offset);
     (selected_y, layout)
+}
+
+/// The filtered project's badge and name, where a row's text would sit.
+fn render_header(project: &Project, area: Rect, buf: &mut Buffer) {
+    let text = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    }
+    .inner(Margin::new(2, 0));
+    Line::from(vec![
+        badge(&project.title, true),
+        Span::raw(" "),
+        Span::styled(project.title.as_str(), Style::new().fg(Color::White)),
+    ])
+    .render(text, buf);
 }
 
 /// How many lines a row takes: a card's 3 and the blank line below it, else 1.
@@ -487,6 +516,7 @@ mod tests {
                 title: "orb".to_owned(),
                 root: "/Users/me/dev/orb".into(),
                 created_at: SystemTime::UNIX_EPOCH,
+                removed: false,
                 draft: None,
                 threads,
             }],
@@ -926,5 +956,72 @@ mod tests {
             "",
             "the draft card's third line"
         );
+    }
+
+    /// orb holding `threads`, filtered to orb, with thread 1 selected.
+    fn filtered(threads: Vec<Thread>) -> Sessions {
+        Sessions {
+            filter: Some(ProjectId(1)),
+            cursor: Some(SidebarItem::Thread(ThreadId(1))),
+            ..sessions(threads)
+        }
+    }
+
+    #[rstest::rstest]
+    fn filtered_sidebar_names_the_project_on_its_top_line() {
+        // Given the sidebar filtered to orb.
+        let sessions = filtered(vec![thread(1, ThreadStatus::Idle)]);
+
+        // When rendering it.
+        let buf = draw(&sessions, at(1000), 10);
+
+        // Then the top line is orb's badge and name.
+        assert_eq!(
+            line(&buf, 0).trim_end_matches('│').trim(),
+            "OB orb",
+            "the header should name the filtered project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filtered_sidebar_selects_below_the_header() {
+        // Given the sidebar filtered to orb, with its one card selected.
+        let sessions = filtered(vec![thread(1, ThreadStatus::Idle)]);
+
+        // When rendering a 10-line sidebar.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
+        let (selected_y, _) = render(
+            &sessions,
+            at(1000),
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+        );
+
+        // Then the card's outline starts on the line under the header.
+        assert_eq!(
+            selected_y,
+            Some(1),
+            "the list should start below the header"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filtered_sidebar_reports_the_list_height_without_the_header() {
+        // Given the sidebar filtered to orb.
+        let sessions = filtered(vec![thread(1, ThreadStatus::Idle)]);
+
+        // When rendering a 10-line sidebar.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
+        let (_, layout) = render(
+            &sessions,
+            at(1000),
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+        );
+
+        // Then the list is 9 lines tall.
+        assert_eq!(layout.rows, 9, "the header's line isn't the list's");
     }
 }

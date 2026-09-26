@@ -630,6 +630,13 @@ impl App {
                 let _ = self.sessions.tell(sessions_actor::SaveUi).try_send();
                 Ok(())
             }
+            Command::RemoveProject(id) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::RemoveProject(*id))
+                    .try_send();
+                Ok(())
+            }
         }
     }
 

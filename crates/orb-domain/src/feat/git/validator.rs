@@ -129,6 +129,7 @@ mod tests {
                     title: "work".into(),
                     root: "/work".into(),
                     created_at: SystemTime::UNIX_EPOCH,
+                    removed: false,
                     draft: None,
                     threads: vec![Thread {
                         id: ThreadId(1),

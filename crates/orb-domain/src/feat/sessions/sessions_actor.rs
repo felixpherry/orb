@@ -4,8 +4,7 @@
 //! the session host: every second while a turn is underway or orb is attached,
 //! every five seconds otherwise, and right away when asked. Each poll maps the
 //! host's records onto the threads, stamps when a turn starts, reads new
-//! transcript lines for titles and branches, and saves what changed. It also
-//! adds projects.
+//! transcript lines for titles and branches, and saves what changed.
 //!
 //! It keeps each project's draft: created prefilled from the project's
 //! last-used workspace, model and permission (else the latest used project's
@@ -41,7 +40,12 @@
 //! select it. A thread being deleted is hidden from the sidebar until its
 //! session is removed; if the removal fails, it shows again.
 //!
-//! It restores the sidebar's saved width at start, and saves it when asked.
+//! It adds projects and removes them: a removed project leaves `␣n` and the
+//! project filter and loses its draft, its threads stay, and adding it again
+//! restores it.
+//!
+//! It restores the sidebar's saved width and project filter at start, and
+//! saves them when asked.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -57,7 +61,7 @@ use super::session_host::{
     SessionHostError, SessionHostService, SessionOptions, SessionRecord, WorkspaceUntrusted,
 };
 use super::state::{
-    Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread, ThreadId,
+    Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
     ThreadStatus,
 };
 use super::store::{
@@ -103,10 +107,11 @@ pub struct SessionsActorDeps {
 /// Owns [`Sessions`](super::state::Sessions): the projects and their drafts,
 /// the threads' statuses, titles, pins and settles, the latest `claude` error,
 /// the directory a start waits to be trusted in, and the started thread the
-/// frontend should attach to. It also restores the sidebar's width. The
-/// intent handler also moves the cursor, opens and closes the shelf, marks a
-/// start as starting, edits a draft's fields before asking for them to be
-/// saved, and resizes the sidebar before asking for its width to be saved.
+/// frontend should attach to. It also restores the sidebar's width and
+/// project filter. The intent handler also moves the cursor, opens and closes
+/// the shelf, marks a start as starting, edits a draft's fields before asking
+/// for them to be saved, and resizes or filters the sidebar before asking for
+/// that to be saved.
 pub struct SessionsActor {
     services: Services,
     state: State,
@@ -215,9 +220,14 @@ pub struct Delete(pub ThreadId);
 #[derive(Debug)]
 pub struct Visit(pub ThreadId);
 
-/// Save the sidebar's width as it now is in the app state.
+/// Save the sidebar's width and project filter as they now are in the app
+/// state.
 #[derive(Debug)]
 pub struct SaveUi;
+
+/// Remove a project from `␣n` and the project filter and discard its draft.
+#[derive(Debug)]
+pub struct RemoveProject(pub ProjectId);
 
 /// A session start in flight: what it is for, where it runs, the branch
 /// checked out there when known, the worktree orb made for it, if any, and
@@ -509,10 +519,23 @@ impl Message<SaveUi> for SessionsActor {
     }
 }
 
+impl Message<RemoveProject> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        RemoveProject(id): RemoveProject,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.remove_project(id);
+    }
+}
+
 impl SessionsActor {
-    /// Shows the saved projects, threads and drafts, selects the sidebar's
-    /// first row, and sizes the sidebar as it was saved, kept within its
-    /// bounds. Each draft learns what git says about it.
+    /// Shows the saved projects, threads and drafts, sizes the sidebar as it
+    /// was saved, kept within its bounds, filters it to the saved project if
+    /// that's still shown and not removed, and selects its first row. Each
+    /// draft learns what git says about it.
     fn restore(deps: SessionsActorDeps) -> Self {
         let SessionsActorDeps {
             services,
@@ -547,19 +570,22 @@ impl SessionsActor {
                 title: project.title,
                 root: project.root,
                 created_at: from_ms(project.created_at),
+                removed: project.removed_at.is_some(),
             })
             .collect();
-        let width = store
-            .ui()
-            .ok()
-            .and_then(|ui| ui.sidebar_width)
-            .map_or(DEFAULT_WIDTH, clamp_width);
+        let ui = store.ui().unwrap_or_default();
+        let filter = ui.project_filter.filter(|&id| {
+            projects
+                .iter()
+                .any(|project| project.id == id && !project.removed)
+        });
         {
             let mut app = state.write();
-            app.sidebar.width = width;
+            app.sidebar.width = ui.sidebar_width.map_or(DEFAULT_WIDTH, clamp_width);
             let sessions = &mut app.sessions;
             sessions.projects = projects;
-            sessions.cursor = sessions.sidebar().first().map(SidebarRow::item);
+            sessions.cursor = None;
+            sessions.filter_to(filter);
             sessions.error = error;
         }
         wake();
@@ -1321,7 +1347,8 @@ impl SessionsActor {
         Ok(thread)
     }
 
-    /// Saves `root` as a project, unless it already is one, and shows it.
+    /// Saves `root` as a project, unless it already is one, and shows it; a
+    /// removed project is restored.
     fn add_project(&mut self, root: PathBuf) {
         let now = now_ms();
         let title = project_title(&root);
@@ -1338,18 +1365,43 @@ impl SessionsActor {
             match added {
                 Ok(id) => {
                     sessions.error = None;
-                    if !sessions.projects.iter().any(|project| project.id == id) {
-                        sessions.projects.push(Project {
+                    match sessions
+                        .projects
+                        .iter_mut()
+                        .find(|project| project.id == id)
+                    {
+                        Some(project) => project.removed = false,
+                        None => sessions.projects.push(Project {
                             id,
                             title,
                             root,
                             created_at: from_ms(now),
                             threads: Vec::new(),
                             draft: None,
-                        });
+                            removed: false,
+                        }),
                     }
                 }
                 Err(error) => sessions.error = Some(error),
+            }
+        }
+        (self.wake)();
+    }
+
+    /// Removes project `id` from `␣n` and the project filter and discards its
+    /// draft, once the store has; its threads stay.
+    fn remove_project(&mut self, id: ProjectId) {
+        let removed = self.store.remove_project(id, now_ms());
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            match (removed, sessions.projects.iter_mut().find(|p| p.id == id)) {
+                (Ok(()), Some(project)) => {
+                    project.removed = true;
+                    project.draft = None;
+                }
+                (Ok(()), None) => {}
+                (Err(_), _) => sessions.error = Some(SAVE_FAILED.to_owned()),
             }
         }
         (self.wake)();
@@ -1431,11 +1483,14 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Saves the sidebar's width, showing why if it can't.
+    /// Saves the sidebar's width and project filter, showing why if it can't.
     fn save_ui(&self) {
-        let ui = Ui {
-            sidebar_width: Some(self.state.read().sidebar.width),
-            project_filter: None,
+        let ui = {
+            let app = self.state.read();
+            Ui {
+                sidebar_width: Some(app.sidebar.width),
+                project_filter: app.sessions.filter,
+            }
         };
         if self.store.save_ui(&ui).is_err() {
             self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
@@ -4579,6 +4634,219 @@ mod tests {
                 project_filter: None,
             },
             "SaveUi should save the sidebar's width"
+        );
+        Ok(())
+    }
+
+    /// Whether project `id` shows as removed.
+    fn removed_of(state: &State, id: ProjectId) -> Option<bool> {
+        state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| project.removed)
+    }
+
+    #[rstest::rstest]
+    fn remove_project_marks_it_removed() -> Result<(), Report<StoreError>> {
+        // Given a project with a draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When removing it.
+        actor.remove_project(id);
+
+        // Then it shows as removed.
+        assert_eq!(
+            removed_of(&state, id),
+            Some(true),
+            "a removed project should leave ␣n and the filter"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn remove_project_drops_its_draft() -> Result<(), Report<StoreError>> {
+        // Given a project with a draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When removing it.
+        actor.remove_project(id);
+
+        // Then it has no draft.
+        assert_eq!(
+            shown_draft(&state, id),
+            None,
+            "a removed project's draft should be discarded"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_shows_a_removed_project_as_removed() -> Result<(), Report<StoreError>> {
+        // Given a removed project.
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        store.remove_project(id, 1_000)?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the project shows as removed.
+        assert_eq!(
+            removed_of(&state, id),
+            Some(true),
+            "the removal should survive a restart"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_a_removed_project_restores_it() -> Result<(), Report<StoreError>> {
+        // Given a directory that's a removed project.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let store = Store::open_in_memory()?;
+        let id = store.add_project(dir.path(), "web", 0)?;
+        store.remove_project(id, 1_000)?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When adding it again.
+        actor.add_project(dir.path().to_owned());
+
+        // Then it's no longer removed.
+        assert_eq!(
+            removed_of(&state, id),
+            Some(false),
+            "␣p on a removed project's directory should restore it"
+        );
+        Ok(())
+    }
+
+    /// A store with projects orb and web, each holding one thread, and its
+    /// layout saved filtered to web. Returns web's id and thread.
+    fn store_filtered_to_web() -> Result<(Store, ProjectId, ThreadId), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        add_thread(&store, "aa", 1_000)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let thread = store.insert_thread(&NewThread {
+            project_id: web,
+            short_id: "bb".to_owned(),
+            cwd: PathBuf::from("/tmp/web"),
+            created_at: 500,
+            model: None,
+            permission_mode: None,
+        })?;
+        store.save_ui(&Ui {
+            sidebar_width: None,
+            project_filter: Some(web),
+        })?;
+        Ok((store, web, thread))
+    }
+
+    #[rstest::rstest]
+    fn restore_applies_the_saved_filter() -> Result<(), Report<StoreError>> {
+        // Given a sidebar saved filtered to web.
+        let (store, web, _) = store_filtered_to_web()?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the sidebar is filtered to web.
+        assert_eq!(
+            state.read().sessions.filter,
+            Some(web),
+            "the saved filter should be restored"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_selects_the_first_filtered_row() -> Result<(), Report<StoreError>> {
+        // Given a sidebar saved filtered to web, whose thread is older than
+        // orb's, so it would otherwise be the second row.
+        let (store, _, thread) = store_filtered_to_web()?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the cursor is on web's thread.
+        assert_eq!(
+            state.read().sessions.cursor,
+            Some(SidebarItem::Thread(thread)),
+            "the cursor should start on the filtered sidebar's first row"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_ignores_a_filter_to_a_removed_project() -> Result<(), Report<StoreError>> {
+        // Given a sidebar saved filtered to web, which was then removed.
+        let (store, web, _) = store_filtered_to_web()?;
+        store.remove_project(web, 2_000)?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the sidebar lists every project.
+        assert_eq!(
+            state.read().sessions.filter,
+            None,
+            "a filter to a removed project should be dropped"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn save_ui_saves_the_filter() -> Result<(), Report<StoreError>> {
+        // Given the actor with the orb project and the sidebar filtered to it.
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        let (actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+        state.write().sessions.filter = Some(id);
+
+        // When saving the layout.
+        actor.save_ui();
+
+        // Then the store holds the filter.
+        assert_eq!(
+            actor.store.ui()?.project_filter,
+            Some(id),
+            "SaveUi should save the project filter"
         );
         Ok(())
     }

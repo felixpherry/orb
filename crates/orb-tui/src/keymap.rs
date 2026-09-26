@@ -9,7 +9,8 @@
 //! popups don't offer it. `<C-Right>`/`<C-Left>` resize the focused side
 //! outside which-key, which can't name them. While attached, every key goes
 //! to Claude except `<C-\>` and `<C-h>`. An open picker takes typed
-//! characters as filter text and has its own fixed keys.
+//! characters as filter text and has its own fixed keys, `<C-x>` among them
+//! for removing a project from the project filter.
 
 use std::fmt;
 
@@ -148,6 +149,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             .bind(
                 "<leader>p",
                 Intent::AddProject,
+                KeyCategory::Sessions,
+                scope,
+            )
+            .bind(
+                "<leader>f",
+                Intent::FilterProjects,
                 KeyCategory::Sessions,
                 scope,
             );
@@ -374,6 +381,7 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
         (KeyCode::Enter, KeyModifiers::NONE) => Some(Intent::PickerConfirm),
         (KeyCode::Tab, KeyModifiers::NONE) => Some(Intent::PickerOpen),
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Intent::PickerCancel),
+        (KeyCode::Char('x'), KeyModifiers::CONTROL) => Some(Intent::PickerRemove),
         _ => None,
     }
 }
@@ -540,12 +548,49 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn ctrl_x_does_nothing_in_the_picker() {
+    fn ctrl_x_asks_to_remove_in_the_picker() {
         // Given / When routing `<C-x>` in an open picker.
         let intent = picker_route(ctrl('x'));
 
-        // Then nothing happens.
-        assert_eq!(intent, None, "<C-x> isn't bound in the picker");
+        // Then it asks to remove the highlighted project.
+        assert_eq!(
+            intent,
+            Some(Intent::PickerRemove),
+            "<C-x> should remove in the picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_f_filters_projects_in_the_sidebar(
+        #[values(Scope::Sidebar, Scope::SidebarDraft, Scope::SidebarEmpty)] scope: Scope,
+    ) {
+        // Given Space already pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `f`.
+        let intent = press(&mut keys, key(KeyCode::Char('f')));
+
+        // Then it opens the project filter.
+        assert_eq!(
+            intent,
+            Some(Intent::FilterProjects),
+            "␣f should filter projects in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_popup_lists_no_filter_in_the_preview(
+        #[values(Scope::Preview, Scope::DraftForm, Scope::PreviewEmpty)] scope: Scope,
+    ) {
+        // Given the leader popup's keys in a preview scope.
+        let keys = leader_popup(scope);
+
+        // When looking for `f`.
+        let found = keys.contains(&key(KeyCode::Char('f')));
+
+        // Then it isn't listed.
+        assert!(!found, "␣f is sidebar-only, not in {scope:?}");
     }
 
     #[rstest::rstest]

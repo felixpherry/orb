@@ -12,7 +12,7 @@ use crate::feat::pane::validator::validate_attach;
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
 use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
 use crate::feat::picker::validator::{
-    validate_add_directory, validate_open_directory, validate_pick_project,
+    validate_add_directory, validate_open_directory, validate_pick_project, validate_remove_project,
 };
 use crate::feat::preview::validator::{validate_toggle_fold, validate_yank};
 use crate::feat::sessions::state::{
@@ -136,13 +136,23 @@ impl IntentHandler {
                     .sessions
                     .projects_by_recency()
                     .into_iter()
-                    .map(|project| PickerItem::Project {
-                        id: project.id,
-                        title: project.title.clone(),
-                        root: project.root.clone(),
-                    })
+                    .map(project_item)
                     .collect();
                 open_picker(state, PickerState::projects(items, state.focus));
+                vec![]
+            }
+            Intent::FilterProjects => {
+                let items = std::iter::once(PickerItem::AllProjects)
+                    .chain(
+                        state
+                            .sessions
+                            .projects_by_recency()
+                            .into_iter()
+                            .map(project_item),
+                    )
+                    .collect();
+                let picker = PickerState::project_filter(items, state.sessions.filter, state.focus);
+                open_picker(state, picker);
                 vec![]
             }
             Intent::AddProject => {
@@ -373,6 +383,19 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
+                Some(&PickerKind::RemoveProject { project }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Confirm(true)) => remove_project(state, project),
+                        _ => vec![],
+                    }
+                }
+                Some(PickerKind::ProjectFilter) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::AllProjects) => filter_to(state, None),
+                        Some(&PickerItem::Project { id, .. }) => filter_to(state, Some(id)),
+                        _ => vec![],
+                    }
+                }
                 Some(PickerKind::Branches {
                     target: PickTarget::Thread(_),
                     ..
@@ -404,6 +427,20 @@ impl IntentHandler {
                 close_picker(state);
                 vec![]
             }
+            Intent::PickerRemove => match (
+                validate_remove_project(state),
+                state.picker.as_ref().and_then(PickerState::selected),
+            ) {
+                (Ok(()), Some(&PickerItem::Project { id, .. })) => {
+                    let return_to = state
+                        .picker
+                        .as_ref()
+                        .map_or(Focus::Sidebar, PickerState::return_to);
+                    state.picker = Some(PickerState::remove_project(id, return_to));
+                    vec![]
+                }
+                _ => vec![],
+            },
             Intent::NextBlock => {
                 state.preview.next_block();
                 vec![]
@@ -495,6 +532,15 @@ impl IntentHandler {
                 _ => vec![],
             },
         }
+    }
+}
+
+/// The picker row for `project`.
+fn project_item(project: &Project) -> PickerItem {
+    PickerItem::Project {
+        id: project.id,
+        title: project.title.clone(),
+        root: project.root.clone(),
     }
 }
 
@@ -676,20 +722,56 @@ fn workspace_items(
     .collect()
 }
 
+/// Filters the sidebar to `filter`'s project, or to all projects, and asks
+/// for the filter to be saved.
+fn filter_to(state: &mut AppState, filter: Option<ProjectId>) -> Vec<Command> {
+    state.sessions.filter_to(filter);
+    with_visit(state, vec![Command::SaveUi, Command::ShowPreview])
+}
+
+/// Asks for `project` to be removed. A filter to it goes back to all
+/// projects, and a cursor on its draft moves to the neighbouring row.
+fn remove_project(state: &mut AppState, project: ProjectId) -> Vec<Command> {
+    if state.sessions.filter == Some(project) {
+        state.sessions.filter = None;
+    }
+    let draft = SidebarItem::Draft(project);
+    if state.sessions.cursor == Some(draft) {
+        state.sessions.cursor = state.sessions.row_neighbour(draft);
+    }
+    with_visit(
+        state,
+        vec![
+            Command::RemoveProject(project),
+            Command::SaveUi,
+            Command::ShowPreview,
+        ],
+    )
+}
+
 /// Selects `project`'s draft and gives the keys to its form, asking the
-/// sessions actor to create the draft when the project has none.
+/// sessions actor to create the draft when the project has none. A filter to
+/// another project goes back to all projects.
 fn open_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
     let exists = state
         .sessions
         .projects
         .iter()
         .any(|p| p.id == project && p.draft.is_some());
+    let outside = state
+        .sessions
+        .filter
+        .is_some_and(|filter| filter != project);
+    if outside {
+        state.sessions.filter = None;
+    }
     state.sessions.cursor = Some(SidebarItem::Draft(project));
     state.focus = Focus::Preview;
     (!exists)
         .then_some(Command::CreateDraft(project))
         .into_iter()
         .chain([Command::ShowPreview])
+        .chain(outside.then_some(Command::SaveUi))
         .collect()
 }
 
@@ -819,6 +901,7 @@ mod tests {
                     title: "work".into(),
                     root: "/work".into(),
                     created_at: SystemTime::UNIX_EPOCH,
+                    removed: false,
                     draft: None,
                     threads,
                 }],
@@ -841,6 +924,7 @@ mod tests {
                         title: (*title).to_owned(),
                         root: format!("/{title}").into(),
                         created_at: SystemTime::UNIX_EPOCH,
+                        removed: false,
                         draft: None,
                         threads: vec![],
                     })
@@ -3447,5 +3531,356 @@ mod tests {
 
         // Then nothing opens.
         assert!(commands.is_empty(), "a tool needs a thread or draft");
+    }
+
+    /// The picker row for project `id` of [`with_projects`].
+    fn project_row(id: i64, title: &str) -> PickerItem {
+        PickerItem::Project {
+            id: ProjectId(id),
+            title: title.to_owned(),
+            root: format!("/{title}").into(),
+        }
+    }
+
+    /// Projects alpha (1) and beta (2), holding idle threads 11 and 21 (21
+    /// listed first), the sidebar filtered to `filter` with the cursor on
+    /// `cursor`, and the project filter opened from the sidebar.
+    fn filtering(filter: Option<i64>, cursor: SidebarItem) -> AppState {
+        let mut state = with_projects(&["alpha", "beta"]);
+        for (project, id) in state.sessions.projects.iter_mut().zip([11, 21]) {
+            project.threads = vec![thread(id, ThreadStatus::Idle)];
+        }
+        state.sessions.filter = filter.map(ProjectId);
+        state.sessions.cursor = Some(cursor);
+        IntentHandler::handle(&Intent::FilterProjects, &mut state);
+        state
+    }
+
+    /// Highlights `item` in the open picker.
+    fn highlight(state: &mut AppState, item: &PickerItem) {
+        if let Some(picker) = &mut state.picker {
+            picker.select(item);
+        }
+    }
+
+    /// [`filtering`], then `<C-x>` on alpha.
+    fn removing_alpha(filter: Option<i64>, cursor: SidebarItem) -> AppState {
+        let mut state = filtering(filter, cursor);
+        highlight(&mut state, &project_row(1, "alpha"));
+        IntentHandler::handle(&Intent::PickerRemove, &mut state);
+        state
+    }
+
+    fn on_thread(id: i64) -> SidebarItem {
+        SidebarItem::Thread(ThreadId(id))
+    }
+
+    #[rstest::rstest]
+    fn filter_projects_lists_all_projects_then_the_projects() {
+        // Given projects alpha and beta.
+        // When handling FilterProjects.
+        let state = filtering(None, on_thread(21));
+
+        // Then the picker lists All projects, then alpha and beta.
+        let rows: Vec<PickerItem> = state
+            .picker
+            .iter()
+            .flat_map(PickerState::shown)
+            .map(|(item, _)| item.clone())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                PickerItem::AllProjects,
+                project_row(1, "alpha"),
+                project_row(2, "beta"),
+            ],
+            "the project filter's rows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filter_projects_selects_the_current_filter() {
+        // Given the sidebar filtered to beta.
+        // When handling FilterProjects.
+        let state = filtering(Some(2), on_thread(21));
+
+        // Then beta is highlighted.
+        assert_eq!(
+            state.picker.as_ref().and_then(PickerState::selected),
+            Some(&project_row(2, "beta")),
+            "the current filter should be preselected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filter_projects_selects_all_projects_without_a_filter() {
+        // Given no filter.
+        // When handling FilterProjects.
+        let state = filtering(None, on_thread(21));
+
+        // Then All projects is highlighted.
+        assert_eq!(
+            state.picker.as_ref().and_then(PickerState::selected),
+            Some(&PickerItem::AllProjects),
+            "no filter should preselect All projects"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_project_filter_sets_it() {
+        // Given the project filter with beta highlighted.
+        let mut state = filtering(None, on_thread(21));
+        highlight(&mut state, &project_row(2, "beta"));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sidebar is filtered to beta.
+        assert_eq!(
+            state.sessions.filter,
+            Some(ProjectId(2)),
+            "picking beta should filter to it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_project_filter_moves_an_outside_cursor_to_the_first_row() {
+        // Given the cursor on alpha's thread 11 and beta highlighted.
+        let mut state = filtering(None, on_thread(11));
+        highlight(&mut state, &project_row(2, "beta"));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the cursor is on beta's thread 21, the first row left.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(21)),
+            "a cursor the filter hides should move to the first row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_project_filter_returns_save_ui() {
+        // Given the cursor on beta's thread 21 and beta highlighted.
+        let mut state = filtering(None, on_thread(21));
+        highlight(&mut state, &project_row(2, "beta"));
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the filter is saved, the preview refreshed and thread 21
+        // visited.
+        assert_eq!(
+            commands,
+            vec![
+                Command::SaveUi,
+                Command::ShowPreview,
+                Command::Visit(ThreadId(21)),
+            ],
+            "filtering should save the filter"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_all_projects_clears_the_filter() {
+        // Given the sidebar filtered to beta and All projects highlighted.
+        let mut state = filtering(Some(2), on_thread(21));
+        highlight(&mut state, &PickerItem::AllProjects);
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sidebar lists every project again.
+        assert_eq!(
+            state.sessions.filter, None,
+            "All projects should clear the filter"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_remove_on_a_project_opens_the_remove_confirm() {
+        // Given the project filter with alpha highlighted.
+        // When handling PickerRemove.
+        let state = removing_alpha(None, on_thread(21));
+
+        // Then the remove confirm for alpha is open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::RemoveProject {
+                project: ProjectId(1)
+            }),
+            "<C-x> on a project should ask to confirm its removal"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_remove_on_all_projects_does_nothing() {
+        // Given the project filter with All projects highlighted.
+        let mut state = filtering(None, on_thread(21));
+
+        // When handling PickerRemove.
+        IntentHandler::handle(&Intent::PickerRemove, &mut state);
+
+        // Then the project filter stays open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::ProjectFilter),
+            "All projects can't be removed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_yes_returns_remove_project() {
+        // Given the remove confirm for alpha with Yes highlighted.
+        let mut state = removing_alpha(None, on_thread(21));
+        highlight(&mut state, &PickerItem::Confirm(true));
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then alpha is removed, the filter saved, and the preview refreshed.
+        assert_eq!(
+            commands,
+            vec![
+                Command::RemoveProject(ProjectId(1)),
+                Command::SaveUi,
+                Command::ShowPreview,
+                Command::Visit(ThreadId(21)),
+            ],
+            "Yes should remove the project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_yes_clears_a_filter_to_the_project() {
+        // Given the sidebar filtered to alpha, and the remove confirm for
+        // alpha with Yes highlighted.
+        let mut state = removing_alpha(Some(1), on_thread(11));
+        highlight(&mut state, &PickerItem::Confirm(true));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sidebar lists every project again.
+        assert_eq!(
+            state.sessions.filter, None,
+            "removing the filtered project should clear the filter"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_yes_moves_the_cursor_off_the_projects_draft() {
+        // Given alpha's draft selected (above threads 21 and 11), and the
+        // remove confirm for alpha with Yes highlighted.
+        let mut state = {
+            let mut state = filtering(None, SidebarItem::Draft(ProjectId(1)));
+            if let Some(alpha) = state.sessions.projects.first_mut() {
+                alpha.draft = Some(draft(DraftWorkspace::Local));
+            }
+            highlight(&mut state, &project_row(1, "alpha"));
+            IntentHandler::handle(&Intent::PickerRemove, &mut state);
+            state
+        };
+        highlight(&mut state, &PickerItem::Confirm(true));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the cursor is on thread 21, the row below the draft.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(21)),
+            "the cursor should leave the discarded draft"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_no_returns_nothing() {
+        // Given the remove confirm for alpha with No highlighted.
+        let mut state = removing_alpha(None, on_thread(21));
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing is removed.
+        assert!(commands.is_empty(), "No should remove nothing");
+    }
+
+    #[rstest::rstest]
+    fn cancelling_the_remove_confirm_returns_to_the_sidebar() {
+        // Given the remove confirm opened from the sidebar's project filter.
+        let mut state = removing_alpha(None, on_thread(21));
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the picker is closed and the keys are back in the sidebar.
+        assert_eq!(
+            (state.picker.is_none(), state.focus),
+            (true, Focus::Sidebar),
+            "Esc should close the confirm back to the sidebar"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_session_outside_the_filter_clears_it() {
+        // Given the sidebar filtered to beta and the project picker with alpha
+        // highlighted.
+        let mut state = picking(Focus::Sidebar);
+        state.sessions.filter = Some(ProjectId(2));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sidebar lists every project again.
+        assert_eq!(
+            state.sessions.filter, None,
+            "opening another project's draft should clear the filter"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_session_outside_the_filter_returns_save_ui() {
+        // Given the sidebar filtered to beta and the project picker with alpha
+        // highlighted.
+        let mut state = picking(Focus::Sidebar);
+        state.sessions.filter = Some(ProjectId(2));
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then alpha's draft is created and the cleared filter saved.
+        assert_eq!(
+            commands,
+            vec![
+                Command::CreateDraft(ProjectId(1)),
+                Command::ShowPreview,
+                Command::SaveUi,
+            ],
+            "clearing the filter should save it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_session_inside_the_filter_keeps_it() {
+        // Given the sidebar filtered to alpha and the project picker with
+        // alpha highlighted.
+        let mut state = picking(Focus::Sidebar);
+        state.sessions.filter = Some(ProjectId(1));
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the filter stays, and isn't saved.
+        assert_eq!(
+            (state.sessions.filter, commands),
+            (
+                Some(ProjectId(1)),
+                vec![Command::CreateDraft(ProjectId(1)), Command::ShowPreview],
+            ),
+            "a project inside the filter leaves it alone"
+        );
     }
 }

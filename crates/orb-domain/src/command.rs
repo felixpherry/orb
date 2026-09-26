@@ -1,10 +1,10 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
 //! has updated [`AppState`](crate::AppState). Pane commands, `Yank`,
 //! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
-//! frontend loop; session commands (drafts, add project, move to another
-//! workspace, switch branch, refresh, pin, settle, delete, visit, save the
-//! sidebar's width) go to the sessions actor; `ShowPreview` goes to the
-//! preview actor.
+//! frontend loop; session commands (drafts, add or remove a project, move to
+//! another workspace, switch branch, refresh, pin, settle, delete, visit, save
+//! the sidebar's width and filter) go to the sessions actor; `ShowPreview`
+//! goes to the preview actor.
 
 use std::path::PathBuf;
 
@@ -76,8 +76,12 @@ pub enum Command {
     Delete(ThreadId),
     /// The user is looking at the thread now.
     Visit(ThreadId),
-    /// Save the sidebar's width as it now is in the app state.
+    /// Save the sidebar's width and project filter as they now are in the
+    /// app state.
     SaveUi,
+    /// Remove the project from `␣n` and the project filter and discard its
+    /// draft; its threads stay.
+    RemoveProject(ProjectId),
 }
 
 /// Where a thread's session runs.

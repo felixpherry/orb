@@ -41,6 +41,9 @@ pub enum Intent {
     LeavePane,
     /// Open the project picker to open that project's draft.
     NewSession,
+    /// Open the project filter picker to filter the sidebar to one project,
+    /// or to all of them.
+    FilterProjects,
     /// Move the preview's cursor to the next block.
     NextBlock,
     /// Move the preview's cursor to the previous block.
@@ -105,6 +108,8 @@ pub enum Intent {
     PickerOpen,
     /// Close the picker without picking.
     PickerCancel,
+    /// Ask to remove the project highlighted in the project filter.
+    PickerRemove,
 }
 
 /// The label the which-key popup shows for the intent.
@@ -122,6 +127,7 @@ impl fmt::Display for Intent {
             Self::Attach => "attach",
             Self::Detach => "back to orb",
             Self::NewSession => "new session",
+            Self::FilterProjects => "filter projects",
             Self::NextBlock => "next block",
             Self::PrevBlock => "previous block",
             Self::HalfPageDown | Self::PickerHalfPageDown | Self::SelectHalfPageDown => {
@@ -152,6 +158,7 @@ impl fmt::Display for Intent {
             Self::PickerConfirm => "pick",
             Self::PickerOpen => "open directory",
             Self::PickerCancel => "cancel",
+            Self::PickerRemove => "remove",
         })
     }
 }
