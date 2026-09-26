@@ -908,6 +908,7 @@ mod tests {
     #[case(KeyCode::Esc, KeyModifiers::NONE)]
     #[case(KeyCode::Char('h'), KeyModifiers::CONTROL)]
     #[case(KeyCode::Char('a'), KeyModifiers::NONE)]
+    #[case(KeyCode::Char(' '), KeyModifiers::NONE)]
     fn keys_are_forwarded_while_attached(#[case] code: KeyCode, #[case] modifiers: KeyModifiers) {
         // Given a key other than `<C-\>`.
         let key = KeyEvent::new(code, modifiers);
