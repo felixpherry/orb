@@ -27,12 +27,14 @@ pub struct IntentHandler;
 
 impl IntentHandler {
     /// Apply `intent` to `state` and return the commands that must follow.
-    /// An intent that fails validation changes nothing.
+    /// Every intent first clears the mode line's error, which the user has now
+    /// seen; otherwise an intent that fails validation changes nothing.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per intent keeps every input decision in one match"
     )]
     pub fn handle(intent: &Intent, state: &mut AppState) -> Vec<Command> {
+        state.sessions.error = None;
         match intent {
             Intent::Quit => {
                 state.should_quit = true;
@@ -1169,6 +1171,22 @@ mod tests {
             commands,
             [Command::ListBranches("/work".into())],
             "the picker's refs come from the thread's directory"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_intent_clears_the_error() {
+        // Given a failure on the mode line.
+        let mut state = state_with(vec![in_root(1)], 1);
+        state.sessions.error = Some("Claude is working in this directory".to_owned());
+
+        // When handling the next intent.
+        IntentHandler::handle(&Intent::SelectNext, &mut state);
+
+        // Then the failure is gone.
+        assert_eq!(
+            state.sessions.error, None,
+            "the user has seen the error once they press a key"
         );
     }
 

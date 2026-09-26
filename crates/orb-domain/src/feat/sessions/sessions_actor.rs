@@ -505,8 +505,11 @@ impl SessionsActor {
         let changed = {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
-            let mut changed = sessions.error != error;
-            sessions.error = error;
+            let mut changed = false;
+            if let Some(error) = error {
+                changed = sessions.error.as_ref() != Some(&error);
+                sessions.error = Some(error);
+            }
             for (row, status) in self.rows.iter().zip(statuses) {
                 if let Some(thread) = thread_mut(sessions, row.id) {
                     changed |= show(thread, row, status);
@@ -1940,6 +1943,27 @@ mod tests {
             stamp_of(&state, id),
             None,
             "an idle thread has no turn running"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn poll_keeps_an_earlier_error() -> Result<(), Report<StoreError>> {
+        // Given a failure on the mode line.
+        let (store, _) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.error = Some("Claude is working in this directory".to_owned());
+
+        // When a poll succeeds.
+        actor.poll().await;
+
+        // Then the failure still shows.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("Claude is working in this directory"),
+            "a poll shouldn't hide an error the user hasn't seen"
         );
         Ok(())
     }

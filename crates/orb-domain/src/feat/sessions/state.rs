@@ -141,7 +141,7 @@ pub struct Sessions {
     pub shelf_open: bool,
     /// A new session is being created.
     pub starting: bool,
-    /// The latest `claude` failure; cleared by the next success.
+    /// The latest failure; shown until the next intent or a later success.
     pub error: Option<String>,
     /// A session start waits for the user to trust this directory in an
     /// interactive `claude`.
