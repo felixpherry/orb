@@ -339,6 +339,29 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case(
+        command("sh", &["-c", "echo >&2; echo '  no session  ' >&2; echo more >&2; exit 1"]),
+        "no session"
+    )]
+    #[case(command("sh", &["-c", "exit 1"]), "zellij failed")]
+    #[case(command("/nonexistent/zellij", &[]), "couldn't run zellij")]
+    fn run_within_gives_the_reason_a_failed_command_left(
+        #[case] failing: Command,
+        #[case] expected: &str,
+    ) {
+        // Given a command that fails, with or without saying why, or can't start.
+        // When running it.
+        let result = run_within(failing, Duration::from_secs(5));
+
+        // Then the reason is stderr's first non-empty line, else a stock one.
+        assert_eq!(
+            result.err().as_ref().map(zellij_reason),
+            Some(expected.to_owned()),
+            "the reason for the mode line"
+        );
+    }
+
+    #[rstest::rstest]
     fn run_within_kills_a_command_that_outlives_the_limit() -> std::io::Result<()> {
         // Given a command that writes its pid to a file, then runs longer than the limit.
         let dir = TempDir::new()?;
