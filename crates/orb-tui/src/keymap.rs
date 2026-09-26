@@ -5,13 +5,15 @@
 //! scope is the focus and what the sidebar cursor is on; `<Space>` is the
 //! leader and shows a popup. A key that does nothing for the selection isn't
 //! bound there (the preview's block keys on a draft, `␣m`/`␣a` on a thread,
-//! `␣w`/`␣b` with nothing selected), so the popups don't offer it. While
-//! attached, every key goes to Claude except `<C-\>`. An open picker takes
-//! typed characters as filter text and has its own fixed keys.
+//! `␣w`/`␣b` and the tool keys `␣t`/`␣g`/`␣v` with nothing selected), so the
+//! popups don't offer it. While attached, every key goes to Claude except
+//! `<C-\>`. An open picker takes typed characters as filter text and has its
+//! own fixed keys.
 
 use std::fmt;
 
 use orb_domain::feat::sessions::state::Sessions;
+use orb_domain::feat::zellij::zellij_service::Tool;
 use orb_domain::{Focus, Intent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_which_key::{Keymap, WhichKeyState};
@@ -24,6 +26,7 @@ pub(crate) enum KeyCategory {
     Sessions,
     Threads,
     Preview,
+    Tools,
 }
 
 impl fmt::Display for KeyCategory {
@@ -34,6 +37,7 @@ impl fmt::Display for KeyCategory {
             Self::Sessions => "sessions",
             Self::Threads => "threads",
             Self::Preview => "preview",
+            Self::Tools => "tools",
         })
     }
 }
@@ -224,6 +228,24 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 Intent::SwitchBranch,
                 KeyCategory::Sessions,
                 scope,
+            )
+            .bind(
+                "<leader>t",
+                Intent::OpenTool(Tool::Shell),
+                KeyCategory::Tools,
+                scope,
+            )
+            .bind(
+                "<leader>g",
+                Intent::OpenTool(Tool::Lazygit),
+                KeyCategory::Tools,
+                scope,
+            )
+            .bind(
+                "<leader>v",
+                Intent::OpenTool(Tool::Nvim),
+                KeyCategory::Tools,
+                scope,
             );
     }
     for scope in [Scope::SidebarDraft, Scope::DraftForm] {
@@ -316,6 +338,7 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
 
 #[cfg(test)]
 mod tests {
+    use orb_domain::feat::zellij::zellij_service::Tool;
     use orb_domain::{Focus, Intent};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
@@ -628,6 +651,49 @@ mod tests {
 
         // Then both are listed exactly when a thread or draft is selected.
         assert_eq!(found, [listed; 2], "w/b in the {scope:?} leader popup");
+    }
+
+    #[rstest::rstest]
+    fn leader_keys_open_tools(
+        #[values(Scope::Sidebar, Scope::SidebarDraft, Scope::Preview, Scope::DraftForm)]
+        scope: Scope,
+        #[values(('t', Tool::Shell), ('g', Tool::Lazygit), ('v', Tool::Nvim))] binding: (
+            char,
+            Tool,
+        ),
+    ) {
+        // Given Space already pressed.
+        let (pressed, tool) = binding;
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing the tool's key.
+        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
+
+        // Then it opens that tool.
+        assert_eq!(
+            intent,
+            Some(Intent::OpenTool(tool)),
+            "Space {pressed} in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::SidebarEmpty, false)]
+    #[case(Scope::PreviewEmpty, false)]
+    #[case(Scope::Sidebar, true)]
+    #[case(Scope::Preview, true)]
+    #[case(Scope::SidebarDraft, true)]
+    #[case(Scope::DraftForm, true)]
+    fn leader_popup_lists_tools_only_with_a_selection(#[case] scope: Scope, #[case] listed: bool) {
+        // Given the leader popup's keys in the scope.
+        let keys = leader_popup(scope);
+
+        // When looking for `t`, `g` and `v`.
+        let found = ['t', 'g', 'v'].map(|c| keys.contains(&key(KeyCode::Char(c))));
+
+        // Then all three are listed exactly when a thread or draft is selected.
+        assert_eq!(found, [listed; 3], "t/g/v in the {scope:?} leader popup");
     }
 
     #[rstest::rstest]
