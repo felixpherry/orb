@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::feat::sessions::state::{Project, Thread};
+use crate::feat::sessions::state::{Project, ThreadId};
 
 /// The longest branch slug, in bytes.
 const SLUG_MAX: usize = 40;
@@ -67,16 +67,18 @@ pub fn slug(title: &str) -> Option<String> {
     (!slug.is_empty()).then(|| slug.to_owned())
 }
 
-/// The project's previous worktree for `thread`: the worktree (not the
-/// project's root) of the thread with the latest activity, other than
-/// `thread` and its own directory. Returns its path and branch.
-pub fn previous_worktree(project: &Project, thread: &Thread) -> Option<(PathBuf, Option<String>)> {
+/// The project's previous worktree seen from `cwd`: the worktree (not the
+/// project's root, nor `cwd`) of the thread with the latest activity, other
+/// than `except`. Returns its path and branch.
+pub fn previous_worktree(
+    project: &Project,
+    cwd: &Path,
+    except: Option<ThreadId>,
+) -> Option<(PathBuf, Option<String>)> {
     project
         .threads
         .iter()
-        .filter(|other| {
-            other.id != thread.id && other.cwd != project.root && other.cwd != thread.cwd
-        })
+        .filter(|other| Some(other.id) != except && other.cwd != project.root && other.cwd != cwd)
         .max_by_key(|other| other.last_activity_at)
         .map(|other| (other.cwd.clone(), other.branch.clone()))
 }
@@ -117,6 +119,7 @@ mod tests {
             root: PathBuf::from(ROOT),
             created_at: SystemTime::UNIX_EPOCH,
             threads,
+            draft: None,
         }
     }
 
@@ -173,7 +176,7 @@ mod tests {
         ]);
 
         // When finding the previous worktree for the fresh thread.
-        let previous = previous_worktree(&project, &fresh);
+        let previous = previous_worktree(&project, &fresh.cwd, Some(fresh.id));
 
         // Then it's the most recently active worktree thread's directory and branch.
         assert_eq!(
@@ -190,9 +193,29 @@ mod tests {
         let project = project(vec![fresh.clone(), thread(2, ROOT, "main", 90)]);
 
         // When finding the previous worktree.
-        let previous = previous_worktree(&project, &fresh);
+        let previous = previous_worktree(&project, &fresh.cwd, Some(fresh.id));
 
         // Then there is none.
         assert_eq!(previous, None, "root threads aren't a previous worktree");
+    }
+
+    #[rstest::rstest]
+    fn previous_worktree_from_the_root_without_an_excluded_thread_finds_the_latest() {
+        // Given a root thread active latest and two worktree threads.
+        let project = project(vec![
+            thread(1, ROOT, "main", 90),
+            thread(2, "/wt/orb-old", "orb/old", 10),
+            thread(3, "/wt/orb-new", "orb/new", 50),
+        ]);
+
+        // When finding the previous worktree from the root, excluding no thread.
+        let previous = previous_worktree(&project, Path::new(ROOT), None);
+
+        // Then it's the most recently active worktree thread's directory and branch.
+        assert_eq!(
+            previous,
+            Some((PathBuf::from("/wt/orb-new"), Some("orb/new".to_owned()))),
+            "a draft should find the latest worktree thread"
+        );
     }
 }

@@ -42,7 +42,10 @@ pub(crate) fn render(
     // blank line for the first card's outline. Blank lines above the shelf
     // header keep the shelf at the bottom while the list is short.
     let (placed, total) = {
-        let lead = u16::from(matches!(rows.first(), Some(SidebarRow::Card { .. })));
+        let lead = u16::from(matches!(
+            rows.first(),
+            Some(SidebarRow::Draft { .. } | SidebarRow::Card { .. })
+        ));
         let content = rows.iter().map(height).fold(lead, u16::saturating_add);
         let gap = inner.height.saturating_sub(content);
         let mut top = lead;
@@ -96,7 +99,7 @@ pub(crate) fn render(
 /// How many lines a row takes: a card's 3 and the blank line below it, else 1.
 fn height(row: &SidebarRow<'_>) -> u16 {
     match row {
-        SidebarRow::Card { .. } => 4,
+        SidebarRow::Draft { .. } | SidebarRow::Card { .. } => 4,
         SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } => 1,
     }
 }
@@ -105,7 +108,7 @@ fn height(row: &SidebarRow<'_>) -> u16 {
 /// the blank lines above and below it.
 fn extent(row: &SidebarRow<'_>, top: u16) -> (u16, u16) {
     match row {
-        SidebarRow::Card { .. } => (top.saturating_sub(1), 5),
+        SidebarRow::Draft { .. } | SidebarRow::Card { .. } => (top.saturating_sub(1), 5),
         SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } => (top, 1),
     }
 }
@@ -119,6 +122,11 @@ fn render_row(row: &SidebarRow<'_>, selected: bool, now: SystemTime, area: Rect,
     };
     let text = area.inner(Margin::new(2, 0));
     match row {
+        SidebarRow::Draft { .. } => {
+            if selected {
+                render_outline(area, buf);
+            }
+        }
         SidebarRow::Card { project, thread } => {
             if selected {
                 render_outline(area, buf);
@@ -451,6 +459,7 @@ mod tests {
                 title: "orb".to_owned(),
                 root: "/Users/me/dev/orb".into(),
                 created_at: SystemTime::UNIX_EPOCH,
+                draft: None,
                 threads,
             }],
             ..Sessions::default()

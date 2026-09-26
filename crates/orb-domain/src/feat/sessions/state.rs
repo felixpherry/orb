@@ -1,5 +1,5 @@
-//! The sidebar's contents: projects, their threads, the sidebar's order, and
-//! its cursor.
+//! The sidebar's contents: projects, their threads and drafts, the sidebar's
+//! order, and its cursor.
 
 use std::cmp::Reverse;
 use std::ffi::OsString;
@@ -71,6 +71,32 @@ pub struct Thread {
     pub unseen: bool,
 }
 
+/// Where a draft's session will run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftWorkspace {
+    /// The project's root.
+    Local,
+    /// A worktree orb creates when the draft starts.
+    NewWorktree,
+    /// A worktree that already exists.
+    Existing(PathBuf),
+}
+
+/// The session setup picked for a project's next thread, before it starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Draft {
+    pub workspace: DraftWorkspace,
+    /// Local: the root's checked-out branch as last known. New worktree: the
+    /// base it starts from (a ref name like `main` or `origin/x`). Existing:
+    /// that worktree's branch.
+    pub branch: Option<String>,
+    /// The `--model`; `None` = Claude's default.
+    pub model: Option<String>,
+    /// The `--permission-mode`; `None` = Claude's default.
+    pub permission: Option<String>,
+    pub created_at: SystemTime,
+}
+
 /// A directory the user starts sessions in.
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -81,11 +107,15 @@ pub struct Project {
     pub created_at: SystemTime,
     /// Newest first.
     pub threads: Vec<Thread>,
+    /// The project's draft; a project has at most one.
+    pub draft: Option<Draft>,
 }
 
 /// A row the sidebar's cursor can rest on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarItem {
+    /// A project's draft.
+    Draft(ProjectId),
     Thread(ThreadId),
     /// The Settled shelf's header.
     SettledShelf,
@@ -94,6 +124,11 @@ pub enum SidebarItem {
 /// One sidebar row, in display order.
 #[derive(Debug, Clone, Copy)]
 pub enum SidebarRow<'a> {
+    /// A project's draft, drawn as a card.
+    Draft {
+        project: &'a Project,
+        draft: &'a Draft,
+    },
     /// A pinned or active thread, drawn as a card.
     Card {
         project: &'a Project,
@@ -116,6 +151,7 @@ impl SidebarRow<'_> {
     /// What the cursor rests on when it is on this row.
     pub fn item(&self) -> SidebarItem {
         match self {
+            Self::Draft { project, .. } => SidebarItem::Draft(project.id),
             Self::Card { thread, .. } | Self::Settled { thread, .. } => {
                 SidebarItem::Thread(thread.id)
             }
@@ -124,13 +160,13 @@ impl SidebarRow<'_> {
     }
 }
 
-/// orb's projects and threads, and where the sidebar's cursor is.
+/// orb's projects, threads and drafts, and where the sidebar's cursor is.
 ///
-/// Written by the sessions actor (projects, `error`, `starting` when a create
-/// ends, `trust`, the cursor after a restore or a create) and by the intent
-/// handler
-/// (the cursor on navigation, settle and delete, `shelf_open`, `starting` when
-/// a create begins).
+/// Written by the sessions actor (projects and their drafts, `error`,
+/// `starting` when a create ends, `trust`, `attach`, the cursor after a
+/// restore or a create) and by the intent handler (the cursor on navigation,
+/// settle and delete, `shelf_open`, `starting` when a create begins, a draft's
+/// fields when the user picks them). The frontend loop takes `attach`.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
@@ -146,6 +182,8 @@ pub struct Sessions {
     /// A session start waits for the user to trust this directory in an
     /// interactive `claude`.
     pub trust: Option<PathBuf>,
+    /// A started draft's thread for the frontend to attach to.
+    pub attach: Option<ThreadId>,
 }
 
 impl Sessions {
@@ -172,11 +210,18 @@ impl Sessions {
             .flat_map(|project| project.threads.iter())
     }
 
-    /// The sidebar's rows: pinned cards (newest pin first), active cards
-    /// (newest created or un-settled first), then, if anything is settled, the
-    /// shelf header and the settled rows (newest settle first). A collapsed
-    /// shelf still lists the cursor's settled thread. Ties go to the higher id.
+    /// The sidebar's rows: drafts (newest first), pinned cards (newest pin
+    /// first), active cards (newest created or un-settled first), then, if
+    /// anything is settled, the shelf header and the settled rows (newest
+    /// settle first). A collapsed shelf still lists the cursor's settled
+    /// thread. Ties go to the higher id.
     pub fn sidebar(&self) -> Vec<SidebarRow<'_>> {
+        let mut drafts: Vec<_> = self
+            .projects
+            .iter()
+            .filter_map(|project| project.draft.as_ref().map(|draft| (project, draft)))
+            .collect();
+        drafts.sort_by_key(|(project, draft)| Reverse((draft.created_at, project.id.0)));
         let (mut settled, live): (Vec<_>, Vec<_>) = self
             .projects
             .iter()
@@ -188,10 +233,15 @@ impl Sessions {
         pinned.sort_by_key(|(_, thread)| Reverse((thread.pinned_at, thread.id.0)));
         active.sort_by_key(|(_, thread)| Reverse((thread.active_since, thread.id.0)));
         settled.sort_by_key(|(_, thread)| Reverse((thread.settled_at, thread.id.0)));
-        let mut rows: Vec<SidebarRow<'_>> = pinned
+        let mut rows: Vec<SidebarRow<'_>> = drafts
             .into_iter()
-            .chain(active)
-            .map(|(project, thread)| SidebarRow::Card { project, thread })
+            .map(|(project, draft)| SidebarRow::Draft { project, draft })
+            .chain(
+                pinned
+                    .into_iter()
+                    .chain(active)
+                    .map(|(project, thread)| SidebarRow::Card { project, thread }),
+            )
             .collect();
         if !settled.is_empty() {
             rows.push(SidebarRow::ShelfHeader {
@@ -214,6 +264,18 @@ impl Sessions {
     pub fn selected_thread(&self) -> Option<&Thread> {
         match self.cursor {
             Some(SidebarItem::Thread(id)) => self.threads().find(|thread| thread.id == id),
+            _ => None,
+        }
+    }
+
+    /// The draft under the cursor and its project, if it still exists.
+    pub fn selected_draft(&self) -> Option<(&Project, &Draft)> {
+        match self.cursor {
+            Some(SidebarItem::Draft(id)) => self
+                .projects
+                .iter()
+                .find(|project| project.id == id)
+                .and_then(|project| project.draft.as_ref().map(|draft| (project, draft))),
             _ => None,
         }
     }
@@ -260,18 +322,22 @@ impl Sessions {
     /// Where the cursor goes when thread `id` is settled: the next card below,
     /// else the nearest card above, else the shelf header the settle creates.
     pub fn card_neighbour(&self, id: ThreadId) -> Option<SidebarItem> {
-        self.neighbour(id, |row| matches!(row, SidebarRow::Card { .. }))
-            .or(Some(SidebarItem::SettledShelf))
+        self.neighbour(SidebarItem::Thread(id), |row| {
+            matches!(row, SidebarRow::Card { .. })
+        })
+        .or(Some(SidebarItem::SettledShelf))
     }
 
-    /// Where the cursor goes when thread `id` is deleted: the next thread row
-    /// below, else the nearest one above, else the shelf header if another
-    /// thread is settled.
-    pub fn row_neighbour(&self, id: ThreadId) -> Option<SidebarItem> {
-        self.neighbour(id, |row| !matches!(row, SidebarRow::ShelfHeader { .. }))
+    /// Where the cursor goes when the draft or thread `item` is deleted: the
+    /// next draft or thread row below, else the nearest one above, else the
+    /// shelf header if another thread is settled.
+    pub fn row_neighbour(&self, item: SidebarItem) -> Option<SidebarItem> {
+        self.neighbour(item, |row| !matches!(row, SidebarRow::ShelfHeader { .. }))
             .or_else(|| {
                 self.threads()
-                    .any(|thread| thread.id != id && thread.settled_at.is_some())
+                    .any(|thread| {
+                        SidebarItem::Thread(thread.id) != item && thread.settled_at.is_some()
+                    })
                     .then_some(SidebarItem::SettledShelf)
             })
     }
@@ -310,16 +376,16 @@ impl Sessions {
         items.iter().position(|&item| item == cursor)
     }
 
-    /// The first row after thread `id` that `fits`, else the nearest one
-    /// before it.
-    fn neighbour<F>(&self, id: ThreadId, fits: F) -> Option<SidebarItem>
+    /// The first row after `item`'s that `fits`, else the nearest one before
+    /// it.
+    fn neighbour<F>(&self, item: SidebarItem, fits: F) -> Option<SidebarItem>
     where
         F: Fn(&SidebarRow<'_>) -> bool,
     {
         let rows = self.sidebar();
         let at = rows
             .iter()
-            .position(|row| row.item() == SidebarItem::Thread(id))
+            .position(|row| row.item() == item)
             .unwrap_or(rows.len());
         let (before, after) = rows.split_at(at);
         after
@@ -344,7 +410,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread,
+        ThreadId, ThreadStatus,
     };
 
     fn at(secs: u64) -> SystemTime {
@@ -416,8 +483,27 @@ mod tests {
             title: format!("project-{id}"),
             root: "/tmp".into(),
             created_at: SystemTime::UNIX_EPOCH,
+            draft: None,
             threads,
         }
+    }
+
+    /// Project `id` with no threads and a local draft created at second `secs`.
+    fn drafted(id: i64, secs: u64) -> Project {
+        Project {
+            draft: Some(Draft {
+                workspace: DraftWorkspace::Local,
+                branch: None,
+                model: None,
+                permission: None,
+                created_at: at(secs),
+            }),
+            ..project(id, vec![])
+        }
+    }
+
+    fn on_draft(id: i64) -> SidebarItem {
+        SidebarItem::Draft(ProjectId(id))
     }
 
     /// One project holding `threads`, with the cursor on `cursor`.
@@ -670,6 +756,114 @@ mod tests {
             sessions.cursor,
             Some(on(2)),
             "the sidebar should be one list across projects"
+        );
+    }
+
+    #[rstest::rstest]
+    fn sidebar_lists_drafts_before_pinned_and_active() {
+        // Given project 1 with a pinned and an active thread, and project 2
+        // with a draft.
+        let sessions = Sessions {
+            projects: vec![
+                project(1, vec![pinned(1, 10), active(2, 20)]),
+                drafted(2, 5),
+            ],
+            ..Sessions::default()
+        };
+
+        // When listing the sidebar.
+        let items = items(&sessions);
+
+        // Then the draft comes first.
+        assert_eq!(
+            items,
+            vec![on_draft(2), on(1), on(2)],
+            "drafts should lead the sidebar"
+        );
+    }
+
+    #[rstest::rstest]
+    fn sidebar_orders_drafts_by_newest() {
+        // Given drafts created at 10 s (project 1) and 20 s (project 2).
+        let sessions = Sessions {
+            projects: vec![drafted(1, 10), drafted(2, 20)],
+            ..Sessions::default()
+        };
+
+        // When listing the sidebar.
+        let items = items(&sessions);
+
+        // Then the newer draft comes first.
+        assert_eq!(
+            items,
+            vec![on_draft(2), on_draft(1)],
+            "drafts should list the newest first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_next_from_a_draft_reaches_the_first_pinned_card() {
+        // Given a draft, selected, and pinned threads.
+        let mut sessions = Sessions {
+            projects: vec![
+                drafted(1, 5),
+                project(2, vec![pinned(1, 10), pinned(2, 20)]),
+            ],
+            cursor: Some(on_draft(1)),
+            ..Sessions::default()
+        };
+
+        // When selecting the next row.
+        sessions.select_next();
+
+        // Then the newest pinned card is selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(2)),
+            "next after the last draft should be the first pinned card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn row_neighbour_of_a_draft_is_the_next_row() {
+        // Given two drafts and an active thread.
+        let sessions = Sessions {
+            projects: vec![
+                drafted(1, 20),
+                drafted(2, 10),
+                project(3, vec![active(1, 30)]),
+            ],
+            ..Sessions::default()
+        };
+
+        // When finding where the cursor goes when the newer draft is deleted.
+        let neighbour = sessions.row_neighbour(on_draft(1));
+
+        // Then it's the draft below.
+        assert_eq!(
+            neighbour,
+            Some(on_draft(2)),
+            "deleting a draft should move to the next row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selected_draft_is_the_cursors_draft() {
+        // Given two drafts with the cursor on project 2's.
+        let sessions = Sessions {
+            projects: vec![drafted(1, 10), drafted(2, 20)],
+            cursor: Some(on_draft(2)),
+            ..Sessions::default()
+        };
+
+        // When reading the selected draft.
+        let selected = sessions.selected_draft().map(|(project, _)| project.id);
+
+        // Then it's project 2's.
+        assert_eq!(
+            selected,
+            Some(ProjectId(2)),
+            "the selected draft should be the cursor's"
         );
     }
 }
