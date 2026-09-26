@@ -5,7 +5,7 @@
 //! every five seconds otherwise, and right away when asked. Each poll maps the
 //! host's records onto the threads, stamps when a turn starts, reads new
 //! transcript lines for titles and branches, and saves what changed. It also
-//! starts new sessions in orb's launch directory.
+//! starts new sessions in a picked project's directory and adds projects.
 //!
 //! It keeps each thread's place in the sidebar: pinning, settling onto the
 //! Settled shelf (which stops the session), un-settling, and deleting. A turn
@@ -41,6 +41,8 @@ const SLOW_POLL: Duration = Duration::from_secs(5);
 const AUTO_SETTLE_AFTER: i64 = 3 * 24 * 60 * 60 * 1000;
 /// The error shown when orb's store can't be written.
 const SAVE_FAILED: &str = "couldn't save orb's state";
+/// The error shown when a started session can't be saved or shown.
+const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
 
 /// What the sessions actor needs to start.
 pub struct SessionsActorDeps {
@@ -49,8 +51,6 @@ pub struct SessionsActorDeps {
     pub store: Store,
     /// Claude's config directory, where transcripts live.
     pub claude_dir: PathBuf,
-    /// Where orb was launched; new sessions start here.
-    pub launch_dir: PathBuf,
     /// Tells the frontend to redraw.
     pub wake: Wake,
 }
@@ -64,7 +64,6 @@ pub struct SessionsActor {
     state: State,
     store: Store,
     claude_dir: PathBuf,
-    launch_dir: PathBuf,
     wake: Wake,
     /// Cuts the ticker's wait short so it polls now.
     poke: Arc<Notify>,
@@ -80,9 +79,16 @@ pub struct Poll;
 #[derive(Debug, Reply)]
 pub struct NextPoll(pub Duration);
 
-/// Start a new session in orb's launch directory.
+/// Start a new session in a project's directory.
 #[derive(Debug)]
-pub struct CreateSession;
+pub struct CreateSession {
+    pub project: ProjectId,
+    pub root: PathBuf,
+}
+
+/// Add a directory as a project.
+#[derive(Debug)]
+pub struct AddProject(pub PathBuf);
 
 /// Poll now instead of waiting for the next tick.
 #[derive(Debug)]
@@ -153,10 +159,22 @@ impl Message<CreateSession> for SessionsActor {
 
     async fn handle(
         &mut self,
-        _msg: CreateSession,
+        CreateSession { project, root }: CreateSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.create().await;
+        self.create(project, &root).await;
+    }
+}
+
+impl Message<AddProject> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        AddProject(root): AddProject,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.add_project(root);
     }
 }
 
@@ -249,7 +267,6 @@ impl SessionsActor {
             state,
             store,
             claude_dir,
-            launch_dir,
             wake,
         } = deps;
         let (projects, rows, error) = match store.load() {
@@ -287,7 +304,6 @@ impl SessionsActor {
             state,
             store,
             claude_dir,
-            launch_dir,
             wake,
             poke: Arc::default(),
             rows,
@@ -366,11 +382,11 @@ impl SessionsActor {
         to_stop
     }
 
-    /// Starts a session in the launch directory, saves it, and shows it
-    /// selected at the top of its project.
-    async fn create(&mut self) {
-        let created = match self.services.session_host.create(&self.launch_dir).await {
-            Ok(created) => self.save_new(&created.short_id),
+    /// Starts a session in the project's directory, saves it, and shows it
+    /// selected at the top of the project.
+    async fn create(&mut self, project_id: ProjectId, root: &Path) {
+        let created = match self.services.session_host.create(root).await {
+            Ok(created) => self.save_new(project_id, root, &created.short_id),
             Err(report) => Err(reason(&report)),
         };
         let succeeded = created.is_ok();
@@ -379,24 +395,18 @@ impl SessionsActor {
             let sessions = &mut app.sessions;
             sessions.starting = false;
             match created {
-                Ok((project_id, thread)) => {
-                    sessions.cursor = Some(SidebarItem::Thread(thread.id));
-                    sessions.error = None;
-                    match sessions
-                        .projects
-                        .iter_mut()
-                        .find(|project| project.id == project_id)
-                    {
-                        Some(project) => project.threads.insert(0, thread),
-                        None => sessions.projects.push(Project {
-                            id: project_id,
-                            title: project_title(&self.launch_dir),
-                            root: self.launch_dir.clone(),
-                            created_at: SystemTime::now(),
-                            threads: vec![thread],
-                        }),
+                Ok(thread) => match sessions
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.id == project_id)
+                {
+                    Some(project) => {
+                        sessions.cursor = Some(SidebarItem::Thread(thread.id));
+                        sessions.error = None;
+                        project.threads.insert(0, thread);
                     }
-                }
+                    None => sessions.error = Some(NEW_SESSION_UNSAVED.to_owned()),
+                },
                 Err(error) => sessions.error = Some(error),
             }
         }
@@ -406,34 +416,31 @@ impl SessionsActor {
         }
     }
 
-    /// Saves a just-started session under the launch directory's project.
-    fn save_new(&mut self, short_id: &str) -> Result<(ProjectId, Thread), String> {
+    /// Saves a just-started session in `root` under the project.
+    fn save_new(
+        &mut self,
+        project_id: ProjectId,
+        root: &Path,
+        short_id: &str,
+    ) -> Result<Thread, String> {
         let now = now_ms();
-        let saved = self
-            .store
-            .upsert_project(&self.launch_dir, &project_title(&self.launch_dir), now)
-            .and_then(|project_id| {
-                let row = NewThread {
-                    project_id,
-                    short_id: short_id.to_owned(),
-                    cwd: self.launch_dir.clone(),
-                    created_at: now,
-                };
-                self.store
-                    .insert_thread(&row)
-                    .map(|thread_id| (project_id, thread_id))
-            });
-        let Ok((project_id, id)) = saved else {
-            return Err("couldn't save the new session".to_owned());
+        let new = NewThread {
+            project_id,
+            short_id: short_id.to_owned(),
+            cwd: root.to_owned(),
+            created_at: now,
+        };
+        let Ok(id) = self.store.insert_thread(&new) else {
+            return Err(NEW_SESSION_UNSAVED.to_owned());
         };
         let row = ThreadRow {
             id,
             project_id,
-            short_id: short_id.to_owned(),
+            short_id: new.short_id,
             session_id: None,
             title: None,
             custom_title: None,
-            cwd: self.launch_dir.clone(),
+            cwd: new.cwd,
             transcript_path: None,
             transcript_offset: 0,
             created_at: now,
@@ -448,7 +455,40 @@ impl SessionsActor {
         };
         let thread = unpolled(&self.services.session_host, &row);
         self.rows.push(row);
-        Ok((project_id, thread))
+        Ok(thread)
+    }
+
+    /// Saves `root` as a project, unless it already is one, and shows it.
+    fn add_project(&mut self, root: PathBuf) {
+        let now = now_ms();
+        let title = project_title(&root);
+        let added = if root.is_dir() {
+            self.store
+                .add_project(&root, &title, now)
+                .map_err(|_report| SAVE_FAILED.to_owned())
+        } else {
+            Err(format!("not a directory: {}", root.display()))
+        };
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            match added {
+                Ok(id) => {
+                    sessions.error = None;
+                    if !sessions.projects.iter().any(|project| project.id == id) {
+                        sessions.projects.push(Project {
+                            id,
+                            title,
+                            root,
+                            created_at: from_ms(now),
+                            threads: Vec::new(),
+                        });
+                    }
+                }
+                Err(error) => sessions.error = Some(error),
+            }
+        }
+        (self.wake)();
     }
 
     /// Pins a thread; pinning a settled thread un-settles it.
@@ -781,11 +821,13 @@ mod tests {
     use crate::feat::sessions::session_host::{
         CreatedSession, SessionHost, SessionHostError, SessionHostService, SessionRecord,
     };
-    use crate::feat::sessions::state::{SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus};
+    use crate::feat::sessions::state::{
+        ProjectId, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+    };
     use crate::feat::sessions::store::{NewThread, SettledOverride, Store, StoreError, ThreadRow};
     use crate::feat::sessions::transcript::transcript_path;
 
-    const LAUNCH_DIR: &str = "/tmp/orb";
+    const PROJECT_ROOT: &str = "/tmp/orb";
     const NO_CLAUDE_DIR: &str = "/nonexistent/claude";
     const HOUR_MS: i64 = 60 * 60 * 1000;
     const DAY_MS: i64 = 24 * HOUR_MS;
@@ -799,6 +841,8 @@ mod tests {
         stopped: Mutex<Vec<String>>,
         /// The sessions `remove` was called on, in order.
         removed: Mutex<Vec<String>>,
+        /// The directories `create` was called in, in order.
+        created_in: Mutex<Vec<PathBuf>>,
     }
 
     impl FakeHost {
@@ -810,6 +854,7 @@ mod tests {
                 remove: Ok(()),
                 stopped: Mutex::default(),
                 removed: Mutex::default(),
+                created_in: Mutex::default(),
             }
         }
 
@@ -845,6 +890,13 @@ mod tests {
                 .clone()
         }
 
+        fn created_in(&self) -> Vec<PathBuf> {
+            self.created_in
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
         fn set_list(&self, list: Result<Vec<SessionRecord>, String>) {
             *self.list.lock().unwrap_or_else(PoisonError::into_inner) = list;
         }
@@ -856,7 +908,11 @@ mod tests {
             "fake"
         }
 
-        async fn create(&self, _cwd: &Path) -> Result<CreatedSession, Report<SessionHostError>> {
+        async fn create(&self, cwd: &Path) -> Result<CreatedSession, Report<SessionHostError>> {
+            self.created_in
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(cwd.to_owned());
             self.create
                 .clone()
                 .map(|short_id| CreatedSession { short_id })
@@ -902,25 +958,29 @@ mod tests {
         }
     }
 
-    /// A store holding one thread in the launch directory's project, created
-    /// an hour ago.
+    /// A store holding one thread in the orb project, created an hour ago.
     fn store_with_thread(short_id: &str) -> Result<(Store, ThreadId), Report<StoreError>> {
         let store = Store::open_in_memory()?;
         let id = add_thread(&store, short_id, now_ms() - HOUR_MS)?;
         Ok((store, id))
     }
 
-    /// Saves a thread created at `created_at` in the launch directory's project.
+    /// Saves the orb project rooted at [`PROJECT_ROOT`].
+    fn orb_project(store: &Store) -> Result<ProjectId, Report<StoreError>> {
+        store.add_project(Path::new(PROJECT_ROOT), "orb", 0)
+    }
+
+    /// Saves a thread created at `created_at` in the orb project.
     fn add_thread(
         store: &Store,
         short_id: &str,
         created_at: i64,
     ) -> Result<ThreadId, Report<StoreError>> {
-        let project_id = store.upsert_project(Path::new(LAUNCH_DIR), "orb", 0)?;
+        let project_id = orb_project(store)?;
         store.insert_thread(&NewThread {
             project_id,
             short_id: short_id.to_owned(),
-            cwd: PathBuf::from(LAUNCH_DIR),
+            cwd: PathBuf::from(PROJECT_ROOT),
             created_at,
         })
     }
@@ -953,7 +1013,6 @@ mod tests {
             state: state.clone(),
             store,
             claude_dir: claude_dir.to_owned(),
-            launch_dir: PathBuf::from(LAUNCH_DIR),
             wake: Arc::new(|| {}),
         });
         (actor, state)
@@ -1255,21 +1314,23 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test]
     async fn created_thread_is_first_in_its_project() -> Result<(), Report<StoreError>> {
-        // Given a saved thread in the launch directory's project.
+        // Given a saved thread in the orb project.
         let (store, _) = store_with_thread("aa")?;
+        let project = orb_project(&store)?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
-        // When creating a session.
-        actor.create().await;
+        // When creating a session in it.
+        actor.create(project, Path::new(PROJECT_ROOT)).await;
 
         // Then the new thread is the project's first.
         let first = state
             .read()
             .sessions
             .projects
-            .first()
-            .and_then(|project| project.threads.first())
+            .iter()
+            .find(|shown| shown.id == project)
+            .and_then(|shown| shown.threads.first())
             .map(|thread| thread.id);
         assert_eq!(
             first,
@@ -1284,11 +1345,12 @@ mod tests {
     async fn created_thread_is_selected() -> Result<(), Report<StoreError>> {
         // Given a saved thread, selected.
         let (store, _) = store_with_thread("aa")?;
+        let project = orb_project(&store)?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
-        // When creating a session.
-        actor.create().await;
+        // When creating a session in its project.
+        actor.create(project, Path::new(PROJECT_ROOT)).await;
 
         // Then the new thread is selected.
         assert_eq!(
@@ -1306,13 +1368,15 @@ mod tests {
     async fn create_ends_starting(
         #[case] outcome: Result<&str, &str>,
     ) -> Result<(), Report<StoreError>> {
-        // Given a create in flight.
+        // Given a create in flight in the orb project.
+        let store = Store::open_in_memory()?;
+        let project = orb_project(&store)?;
         let host = FakeHost::creating(outcome);
-        let (mut actor, state) = start(Store::open_in_memory()?, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state.write().sessions.starting = true;
 
         // When the create finishes.
-        actor.create().await;
+        actor.create(project, Path::new(PROJECT_ROOT)).await;
 
         // Then nothing is starting any more.
         assert!(
@@ -1326,11 +1390,13 @@ mod tests {
     #[tokio::test]
     async fn failed_create_shows_the_reason() -> Result<(), Report<StoreError>> {
         // Given a host that refuses to start a session.
+        let store = Store::open_in_memory()?;
+        let project = orb_project(&store)?;
         let host = FakeHost::creating(Err("Workspace not trusted"));
-        let (mut actor, state) = start(Store::open_in_memory()?, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When creating a session.
-        actor.create().await;
+        actor.create(project, Path::new(PROJECT_ROOT)).await;
 
         // Then the reason is the error.
         assert_eq!(
@@ -1345,11 +1411,13 @@ mod tests {
     #[tokio::test]
     async fn failed_create_adds_no_thread() -> Result<(), Report<StoreError>> {
         // Given no threads and a host that refuses to start a session.
+        let store = Store::open_in_memory()?;
+        let project = orb_project(&store)?;
         let host = FakeHost::creating(Err("Workspace not trusted"));
-        let (mut actor, state) = start(Store::open_in_memory()?, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When creating a session.
-        actor.create().await;
+        actor.create(project, Path::new(PROJECT_ROOT)).await;
 
         // Then there are still no threads.
         assert_eq!(
@@ -1362,10 +1430,151 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn create_starts_the_session_in_the_projects_root() -> Result<(), Report<StoreError>> {
+        // Given saved orb and web projects.
+        let store = Store::open_in_memory()?;
+        orb_project(&store)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When creating a session in web.
+        actor.create(web, Path::new("/tmp/web")).await;
+
+        // Then the host starts it in web's root.
+        assert_eq!(
+            host.created_in(),
+            vec![PathBuf::from("/tmp/web")],
+            "a session should start in its project's root"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn created_thread_is_saved_under_its_project() -> Result<(), Report<StoreError>> {
+        // Given saved orb and web projects.
+        let store = Store::open_in_memory()?;
+        orb_project(&store)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When creating a session in web.
+        actor.create(web, Path::new("/tmp/web")).await;
+
+        // Then the saved thread belongs to web.
+        assert_eq!(
+            saved(&actor.store, "bb")?.project_id,
+            web,
+            "the new thread should be saved under the picked project"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_a_directory_shows_it_as_a_project() -> Result<(), Report<StoreError>> {
+        // Given no projects and an existing directory.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let (mut actor, state) = start(
+            Store::open_in_memory()?,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When adding it as a project.
+        actor.add_project(dir.path().to_owned());
+
+        // Then it's the one project shown.
+        let roots: Vec<PathBuf> = state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .map(|project| project.root.clone())
+            .collect();
+        assert_eq!(
+            roots,
+            vec![dir.path().to_owned()],
+            "the added directory should show as a project"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_an_existing_project_shows_it_once() -> Result<(), Report<StoreError>> {
+        // Given a directory that's already a saved project.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let store = Store::open_in_memory()?;
+        store.add_project(dir.path(), "web", 0)?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When adding it again.
+        actor.add_project(dir.path().to_owned());
+
+        // Then it's shown once.
+        let shown = state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .filter(|project| project.root == dir.path())
+            .count();
+        assert_eq!(shown, 1, "an existing project shouldn't be shown twice");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_a_missing_directory_shows_an_error() -> Result<(), Report<StoreError>> {
+        // Given no projects.
+        let (mut actor, state) = start(
+            Store::open_in_memory()?,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When adding a path that doesn't exist.
+        actor.add_project(PathBuf::from("/nonexistent/project"));
+
+        // Then the error names it.
+        assert_eq!(
+            state.read().sessions.error.as_deref(),
+            Some("not a directory: /nonexistent/project"),
+            "the mode line should say the path isn't a directory"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_a_missing_directory_saves_nothing() -> Result<(), Report<StoreError>> {
+        // Given no projects.
+        let (mut actor, _state) = start(
+            Store::open_in_memory()?,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When adding a path that doesn't exist.
+        actor.add_project(PathBuf::from("/nonexistent/project"));
+
+        // Then no project is saved.
+        assert!(
+            actor.store.load()?.0.is_empty(),
+            "a missing directory shouldn't be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn poll_titles_a_thread_with_its_transcripts_prompt() -> Result<(), Report<StoreError>> {
         // Given a thread whose session's transcript has a prompt.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(LAUNCH_DIR), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(
@@ -1403,7 +1612,7 @@ mod tests {
     async fn poll_titles_a_thread_with_its_custom_title() -> Result<(), Report<StoreError>> {
         // Given a thread whose transcript has a prompt, an ai-title, then a `/rename`.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(LAUNCH_DIR), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(
@@ -1445,7 +1654,7 @@ mod tests {
     async fn poll_shows_the_located_transcript_on_the_thread() -> Result<(), Report<StoreError>> {
         // Given a thread whose session has a transcript.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(LAUNCH_DIR), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(&path, "").change_context(StoreError)?;
@@ -1480,8 +1689,8 @@ mod tests {
         // Given project B saved before project A but first used after it,
         // with A's threads created at 10 and 30 and B's at 20.
         let store = Store::open_in_memory()?;
-        let b = store.upsert_project(Path::new("/b"), "b", 2)?;
-        let a = store.upsert_project(Path::new("/a"), "a", 1)?;
+        let b = store.add_project(Path::new("/b"), "b", 2)?;
+        let a = store.add_project(Path::new("/a"), "a", 1)?;
         let insert = |project_id, short_id: &str, created_at| {
             store.insert_thread(&NewThread {
                 project_id,
@@ -1539,6 +1748,35 @@ mod tests {
             state.read().sessions.cursor,
             Some(SidebarItem::Thread(pinned)),
             "the sidebar's first row should be selected"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_shows_when_each_project_was_added() -> Result<(), Report<StoreError>> {
+        // Given a project saved at 1.5 s.
+        let store = Store::open_in_memory()?;
+        store.add_project(Path::new(PROJECT_ROOT), "orb", 1_500)?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the project shows it was added at 1.5 s.
+        let added: Vec<SystemTime> = state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .map(|project| project.created_at)
+            .collect();
+        assert_eq!(
+            added,
+            vec![SystemTime::UNIX_EPOCH + Duration::from_millis(1_500)],
+            "a restored project should keep when it was added"
         );
         Ok(())
     }
@@ -2160,7 +2398,7 @@ mod tests {
     async fn poll_shows_the_transcript_branch() -> Result<(), Report<StoreError>> {
         // Given a thread whose transcript's prompt names a branch.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(LAUNCH_DIR), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(
