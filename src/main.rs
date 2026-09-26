@@ -30,6 +30,7 @@ fn main() -> Result<(), Report<OrbError>> {
         std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from);
     let claude_env = child_env(std::env::vars_os());
     let store = Store::open(&home.join(".orb/userdata/state.sqlite")).change_context(OrbError)?;
+    let worktrees_root = home.join(".orb/worktrees");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
     let _context = runtime.enter();
     let state = State::new(AppState {
@@ -46,6 +47,7 @@ fn main() -> Result<(), Report<OrbError>> {
         state: state.clone(),
         store,
         claude_dir,
+        worktrees_root,
         wake: frontend.waker(),
     });
     let preview = spawn_preview_actor(PreviewActorDeps {

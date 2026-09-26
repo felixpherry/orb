@@ -64,6 +64,8 @@ pub struct ThreadRow {
     pub last_activity_at: i64,
     /// When the user last selected the thread.
     pub last_visited_at: i64,
+    /// Whether Claude has generated a title for the thread.
+    pub ai_titled: bool,
 }
 
 /// A thread's settle state as set by the user, auto-settle, or activity.
@@ -129,6 +131,7 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE threads ADD COLUMN last_visited_at INTEGER NOT NULL DEFAULT 0;
     UPDATE threads SET last_activity_at = created_at, last_visited_at = created_at;
 ",
+    "ALTER TABLE threads ADD COLUMN ai_titled INTEGER NOT NULL DEFAULT 0;",
 ];
 
 impl Store {
@@ -188,7 +191,7 @@ impl Store {
                 "SELECT id, project_id, short_id, session_id, title, cwd, transcript_path,
                         transcript_offset, created_at, turn_started_at, custom_title,
                         branch, pinned_at, settled_override, settled_at, unsettled_at,
-                        last_activity_at, last_visited_at
+                        last_activity_at, last_visited_at, ai_titled
                  FROM threads ORDER BY created_at DESC, id DESC",
                 thread_row,
             )
@@ -248,13 +251,14 @@ impl Store {
     }
 
     /// Updates everything about a thread that changes after it's created: its
-    /// session id, titles, branch, transcript position, turn start, pin and
-    /// settle state, and activity and visit stamps.
+    /// session and directory (a thread can move to another workspace), titles,
+    /// branch, transcript position, turn start, pin and settle state, and
+    /// activity and visit stamps.
     ///
     /// # Errors
     ///
-    /// Returns an error if the transcript path isn't UTF-8 or the database
-    /// can't be written.
+    /// Returns an error if the cwd or transcript path isn't UTF-8, the short
+    /// id belongs to another thread, or the database can't be written.
     pub fn save_thread(&self, row: &ThreadRow) -> Result<(), Report<StoreError>> {
         let transcript_path = row.transcript_path.as_deref().map(utf8).transpose()?;
         self.conn
@@ -262,7 +266,8 @@ impl Store {
                 "UPDATE threads SET session_id = ?2, title = ?3, transcript_path = ?4,
                         transcript_offset = ?5, turn_started_at = ?6, custom_title = ?7,
                         branch = ?8, pinned_at = ?9, settled_override = ?10, settled_at = ?11,
-                        unsettled_at = ?12, last_activity_at = ?13, last_visited_at = ?14
+                        unsettled_at = ?12, last_activity_at = ?13, last_visited_at = ?14,
+                        short_id = ?15, cwd = ?16, ai_titled = ?17
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -279,6 +284,9 @@ impl Store {
                     row.unsettled_at,
                     row.last_activity_at,
                     row.last_visited_at,
+                    row.short_id,
+                    utf8(&row.cwd)?,
+                    row.ai_titled,
                 ],
             )
             .change_context(StoreError)
@@ -382,6 +390,7 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         unsettled_at: row.get(15)?,
         last_activity_at: row.get(16)?,
         last_visited_at: row.get(17)?,
+        ai_titled: row.get(18)?,
     })
 }
 
@@ -503,6 +512,41 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn migrating_a_v3_database_adds_ai_titled() -> Result<(), Report<StoreError>> {
+        // Given a database at schema version 3 holding a thread.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        {
+            let conn = Connection::open(&path).change_context(StoreError)?;
+            for sql in MIGRATIONS
+                .get(..3)
+                .ok_or_else(|| Report::new(StoreError).attach("no v3 migrations"))?
+            {
+                conn.execute_batch(sql).change_context(StoreError)?;
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
+                 INSERT INTO threads (project_id, short_id, cwd, created_at)
+                 VALUES (1, '28bf38e2', '/tmp/orb', 1000);
+                 PRAGMA user_version = 3;",
+            )
+            .change_context(StoreError)?;
+        }
+
+        // When opening the store and loading.
+        let (_, threads) = Store::open(&path)?.load()?;
+
+        // Then it's at the latest version and the thread isn't AI-titled.
+        let ai_titled: Vec<bool> = threads.iter().map(|row| row.ai_titled).collect();
+        assert_eq!(
+            (user_version(&path)?, ai_titled),
+            (MIGRATIONS.len(), vec![false]),
+            "migration v4 should add ai_titled, false for existing threads"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn reopening_a_migrated_database_keeps_its_schema_version() -> Result<(), Report<StoreError>> {
         // Given a database that was already migrated.
         let dir = tempfile::tempdir().change_context(StoreError)?;
@@ -555,6 +599,7 @@ mod tests {
             unsettled_at: None,
             last_activity_at: 1_000,
             last_visited_at: 1_000,
+            ai_titled: false,
         };
         assert_eq!(threads, vec![expected], "the saved thread should load back");
         Ok(())
@@ -627,6 +672,7 @@ mod tests {
             unsettled_at: None,
             last_activity_at: 1_000,
             last_visited_at: 1_000,
+            ai_titled: false,
         };
         store.save_thread(&updated)?;
 
@@ -661,6 +707,7 @@ mod tests {
             unsettled_at: Some(1_500),
             last_activity_at: 2_500,
             last_visited_at: 2_600,
+            ai_titled: false,
             ..inserted
         };
         store.save_thread(&updated)?;

@@ -1,8 +1,8 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
 //! has updated [`AppState`](crate::AppState). Pane commands, `Yank` and
 //! `ListDirectories` are carried out by the frontend loop; session commands
-//! (create, add project, refresh, pin, settle, delete, visit) go to the
-//! sessions actor; `ShowPreview` goes to the preview actor.
+//! (create, add project, move to another workspace, refresh, pin, settle,
+//! delete, visit) go to the sessions actor; `ShowPreview` goes to the preview actor.
 
 use std::path::PathBuf;
 
@@ -17,6 +17,9 @@ pub enum Command {
     Detach,
     /// Start a new Claude session in the project's directory.
     CreateSession { project: ProjectId, root: PathBuf },
+    /// Start the thread's session over in another workspace, before its
+    /// first prompt.
+    MoveThread { thread: ThreadId, to: Workspace },
     /// Add the directory as a project.
     AddProject(PathBuf),
     /// List the directory's subdirectories into the open directory picker.
@@ -40,4 +43,13 @@ pub enum Command {
     Delete(ThreadId),
     /// The user is looking at the thread now.
     Visit(ThreadId),
+}
+
+/// Where a thread's session runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Workspace {
+    /// A new worktree of the project, on a new branch.
+    NewWorktree,
+    /// A directory that already exists: a worktree or the project's root.
+    Existing(PathBuf),
 }
