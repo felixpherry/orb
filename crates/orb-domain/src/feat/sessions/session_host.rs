@@ -30,6 +30,15 @@ pub struct CreatedSession {
     pub short_id: String,
 }
 
+/// How to start a session; `None` leaves the setting to Claude's own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionOptions {
+    /// The model alias or name.
+    pub model: Option<String>,
+    /// The permission mode.
+    pub permission_mode: Option<String>,
+}
+
 /// One session the host knows about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
@@ -44,12 +53,16 @@ pub struct SessionRecord {
 pub trait SessionHost: Send + Sync {
     fn name(&self) -> &'static str;
 
-    /// Starts an idle session in `cwd`.
+    /// Starts an idle session in `cwd` with `options`.
     ///
     /// # Errors
     ///
     /// Returns an error if the host refuses or fails to start the session.
-    async fn create(&self, cwd: &Path) -> Result<CreatedSession, Report<SessionHostError>>;
+    async fn create(
+        &self,
+        cwd: &Path,
+        options: &SessionOptions,
+    ) -> Result<CreatedSession, Report<SessionHostError>>;
 
     /// Every session the host knows about.
     ///
@@ -87,13 +100,17 @@ impl SessionHostService {
         Self { host }
     }
 
-    /// Starts an idle session in `cwd`.
+    /// Starts an idle session in `cwd` with `options`.
     ///
     /// # Errors
     ///
     /// Returns an error if the host refuses or fails to start the session.
-    pub async fn create(&self, cwd: &Path) -> Result<CreatedSession, Report<SessionHostError>> {
-        self.host.create(cwd).await
+    pub async fn create(
+        &self,
+        cwd: &Path,
+        options: &SessionOptions,
+    ) -> Result<CreatedSession, Report<SessionHostError>> {
+        self.host.create(cwd, options).await
     }
 
     /// Every session the host knows about.

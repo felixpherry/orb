@@ -5,7 +5,15 @@
 //! every five seconds otherwise, and right away when asked. Each poll maps the
 //! host's records onto the threads, stamps when a turn starts, reads new
 //! transcript lines for titles and branches, and saves what changed. It also
-//! starts new sessions in a picked project's directory and adds projects.
+//! adds projects.
+//!
+//! It keeps each project's draft: created prefilled from the project's
+//! last-used workspace, model and permission (else the latest used project's
+//! model and permission in a local checkout), saved as the user edits it, and
+//! following checkouts in the project's root while it is a local draft.
+//! Starting a draft makes its worktree if it needs a new one, starts the
+//! session with its model and permission, and replaces the draft with the new
+//! thread; orb attaches to it only if the draft was still selected.
 //!
 //! Before a thread's first prompt it can move the thread to another workspace:
 //! a new worktree of the project, or a directory that already exists. The new
@@ -15,9 +23,10 @@
 //! ends in a worktree still on orb's `orb/<hex>` branch, and Claude or the
 //! user has titled the thread, the branch is renamed after that title.
 //!
-//! It checks branches out in a thread's directory, unless a turn is underway
-//! there. Before the first prompt, picking the default branch from a worktree
-//! checks it out in the project's root and moves the thread there.
+//! It checks branches out in a thread's directory or for a local draft,
+//! unless a turn is underway there. Before the first prompt, picking the
+//! default branch from a worktree checks it out in the project's root and
+//! moves the thread there.
 //!
 //! When Claude refuses to start in a directory it hasn't been trusted in, the
 //! start waits: the actor asks the frontend for an interactive `claude` there,
@@ -41,19 +50,24 @@ use kameo::prelude::{Actor, ActorRef, Context, Message, Reply, Spawn};
 use tokio::sync::Notify;
 
 use super::session_host::{
-    SessionHostError, SessionHostService, SessionRecord, WorkspaceUntrusted,
+    SessionHostError, SessionHostService, SessionOptions, SessionRecord, WorkspaceUntrusted,
 };
 use super::state::{
-    Draft, Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+    Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread, ThreadId,
+    ThreadStatus,
 };
-use super::store::{DraftRow, NewThread, SettledOverride, Store, ThreadRow};
+use super::store::{
+    DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, ThreadRow,
+};
 use super::transcript::{locate, scan_title};
 use crate::Focus;
 use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
 use crate::feat::git::validator::BUSY_DIRECTORY;
-use crate::feat::git::worktree::{hex, hex_branch, is_orb_worktree, new_worktree_path, slug};
+use crate::feat::git::worktree::{
+    hex, hex_branch, is_orb_worktree, new_worktree_path, previous_worktree, slug,
+};
 
 /// How long to wait between polls while a turn is underway or orb is attached.
 const FAST_POLL: Duration = Duration::from_secs(1);
@@ -81,11 +95,12 @@ pub struct SessionsActorDeps {
     pub wake: Wake,
 }
 
-/// Owns [`Sessions`](super::state::Sessions): the projects, the threads'
-/// statuses, titles, pins and settles, the latest `claude` error, and the
-/// directory a start waits to be trusted in. The
-/// intent handler also moves the cursor, opens and closes the shelf, and marks
-/// a create as starting.
+/// Owns [`Sessions`](super::state::Sessions): the projects and their drafts,
+/// the threads' statuses, titles, pins and settles, the latest `claude` error,
+/// the directory a start waits to be trusted in, and the started thread the
+/// frontend should attach to. The intent handler also moves the cursor, opens
+/// and closes the shelf, marks a start as starting, and edits a draft's fields
+/// before asking for them to be saved.
 pub struct SessionsActor {
     services: Services,
     state: State,
@@ -109,12 +124,30 @@ pub struct Poll;
 #[derive(Debug, Reply)]
 pub struct NextPoll(pub Duration);
 
-/// Start a new session in a project's directory.
+/// Give a project a draft, prefilled from its last-used settings, unless it
+/// has one.
 #[derive(Debug)]
-pub struct CreateSession {
+pub struct CreateDraft(pub ProjectId);
+
+/// Save a project's draft as the app state has it, filling in its branch if
+/// it has none.
+#[derive(Debug)]
+pub struct SaveDraft(pub ProjectId);
+
+/// Check a branch out in a project's root for its local draft.
+#[derive(Debug)]
+pub struct CheckoutDraft {
     pub project: ProjectId,
-    pub root: PathBuf,
+    pub git_ref: GitRef,
 }
+
+/// Start a session from a project's draft, which becomes a thread.
+#[derive(Debug)]
+pub struct StartDraft(pub ProjectId);
+
+/// Throw a project's draft away.
+#[derive(Debug)]
+pub struct DiscardDraft(pub ProjectId);
 
 /// Start a thread's session over in another workspace, before its first
 /// prompt.
@@ -171,18 +204,24 @@ pub struct Delete(pub ThreadId);
 pub struct Visit(pub ThreadId);
 
 /// A session start in flight: what it is for, where it runs, the branch
-/// checked out there when known, and the worktree orb made for it, if any.
+/// checked out there when known, the worktree orb made for it, if any, and
+/// the options the session starts with.
 struct PendingStart {
     kind: StartKind,
     cwd: PathBuf,
     branch: Option<String>,
     made: Option<MadeWorktree>,
+    options: SessionOptions,
 }
 
 /// What a session start is for.
 enum StartKind {
-    /// A new thread in the project.
-    Create { project: ProjectId },
+    /// A new thread from the project's draft, whose workspace was of kind
+    /// `workspace`.
+    Draft {
+        project: ProjectId,
+        workspace: LastWorkspace,
+    },
     /// An existing, prompt-less thread moving out of `old_cwd`.
     Move {
         thread: ThreadId,
@@ -234,15 +273,63 @@ impl Message<Poll> for SessionsActor {
     }
 }
 
-impl Message<CreateSession> for SessionsActor {
+impl Message<CreateDraft> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        CreateSession { project, root }: CreateSession,
+        CreateDraft(id): CreateDraft,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.create(project, &root).await;
+        self.create_draft(id);
+    }
+}
+
+impl Message<SaveDraft> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        SaveDraft(id): SaveDraft,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.save_draft(id);
+    }
+}
+
+impl Message<CheckoutDraft> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        CheckoutDraft { project, git_ref }: CheckoutDraft,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.checkout_draft(project, &git_ref);
+    }
+}
+
+impl Message<StartDraft> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        StartDraft(id): StartDraft,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.start_draft(id).await;
+    }
+}
+
+impl Message<DiscardDraft> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        DiscardDraft(id): DiscardDraft,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.discard_draft(id);
     }
 }
 
@@ -525,19 +612,172 @@ impl SessionsActor {
         to_stop
     }
 
-    /// Starts a session in the project's directory, saves it, and shows it
-    /// selected at the top of the project.
-    async fn create(&mut self, project: ProjectId, root: &Path) {
-        self.start(
-            PendingStart {
-                kind: StartKind::Create { project },
-                cwd: root.to_owned(),
-                branch: None,
-                made: None,
+    /// Gives project `id` a draft unless it has one: the project's last-used
+    /// workspace, model and permission, else the latest used project's model
+    /// and permission in a local checkout. A remembered previous worktree the
+    /// project no longer has falls back to a local checkout. The branch is the
+    /// one checked out in the draft's directory, or for a new worktree the
+    /// default branch.
+    fn create_draft(&mut self, id: ProjectId) {
+        let seeds = self
+            .state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .find(|project| project.id == id && project.draft.is_none())
+            .map(|project| {
+                let previous = previous_worktree(project, &project.root, None);
+                (project.root.clone(), previous)
+            });
+        let Some((root, previous)) = seeds else {
+            return (self.wake)();
+        };
+        let last = self.store.last_used(id).ok().flatten();
+        let (workspace, branch) = match (last.as_ref().map(|last| last.workspace), previous) {
+            (Some(LastWorkspace::NewWorktree), _) => (DraftWorkspace::NewWorktree, None),
+            (Some(LastWorkspace::Previous), Some((path, branch))) => {
+                (DraftWorkspace::Existing(path), branch)
+            }
+            _ => (DraftWorkspace::Local, None),
+        };
+        let settings = last.or_else(|| self.store.latest_last_used().ok().flatten());
+        let draft = Draft {
+            branch: branch.or_else(|| self.draft_branch(&root, &workspace)),
+            workspace,
+            model: settings.as_ref().and_then(|used| used.model.clone()),
+            permission: settings.and_then(|used| used.permission_mode),
+            created_at: from_ms(now_ms()),
+        };
+        let saved = self.store.save_draft(&draft_row(id, &draft));
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            if let Some(project) = sessions.projects.iter_mut().find(|p| p.id == id) {
+                project.draft = Some(draft);
+            }
+            if saved.is_err() {
+                sessions.error = Some(SAVE_FAILED.to_owned());
+            }
+        }
+        (self.wake)();
+    }
+
+    /// Saves project `id`'s draft as the app state has it, first filling in
+    /// its branch when it has none.
+    fn save_draft(&mut self, id: ProjectId) {
+        let Some((root, draft)) = self.draft(id) else {
+            return;
+        };
+        let branch = match draft.branch {
+            Some(_) => None,
+            None => self.draft_branch(&root, &draft.workspace),
+        };
+        let row = {
+            let mut app = self.state.write();
+            let Some(shown) = app.sessions.draft_mut(id) else {
+                return;
+            };
+            if shown.branch.is_none() && shown.workspace == draft.workspace {
+                shown.branch = branch;
+            }
+            draft_row(id, shown)
+        };
+        if self.store.save_draft(&row).is_err() {
+            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+        }
+        (self.wake)();
+    }
+
+    /// Checks `git_ref` out in project `id`'s root for its local draft.
+    fn checkout_draft(&mut self, id: ProjectId, git_ref: &GitRef) {
+        if let Some(root) = self.project_root(id) {
+            self.check_out_in(&root, git_ref);
+        }
+    }
+
+    /// Forgets project `id`'s draft.
+    fn discard_draft(&mut self, id: ProjectId) {
+        let deleted = self.store.delete_draft(id);
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            if let Some(project) = sessions.projects.iter_mut().find(|p| p.id == id) {
+                project.draft = None;
+            }
+            if deleted.is_err() {
+                sessions.error = Some(SAVE_FAILED.to_owned());
+            }
+        }
+        (self.wake)();
+    }
+
+    /// Starts a session from project `id`'s draft, with its model and
+    /// permission: in the project's root, in its existing worktree, or in a
+    /// new worktree made now from the draft's base branch.
+    async fn start_draft(&mut self, id: ProjectId) {
+        let Some((root, draft)) = self.draft(id) else {
+            return self.end_start(Err("the draft is gone".to_owned()));
+        };
+        let options = SessionOptions {
+            model: draft.model,
+            permission_mode: draft.permission,
+        };
+        let (workspace, cwd, made) = match draft.workspace {
+            DraftWorkspace::Local => (LastWorkspace::Local, root, None),
+            DraftWorkspace::Existing(path) if path.is_dir() => {
+                (LastWorkspace::Previous, path, None)
+            }
+            DraftWorkspace::Existing(path) => {
+                return self.end_start(Err(format!(
+                    "worktree no longer exists: {}",
+                    path.display()
+                )));
+            }
+            DraftWorkspace::NewWorktree => {
+                match self.add_worktree(&root, draft.branch.as_deref()) {
+                    Ok(made) => (LastWorkspace::NewWorktree, made.path.clone(), Some(made)),
+                    Err(report) => return self.end_start(Err(git_reason(&report))),
+                }
+            }
+        };
+        let branch = made
+            .as_ref()
+            .map_or(draft.branch, |made| Some(made.branch.clone()));
+        let pending = PendingStart {
+            kind: StartKind::Draft {
+                project: id,
+                workspace,
             },
-            true,
-        )
-        .await;
+            cwd,
+            branch,
+            made,
+            options,
+        };
+        self.start(pending, true).await;
+    }
+
+    /// Project `id`'s root and draft, if it has one.
+    fn draft(&self, id: ProjectId) -> Option<(PathBuf, Draft)> {
+        self.state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .and_then(|project| Some((project.root.clone(), project.draft.clone()?)))
+    }
+
+    /// The branch a draft in `workspace` of the project at `root` shows: the
+    /// one checked out in its directory, or for a new worktree the default
+    /// branch. `None` when git can't tell.
+    fn draft_branch(&self, root: &Path, workspace: &DraftWorkspace) -> Option<String> {
+        let git = &self.services.git;
+        match workspace {
+            DraftWorkspace::Local => current_branch(git, root),
+            DraftWorkspace::Existing(path) => current_branch(git, path),
+            DraftWorkspace::NewWorktree => git.default_branch(root).ok(),
+        }
     }
 
     /// Starts a session for `pending` and finishes what it was for. If Claude
@@ -545,7 +785,11 @@ impl SessionsActor {
     /// for the user to trust it. If it fails, the reason shows and a worktree
     /// made for it is removed.
     async fn start(&mut self, pending: PendingStart, allow_trust: bool) {
-        let created = self.services.session_host.create(&pending.cwd).await;
+        let created = self
+            .services
+            .session_host
+            .create(&pending.cwd, &pending.options)
+            .await;
         if let Err(report) = &created
             && allow_trust
             && report.contains::<WorkspaceUntrusted>()
@@ -559,11 +803,17 @@ impl SessionsActor {
             cwd,
             branch,
             made,
+            options,
         } = pending;
         match (created, kind) {
-            (Ok(created), StartKind::Create { project }) => {
-                let thread = self.save_new(project, &cwd, &created.short_id);
-                self.show_created(project, thread);
+            (Ok(created), StartKind::Draft { project, workspace }) => {
+                let thread = self.save_new(project, &cwd, &created.short_id, branch, &options);
+                let used = LastUsed {
+                    workspace,
+                    model: options.model,
+                    permission_mode: options.permission_mode,
+                };
+                self.finish_draft(project, &used, thread);
             }
             (
                 Ok(created),
@@ -599,9 +849,21 @@ impl SessionsActor {
         self.start(pending, false).await;
     }
 
-    /// Shows a thread just created in the project selected at its top.
-    fn show_created(&mut self, project_id: ProjectId, created: Result<Thread, String>) {
-        let created = created.and_then(|thread| {
+    /// Replaces project `project_id`'s draft with the thread `created` from
+    /// it, first in the project, and records `used` as the project's last-used
+    /// settings. If the draft was still selected, selects the thread and asks
+    /// the frontend to attach to it.
+    fn finish_draft(
+        &mut self,
+        project_id: ProjectId,
+        used: &LastUsed,
+        created: Result<Thread, String>,
+    ) {
+        let result = created.and_then(|thread| {
+            let saved = self
+                .store
+                .delete_draft(project_id)
+                .and_then(|()| self.store.record_last_used(project_id, used, now_ms()));
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
             let project = sessions
@@ -609,11 +871,16 @@ impl SessionsActor {
                 .iter_mut()
                 .find(|project| project.id == project_id)
                 .ok_or_else(|| NEW_SESSION_UNSAVED.to_owned())?;
-            sessions.cursor = Some(SidebarItem::Thread(thread.id));
+            let id = thread.id;
+            project.draft = None;
             project.threads.insert(0, thread);
-            Ok(())
+            if sessions.cursor == Some(SidebarItem::Draft(project_id)) {
+                sessions.cursor = Some(SidebarItem::Thread(id));
+                sessions.attach = Some(id);
+            }
+            saved.map_err(|_report| SAVE_FAILED.to_owned())
         });
-        self.end_start(created);
+        self.end_start(result);
     }
 
     /// Ends a session start: stops showing it as starting and shows `result`'s
@@ -644,7 +911,8 @@ impl SessionsActor {
     /// Checks again that thread `id` has had no prompt, then gets the
     /// workspace ready: an existing directory, or a new worktree of the
     /// project, made from its default branch (fetched first from `origin` when
-    /// there is one).
+    /// there is one). The session starts over with the thread's model and
+    /// permission.
     async fn prepare_move(&mut self, id: ThreadId, to: Workspace) -> Result<PendingStart, String> {
         self.sync().await.map_err(|report| reason(&report))?;
         let row = self
@@ -669,6 +937,10 @@ impl SessionsActor {
             old_short_id: row.short_id.clone(),
             old_cwd: row.cwd.clone(),
         };
+        let options = SessionOptions {
+            model: row.model.clone(),
+            permission_mode: row.permission_mode.clone(),
+        };
         let (cwd, made) = match to {
             Workspace::Existing(path) if path.is_dir() => (path, None),
             Workspace::Existing(path) => {
@@ -676,7 +948,7 @@ impl SessionsActor {
             }
             Workspace::NewWorktree => {
                 let made = self
-                    .add_worktree(&root)
+                    .add_worktree(&root, None)
                     .map_err(|report| git_reason(&report))?;
                 (made.path.clone(), Some(made))
             }
@@ -686,18 +958,34 @@ impl SessionsActor {
             cwd,
             branch: made.as_ref().map(|made| made.branch.clone()),
             made,
+            options,
         })
     }
 
     /// Makes a new worktree of the repository at `repo` on a new `orb/<hex>`
-    /// branch, from the default branch as origin has it, else as it is locally.
-    fn add_worktree(&self, repo: &Path) -> Result<MadeWorktree, Report<GitError>> {
+    /// branch, from `base` (else the default branch) as origin has it, else as
+    /// it is locally. A ref of another remote, like `upstream/x`, is used as it
+    /// is.
+    fn add_worktree(
+        &self,
+        repo: &Path,
+        base: Option<&str>,
+    ) -> Result<MadeWorktree, Report<GitError>> {
         let git = &self.services.git;
-        let default = git.default_branch(repo)?;
-        let base = if git.has_origin(repo) && git.fetch(repo, &default)? {
-            format!("origin/{default}")
-        } else {
-            default
+        let base = match base {
+            Some(base) => base.to_owned(),
+            None => git.default_branch(repo)?,
+        };
+        let on_origin = match base.strip_prefix("origin/") {
+            Some(branch) => Some(branch),
+            None if !base.contains('/') || git.branch_exists(repo, &base) => Some(base.as_str()),
+            None => None,
+        };
+        let base = match on_origin {
+            Some(branch) if git.has_origin(repo) && git.fetch(repo, branch)? => {
+                format!("origin/{branch}")
+            }
+            _ => base.clone(),
         };
         let (path, branch) = (0..WORKTREE_NAME_ATTEMPTS)
             .map(|attempt| {
@@ -778,22 +1066,26 @@ impl SessionsActor {
         self.end_start(result);
     }
 
-    /// Checks `git_ref` out in thread `id`'s directory and shows the branch on
-    /// every thread there. Refused while a turn is underway in it.
+    /// Checks `git_ref` out in thread `id`'s directory.
     fn check_out(&mut self, id: ThreadId, git_ref: &GitRef) {
-        let Some(cwd) = self
+        let cwd = self
             .rows
             .iter()
             .find(|row| row.id == id)
-            .map(|row| row.cwd.clone())
-        else {
-            return;
-        };
-        let result = if self.busy_in(&cwd) {
+            .map(|row| row.cwd.clone());
+        if let Some(cwd) = cwd {
+            self.check_out_in(&cwd, git_ref);
+        }
+    }
+
+    /// Checks `git_ref` out in `cwd` and shows the branch there. Refused while
+    /// a turn is underway in it.
+    fn check_out_in(&mut self, cwd: &Path, git_ref: &GitRef) {
+        let result = if self.busy_in(cwd) {
             Err(BUSY_DIRECTORY.to_owned())
         } else {
-            match self.services.git.checkout(&cwd, git_ref) {
-                Ok(local) => self.show_branch(&cwd, &local),
+            match self.services.git.checkout(cwd, git_ref) {
+                Ok(local) => self.show_branch(cwd, &local),
                 Err(report) => Err(git_reason(&report)),
             }
         };
@@ -836,7 +1128,8 @@ impl SessionsActor {
         }
     }
 
-    /// Saves and shows `branch` on every thread in `cwd`.
+    /// Saves and shows `branch` on every thread in `cwd`, and on the local
+    /// draft of a project rooted there.
     fn show_branch(&mut self, cwd: &Path, branch: &str) -> Result<(), String> {
         let mut saved = Ok(());
         let mut app = self.state.write();
@@ -848,6 +1141,22 @@ impl SessionsActor {
             if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
                 let status = thread.status;
                 show(thread, row, status);
+            }
+        }
+        for project in app.sessions.projects.iter_mut().filter(|p| p.root == cwd) {
+            if let Some(draft) = project
+                .draft
+                .as_mut()
+                .filter(|draft| draft.workspace == DraftWorkspace::Local)
+            {
+                draft.branch = Some(branch.to_owned());
+                if self
+                    .store
+                    .save_draft(&draft_row(project.id, draft))
+                    .is_err()
+                {
+                    saved = Err(SAVE_FAILED.to_owned());
+                }
             }
         }
         saved
@@ -862,21 +1171,24 @@ impl SessionsActor {
             .any(|thread| thread.cwd == cwd && thread.status.in_progress())
     }
 
-    /// Saves a just-started session in `root` under the project.
+    /// Saves a session just started in `cwd` on `branch` with `options`
+    /// under the project.
     fn save_new(
         &mut self,
         project_id: ProjectId,
-        root: &Path,
+        cwd: &Path,
         short_id: &str,
+        branch: Option<String>,
+        options: &SessionOptions,
     ) -> Result<Thread, String> {
         let now = now_ms();
         let new = NewThread {
             project_id,
             short_id: short_id.to_owned(),
-            cwd: root.to_owned(),
+            cwd: cwd.to_owned(),
             created_at: now,
-            model: None,
-            permission_mode: None,
+            model: options.model.clone(),
+            permission_mode: options.permission_mode.clone(),
         };
         let Ok(id) = self.store.insert_thread(&new) else {
             return Err(NEW_SESSION_UNSAVED.to_owned());
@@ -893,7 +1205,7 @@ impl SessionsActor {
             transcript_offset: 0,
             created_at: now,
             turn_started_at: None,
-            branch: None,
+            branch,
             pinned_at: None,
             settled_override: None,
             settled_at: None,
@@ -904,6 +1216,9 @@ impl SessionsActor {
             model: new.model,
             permission_mode: new.permission_mode,
         };
+        if row.branch.is_some() && self.store.save_thread(&row).is_err() {
+            return Err(NEW_SESSION_UNSAVED.to_owned());
+        }
         let thread = unpolled(&self.services.session_host, &row);
         self.rows.push(row);
         Ok(thread)
@@ -1271,6 +1586,27 @@ fn unpolled(host: &SessionHostService, row: &ThreadRow) -> Thread {
     thread(row, ThreadStatus::Unknown, host.attach_argv(&row.short_id))
 }
 
+/// The branch checked out in `cwd`, if git can tell.
+fn current_branch(git: &GitService, cwd: &Path) -> Option<String> {
+    git.refs(cwd)
+        .ok()?
+        .into_iter()
+        .find(|git_ref| git_ref.current)
+        .map(|git_ref| git_ref.name)
+}
+
+/// How project `project_id`'s draft is saved.
+fn draft_row(project_id: ProjectId, draft: &Draft) -> DraftRow {
+    DraftRow {
+        project_id,
+        workspace: draft.workspace.clone(),
+        branch: draft.branch.clone(),
+        model: draft.model.clone(),
+        permission_mode: draft.permission.clone(),
+        created_at: to_ms(draft.created_at),
+    }
+}
+
 /// How a saved draft looks.
 fn draft_of(row: &DraftRow) -> Draft {
     Draft {
@@ -1292,8 +1628,12 @@ fn project_title(root: &Path) -> String {
 
 /// Milliseconds since the Unix epoch, now.
 fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+    to_ms(SystemTime::now())
+}
+
+/// Milliseconds since the Unix epoch at `time`; before the epoch clamps to 0.
+fn to_ms(time: SystemTime) -> i64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
         })
@@ -1324,20 +1664,23 @@ mod tests {
     use crate::command::Workspace;
     use crate::common::{Services, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService};
+    use crate::feat::git::validator::BUSY_DIRECTORY;
     use crate::feat::git::worktree::hex_branch;
     use crate::feat::sessions::session_host::{
-        CreatedSession, SessionHost, SessionHostError, SessionHostService, SessionRecord,
-        WorkspaceUntrusted,
+        CreatedSession, SessionHost, SessionHostError, SessionHostService, SessionOptions,
+        SessionRecord, WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
         Draft, DraftWorkspace, ProjectId, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::store::{
-        DraftRow, NewThread, SettledOverride, Store, StoreError, ThreadRow,
+        DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, StoreError, ThreadRow,
     };
     use crate::feat::sessions::transcript::transcript_path;
 
     const PROJECT_ROOT: &str = "/tmp/orb";
+    /// The branch checked out wherever the fake git lists refs.
+    const CURRENT_BRANCH: &str = "dev";
     const NO_CLAUDE_DIR: &str = "/nonexistent/claude";
     const WORKTREES_ROOT: &str = "/nonexistent/worktrees";
     const UNTRUSTED: &str =
@@ -1356,6 +1699,8 @@ mod tests {
         removed: Mutex<Vec<String>>,
         /// The directories `create` was called in, in order.
         created_in: Mutex<Vec<PathBuf>>,
+        /// The options `create` was called with, in order.
+        created_with: Mutex<Vec<SessionOptions>>,
         /// How many more creates refuse an untrusted directory before
         /// `create` answers.
         untrusted: Mutex<u32>,
@@ -1371,6 +1716,7 @@ mod tests {
                 stopped: Mutex::default(),
                 removed: Mutex::default(),
                 created_in: Mutex::default(),
+                created_with: Mutex::default(),
                 untrusted: Mutex::default(),
             }
         }
@@ -1432,6 +1778,13 @@ mod tests {
                 .clone()
         }
 
+        fn created_with(&self) -> Vec<SessionOptions> {
+            self.created_with
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
         fn set_list(&self, list: Result<Vec<SessionRecord>, String>) {
             *self.list.lock().unwrap_or_else(PoisonError::into_inner) = list;
         }
@@ -1443,11 +1796,19 @@ mod tests {
             "fake"
         }
 
-        async fn create(&self, cwd: &Path) -> Result<CreatedSession, Report<SessionHostError>> {
+        async fn create(
+            &self,
+            cwd: &Path,
+            options: &SessionOptions,
+        ) -> Result<CreatedSession, Report<SessionHostError>> {
             self.created_in
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(cwd.to_owned());
+            self.created_with
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(options.clone());
             {
                 let mut untrusted = self
                     .untrusted
@@ -1520,8 +1881,9 @@ mod tests {
         },
     }
 
-    /// A git whose default branch is `main`, whose answers the test scripts,
-    /// and that records the calls that change a repository.
+    /// A git whose default branch is `main`, with [`CURRENT_BRANCH`] checked
+    /// out everywhere, whose answers the test scripts, and that records the
+    /// calls that change a repository.
     struct FakeGit {
         origin: bool,
         fetch: Result<bool, String>,
@@ -1598,7 +1960,10 @@ mod tests {
         }
 
         fn refs(&self, _cwd: &Path) -> Result<Vec<GitRef>, Report<GitError>> {
-            Ok(Vec::new())
+            Ok(vec![GitRef {
+                current: true,
+                ..git_ref(CURRENT_BRANCH, false)
+            }])
         }
 
         fn default_branch(&self, _repo: &Path) -> Result<String, Report<GitError>> {
@@ -2125,17 +2490,912 @@ mod tests {
         Ok(())
     }
 
+    /// A draft of the project in `workspace` with Claude's defaults and no
+    /// branch, created at 1 s.
+    fn draft_row(project_id: ProjectId, workspace: DraftWorkspace) -> DraftRow {
+        DraftRow {
+            project_id,
+            workspace,
+            branch: None,
+            model: None,
+            permission_mode: None,
+            created_at: 1_000,
+        }
+    }
+
+    /// A store holding the orb project with `draft` saved for it.
+    fn store_with_draft<F>(draft: F) -> Result<(Store, ProjectId), Report<StoreError>>
+    where
+        F: FnOnce(ProjectId) -> DraftRow,
+    {
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        store.save_draft(&draft(id))?;
+        Ok((store, id))
+    }
+
+    /// Project `id`'s draft as the sidebar shows it.
+    fn shown_draft(state: &State, id: ProjectId) -> Option<Draft> {
+        state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .and_then(|project| project.draft.clone())
+    }
+
+    /// Project `id`'s saved draft.
+    fn saved_draft(store: &Store, id: ProjectId) -> Result<Option<DraftRow>, Report<StoreError>> {
+        Ok(store
+            .load()?
+            .2
+            .into_iter()
+            .find(|draft| draft.project_id == id))
+    }
+
+    /// Settings used last with `workspace`, sonnet and plan mode.
+    fn used(workspace: LastWorkspace) -> LastUsed {
+        LastUsed {
+            workspace,
+            model: Some("sonnet".to_owned()),
+            permission_mode: Some("plan".to_owned()),
+        }
+    }
+
+    /// The fetches and worktree adds git saw, in order.
+    fn fetch_and_add_steps(git: &FakeGit) -> Vec<String> {
+        git.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                GitCall::Fetch(branch) => Some(format!("fetch {branch}")),
+                GitCall::AddWorktree { base, .. } => Some(format!("add from {base}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn create_draft_prefills_the_projects_last_used_settings() -> Result<(), Report<StoreError>> {
+        // Given a project last started in a new worktree with sonnet in plan mode.
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        store.record_last_used(id, &used(LastWorkspace::NewWorktree), 10)?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When creating its draft.
+        actor.create_draft(id);
+
+        // Then the draft has that workspace, model and permission.
+        let settings =
+            shown_draft(&state, id).map(|draft| (draft.workspace, draft.model, draft.permission));
+        assert_eq!(
+            settings,
+            Some((
+                DraftWorkspace::NewWorktree,
+                Some("sonnet".to_owned()),
+                Some("plan".to_owned())
+            )),
+            "the draft should take the project's last-used settings"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn create_draft_in_a_new_project_takes_the_latest_model_and_permission()
+    -> Result<(), Report<StoreError>> {
+        // Given orb last started in a new worktree with sonnet in plan mode,
+        // and web never started.
+        let store = Store::open_in_memory()?;
+        let orb = orb_project(&store)?;
+        store.record_last_used(orb, &used(LastWorkspace::NewWorktree), 10)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When creating web's draft.
+        actor.create_draft(web);
+
+        // Then it has orb's model and permission in a local checkout.
+        let settings =
+            shown_draft(&state, web).map(|draft| (draft.workspace, draft.model, draft.permission));
+        assert_eq!(
+            settings,
+            Some((
+                DraftWorkspace::Local,
+                Some("sonnet".to_owned()),
+                Some("plan".to_owned())
+            )),
+            "a new project should take the latest model and permission, locally"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn remembered_previous_worktree_without_one_falls_back_to_local()
+    -> Result<(), Report<StoreError>> {
+        // Given a project last started in a previous worktree, with no thread
+        // in a worktree now.
+        let (store, _) = store_with_thread("aa")?;
+        let id = orb_project(&store)?;
+        store.record_last_used(id, &used(LastWorkspace::Previous), 10)?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When creating its draft.
+        actor.create_draft(id);
+
+        // Then the draft is a local checkout.
+        assert_eq!(
+            shown_draft(&state, id).map(|draft| draft.workspace),
+            Some(DraftWorkspace::Local),
+            "a previous worktree the project lacks should fall back to local"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn remembered_previous_worktree_prefills_it_with_its_branch() -> Result<(), Report<StoreError>>
+    {
+        // Given a project last started in a previous worktree, and a thread
+        // in the worktree on feat.
+        let (store, _) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            cwd: PathBuf::from(HEX_WORKTREE),
+            branch: Some("feat".to_owned()),
+            ..row
+        })?;
+        let id = orb_project(&store)?;
+        store.record_last_used(id, &used(LastWorkspace::Previous), 10)?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When creating its draft.
+        actor.create_draft(id);
+
+        // Then the draft is in that worktree, on feat.
+        let workspace = shown_draft(&state, id).map(|draft| (draft.workspace, draft.branch));
+        assert_eq!(
+            workspace,
+            Some((
+                DraftWorkspace::Existing(PathBuf::from(HEX_WORKTREE)),
+                Some("feat".to_owned())
+            )),
+            "the draft should reopen the previous worktree on its branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_worktree_draft_branch_is_the_default_branch() -> Result<(), Report<StoreError>> {
+        // Given a project last started in a new worktree, whose default branch is main.
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        store.record_last_used(id, &used(LastWorkspace::NewWorktree), 10)?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When creating its draft.
+        actor.create_draft(id);
+
+        // Then the draft's base branch is main.
+        assert_eq!(
+            shown_draft(&state, id)
+                .and_then(|draft| draft.branch)
+                .as_deref(),
+            Some("main"),
+            "a new worktree should start from the default branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn local_draft_branch_is_the_roots_current_branch() -> Result<(), Report<StoreError>> {
+        // Given a never-started project whose root is on dev.
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When creating its draft.
+        actor.create_draft(id);
+
+        // Then the local draft shows dev.
+        assert_eq!(
+            shown_draft(&state, id)
+                .and_then(|draft| draft.branch)
+                .as_deref(),
+            Some(CURRENT_BRANCH),
+            "a local draft should show the root's current branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn created_draft_is_saved() -> Result<(), Report<StoreError>> {
+        // Given a project without a draft.
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        let (mut actor, _state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When creating its draft.
+        actor.create_draft(id);
+
+        // Then the store holds a local draft on dev.
+        let saved = saved_draft(&actor.store, id)?.map(|draft| (draft.workspace, draft.branch));
+        assert_eq!(
+            saved,
+            Some((DraftWorkspace::Local, Some(CURRENT_BRANCH.to_owned()))),
+            "the new draft should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn create_draft_keeps_an_existing_draft() -> Result<(), Report<StoreError>> {
+        // Given a project with an opus draft, last started with sonnet.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            model: Some("opus".to_owned()),
+            ..draft_row(id, DraftWorkspace::Local)
+        })?;
+        store.record_last_used(id, &used(LastWorkspace::Local), 10)?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When asked to create its draft again.
+        actor.create_draft(id);
+
+        // Then the opus draft stays.
+        assert_eq!(
+            shown_draft(&state, id)
+                .and_then(|draft| draft.model)
+                .as_deref(),
+            Some("opus"),
+            "an existing draft should not be replaced"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn save_draft_saves_the_drafts_edits() -> Result<(), Report<StoreError>> {
+        // Given a local draft the user switched to haiku.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+        if let Some(draft) = state.write().sessions.draft_mut(id) {
+            draft.model = Some("haiku".to_owned());
+        }
+
+        // When saving it.
+        actor.save_draft(id);
+
+        // Then the saved draft is on haiku.
+        assert_eq!(
+            saved_draft(&actor.store, id)?
+                .and_then(|draft| draft.model)
+                .as_deref(),
+            Some("haiku"),
+            "the draft's edit should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn save_draft_fills_in_a_missing_branch() -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft without a base branch.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When saving it.
+        actor.save_draft(id);
+
+        // Then its base branch is the default branch.
+        assert_eq!(
+            shown_draft(&state, id)
+                .and_then(|draft| draft.branch)
+                .as_deref(),
+            Some("main"),
+            "a saved new-worktree draft should get the default branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn checkout_draft_shows_the_branch_on_the_local_draft() -> Result<(), Report<StoreError>> {
+        // Given a local draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When checking out origin/feat for it.
+        actor.checkout_draft(id, &git_ref("origin/feat", true));
+
+        // Then the draft shows the local branch feat.
+        assert_eq!(
+            shown_draft(&state, id)
+                .and_then(|draft| draft.branch)
+                .as_deref(),
+            Some("feat"),
+            "the draft should show the branch checked out in the root"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn checkout_draft_saves_the_drafts_branch() -> Result<(), Report<StoreError>> {
+        // Given a local draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (mut actor, _state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When checking out feat for it.
+        actor.checkout_draft(id, &git_ref("feat", false));
+
+        // Then the saved draft is on feat.
+        assert_eq!(
+            saved_draft(&actor.store, id)?
+                .and_then(|draft| draft.branch)
+                .as_deref(),
+            Some("feat"),
+            "the draft's new branch should be saved"
+        );
+        Ok(())
+    }
+
     #[rstest::rstest]
     #[tokio::test]
-    async fn created_thread_is_first_in_its_project() -> Result<(), Report<StoreError>> {
-        // Given a saved thread in the orb project.
+    async fn checkout_draft_refused_while_the_root_is_busy() -> Result<(), Report<StoreError>> {
+        // Given a local draft and a thread working in the root.
         let (store, _) = store_with_thread("aa")?;
-        let project = orb_project(&store)?;
+        let id = orb_project(&store)?;
+        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When checking out feat for the draft.
+        actor.checkout_draft(id, &git_ref("feat", false));
+
+        // Then the mode line says Claude is working there.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some(BUSY_DIRECTORY),
+            "a checkout under a running turn should be refused"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn refused_checkout_keeps_the_drafts_branch() -> Result<(), Report<StoreError>> {
+        // Given a local draft on main and a thread working in the root.
+        let (store, _) = store_with_thread("aa")?;
+        let id = orb_project(&store)?;
+        store.save_draft(&DraftRow {
+            branch: Some("main".to_owned()),
+            ..draft_row(id, DraftWorkspace::Local)
+        })?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When checking out feat for the draft.
+        actor.checkout_draft(id, &git_ref("feat", false));
+
+        // Then the draft is still on main.
+        assert_eq!(
+            shown_draft(&state, id)
+                .and_then(|draft| draft.branch)
+                .as_deref(),
+            Some("main"),
+            "a refused checkout should leave the draft's branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn thread_checkout_in_the_root_updates_the_local_draft() -> Result<(), Report<StoreError>> {
+        // Given a thread in the root and a local draft on main.
+        let (store, thread) = store_with_thread("aa")?;
+        let id = orb_project(&store)?;
+        store.save_draft(&DraftRow {
+            branch: Some("main".to_owned()),
+            ..draft_row(id, DraftWorkspace::Local)
+        })?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When switching the thread to feat.
+        actor.check_out(thread, &git_ref("feat", false));
+
+        // Then the draft follows the root onto feat.
+        assert_eq!(
+            shown_draft(&state, id)
+                .and_then(|draft| draft.branch)
+                .as_deref(),
+            Some("feat"),
+            "a local draft should follow checkouts in the root"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn thread_checkout_in_the_root_leaves_a_new_worktree_draft() -> Result<(), Report<StoreError>> {
+        // Given a thread in the root and a new-worktree draft based on main.
+        let (store, thread) = store_with_thread("aa")?;
+        let id = orb_project(&store)?;
+        store.save_draft(&DraftRow {
+            branch: Some("main".to_owned()),
+            ..draft_row(id, DraftWorkspace::NewWorktree)
+        })?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When switching the thread to feat.
+        actor.check_out(thread, &git_ref("feat", false));
+
+        // Then the draft keeps its base main.
+        assert_eq!(
+            shown_draft(&state, id)
+                .and_then(|draft| draft.branch)
+                .as_deref(),
+            Some("main"),
+            "a new-worktree draft's base should not follow the root"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn discard_forgets_the_draft() -> Result<(), Report<StoreError>> {
+        // Given a project with a draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When discarding it.
+        actor.discard_draft(id);
+
+        // Then the project has no draft.
+        assert_eq!(
+            shown_draft(&state, id),
+            None,
+            "a discarded draft should leave the sidebar"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn discard_deletes_the_saved_draft() -> Result<(), Report<StoreError>> {
+        // Given a project with a draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (mut actor, _state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When discarding it.
+        actor.discard_draft(id);
+
+        // Then no draft is saved.
+        assert_eq!(
+            saved_draft(&actor.store, id)?,
+            None,
+            "a discarded draft should be deleted from the store"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn discard_asks_nothing_of_the_session_host() -> Result<(), Report<StoreError>> {
+        // Given a project with a draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When discarding it.
+        actor.discard_draft(id);
+
+        // Then no session was created, stopped or removed.
+        assert!(
+            host.created_in().is_empty() && host.stopped().is_empty() && host.removed().is_empty(),
+            "a draft has no session to remove"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::local_name("feat")]
+    #[case::origin_ref("origin/feat")]
+    #[tokio::test]
+    async fn new_worktree_start_bases_on_the_drafts_branch_from_origin(
+        #[case] base: &str,
+    ) -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft based on `base`, and an origin that has feat.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            branch: Some(base.to_owned()),
+            ..draft_row(id, DraftWorkspace::NewWorktree)
+        })?;
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::with_origin(Ok(true)));
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then feat is fetched and the worktree starts from origin/feat.
+        assert_eq!(
+            fetch_and_add_steps(&git),
+            vec!["fetch feat".to_owned(), "add from origin/feat".to_owned()],
+            "the worktree should start from freshly fetched origin/feat"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn new_worktree_start_uses_another_remotes_ref_as_it_is() -> Result<(), Report<StoreError>>
+    {
+        // Given a new-worktree draft based on upstream/feat.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            branch: Some("upstream/feat".to_owned()),
+            ..draft_row(id, DraftWorkspace::NewWorktree)
+        })?;
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::with_origin(Ok(true)));
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then nothing is fetched and the worktree starts from upstream/feat.
+        assert_eq!(
+            fetch_and_add_steps(&git),
+            vec!["add from upstream/feat".to_owned()],
+            "another remote's ref should be used without a fetch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn new_worktree_start_runs_the_session_in_the_new_worktree()
+    -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the session starts in the worktree git added.
+        assert_eq!(
+            host.created_in(),
+            git.added()
+                .map(|(path, _)| path)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "the session should start in the new worktree"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn new_worktree_thread_is_saved_on_the_worktrees_branch() -> Result<(), Report<StoreError>>
+    {
+        // Given a new-worktree draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the saved thread is on the branch orb made.
+        assert_eq!(
+            saved(&actor.store, "bb")?.branch,
+            git.added().map(|(_, branch)| branch),
+            "the new thread should be saved on its worktree's branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn start_passes_the_drafts_model_and_permission() -> Result<(), Report<StoreError>> {
+        // Given a local draft with sonnet in plan mode.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            model: Some("sonnet".to_owned()),
+            permission_mode: Some("plan".to_owned()),
+            ..draft_row(id, DraftWorkspace::Local)
+        })?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the session starts with sonnet in plan mode.
+        assert_eq!(
+            host.created_with(),
+            vec![SessionOptions {
+                model: Some("sonnet".to_owned()),
+                permission_mode: Some("plan".to_owned()),
+            }],
+            "the session should start with the draft's model and permission"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn local_draft_starts_in_the_projects_root() -> Result<(), Report<StoreError>> {
+        // Given saved orb and web projects, web with a local draft.
+        let store = Store::open_in_memory()?;
+        orb_project(&store)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        store.save_draft(&draft_row(web, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting web's draft.
+        actor.start_draft(web).await;
+
+        // Then the host starts it in web's root.
+        assert_eq!(
+            host.created_in(),
+            vec![PathBuf::from("/tmp/web")],
+            "a local draft should start in its project's root"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn start_of_a_missing_worktree_shows_why() -> Result<(), Report<StoreError>> {
+        // Given a draft in a worktree that no longer exists.
+        let (store, id) = store_with_draft(|id| {
+            draft_row(
+                id,
+                DraftWorkspace::Existing(PathBuf::from("/nonexistent/wt")),
+            )
+        })?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
-        // When creating a session in it.
-        actor.create(project, Path::new(PROJECT_ROOT)).await;
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the mode line says the worktree is gone.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("worktree no longer exists: /nonexistent/wt"),
+            "a missing worktree should fail the start with its path"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn start_of_a_gone_draft_shows_why() -> Result<(), Report<StoreError>> {
+        // Given a project without a draft.
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting its draft.
+        actor.start_draft(id).await;
+
+        // Then the mode line says the draft is gone.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("the draft is gone"),
+            "a start without a draft should fail"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::succeeded(Ok("bb"))]
+    #[case::failed(Err("claude failed"))]
+    #[tokio::test]
+    async fn start_ends_starting(
+        #[case] outcome: Result<&str, &str>,
+    ) -> Result<(), Report<StoreError>> {
+        // Given a draft start in flight.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(outcome);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.starting = true;
+
+        // When the start finishes.
+        actor.start_draft(id).await;
+
+        // Then nothing is starting any more.
+        assert!(
+            !state.read().sessions.starting,
+            "a finished start should stop showing as starting"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_start_keeps_the_draft() -> Result<(), Report<StoreError>> {
+        // Given a local draft and a host that refuses to start a session.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Err("claude failed"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the draft is still there.
+        assert!(
+            shown_draft(&state, id).is_some(),
+            "a failed start should keep the draft"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_start_shows_the_reason() -> Result<(), Report<StoreError>> {
+        // Given a local draft and a host that refuses to start a session.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Err("claude failed"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the reason is the error.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("claude failed"),
+            "the mode line should show why the start failed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_start_adds_no_thread() -> Result<(), Report<StoreError>> {
+        // Given a local draft and a host that refuses to start a session.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Err("claude failed"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then there are still no threads.
+        assert_eq!(
+            state.read().sessions.threads().count(),
+            0,
+            "a failed start shouldn't add a thread"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_draft_start_removes_its_new_worktree() -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft and a host that refuses to start a session.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
+        let (host, git) = (FakeHost::creating(Err("claude failed")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the worktree orb made is force-removed.
+        let (path, _branch) = git
+            .added()
+            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
+        assert!(
+            git.calls()
+                .contains(&GitCall::RemoveWorktree { path, force: true }),
+            "a failed start should remove the worktree made for it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn started_draft_leaves_the_project() -> Result<(), Report<StoreError>> {
+        // Given a local draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting it.
+        actor.start_draft(id).await;
+
+        // Then the project has no draft.
+        assert_eq!(
+            shown_draft(&state, id),
+            None,
+            "a started draft should leave the sidebar"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn started_draft_is_deleted_from_the_store() -> Result<(), Report<StoreError>> {
+        // Given a local draft.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting it.
+        actor.start_draft(id).await;
+
+        // Then no draft is saved.
+        assert_eq!(
+            saved_draft(&actor.store, id)?,
+            None,
+            "a started draft should be deleted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn started_thread_is_first_in_its_project() -> Result<(), Report<StoreError>> {
+        // Given a saved thread and a local draft in the orb project.
+        let (store, _) = store_with_thread("aa")?;
+        let project = orb_project(&store)?;
+        store.save_draft(&draft_row(project, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(project).await;
 
         // Then the new thread is the project's first.
         let first = state
@@ -2156,132 +3416,161 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn created_thread_is_selected() -> Result<(), Report<StoreError>> {
-        // Given a saved thread, selected.
-        let (store, _) = store_with_thread("aa")?;
-        let project = orb_project(&store)?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When creating a session in its project.
-        actor.create(project, Path::new(PROJECT_ROOT)).await;
-
-        // Then the new thread is selected.
-        assert_eq!(
-            state.read().sessions.selected_id(),
-            Some(saved(&actor.store, "bb")?.id),
-            "the new thread should be selected"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[case::succeeded(Ok("bb"))]
-    #[case::failed(Err("Workspace not trusted"))]
-    #[tokio::test]
-    async fn create_ends_starting(
-        #[case] outcome: Result<&str, &str>,
-    ) -> Result<(), Report<StoreError>> {
-        // Given a create in flight in the orb project.
-        let store = Store::open_in_memory()?;
-        let project = orb_project(&store)?;
-        let host = FakeHost::creating(outcome);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.starting = true;
-
-        // When the create finishes.
-        actor.create(project, Path::new(PROJECT_ROOT)).await;
-
-        // Then nothing is starting any more.
-        assert!(
-            !state.read().sessions.starting,
-            "a finished create should stop showing as starting"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_create_shows_the_reason() -> Result<(), Report<StoreError>> {
-        // Given a host that refuses to start a session.
-        let store = Store::open_in_memory()?;
-        let project = orb_project(&store)?;
-        let host = FakeHost::creating(Err("Workspace not trusted"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When creating a session.
-        actor.create(project, Path::new(PROJECT_ROOT)).await;
-
-        // Then the reason is the error.
-        assert_eq!(
-            state.read().sessions.error.as_deref(),
-            Some("Workspace not trusted"),
-            "the mode line should show why the create failed"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_create_adds_no_thread() -> Result<(), Report<StoreError>> {
-        // Given no threads and a host that refuses to start a session.
-        let store = Store::open_in_memory()?;
-        let project = orb_project(&store)?;
-        let host = FakeHost::creating(Err("Workspace not trusted"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When creating a session.
-        actor.create(project, Path::new(PROJECT_ROOT)).await;
-
-        // Then there are still no threads.
-        assert_eq!(
-            state.read().sessions.threads().count(),
-            0,
-            "a failed create shouldn't add a thread"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn create_starts_the_session_in_the_projects_root() -> Result<(), Report<StoreError>> {
-        // Given saved orb and web projects.
+    async fn started_thread_is_saved_under_its_project() -> Result<(), Report<StoreError>> {
+        // Given saved orb and web projects, web with a local draft.
         let store = Store::open_in_memory()?;
         orb_project(&store)?;
         let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        store.save_draft(&draft_row(web, DraftWorkspace::Local))?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
-        // When creating a session in web.
-        actor.create(web, Path::new("/tmp/web")).await;
-
-        // Then the host starts it in web's root.
-        assert_eq!(
-            host.created_in(),
-            vec![PathBuf::from("/tmp/web")],
-            "a session should start in its project's root"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn created_thread_is_saved_under_its_project() -> Result<(), Report<StoreError>> {
-        // Given saved orb and web projects.
-        let store = Store::open_in_memory()?;
-        orb_project(&store)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When creating a session in web.
-        actor.create(web, Path::new("/tmp/web")).await;
+        // When starting web's draft.
+        actor.start_draft(web).await;
 
         // Then the saved thread belongs to web.
         assert_eq!(
             saved(&actor.store, "bb")?.project_id,
             web,
-            "the new thread should be saved under the picked project"
+            "the new thread should be saved under the draft's project"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn started_thread_saves_its_model_and_permission() -> Result<(), Report<StoreError>> {
+        // Given a local draft with sonnet in plan mode.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            model: Some("sonnet".to_owned()),
+            permission_mode: Some("plan".to_owned()),
+            ..draft_row(id, DraftWorkspace::Local)
+        })?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting it.
+        actor.start_draft(id).await;
+
+        // Then the saved thread remembers sonnet and plan mode.
+        let row = saved(&actor.store, "bb")?;
+        assert_eq!(
+            (row.model.as_deref(), row.permission_mode.as_deref()),
+            (Some("sonnet"), Some("plan")),
+            "the thread should save the flags it started with"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn start_records_the_last_used_settings() -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft with sonnet in plan mode.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            model: Some("sonnet".to_owned()),
+            permission_mode: Some("plan".to_owned()),
+            ..draft_row(id, DraftWorkspace::NewWorktree)
+        })?;
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When starting it.
+        actor.start_draft(id).await;
+
+        // Then the project's last-used settings are those.
+        assert_eq!(
+            actor.store.last_used(id)?,
+            Some(used(LastWorkspace::NewWorktree)),
+            "a start should record its workspace kind, model and permission"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn start_with_the_draft_selected_selects_the_thread() -> Result<(), Report<StoreError>> {
+        // Given a local draft, selected.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.cursor = Some(SidebarItem::Draft(id));
+
+        // When starting it.
+        actor.start_draft(id).await;
+
+        // Then the new thread is selected.
+        assert_eq!(
+            state.read().sessions.selected_id(),
+            Some(saved(&actor.store, "bb")?.id),
+            "the new thread should take the draft's place under the cursor"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn start_with_the_draft_selected_asks_to_attach() -> Result<(), Report<StoreError>> {
+        // Given a local draft, selected.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.cursor = Some(SidebarItem::Draft(id));
+
+        // When starting it.
+        actor.start_draft(id).await;
+
+        // Then the frontend is asked to attach to the new thread.
+        assert_eq!(
+            state.read().sessions.attach,
+            Some(saved(&actor.store, "bb")?.id),
+            "a still-selected draft's thread should be attached to"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn start_after_the_cursor_moved_does_not_ask_to_attach() -> Result<(), Report<StoreError>>
+    {
+        // Given a thread and a local draft, with the thread selected.
+        let (store, thread) = store_with_thread("aa")?;
+        let id = orb_project(&store)?;
+        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.cursor = Some(SidebarItem::Thread(thread));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then nothing is to be attached to.
+        assert_eq!(
+            state.read().sessions.attach,
+            None,
+            "a draft the user moved away from should not steal focus"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn start_after_the_cursor_moved_keeps_the_cursor() -> Result<(), Report<StoreError>> {
+        // Given a thread and a local draft, with the thread selected.
+        let (store, thread) = store_with_thread("aa")?;
+        let id = orb_project(&store)?;
+        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.cursor = Some(SidebarItem::Thread(thread));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the old thread stays selected.
+        assert_eq!(
+            state.read().sessions.cursor,
+            Some(SidebarItem::Thread(thread)),
+            "the cursor should stay where the user moved it"
         );
         Ok(())
     }
@@ -3646,15 +4935,46 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn untrusted_create_asks_for_trust_in_the_directory() -> Result<(), Report<StoreError>> {
-        // Given claude refusing the project's untrusted root.
+    async fn move_restarts_with_the_threads_model_and_permission() -> Result<(), Report<StoreError>>
+    {
+        // Given a prompt-less thread started with sonnet in plan mode.
         let store = Store::open_in_memory()?;
-        let project = orb_project(&store)?;
+        let id = store.insert_thread(&NewThread {
+            project_id: orb_project(&store)?,
+            short_id: "aa".to_owned(),
+            cwd: PathBuf::from(PROJECT_ROOT),
+            created_at: now_ms() - HOUR_MS,
+            model: Some("sonnet".to_owned()),
+            permission_mode: Some("plan".to_owned()),
+        })?;
+        let host = FakeHost::moving(Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When moving it to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then its new session starts with sonnet in plan mode.
+        assert_eq!(
+            host.created_with(),
+            vec![SessionOptions {
+                model: Some("sonnet".to_owned()),
+                permission_mode: Some("plan".to_owned()),
+            }],
+            "a moved thread should keep its model and permission"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn untrusted_draft_start_asks_for_trust_in_the_root() -> Result<(), Report<StoreError>> {
+        // Given a local draft and claude refusing the project's untrusted root.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
         let host = FakeHost::untrusted(1, Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
-        // When creating a session there.
-        actor.create(project, Path::new(PROJECT_ROOT)).await;
+        // When starting the draft.
+        actor.start_draft(project).await;
 
         // Then the start waits for the root to be trusted.
         assert_eq!(
@@ -3708,12 +5028,11 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test]
     async fn retry_after_trust_starts_the_session() -> Result<(), Report<StoreError>> {
-        // Given a create waiting for its directory to be trusted.
-        let store = Store::open_in_memory()?;
-        let project = orb_project(&store)?;
+        // Given a draft start waiting for its directory to be trusted.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
         let host = FakeHost::untrusted(1, Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.create(project, Path::new(PROJECT_ROOT)).await;
+        actor.start_draft(project).await;
 
         // When retrying the start after the user trusted it.
         actor.retry_start().await;
@@ -3730,12 +5049,11 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test]
     async fn retry_refused_again_shows_the_error() -> Result<(), Report<StoreError>> {
-        // Given a create waiting for trust, and the directory still untrusted.
-        let store = Store::open_in_memory()?;
-        let project = orb_project(&store)?;
+        // Given a draft start waiting for trust, and the directory still untrusted.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
         let host = FakeHost::untrusted(2, Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.create(project, Path::new(PROJECT_ROOT)).await;
+        actor.start_draft(project).await;
 
         // When retrying the start.
         actor.retry_start().await;
@@ -3776,12 +5094,11 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test]
     async fn retry_refused_again_does_not_ask_for_trust() -> Result<(), Report<StoreError>> {
-        // Given a create waiting for trust, and the directory still untrusted.
-        let store = Store::open_in_memory()?;
-        let project = orb_project(&store)?;
+        // Given a draft start waiting for trust, and the directory still untrusted.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
         let host = FakeHost::untrusted(2, Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.create(project, Path::new(PROJECT_ROOT)).await;
+        actor.start_draft(project).await;
 
         // When retrying the start.
         actor.retry_start().await;

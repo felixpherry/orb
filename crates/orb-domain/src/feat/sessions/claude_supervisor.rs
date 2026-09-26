@@ -1,6 +1,7 @@
 //! Claude Code's background supervisor as orb's session host.
 //!
-//! `claude --bg` starts an idle session, `claude agents --json --all` reports
+//! `claude --bg` starts an idle session, with `--model` and
+//! `--permission-mode` when a session asks for them, `claude agents --json --all` reports
 //! what every session is doing, `claude stop <id>` stops one and keeps its
 //! conversation, `claude rm <id>` deletes one, and `claude attach <id>`
 //! attaches to one, resuming it if it was stopped. Every `claude` process runs
@@ -20,7 +21,8 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::session_host::{
-    CreatedSession, SessionHost, SessionHostError, SessionRecord, WorkspaceUntrusted,
+    CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
+    WorkspaceUntrusted,
 };
 use super::state::ThreadStatus;
 
@@ -68,9 +70,13 @@ impl SessionHost for ClaudeSupervisor {
         "claude"
     }
 
-    async fn create(&self, cwd: &Path) -> Result<CreatedSession, Report<SessionHostError>> {
+    async fn create(
+        &self,
+        cwd: &Path,
+        options: &SessionOptions,
+    ) -> Result<CreatedSession, Report<SessionHostError>> {
         let command = {
-            let mut command = self.claude(&["--bg"]);
+            let mut command = self.claude(&bg_args(options));
             command.current_dir(cwd);
             command
         };
@@ -103,6 +109,20 @@ impl SessionHost for ClaudeSupervisor {
     fn attach_argv(&self, short_id: &str) -> Vec<OsString> {
         ["claude", "attach", short_id].map(OsString::from).into()
     }
+}
+
+/// The arguments of `claude` that start an idle session with `options`.
+fn bg_args(options: &SessionOptions) -> Vec<&str> {
+    let model = options.model.as_deref().map(|model| ["--model", model]);
+    let mode = options
+        .permission_mode
+        .as_deref()
+        .map(|mode| ["--permission-mode", mode]);
+    ["--bg"]
+        .into_iter()
+        .chain(model.into_iter().flatten())
+        .chain(mode.into_iter().flatten())
+        .collect()
 }
 
 /// Runs `command` for at most `limit`; returns its stdout, then its stderr.
@@ -218,10 +238,41 @@ mod tests {
     use error_stack::Report;
 
     use super::{
-        ClaudeSupervisor, SessionHostError, ThreadStatus, WorkspaceUntrusted, parse_agents,
-        parse_backgrounded,
+        ClaudeSupervisor, SessionHostError, SessionOptions, ThreadStatus, WorkspaceUntrusted,
+        bg_args, parse_agents, parse_backgrounded,
     };
     use crate::feat::sessions::session_host::SessionHost;
+
+    #[rstest::rstest]
+    fn default_options_start_with_only_bg() {
+        // Given options that leave model and permission to Claude.
+        let options = SessionOptions::default();
+
+        // When building the start arguments.
+        let args = bg_args(&options);
+
+        // Then only `--bg` is passed.
+        assert_eq!(args, ["--bg"], "defaults should pass no flags");
+    }
+
+    #[rstest::rstest]
+    fn model_and_permission_mode_are_passed_as_flags() {
+        // Given sonnet in plan mode.
+        let options = SessionOptions {
+            model: Some("sonnet".to_owned()),
+            permission_mode: Some("plan".to_owned()),
+        };
+
+        // When building the start arguments.
+        let args = bg_args(&options);
+
+        // Then both flags follow `--bg`.
+        assert_eq!(
+            args,
+            ["--bg", "--model", "sonnet", "--permission-mode", "plan"],
+            "the model and permission mode should be passed"
+        );
+    }
 
     #[rstest::rstest]
     fn backgrounded_line_with_a_name_yields_the_short_id() -> Result<(), Report<SessionHostError>> {

@@ -16,7 +16,7 @@ use crate::feat::picker::validator::{
 };
 use crate::feat::preview::validator::{validate_toggle_fold, validate_yank};
 use crate::feat::sessions::state::{
-    AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, ThreadId,
+    AttachTarget, Draft, DraftWorkspace, Project, ProjectId, SidebarItem, ThreadId,
 };
 use crate::feat::sessions::validator::{
     validate_close_shelf, validate_delete, validate_open_shelf, validate_pick_setting,
@@ -492,7 +492,7 @@ fn pick_draft_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command>
     else {
         return vec![];
     };
-    let Some(draft) = draft_mut(&mut state.sessions, project) else {
+    let Some(draft) = state.sessions.draft_mut(project) else {
         return vec![];
     };
     let elsewhere = git_ref.worktree.as_ref().filter(|path| *path != cwd);
@@ -559,22 +559,13 @@ fn edit_draft<F>(state: &mut AppState, project: ProjectId, edit: F) -> Vec<Comma
 where
     F: FnOnce(&mut Draft),
 {
-    match draft_mut(&mut state.sessions, project) {
+    match state.sessions.draft_mut(project) {
         Some(draft) => {
             edit(draft);
             vec![Command::SaveDraft(project)]
         }
         None => vec![],
     }
-}
-
-/// `project`'s draft, if it has one.
-fn draft_mut(sessions: &mut Sessions, project: ProjectId) -> Option<&mut Draft> {
-    sessions
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project)
-        .and_then(|p| p.draft.as_mut())
 }
 
 /// Opens `picker` and gives it the keys.
