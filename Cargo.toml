@@ -41,6 +41,7 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 rusqlite = { version = "0.40", default-features = false, features = ["fallible_uint"] }
 ratatui-which-key = "0.14"
 unicode-segmentation = "1.13"
+fuzzy-matcher = "0.3"
 tempfile = "3.27"
 
 [lints]
