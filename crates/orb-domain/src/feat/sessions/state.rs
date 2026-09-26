@@ -127,7 +127,8 @@ impl SidebarRow<'_> {
 /// orb's projects and threads, and where the sidebar's cursor is.
 ///
 /// Written by the sessions actor (projects, `error`, `starting` when a create
-/// ends, the cursor after a restore or a create) and by the intent handler
+/// ends, `trust`, the cursor after a restore or a create) and by the intent
+/// handler
 /// (the cursor on navigation, settle and delete, `shelf_open`, `starting` when
 /// a create begins).
 #[derive(Debug, Clone, Default)]
@@ -142,6 +143,9 @@ pub struct Sessions {
     pub starting: bool,
     /// The latest `claude` failure; cleared by the next success.
     pub error: Option<String>,
+    /// A session start waits for the user to trust this directory in an
+    /// interactive `claude`.
+    pub trust: Option<PathBuf>,
 }
 
 impl Sessions {

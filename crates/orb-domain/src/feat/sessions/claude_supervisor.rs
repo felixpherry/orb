@@ -19,7 +19,9 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use super::session_host::{CreatedSession, SessionHost, SessionHostError, SessionRecord};
+use super::session_host::{
+    CreatedSession, SessionHost, SessionHostError, SessionRecord, WorkspaceUntrusted,
+};
 use super::state::ThreadStatus;
 
 const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -32,6 +34,8 @@ const APPROVALS: [&str; 3] = ["permission prompt", "sandbox request", "worker re
 
 /// What `claude --bg` prints to stderr before the session's id.
 const BANNER: &str = "Starting background service";
+/// What `claude` prints when it refuses a directory it hasn't been trusted in.
+const UNTRUSTED: &str = "Workspace not trusted";
 
 /// Hosts sessions in Claude Code's background supervisor.
 #[derive(Debug, Clone)]
@@ -133,14 +137,21 @@ async fn run(
 }
 
 /// A report whose reason is the first line `claude` printed (skipping the
-/// startup banner), else `fallback`.
+/// startup banner), else `fallback`. A refused untrusted directory is also
+/// marked [`WorkspaceUntrusted`].
 fn failure(text: &str, fallback: &str) -> Report<SessionHostError> {
     let reason = text
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with(BANNER))
         .unwrap_or(fallback);
-    Report::new(SessionHostError).attach(reason.to_owned())
+    let report = Report::new(SessionHostError);
+    let report = if text.contains(UNTRUSTED) {
+        report.attach_opaque(WorkspaceUntrusted)
+    } else {
+        report
+    };
+    report.attach(reason.to_owned())
 }
 
 /// The short id in `claude --bg`'s `backgrounded · <id> …` line.
@@ -207,7 +218,8 @@ mod tests {
     use error_stack::Report;
 
     use super::{
-        ClaudeSupervisor, SessionHostError, ThreadStatus, parse_agents, parse_backgrounded,
+        ClaudeSupervisor, SessionHostError, ThreadStatus, WorkspaceUntrusted, parse_agents,
+        parse_backgrounded,
     };
     use crate::feat::sessions::session_host::SessionHost;
 
@@ -249,7 +261,25 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn untrusted_workspace_refusal_is_the_error_reason() {
+    fn untrusted_refusal_carries_the_untrusted_marker() {
+        // Given `claude --bg`'s refusal in an untrusted directory.
+        let text = "\nStarting background service…\n\
+                    Workspace not trusted. Run `claude` in /tmp/x once and accept the trust prompt\n";
+
+        // When parsing it.
+        let result = parse_backgrounded(text);
+
+        // Then the error is marked as an untrusted workspace.
+        assert!(
+            result
+                .err()
+                .is_some_and(|report| report.contains::<WorkspaceUntrusted>()),
+            "the refusal should be marked untrusted"
+        );
+    }
+
+    #[rstest::rstest]
+    fn untrusted_refusal_keeps_its_reason() {
         // Given `claude --bg`'s refusal in an untrusted directory.
         let refusal =
             "Workspace not trusted. Run `claude` in /tmp/x once and accept the trust prompt";

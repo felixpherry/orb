@@ -11,11 +11,15 @@
 //! to Claude; otherwise keys go through the [`keymap`]. The loop reads the
 //! directory picker's listings itself, since a listing takes about a
 //! millisecond.
+//!
+//! When a session start waits for the user to trust a directory, the pane
+//! runs an interactive `claude` there instead. Leaving it, by its exit or
+//! `<C-\>`, asks the sessions actor to try the start again.
 
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -103,9 +107,40 @@ enum LoopEvent {
     StateChanged,
 }
 
-/// A running `claude attach` and the thread it belongs to.
+/// What the pane is running for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneOwner {
+    /// `claude attach` to the thread's session.
+    Thread(ThreadId),
+    /// An interactive `claude` where the user trusts a directory.
+    Trust,
+}
+
+impl PaneOwner {
+    /// The pane still belongs on screen while `selected` is the selected
+    /// thread. A trust pane stays whatever is selected.
+    fn shown_with(self, selected: Option<ThreadId>) -> bool {
+        match self {
+            Self::Thread(thread) => Some(thread) == selected,
+            Self::Trust => true,
+        }
+    }
+
+    /// Leaving the pane tries the waiting session start again.
+    fn retries_start(self) -> bool {
+        matches!(self, Self::Trust)
+    }
+}
+
+/// The directory to open a trust pane in: the one a start waits on, unless
+/// its pane was already opened.
+fn trust_to_open(trust: Option<&Path>, opened: Option<&Path>) -> Option<PathBuf> {
+    trust.filter(|&dir| Some(dir) != opened).map(Path::to_owned)
+}
+
+/// A running pane and what it is for.
 struct AttachedPane {
-    thread: ThreadId,
+    owner: PaneOwner,
     pane: Pane,
 }
 
@@ -117,6 +152,8 @@ struct App {
     pane: Option<AttachedPane>,
     /// Shown under the preview header when `claude attach` couldn't start.
     pane_error: Option<String>,
+    /// The directory a trust pane was opened for, while its start waits.
+    opened_trust: Option<PathBuf>,
     /// The environment attached sessions run with.
     claude_env: Vec<(OsString, OsString)>,
     tx: Sender<LoopEvent>,
@@ -144,6 +181,7 @@ impl App {
             keys: Keys::new(keymap::keymap(), focus),
             pane: None,
             pane_error: None,
+            opened_trust: None,
             claude_env,
             tx,
             pane_area: Rect::default(),
@@ -170,7 +208,7 @@ impl App {
                     .pane
                     .as_ref()
                     .filter(|attached| {
-                        Some(attached.thread) == state.sessions.selected_id()
+                        attached.owner.shown_with(state.sessions.selected_id())
                             && !attached.pane.has_exited()
                     })
                     .map(|attached| &attached.pane);
@@ -225,6 +263,7 @@ impl App {
                 self.handle(event, terminal.backend_mut())?;
             }
             self.reconcile(terminal.backend_mut())?;
+            self.open_trust(terminal.backend_mut())?;
             if let Some(attached) = &self.pane {
                 attached.pane.flush_expired_sync(Instant::now());
             }
@@ -314,13 +353,18 @@ impl App {
             LoopEvent::Pane(PaneEvent::Exited) => {
                 // A pane dropped for another thread reports its exit too;
                 // only the current pane's exit leaves the session.
-                if self
+                let exited = self
                     .pane
                     .as_ref()
-                    .is_some_and(|attached| attached.pane.has_exited())
-                {
-                    self.state.write().focus = Focus::Preview;
-                    self.leave_pane(out)?;
+                    .filter(|attached| attached.pane.has_exited())
+                    .map(|attached| attached.owner.retries_start());
+                match exited {
+                    Some(true) => self.leave_trust(out)?,
+                    Some(false) => {
+                        self.state.write().focus = Focus::Preview;
+                        self.leave_pane(out)?;
+                    }
+                    None => {}
                 }
             }
         }
@@ -334,29 +378,18 @@ impl App {
     {
         match command {
             Command::Attach(target) => {
-                let reusable = self.pane.as_ref().is_some_and(|attached| {
-                    attached.thread == target.thread && !attached.pane.has_exited()
-                });
+                let owner = PaneOwner::Thread(target.thread);
+                let reusable = self
+                    .pane
+                    .as_ref()
+                    .is_some_and(|attached| attached.owner == owner && !attached.pane.has_exited());
                 if !reusable {
-                    let tx = self.tx.clone();
-                    let command = PaneCommand {
-                        argv: target.argv.clone(),
-                        cwd: target.cwd.clone(),
-                        env: self.claude_env.clone(),
-                    };
-                    let spawned =
-                        Pane::spawn(&command, PaneSize::from(self.pane_area), move |event| {
-                            let _ = tx.send(LoopEvent::Pane(event));
-                        });
-                    match spawned {
-                        Ok(pane) => {
-                            self.pane = Some(AttachedPane {
-                                thread: target.thread,
-                                pane,
-                            });
+                    match self.spawn_pane(target.argv.clone(), target.cwd.clone()) {
+                        Some(pane) => {
+                            self.pane = Some(AttachedPane { owner, pane });
                             self.pane_error = None;
                         }
-                        Err(_) => {
+                        None => {
                             self.pane_error = Some("couldn't start claude attach".to_owned());
                             self.state.write().focus = Focus::Preview;
                             return Ok(());
@@ -370,6 +403,9 @@ impl App {
             }
             Command::Detach => {
                 if let Some(attached) = &self.pane {
+                    if attached.owner.retries_start() {
+                        return self.leave_trust(out);
+                    }
                     attached.pane.focus(false);
                 }
                 self.leave_pane(out)
@@ -461,7 +497,7 @@ impl App {
         if self
             .pane
             .as_ref()
-            .is_none_or(|attached| Some(attached.thread) == selected)
+            .is_none_or(|attached| attached.owner.shown_with(selected))
         {
             return Ok(());
         }
@@ -471,6 +507,68 @@ impl App {
             self.leave_pane(out)?;
         }
         Ok(())
+    }
+
+    /// Opens an interactive `claude` in the pane when a session start begins
+    /// waiting for the user to trust its directory, and attaches to it.
+    fn open_trust<W>(&mut self, out: &mut W) -> io::Result<()>
+    where
+        W: Write,
+    {
+        let trust = self.state.read().sessions.trust.clone();
+        let open = trust_to_open(trust.as_deref(), self.opened_trust.as_deref());
+        self.opened_trust = trust;
+        let Some(dir) = open else {
+            return Ok(());
+        };
+        match self.spawn_pane(vec![OsString::from("claude")], dir) {
+            Some(pane) => {
+                pane.focus(true);
+                self.pane = Some(AttachedPane {
+                    owner: PaneOwner::Trust,
+                    pane,
+                });
+                self.pane_error = None;
+                self.state.write().focus = Focus::Attached;
+                outer_terminal::set_mouse_capture(out, true)
+            }
+            None => {
+                self.pane_error = Some("couldn't start claude".to_owned());
+                self.retry_start();
+                Ok(())
+            }
+        }
+    }
+
+    /// Closes the trust pane, returns to the preview, and tries the waiting
+    /// session start again.
+    fn leave_trust<W>(&mut self, out: &mut W) -> io::Result<()>
+    where
+        W: Write,
+    {
+        self.pane = None;
+        self.state.write().focus = Focus::Preview;
+        self.retry_start();
+        self.leave_pane(out)
+    }
+
+    fn retry_start(&self) {
+        let _ = self.sessions.tell(sessions_actor::RetryStart).try_send();
+    }
+
+    /// Runs `argv` in `cwd` in a pane the size of the pane area, with
+    /// Claude's environment; `None` if it can't start.
+    fn spawn_pane(&self, argv: Vec<OsString>, cwd: PathBuf) -> Option<Pane> {
+        let tx = self.tx.clone();
+        let command = PaneCommand {
+            argv,
+            cwd,
+            env: self.claude_env.clone(),
+        };
+        Pane::spawn(&command, PaneSize::from(self.pane_area), move |event| {
+            let _ = tx.send(LoopEvent::Pane(event));
+        })
+        .ok()
     }
 
     /// Gives the mouse and the cursor shape back to orb.
@@ -543,8 +641,11 @@ mod tests {
     use std::fs;
     use std::io;
     use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
 
-    use super::list_directories;
+    use orb_domain::feat::sessions::state::ThreadId;
+
+    use super::{PaneOwner, list_directories, trust_to_open};
 
     #[rstest::rstest]
     fn list_directories_keeps_directories_and_links_to_them() -> io::Result<()> {
@@ -564,5 +665,71 @@ mod tests {
         // Then the directory and the link are listed, not the file.
         assert_eq!(names, ["dev", "linked"], "the listed subdirectories");
         Ok(())
+    }
+
+    #[rstest::rstest]
+    fn thread_pane_is_dropped_when_another_thread_is_selected() {
+        // Given a pane attached to thread 1.
+        let owner = PaneOwner::Thread(ThreadId(1));
+
+        // When thread 2 is selected.
+        let shown = owner.shown_with(Some(ThreadId(2)));
+
+        // Then the pane no longer belongs on screen.
+        assert!(!shown, "another thread's pane should be dropped");
+    }
+
+    #[rstest::rstest]
+    fn trust_pane_survives_a_selection_change() {
+        // Given a trust pane.
+        let owner = PaneOwner::Trust;
+
+        // When thread 2 is selected.
+        let shown = owner.shown_with(Some(ThreadId(2)));
+
+        // Then the pane stays.
+        assert!(shown, "a selection change shouldn't close the trust pane");
+    }
+
+    #[rstest::rstest]
+    #[case(PaneOwner::Trust, true)]
+    #[case(PaneOwner::Thread(ThreadId(1)), false)]
+    fn leaving_a_pane_retries_the_start_only_for_trust(
+        #[case] owner: PaneOwner,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            owner.retries_start(),
+            expected,
+            "only a trust pane retries the waiting start"
+        );
+    }
+
+    #[rstest::rstest]
+    fn trust_pane_opens_for_a_new_trust_request() {
+        // Given a start waiting on /tmp/x and no trust pane opened.
+        let trust = Path::new("/tmp/x");
+
+        // When deciding what to open.
+        let open = trust_to_open(Some(trust), None);
+
+        // Then a trust pane opens in /tmp/x.
+        assert_eq!(
+            open,
+            Some(PathBuf::from("/tmp/x")),
+            "a new trust request should open the pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn trust_pane_is_not_reopened_while_the_same_trust_waits() {
+        // Given a start waiting on /tmp/x whose trust pane was opened.
+        let trust = Path::new("/tmp/x");
+
+        // When deciding what to open.
+        let open = trust_to_open(Some(trust), Some(trust));
+
+        // Then nothing opens.
+        assert_eq!(open, None, "the same request shouldn't reopen the pane");
     }
 }
