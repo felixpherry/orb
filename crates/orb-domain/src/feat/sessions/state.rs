@@ -218,6 +218,14 @@ impl Sessions {
         }
     }
 
+    /// The project holding the thread under the cursor.
+    pub fn selected_project(&self) -> Option<&Project> {
+        let id = self.selected_id()?;
+        self.projects
+            .iter()
+            .find(|project| project.threads.iter().any(|thread| thread.id == id))
+    }
+
     /// The id of the thread under the cursor, if it still exists.
     pub fn selected_id(&self) -> Option<ThreadId> {
         self.selected_thread().map(|thread| thread.id)

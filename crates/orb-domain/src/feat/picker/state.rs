@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Focus;
 use crate::feat::picker::list::{Matches, PickerItem, PickerList};
+use crate::feat::sessions::state::ThreadId;
 
 /// What an open picker picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +20,8 @@ pub enum PickerKind {
     /// text (e.g. `~/dev/`) the items were read from; `None` while the input
     /// isn't a path.
     Directories { listed: Option<String> },
+    /// `␣w`: pick where `thread`'s session runs.
+    Workspace { thread: ThreadId },
 }
 
 /// The open picker.
@@ -39,6 +42,17 @@ impl PickerState {
     pub fn projects(items: Vec<PickerItem>, return_to: Focus) -> Self {
         Self {
             kind: PickerKind::Projects,
+            list: PickerList::new(items),
+            return_to,
+            home: PathBuf::new(),
+            page: 0,
+        }
+    }
+
+    /// A workspace picker for `thread` over `items`, in the order given.
+    pub fn workspace(thread: ThreadId, items: Vec<PickerItem>, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::Workspace { thread },
             list: PickerList::new(items),
             return_to,
             home: PathBuf::new(),
@@ -131,7 +145,7 @@ impl PickerState {
         let dir = expand(dir_text, &self.home);
         match self.list.selected() {
             Some(PickerItem::Directory { name }) => Some(dir.join(name)),
-            Some(PickerItem::Project { .. }) => None,
+            Some(PickerItem::Project { .. } | PickerItem::Workspace(_)) => None,
             None => leaf.is_empty().then_some(dir),
         }
     }
@@ -274,7 +288,7 @@ mod tests {
             .shown()
             .filter_map(|(item, _)| match item {
                 PickerItem::Directory { name } => Some(name.clone()),
-                PickerItem::Project { .. } => None,
+                PickerItem::Project { .. } | PickerItem::Workspace(_) => None,
             })
             .collect()
     }

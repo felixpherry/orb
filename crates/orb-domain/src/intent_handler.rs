@@ -2,9 +2,12 @@
 
 use std::path::PathBuf;
 
+use crate::command::Workspace;
+use crate::feat::git::validator::{ChangeWorkspaceError, validate_change_workspace};
+use crate::feat::git::worktree::previous_worktree;
 use crate::feat::pane::validator::validate_attach;
-use crate::feat::picker::list::PickerItem;
-use crate::feat::picker::state::PickerState;
+use crate::feat::picker::list::{PickerItem, WorkspaceChoice};
+use crate::feat::picker::state::{PickerKind, PickerState};
 use crate::feat::picker::validator::{
     validate_add_directory, validate_open_directory, validate_pick_project,
 };
@@ -96,6 +99,41 @@ impl IntentHandler {
                 state.focus = Focus::Picker;
                 vec![Command::ListDirectories(dir)]
             }
+            Intent::ChangeWorkspace => match (
+                validate_change_workspace(state),
+                state.sessions.selected_project(),
+                state.sessions.selected_thread(),
+            ) {
+                (Ok(()), Some(project), Some(thread)) => {
+                    let items = [
+                        WorkspaceChoice::Current {
+                            worktree: thread.cwd != project.root,
+                        },
+                        WorkspaceChoice::NewWorktree,
+                    ]
+                    .into_iter()
+                    .chain(
+                        previous_worktree(project, thread)
+                            .map(|(path, branch)| WorkspaceChoice::Previous { path, branch }),
+                    )
+                    .map(PickerItem::Workspace)
+                    .collect();
+                    let picker = PickerState::workspace(thread.id, items, state.focus);
+                    state.picker = Some(picker);
+                    state.focus = Focus::Picker;
+                    vec![]
+                }
+                (Err(ChangeWorkspaceError::Locked { worktree }), _, _) => {
+                    let workspace = if worktree {
+                        "Worktree"
+                    } else {
+                        "Local checkout"
+                    };
+                    state.sessions.error = Some(format!("Workspace locked · {workspace}"));
+                    vec![]
+                }
+                _ => vec![],
+            },
             Intent::PickerInput(ch) => list(state.picker.as_mut().and_then(|p| p.insert(*ch))),
             Intent::PickerBackspace => list(state.picker.as_mut().and_then(PickerState::backspace)),
             Intent::PickerDeleteWord => {
@@ -141,8 +179,26 @@ impl IntentHandler {
                 Ok(()) => list(state.picker.as_mut().and_then(PickerState::open_directory)),
                 Err(_) => vec![],
             },
-            Intent::PickerConfirm => {
-                match (validate_pick_project(state), validate_add_directory(state)) {
+            Intent::PickerConfirm => match state.picker.as_ref().map(PickerState::kind) {
+                Some(&PickerKind::Workspace { thread }) => {
+                    let to = match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Workspace(WorkspaceChoice::NewWorktree)) => {
+                            Some(Workspace::NewWorktree)
+                        }
+                        Some(PickerItem::Workspace(WorkspaceChoice::Previous { path, .. })) => {
+                            Some(Workspace::Existing(path.clone()))
+                        }
+                        _ => None,
+                    };
+                    match to {
+                        Some(to) => {
+                            state.sessions.starting = true;
+                            vec![Command::MoveThread { thread, to }]
+                        }
+                        None => vec![],
+                    }
+                }
+                _ => match (validate_pick_project(state), validate_add_directory(state)) {
                     (Ok(()), _) => {
                         match close_picker(state).as_ref().and_then(PickerState::selected) {
                             Some(PickerItem::Project { id, root, .. }) => {
@@ -161,8 +217,8 @@ impl IntentHandler {
                         .into_iter()
                         .collect(),
                     _ => vec![],
-                }
-            }
+                },
+            },
             Intent::PickerCancel => {
                 close_picker(state);
                 vec![]
@@ -275,6 +331,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
+    use crate::command::Workspace;
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::{PickerKind, PickerState};
     use crate::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
@@ -385,6 +442,36 @@ mod tests {
     /// One project holding `threads`, with thread `selected` selected.
     fn state_with(threads: Vec<Thread>, selected: i64) -> AppState {
         state_at(threads, SidebarItem::Thread(ThreadId(selected)))
+    }
+
+    /// Thread `id`, idle and prompt-less, in the project's root `/work`.
+    fn in_root(id: i64) -> Thread {
+        Thread {
+            cwd: "/work".into(),
+            ..thread(id, ThreadStatus::Idle)
+        }
+    }
+
+    /// The workspace picker opened on thread 1 of `threads`.
+    fn choosing_workspace(threads: Vec<Thread>) -> AppState {
+        let mut state = AppState {
+            focus: Focus::Preview,
+            ..state_with(threads, 1)
+        };
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+        state
+    }
+
+    fn workspace_labels(state: &AppState) -> Vec<String> {
+        state
+            .picker
+            .iter()
+            .flat_map(PickerState::shown)
+            .filter_map(|(item, _)| match item {
+                PickerItem::Workspace(choice) => Some(choice.label()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A preview showing one block of `kind`, followed.
@@ -804,6 +891,146 @@ mod tests {
             (Focus::Preview, true),
             "PickerCancel should close the picker and return to the preview"
         );
+    }
+
+    #[rstest::rstest]
+    fn change_workspace_opens_the_workspace_picker() {
+        // Given a selected prompt-less thread.
+        let mut state = state_with(vec![in_root(1)], 1);
+
+        // When handling ChangeWorkspace.
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+
+        // Then the thread's workspace picker is open and takes the keys.
+        assert_eq!(
+            (state.focus, state.picker.as_ref().map(PickerState::kind)),
+            (
+                Focus::Picker,
+                Some(&PickerKind::Workspace {
+                    thread: ThreadId(1)
+                })
+            ),
+            "ChangeWorkspace should open the workspace picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn locked_workspace_shows_the_lock_message() {
+        // Given a selected thread in the root checkout that has a transcript.
+        let mut state = state_with(
+            vec![Thread {
+                transcript: Some("/claude/t1.jsonl".into()),
+                ..in_root(1)
+            }],
+            1,
+        );
+
+        // When handling ChangeWorkspace.
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+
+        // Then the mode line says the local checkout is locked.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some("Workspace locked · Local checkout"),
+            "a prompted thread should show the lock"
+        );
+    }
+
+    #[rstest::rstest]
+    fn workspace_picker_offers_previous_worktree_with_its_branch() {
+        // Given another thread of the project in a worktree on `orb/feat`.
+        let worktree = Thread {
+            branch: Some("orb/feat".into()),
+            ..thread(2, ThreadStatus::Idle)
+        };
+
+        // When opening the workspace picker on a root thread.
+        let state = choosing_workspace(vec![in_root(1), worktree]);
+
+        // Then the last row offers that worktree by its branch.
+        assert_eq!(
+            workspace_labels(&state),
+            [
+                "Current checkout",
+                "New worktree",
+                "Previous worktree (orb/feat)"
+            ],
+            "the seed worktree should be offered"
+        );
+    }
+
+    #[rstest::rstest]
+    fn workspace_picker_omits_previous_worktree_without_a_seed() {
+        // Given / When opening the workspace picker on a project's only thread.
+        let state = choosing_workspace(vec![in_root(1)]);
+
+        // Then there is no previous-worktree row.
+        assert_eq!(
+            workspace_labels(&state),
+            ["Current checkout", "New worktree"],
+            "no seed means no previous worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn current_row_reads_current_worktree_inside_a_worktree() {
+        // Given / When opening the workspace picker on a thread in a worktree.
+        let state = choosing_workspace(vec![thread(1, ThreadStatus::Idle)]);
+
+        // Then the first row is the current worktree.
+        assert_eq!(
+            workspace_labels(&state).first().map(String::as_str),
+            Some("Current worktree"),
+            "a worktree thread's current row names the worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_new_worktree_returns_move_thread() {
+        // Given the workspace picker with `New worktree` highlighted.
+        let mut state = choosing_workspace(vec![in_root(1)]);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the thread moves to a new worktree.
+        assert_eq!(
+            commands,
+            [Command::MoveThread {
+                thread: ThreadId(1),
+                to: Workspace::NewWorktree
+            }],
+            "New worktree should move the thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_new_worktree_marks_starting() {
+        // Given the workspace picker with `New worktree` highlighted.
+        let mut state = choosing_workspace(vec![in_root(1)]);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then a start is in flight.
+        assert!(
+            state.sessions.starting,
+            "a move should mark the start in flight"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_current_returns_no_command() {
+        // Given the workspace picker with the current checkout highlighted.
+        let mut state = choosing_workspace(vec![in_root(1)]);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing happens.
+        assert!(commands.is_empty(), "staying put needs no command");
     }
 
     #[rstest::rstest]
