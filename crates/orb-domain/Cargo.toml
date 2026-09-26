@@ -13,6 +13,8 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }
+fuzzy-matcher = { workspace = true }
+unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
