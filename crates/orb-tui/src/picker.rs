@@ -250,10 +250,11 @@ fn render_branch(
     buf: &mut Buffer,
 ) {
     let git_ref = &row.git_ref;
-    let (name_colour, right) = match (row.disabled, &git_ref.worktree) {
-        (true, Some(path)) => (DARK_GRAY, format!("in {}", tilde(path, home))),
+    let (name_colour, prefix, right) = match (row.disabled, &git_ref.worktree) {
+        (true, Some(path)) => (DARK_GRAY, "in ", tilde(path, home)),
         _ => (
             Color::White,
+            "",
             branch_badge(git_ref, cwd).unwrap_or_default().to_owned(),
         ),
     };
@@ -262,8 +263,11 @@ fn render_branch(
         &matches.name,
         Style::new().fg(name_colour),
     ));
-    let room = usize::from(area.width).saturating_sub(name.width() + 2);
-    let right = Line::styled(cut_left(&right, room), Style::new().fg(DARK_GRAY));
+    let room = usize::from(area.width).saturating_sub(name.width() + 2 + prefix.len());
+    let right = Line::styled(
+        format!("{prefix}{}", cut_left(&right, room)),
+        Style::new().fg(DARK_GRAY),
+    );
     let right_width = u16::try_from(right.width()).unwrap_or(u16::MAX);
     name.render(area, buf);
     right.render(
@@ -899,7 +903,23 @@ mod tests {
         let line = line_with(&buf, "feature");
         assert!(
             line.as_deref()
-                .is_some_and(|line| line.contains("…") && line.contains("orb-1a2b3c4d")),
+                .is_some_and(|line| line.contains("…") && line.contains("1a2b3c4d")),
+            "feature's row was {line:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cut_checkout_path_keeps_the_in_prefix() {
+        // Given a branch picker with feature disabled.
+        let picker = with_disabled();
+
+        // When drawing it too narrow for the whole path.
+        let buf = draw(&picker, 40, 16);
+
+        // Then feature's row still says where, before the cut path.
+        let line = line_with(&buf, "feature");
+        assert!(
+            line.as_deref().is_some_and(|line| line.contains("in …")),
             "feature's row was {line:?}"
         );
     }
