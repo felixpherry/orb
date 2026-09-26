@@ -354,7 +354,7 @@ T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913
 - Claude records trust per directory as `projects["<absolute path>"].hasTrustDialogAccepted` in `~/.claude.json`.
 - Headless `claude -p` runs in an untrusted directory without asking and doesn't mark it trusted. This is why T3, which drives Claude through the Agent SDK, never meets the prompt: its app source has no trust handling. (Probed 2026-09-26, Claude Code 2.1.283.)
 - Trust is inherited from a parent: `claude --bg` started in a new directory under the trusted `/private/var`, which has no entry of its own. Trusting `~/.orb/worktrees` once covers every worktree under it. (Probed 2026-09-26, Claude Code 2.1.283.)
-  - *Corrected in §11:* this holds only for a plain directory. A git repo under a trusted parent is still refused, and a worktree takes its trust from its main repo, so `~/.orb/worktrees` never needs trusting.
+  - *Corrected in §11:* this holds only for a plain directory. A git repo under a trusted parent is still refused, and a worktree takes its trust from its main repo, so trusting `~/.orb/worktrees` covers nothing.
 
 ## 11. Worktrees & branches (verified 2026-09-26; T3 f5ef0dd)
 
@@ -382,7 +382,12 @@ T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913
 - `git checkout --track <remote>/<b>` creates and checks out a local `<b>` tracking it.
 
 ### `claude` 2.1.283 trust and output **[verified]**
-- Trust keys on the git repo, not the directory tree. `claude --bg` started in a plain directory under the trusted `/private/var`, was refused in a fresh `git init` repo under it, and started in a detached worktree of the trusted `~/dev/orb` at `~/.orb/worktrees/…`, which has no trusted parent. So a worktree of a trusted repo never meets the trust prompt; only a new project does. (Probed 2026-09-26.)
+- **Trust check** (minified bundle, `iN`/`MTe`/`oS`/`iS`) **[verified: bundle]**. A directory is trusted when any of these holds (`~/.claude.json` `projects[<path>].hasTrustDialogAccepted`):
+  1. `CLAUDE_CODE_SANDBOXED` is set.
+  2. The **project path** is trusted: the cwd's canonical git root, which for a worktree is its **main repo** (the worktree's `.git` file points there), else the cwd itself.
+  3. Walking up from the cwd finds a trusted directory. Inside a git repo the walk **stops at the repo root**; outside git it goes up to `/`.
+  - So a worktree of a trusted repo is always trusted, a parent above a repo never covers it, and trusting `~/.orb/worktrees` covers no worktree. The accept writes the entry for the project path. Minified names repeat across chunks, so step 3's git-root bound is read from the call site, not a named helper.
+- The probes agree (2026-09-26): `claude --bg` started in a plain directory under the trusted `/private/var`; was refused in a fresh `git init` repo under it; started in a detached worktree of the trusted `~/dev/orb` at `~/.orb/worktrees/…`, which has no trusted parent **[verified]**. Only a new project meets the trust prompt.
 - `claude --bg` colours the session id in its `backgrounded · <id>` line when `FORCE_COLOR` is set (Claude Code's own tool shell exports `FORCE_COLOR=3`), so the child env must drop it.
 
 ### Transcript `gitBranch` follows checkouts **[verified]**

@@ -74,3 +74,15 @@ Entries are added or amended **only with human approval**.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
 - (tui) The mode line cuts a long status message at its end, so the mode's key hints and a 2-cell gap stay visible.
 - (picker) The picker popup is only as tall as its rows, at most 90 columns wide, and keeps its top edge fixed while filtering.
+- (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
+- (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`.
+- (worktrees) A new worktree starts from the project's default branch fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
+- (worktrees) A session start that fails removes the worktree and branch orb created for it.
+- (worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from Claude's title; the directory keeps its name.
+- (worktrees) Deleting a thread leaves its worktree on disk.
+- (worktrees) A thread's workspace can change only before its first prompt; orb then starts a new session in the new workspace and removes the old one.
+- (keybinds) `␣w` in the preview opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.
+- (keybinds) `␣b` in the preview opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.
+- (branches) After a thread's first prompt, the branch picker disables branches checked out in another worktree and shows where.
+- (branches) Switching branch is refused while any thread in the same directory is working or waiting.
+- (trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>`.
