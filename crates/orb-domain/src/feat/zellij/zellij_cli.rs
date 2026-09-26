@@ -4,7 +4,9 @@
 //! environment, not orb's child environment: inside zellij that environment
 //! carries `ZELLIJ_SESSION_NAME` and `ZELLIJ_PANE_ID`, so each action targets
 //! orb's session and client. When zellij fails, the first line it printed to
-//! stderr becomes the reason.
+//! stderr becomes the reason. Against a session that's gone, such as one
+//! renamed since orb started, zellij waits forever, so a call that outlives
+//! [`TIMEOUT`] is killed and fails.
 //!
 //! zellij runs a new pane's command under its server's environment, not
 //! orb's, so the command goes through `env` to carry orb's own `NO_COLOR`:
@@ -12,13 +14,21 @@
 //! otherwise turn lazygit monochrome.
 
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use error_stack::Report;
 use serde::Deserialize;
 
 use super::zellij_service::{Zellij, ZellijError, ZellijPane};
+
+/// How long one `zellij action` may take.
+const TIMEOUT: Duration = Duration::from_secs(2);
+/// How often a running `zellij action` is checked for having exited.
+const POLL: Duration = Duration::from_millis(10);
 
 /// Runs the `zellij` on `PATH`.
 #[derive(Debug, Clone)]
@@ -66,26 +76,68 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new("zellij")
-        .arg("action")
-        .args(args)
+    let mut command = Command::new("zellij");
+    command.arg("action").args(args);
+    run_within(command, TIMEOUT)
+}
+
+/// Runs `command` with no stdin for at most `limit`, killing it if it runs
+/// longer; returns its stdout.
+fn run_within(mut command: Command, limit: Duration) -> Result<String, Report<ZellijError>> {
+    let couldnt_run = |error: std::io::Error| {
+        Report::new(error)
+            .change_context(ZellijError)
+            .attach("couldn't run zellij".to_owned())
+    };
+    let mut child = command
         .stdin(Stdio::null())
-        .output()
-        .map_err(|error| {
-            Report::new(error)
-                .change_context(ZellijError)
-                .attach("couldn't run zellij".to_owned())
-        })?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(couldnt_run)?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(POLL),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let reason = "zellij timed out (session renamed? restart orb)".to_owned();
+                return Err(Report::new(ZellijError).attach(reason));
+            }
+            Err(error) => return Err(couldnt_run(error)),
+        }
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
-        let reason = String::from_utf8_lossy(&output.stderr)
+        let reason = String::from_utf8_lossy(&stderr)
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
             .map_or_else(|| "zellij failed".to_owned(), str::to_owned);
         Err(Report::new(ZellijError).attach(reason))
     }
+}
+
+/// Reads all of `pipe` on a thread of its own, so a child that prints more
+/// than a pipe holds isn't stalled waiting for orb to read it.
+fn drain<R>(pipe: Option<R>) -> JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
 }
 
 /// One entry of `zellij action list-panes --json`, only the fields orb reads:
@@ -153,10 +205,16 @@ pub fn new_pane_args(
 )]
 mod tests {
     use std::ffi::{OsStr, OsString};
+    use std::fs;
     use std::path::Path;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
 
-    use super::{new_pane_args, parse_panes};
-    use crate::feat::zellij::zellij_service::ZellijPane;
+    use error_stack::Report;
+    use tempfile::TempDir;
+
+    use super::{new_pane_args, parse_panes, run_within};
+    use crate::feat::zellij::zellij_service::{ZellijError, ZellijPane, zellij_reason};
 
     fn pane(id: u32, name: &str, tab: u64) -> ZellijPane {
         ZellijPane {
@@ -255,5 +313,70 @@ mod tests {
 
         // Then the command runs through `env` with that NO_COLOR, whatever the server's is.
         assert_eq!(command, os_strings(expected), "the pane's command");
+    }
+
+    /// `program` with `args`, as a stand-in for `zellij action`.
+    fn command(program: &str, args: &[&str]) -> Command {
+        let mut command = Command::new(program);
+        command.args(args);
+        command
+    }
+
+    #[rstest::rstest]
+    fn run_within_says_a_command_that_outlives_the_limit_timed_out() {
+        // Given a command that runs longer than the limit.
+        let sleep = command("sleep", &["10"]);
+
+        // When running it with a 100 ms limit.
+        let result = run_within(sleep, Duration::from_millis(100));
+
+        // Then the reason says zellij timed out and how to recover.
+        assert_eq!(
+            result.err().as_ref().map(zellij_reason),
+            Some("zellij timed out (session renamed? restart orb)".to_owned()),
+            "a command past its limit should fail as timed out"
+        );
+    }
+
+    #[rstest::rstest]
+    fn run_within_kills_a_command_that_outlives_the_limit() -> std::io::Result<()> {
+        // Given a command that writes its pid to a file, then runs longer than the limit.
+        let dir = TempDir::new()?;
+        let pid_file = dir.path().join("pid");
+        let sleep = command(
+            "sh",
+            &[
+                "-c",
+                r#"echo $$ > "$0"; exec sleep 10"#,
+                &pid_file.to_string_lossy(),
+            ],
+        );
+
+        // When running it with a 500 ms limit.
+        let _timed_out = run_within(sleep, Duration::from_millis(500));
+
+        // Then that process is gone.
+        let pid = fs::read_to_string(&pid_file)?;
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()?
+            .success();
+        assert!(!alive, "a command past its limit should be killed");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn run_within_returns_all_of_an_output_longer_than_a_pipe_holds()
+    -> Result<(), Report<ZellijError>> {
+        // Given a command that prints 1 MB, far more than a pipe holds.
+        let head = command("head", &["-c", "1000000", "/dev/zero"]);
+
+        // When running it with a 5 s limit.
+        let output = run_within(head, Duration::from_secs(5))?;
+
+        // Then all of its output comes back.
+        assert_eq!(output.len(), 1_000_000, "the whole stdout");
+        Ok(())
     }
 }
