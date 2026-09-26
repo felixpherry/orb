@@ -7,6 +7,7 @@ use fuzzy_matcher::FuzzyMatcher as _;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::feat::git::git_service::GitRef;
 use crate::feat::sessions::state::ProjectId;
 
 /// One row a picker can show.
@@ -22,6 +23,24 @@ pub enum PickerItem {
     Directory { name: String },
     /// Where a thread's session could run, matched on its label.
     Workspace(WorkspaceChoice),
+    /// A branch to switch to, matched on its name.
+    Branch(BranchRow),
+}
+
+impl PickerItem {
+    /// Whether the row is shown but can't be selected.
+    pub fn disabled(&self) -> bool {
+        matches!(self, Self::Branch(BranchRow { disabled: true, .. }))
+    }
+}
+
+/// A row of the branch picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRow {
+    pub git_ref: GitRef,
+    /// The branch is checked out in another worktree and the thread can no
+    /// longer follow it there.
+    pub disabled: bool,
 }
 
 /// A row of the workspace picker.
@@ -91,7 +110,8 @@ impl PickerList {
     }
 
     /// Shows the items matching every whitespace-separated term of `pattern`,
-    /// best score first, list order breaking ties, and selects the first.
+    /// best score first, list order breaking ties, and selects the first that
+    /// isn't disabled.
     ///
     /// Directories whose name starts with `.` stay hidden unless `pattern`
     /// does too.
@@ -112,7 +132,9 @@ impl PickerList {
             .into_iter()
             .map(|(_, index, matches)| (index, matches))
             .collect();
-        self.selection = 0;
+        self.selection = (0..self.shown.len())
+            .find(|&index| self.enabled(index))
+            .unwrap_or(0);
     }
 
     /// Replaces the filter text, leaving the cursor at its end.
@@ -172,14 +194,15 @@ impl PickerList {
         self.cursor = (self.cursor + 1).min(self.input.graphemes(true).count());
     }
 
-    /// Selects the next shown item, stopping at the last.
+    /// Selects the next shown item, stopping at the last. Disabled items are
+    /// skipped here and by every other move.
     pub fn next(&mut self) {
         self.move_down(1);
     }
 
     /// Selects the previous shown item, stopping at the first.
     pub fn prev(&mut self) {
-        self.selection = self.selection.saturating_sub(1);
+        self.move_up(1);
     }
 
     /// Moves the selection down half of the `page` items that fit on screen.
@@ -189,7 +212,7 @@ impl PickerList {
 
     /// Moves the selection up half of the `page` items that fit on screen.
     pub fn half_page_up(&mut self, page: usize) {
-        self.selection = self.selection.saturating_sub((page / 2).max(1));
+        self.move_up((page / 2).max(1));
     }
 
     /// The typed filter text.
@@ -207,10 +230,10 @@ impl PickerList {
         self.selection
     }
 
-    /// The selected item; `None` when nothing is shown.
+    /// The selected item; `None` when nothing selectable is shown.
     pub fn selected(&self) -> Option<&PickerItem> {
         let (index, _) = self.shown.get(self.selection)?;
-        self.items.get(*index)
+        self.items.get(*index).filter(|item| !item.disabled())
     }
 
     /// The shown items and where they matched, in display order.
@@ -230,8 +253,38 @@ impl PickerList {
         self.shown.is_empty()
     }
 
+    /// Selects the first enabled item from `step` rows down, else the nearest
+    /// enabled one before it, else stays.
     fn move_down(&mut self, step: usize) {
-        self.selection = (self.selection + step).min(self.shown.len().saturating_sub(1));
+        let last = self.shown.len().saturating_sub(1);
+        let target = (self.selection + step).min(last);
+        if let Some(found) = (target..=last)
+            .chain((self.selection + 1..target).rev())
+            .find(|&index| self.enabled(index))
+        {
+            self.selection = found;
+        }
+    }
+
+    /// Selects the first enabled item from `step` rows up, else the nearest
+    /// enabled one after it, else stays.
+    fn move_up(&mut self, step: usize) {
+        let target = self.selection.saturating_sub(step);
+        if let Some(found) = (0..=target)
+            .rev()
+            .chain(target + 1..self.selection)
+            .find(|&index| self.enabled(index))
+        {
+            self.selection = found;
+        }
+    }
+
+    /// Whether shown row `index` exists and isn't disabled.
+    fn enabled(&self, index: usize) -> bool {
+        self.shown
+            .get(index)
+            .and_then(|(item, _)| self.items.get(*item))
+            .is_some_and(|item| !item.disabled())
     }
 
     /// The byte offset of grapheme `index` in the input, or its end.
@@ -258,6 +311,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         }
         PickerItem::Directory { name } => (name.clone(), None),
         PickerItem::Workspace(choice) => (choice.label(), None),
+        PickerItem::Branch(row) => (row.git_ref.name.clone(), None),
     };
     let bytes: Vec<usize> = label.char_indices().map(|(at, _)| at).collect();
     let mut total = 0;
@@ -293,7 +347,8 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Matches, PickerItem, PickerList};
+    use super::{BranchRow, Matches, PickerItem, PickerList};
+    use crate::feat::git::git_service::GitRef;
     use crate::feat::sessions::state::ProjectId;
 
     fn directories(names: &[&str]) -> Vec<PickerItem> {
@@ -319,8 +374,36 @@ mod tests {
                 PickerItem::Directory { name } => name.clone(),
                 PickerItem::Project { title, .. } => title.clone(),
                 PickerItem::Workspace(choice) => choice.label(),
+                PickerItem::Branch(row) => row.git_ref.name.clone(),
             })
             .collect()
+    }
+
+    /// Local branches named `names`; a leading `!` makes the row disabled.
+    fn branches(names: &[&str]) -> Vec<PickerItem> {
+        names
+            .iter()
+            .map(|name| {
+                let disabled = name.starts_with('!');
+                PickerItem::Branch(BranchRow {
+                    git_ref: GitRef {
+                        name: name.trim_start_matches('!').to_owned(),
+                        remote: false,
+                        current: false,
+                        default: false,
+                        worktree: None,
+                    },
+                    disabled,
+                })
+            })
+            .collect()
+    }
+
+    fn selected_name(list: &PickerList) -> Option<String> {
+        match list.selected() {
+            Some(PickerItem::Branch(row)) => Some(row.git_ref.name.clone()),
+            _ => None,
+        }
     }
 
     fn typed(text: &str) -> PickerList {
@@ -376,7 +459,9 @@ mod tests {
             .shown()
             .filter_map(|(item, _)| match item {
                 PickerItem::Project { id, .. } => Some(*id),
-                PickerItem::Directory { .. } | PickerItem::Workspace(_) => None,
+                PickerItem::Directory { .. } | PickerItem::Workspace(_) | PickerItem::Branch(_) => {
+                    None
+                }
             })
             .collect();
         assert_eq!(
@@ -518,5 +603,50 @@ mod tests {
 
         // Then the last item stays selected.
         assert_eq!(list.selection(), 1, "next should stop at the last item");
+    }
+
+    #[rstest::rstest]
+    fn next_skips_a_disabled_row() {
+        // Given main selected, above a disabled row and then dev.
+        let mut list = PickerList::new(branches(&["main", "!taken", "dev"]));
+
+        // When selecting the next item.
+        list.next();
+
+        // Then dev is selected.
+        assert_eq!(
+            selected_name(&list).as_deref(),
+            Some("dev"),
+            "next should skip the disabled row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn prev_skips_a_disabled_row() {
+        // Given dev selected, below a disabled row and then main.
+        let mut list = PickerList::new(branches(&["main", "!taken", "dev"]));
+        list.next();
+
+        // When selecting the previous item.
+        list.prev();
+
+        // Then main is selected.
+        assert_eq!(
+            selected_name(&list).as_deref(),
+            Some("main"),
+            "prev should skip the disabled row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filter_matching_only_disabled_rows_selects_nothing() {
+        // Given one enabled and one disabled branch.
+        let mut list = PickerList::new(branches(&["main", "!taken"]));
+
+        // When filtering down to the disabled one.
+        list.refilter("taken");
+
+        // Then nothing is selected.
+        assert_eq!(selected_name(&list), None, "a disabled row can't be picked");
     }
 }

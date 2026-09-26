@@ -13,6 +13,10 @@
 //! made for a start that failed is removed again, and an orb worktree no
 //! thread uses after a move is removed unless it has changes.
 //!
+//! It checks branches out in a thread's directory, unless a turn is underway
+//! there. Before the first prompt, picking the default branch from a worktree
+//! checks it out in the project's root and moves the thread there.
+//!
 //! When Claude refuses to start in a directory it hasn't been trusted in, the
 //! start waits: the actor asks the frontend for an interactive `claude` there
 //! (in the worktrees root for a worktree, so one trust covers them all), and
@@ -46,7 +50,8 @@ use super::transcript::{locate, scan_title};
 use crate::Focus;
 use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
-use crate::feat::git::git_service::GitError;
+use crate::feat::git::git_service::{GitError, GitRef, git_reason};
+use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{hex, is_orb_worktree, new_worktree_path, trust_dir};
 
 /// How long to wait between polls while a turn is underway or orb is attached.
@@ -118,6 +123,15 @@ pub struct MoveThread {
     pub to: Workspace,
 }
 
+/// Check a branch out for a thread: in its directory, or with `to_root` in
+/// its project's root, moving the prompt-less thread there.
+#[derive(Debug)]
+pub struct SwitchBranch {
+    pub thread: ThreadId,
+    pub git_ref: GitRef,
+    pub to_root: bool,
+}
+
 /// Try the start that waits for trust once more, now that the user had the
 /// chance to trust its directory.
 #[derive(Debug)]
@@ -155,11 +169,12 @@ pub struct Delete(pub ThreadId);
 #[derive(Debug)]
 pub struct Visit(pub ThreadId);
 
-/// A session start in flight: what it is for, where it runs, and the
-/// worktree orb made for it, if any.
+/// A session start in flight: what it is for, where it runs, the branch
+/// checked out there when known, and the worktree orb made for it, if any.
 struct PendingStart {
     kind: StartKind,
     cwd: PathBuf,
+    branch: Option<String>,
     made: Option<MadeWorktree>,
 }
 
@@ -239,6 +254,26 @@ impl Message<MoveThread> for SessionsActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.move_thread(thread, to).await;
+    }
+}
+
+impl Message<SwitchBranch> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        SwitchBranch {
+            thread,
+            git_ref,
+            to_root,
+        }: SwitchBranch,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if to_root {
+            self.switch_to_root(thread, &git_ref).await;
+        } else {
+            self.check_out(thread, &git_ref);
+        }
     }
 }
 
@@ -485,6 +520,7 @@ impl SessionsActor {
             PendingStart {
                 kind: StartKind::Create { project },
                 cwd: root.to_owned(),
+                branch: None,
                 made: None,
             },
             true,
@@ -507,7 +543,12 @@ impl SessionsActor {
             self.state.write().sessions.trust = Some(dir);
             return (self.wake)();
         }
-        let PendingStart { kind, cwd, made } = pending;
+        let PendingStart {
+            kind,
+            cwd,
+            branch,
+            made,
+        } = pending;
         match (created, kind) {
             (Ok(created), StartKind::Create { project }) => {
                 let thread = self.save_new(project, &cwd, &created.short_id);
@@ -525,7 +566,7 @@ impl SessionsActor {
                     thread,
                     short_id: created.short_id,
                     cwd,
-                    branch: made.map(|made| made.branch),
+                    branch,
                 };
                 self.finish_move(moved, &old_short_id, &old_cwd).await;
             }
@@ -629,7 +670,12 @@ impl SessionsActor {
                 (made.path.clone(), Some(made))
             }
         };
-        Ok(PendingStart { kind, cwd, made })
+        Ok(PendingStart {
+            kind,
+            cwd,
+            branch: made.as_ref().map(|made| made.branch.clone()),
+            made,
+        })
     }
 
     /// Makes a new worktree of the repository at `repo` on a new `orb/<hex>`
@@ -719,6 +765,90 @@ impl SessionsActor {
             (Ok(()), Ok(())) => Ok(()),
         };
         self.end_start(result);
+    }
+
+    /// Checks `git_ref` out in thread `id`'s directory and shows the branch on
+    /// every thread there. Refused while a turn is underway in it.
+    fn check_out(&mut self, id: ThreadId, git_ref: &GitRef) {
+        let Some(cwd) = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.cwd.clone())
+        else {
+            return;
+        };
+        let result = if self.busy_in(&cwd) {
+            Err(BUSY_DIRECTORY.to_owned())
+        } else {
+            match self.services.git.checkout(&cwd, git_ref) {
+                Ok(local) => self.show_branch(&cwd, &local),
+                Err(report) => Err(git_reason(&report)),
+            }
+        };
+        self.state.write().sessions.error = result.err();
+        (self.wake)();
+    }
+
+    /// Checks the default branch out in the project's root and moves the
+    /// prompt-less thread `id` there from its worktree. Refused while a turn
+    /// is underway in the root.
+    async fn switch_to_root(&mut self, id: ThreadId, git_ref: &GitRef) {
+        let root = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .and_then(|row| self.project_root(row.project_id));
+        let Some(root) = root else {
+            return self.end_start(Err("the thread is gone".to_owned()));
+        };
+        let pending = match self
+            .prepare_move(id, Workspace::Existing(root.clone()))
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => return self.end_start(Err(error)),
+        };
+        if self.busy_in(&root) {
+            return self.end_start(Err(BUSY_DIRECTORY.to_owned()));
+        }
+        match self.services.git.checkout(&root, git_ref) {
+            Ok(local) => {
+                let _ = self.show_branch(&root, &local);
+                let pending = PendingStart {
+                    branch: Some(local),
+                    ..pending
+                };
+                self.start(pending, true).await;
+            }
+            Err(report) => self.end_start(Err(git_reason(&report))),
+        }
+    }
+
+    /// Saves and shows `branch` on every thread in `cwd`.
+    fn show_branch(&mut self, cwd: &Path, branch: &str) -> Result<(), String> {
+        let mut saved = Ok(());
+        let mut app = self.state.write();
+        for row in self.rows.iter_mut().filter(|row| row.cwd == cwd) {
+            row.branch = Some(branch.to_owned());
+            if self.store.save_thread(row).is_err() {
+                saved = Err(SAVE_FAILED.to_owned());
+            }
+            if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
+                let status = thread.status;
+                show(thread, row, status);
+            }
+        }
+        saved
+    }
+
+    /// Whether a turn is underway in any thread in `cwd`.
+    fn busy_in(&self, cwd: &Path) -> bool {
+        self.state
+            .read()
+            .sessions
+            .threads()
+            .any(|thread| thread.cwd == cwd && thread.status.in_progress())
     }
 
     /// Saves a just-started session in `root` under the project.
@@ -939,7 +1069,7 @@ struct Moved {
     short_id: String,
     /// The new workspace.
     cwd: PathBuf,
-    /// The branch orb made for the new workspace, if it made one.
+    /// The new workspace's branch, when orb made or checked it out.
     branch: Option<String>,
 }
 
@@ -1077,14 +1207,6 @@ fn reason(report: &Report<SessionHostError>) -> String {
         .downcast_ref::<String>()
         .cloned()
         .unwrap_or_else(|| "claude failed".to_owned())
-}
-
-/// The one-line reason a git failure carries.
-fn git_reason(report: &Report<GitError>) -> String {
-    report
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_else(|| "git failed".to_owned())
 }
 
 /// How a saved thread looks with `status`, attached to with `attach_argv`.
@@ -1466,7 +1588,11 @@ mod tests {
         }
 
         fn checkout(&self, _cwd: &Path, git_ref: &GitRef) -> Result<String, Report<GitError>> {
-            Ok(git_ref.name.clone())
+            let local = match git_ref.name.split_once('/') {
+                Some((_, branch)) if git_ref.remote => branch,
+                _ => &git_ref.name,
+            };
+            Ok(local.to_owned())
         }
 
         fn rename_branch(
@@ -3482,6 +3608,112 @@ mod tests {
             trust_of(&state),
             None,
             "a retry should never reopen the trust prompt"
+        );
+        Ok(())
+    }
+
+    /// A ref named `name`, on a remote when `remote`, checked out nowhere.
+    fn git_ref(name: &str, remote: bool) -> GitRef {
+        GitRef {
+            name: name.to_owned(),
+            remote,
+            current: false,
+            default: false,
+            worktree: None,
+        }
+    }
+
+    fn branch_of(state: &State, id: ThreadId) -> Option<String> {
+        shown(state, id)?.branch
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_checks_out_and_shows_the_branch() -> Result<(), Report<StoreError>> {
+        // Given a thread in the orb project's root.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When switching it to `feat`.
+        actor.check_out(id, &git_ref("feat", false));
+
+        // Then the sidebar shows it on feat.
+        assert_eq!(
+            branch_of(&state, id).as_deref(),
+            Some("feat"),
+            "the thread should show its new branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn switch_branch_refused_after_the_directory_became_busy()
+    -> Result<(), Report<StoreError>> {
+        // Given a thread whose turn started after the picker opened.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When switching it to `feat`.
+        actor.check_out(id, &git_ref("feat", false));
+
+        // Then the mode line says Claude is working there.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("Claude is working in this directory"),
+            "a checkout under a running turn should be refused"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn switch_to_a_remote_ref_shows_the_local_branch_name() -> Result<(), Report<StoreError>> {
+        // Given a thread in the orb project's root.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When switching it to `origin/feat`.
+        actor.check_out(id, &git_ref("origin/feat", true));
+
+        // Then the sidebar shows the tracking branch feat.
+        assert_eq!(
+            branch_of(&state, id).as_deref(),
+            Some("feat"),
+            "a remote ref checks out as its local branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn unstarted_default_pick_from_a_worktree_moves_to_the_root()
+    -> Result<(), Report<StoreError>> {
+        // Given a prompt-less thread in an orb worktree of a project on disk.
+        let root = tempfile::tempdir().change_context(StoreError)?;
+        let store = Store::open_in_memory()?;
+        let id = {
+            let project_id = store.add_project(root.path(), "orb", 0)?;
+            store.insert_thread(&NewThread {
+                project_id,
+                short_id: "aa".to_owned(),
+                cwd: Path::new(WORKTREES_ROOT).join("orb/orb-0123abcd"),
+                created_at: now_ms() - HOUR_MS,
+            })?
+        };
+        let host = FakeHost::moving(Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When picking the default branch, checked out nowhere.
+        actor.switch_to_root(id, &git_ref("main", false)).await;
+
+        // Then its session starts over in the root.
+        assert_eq!(
+            host.created_in(),
+            vec![root.path().to_owned()],
+            "the thread should move back to the root checkout"
         );
         Ok(())
     }

@@ -1,11 +1,13 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
-//! has updated [`AppState`](crate::AppState). Pane commands, `Yank` and
-//! `ListDirectories` are carried out by the frontend loop; session commands
-//! (create, add project, move to another workspace, refresh, pin, settle,
-//! delete, visit) go to the sessions actor; `ShowPreview` goes to the preview actor.
+//! has updated [`AppState`](crate::AppState). Pane commands, `Yank`,
+//! `ListDirectories` and `ListBranches` are carried out by the frontend loop;
+//! session commands (create, add project, move to another workspace, switch
+//! branch, refresh, pin, settle, delete, visit) go to the sessions actor;
+//! `ShowPreview` goes to the preview actor.
 
 use std::path::PathBuf;
 
+use crate::feat::git::git_service::GitRef;
 use crate::feat::sessions::state::{AttachTarget, ProjectId, ThreadId};
 
 /// Something that must happen in response to an intent.
@@ -20,6 +22,16 @@ pub enum Command {
     /// Start the thread's session over in another workspace, before its
     /// first prompt.
     MoveThread { thread: ThreadId, to: Workspace },
+    /// Check the branch out in the thread's directory. With `to_root`, check
+    /// it out in the project's root instead and move the prompt-less thread
+    /// there.
+    SwitchBranch {
+        thread: ThreadId,
+        git_ref: GitRef,
+        to_root: bool,
+    },
+    /// List the refs of the directory's repository into the open branch picker.
+    ListBranches(PathBuf),
     /// Add the directory as a project.
     AddProject(PathBuf),
     /// List the directory's subdirectories into the open directory picker.

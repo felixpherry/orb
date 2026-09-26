@@ -192,6 +192,10 @@ fn render_item(item: &PickerItem, matches: &Matches, area: Rect, buf: &mut Buffe
             Line::from_iter(highlight(&choice.label(), &matches.name, Style::new()))
                 .render(area, buf);
         }
+        PickerItem::Branch(row) => {
+            Line::from_iter(highlight(&row.git_ref.name, &matches.name, Style::new()))
+                .render(area, buf);
+        }
     }
 }
 

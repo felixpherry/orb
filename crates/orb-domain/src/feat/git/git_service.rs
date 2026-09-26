@@ -114,6 +114,14 @@ pub trait Git: Send + Sync {
     fn rename_branch(&self, cwd: &Path, old: &str, new: &str) -> Result<(), Report<GitError>>;
 }
 
+/// The one-line reason a git failure carries.
+pub fn git_reason(report: &Report<GitError>) -> String {
+    report
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_else(|| "git failed".to_owned())
+}
+
 /// Shared handle to the [`Git`] in use.
 #[derive(Clone)]
 pub struct GitService {
