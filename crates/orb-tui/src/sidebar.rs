@@ -329,7 +329,7 @@ pub(crate) fn badge_colour(name: &str) -> usize {
 }
 
 /// The project's monogram tile, in its colour, or in gray unless `lit`.
-fn badge(name: &str, lit: bool) -> Span<'static> {
+pub(crate) fn badge(name: &str, lit: bool) -> Span<'static> {
     let (r, g, b) = if lit {
         BADGE.get(badge_colour(name))
     } else {
@@ -388,15 +388,15 @@ const EMERALD: Color = Color::Rgb(0x6e, 0xe7, 0xb7);
 /// Failed and gone (red-300).
 const RED: Color = Color::Rgb(0xfc, 0xa5, 0xa5);
 /// The project name, settled titles, the shelf header, and idle times.
-const GRAY: Color = Color::Rgb(0xa3, 0xa3, 0xa3);
+pub(crate) const GRAY: Color = Color::Rgb(0xa3, 0xa3, 0xa3);
 /// The branch and settled times.
-const DARK_GRAY: Color = Color::Rgb(0x73, 0x73, 0x73);
+pub(crate) const DARK_GRAY: Color = Color::Rgb(0x73, 0x73, 0x73);
 /// The ✳ logo.
 const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
 /// Behind the selected row.
-const SELECTED: Color = Color::Rgb(0x26, 0x26, 0x26);
+pub(crate) const SELECTED: Color = Color::Rgb(0x26, 0x26, 0x26);
 /// The selected card's outline (neutral-600).
-const OUTLINE: Color = Color::Rgb(0x52, 0x52, 0x52);
+pub(crate) const OUTLINE: Color = Color::Rgb(0x52, 0x52, 0x52);
 
 #[cfg(test)]
 mod tests {

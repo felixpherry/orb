@@ -8,10 +8,14 @@
 //!
 //! Each thread gets its own `claude attach` pane; selecting another thread
 //! drops it (the session keeps running). While attached, input goes straight
-//! to Claude; otherwise keys go through the [`keymap`].
+//! to Claude; otherwise keys go through the [`keymap`]. The loop reads the
+//! directory picker's listings itself, since a listing takes about a
+//! millisecond.
 
 use std::ffi::OsString;
+use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -31,6 +35,7 @@ use ratatui::layout::Rect;
 use wherror::Error;
 
 use crate::keymap::{self, Keys, Route};
+use crate::picker::PickerScroll;
 use crate::preview::PreviewCache;
 use crate::sidebar::SidebarScroll;
 use crate::{outer_terminal, render};
@@ -120,6 +125,7 @@ struct App {
     cursor_style: SetCursorStyle,
     preview_cache: PreviewCache,
     sidebar_scroll: SidebarScroll,
+    picker_scroll: PickerScroll,
 }
 
 impl App {
@@ -144,6 +150,7 @@ impl App {
             cursor_style: SetCursorStyle::DefaultUserShape,
             preview_cache: PreviewCache::default(),
             sidebar_scroll: SidebarScroll::default(),
+            picker_scroll: PickerScroll::default(),
         }
     }
 
@@ -156,7 +163,7 @@ impl App {
                 attached.pane.resize(PaneSize::from(pane_area));
             }
             let now = SystemTime::now();
-            let mut preview_layout = None;
+            let mut drawn = (None, None);
             terminal.draw(|frame| {
                 let state = self.state.read();
                 let pane = self
@@ -167,7 +174,7 @@ impl App {
                             && !attached.pane.has_exited()
                     })
                     .map(|attached| &attached.pane);
-                preview_layout = render::render(
+                drawn = render::render(
                     frame,
                     &state,
                     pane,
@@ -176,13 +183,26 @@ impl App {
                     now,
                     &mut self.preview_cache,
                     &mut self.sidebar_scroll,
+                    &mut self.picker_scroll,
                 );
             })?;
             // Navigation scrolls by what was just drawn.
+            let (preview_layout, picker_page) = drawn;
             if let Some(layout) = preview_layout
                 && self.state.read().preview.layout != layout
             {
                 self.state.write().preview.layout = layout;
+            }
+            if let Some(page) = picker_page
+                && self
+                    .state
+                    .read()
+                    .picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.page() != page)
+                && let Some(picker) = &mut self.state.write().picker
+            {
+                picker.resize(page);
             }
             self.mirror_cursor_style(terminal.backend_mut())?;
             if self.state.read().should_quit {
@@ -256,7 +276,7 @@ impl App {
                         }
                         keymap::press(&mut self.keys, key)
                     }
-                    Focus::Picker => None,
+                    Focus::Picker => keymap::picker_route(key),
                 };
                 if let Some(intent) = intent {
                     let commands = IntentHandler::handle(&intent, &mut self.state.write());
@@ -307,6 +327,7 @@ impl App {
         Ok(())
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per command")]
     fn execute<W>(&mut self, command: &Command, out: &mut W) -> io::Result<()>
     where
         W: Write,
@@ -370,7 +391,13 @@ impl App {
                     .try_send();
                 Ok(())
             }
-            Command::ListDirectories(_) => Ok(()),
+            Command::ListDirectories(dir) => {
+                let names = list_directories(dir);
+                if let Some(picker) = &mut self.state.write().picker {
+                    picker.show_directories(dir, names);
+                }
+                Ok(())
+            }
             Command::RefreshSessions => {
                 let _ = self
                     .sessions
@@ -462,6 +489,19 @@ impl App {
     }
 }
 
+/// The names of `dir`'s subdirectories, symlinked ones included. Names that
+/// aren't UTF-8 are skipped, and an unreadable `dir` has none.
+fn list_directories(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect()
+}
+
 /// Reads terminal events on a background thread and sends them to the loop.
 fn spawn_input_thread(tx: Sender<LoopEvent>) -> io::Result<()> {
     thread::Builder::new()
@@ -482,4 +522,37 @@ fn spawn_input_thread(tx: Sender<LoopEvent>) -> io::Result<()> {
             }
         })
         .map(drop)
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "tests propagate file failures with `?` and assert on the outcome"
+)]
+mod tests {
+    use std::fs;
+    use std::io;
+    use std::os::unix::fs::symlink;
+
+    use super::list_directories;
+
+    #[rstest::rstest]
+    fn list_directories_keeps_directories_and_links_to_them() -> io::Result<()> {
+        // Given a directory holding a file, a directory, and a link to it.
+        let dir = tempfile::tempdir()?;
+        fs::write(dir.path().join("notes.txt"), "")?;
+        fs::create_dir_all(dir.path().join("dev"))?;
+        symlink(dir.path().join("dev"), dir.path().join("linked"))?;
+
+        // When listing its subdirectories.
+        let names = {
+            let mut names = list_directories(dir.path());
+            names.sort();
+            names
+        };
+
+        // Then the directory and the link are listed, not the file.
+        assert_eq!(names, ["dev", "linked"], "the listed subdirectories");
+        Ok(())
+    }
 }
