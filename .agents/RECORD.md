@@ -94,5 +94,11 @@ Entries are added or amended **only with human approval**.
 - (drafts) A draft of a project that isn't a git repository has no workspace or base branch, starts in the project's directory, and `␣w`/`␣b` offer to initialize git.
 - (drafts) The model picker lists `Default`, then T3 Code's current Claude models by name, then its legacy models under a `Legacy models` heading; orb passes the picked model's full ID to `--model`.
 - (keybinds) On a draft, in the sidebar or its form, `⏎` starts it and `␣w`/`␣b`/`␣m`/`␣a` pick its workspace, base branch, model, and permission.
-- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` only on a draft, `␣w`/`␣b` only on a thread or draft, and `p`/`ss` only on a thread.
+- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` only on a thread or draft, and `p`/`ss` only on a thread.
 - (preview) The preview header names the thread's model as the model picker does (e.g. Claude Opus 5.5), else shows its ID without `claude-`.
+- (keybinds) `␣t` opens a shell, `␣g` lazygit, and `␣v` `nvim .` in the selected thread's or draft's directory, in the sidebar or preview.
+- (zellij) Tool handoff opens each tool as a full-screen floating zellij pane named `orb:<directory>:<tool>`, which closes when the tool exits.
+- (zellij) Tool handoff focuses an existing pane of the same name, switching to its tab, instead of opening a second one.
+- (zellij) A draft's tools open in its worktree, or in the project root for a local or new-worktree draft.
+- (zellij) Tool panes run with orb's own `NO_COLOR`, not the zellij server's.
+- (zellij) A zellij call that runs longer than 2 s is killed, and the mode line shows `zellij timed out (session renamed? restart orb)`.
