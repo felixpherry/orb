@@ -416,16 +416,11 @@ impl App {
                 }
                 self.leave_pane(out)
             }
-            Command::CreateSession { project, root } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::CreateSession {
-                        project: *project,
-                        root: root.clone(),
-                    })
-                    .try_send();
-                Ok(())
-            }
+            Command::CreateDraft(_)
+            | Command::SaveDraft(_)
+            | Command::CheckoutDraft { .. }
+            | Command::StartDraft(_)
+            | Command::DiscardDraft(_) => Ok(()),
             Command::MoveThread { thread, to } => {
                 let _ = self
                     .sessions

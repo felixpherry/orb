@@ -1,7 +1,7 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
 //! has updated [`AppState`](crate::AppState). Pane commands, `Yank`,
 //! `ListDirectories` and `ListBranches` are carried out by the frontend loop;
-//! session commands (create, add project, move to another workspace, switch
+//! session commands (drafts, add project, move to another workspace, switch
 //! branch, refresh, pin, settle, delete, visit) go to the sessions actor;
 //! `ShowPreview` goes to the preview actor.
 
@@ -17,8 +17,18 @@ pub enum Command {
     Attach(AttachTarget),
     /// Stop sending input to the terminal pane.
     Detach,
-    /// Start a new Claude session in the project's directory.
-    CreateSession { project: ProjectId, root: PathBuf },
+    /// Give the project a draft, prefilled from its last-used settings,
+    /// unless it has one.
+    CreateDraft(ProjectId),
+    /// Save the project's draft as it now is in the app state.
+    SaveDraft(ProjectId),
+    /// Check the branch out in the project's root for its local draft.
+    CheckoutDraft { project: ProjectId, git_ref: GitRef },
+    /// Start a Claude session from the project's draft, which becomes a
+    /// thread.
+    StartDraft(ProjectId),
+    /// Throw the project's draft away.
+    DiscardDraft(ProjectId),
     /// Start the thread's session over in another workspace, before its
     /// first prompt.
     MoveThread { thread: ThreadId, to: Workspace },

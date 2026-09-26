@@ -9,8 +9,17 @@ use std::path::{Path, PathBuf};
 
 use crate::Focus;
 use crate::feat::git::git_service::GitRef;
-use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList};
-use crate::feat::sessions::state::ThreadId;
+use crate::feat::picker::list::{
+    BranchRow, MODELS, Matches, PERMISSION_MODES, PickerItem, PickerList,
+};
+use crate::feat::sessions::state::{ProjectId, ThreadId};
+
+/// What a workspace or branch picker sets up: a thread, or a project's draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickTarget {
+    Thread(ThreadId),
+    Draft(ProjectId),
+}
 
 /// What an open picker picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,16 +30,20 @@ pub enum PickerKind {
     /// text (e.g. `~/dev/`) the items were read from; `None` while the input
     /// isn't a path.
     Directories { listed: Option<String> },
-    /// `␣w`: pick where `thread`'s session runs.
-    Workspace { thread: ThreadId },
-    /// `␣b`: pick a branch for `thread`, whose session runs in `cwd`.
+    /// `␣w`: pick where `target`'s session runs.
+    Workspace { target: PickTarget },
+    /// `␣b`: pick a branch for `target`, whose refs are listed in `cwd`.
     /// `unstarted` is whether it has had no prompt yet, so it can still
     /// follow a branch into another worktree.
     Branches {
-        thread: ThreadId,
+        target: PickTarget,
         cwd: PathBuf,
         unstarted: bool,
     },
+    /// `␣m`: pick the model of `project`'s draft.
+    Model { project: ProjectId },
+    /// `␣a`: pick the permission mode of `project`'s draft.
+    Permission { project: ProjectId },
 }
 
 /// The open picker.
@@ -58,10 +71,10 @@ impl PickerState {
         }
     }
 
-    /// A workspace picker for `thread` over `items`, in the order given.
-    pub fn workspace(thread: ThreadId, items: Vec<PickerItem>, return_to: Focus) -> Self {
+    /// A workspace picker for `target` over `items`, in the order given.
+    pub fn workspace(target: PickTarget, items: Vec<PickerItem>, return_to: Focus) -> Self {
         Self {
-            kind: PickerKind::Workspace { thread },
+            kind: PickerKind::Workspace { target },
             list: PickerList::new(items),
             return_to,
             home: PathBuf::new(),
@@ -69,15 +82,58 @@ impl PickerState {
         }
     }
 
-    /// A branch picker for `thread` in `cwd`, empty until its refs are listed.
-    pub fn branches(thread: ThreadId, cwd: PathBuf, unstarted: bool, return_to: Focus) -> Self {
+    /// A branch picker for `target` in `cwd`, empty until its refs are listed.
+    pub fn branches(target: PickTarget, cwd: PathBuf, unstarted: bool, return_to: Focus) -> Self {
         Self {
             kind: PickerKind::Branches {
-                thread,
+                target,
                 cwd,
                 unstarted,
             },
             list: PickerList::default(),
+            return_to,
+            home: PathBuf::new(),
+            page: 0,
+        }
+    }
+
+    /// A model picker for `project`'s draft: `Default`, then [`MODELS`], with
+    /// `current` selected.
+    pub fn models(project: ProjectId, current: Option<&str>, return_to: Focus) -> Self {
+        Self::settings(PickerKind::Model { project }, &MODELS, current, return_to)
+    }
+
+    /// A permission-mode picker for `project`'s draft: `Default`, then
+    /// [`PERMISSION_MODES`], with `current` selected.
+    pub fn permissions(project: ProjectId, current: Option<&str>, return_to: Focus) -> Self {
+        Self::settings(
+            PickerKind::Permission { project },
+            &PERMISSION_MODES,
+            current,
+            return_to,
+        )
+    }
+
+    /// A `kind` picker over `Default` and `values`, with `current` selected.
+    fn settings(
+        kind: PickerKind,
+        values: &[&'static str],
+        current: Option<&str>,
+        return_to: Focus,
+    ) -> Self {
+        let list = {
+            let items = std::iter::once(None)
+                .chain(values.iter().copied().map(Some))
+                .map(PickerItem::Setting)
+                .collect();
+            let mut list = PickerList::new(items);
+            let selected = values.iter().copied().find(|value| Some(*value) == current);
+            list.select(&PickerItem::Setting(selected));
+            list
+        };
+        Self {
+            kind,
+            list,
             return_to,
             home: PathBuf::new(),
             page: 0,
@@ -198,9 +254,12 @@ impl PickerState {
         let dir = expand(dir_text, &self.home);
         match self.list.selected() {
             Some(PickerItem::Directory { name }) => Some(dir.join(name)),
-            Some(PickerItem::Project { .. } | PickerItem::Workspace(_) | PickerItem::Branch(_)) => {
-                None
-            }
+            Some(
+                PickerItem::Project { .. }
+                | PickerItem::Workspace(_)
+                | PickerItem::Branch(_)
+                | PickerItem::Setting(_),
+            ) => None,
             None => leaf.is_empty().then_some(dir),
         }
     }
@@ -328,11 +387,11 @@ pub fn expand(dir_text: &str, home: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{PickerState, expand, split_path};
+    use super::{PickTarget, PickerState, expand, split_path};
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::PickerItem;
-    use crate::feat::sessions::state::ThreadId;
+    use crate::feat::sessions::state::{ProjectId, ThreadId};
 
     const HOME: &str = "/home/u";
 
@@ -611,7 +670,12 @@ mod tests {
 
     /// Thread 1's branch picker in [`CWD`], showing `refs`.
     fn branches_listing(unstarted: bool, refs: Vec<GitRef>) -> PickerState {
-        let mut picker = PickerState::branches(ThreadId(1), CWD.into(), unstarted, Focus::Preview);
+        let mut picker = PickerState::branches(
+            PickTarget::Thread(ThreadId(1)),
+            CWD.into(),
+            unstarted,
+            Focus::Preview,
+        );
         picker.show_branches(Path::new(CWD), refs);
         picker
     }
@@ -655,6 +719,49 @@ mod tests {
             picker.shown().count(),
             0,
             "a listing for another directory should be ignored"
+        );
+    }
+
+    /// The labels of the shown setting rows.
+    fn setting_labels(picker: &PickerState) -> Vec<Option<&'static str>> {
+        picker
+            .shown()
+            .filter_map(|(item, _)| match item {
+                PickerItem::Setting(value) => Some(*value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn model_picker_lists_default_then_the_models() {
+        // Given / When opening a model picker for a draft with no model.
+        let picker = PickerState::models(ProjectId(1), None, Focus::Preview);
+
+        // Then Default comes first, then every model alias.
+        assert_eq!(
+            setting_labels(&picker),
+            [
+                None,
+                Some("opus"),
+                Some("sonnet"),
+                Some("fable"),
+                Some("haiku")
+            ],
+            "the model picker lists Default then the aliases"
+        );
+    }
+
+    #[rstest::rstest]
+    fn permission_picker_selects_the_current_mode() {
+        // Given / When opening a permission picker for a draft in plan mode.
+        let picker = PickerState::permissions(ProjectId(1), Some("plan"), Focus::Preview);
+
+        // Then plan is selected.
+        assert_eq!(
+            picker.selected(),
+            Some(&PickerItem::Setting(Some("plan"))),
+            "the draft's current mode should be selected"
         );
     }
 }
