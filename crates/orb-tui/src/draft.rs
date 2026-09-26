@@ -1,10 +1,10 @@
 //! The draft form: what the right side shows while a draft is selected.
 //!
 //! It names the project and lists the four settings the draft's session will
-//! start with — workspace, base branch, model and permission — each with the
-//! leader key that picks it, then how to start. An existing worktree shows its
-//! path, cut from the left when it's too long; its branch is its own and can't
-//! be picked, so that row is dimmed.
+//! start with — workspace, base branch, model (by name) and permission — then
+//! how to start. An existing worktree shows its path, cut from the left when
+//! it's too long; its branch is its own and can't be picked, so that row is
+//! dimmed.
 
 use std::path::Path;
 
@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::picker::{cut_left, tilde};
-use crate::sidebar::{DARK_GRAY, GRAY, badge, render_split, workspace_label};
+use crate::sidebar::{DARK_GRAY, GRAY, badge};
 
 /// Draws `project`'s `draft` into `area`; paths under `home` show as `~/`.
 pub(crate) fn render(project: &Project, draft: &Draft, home: &Path, area: Rect, buf: &mut Buffer) {
@@ -37,11 +37,10 @@ pub(crate) fn render(project: &Project, draft: &Draft, home: &Path, area: Rect, 
         }
     };
     let read_only = matches!(draft.workspace, DraftWorkspace::Existing(_));
-    render_field("Workspace", &place, "␣w", false, workspace, buf);
+    render_field("Workspace", &place, false, workspace, buf);
     render_field(
         "Base branch",
         draft.branch.as_deref().unwrap_or("unknown"),
-        "␣b",
         read_only,
         branch,
         buf,
@@ -49,7 +48,6 @@ pub(crate) fn render(project: &Project, draft: &Draft, home: &Path, area: Rect, 
     render_field(
         "Model",
         setting_label(draft.model.as_deref()),
-        "␣m",
         false,
         model,
         buf,
@@ -57,7 +55,6 @@ pub(crate) fn render(project: &Project, draft: &Draft, home: &Path, area: Rect, 
     render_field(
         "Permission",
         setting_label(draft.permission.as_deref()),
-        "␣a",
         false,
         permission,
         buf,
@@ -65,25 +62,32 @@ pub(crate) fn render(project: &Project, draft: &Draft, home: &Path, area: Rect, 
     Line::raw("⏎ start").render(start, buf);
 }
 
+/// Where a draft's session will run, in a word or two.
+fn workspace_label(workspace: &DraftWorkspace) -> &'static str {
+    match workspace {
+        DraftWorkspace::Local => "Local checkout",
+        DraftWorkspace::NewWorktree => "New worktree",
+        DraftWorkspace::Existing(_) => "Worktree",
+    }
+}
+
 /// The column a field's value starts at.
 const VALUE_X: usize = 13;
 
-/// A setting's label and value, with the key that picks it on the right; all
-/// dimmed when it can't be picked. A value too long for the row is cut from
-/// the left.
-fn render_field(label: &str, value: &str, key: &str, dim: bool, area: Rect, buf: &mut Buffer) {
+/// A setting's label and value, both dimmed when it can't be picked. A value
+/// too long for the row is cut from the left.
+fn render_field(label: &str, value: &str, dim: bool, area: Rect, buf: &mut Buffer) {
     let (label_colour, value_colour) = if dim {
         (DARK_GRAY, DARK_GRAY)
     } else {
         (GRAY, Color::White)
     };
-    let key = Line::styled(key, Style::new().fg(DARK_GRAY));
-    let room = usize::from(area.width).saturating_sub(VALUE_X + key.width() + 1);
-    let row = Line::from(vec![
+    let room = usize::from(area.width).saturating_sub(VALUE_X);
+    Line::from(vec![
         Span::styled(format!("{label:<VALUE_X$}"), Style::new().fg(label_colour)),
         Span::styled(cut_left(value, room), Style::new().fg(value_colour)),
-    ]);
-    render_split(row, key, area, buf);
+    ])
+    .render(area, buf);
 }
 
 #[cfg(test)]
@@ -160,22 +164,39 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(1, "Workspace    Local checkout", "␣w")]
-    #[case(2, "Base branch  dev", "␣b")]
-    #[case(3, "Model        Default", "␣m")]
-    #[case(4, "Permission   plan", "␣a")]
-    fn field_row_shows_its_value_and_key(#[case] y: usize, #[case] field: &str, #[case] key: &str) {
+    #[case(1, "Workspace    Local checkout")]
+    #[case(2, "Base branch  dev")]
+    #[case(3, "Model        Default")]
+    #[case(4, "Permission   plan")]
+    fn field_row_shows_only_its_label_and_value(#[case] y: usize, #[case] field: &str) {
         // Given a local draft on dev with the default model in plan mode.
         let draft = draft(DraftWorkspace::Local);
 
         // When drawing its form.
         let row = line(&draw(&draft), y);
 
-        // Then the row shows the field's value, and its key at the right edge.
-        assert!(
-            row.starts_with(field) && row.trim_end().ends_with(key),
-            "row was '{row}'"
-        );
+        // Then the row is the field's label and value, with no key after it.
+        assert_eq!(row.trim_end(), field, "the field row");
+    }
+
+    #[rstest::rstest]
+    #[case("claude-opus-5-5", "Model        Claude Opus 5.5")]
+    #[case("opus", "Model        opus")]
+    fn model_row_names_a_known_model_and_shows_others_as_stored(
+        #[case] model: &str,
+        #[case] expected: &str,
+    ) {
+        // Given a draft on `model`.
+        let draft = Draft {
+            model: Some(model.to_owned()),
+            ..draft(DraftWorkspace::Local)
+        };
+
+        // When drawing its form.
+        let row = line(&draw(&draft), 3);
+
+        // Then the model row shows the model's name, or the stored value.
+        assert_eq!(row.trim_end(), expected, "the model row");
     }
 
     #[rstest::rstest]
@@ -205,9 +226,9 @@ mod tests {
         // When drawing its form.
         let row = line(&draw(&draft), 1);
 
-        // Then the path's start gives way to `…`, keeping its end and the key.
+        // Then the path's start gives way to `…`, keeping its end.
         assert!(
-            row.starts_with("Workspace    …") && row.trim_end().ends_with("orb-1a2b3c4d ␣w"),
+            row.starts_with("Workspace    …") && row.ends_with("/orb-1a2b3c4d"),
             "row was '{row}'"
         );
     }

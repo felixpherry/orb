@@ -41,7 +41,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::layout::Rect;
 use wherror::Error;
 
-use crate::keymap::{self, Keys, Route};
+use crate::keymap::{self, Keys, Route, Scope};
 use crate::picker::PickerScroll;
 use crate::preview::PreviewCache;
 use crate::sidebar::SidebarScroll;
@@ -186,13 +186,16 @@ impl App {
         claude_env: Vec<(OsString, OsString)>,
         tx: Sender<LoopEvent>,
     ) -> Self {
-        let focus = state.read().focus;
+        let scope = {
+            let state = state.read();
+            Scope::new(state.focus, state.sessions.selected_draft().is_some())
+        };
         Self {
             state,
             sessions,
             preview,
             git,
-            keys: Keys::new(keymap::keymap(), focus),
+            keys: Keys::new(keymap::keymap(), scope),
             pane: None,
             pane_error: None,
             opened_trust: None,
@@ -324,9 +327,14 @@ impl App {
                         }
                     },
                     Focus::Sidebar | Focus::Preview => {
-                        // Focus also changes outside intents (the pane exits).
-                        if *self.keys.scope() != focus {
-                            self.keys.set_scope(focus);
+                        // Focus and the selection also change outside
+                        // intents (the pane exits, a draft starts).
+                        let scope = Scope::new(
+                            focus,
+                            self.state.read().sessions.selected_draft().is_some(),
+                        );
+                        if *self.keys.scope() != scope {
+                            self.keys.set_scope(scope);
                         }
                         keymap::press(&mut self.keys, key)
                     }

@@ -7,8 +7,9 @@
 //! directory picker shows one folder per row; the workspace picker shows where
 //! a thread's session could run, each with its glyph; the branch picker shows
 //! each branch with its badge, dimming the ones checked out where the thread
-//! can't follow and saying where. Where the filter matched is bold and
-//! underlined, and the rows scroll to keep the selection in view.
+//! can't follow and saying where; the model picker shows each model's name,
+//! with its legacy models under their own label. Where the filter matched is
+//! bold and underlined, and the rows scroll to keep the selection in view.
 
 use std::path::Path;
 
@@ -247,6 +248,9 @@ fn render_item(
                 Style::new(),
             ))
             .render(area, buf);
+        }
+        PickerItem::Heading(text) => {
+            Line::styled(*text, Style::new().fg(GRAY)).render(area, buf);
         }
     }
 }
@@ -1002,6 +1006,46 @@ mod tests {
             .nth(1);
         assert!(
             first.is_some_and(|line| line.trim_matches(['│', ' ']) == "Default"),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn model_picker_names_the_models() {
+        // Given a model picker.
+        let picker = PickerState::models(ProjectId(1), None, Focus::Preview);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 40);
+
+        // Then the row after Default is Claude Opus 5.5, not its ID.
+        let lines = lines(&buf);
+        let second = lines
+            .iter()
+            .skip_while(|line| !line.contains("Models"))
+            .nth(2);
+        assert!(
+            second.is_some_and(|line| line.trim_matches(['│', ' ']) == "Claude Opus 5.5"),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn model_picker_labels_the_legacy_models() {
+        // Given a model picker.
+        let picker = PickerState::models(ProjectId(1), None, Focus::Preview);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 40);
+
+        // Then a Legacy models label follows Claude Sonnet 5.
+        let lines = lines(&buf);
+        let after = lines
+            .iter()
+            .skip_while(|line| !line.contains("Claude Sonnet 5"))
+            .nth(1);
+        assert!(
+            after.is_some_and(|line| line.trim_matches(['│', ' ']) == "Legacy models"),
             "screen was {lines:#?}"
         );
     }

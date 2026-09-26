@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::Focus;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::picker::list::{
-    BranchRow, MODELS, Matches, PERMISSION_MODES, PickerItem, PickerList,
+    BranchRow, LEGACY_MODELS, MODELS, Matches, Model, PERMISSION_MODES, PickerItem, PickerList,
 };
 use crate::feat::sessions::state::{ProjectId, ThreadId};
 
@@ -97,38 +97,56 @@ impl PickerState {
         }
     }
 
-    /// A model picker for `project`'s draft: `Default`, then [`MODELS`], with
-    /// `current` selected.
+    /// A model picker for `project`'s draft: `Default`, then [`MODELS`], then
+    /// a `Legacy models` heading over [`LEGACY_MODELS`], with `current`
+    /// selected.
     pub fn models(project: ProjectId, current: Option<&str>, return_to: Focus) -> Self {
-        Self::settings(PickerKind::Model { project }, &MODELS, current, return_to)
+        let ids = |models: &[Model]| {
+            models
+                .iter()
+                .map(|model| PickerItem::Setting(Some(model.id)))
+                .collect::<Vec<_>>()
+        };
+        let items = std::iter::once(PickerItem::Setting(None))
+            .chain(ids(&MODELS))
+            .chain(std::iter::once(PickerItem::Heading("Legacy models")))
+            .chain(ids(&LEGACY_MODELS))
+            .collect();
+        Self::settings(PickerKind::Model { project }, items, current, return_to)
     }
 
     /// A permission-mode picker for `project`'s draft: `Default`, then
     /// [`PERMISSION_MODES`], with `current` selected.
     pub fn permissions(project: ProjectId, current: Option<&str>, return_to: Focus) -> Self {
+        let items = std::iter::once(None)
+            .chain(PERMISSION_MODES.map(Some))
+            .map(PickerItem::Setting)
+            .collect();
         Self::settings(
             PickerKind::Permission { project },
-            &PERMISSION_MODES,
+            items,
             current,
             return_to,
         )
     }
 
-    /// A `kind` picker over `Default` and `values`, with `current` selected.
+    /// A `kind` picker over `items`, with the setting `current` selected, else
+    /// the first.
     fn settings(
         kind: PickerKind,
-        values: &[&'static str],
+        items: Vec<PickerItem>,
         current: Option<&str>,
         return_to: Focus,
     ) -> Self {
         let list = {
-            let items = std::iter::once(None)
-                .chain(values.iter().copied().map(Some))
-                .map(PickerItem::Setting)
-                .collect();
+            let selected = items
+                .iter()
+                .find(|item| matches!(item, PickerItem::Setting(value) if *value == current))
+                .cloned();
             let mut list = PickerList::new(items);
-            let selected = values.iter().copied().find(|value| Some(*value) == current);
-            list.select(&PickerItem::Setting(selected));
+            if let Some(selected) = selected {
+                list.select(&selected);
+            }
             list
         };
         Self {
@@ -258,7 +276,8 @@ impl PickerState {
                 PickerItem::Project { .. }
                 | PickerItem::Workspace(_)
                 | PickerItem::Branch(_)
-                | PickerItem::Setting(_),
+                | PickerItem::Setting(_)
+                | PickerItem::Heading(_),
             ) => None,
             None => leaf.is_empty().then_some(dir),
         }
@@ -738,17 +757,87 @@ mod tests {
         // Given / When opening a model picker for a draft with no model.
         let picker = PickerState::models(ProjectId(1), None, Focus::Preview);
 
-        // Then Default comes first, then every model alias.
+        // Then Default comes first, then every model ID, current then legacy.
         assert_eq!(
             setting_labels(&picker),
             [
                 None,
-                Some("opus"),
-                Some("sonnet"),
-                Some("fable"),
-                Some("haiku")
+                Some("claude-opus-5-5"),
+                Some("claude-fable-5-1"),
+                Some("claude-opus-5"),
+                Some("claude-sonnet-5"),
+                Some("claude-fable-5"),
+                Some("claude-opus-4-8"),
+                Some("claude-opus-4-7"),
+                Some("claude-opus-4-6"),
+                Some("claude-opus-4-5"),
+                Some("claude-sonnet-4-6"),
+                Some("claude-haiku-4-5"),
             ],
-            "the model picker lists Default then the aliases"
+            "the model picker lists Default then the model IDs"
+        );
+    }
+
+    #[rstest::rstest]
+    fn model_picker_heads_the_legacy_models() {
+        // Given / When opening a model picker.
+        let picker = PickerState::models(ProjectId(1), None, Focus::Preview);
+
+        // Then the Legacy models heading sits between Sonnet 5 and Fable 5.
+        let rows: Vec<&PickerItem> = picker.shown().map(|(item, _)| item).collect();
+        assert_eq!(
+            rows.get(4..7),
+            Some(
+                [
+                    &PickerItem::Setting(Some("claude-sonnet-5")),
+                    &PickerItem::Heading("Legacy models"),
+                    &PickerItem::Setting(Some("claude-fable-5")),
+                ]
+                .as_slice()
+            ),
+            "the legacy models should follow their heading"
+        );
+    }
+
+    #[rstest::rstest]
+    fn moving_down_skips_the_legacy_heading() {
+        // Given a model picker on Claude Sonnet 5, the last current model.
+        let mut picker = PickerState::models(ProjectId(1), Some("claude-sonnet-5"), Focus::Preview);
+
+        // When moving down.
+        picker.next();
+
+        // Then the first legacy model is selected, not the heading.
+        assert_eq!(
+            picker.selected(),
+            Some(&PickerItem::Setting(Some("claude-fable-5"))),
+            "the heading can't be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn model_picker_selects_the_current_legacy_model() {
+        // Given / When opening a model picker for a draft on Claude Haiku 4.5.
+        let picker = PickerState::models(ProjectId(1), Some("claude-haiku-4-5"), Focus::Preview);
+
+        // Then Claude Haiku 4.5 is selected.
+        assert_eq!(
+            picker.selected(),
+            Some(&PickerItem::Setting(Some("claude-haiku-4-5"))),
+            "the draft's legacy model should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn model_picker_selects_default_for_an_unknown_model() {
+        // Given / When opening a model picker for a draft on an old alias.
+        let picker = PickerState::models(ProjectId(1), Some("opus"), Focus::Preview);
+
+        // Then Default is selected.
+        assert_eq!(
+            picker.selected(),
+            Some(&PickerItem::Setting(None)),
+            "a model not in the list should select Default"
         );
     }
 

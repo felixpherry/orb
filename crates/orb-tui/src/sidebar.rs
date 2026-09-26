@@ -4,17 +4,15 @@
 //! Drafts come first, then pinned threads, then active ones, each a
 //! three-line card. A thread's card shows the project's badge and name with
 //! the thread's status (or the time since its last turn), the title, and the
-//! branch; a draft's shows `✎` before the project, `New thread`, and where its
-//! session will run. A blank line separates the cards,
+//! branch; a draft's shows `✎` before the project and `New thread`, its third
+//! line left empty. A blank line separates the cards,
 //! and the selected one is drawn in a rounded outline. Settled threads fold
 //! into a shelf at the bottom, drawn as one-line rows while it's open. The
 //! sidebar scrolls to keep the selection in view.
 
 use std::time::{Duration, SystemTime};
 
-use orb_domain::feat::sessions::state::{
-    Draft, DraftWorkspace, Project, Sessions, SidebarRow, Thread, ThreadStatus,
-};
+use orb_domain::feat::sessions::state::{Project, Sessions, SidebarRow, Thread, ThreadStatus};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
@@ -127,11 +125,11 @@ fn render_row(row: &SidebarRow<'_>, selected: bool, now: SystemTime, area: Rect,
     };
     let text = area.inner(Margin::new(2, 0));
     match row {
-        SidebarRow::Draft { project, draft } => {
+        SidebarRow::Draft { project, .. } => {
             if selected {
                 render_outline(area, buf);
             }
-            render_draft(project, draft, text, buf);
+            render_draft(project, text, buf);
         }
         SidebarRow::Card { project, thread } => {
             if selected {
@@ -195,9 +193,10 @@ fn render_card(project: &Project, thread: &Thread, now: SystemTime, area: Rect, 
     );
 }
 
-/// `✎`, the badge and project; `New thread`; the workspace and branch.
-fn render_draft(project: &Project, draft: &Draft, area: Rect, buf: &mut Buffer) {
-    let [heading, title, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
+/// `✎`, the badge and project; `New thread`. The third line stays empty so
+/// the card is as tall as a thread's.
+fn render_draft(project: &Project, area: Rect, buf: &mut Buffer) {
+    let [heading, title, _] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
     Line::from(vec![
         Span::styled("✎ ", Style::new().fg(DRAFT)),
         badge(&project.title, true),
@@ -206,20 +205,6 @@ fn render_draft(project: &Project, draft: &Draft, area: Rect, buf: &mut Buffer) 
     ])
     .render(heading, buf);
     Line::raw("New thread").render(title, buf);
-    let place = match &draft.branch {
-        Some(branch) => format!("{} · {branch}", workspace_label(&draft.workspace)),
-        None => workspace_label(&draft.workspace).to_owned(),
-    };
-    Line::styled(place, Style::new().fg(DARK_GRAY)).render(footer, buf);
-}
-
-/// Where a draft's session will run, in a word or two.
-pub(crate) fn workspace_label(workspace: &DraftWorkspace) -> &'static str {
-    match workspace {
-        DraftWorkspace::Local => "Local checkout",
-        DraftWorkspace::NewWorktree => "New worktree",
-        DraftWorkspace::Existing(_) => "Worktree",
-    }
 }
 
 /// A settled thread's row: its badge (lit only while selected), title, and
@@ -886,30 +871,21 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(DraftWorkspace::Local, Some("dev"), "Local checkout · dev")]
-    #[case(DraftWorkspace::NewWorktree, Some("main"), "New worktree · main")]
-    #[case(
-        DraftWorkspace::Existing("/Users/me/.orb/worktrees/orb/orb-1a2b".into()),
-        Some("orb/fix"),
-        "Worktree · orb/fix"
-    )]
-    #[case(DraftWorkspace::Local, None, "Local checkout")]
-    fn draft_card_footer_shows_the_workspace_and_branch(
-        #[case] workspace: DraftWorkspace,
-        #[case] branch: Option<&str>,
-        #[case] expected: &str,
-    ) {
-        // Given a draft in `workspace` on `branch`.
-        let sessions = draft(workspace, branch);
+    #[case(DraftWorkspace::Local)]
+    #[case(DraftWorkspace::NewWorktree)]
+    #[case(DraftWorkspace::Existing("/Users/me/.orb/worktrees/orb/orb-1a2b".into()))]
+    fn draft_card_third_line_is_empty(#[case] workspace: DraftWorkspace) {
+        // Given a draft in `workspace` on a known branch.
+        let sessions = draft(workspace, Some("dev"));
 
         // When rendering the sidebar.
         let footer = line(&draw(&sessions, at(1000), 5), 3);
 
-        // Then its third line says where its session will run.
+        // Then its third line shows neither the workspace nor the branch.
         assert_eq!(
-            footer.trim_end_matches('│').trim_end(),
-            format!("  {expected}"),
-            "the draft card's footer"
+            footer.trim_end_matches('│').trim(),
+            "",
+            "the draft card's third line"
         );
     }
 }
