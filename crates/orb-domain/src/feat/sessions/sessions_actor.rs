@@ -7,6 +7,12 @@
 //! transcript lines for titles and branches, and saves what changed. It also
 //! starts new sessions in a picked project's directory and adds projects.
 //!
+//! Before a thread's first prompt it can move the thread to another workspace:
+//! a new worktree of the project, or a directory that already exists. The new
+//! session starts first, and only then is the old one removed; a worktree orb
+//! made for a start that failed is removed again, and an orb worktree no
+//! thread uses after a move is removed unless it has changes.
+//!
 //! It keeps each thread's place in the sidebar: pinning, settling onto the
 //! Settled shelf (which stops the session), un-settling, and deleting. A turn
 //! un-settles its thread, and a thread idle for three days settles itself
@@ -31,7 +37,10 @@ use super::state::{
 use super::store::{NewThread, SettledOverride, Store, ThreadRow};
 use super::transcript::{locate, scan_title};
 use crate::Focus;
+use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
+use crate::feat::git::git_service::GitError;
+use crate::feat::git::worktree::{hex, is_orb_worktree, new_worktree_path};
 
 /// How long to wait between polls while a turn is underway or orb is attached.
 const FAST_POLL: Duration = Duration::from_secs(1);
@@ -43,6 +52,8 @@ const AUTO_SETTLE_AFTER: i64 = 3 * 24 * 60 * 60 * 1000;
 const SAVE_FAILED: &str = "couldn't save orb's state";
 /// The error shown when a started session can't be saved or shown.
 const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
+/// How many random worktree names to try before giving up.
+const WORKTREE_NAME_ATTEMPTS: u32 = 8;
 
 /// What the sessions actor needs to start.
 pub struct SessionsActorDeps {
@@ -51,6 +62,8 @@ pub struct SessionsActorDeps {
     pub store: Store,
     /// Claude's config directory, where transcripts live.
     pub claude_dir: PathBuf,
+    /// Where orb makes new worktrees.
+    pub worktrees_root: PathBuf,
     /// Tells the frontend to redraw.
     pub wake: Wake,
 }
@@ -64,6 +77,7 @@ pub struct SessionsActor {
     state: State,
     store: Store,
     claude_dir: PathBuf,
+    worktrees_root: PathBuf,
     wake: Wake,
     /// Cuts the ticker's wait short so it polls now.
     poke: Arc<Notify>,
@@ -84,6 +98,14 @@ pub struct NextPoll(pub Duration);
 pub struct CreateSession {
     pub project: ProjectId,
     pub root: PathBuf,
+}
+
+/// Start a thread's session over in another workspace, before its first
+/// prompt.
+#[derive(Debug)]
+pub struct MoveThread {
+    pub thread: ThreadId,
+    pub to: Workspace,
 }
 
 /// Add a directory as a project.
@@ -117,6 +139,33 @@ pub struct Delete(pub ThreadId);
 /// The user selected a thread, so its latest turn is seen.
 #[derive(Debug)]
 pub struct Visit(pub ThreadId);
+
+/// A session start in flight: what it is for, where it runs, and the
+/// worktree orb made for it, if any.
+struct PendingStart {
+    kind: StartKind,
+    cwd: PathBuf,
+    made: Option<MadeWorktree>,
+}
+
+/// What a session start is for.
+enum StartKind {
+    /// A new thread in the project.
+    Create { project: ProjectId },
+    /// An existing, prompt-less thread moving out of `old_cwd`.
+    Move {
+        thread: ThreadId,
+        old_short_id: String,
+        old_cwd: PathBuf,
+    },
+}
+
+/// A worktree orb made, on its new branch.
+struct MadeWorktree {
+    repo: PathBuf,
+    path: PathBuf,
+    branch: String,
+}
 
 /// Spawns the sessions actor with a mailbox that never refuses a message.
 /// Must be called inside a tokio runtime.
@@ -163,6 +212,18 @@ impl Message<CreateSession> for SessionsActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.create(project, &root).await;
+    }
+}
+
+impl Message<MoveThread> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        MoveThread { thread, to }: MoveThread,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.move_thread(thread, to).await;
     }
 }
 
@@ -267,6 +328,7 @@ impl SessionsActor {
             state,
             store,
             claude_dir,
+            worktrees_root,
             wake,
         } = deps;
         let (projects, rows, error) = match store.load() {
@@ -304,6 +366,7 @@ impl SessionsActor {
             state,
             store,
             claude_dir,
+            worktrees_root,
             wake,
             poke: Arc::default(),
             rows,
@@ -313,15 +376,8 @@ impl SessionsActor {
     /// Asks the host what every session is doing and shows it. Returns how
     /// long to wait before the next poll.
     async fn poll(&mut self) -> Duration {
-        match self.services.session_host.list().await {
-            Ok(records) => {
-                // ponytail: stops run in order (~0.7 s each); only a first
-                // launch that auto-settles many threads waits long.
-                for short_id in self.apply(&records) {
-                    self.stop(&short_id).await;
-                }
-            }
-            Err(report) => self.fail(&report),
+        if let Err(report) = self.sync().await {
+            self.fail(&report);
         }
         let app = self.state.read();
         if app.sessions.any_in_progress() || app.focus == Focus::Attached {
@@ -329,6 +385,18 @@ impl SessionsActor {
         } else {
             SLOW_POLL
         }
+    }
+
+    /// Asks the host what every session is doing, shows it, and stops the
+    /// sessions that auto-settled.
+    async fn sync(&mut self) -> Result<(), Report<SessionHostError>> {
+        let records = self.services.session_host.list().await?;
+        // ponytail: stops run in order (~0.7 s each); only a first launch
+        // that auto-settles many threads waits long.
+        for short_id in self.apply(&records) {
+            self.stop(&short_id).await;
+        }
+        Ok(())
     }
 
     /// Updates every saved thread from its record and transcript, follows its
@@ -384,36 +452,222 @@ impl SessionsActor {
 
     /// Starts a session in the project's directory, saves it, and shows it
     /// selected at the top of the project.
-    async fn create(&mut self, project_id: ProjectId, root: &Path) {
-        let created = match self.services.session_host.create(root).await {
-            Ok(created) => self.save_new(project_id, root, &created.short_id),
-            Err(report) => Err(reason(&report)),
-        };
-        let succeeded = created.is_ok();
+    async fn create(&mut self, project: ProjectId, root: &Path) {
+        self.start(PendingStart {
+            kind: StartKind::Create { project },
+            cwd: root.to_owned(),
+            made: None,
+        })
+        .await;
+    }
+
+    /// Starts a session for `pending` and finishes what it was for. If it
+    /// fails, the reason shows and a worktree made for it is removed.
+    async fn start(&mut self, pending: PendingStart) {
+        let PendingStart { kind, cwd, made } = pending;
+        let created = self.services.session_host.create(&cwd).await;
+        match (created, kind) {
+            (Ok(created), StartKind::Create { project }) => {
+                let thread = self.save_new(project, &cwd, &created.short_id);
+                self.show_created(project, thread);
+            }
+            (
+                Ok(created),
+                StartKind::Move {
+                    thread,
+                    old_short_id,
+                    old_cwd,
+                },
+            ) => {
+                let moved = Moved {
+                    thread,
+                    short_id: created.short_id,
+                    cwd,
+                    branch: made.map(|made| made.branch),
+                };
+                self.finish_move(moved, &old_short_id, &old_cwd).await;
+            }
+            (Err(report), _) => {
+                if let Some(made) = made {
+                    self.remove_made(&made);
+                }
+                self.end_start(Err(reason(&report)));
+            }
+        }
+    }
+
+    /// Shows a thread just created in the project selected at its top.
+    fn show_created(&mut self, project_id: ProjectId, created: Result<Thread, String>) {
+        let created = created.and_then(|thread| {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            let project = sessions
+                .projects
+                .iter_mut()
+                .find(|project| project.id == project_id)
+                .ok_or_else(|| NEW_SESSION_UNSAVED.to_owned())?;
+            sessions.cursor = Some(SidebarItem::Thread(thread.id));
+            project.threads.insert(0, thread);
+            Ok(())
+        });
+        self.end_start(created);
+    }
+
+    /// Ends a session start: stops showing it as starting and shows `result`'s
+    /// error, or clears the error and polls the new session now.
+    fn end_start(&self, result: Result<(), String>) {
+        let succeeded = result.is_ok();
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
             sessions.starting = false;
-            match created {
-                Ok(thread) => match sessions
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.id == project_id)
-                {
-                    Some(project) => {
-                        sessions.cursor = Some(SidebarItem::Thread(thread.id));
-                        sessions.error = None;
-                        project.threads.insert(0, thread);
-                    }
-                    None => sessions.error = Some(NEW_SESSION_UNSAVED.to_owned()),
-                },
-                Err(error) => sessions.error = Some(error),
-            }
+            sessions.error = result.err();
         }
         (self.wake)();
         if succeeded {
             self.poke.notify_one();
         }
+    }
+
+    /// Moves a prompt-less thread to another workspace: prepares it, then
+    /// starts the thread's session there.
+    async fn move_thread(&mut self, id: ThreadId, to: Workspace) {
+        match self.prepare_move(id, to).await {
+            Ok(pending) => self.start(pending).await,
+            Err(error) => self.end_start(Err(error)),
+        }
+    }
+
+    /// Checks again that thread `id` has had no prompt, then gets the
+    /// workspace ready: an existing directory, or a new worktree of the
+    /// project, made from its default branch (fetched first from `origin` when
+    /// there is one).
+    async fn prepare_move(&mut self, id: ThreadId, to: Workspace) -> Result<PendingStart, String> {
+        self.sync().await.map_err(|report| reason(&report))?;
+        let row = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .ok_or_else(|| "the thread is gone".to_owned())?;
+        let root = self
+            .project_root(row.project_id)
+            .ok_or_else(|| "the thread's project is gone".to_owned())?;
+        let busy = self.status(id).is_some_and(ThreadStatus::in_progress);
+        if row.transcript_path.is_some() || busy {
+            let workspace = if row.cwd == root {
+                "Local checkout"
+            } else {
+                "Worktree"
+            };
+            return Err(format!("Workspace locked · {workspace}"));
+        }
+        let kind = StartKind::Move {
+            thread: id,
+            old_short_id: row.short_id.clone(),
+            old_cwd: row.cwd.clone(),
+        };
+        let (cwd, made) = match to {
+            Workspace::Existing(path) if path.is_dir() => (path, None),
+            Workspace::Existing(path) => {
+                return Err(format!("worktree no longer exists: {}", path.display()));
+            }
+            Workspace::NewWorktree => {
+                let made = self
+                    .add_worktree(&root)
+                    .map_err(|report| git_reason(&report))?;
+                (made.path.clone(), Some(made))
+            }
+        };
+        Ok(PendingStart { kind, cwd, made })
+    }
+
+    /// Makes a new worktree of the repository at `repo` on a new `orb/<hex>`
+    /// branch, from the default branch as origin has it, else as it is locally.
+    fn add_worktree(&self, repo: &Path) -> Result<MadeWorktree, Report<GitError>> {
+        let git = &self.services.git;
+        let default = git.default_branch(repo)?;
+        let base = if git.has_origin(repo) && git.fetch(repo, &default)? {
+            format!("origin/{default}")
+        } else {
+            default
+        };
+        let (path, branch) = (0..WORKTREE_NAME_ATTEMPTS)
+            .map(|attempt| {
+                let hex = hex(attempt);
+                (
+                    new_worktree_path(&self.worktrees_root, repo, &hex),
+                    format!("orb/{hex}"),
+                )
+            })
+            .find(|(path, branch)| !path.exists() && !git.branch_exists(repo, branch))
+            .ok_or_else(|| Report::new(GitError).attach("couldn't pick a new worktree name"))?;
+        git.add_worktree(repo, &path, &branch, &base)?;
+        Ok(MadeWorktree {
+            repo: repo.to_owned(),
+            path,
+            branch,
+        })
+    }
+
+    /// Removes a worktree orb just made, and its branch, discarding anything
+    /// in them.
+    fn remove_made(&self, made: &MadeWorktree) {
+        let git = &self.services.git;
+        if git.remove_worktree(&made.repo, &made.path, true).is_ok() {
+            let _ = git.delete_branch(&made.repo, &made.branch, true);
+        }
+    }
+
+    /// Finishes a move once the new session runs: removes the old session,
+    /// saves and shows the thread in its new workspace, and removes the orb
+    /// worktree it left if no thread uses it and it has no changes.
+    async fn finish_move(&mut self, moved: Moved, old_short_id: &str, old_cwd: &Path) {
+        let removed = self.services.session_host.remove(old_short_id).await;
+        let branch = moved.branch.or_else(|| {
+            self.rows
+                .iter()
+                .find(|row| row.id != moved.thread && row.cwd == moved.cwd)
+                .and_then(|row| row.branch.clone())
+        });
+        let Some(row) = self.rows.iter_mut().find(|row| row.id == moved.thread) else {
+            return self.end_start(Err(NEW_SESSION_UNSAVED.to_owned()));
+        };
+        let old_branch = row.branch.take();
+        *row = ThreadRow {
+            short_id: moved.short_id,
+            cwd: moved.cwd,
+            session_id: None,
+            transcript_path: None,
+            transcript_offset: 0,
+            title: None,
+            custom_title: None,
+            ai_titled: false,
+            branch,
+            ..row.clone()
+        };
+        let saved = self.store.save_thread(row);
+        let shown = unpolled(&self.services.session_host, row);
+        let project_id = row.project_id;
+        if let Some(thread) = thread_mut(&mut self.state.write().sessions, moved.thread) {
+            *thread = shown;
+        }
+        if is_orb_worktree(&self.worktrees_root, old_cwd)
+            && !self.rows.iter().any(|row| row.cwd == old_cwd)
+            && let Some(root) = self.project_root(project_id)
+        {
+            let git = &self.services.git;
+            if git.remove_worktree(&root, old_cwd, false).is_ok()
+                && let Some(old_branch) = old_branch
+            {
+                let _ = git.delete_branch(&root, &old_branch, false);
+            }
+        }
+        let result = match (saved, removed) {
+            (Err(_), _) => Err(SAVE_FAILED.to_owned()),
+            (Ok(()), Err(report)) => Err(reason(&report)),
+            (Ok(()), Ok(())) => Ok(()),
+        };
+        self.end_start(result);
     }
 
     /// Saves a just-started session in `root` under the project.
@@ -452,6 +706,7 @@ impl SessionsActor {
             unsettled_at: None,
             last_activity_at: now,
             last_visited_at: now,
+            ai_titled: false,
         };
         let thread = unpolled(&self.services.session_host, &row);
         self.rows.push(row);
@@ -604,6 +859,17 @@ impl SessionsActor {
             .map(|row| row.short_id.clone())
     }
 
+    /// The directory project `id`'s sessions start in.
+    fn project_root(&self, id: ProjectId) -> Option<PathBuf> {
+        self.state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| project.root.clone())
+    }
+
     /// What thread `id`'s session was doing at the last poll.
     fn status(&self, id: ThreadId) -> Option<ThreadStatus> {
         self.state
@@ -613,6 +879,17 @@ impl SessionsActor {
             .find(|thread| thread.id == id)
             .map(|thread| thread.status)
     }
+}
+
+/// A thread whose session started over in a new workspace.
+struct Moved {
+    thread: ThreadId,
+    /// The new session's id.
+    short_id: String,
+    /// The new workspace.
+    cwd: PathBuf,
+    /// The branch orb made for the new workspace, if it made one.
+    branch: Option<String>,
 }
 
 /// Follows a polled row's settle lifecycle, given its `status` now and
@@ -751,6 +1028,14 @@ fn reason(report: &Report<SessionHostError>) -> String {
         .unwrap_or_else(|| "claude failed".to_owned())
 }
 
+/// The one-line reason a git failure carries.
+fn git_reason(report: &Report<GitError>) -> String {
+    report
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_else(|| "git failed".to_owned())
+}
+
 /// How a saved thread looks with `status`, attached to with `attach_argv`.
 fn thread(row: &ThreadRow, status: ThreadStatus, attach_argv: Vec<OsString>) -> Thread {
     Thread {
@@ -817,9 +1102,10 @@ mod tests {
 
     use super::{FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps, now_ms};
     use crate::Focus;
+    use crate::command::Workspace;
     use crate::common::{Services, State};
-    use crate::feat::git::git_cli::GitCli;
-    use crate::feat::git::git_service::GitService;
+    use crate::feat::git::git_service::{Git, GitError, GitRef, GitService};
+    use crate::feat::git::worktree::hex_branch;
     use crate::feat::sessions::session_host::{
         CreatedSession, SessionHost, SessionHostError, SessionHostService, SessionRecord,
     };
@@ -831,6 +1117,7 @@ mod tests {
 
     const PROJECT_ROOT: &str = "/tmp/orb";
     const NO_CLAUDE_DIR: &str = "/nonexistent/claude";
+    const WORKTREES_ROOT: &str = "/nonexistent/worktrees";
     const HOUR_MS: i64 = 60 * 60 * 1000;
     const DAY_MS: i64 = 24 * HOUR_MS;
 
@@ -868,6 +1155,14 @@ mod tests {
             Arc::new(Self {
                 create: create.map(str::to_owned).map_err(str::to_owned),
                 ..Self::answering(Vec::new())
+            })
+        }
+
+        /// Lists the thread `aa` idle and answers creates with `create`.
+        fn moving(create: Result<&str, &str>) -> Arc<Self> {
+            Arc::new(Self {
+                create: create.map(str::to_owned).map_err(str::to_owned),
+                ..Self::answering(vec![record("aa", ThreadStatus::Idle)])
             })
         }
 
@@ -952,6 +1247,158 @@ mod tests {
         }
     }
 
+    /// A git call the actor made.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum GitCall {
+        Fetch(String),
+        AddWorktree {
+            path: PathBuf,
+            branch: String,
+            base: String,
+        },
+        RemoveWorktree {
+            path: PathBuf,
+            force: bool,
+        },
+        DeleteBranch {
+            branch: String,
+            force: bool,
+        },
+    }
+
+    /// A git whose default branch is `main`, whose answers the test scripts,
+    /// and that records the calls that change a repository.
+    struct FakeGit {
+        origin: bool,
+        fetch: Result<bool, String>,
+        calls: Mutex<Vec<GitCall>>,
+    }
+
+    impl FakeGit {
+        /// A repository without an `origin`.
+        fn local() -> Arc<Self> {
+            Arc::new(Self {
+                origin: false,
+                fetch: Ok(true),
+                calls: Mutex::default(),
+            })
+        }
+
+        /// A repository with an `origin` that answers fetches with `fetch`.
+        fn with_origin(fetch: Result<bool, &str>) -> Arc<Self> {
+            Arc::new(Self {
+                origin: true,
+                fetch: fetch.map_err(str::to_owned),
+                calls: Mutex::default(),
+            })
+        }
+
+        fn calls(&self) -> Vec<GitCall> {
+            self.calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        fn record(&self, call: GitCall) {
+            self.calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(call);
+        }
+
+        /// The worktree the actor added, and its branch.
+        fn added(&self) -> Option<(PathBuf, String)> {
+            self.calls().into_iter().find_map(|call| match call {
+                GitCall::AddWorktree { path, branch, .. } => Some((path, branch)),
+                _ => None,
+            })
+        }
+    }
+
+    impl Git for FakeGit {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn refs(&self, _cwd: &Path) -> Result<Vec<GitRef>, Report<GitError>> {
+            Ok(Vec::new())
+        }
+
+        fn default_branch(&self, _repo: &Path) -> Result<String, Report<GitError>> {
+            Ok("main".to_owned())
+        }
+
+        fn has_origin(&self, _repo: &Path) -> bool {
+            self.origin
+        }
+
+        fn fetch(&self, _repo: &Path, branch: &str) -> Result<bool, Report<GitError>> {
+            self.record(GitCall::Fetch(branch.to_owned()));
+            self.fetch
+                .clone()
+                .map_err(|reason| Report::new(GitError).attach(reason))
+        }
+
+        fn add_worktree(
+            &self,
+            _repo: &Path,
+            path: &Path,
+            branch: &str,
+            base: &str,
+        ) -> Result<(), Report<GitError>> {
+            self.record(GitCall::AddWorktree {
+                path: path.to_owned(),
+                branch: branch.to_owned(),
+                base: base.to_owned(),
+            });
+            Ok(())
+        }
+
+        fn remove_worktree(
+            &self,
+            _repo: &Path,
+            path: &Path,
+            force: bool,
+        ) -> Result<(), Report<GitError>> {
+            self.record(GitCall::RemoveWorktree {
+                path: path.to_owned(),
+                force,
+            });
+            Ok(())
+        }
+
+        fn delete_branch(
+            &self,
+            _repo: &Path,
+            branch: &str,
+            force: bool,
+        ) -> Result<(), Report<GitError>> {
+            self.record(GitCall::DeleteBranch {
+                branch: branch.to_owned(),
+                force,
+            });
+            Ok(())
+        }
+
+        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
+            false
+        }
+
+        fn checkout(&self, _cwd: &Path, git_ref: &GitRef) -> Result<String, Report<GitError>> {
+            Ok(git_ref.name.clone())
+        }
+
+        fn rename_branch(
+            &self,
+            _cwd: &Path,
+            _old: &str,
+            _new: &str,
+        ) -> Result<(), Report<GitError>> {
+            Ok(())
+        }
+    }
+
     fn record(short_id: &str, status: ThreadStatus) -> SessionRecord {
         SessionRecord {
             short_id: short_id.to_owned(),
@@ -1007,18 +1454,34 @@ mod tests {
 
     /// Starts the actor on `store` the way `on_start` does, without the ticker.
     fn start(store: Store, host: &Arc<FakeHost>, claude_dir: &Path) -> (SessionsActor, State) {
+        start_with(store, host, &FakeGit::local(), claude_dir)
+    }
+
+    /// Starts the actor on `store` with `git`, making worktrees under
+    /// [`WORKTREES_ROOT`].
+    fn start_with(
+        store: Store,
+        host: &Arc<FakeHost>,
+        git: &Arc<FakeGit>,
+        claude_dir: &Path,
+    ) -> (SessionsActor, State) {
         let state = State::default();
         let actor = SessionsActor::restore(SessionsActorDeps {
             services: Services {
                 session_host: SessionHostService::new(host.clone()),
-                git: GitService::new(Arc::new(GitCli::new(Vec::new()))),
+                git: GitService::new(git.clone()),
             },
             state: state.clone(),
             store,
             claude_dir: claude_dir.to_owned(),
+            worktrees_root: PathBuf::from(WORKTREES_ROOT),
             wake: Arc::new(|| {}),
         });
         (actor, state)
+    }
+
+    fn error_of(state: &State) -> Option<String> {
+        state.read().sessions.error.clone()
     }
 
     /// The thread `id` as the sidebar shows it.
@@ -2424,6 +2887,365 @@ mod tests {
             shown(&state, id).and_then(|thread| thread.branch),
             Some("main".to_owned()),
             "the transcript's branch should show on the thread"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn move_to_new_worktree_starts_the_session_in_the_new_worktree()
+    -> Result<(), Report<StoreError>> {
+        // Given a prompt-less thread in the orb project's root.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving it to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then the new session starts in an orb-<hex> worktree of orb.
+        let created = host.created_in();
+        let in_worktree = created.first().is_some_and(|cwd| {
+            cwd.parent() == Some(Path::new("/nonexistent/worktrees/orb"))
+                && hex_branch(Path::new(WORKTREES_ROOT), cwd).is_some()
+        });
+        assert!(
+            created.len() == 1 && in_worktree,
+            "one session should start in a new orb worktree, got {created:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn move_to_new_worktree_keeps_the_threads_row() -> Result<(), Report<StoreError>> {
+        // Given a prompt-less thread in the orb project's root.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving it to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then the same thread, alone in its project, now runs in the worktree on its branch.
+        let threads: Vec<(ThreadId, PathBuf, Option<String>)> = state
+            .read()
+            .sessions
+            .threads()
+            .map(|thread| (thread.id, thread.cwd.clone(), thread.branch.clone()))
+            .collect();
+        let expected = git
+            .added()
+            .map(|(path, branch)| vec![(id, path, Some(branch))]);
+        assert_eq!(
+            Some(threads),
+            expected,
+            "the thread should keep its row in the new worktree"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn move_removes_the_old_session() -> Result<(), Report<StoreError>> {
+        // Given a prompt-less thread whose session is aa.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving it to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then aa is removed.
+        assert_eq!(
+            host.removed(),
+            vec!["aa".to_owned()],
+            "the old session should be removed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn move_bases_on_origin_default_when_origin_exists() -> Result<(), Report<StoreError>> {
+        // Given a repository with an origin that has main.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::with_origin(Ok(true)));
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving a thread to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then main is fetched and the worktree starts from origin/main.
+        let steps: Vec<String> = git
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                GitCall::Fetch(branch) => Some(format!("fetch {branch}")),
+                GitCall::AddWorktree { base, .. } => Some(format!("add from {base}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            vec!["fetch main".to_owned(), "add from origin/main".to_owned()],
+            "the worktree should start from freshly fetched origin/main"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn move_bases_on_local_default_without_origin() -> Result<(), Report<StoreError>> {
+        // Given a repository without an origin.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving a thread to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then nothing is fetched and the worktree starts from the local main.
+        let calls: Vec<Option<String>> = git
+            .calls()
+            .into_iter()
+            .map(|call| match call {
+                GitCall::AddWorktree { base, .. } => Some(base),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![Some("main".to_owned())],
+            "the only call should add a worktree from main"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_fetch_fails_the_move_with_the_reason() -> Result<(), Report<StoreError>> {
+        // Given an origin that can't be reached.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::moving(Ok("bb"));
+        let git = FakeGit::with_origin(Err("fatal: unable to access origin"));
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving a thread to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then git's reason shows.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("fatal: unable to access origin"),
+            "the fetch's reason should show"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_fetch_adds_no_worktree() -> Result<(), Report<StoreError>> {
+        // Given an origin that can't be reached.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::moving(Ok("bb"));
+        let git = FakeGit::with_origin(Err("fatal: unable to access origin"));
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving a thread to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then no worktree is added.
+        assert_eq!(git.added(), None, "a failed fetch shouldn't add a worktree");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_start_removes_the_new_worktree_and_branch() -> Result<(), Report<StoreError>> {
+        // Given claude refusing to start a session.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::moving(Err("claude failed to start"));
+        let git = FakeGit::local();
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving a thread to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then the worktree and its branch are force-removed after being added.
+        let (path, branch) = git
+            .added()
+            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
+        let cleanup: Vec<GitCall> = git.calls().into_iter().skip(1).collect();
+        assert_eq!(
+            cleanup,
+            vec![
+                GitCall::RemoveWorktree { path, force: true },
+                GitCall::DeleteBranch {
+                    branch,
+                    force: true
+                }
+            ],
+            "a failed start should remove what orb made for it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_start_keeps_the_old_session() -> Result<(), Report<StoreError>> {
+        // Given claude refusing to start a session.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::moving(Err("claude failed to start"));
+        let git = FakeGit::local();
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving a thread to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then the old session isn't removed.
+        assert!(
+            host.removed().is_empty(),
+            "a failed start should keep the old session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn move_to_existing_path_adds_no_worktree() -> Result<(), Report<StoreError>> {
+        // Given a prompt-less thread and an existing worktree directory.
+        let existing = tempfile::tempdir().change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving the thread there.
+        actor
+            .move_thread(id, Workspace::Existing(existing.path().to_owned()))
+            .await;
+
+        // Then the session starts there and git adds nothing.
+        assert_eq!(
+            (host.created_in(), git.added()),
+            (vec![existing.path().to_owned()], None),
+            "a move to an existing directory should only start a session there"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn move_to_missing_path_shows_an_error() -> Result<(), Report<StoreError>> {
+        // Given a prompt-less thread and a worktree directory that is gone.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving the thread there.
+        actor
+            .move_thread(id, Workspace::Existing(PathBuf::from("/nonexistent/gone")))
+            .await;
+
+        // Then the error names the missing worktree.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("worktree no longer exists: /nonexistent/gone"),
+            "a missing worktree should fail the move"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn move_out_of_an_unused_orb_worktree_removes_it() -> Result<(), Report<StoreError>> {
+        // Given a prompt-less thread alone in an orb worktree on its hex branch.
+        let old = PathBuf::from("/nonexistent/worktrees/orb/orb-0a1b2c3d");
+        let existing = tempfile::tempdir().change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            cwd: old.clone(),
+            branch: Some("orb/0a1b2c3d".to_owned()),
+            ..row
+        })?;
+        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving the thread to another directory.
+        actor
+            .move_thread(id, Workspace::Existing(existing.path().to_owned()))
+            .await;
+
+        // Then the old worktree and its branch are removed, without force.
+        assert_eq!(
+            git.calls(),
+            vec![
+                GitCall::RemoveWorktree {
+                    path: old,
+                    force: false
+                },
+                GitCall::DeleteBranch {
+                    branch: "orb/0a1b2c3d".to_owned(),
+                    force: false
+                }
+            ],
+            "an orb worktree no thread uses should be removed safely"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn move_refused_once_the_thread_has_a_transcript() -> Result<(), Report<StoreError>> {
+        // Given a thread whose session wrote a transcript since the last poll.
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(&path, "").change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        let host = Arc::new(FakeHost {
+            create: Ok("bb".to_owned()),
+            ..FakeHost::answering(vec![SessionRecord {
+                session_id: Some("s1".to_owned()),
+                ..record("aa", ThreadStatus::Idle)
+            }])
+        });
+        let git = FakeGit::local();
+        let (mut actor, state) = start_with(store, &host, &git, claude_dir.path());
+
+        // When moving it to a new worktree.
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // Then the move is refused with the lock message and no session starts.
+        assert_eq!(
+            (error_of(&state).as_deref(), host.created_in()),
+            (Some("Workspace locked · Local checkout"), Vec::new()),
+            "a thread with a transcript can't change workspace"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn moved_thread_saves_its_new_short_id_and_cwd() -> Result<(), Report<StoreError>> {
+        // Given a prompt-less thread and an existing worktree directory.
+        let existing = tempfile::tempdir().change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving the thread there.
+        actor
+            .move_thread(id, Workspace::Existing(existing.path().to_owned()))
+            .await;
+
+        // Then the store has the thread under its new session, in the new directory.
+        let row = saved(&actor.store, "bb")?;
+        assert_eq!(
+            (row.id, row.cwd),
+            (id, existing.path().to_owned()),
+            "the move should survive a relaunch"
         );
         Ok(())
     }

@@ -384,6 +384,16 @@ impl App {
                     .try_send();
                 Ok(())
             }
+            Command::MoveThread { thread, to } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::MoveThread {
+                        thread: *thread,
+                        to: to.clone(),
+                    })
+                    .try_send();
+                Ok(())
+            }
             Command::AddProject(root) => {
                 let _ = self
                     .sessions
