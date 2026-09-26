@@ -1,0 +1,473 @@
+//! The picker popup, in T3 Code's command-palette look: a rounded box over
+//! the screen holding the filter input, a section label, the rows, and a
+//! footer of keys.
+//!
+//! The project picker shows each project's badge and name over its path; the
+//! directory picker shows one folder per row. Where the filter matched is
+//! bold and underlined, and the rows scroll to keep the selection in view.
+
+use orb_domain::feat::picker::list::{Matches, PickerItem};
+use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Widget};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::sidebar::{DARK_GRAY, GRAY, OUTLINE, SELECTED, badge};
+
+/// Nerd Font's search glyph, before the project picker's input.
+const SEARCH: &str = "\u{f002}";
+/// Nerd Font's folder glyph, before the directory picker's input and rows.
+const FOLDER: &str = "\u{f07b}";
+
+/// How far the picker's rows are scrolled, kept between frames.
+#[derive(Debug, Default)]
+pub(crate) struct PickerScroll {
+    /// The row drawn at the top.
+    offset: usize,
+}
+
+/// Draws `picker` in a popup over `area`. Returns how many rows fit, and
+/// where the terminal cursor goes in the input.
+pub(crate) fn render(
+    picker: &PickerState,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll: &mut PickerScroll,
+) -> (usize, Position) {
+    let popup = popup_rect(area);
+    Clear.render(popup, buf);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(OUTLINE));
+    let inner = block.inner(popup);
+    block.render(popup, buf);
+    let [input, _, label, rows, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let projects = matches!(picker.kind(), PickerKind::Projects);
+    let cursor = render_input(picker, projects, pad(input), buf);
+    Line::styled(
+        if projects { "Projects" } else { "Directories" },
+        Style::new().fg(GRAY),
+    )
+    .render(pad(label), buf);
+    let page = render_rows(picker, projects, rows, buf, scroll);
+    render_footer(projects, pad(footer), buf);
+    (page, cursor)
+}
+
+/// jinn's popup: 80% of the width (at least 30 columns) and 75% of the
+/// height plus 4 rows, centred across and a third of the way down.
+fn popup_rect(area: Rect) -> Rect {
+    let width = (area.width - area.width / 5).max(30).min(area.width);
+    let height = (area.height - area.height.div_ceil(4))
+        .saturating_add(4)
+        .min(area.height);
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 3,
+        width,
+        height,
+    )
+}
+
+/// A row's text area: a cell in from each side of the popup.
+fn pad(area: Rect) -> Rect {
+    area.inner(Margin::new(1, 0))
+}
+
+/// The glyph and the typed text, or the project picker's placeholder.
+/// Returns the cursor's position.
+fn render_input(picker: &PickerState, projects: bool, area: Rect, buf: &mut Buffer) -> Position {
+    let glyph = Span::styled(
+        format!("{} ", if projects { SEARCH } else { FOLDER }),
+        Style::new().fg(DARK_GRAY),
+    );
+    let text = match picker.input() {
+        "" if projects => Span::styled("Search projects...", Style::new().fg(DARK_GRAY)),
+        input => Span::raw(input),
+    };
+    let before: String = picker
+        .input()
+        .graphemes(true)
+        .take(picker.cursor())
+        .collect();
+    let column = glyph.width() + Line::raw(before).width();
+    Line::from(vec![glyph, text]).render(area, buf);
+    let x = u16::try_from(column)
+        .unwrap_or(u16::MAX)
+        .min(area.width.saturating_sub(1));
+    Position::new(area.x + x, area.y)
+}
+
+/// The rows from the scroll offset down, or a hint when there are none.
+/// Returns how many rows fit.
+fn render_rows(
+    picker: &PickerState,
+    projects: bool,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll: &mut PickerScroll,
+) -> usize {
+    let row_height: u16 = if projects { 2 } else { 1 };
+    let page = usize::from(area.height / row_height).max(1);
+    let shown: Vec<(&PickerItem, &Matches)> = picker.shown().collect();
+    if shown.is_empty() {
+        Line::styled(empty_hint(picker), Style::new().fg(DARK_GRAY)).render(pad(area), buf);
+        return page;
+    }
+    let selection = picker.selection();
+    scroll.offset = scroll
+        .offset
+        .min(selection)
+        .max((selection + 1).saturating_sub(page))
+        .min(shown.len().saturating_sub(page));
+    let tops = (area.top()..area.bottom()).step_by(usize::from(row_height));
+    for ((index, (item, matches)), top) in
+        shown.into_iter().enumerate().skip(scroll.offset).zip(tops)
+    {
+        let row = Rect::new(area.x, top, area.width, row_height).intersection(area);
+        if index == selection {
+            buf.set_style(row, Style::new().bg(SELECTED));
+        }
+        render_item(item, matches, pad(row), buf);
+    }
+    page
+}
+
+/// A project's badge and name over its path, or a directory's folder and
+/// name.
+fn render_item(item: &PickerItem, matches: &Matches, area: Rect, buf: &mut Buffer) {
+    match item {
+        PickerItem::Project { title, root, .. } => {
+            let [name_area, path_area] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+            let name = [badge(title, true), Span::raw(" ")]
+                .into_iter()
+                .chain(highlight(
+                    title,
+                    &matches.name,
+                    Style::new().fg(Color::White),
+                ));
+            Line::from_iter(name).render(name_area, buf);
+            let path = std::iter::once(Span::raw("   ")).chain(highlight(
+                &root.display().to_string(),
+                &matches.path,
+                Style::new().fg(DARK_GRAY),
+            ));
+            Line::from_iter(path).render(path_area, buf);
+        }
+        PickerItem::Directory { name } => {
+            let row = [Span::styled(FOLDER, Style::new().fg(GRAY)), Span::raw(" ")]
+                .into_iter()
+                .chain(highlight(name, &matches.name, Style::new()));
+            Line::from_iter(row).render(area, buf);
+        }
+    }
+}
+
+/// `text` in `style`, with each grapheme holding one of `offsets` (byte
+/// offsets into `text`) bold and underlined.
+fn highlight(text: &str, offsets: &[usize], style: Style) -> Vec<Span<'static>> {
+    let matched = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (start, grapheme) in text.grapheme_indices(true) {
+        let bytes = start..start + grapheme.len();
+        let style = if offsets.iter().any(|offset| bytes.contains(offset)) {
+            matched
+        } else {
+            style
+        };
+        match spans.last_mut() {
+            Some(last) if last.style == style => last.content.to_mut().push_str(grapheme),
+            _ => spans.push(Span::styled(grapheme.to_owned(), style)),
+        }
+    }
+    spans
+}
+
+/// Why no rows are shown.
+fn empty_hint(picker: &PickerState) -> &'static str {
+    match (picker.kind(), split_path(picker.input())) {
+        (PickerKind::Projects, _) if picker.input().trim().is_empty() => {
+            "No projects — ␣p adds one"
+        }
+        (PickerKind::Directories { .. }, None) => "Type a path starting with / or ~/",
+        (PickerKind::Directories { .. }, Some((_, ""))) => "No directories",
+        _ => "No matches",
+    }
+}
+
+/// The picker's keys as chips: the key on a filled tile, then what it does.
+fn render_footer(projects: bool, area: Rect, buf: &mut Buffer) {
+    let keys: &[(&str, &str)] = if projects {
+        &[("↑ ↓", "Navigate"), ("Enter", "Select"), ("Esc", "Close")]
+    } else {
+        &[
+            ("↑ ↓", "Navigate"),
+            ("Tab", "Open"),
+            ("Enter", "Add"),
+            ("Esc", "Close"),
+        ]
+    };
+    let chips = keys.iter().flat_map(|(key, label)| {
+        [
+            Span::styled(
+                format!(" {key} "),
+                Style::new().fg(Color::White).bg(SELECTED),
+            ),
+            Span::styled(format!(" {label}   "), Style::new().fg(GRAY)),
+        ]
+    });
+    Line::from_iter(chips).render(area, buf);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use orb_domain::Focus;
+    use orb_domain::feat::picker::list::PickerItem;
+    use orb_domain::feat::picker::state::PickerState;
+    use orb_domain::feat::sessions::state::ProjectId;
+    use ratatui::buffer::{Buffer, Cell};
+    use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    use super::{DARK_GRAY, FOLDER, PickerScroll, SELECTED, render};
+
+    fn project(id: i64, title: &str, root: &str) -> PickerItem {
+        PickerItem::Project {
+            id: ProjectId(id),
+            title: title.to_owned(),
+            root: root.into(),
+        }
+    }
+
+    /// Draws `picker` over a `width`×`height` screen.
+    fn draw(picker: &PickerState, width: u16, height: u16) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        render(picker, buf.area, &mut buf, &mut PickerScroll::default());
+        buf
+    }
+
+    /// The screen's lines, top to bottom.
+    fn lines(buf: &Buffer) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(Cell::symbol))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The cell where `text` first starts, row by row.
+    fn find(buf: &Buffer, text: &str) -> Option<(u16, u16)> {
+        let len = text.graphemes(true).count();
+        (0..buf.area.height).find_map(|y| {
+            let row: Vec<&str> = (0..buf.area.width)
+                .filter_map(|x| buf.cell((x, y)).map(Cell::symbol))
+                .collect();
+            (0..row.len())
+                .find(|&x| {
+                    row.get(x..x + len)
+                        .is_some_and(|cells| cells.concat() == text)
+                })
+                .map(|x| (x as u16, y))
+        })
+    }
+
+    fn orb() -> PickerState {
+        PickerState::projects(
+            vec![
+                project(1, "orb", "/Users/me/dev/orb"),
+                project(2, "jinn", "/Users/me/dev/jinn"),
+            ],
+            Focus::Sidebar,
+        )
+    }
+
+    #[rstest::rstest]
+    fn project_row_shows_the_badge_and_name() {
+        // Given a project picker listing orb.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then orb's first line is its badge and name.
+        let lines = lines(&buf);
+        assert!(
+            lines.iter().any(|line| line.contains("OB orb")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn project_row_shows_the_path_dimmed_below_the_name() {
+        // Given a project picker listing orb.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the line below the name is the path, in dark gray.
+        let name = find(&buf, "OB orb");
+        let path = find(&buf, "/Users/me/dev/orb");
+        let fg = path.and_then(|at| buf.cell(at)).map(|cell| cell.fg);
+        assert_eq!(
+            (path.map(|(_, y)| y), fg),
+            (name.map(|(_, y)| y + 1), Some(DARK_GRAY)),
+            "the path's row and colour"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selected_project_is_filled_on_both_lines() {
+        // Given a project picker with orb, the first project, selected.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the cell left of the text is filled on the name and path lines.
+        let fills = find(&buf, "OB orb")
+            .map(|(x, y)| [y, y + 1].map(|y| buf.cell((x - 1, y)).map(|cell| cell.bg)));
+        assert_eq!(
+            fills,
+            Some([Some(SELECTED); 2]),
+            "the selected row's background"
+        );
+    }
+
+    #[rstest::rstest]
+    fn matched_graphemes_are_bold_and_underlined() {
+        // Given a project picker filtered by "rb".
+        let picker = {
+            let mut picker =
+                PickerState::projects(vec![project(1, "orb", "/tmp/x")], Focus::Sidebar);
+            picker.insert('r');
+            picker.insert('b');
+            picker
+        };
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the title's `r` is bold and underlined.
+        let r = find(&buf, "orb").and_then(|(x, y)| buf.cell((x + 1, y)));
+        assert!(
+            r.is_some_and(|cell| cell
+                .modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED)),
+            "the matched r was {r:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn directory_picker_is_labelled_directories() {
+        // Given a directory picker at `~/`.
+        let (picker, _) = PickerState::directories(PathBuf::from("/Users/me"), Focus::Sidebar);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then its section label says Directories.
+        let lines = lines(&buf);
+        assert!(
+            lines.iter().any(|line| line.contains("Directories")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn directory_row_shows_a_folder_and_the_name() {
+        // Given a directory picker listing `~/dev`.
+        let picker = {
+            let home = PathBuf::from("/Users/me");
+            let (mut picker, _) = PickerState::directories(home.clone(), Focus::Sidebar);
+            picker.show_directories(&home, vec!["dev".to_owned()]);
+            picker
+        };
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the row is a folder glyph and the name.
+        let lines = lines(&buf);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("{FOLDER} dev"))),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn empty_project_picker_shows_the_search_placeholder() {
+        // Given a project picker with no projects.
+        let picker = PickerState::projects(vec![], Focus::Sidebar);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the input shows the placeholder.
+        let lines = lines(&buf);
+        assert!(
+            lines.iter().any(|line| line.contains("Search projects...")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn empty_project_picker_says_how_to_add_one() {
+        // Given a project picker with no projects.
+        let picker = PickerState::projects(vec![], Focus::Sidebar);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the rows say how to add a project.
+        let lines = lines(&buf);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("No projects — ␣p adds one")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selection_below_the_fold_scrolls_into_view() {
+        // Given ten projects on a screen that fits three, the sixth selected.
+        let picker = {
+            let items = (0..10)
+                .map(|i| project(i, &format!("proj{i}"), &format!("/tmp/{i}")))
+                .collect();
+            let mut picker = PickerState::projects(items, Focus::Sidebar);
+            for _ in 0..5 {
+                picker.next();
+            }
+            picker
+        };
+
+        // When drawing it.
+        let buf = draw(&picker, 40, 12);
+
+        // Then the sixth project is on screen.
+        let lines = lines(&buf);
+        assert!(
+            lines.iter().any(|line| line.contains("P5 proj5")),
+            "screen was {lines:#?}"
+        );
+    }
+}

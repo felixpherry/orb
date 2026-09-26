@@ -3,7 +3,8 @@
 //!
 //! In the sidebar and the preview, keys go through a which-key keymap whose
 //! scope is the focus; `<Space>` is the leader and shows a popup. While
-//! attached, every key goes to Claude except `<C-\>`.
+//! attached, every key goes to Claude except `<C-\>`. An open picker takes
+//! typed characters as filter text and has its own fixed keys.
 
 use std::fmt;
 
@@ -102,6 +103,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
             Focus::Sidebar,
         )
         .bind(
+            "<leader>p",
+            Intent::AddProject,
+            KeyCategory::Sessions,
+            Focus::Sidebar,
+        )
+        .bind(
             "<c-h>",
             Intent::FocusSidebar,
             KeyCategory::Navigation,
@@ -116,6 +123,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
         .bind(
             "<leader>n",
             Intent::NewSession,
+            KeyCategory::Sessions,
+            Focus::Preview,
+        )
+        .bind(
+            "<leader>p",
+            Intent::AddProject,
             KeyCategory::Sessions,
             Focus::Preview,
         )
@@ -211,12 +224,37 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
     }
 }
 
+/// What `key` does in an open picker; `None` when it does nothing.
+pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+            Some(Intent::PickerInput(c))
+        }
+        (KeyCode::Backspace, KeyModifiers::NONE) => Some(Intent::PickerBackspace),
+        (KeyCode::Char('w'), KeyModifiers::CONTROL) => Some(Intent::PickerDeleteWord),
+        (KeyCode::Left, KeyModifiers::NONE) => Some(Intent::PickerCursorLeft),
+        (KeyCode::Right, KeyModifiers::NONE) => Some(Intent::PickerCursorRight),
+        (KeyCode::Down, KeyModifiers::NONE) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+            Some(Intent::PickerNext)
+        }
+        (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+            Some(Intent::PickerPrev)
+        }
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Intent::PickerHalfPageDown),
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Intent::PickerHalfPageUp),
+        (KeyCode::Enter, KeyModifiers::NONE) => Some(Intent::PickerConfirm),
+        (KeyCode::Tab, KeyModifiers::NONE) => Some(Intent::PickerOpen),
+        (KeyCode::Esc, KeyModifiers::NONE) => Some(Intent::PickerCancel),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use orb_domain::{Focus, Intent};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-    use super::{Keys, Route, attached_route, keymap, press};
+    use super::{Keys, Route, attached_route, keymap, picker_route, press};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -253,6 +291,67 @@ mod tests {
             Some(Intent::NewSession),
             "Space n should start a session"
         );
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Sidebar)]
+    #[case(Focus::Preview)]
+    fn space_then_p_adds_a_project(#[case] focus: Focus) {
+        // Given Space already pressed.
+        let mut keys = Keys::new(keymap(), focus);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `p`.
+        let intent = press(&mut keys, key(KeyCode::Char('p')));
+
+        // Then it opens the directory picker.
+        assert_eq!(
+            intent,
+            Some(Intent::AddProject),
+            "Space p should add a project in {focus:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(key(KeyCode::Char('q')), Intent::PickerInput('q'))]
+    #[case(key(KeyCode::Char('j')), Intent::PickerInput('j'))]
+    #[case(key(KeyCode::Char(' ')), Intent::PickerInput(' '))]
+    #[case(
+        KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        Intent::PickerInput('G')
+    )]
+    #[case(ctrl('j'), Intent::PickerNext)]
+    #[case(ctrl('k'), Intent::PickerPrev)]
+    #[case(key(KeyCode::Down), Intent::PickerNext)]
+    #[case(key(KeyCode::Up), Intent::PickerPrev)]
+    #[case(ctrl('d'), Intent::PickerHalfPageDown)]
+    #[case(ctrl('u'), Intent::PickerHalfPageUp)]
+    #[case(ctrl('w'), Intent::PickerDeleteWord)]
+    #[case(key(KeyCode::Backspace), Intent::PickerBackspace)]
+    #[case(key(KeyCode::Left), Intent::PickerCursorLeft)]
+    #[case(key(KeyCode::Right), Intent::PickerCursorRight)]
+    #[case(key(KeyCode::Enter), Intent::PickerConfirm)]
+    #[case(key(KeyCode::Tab), Intent::PickerOpen)]
+    #[case(key(KeyCode::Esc), Intent::PickerCancel)]
+    fn picker_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
+        // Given / When routing the key in an open picker.
+        let intent = picker_route(pressed);
+
+        // Then it yields its intent.
+        assert_eq!(
+            intent.as_ref(),
+            Some(&expected),
+            "the key for {expected} in the picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn ctrl_x_does_nothing_in_the_picker() {
+        // Given / When routing `<C-x>` in an open picker.
+        let intent = picker_route(ctrl('x'));
+
+        // Then nothing happens.
+        assert_eq!(intent, None, "<C-x> isn't bound in the picker");
     }
 
     #[rstest::rstest]

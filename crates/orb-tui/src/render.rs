@@ -2,7 +2,8 @@
 //! selected thread's preview on the right, the mode line at the bottom, and the
 //! which-key popup on top while a key sequence is pending. While `s` or `x`
 //! waits for its repeat, a banner above the selected thread says what the
-//! repeat will do instead of the popup.
+//! repeat will do instead of the popup. An open picker is drawn over
+//! everything but the mode line, with neither the popup nor the banner.
 
 use std::time::SystemTime;
 
@@ -20,6 +21,7 @@ use ratatui::widgets::Widget;
 use ratatui_which_key::WhichKey;
 
 use crate::keymap::{self, Keys};
+use crate::picker::{self, PickerScroll};
 use crate::preview::{self, PreviewCache};
 use crate::sidebar::{self, SidebarScroll};
 
@@ -35,10 +37,11 @@ pub(crate) fn layout(area: Rect) -> [Rect; 3] {
 /// Draws the whole frame. `pane` is the selected thread's session, if orb has
 /// one running; it's drawn only while attached, and otherwise the right side
 /// shows the selected thread's preview, with `pane_error` saying why the
-/// session couldn't start. Returns the preview's layout when it was drawn.
+/// session couldn't start. Returns the preview's layout when it was drawn,
+/// and how many rows the picker fits when it's open.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the frame's inputs and the two frontend view states it updates"
+    reason = "the frame's inputs and the three frontend view states it updates"
 )]
 pub(crate) fn render(
     frame: &mut Frame,
@@ -49,7 +52,8 @@ pub(crate) fn render(
     now: SystemTime,
     cache: &mut PreviewCache,
     scroll: &mut SidebarScroll,
-) -> Option<PreviewLayout> {
+    picker_scroll: &mut PickerScroll,
+) -> (Option<PreviewLayout>, Option<usize>) {
     let [sidebar_area, right, mode_line] = layout(frame.area());
     let selected_y = sidebar::render(
         &state.sessions,
@@ -77,7 +81,7 @@ pub(crate) fn render(
             None => {
                 let hint = match state.sessions.cursor {
                     Some(SidebarItem::SettledShelf) => shelf_hint(state),
-                    _ => "␣n new session".to_owned(),
+                    _ => "␣n new session · ␣p add project".to_owned(),
                 };
                 Line::raw(hint).render(right, frame.buffer_mut());
                 None
@@ -85,17 +89,31 @@ pub(crate) fn render(
         },
     };
     render_mode_line(state, mode_line, frame.buffer_mut());
-    match keymap::pending_confirm(keys) {
-        Some(confirm) => {
+    let picker_page = match (&state.picker, keymap::pending_confirm(keys)) {
+        (Some(picker), _) => {
+            let (rows, cursor) = picker::render(
+                picker,
+                sidebar_area.union(right),
+                frame.buffer_mut(),
+                picker_scroll,
+            );
+            frame.set_cursor_position(cursor);
+            Some(rows)
+        }
+        (None, Some(confirm)) => {
             if let Some(y) = selected_y {
                 render_banner(state, confirm, y, frame.buffer_mut());
             }
+            None
         }
         // ratatui-which-key divides by the height inside the popup's borders.
-        None if frame.area().height > 2 => WhichKey::new().render(frame.buffer_mut(), keys),
-        None => {}
-    }
-    preview_layout
+        (None, None) if frame.area().height > 2 => {
+            WhichKey::new().render(frame.buffer_mut(), keys);
+            None
+        }
+        (None, None) => None,
+    };
+    (preview_layout, picker_page)
 }
 
 /// What `⏎` does on the Settled header: `▸ Settled (N) · ⏎ open`, or
@@ -171,6 +189,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime};
 
+    use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::preview::state::Preview;
     use orb_domain::feat::sessions::state::{
         Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
@@ -186,6 +205,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::keymap::{Keys, keymap, press};
+    use crate::picker::PickerScroll;
     use crate::preview::PreviewCache;
     use crate::sidebar::SidebarScroll;
 
@@ -238,6 +258,7 @@ mod tests {
                 SystemTime::UNIX_EPOCH,
                 &mut PreviewCache::default(),
                 &mut SidebarScroll::default(),
+                &mut PickerScroll::default(),
             );
         });
         terminal.backend().buffer().clone()
@@ -283,6 +304,7 @@ mod tests {
                 SystemTime::UNIX_EPOCH,
                 &mut PreviewCache::default(),
                 &mut SidebarScroll::default(),
+                &mut PickerScroll::default(),
             );
         });
         let buffer = terminal.backend().buffer();
@@ -437,6 +459,26 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn mode_line_shows_picker_while_the_picker_is_open() {
+        // Given an open project picker.
+        let state = AppState {
+            focus: Focus::Picker,
+            picker: Some(PickerState::projects(vec![], Focus::Sidebar)),
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the mode line says so.
+        let mode_line = mode_line(&buffer);
+        assert!(
+            mode_line.starts_with("PICKER"),
+            "mode line was '{mode_line}'"
+        );
+    }
+
+    #[rstest::rstest]
     fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
         // Given Space pressed on a two-row screen, too short for the popup.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 2));
@@ -458,6 +500,7 @@ mod tests {
                 SystemTime::UNIX_EPOCH,
                 &mut PreviewCache::default(),
                 &mut SidebarScroll::default(),
+                &mut PickerScroll::default(),
             );
         });
 
