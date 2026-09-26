@@ -36,7 +36,7 @@
 - Env knobs: `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, `CLAUDE_CODE_DISABLE_MOUSE=1`, `CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1`, `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`, `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` (for self-hosted PTYs). **[reported/docs]**
 - Window title via OSC 0 (`✳ Claude Code`, later the session title). **[reported]**
 - Send focus in/out (`CSI I`/`CSI O`); Claude uses them for "away" detection / notifications. **[docs]**
-- Workspace-trust dialog appears the first time Claude runs in a new directory. **[reported]**
+- Workspace-trust dialog appears the first time Claude runs in a new directory, unless a parent is trusted (§10). **[reported]**
 - Each `claude` process ≈ 300–480 MB RSS. **[reported]**
 
 ### Headless mode (rejected, for the record)
@@ -351,3 +351,6 @@ T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913
 
 ### `claude --bg` and trust **[verified]**
 - `claude --bg` refuses in a directory Claude hasn't trusted: "Workspace not trusted. Run `claude` in … once and accept the trust prompt" (§6, §7). A newly added project fails its first session start with that message until `claude` has been run there once.
+- Claude records trust per directory as `projects["<absolute path>"].hasTrustDialogAccepted` in `~/.claude.json`.
+- Headless `claude -p` runs in an untrusted directory without asking and doesn't mark it trusted. This is why T3, which drives Claude through the Agent SDK, never meets the prompt: its app source has no trust handling. (Probed 2026-09-26, Claude Code 2.1.283.)
+- Trust is inherited from a parent: `claude --bg` started in a new directory under the trusted `/private/var`, which has no entry of its own. Trusting `~/.orb/worktrees` once covers every worktree under it. (Probed 2026-09-26, Claude Code 2.1.283.)
