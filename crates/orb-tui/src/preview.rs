@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use orb_domain::feat::picker::list::model;
 use orb_domain::feat::preview::block::{
     Block, BlockId, BlockKind, SystemLevel, ToolCall, ToolStatus,
 };
@@ -203,7 +204,9 @@ pub(crate) fn render(
 }
 
 /// `title · branch · model`, and how many transcript lines couldn't be read.
-/// Only the title shows until the thread's transcript is loaded.
+/// Only the title shows until the thread's transcript is loaded. The model
+/// shows its name when its ID or alias is a known model's, as in the model
+/// picker, else its ID without `claude-`.
 fn header(preview: &Preview, thread: &Thread) -> String {
     let mut parts = vec![
         thread
@@ -213,7 +216,14 @@ fn header(preview: &Preview, thread: &Thread) -> String {
     ];
     if preview.thread == Some(thread.id) {
         parts.extend(preview.branch.clone());
-        parts.extend(preview.model.clone());
+        parts.extend(preview.model.as_deref().map(|id| {
+            model(id)
+                .map_or_else(
+                    || id.strip_prefix("claude-").unwrap_or(id),
+                    |model| model.name,
+                )
+                .to_owned()
+        }));
         if preview.skipped > 0 {
             parts.push(format!("⚠ {} unreadable lines", preview.skipped));
         }
@@ -513,21 +523,41 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn header_shows_title_branch_and_model() {
-        // Given the transcript's branch and model.
+    fn header_shows_title_branch_and_model_name() {
+        // Given the transcript's branch and a known model's ID.
         let state = state(Preview {
             branch: Some("main".to_owned()),
-            model: Some("opus-5-5".to_owned()),
+            model: Some("claude-opus-5-5".to_owned()),
             ..preview(vec![you("hi")])
         });
 
         // When drawing.
         let (buffer, _) = draw(&state, 60, 5, &mut PreviewCache::default());
 
-        // Then the header joins them.
+        // Then the header joins the title, branch and the model's name.
         let header = row(&buffer, 0, 0);
         assert_eq!(
-            header, "Fix the bug · main · opus-5-5",
+            header, "Fix the bug · main · Claude Opus 5.5",
+            "the header was '{header}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn header_shows_an_unknown_model_id_without_its_claude_prefix() {
+        // Given a model ID no known model has.
+        let state = state(Preview {
+            branch: Some("main".to_owned()),
+            model: Some("claude-opus-5-5-20260901".to_owned()),
+            ..preview(vec![you("hi")])
+        });
+
+        // When drawing.
+        let (buffer, _) = draw(&state, 60, 5, &mut PreviewCache::default());
+
+        // Then the header shows the ID without `claude-`.
+        let header = row(&buffer, 0, 0);
+        assert_eq!(
+            header, "Fix the bug · main · opus-5-5-20260901",
             "the header was '{header}'"
         );
     }

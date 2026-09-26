@@ -190,7 +190,7 @@ impl Conversation {
         self.branch.as_deref()
     }
 
-    /// The model of Claude's latest reply, without a leading `claude-`.
+    /// The model ID of Claude's latest reply, as the transcript records it.
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
     }
@@ -206,7 +206,7 @@ impl Conversation {
                 .and_then(|message| message.model.as_deref())
                 .filter(|&model| model != "<synthetic>")
         {
-            self.model = Some(model.strip_prefix("claude-").unwrap_or(model).to_owned());
+            self.model = Some(model.to_owned());
         }
         let Some(uuid) = line.uuid.clone() else {
             return;
@@ -1303,7 +1303,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn model_is_the_latest_real_model_without_the_claude_prefix() {
+    fn model_is_the_latest_real_model_id() {
         // Given a reply from claude-opus-5-5, then a synthetic one.
         let lines = [
             assistant("a", None, "m1", &text("Done")),
@@ -1316,10 +1316,10 @@ mod tests {
         // When reading them.
         let conversation = conversation(&transcript(&lines));
 
-        // Then the model is the real one, without `claude-`.
+        // Then the model is the real one's ID.
         assert_eq!(
             conversation.model(),
-            Some("opus-5-5"),
+            Some("claude-opus-5-5"),
             "the latest real model"
         );
     }
