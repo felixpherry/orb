@@ -99,6 +99,7 @@ pub(crate) fn render(
         (Some(picker), _) => {
             let (rows, cursor) = picker::render(
                 picker,
+                &state.home,
                 sidebar_area.union(right),
                 frame.buffer_mut(),
                 picker_scroll,
