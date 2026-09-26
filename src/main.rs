@@ -13,6 +13,8 @@ use orb_domain::feat::sessions::claude_supervisor::ClaudeSupervisor;
 use orb_domain::feat::sessions::session_host::SessionHostService;
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
 use orb_domain::feat::sessions::store::Store;
+use orb_domain::feat::zellij::zellij_cli::ZellijCli;
+use orb_domain::feat::zellij::zellij_service::ZellijService;
 use orb_domain::{AppState, Services, State};
 use orb_tui::Frontend;
 use wherror::Error;
@@ -29,6 +31,11 @@ fn main() -> Result<(), Report<OrbError>> {
     let claude_dir =
         std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from);
     let claude_env = child_env(std::env::vars_os());
+    let zellij = {
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "sh".into());
+        std::env::var_os("ZELLIJ_SESSION_NAME")
+            .map(|_| ZellijService::new(Arc::new(ZellijCli), shell, home.clone()))
+    };
     let store = Store::open(&home.join(".orb/userdata/state.sqlite")).change_context(OrbError)?;
     let worktrees_root = home.join(".orb/worktrees");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
@@ -56,6 +63,6 @@ fn main() -> Result<(), Report<OrbError>> {
         wake: frontend.waker(),
     });
     frontend
-        .run(state, sessions, preview, git, claude_env)
+        .run(state, sessions, preview, git, claude_env, zellij)
         .change_context(OrbError)
 }

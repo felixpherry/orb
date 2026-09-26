@@ -8,9 +8,9 @@
 //!
 //! Each thread gets its own `claude attach` pane; selecting another thread
 //! drops it (the session keeps running). While attached, input goes straight
-//! to Claude; otherwise keys go through the [`keymap`]. The loop reads the
-//! directory picker's listings and the branch picker's refs itself, since
-//! each takes milliseconds.
+//! to Claude; otherwise keys go through the [`keymap`]. The loop itself reads
+//! the directory picker's listings and the branch picker's refs, and hands
+//! tools to zellij, since each takes milliseconds.
 //!
 //! When a session start waits for the user to trust a directory, the pane
 //! runs an interactive `claude` there instead. Leaving it, by its exit or
@@ -33,6 +33,7 @@ use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::preview::preview_actor::{self, PreviewActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
+use orb_domain::feat::zellij::zellij_service::{NOT_IN_ZELLIJ, ZellijService, zellij_reason};
 use orb_domain::{Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
@@ -76,8 +77,9 @@ impl Frontend {
 
     /// Runs orb's TUI until the user quits. Session commands go to
     /// `sessions` and preview commands to `preview`; the branch picker's refs
-    /// come from `git`; attached sessions run with `claude_env`. The terminal
-    /// is restored on exit and on panic.
+    /// come from `git`; attached sessions run with `claude_env`; tools open
+    /// through `zellij`, `None` outside zellij. The terminal is restored on
+    /// exit and on panic.
     ///
     /// # Errors
     ///
@@ -90,12 +92,14 @@ impl Frontend {
         preview: ActorRef<PreviewActor>,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
+        zellij: Option<ZellijService>,
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx } = self;
         ratatui::run(|terminal| -> io::Result<()> {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook();
-            let result = App::new(state, sessions, preview, git, claude_env, tx).run(terminal, &rx);
+            let result =
+                App::new(state, sessions, preview, git, claude_env, zellij, tx).run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
             result.and(restored)
         })
@@ -168,6 +172,8 @@ struct App {
     opened_trust: Option<PathBuf>,
     /// The environment attached sessions run with.
     claude_env: Vec<(OsString, OsString)>,
+    /// Opens tools; `None` outside zellij.
+    zellij: Option<ZellijService>,
     tx: Sender<LoopEvent>,
     pane_area: Rect,
     /// The cursor style last sent to the outer terminal.
@@ -184,6 +190,7 @@ impl App {
         preview: ActorRef<PreviewActor>,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
+        zellij: Option<ZellijService>,
         tx: Sender<LoopEvent>,
     ) -> Self {
         let scope = {
@@ -200,6 +207,7 @@ impl App {
             pane_error: None,
             opened_trust: None,
             claude_env,
+            zellij,
             tx,
             pane_area: Rect::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
@@ -523,7 +531,18 @@ impl App {
                 }
                 Ok(())
             }
-            Command::OpenTool { .. } => Ok(()),
+            Command::OpenTool { tool, cwd } => {
+                let opened = match &self.zellij {
+                    None => Err(NOT_IN_ZELLIJ.to_owned()),
+                    Some(zellij) => zellij
+                        .open_tool(*tool, cwd)
+                        .map_err(|report| zellij_reason(&report)),
+                };
+                if let Err(reason) = opened {
+                    self.state.write().sessions.error = Some(reason);
+                }
+                Ok(())
+            }
             Command::AddProject(root) => {
                 let _ = self
                     .sessions
