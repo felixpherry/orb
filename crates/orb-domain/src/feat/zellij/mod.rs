@@ -4,6 +4,8 @@
 //! orb's zellij session, named after its directory and tool, and closes when
 //! the tool exits. Asking for the same tool in the same directory again
 //! focuses that pane, on whichever tab it is, instead of opening another.
+//! A tool needs a selected thread or draft, whose directory it opens in.
 
+pub mod validator;
 pub mod zellij_cli;
 pub mod zellij_service;
