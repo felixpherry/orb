@@ -818,6 +818,8 @@ mod tests {
     use super::{FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps, now_ms};
     use crate::Focus;
     use crate::common::{Services, State};
+    use crate::feat::git::git_cli::GitCli;
+    use crate::feat::git::git_service::GitService;
     use crate::feat::sessions::session_host::{
         CreatedSession, SessionHost, SessionHostError, SessionHostService, SessionRecord,
     };
@@ -1009,6 +1011,7 @@ mod tests {
         let actor = SessionsActor::restore(SessionsActorDeps {
             services: Services {
                 session_host: SessionHostService::new(host.clone()),
+                git: GitService::new(Arc::new(GitCli::new(Vec::new()))),
             },
             state: state.clone(),
             store,

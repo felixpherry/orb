@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use error_stack::{Report, ResultExt};
+use orb_domain::feat::git::git_cli::GitCli;
+use orb_domain::feat::git::git_service::GitService;
 use orb_domain::feat::preview::preview_actor::{PreviewActorDeps, spawn_preview_actor};
 use orb_domain::feat::sessions::child_env::child_env;
 use orb_domain::feat::sessions::claude_supervisor::ClaudeSupervisor;
@@ -37,6 +39,7 @@ fn main() -> Result<(), Report<OrbError>> {
     let frontend = Frontend::default();
     let services = Services {
         session_host: SessionHostService::new(Arc::new(ClaudeSupervisor::new(claude_env.clone()))),
+        git: GitService::new(Arc::new(GitCli::new(claude_env.clone()))),
     };
     let sessions = spawn_sessions_actor(SessionsActorDeps {
         services,
