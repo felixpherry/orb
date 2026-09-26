@@ -416,11 +416,44 @@ impl App {
                 }
                 self.leave_pane(out)
             }
-            Command::CreateDraft(_)
-            | Command::SaveDraft(_)
-            | Command::CheckoutDraft { .. }
-            | Command::StartDraft(_)
-            | Command::DiscardDraft(_) => Ok(()),
+            Command::CreateDraft(project) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::CreateDraft(*project))
+                    .try_send();
+                Ok(())
+            }
+            Command::SaveDraft(project) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::SaveDraft(*project))
+                    .try_send();
+                Ok(())
+            }
+            Command::CheckoutDraft { project, git_ref } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::CheckoutDraft {
+                        project: *project,
+                        git_ref: git_ref.clone(),
+                    })
+                    .try_send();
+                Ok(())
+            }
+            Command::StartDraft(project) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::StartDraft(*project))
+                    .try_send();
+                Ok(())
+            }
+            Command::DiscardDraft(project) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::DiscardDraft(*project))
+                    .try_send();
+                Ok(())
+            }
             Command::MoveThread { thread, to } => {
                 let _ = self
                     .sessions

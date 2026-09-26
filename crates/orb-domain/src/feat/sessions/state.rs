@@ -163,10 +163,11 @@ impl SidebarRow<'_> {
 /// orb's projects, threads and drafts, and where the sidebar's cursor is.
 ///
 /// Written by the sessions actor (projects and their drafts, `error`,
-/// `starting` when a create ends, `trust`, `attach`, the cursor after a
-/// restore or a create) and by the intent handler (the cursor on navigation,
-/// settle and delete, `shelf_open`, `starting` when a create begins, a draft's
-/// fields when the user picks them). The frontend loop takes `attach`.
+/// `starting` when a start ends, `trust`, `attach`, the cursor after a
+/// restore or when a still-selected draft becomes a thread) and by the intent
+/// handler (the cursor on navigation, settle and delete, `shelf_open`,
+/// `starting` when a start begins, a draft's fields when the user picks them).
+/// The frontend loop takes `attach`.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
@@ -278,6 +279,14 @@ impl Sessions {
                 .and_then(|project| project.draft.as_ref().map(|draft| (project, draft))),
             _ => None,
         }
+    }
+
+    /// Project `id`'s draft, if it has one.
+    pub fn draft_mut(&mut self, id: ProjectId) -> Option<&mut Draft> {
+        self.projects
+            .iter_mut()
+            .find(|project| project.id == id)
+            .and_then(|project| project.draft.as_mut())
     }
 
     /// The project holding the thread under the cursor.
