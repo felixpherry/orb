@@ -8,8 +8,8 @@
 //! `␣w`/`␣b` and the tool keys `␣t`/`␣g`/`␣v` with nothing selected), so the
 //! popups don't offer it. `<C-Right>`/`<C-Left>` resize the focused side
 //! outside which-key, which can't name them. While attached, every key goes
-//! to Claude except `<C-\>`. An open picker takes typed characters as filter
-//! text and has its own fixed keys.
+//! to Claude except `<C-\>` and `<C-h>`. An open picker takes typed
+//! characters as filter text and has its own fixed keys.
 
 use std::fmt;
 
@@ -337,6 +337,8 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
         // `<C-\>` as the kitty protocol reports it, and as crossterm parses
         // its legacy byte 0x1C.
         (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Route::Intent(Intent::Detach),
+        // Claude can't bind `<C-h>`: it's Backspace in a legacy terminal.
+        (KeyCode::Char('h'), KeyModifiers::CONTROL) => Route::Intent(Intent::LeavePane),
         _ => Route::Forward,
     }
 }
@@ -1032,14 +1034,29 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn ctrl_h_leaves_the_pane_while_attached() {
+        // Given `<C-h>`.
+        let key = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+
+        // When routing it while attached.
+        let routed = attached_route(key);
+
+        // Then it leaves the pane for the sidebar instead of reaching Claude.
+        assert_eq!(
+            routed,
+            Route::Intent(Intent::LeavePane),
+            "<C-h> should leave the pane"
+        );
+    }
+
+    #[rstest::rstest]
     #[case(KeyCode::Char('q'), KeyModifiers::NONE)]
     #[case(KeyCode::Enter, KeyModifiers::NONE)]
     #[case(KeyCode::Esc, KeyModifiers::NONE)]
-    #[case(KeyCode::Char('h'), KeyModifiers::CONTROL)]
     #[case(KeyCode::Char('a'), KeyModifiers::NONE)]
     #[case(KeyCode::Char(' '), KeyModifiers::NONE)]
     fn keys_are_forwarded_while_attached(#[case] code: KeyCode, #[case] modifiers: KeyModifiers) {
-        // Given a key other than `<C-\>`.
+        // Given a key other than `<C-\>` and `<C-h>`.
         let key = KeyEvent::new(code, modifiers);
 
         // When routing it while attached.

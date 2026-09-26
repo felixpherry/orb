@@ -37,6 +37,8 @@ pub enum Intent {
     Attach,
     /// Return from the attached session to its preview.
     Detach,
+    /// Leave the attached session for the sidebar, keeping its pane shown.
+    LeavePane,
     /// Open the project picker to open that project's draft.
     NewSession,
     /// Move the preview's cursor to the next block.
@@ -114,7 +116,7 @@ impl fmt::Display for Intent {
             Self::SelectPrev => "previous thread",
             Self::FocusPreview => "focus preview",
             Self::FocusSidebar => "focus sidebar",
-            Self::ToggleSidebar => "sidebar",
+            Self::ToggleSidebar | Self::LeavePane => "sidebar",
             Self::WidenFocused => "widen",
             Self::NarrowFocused => "narrow",
             Self::Attach => "attach",

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::feat::picker::state::PickerState;
 use crate::feat::preview::state::Preview;
-use crate::feat::sessions::state::Sessions;
+use crate::feat::sessions::state::{Sessions, ThreadId};
 use crate::feat::sidebar::state::SidebarView;
 
 /// Which part of orb receives the user's keys. Ordered so it can key the
@@ -36,6 +36,13 @@ pub struct AppState {
     pub preview: Preview,
     /// The sidebar's width, visibility and last layout.
     pub sidebar: SidebarView,
+    /// The thread whose Claude pane the right-hand area shows instead of its
+    /// preview while focus isn't `Attached`: set on attach, kept by `<C-h>`,
+    /// cleared by `<C-\>`, the pane's exit, a dropped pane, a failed spawn and
+    /// leaving the trust pane. Holding the thread, not a bool, keeps a stale
+    /// value from re-attaching another thread. Written by the intent handler
+    /// and the frontend.
+    pub pane_shown: Option<ThreadId>,
     /// The open picker, if any.
     pub picker: Option<PickerState>,
     /// The user's home directory; what the directory picker's `~/` means.
