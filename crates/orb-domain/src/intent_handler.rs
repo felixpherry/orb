@@ -22,6 +22,7 @@ use crate::feat::sessions::validator::{
     validate_close_shelf, validate_delete, validate_open_shelf, validate_pick_setting,
     validate_start_draft, validate_toggle_pin, validate_toggle_settle,
 };
+use crate::feat::zellij::validator::validate_open_tool;
 use crate::{AppState, Command, Focus, Intent};
 
 /// Applies each [`Intent`] to [`AppState`] in one match block.
@@ -209,10 +210,7 @@ impl IntentHandler {
                     vec![]
                 }
                 (Ok(()), Some((project, draft)), _) => {
-                    let cwd = match &draft.workspace {
-                        DraftWorkspace::Existing(path) => path.clone(),
-                        DraftWorkspace::Local | DraftWorkspace::NewWorktree => project.root.clone(),
-                    };
+                    let cwd = draft_dir(project, draft);
                     let base = match draft.workspace {
                         DraftWorkspace::NewWorktree => draft.branch.clone(),
                         DraftWorkspace::Local | DraftWorkspace::Existing(_) => None,
@@ -236,6 +234,21 @@ impl IntentHandler {
                     state.sessions.error = Some(BUSY_DIRECTORY.to_owned());
                     vec![]
                 }
+                _ => vec![],
+            },
+            Intent::OpenTool(tool) => match (
+                validate_open_tool(state),
+                state.sessions.selected_draft(),
+                state.sessions.selected_thread(),
+            ) {
+                (Ok(()), Some((project, draft)), _) => vec![Command::OpenTool {
+                    tool: *tool,
+                    cwd: draft_dir(project, draft),
+                }],
+                (Ok(()), None, Some(thread)) => vec![Command::OpenTool {
+                    tool: *tool,
+                    cwd: thread.cwd.clone(),
+                }],
                 _ => vec![],
             },
             Intent::PickModel => {
@@ -441,6 +454,14 @@ impl IntentHandler {
                 _ => vec![],
             },
         }
+    }
+}
+
+/// The directory a draft works in: its worktree, else the project's root.
+fn draft_dir(project: &Project, draft: &Draft) -> PathBuf {
+    match &draft.workspace {
+        DraftWorkspace::Existing(path) => path.clone(),
+        DraftWorkspace::Local | DraftWorkspace::NewWorktree => project.root.clone(),
     }
 }
 
@@ -680,6 +701,7 @@ mod tests {
         AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread,
         ThreadId, ThreadStatus,
     };
+    use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
     fn thread(id: i64, status: ThreadStatus) -> Thread {
@@ -2833,5 +2855,81 @@ mod tests {
 
         // Then nothing happens.
         assert!(commands.is_empty(), "{intent:?} does nothing on a draft");
+    }
+
+    #[rstest::rstest]
+    #[case(Tool::Shell)]
+    #[case(Tool::Lazygit)]
+    #[case(Tool::Nvim)]
+    fn open_tool_on_a_thread_opens_it_in_the_threads_directory(#[case] tool: Tool) {
+        // Given a selected thread in `/work/1`.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling OpenTool.
+        let commands = IntentHandler::handle(&Intent::OpenTool(tool), &mut state);
+
+        // Then the tool opens in the thread's directory.
+        assert_eq!(
+            commands,
+            vec![Command::OpenTool {
+                tool,
+                cwd: "/work/1".into(),
+            }],
+            "the tool should open where the thread runs"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_tool_on_an_existing_worktree_draft_opens_it_in_the_worktree() {
+        // Given a selected draft in the existing worktree `/wt/feat`.
+        let mut state = drafting(draft(existing_feat()), vec![]);
+
+        // When handling OpenTool.
+        let commands = IntentHandler::handle(&Intent::OpenTool(Tool::Lazygit), &mut state);
+
+        // Then lazygit opens in the worktree.
+        assert_eq!(
+            commands,
+            vec![Command::OpenTool {
+                tool: Tool::Lazygit,
+                cwd: "/wt/feat".into(),
+            }],
+            "an existing-worktree draft's tools open in its worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(DraftWorkspace::Local)]
+    #[case(DraftWorkspace::NewWorktree)]
+    fn open_tool_on_a_draft_without_a_worktree_opens_it_in_the_root(
+        #[case] workspace: DraftWorkspace,
+    ) {
+        // Given a selected local or new-worktree draft of the project at `/work`.
+        let mut state = drafting(draft(workspace), vec![]);
+
+        // When handling OpenTool.
+        let commands = IntentHandler::handle(&Intent::OpenTool(Tool::Lazygit), &mut state);
+
+        // Then lazygit opens in the project's root.
+        assert_eq!(
+            commands,
+            vec![Command::OpenTool {
+                tool: Tool::Lazygit,
+                cwd: "/work".into(),
+            }],
+            "a draft without a worktree works in the project's root"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_tool_without_a_selection_returns_no_commands() {
+        // Given nothing selected.
+        let mut state = AppState::default();
+
+        // When handling OpenTool.
+        let commands = IntentHandler::handle(&Intent::OpenTool(Tool::Shell), &mut state);
+
+        // Then nothing opens.
+        assert!(commands.is_empty(), "a tool needs a thread or draft");
     }
 }

@@ -523,6 +523,7 @@ impl App {
                 }
                 Ok(())
             }
+            Command::OpenTool { .. } => Ok(()),
             Command::AddProject(root) => {
                 let _ = self
                     .sessions

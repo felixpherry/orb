@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::feat::zellij::zellij_service::Tool;
+
 /// A user action produced by the keymap and applied by the
 /// [`IntentHandler`](crate::IntentHandler).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +57,8 @@ pub enum Intent {
     ChangeWorkspace,
     /// Open the branch picker for the selected thread or draft.
     SwitchBranch,
+    /// Open the tool in the selected thread's or draft's directory.
+    OpenTool(Tool),
     /// Open the model picker for the selected draft.
     PickModel,
     /// Open the permission-mode picker for the selected draft.
@@ -114,6 +118,7 @@ impl fmt::Display for Intent {
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",
+            Self::OpenTool(tool) => tool.label(),
             Self::PickModel => "model",
             Self::PickPermission => "permission",
             Self::PickerInput(_) => "type",
@@ -126,5 +131,24 @@ impl fmt::Display for Intent {
             Self::PickerOpen => "open directory",
             Self::PickerCancel => "cancel",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Intent;
+    use crate::feat::zellij::zellij_service::Tool;
+
+    #[rstest::rstest]
+    #[case(Tool::Shell, "shell")]
+    #[case(Tool::Lazygit, "lazygit")]
+    #[case(Tool::Nvim, "nvim")]
+    fn open_tool_displays_the_tools_label(#[case] tool: Tool, #[case] expected: &str) {
+        // Given / When / Then: which-key labels the intent by its tool.
+        assert_eq!(
+            Intent::OpenTool(tool).to_string(),
+            expected,
+            "which-key label"
+        );
     }
 }

@@ -1,14 +1,15 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
 //! has updated [`AppState`](crate::AppState). Pane commands, `Yank`,
-//! `ListDirectories` and `ListBranches` are carried out by the frontend loop;
-//! session commands (drafts, add project, move to another workspace, switch
-//! branch, refresh, pin, settle, delete, visit) go to the sessions actor;
-//! `ShowPreview` goes to the preview actor.
+//! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
+//! frontend loop; session commands (drafts, add project, move to another
+//! workspace, switch branch, refresh, pin, settle, delete, visit) go to the
+//! sessions actor; `ShowPreview` goes to the preview actor.
 
 use std::path::PathBuf;
 
 use crate::feat::git::git_service::GitRef;
 use crate::feat::sessions::state::{AttachTarget, ProjectId, ThreadId};
+use crate::feat::zellij::zellij_service::Tool;
 
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +50,8 @@ pub enum Command {
     },
     /// List the refs of the directory's repository into the open branch picker.
     ListBranches(PathBuf),
+    /// Focus the tool's zellij pane for the directory, else open one.
+    OpenTool { tool: Tool, cwd: PathBuf },
     /// Add the directory as a project.
     AddProject(PathBuf),
     /// List the directory's subdirectories into the open directory picker.
