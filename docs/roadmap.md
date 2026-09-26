@@ -64,8 +64,8 @@ Sidebar on the left, preview (or attached Claude) on the right, mode line at the
 
 | Focus | Keys |
 |---|---|
-| Sidebar | `j`/`k` next/prev thread — preview follows instantly · `<C-l>` focus preview · `⏎` attach · `p` pin/unpin · `ss` settle/un-settle · `xx` delete · on the Settled header: `⏎` open/close, `l` open, `h` close (`h` on a settled thread in the open shelf also closes it) · `␣n` project picker (new session; M7: new draft) · `␣p` add project · `q` quit orb |
-| Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach · `␣p` add project · `␣w` workspace (before the first prompt) · `␣b` branch |
+| Sidebar | `j`/`k` next/prev thread or draft — preview follows instantly · `<C-l>` focus preview · `⏎` attach (on a draft: start it) · `p` pin/unpin · `ss` settle/un-settle · `xx` delete (on a draft: discard it) · on the Settled header: `⏎` open/close, `l` open, `h` close (`h` on a settled thread in the open shelf also closes it) · `␣n` project picker (opens the project's draft) · `␣p` add project · `␣w` workspace · `␣b` branch · on a draft: `␣m` model, `␣a` permission · `q` quit orb |
+| Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach (on a draft's form: start it) · `␣n` project picker · `␣p` add project · `␣w` workspace (a thread: before the first prompt) · `␣b` branch · on a draft's form: `␣m` model, `␣a` permission |
 | Picker | typing filters · `←`/`→` move the filter cursor · `Backspace`/`<C-w>` delete a char/word · `<C-j>`/`<C-k>` or `↑`/`↓` next/prev item (focus stays in the filter input) · `<C-d>`/`<C-u>` half page · `⏎` pick · `Tab` open the highlighted directory (directory picker) · `Esc` cancel |
 | Attached | **every** key → Claude, except `<C-\>` → back to orb |
 
@@ -74,6 +74,7 @@ Sidebar on the left, preview (or attached Claude) on the right, mode line at the
 - `<C-\>` (single key, configurable) was chosen over nvim's `<C-\><C-n>`. Esc must reach Claude (it interrupts turns / is vim-mode Esc).
 - After `<C-\>`: the right side switches to the **same thread's transcript preview**, focus stays right. The attach process stays alive until another thread is selected, so `⏎` re-enters instantly.
 - Leader chords show a which-key popup. `q` quits orb; sessions keep running. There is no `:` command line (backlog).
+- Keys are bound by what's selected, so which-key never lists a key that does nothing there. `␣m`/`␣a` work only on a draft, `␣w`/`␣b` only on a thread or a draft, and `p`/`ss` only on a thread. The preview's block keys (`j`/`k`, `C-d`/`C-u`, `gg`/`G`, `y`, `za`/`<Tab>`) work only on a thread's preview, not on a draft's form. Keys whose effect depends on runtime state stay bound and explain themselves on the mode line (`Workspace locked`, the busy refusal).
 
 ### Preview behavior
 
@@ -88,17 +89,22 @@ Sidebar on the left, preview (or attached Claude) on the right, mode line at the
 - Typing → ordered by **fuzzy score**, recency breaks ties.
 - `<C-j>`/`<C-k>` move the selection (new; jinn doesn't have these).
 - **Look** (T3's command palette): a centered rounded popup; an input row with a search or folder glyph and a `Search projects...` placeholder; a section label (`Projects` / `Directories`); the selected row filled; matched characters bold + underlined; a footer of key chips (`↑ ↓` Navigate · `Enter` Select · `Esc` Close; the directory picker has `Tab` Open · `Enter` Add).
-- **`␣n`, the project picker.** Two-line rows: the monogram badge and name, then the full path, dimmed. Order is T3's: the project whose threads have the newest last activity (`last_activity_at`) first, a project with no threads by when it was added, ties by title. The filter matches name **and** path. `⏎` starts a local session in the project's directory and selects the new thread, without attaching.
+- **`␣n`, the project picker.** Two-line rows: the monogram badge and name, then the full path, dimmed. Order is T3's: the project whose threads have the newest last activity (`last_activity_at`) first, a project with no threads by when it was added, ties by title. The filter matches name **and** path. `⏎` selects the project's `✎` draft, creating it if there is none, and focuses its form. It never starts a session (M7; M5 started a local session here).
 - **`␣p`, the directory picker** (T3's browse mode). Opens with `~/` typed; rows are a folder glyph and the name, sorted alphabetically ignoring case. Dot-directories are hidden unless the last part of the path starts with `.`. The last part is fuzzy-filtered. `Tab` opens the highlighted directory, and backspacing past a `/` goes up a level. `⏎` adds the highlighted directory as a project (or the typed directory when nothing is highlighted and the last part is empty); it doesn't start a session, and the new project sits first in `␣n`.
 
 ### New thread flow (drafts)
 
 1. `␣n` → project picker.
-2. A `✎` draft appears in the sidebar; the right side shows the **draft form** (orb UI, not Claude).
-3. Fields: workspace (local checkout / new worktree / previous worktree) · base branch · model · permission mode. `j`/`k` between fields; `⏎` on a field opens a picker.
-4. Fields prefill from **that project's last-used settings**. A brand-new project gets the last-used model + permission (from any project), local checkout, and the default branch.
-5. **Start** → create worktree if needed → `claude --bg -n <name> …` (starts idle, no prompt) → attach. The **first prompt is typed natively in Claude** (with Claude's own slash/skill/@-file pickers).
-6. Drafts persist across orb restarts.
+2. The project's `✎` draft is selected, created if it has none (at most one per project). Drafts sit above pinned threads, newest first, as T3's draft card: `✎` + badge + project, then `New thread`. The right side shows the **draft form** (orb UI, not Claude), and focus moves to it. The mode line reads `DRAFT   ⏎ start · ␣ leader`.
+3. Fields: Workspace · Base branch · Model · Permission. Each has a leader key that opens its picker, in the sidebar and in the form: `␣w` / `␣b` / `␣m` / `␣a`. The form shows no key hints, and there's no field cursor.
+   - **Workspace** (T3's rows): `Current checkout`, `New worktree`, `Previous worktree (<branch>)`. On a draft already in a worktree the rows are `Current worktree` (keeps it), `New worktree`, and the other previous worktree. The worktree is created only at Start.
+   - **Base branch** follows T3's per-workspace rules. On a new-worktree draft a pick only records the base. The form reads `From <ref>`, the ref Start will use as of the last fetch (`origin/<b>` when origin has it), or `Select ref`. On a local or worktree draft a pick runs `git checkout` there right away, refused while a thread in that directory is working or waiting. A branch checked out in the root or another worktree moves the draft there, and from a worktree the default branch takes it back to the root.
+   - **Model**: `Default` (no flag), then T3 Code's current Claude models by name, then a `Legacy models` heading over its legacy ones. orb passes the full model ID as `--model`, and a stored alias shows its model's name.
+   - **Permission**: `Default` (no flag), then the six `--permission-mode` choices.
+   - A project that isn't a git repository has no Workspace or Base branch row and starts local. There, `␣w`/`␣b` offer `Initialize Git` (`git init`).
+4. Fields prefill from **that project's last-used workspace, model and permission** (saved when a draft starts). A brand-new project gets the last-used model + permission (from any project) and a local checkout. The base branch is never remembered: a new worktree defaults to the default branch, and a local checkout shows the root's current branch.
+5. **Start** (`⏎`) → create the worktree if needed (fetching `origin/<base>`) → `claude --bg [--model m] [--permission-mode p]` (no `-n`; starts idle, no prompt). The draft becomes a thread. orb attaches only if the draft is still selected when the session comes up. A failed start keeps the draft, shows the reason, and removes any worktree orb made for it. The **first prompt is typed natively in Claude** (with Claude's own slash/skill/@-file pickers).
+6. Drafts persist across orb restarts. `xx` discards a draft (no `claude rm`).
 
 There is no orb-owned prompt composer (rejected: it would lose Claude's pickers/autocomplete).
 
@@ -222,6 +228,22 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Worktree cleanup | A failed start removes the worktree (`--force`) and branch (`-D`) orb just made. A move out of an orb worktree no thread uses removes it with a non-forced `git worktree remove` (the branch stays). `xx` leaves worktrees | Keeping failed-start worktrees — junk `orb/<hex>` branches. Forced removal after a move — could lose work. Removing on delete — "previous worktree" can still offer it. |
 | Branch rename | On a poll that sees a turn end, only if the branch is exactly `orb/<hex>` of its `orb-<hex>` directory and the thread has an `ai-title` or `custom-title`: `git branch -m` to `orb/<slug>` (lowercase `[a-z0-9-]`, ≤40). A clash keeps the old name silently | Retrying every poll — a clash would run `git branch -m` every second. The first-prompt title — long, and T3 renames from a generated title. |
 | Mode-line refusals | The `IntentHandler` writes `sessions.error` for the lock and busy refusals (a user-approved exception to "validation failure = no-op"); every error stays until the next key, and polls write it only when a save failed | A no-op — the user wants to know why. Clearing on the next poll — gone within 1 s while any turn runs. A notification system — YAGNI. |
+| Draft storage (M7) | A `drafts` table keyed by `project_id`, so at most one per project; `Project.draft`; a `Draft` sidebar item and row | A `threads` row with `short_id` NULL — a table rebuild (the column is `NOT NULL UNIQUE`) and a "no session" guard in polling, attach, settle and delete. |
+| Drafts per project | One. `␣n` on a project with a draft selects it | Unlimited — T3 keeps a second draft only when the first has prompt text, and orb drafts never hold a prompt. |
+| Draft base branch | T3's per-workspace meaning. **New worktree**: the base is only recorded, then fetched and started from `origin/<b>` at Start (M6's rule, generalised to the picked branch). **Local or existing worktree**: `git checkout` there right away, refused while a thread in that directory is working or waiting. A branch checked out in the root or another worktree moves the draft there, and from a worktree the default branch takes it back to the root (T3's `resolveBranchSelectionTarget`) | A base only for new worktrees, with local read-only — the user chose T3's immediate checkout. Deferring the local checkout to Start — offered; the user chose T3. A read-only base on an existing-worktree draft (the pre-walk spec) — the user asked to copy T3. |
+| Draft worktree creation | Lazily at Start; the mode line shows `starting session…` meanwhile | Eager on pick — the user prefers the delay at Start. |
+| Draft `From <ref>` | A new-worktree draft's Base branch reads `From <ref>` (T3's label). The ref is worked out by Start's own start-point rule against origin's refs as of the last fetch, by the sessions actor when it creates, saves or restores the draft, so rendering does no git I/O. No branch reads `Select ref` | T3's "start from origin" toggle — orb always starts from origin when origin has the branch. T3's `From origin/<b>` for any local base — T3's server then quietly falls back to the local branch, so the label can be wrong. |
+| Existing-worktree drafts | T3's: the workspace rows are `Current worktree` (selected; keeps it), `New worktree`, and the other previous worktree, with no root row; re-picking the draft's own workspace changes nothing; `␣b` lists the worktree's refs | `Current checkout` first, which moved the draft back to the root on an immediate `⏎` (the pre-walk spec). |
+| Non-git projects | T3's: no Workspace or Base branch row; Start is always local; `␣w`/`␣b` open a one-row `Initialize Git` picker that runs a bare `git init` in the root; a failure shows `Git initialization failed: <reason>`. orb learns it from `git for-each-ref` failing when the draft is created, saved or restored | Offering `New worktree`, which failed only at Start, and a `␣b` that showed git's `fatal: not a git repository`. |
+| Last-used | Columns on `projects` (`last_workspace`, `last_model`, `last_permission_mode`, `last_used_at`), written on a successful Start. The global fallback is the project with the newest `last_used_at`, and gives only model and permission. A remembered previous worktree with no seed falls back to Local. The base branch is never remembered | Deriving it from the newest thread — lost on delete, and NULL for pre-M7 threads. |
+| Model list | `Default` (no flag), then T3 Code's current Claude models in T3's order and names (Claude Opus 5.5, Claude Fable 5.1, Claude Opus 5, Claude Sonnet 5), then a flat `Legacy models` heading over its seven legacy models (research §12). orb stores and passes the **full ID** (`claude-opus-5-5`) as `--model`. A stored alias (`opus`) shows T3's name for it and still passes as is. Any other stored value shows raw. The preview header names a transcript's model the same way | The `--help` aliases `opus`/`sonnet`/`fable`/`haiku` (the first spec) — the user didn't recognise them. T3's collapsible legacy row — the user kept the flat list. `[1m]` variants — unverified as `--model` values; `Default` covers the user's `opus[1m]` setting. |
+| Permission list | `Default` (no flag) + the six `--permission-mode` choices from `claude --help` 2.1.283 | — |
+| Draft keys | `⏎` starts; `␣w`/`␣b`/`␣m`/`␣a` open the field pickers, the same keys in the sidebar and the form (user-defined in M7's plan); `xx` discards | A field cursor with `j`/`k` and a Start row — dropped once `⏎` starts and each field has a leader key. |
+| Keys by selection | The which-key scope is focus × selection (thread, draft, nothing): a key that does nothing for the selection isn't bound, so the popup doesn't list it (`␣m`/`␣a` only on a draft; `␣w`/`␣b` only on a thread or draft; `p`/`ss` not on a draft; no block keys on a draft's form). No new `Focus` variant: the form is what the preview side shows while a draft is selected | Binding every key everywhere as a no-op — the user saw `m model` and `a permission` on a thread. A `Focus::Draft` — with no field cursor it would duplicate every binding. |
+| Draft form and card | Form: a header, then the field rows (label and value only; the value cut from the left when too wide), then `⏎ start`. Card: `✎` + badge + project, then `New thread`, then an empty line (T3's draft row) | Right-aligned `␣w`/`␣b`/`␣m`/`␣a` hints and a `workspace · branch` card line — the user removed both in the walk. |
+| Draft Start | `claude --bg [--model m] [--permission-mode p]` with no `-n`. A local or worktree draft's thread takes its branch from git in that directory at Start. orb attaches only if the cursor is still on the draft when the session comes up. The actor sets `Sessions.attach`, and the frontend loop takes it and runs `Intent::Attach` if that thread is still selected and no picker or pane has focus | `-n <project>` — the thread-title decision rejected fixed names, and `-n` stays in Claude's prompt box. The draft's cached branch — stale after a checkout outside orb or a restart. Always attaching — steals focus after the user moved on. The actor writing `focus` — focus is frontend state. |
+| Draft place in the sidebar | Drafts above Pinned, newest first (T3's `SidebarDraftBlock`) | Inside Active. |
+| Model/permission on threads | Saved on the thread row too, so M6's `␣w` move of a prompt-less thread restarts with the same flags | Dropping them — a moved plan-mode thread would silently restart in default mode. |
 
 ## Milestones
 
@@ -289,6 +311,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 
 ### 7. Drafts
 - `␣n` → project picker → `✎` draft → form (workspace, base branch, model, permission) with pickers; per-project last-used defaults + global fallback; Start → worktree → `claude --bg -n <name> [--model] [--permission-mode]` idle → attach; drafts persist.
+- Resolved in M7's plan: keys — `⏎` starts a draft and `␣w`/`␣b`/`␣m`/`␣a` open its pickers, in the sidebar and the form. `␣w`/`␣b` also work on threads in the sidebar. Keys are bound only for a selection they act on (see Keys). Drafts: one per project, in a `drafts` table. The worktree is made only at Start. A local or worktree draft's branch pick checks out at once (T3). Last-used is saved per project, with a model + permission fallback from any project. Start passes no `-n`, and orb attaches only if the draft is still selected. The model list is T3's manifest with full IDs, not the `--help` aliases. Existing-worktree drafts and non-git projects follow T3 (`Current worktree`, `Initialize Git`). `--bg` honours `--model` and `--permission-mode` (research §12). See Decisions.
 
 ### 8. Tool handoff (zellij)
 - `␣t` shell / `␣g` lazygit / `␣e` nvim as full-screen floating panes in the worktree, named `orb:<thread>:<tool>`, de-duped via `list-panes --json` + `focus-pane-id`.
@@ -339,9 +362,9 @@ PR status via `gh` + settle on merge · snooze · undo · project filter (T3's p
 | 18 | 5 | `␣p`, `Tab` into `~/dev`, `⏎` on a repo | Added; first in `␣n` |
 | 19 | 6 | New worktree thread | `~/.orb/worktrees/<repo>/orb-<hex>` on `orb/<hex>` from origin base |
 | 20 | 6 | Branch switch while running | Refused with reason |
-| 21 | 7 | Draft in a used project | Prefilled with that project's last settings |
-| 22 | 7 | Draft in a new project | Last model + permission; local; default branch |
-| 23 | 7 | Quit with a draft | Draft restored |
+| 21 | 7 | Draft in a used project | Prefilled with that project's last workspace, model and permission; a new worktree's base is the default branch |
+| 22 | 7 | Draft in a new project | Last model + permission from any project; local checkout, showing the root's current branch |
+| 23 | 7 | Quit with a draft, relaunch | Draft restored with its settings |
 | 24 | 8 | `␣g` twice on one thread | Second press focuses the existing pane |
 
 ## Record updates
@@ -452,8 +475,25 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 
 ### M7
 
-- (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session and attaches.
-- (drafts) Draft settings default to the project's last-used values, falling back to the last-used model and permission for new projects.
+**Amend**
+- ``(keybinds) `␣n` opens the project picker; picking a project starts a Claude session in its directory.`` → ``(keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.``
+- `(sidebar) The sidebar lists only sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.` → `(sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.`
+- ``(worktrees) A new worktree starts from the project's default branch fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.`` → ``(worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w`) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.``
+- `(worktrees) A thread's workspace can change only before its first prompt; orb then starts a new session in the new workspace and removes the old one.` → `(worktrees) A thread's workspace can change only before its first prompt; orb then starts a new session in the new workspace, with the same model and permission, and removes the old one.`
+- ``(keybinds) `␣w` in the preview opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.`` → ``(keybinds) `␣w` in the sidebar or preview opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.``
+- ``(keybinds) `␣b` in the preview opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.`` → ``(keybinds) `␣b` in the sidebar or preview opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.``
+
+**Add**
+- ``(drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session with those settings and attaches while the draft is still selected.``
+- `(drafts) Each project has at most one draft; drafts persist to orb's store and sit above pinned threads in the sidebar.`
+- `(drafts) Draft settings default to the project's last-used workspace, model and permission, falling back to the last-used model and permission from any project and a local checkout; a new worktree's base branch defaults to the project's default branch.`
+- ``(drafts) A new-worktree draft creates its worktree only when started; its form shows the ref it will start from as `From <ref>`.``
+- `(drafts) In a draft on the project's root or in an existing worktree, picking a branch checks it out there right away; a branch checked out in the root or another worktree moves the draft there instead, and in a worktree the default branch takes the draft back to the root.`
+- ``(drafts) A draft of a project that isn't a git repository has no workspace or base branch, starts in the project's directory, and `␣w`/`␣b` offer to initialize git.``
+- ``(drafts) The model picker lists `Default`, then T3 Code's current Claude models by name, then its legacy models under a `Legacy models` heading; orb passes the picked model's full ID to `--model`.``
+- ``(keybinds) On a draft, in the sidebar or its form, `⏎` starts it and `␣w`/`␣b`/`␣m`/`␣a` pick its workspace, base branch, model, and permission.``
+- ``(keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` only on a draft, `␣w`/`␣b` only on a thread or draft, and `p`/`ss` only on a thread.``
+- ``(preview) The preview header names the thread's model as the model picker does (e.g. Claude Opus 5.5), else shows its ID without `claude-`.``
 
 ### M8
 

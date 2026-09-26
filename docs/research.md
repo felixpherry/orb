@@ -392,3 +392,95 @@ T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913
 
 ### Transcript `gitBranch` follows checkouts **[verified]**
 - A session's `gitBranch` changes when the branch changes under it: 47 of 281 local transcripts carry more than one branch. So after a checkout or a rename, the thread's branch updates from the next transcript line.
+
+## 12. Drafts (verified 2026-09-26, Claude Code 2.1.283; T3 f5ef0dd)
+
+T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913e7b8a5df30ffc` (paths relative to `apps/web/src/components/` unless a fuller path is given). CLI facts were re-checked against the installed `claude --version` and `claude --help` without starting a session. The live flag checks come from M7's manual check on the same version. Tags as in §6.
+
+### `claude --bg` flags **[verified: `--help`]**
+- `claude --version` prints `2.1.283 (Claude Code)`.
+- `--model <model>`: "Model for the current session. Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name (e.g. 'claude-fable-5')."
+- `--permission-mode <mode>`: "Permission mode to use for the session (choices: "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")". `--help` doesn't describe the modes.
+- `-n, --name <name>`: "Set a display name for this session (shown in the prompt box, /resume picker, and terminal title)". orb passes no `-n` (see the roadmap's thread-title decision).
+- `--bg` **honours** `--model` and `--permission-mode`, unlike `--session-id` (§1). `claude --bg --model sonnet --permission-mode plan` started idle, and once attached Claude showed "Sonnet 5" in the prompt box and "plan mode on". `--model haiku --permission-mode acceptEdits` showed "Haiku 4.5" and "accept edits on". **[verified]**
+- Without the flags, the session uses whatever Claude's own settings give. That's orb's `Default`, which passes no flag.
+
+### Model IDs **[verified: bundle]**
+- **Tried live as `--model`:** the aliases `sonnet` (runs Claude Sonnet 5) and `haiku` (runs Claude Haiku 4.5). **[verified]**
+- **In the binary, not tried live:** all 11 IDs of T3's Claude models (table below) appear as quoted string literals in the 2.1.283 binary (`~/.local/share/claude/versions/2.1.283`), 19–44 times each, e.g. `"claude-opus-5-5"` ×35 and `"claude-haiku-4-5"` ×26. So the CLI knows them. A live `claude --bg --model <full id>` was **not** run for any of them. orb passes these IDs because T3 passes the same slugs to Claude. A rejected ID would show up as a failed start: the draft is kept and Claude's reason shows on the mode line.
+- **Alias meaning.** `--help` says an alias names "the latest model". T3's manifest maps `opus` to Claude Opus 5 (`claude-opus-5`), though Claude Opus 5.5 is listed. orb labels a stored alias with T3's name but passes the alias to `--model` unchanged, so a stored `opus` may run a different Opus than the label says. **[verified: source]**; which model Claude picks for `opus` is not verified.
+- `[1m]` variants such as `opus[1m]` (the user's settings value) are not verified as `--model` values.
+
+### T3 model manifest (`apps/server/src/provider/model-manifest.json`, `providers.claudeAgent.models`, lines 605–707) **[verified: source]**
+Each entry has `slug`, `name`, `status` (`current` or `legacy`), optional `aliases`, and an optional `adapter.claudeCode.minVersion`. Opus 5.5 also has `"badge": "new"` (line 611).
+
+| Status | Name | Slug (`--model`) | Aliases | Line |
+|---|---|---|---|---|
+| current | Claude Opus 5.5 | `claude-opus-5-5` | `opus-5.5`, `claude-opus-5.5` | 607 |
+| current | Claude Fable 5.1 | `claude-fable-5-1` | `fable`, `fable-5.1`, `claude-fable-5.1` | 616 |
+| legacy | Claude Fable 5 | `claude-fable-5` | — | 628 |
+| current | Claude Opus 5 | `claude-opus-5` | `opus`, `opus-5`, `claude-opus-5.0`, `claude-opus-5-0` | 639 |
+| legacy | Claude Opus 4.8 | `claude-opus-4-8` | `opus-4.8`, `claude-opus-4.8` | 651 |
+| legacy | Claude Opus 4.7 | `claude-opus-4-7` | `opus-4.7`, `claude-opus-4.7` | 663 |
+| legacy | Claude Opus 4.6 | `claude-opus-4-6` | `opus-4.6`, `claude-opus-4.6`, `claude-opus-4-6-20251117` | 675 |
+| legacy | Claude Opus 4.5 | `claude-opus-4-5` | — | 682 |
+| current | Claude Sonnet 5 | `claude-sonnet-5` | `sonnet`, `sonnet-5`, `claude-sonnet-5.0`, `claude-sonnet-5-0` | 688 |
+| legacy | Claude Sonnet 4.6 | `claude-sonnet-4-6` | `sonnet-4.6`, `claude-sonnet-4.6`, `claude-sonnet-4-6-20251117` | 695 |
+| legacy | Claude Haiku 4.5 | `claude-haiku-4-5` | `haiku`, `haiku-4.5`, `claude-haiku-4.5`, `claude-haiku-4-5-20251001` | 702 |
+
+- `minVersion`: 2.1.280 for Opus 5.5 and 2.1.257 for Fable 5.1, both below the installed 2.1.283.
+- `apps/server/src/provider/ModelManifest.ts:177` sets `isLegacy` from `status === "legacy"`.
+- Order: `sortProviderModelItems` (`apps/web/src/modelOrdering.ts:58-86`) keeps manifest order unless favourites are grouped. So the current models read Opus 5.5, Fable 5.1, Opus 5, Sonnet 5.
+- Legacy section (`chat/ModelPickerContent.tsx`): `:541-556` splits current from legacy models, with no split while searching. `:683-686` puts the `Legacy models` entry after the current ones. `:958-965` draws it as `Legacy models` / `{n} models`, and it expands on click.
+- Alias lookup (`apps/server/src/provider/ClaudeModelCatalog.ts:121-136`): an exact slug match first, then a case-insensitive alias match. `resolveClaudeModelSlug` normalises an alias to the slug.
+- The ID passed to Claude: `resolveClaudeCatalogApiModelId` (`ClaudeModelCatalog.ts:233-250`) returns the slug. It adds a suffix only for a context-window option.
+
+### T3 drafts (`apps/web/src/hooks/useHandleNewThread.ts`, `apps/web/src/composerDraftStore.ts`) **[verified: source]**
+- **One draft per project.** New thread looks up the project's mapped draft (`useHandleNewThread.ts:171`, `getDraftSessionByLogicalProjectKey`). It reuses that draft only if the user hasn't typed in it (`:186-195`). Otherwise it makes a fresh draft and remaps the project to it (`:403-418`).
+- **Drafts with content survive.** A remap deletes the previous draft only when it has no user content (`composerDraftStore.ts:2684-2705`). A draft with content stays, unmapped, and the sidebar lists it.
+- **New draft defaults** (`useHandleNewThread.ts:403-418`): `branch` and `worktreePath` null, `envMode` from the project's settings (`defaultThreadEnvMode`), `runtimeMode` from the project's default, `interactionMode` carried from the thread being viewed, then the sticky model (`applyStickyState`, `:418`). orb uses per-project last-used values instead (roadmap New thread flow).
+- **Sidebar block** (`Sidebar.tsx`). `SidebarDraftBlock` (`:803-807`) is the first item of the list, above pinned (`:4769`). It sorts drafts newest first by `createdAt` (`:871`), and it lists only drafts with user content (`:866`), each as a `SidebarDraftRow` (`:701`).
+- **Draft card.** Line 1 is the amber pen (`:533`, `:765`), the project favicon and the project name (`:770`). Line 2 is the first prompt line, or `N attachments` (`:724`, `:790`). The row shows no workspace or branch.
+- orb's drafts hold no prompt, so orb keeps one per project and always shows it: `✎` + badge + project, then `New thread`, then an empty third line.
+
+### T3 workspace rows (`BranchToolbar.logic.ts`, `BranchToolbarEnvModeSelector.tsx`, `BranchToolbar.tsx`) **[verified: source]**
+- A draft with a worktree path is in local mode (`resolveEffectiveEnvMode`, `BranchToolbar.logic.ts:156-169`).
+- Rows (`BranchToolbarEnvModeSelector.tsx:45-54`):
+  - `resolveCurrentWorkspaceLabel` (`BranchToolbar.logic.ts:101-103`): `Current worktree` when the draft has a worktree path, else `Current checkout`.
+  - `New worktree`.
+  - `Previous worktree (<branch>)`, or plain `Previous worktree` (`:152-154`), when there is a seed.
+- The selected row is the effective mode (`value={effectiveEnvMode}`, `BranchToolbarEnvModeSelector.tsx:97`).
+- `onEnvModeChange` (`ChatView.tsx:9373-9391`): picking local keeps a draft's worktree path; only `worktree` clears it.
+- **Previous-worktree seed** (`resolvePreviousWorktreeSeed`, `BranchToolbar.logic.ts:119-150`): among the given threads, those with a `worktreePath` other than the current one and not archived, the one with the latest `updatedAt`.
+  - It's computed only for a draft (`BranchToolbar.tsx:536-555`). The input is the project's thread shells (`useThreadShellsForProjectRefs`), so only existing threads count. Deleting the thread drops its worktree from `Previous worktree`, even though the worktree stays on disk.
+  - orb's `previous_worktree` does the same over the project's orb threads (settled ones included; orb has no archive). The project root doesn't count.
+
+### T3 branch pick (`BranchToolbarBranchSelector.tsx`, `BranchToolbar.logic.ts`) **[verified: source]**
+- Refs are listed from the draft's worktree, else the project root (`branchCwd`, `BranchToolbarBranchSelector.tsx:163`).
+- In worktree mode with no worktree path (`isSelectingWorktreeBase`, `:286-287`), a pick only records the ref as the base (`selectBranch`, `:415-423`). Nothing is checked out.
+- Otherwise `selectBranch` (`:425-470`) applies `resolveBranchSelectionTarget` (`BranchToolbar.logic.ts:249-276`):
+  - A ref checked out somewhere is reused. The root means local, any other path means that worktree. Nothing is checked out.
+  - From a worktree, the default branch goes back to the root and is checked out there.
+  - Any other ref is checked out (`switchRef`) in the draft's directory, right away.
+- The default base is origin/HEAD's branch, else the checked-out one (`BranchToolbarBranchSelector.tsx:512-538`).
+- The selected value in worktree mode is the recorded base, else the checked-out branch (`resolveBranchToolbarValue`, `BranchToolbar.logic.ts:186-197`).
+- Badges (`BranchToolbarBranchSelector.tsx:738-747`): `current` › `worktree` (a worktree other than the root) › `remote` › `default`.
+
+### T3 `From <ref>` (`resolveBranchTriggerLabel`, `BranchToolbar.logic.ts:199-224`) **[verified: source]**
+- No branch → `Select ref`.
+- Worktree mode, no worktree path → `From origin/<b>` when "start from origin" is on and the ref is local, else `From <ref>`.
+- Otherwise the branch name.
+- T3's server falls back to the local base when origin lacks the branch (`apps/server/src/ws.ts:1341-1388`), so the label can promise `origin/<b>` and start from `<b>`.
+- orb has no "start from origin" toggle. It uses the start-point rule Start uses, checked against `refs/remotes/origin/<b>` as of the last fetch (no network): `From origin/<b>` only when origin had `<b>`, a local-only branch as is, and another remote's ref as is.
+
+### T3 non-git projects **[verified: source]**
+- `isGitRepo` (`ChatView.tsx:3745-3755`) is the git status's `isRepo`. A checkout never seen before is assumed to be git.
+- `showGitControls={isGitRepo}` (`ChatView.tsx:10203`) hides the workspace and branch controls.
+- `resolveSendEnvMode` (`ChatView.logic.ts:815-820`) always sends `local` outside git.
+- `Initialize Git` is a menu item (`GitActionsControl.tsx:1743-1754`) or a button (`:1788-1794`), reading `Initializing...` while pending.
+- It runs a bare `git init` in the project directory (`initRepository`, `apps/server/src/vcs/GitVcsDriver.ts:709-713`, 10 s timeout).
+- A failure toasts `Git initialization failed` with the error message (`GitActionsControl.tsx:1635-1651`).
+
+### git 2.54 in a new repository **[verified]**
+- After `git init -b main` with no commit, `git for-each-ref` lists nothing, while `git branch --show-current` prints `main` (the unborn branch).
+- `git worktree add -b orb/x <path> main` fails with `fatal: invalid reference: main`, so a new-worktree start in such a repository fails through orb's normal failure path.
