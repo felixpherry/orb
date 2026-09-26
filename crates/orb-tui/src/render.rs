@@ -4,6 +4,8 @@
 //! waits for its repeat, a banner above the selected thread says what the
 //! repeat will do instead of the popup. An open picker is drawn over
 //! everything but the mode line, with neither the popup nor the banner.
+//! Whatever is left on the terminal's default background gets orb's navy, so
+//! a transparent terminal doesn't show through.
 
 use std::time::SystemTime;
 
@@ -24,6 +26,10 @@ use crate::keymap::{self, Keys};
 use crate::picker::{self, PickerScroll};
 use crate::preview::{self, PreviewCache};
 use crate::sidebar::{self, SidebarScroll};
+
+/// Behind everything that doesn't set its own background (tokyonight-moon's
+/// `bg`).
+const BACKGROUND: Color = Color::Rgb(0x22, 0x24, 0x36);
 
 /// Splits the screen into `[sidebar, right side, mode line]`.
 pub(crate) fn layout(area: Rect) -> [Rect; 3] {
@@ -113,6 +119,11 @@ pub(crate) fn render(
         }
         (None, None) => None,
     };
+    for cell in &mut frame.buffer_mut().content {
+        if cell.bg == Color::Reset {
+            cell.bg = BACKGROUND;
+        }
+    }
     (preview_layout, picker_page)
 }
 
@@ -161,7 +172,9 @@ fn render_banner(state: &AppState, confirm: char, selected_y: u16, buf: &mut Buf
 }
 
 /// The mode and its keys on the left; on the right, a session being started,
-/// else the latest `claude` failure, else how many threads are working.
+/// else the latest `claude` failure, else how many threads are working. A
+/// right side too long for the line is cut at its end, two cells after the
+/// keys.
 fn render_mode_line(state: &AppState, area: Rect, buf: &mut Buffer) {
     let mode = match state.focus {
         Focus::Attached => "ATTACHED   <C-\\> back",
@@ -177,10 +190,14 @@ fn render_mode_line(state: &AppState, area: Rect, buf: &mut Buffer) {
             (false, None, working) => format!("{working} running"),
         },
     );
-    let status_width = u16::try_from(status.width()).unwrap_or(u16::MAX);
+    let mode = Line::raw(mode);
+    let status_width = {
+        let room = usize::from(area.width).saturating_sub(mode.width() + 2);
+        u16::try_from(status.width().min(room)).unwrap_or(u16::MAX)
+    };
     let [mode_area, status_area] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(status_width)]).areas(area);
-    Line::raw(mode).render(mode_area, buf);
+    mode.render(mode_area, buf);
     status.render(status_area, buf);
 }
 
@@ -201,7 +218,7 @@ mod tests {
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
 
-    use super::{layout, render};
+    use super::{BACKGROUND, layout, render};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::keymap::{Keys, keymap, press};
@@ -292,6 +309,14 @@ mod tests {
     /// Draws `state` on an 80x8 screen with `pane` running for the selected
     /// thread; returns the right side's text.
     fn right_side_with_pane(state: &AppState, pane: &Pane) -> String {
+        let buffer = draw_with_pane(state, pane);
+        let [_, right, _] = layout(buffer.area);
+        text(&buffer, right)
+    }
+
+    /// Draws `state` on an 80x8 screen with `pane` running for the selected
+    /// thread.
+    fn draw_with_pane(state: &AppState, pane: &Pane) -> Buffer {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
         let keys = Keys::new(keymap(), Focus::Sidebar);
         let Ok(_) = terminal.draw(|frame| {
@@ -307,9 +332,7 @@ mod tests {
                 &mut PickerScroll::default(),
             );
         });
-        let buffer = terminal.backend().buffer();
-        let [_, right, _] = layout(buffer.area);
-        text(buffer, right)
+        terminal.backend().buffer().clone()
     }
 
     /// Thread 1, selected, with the given focus.
@@ -424,6 +447,32 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn long_claude_error_is_cut_after_the_mode_keys() {
+        // Given a `claude` error wider than the 80-column mode line.
+        let state = AppState {
+            sessions: Sessions {
+                error: Some(
+                    "Workspace not trusted. Run `claude` in /Users/me/dev/a-long-project \
+                     once and accept the trust prompt, then retry."
+                        .to_owned(),
+                ),
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the mode's keys stay whole, and the error starts two cells on.
+        let mode_line = mode_line(&buffer);
+        assert!(
+            mode_line.starts_with("NORMAL   ⏎ attach · ␣ leader  Workspace not trusted"),
+            "mode line was '{mode_line}'"
+        );
+    }
+
+    #[rstest::rstest]
     fn mode_line_shows_normal_outside_a_session() {
         // Given orb in Sidebar focus.
         let state = AppState::default();
@@ -456,6 +505,45 @@ mod tests {
             mode_line.starts_with("ATTACHED"),
             "mode line was '{mode_line}'"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::empty_right_side(AppState::default(), (79, 0))]
+    #[case::inside_the_picker(
+        AppState {
+            focus: Focus::Picker,
+            picker: Some(PickerState::projects(vec![], Focus::Sidebar)),
+            ..AppState::default()
+        },
+        (70, 1)
+    )]
+    fn cells_without_a_background_get_orbs(#[case] state: AppState, #[case] at: (u16, u16)) {
+        // Given a frame's state.
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then a cell nothing coloured has orb's background.
+        assert_eq!(
+            buffer.cell(at).map(|cell| cell.bg),
+            Some(BACKGROUND),
+            "background at {at:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attached_pane_default_background_gets_orbs() {
+        // Given a live pane that printed text with no background colour.
+        let pane = pane_with_text();
+        let state = selected(Focus::Attached);
+
+        // When drawing a frame while attached.
+        let buffer = pane.as_ref().map(|pane| draw_with_pane(&state, pane));
+
+        // Then the pane's first cell has orb's background.
+        let [_, right, _] = layout(Rect::new(0, 0, 80, 8));
+        let bg = buffer.and_then(|buffer| buffer.cell((right.x, right.y)).map(|cell| cell.bg));
+        assert_eq!(bg, Some(BACKGROUND), "the pane's background");
     }
 
     #[rstest::rstest]

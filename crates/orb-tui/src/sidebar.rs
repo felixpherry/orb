@@ -393,8 +393,9 @@ pub(crate) const GRAY: Color = Color::Rgb(0xa3, 0xa3, 0xa3);
 pub(crate) const DARK_GRAY: Color = Color::Rgb(0x73, 0x73, 0x73);
 /// The ✳ logo.
 const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
-/// Behind the selected row.
-pub(crate) const SELECTED: Color = Color::Rgb(0x26, 0x26, 0x26);
+/// Behind the selected row (tokyonight's highlight, lighter than the navy
+/// background).
+pub(crate) const SELECTED: Color = Color::Rgb(0x2f, 0x33, 0x4d);
 /// The selected card's outline (neutral-600).
 pub(crate) const OUTLINE: Color = Color::Rgb(0x52, 0x52, 0x52);
 

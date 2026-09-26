@@ -1,6 +1,7 @@
 //! The picker popup, in T3 Code's command-palette look: a rounded box over
 //! the screen holding the filter input, a section label, the rows, and a
-//! footer of keys.
+//! footer of keys. The box is only as tall as its rows need, and its top
+//! stays put while the filter narrows them.
 //!
 //! The project picker shows each project's badge and name over its path; the
 //! directory picker shows one folder per row. Where the filter matched is
@@ -21,6 +22,11 @@ use crate::sidebar::{DARK_GRAY, GRAY, OUTLINE, SELECTED, badge};
 const SEARCH: &str = "\u{f002}";
 /// Nerd Font's folder glyph, before the directory picker's input and rows.
 const FOLDER: &str = "\u{f07b}";
+/// The widest the popup gets, in columns.
+const MAX_WIDTH: u16 = 90;
+/// The popup's lines besides its rows: the borders, a blank line inside each,
+/// the input, the gap and label above the rows, and the gap and footer below.
+const CHROME: u16 = 9;
 
 /// How far the picker's rows are scrolled, kept between frames.
 #[derive(Debug, Default)]
@@ -37,51 +43,64 @@ pub(crate) fn render(
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
 ) -> (usize, Position) {
-    let popup = popup_rect(area);
+    let projects = matches!(picker.kind(), PickerKind::Projects);
+    let row_height: u16 = if projects { 2 } else { 1 };
+    let popup = {
+        let rows = u16::try_from(picker.shown().count())
+            .unwrap_or(u16::MAX)
+            .saturating_mul(row_height)
+            .max(1);
+        popup_rect(area, rows)
+    };
     Clear.render(popup, buf);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(OUTLINE));
-    let inner = block.inner(popup);
+    let inner = block.inner(popup).inner(Margin::new(2, 1));
     block.render(popup, buf);
-    let [input, _, label, rows, footer] = Layout::vertical([
+    let [input, _, label, rows, _, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .areas(inner);
-    let projects = matches!(picker.kind(), PickerKind::Projects);
     let cursor = render_input(picker, projects, pad(input), buf);
     Line::styled(
         if projects { "Projects" } else { "Directories" },
         Style::new().fg(GRAY),
     )
     .render(pad(label), buf);
-    let page = render_rows(picker, projects, rows, buf, scroll);
+    let page = render_rows(picker, row_height, rows, buf, scroll);
     render_footer(projects, pad(footer), buf);
     (page, cursor)
 }
 
-/// jinn's popup: 80% of the width (at least 30 columns) and 75% of the
-/// height plus 4 rows, centred across and a third of the way down.
-fn popup_rect(area: Rect) -> Rect {
-    let width = (area.width - area.width / 5).max(30).min(area.width);
-    let height = (area.height - area.height.div_ceil(4))
+/// jinn's popup, 80% of the width (at least 30 columns) and 75% of the
+/// height plus 4 rows, narrowed to `MAX_WIDTH` and shortened to fit `rows`
+/// lines of results. It's centred across, and its top stays where the
+/// full-height popup's would be, a third of the way down, so filtering
+/// doesn't move the input.
+fn popup_rect(area: Rect, rows: u16) -> Rect {
+    let width = (area.width - area.width / 5)
+        .clamp(30, MAX_WIDTH)
+        .min(area.width);
+    let full = (area.height - area.height.div_ceil(4))
         .saturating_add(4)
         .min(area.height);
     Rect::new(
         area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 3,
+        area.y + (area.height - full) / 3,
         width,
-        height,
+        rows.saturating_add(CHROME).min(full),
     )
 }
 
-/// A row's text area: a cell in from each side of the popup.
+/// A row's text area: two cells in from each side of the selection fill.
 fn pad(area: Rect) -> Rect {
-    area.inner(Margin::new(1, 0))
+    area.inner(Margin::new(2, 0))
 }
 
 /// The glyph and the typed text, or the project picker's placeholder.
@@ -112,12 +131,11 @@ fn render_input(picker: &PickerState, projects: bool, area: Rect, buf: &mut Buff
 /// Returns how many rows fit.
 fn render_rows(
     picker: &PickerState,
-    projects: bool,
+    row_height: u16,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
 ) -> usize {
-    let row_height: u16 = if projects { 2 } else { 1 };
     let page = usize::from(area.height / row_height).max(1);
     let shown: Vec<(&PickerItem, &Matches)> = picker.shown().collect();
     if shown.is_empty() {
@@ -448,7 +466,7 @@ mod tests {
 
     #[rstest::rstest]
     fn selection_below_the_fold_scrolls_into_view() {
-        // Given ten projects on a screen that fits three, the sixth selected.
+        // Given ten projects on a screen that fits one, the sixth selected.
         let picker = {
             let items = (0..10)
                 .map(|i| project(i, &format!("proj{i}"), &format!("/tmp/{i}")))
@@ -468,6 +486,83 @@ mod tests {
         assert!(
             lines.iter().any(|line| line.contains("P5 proj5")),
             "screen was {lines:#?}"
+        );
+    }
+
+    /// The rows of the popup's top and bottom borders.
+    fn border_rows(buf: &Buffer) -> Option<(u16, u16)> {
+        find(buf, "╭")
+            .zip(find(buf, "╰"))
+            .map(|((_, top), (_, bottom))| (top, bottom))
+    }
+
+    #[rstest::rstest]
+    fn popup_is_as_tall_as_its_rows() {
+        // Given a project picker with two projects on a tall screen.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 100, 40);
+
+        // Then the popup is 13 lines: its two 2-line rows and 9 of chrome.
+        let height = border_rows(&buf).map(|(top, bottom)| bottom - top + 1);
+        assert_eq!(height, Some(13), "the popup's height");
+    }
+
+    #[rstest::rstest]
+    fn popup_is_at_most_90_columns_wide() {
+        // Given a project picker.
+        let picker = orb();
+
+        // When drawing it on a 200-column screen.
+        let buf = draw(&picker, 200, 40);
+
+        // Then the popup's top border spans 90 columns.
+        let width = find(&buf, "╭")
+            .zip(find(&buf, "╮"))
+            .map(|((left, _), (right, _))| right - left + 1);
+        assert_eq!(width, Some(90), "the popup's width");
+    }
+
+    #[rstest::rstest]
+    fn popup_top_stays_when_the_filter_hides_rows() {
+        // Given ten projects, unfiltered and filtered down to none.
+        let items: Vec<PickerItem> = (0..10)
+            .map(|i| project(i, &format!("proj{i}"), &format!("/tmp/{i}")))
+            .collect();
+        let unfiltered = PickerState::projects(items.clone(), Focus::Sidebar);
+        let filtered = {
+            let mut picker = PickerState::projects(items, Focus::Sidebar);
+            picker.insert('z');
+            picker
+        };
+
+        // When drawing each.
+        let tops = [unfiltered, filtered]
+            .map(|picker| border_rows(&draw(&picker, 100, 40)).map(|(top, _)| top));
+
+        // Then both popups start on the same row.
+        assert_eq!(tops[0], tops[1], "the popup's top row");
+    }
+
+    #[rstest::rstest]
+    fn selection_fill_stops_short_of_the_border() {
+        // Given a project picker with orb selected.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the two cells inside the left border beside orb's row are
+        // unfilled, and the third is filled.
+        let border = find(&buf, "╭").map(|(x, _)| x);
+        let fills = border.zip(find(&buf, "OB orb")).map(|(x, (_, y))| {
+            [1, 2, 3].map(|dx| buf.cell((x + dx, y)).map(|cell| cell.bg == SELECTED))
+        });
+        assert_eq!(
+            fills,
+            Some([Some(false), Some(false), Some(true)]),
+            "the fill beside the left border"
         );
     }
 }

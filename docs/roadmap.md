@@ -210,6 +210,7 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Directory listing | The frontend loop runs `Command::ListDirectories(dir)` synchronously (as it does for `Yank` and `Attach`) and writes the names into `AppState.picker`, only when the directory part of the path changes | The `IntentHandler` reading the directory — it must not do I/O. A kameo actor — an async hop plus stale-reply handling for a ~1 ms `read_dir`. |
 | T3 import method | A one-off SQL statement (`ATTACH` T3's DB read-only, `INSERT … ON CONFLICT (root) DO NOTHING`) run by hand in M5's manual check | Import code that runs on every launch or once behind a flag — it's seeding, not a feature. |
 | Project removal | Deferred to the backlog project filter (T3's project-scope modal): `<C-x>` with a `No`/`Yes` confirm picker, soft remove (threads stay) | In M5's `␣n` picker — the user wants removal in the filter modal. Hard delete — refused while any thread exists, so an old Settled shelf would block it. |
+| Workspace trust | M5 shows Claude's "Workspace not trusted" refusal on the mode line. M6 adds an in-orb trust flow: on the refusal, orb opens an interactive `claude` in that directory in a pane, the user accepts Claude's own prompt and exits, and orb retries the start (key chosen in M6's plan). It covers new projects and, once, `~/.orb/worktrees` | Writing `hasTrustDialogAccepted` into `~/.claude.json` — an undocumented format that every running Claude rewrites, and it silently skips a security prompt. Headless, as T3 does — rejected with the Agent SDK (see Claude integration). |
 
 ## Milestones
 
@@ -272,7 +273,8 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Previous-worktree reuse (T3: most recently updated non-archived thread in the project with a different worktree).
 - Branch switch: reuse a worktree already on that branch, else checkout in the thread's worktree; refused while the session is running.
 - Rename `orb/<hex>` → `orb/<slug>` after the first turn using Claude's session title.
-- Open questions: Claude's workspace-trust dialog per new worktree dir — does trusting `~/.orb/worktrees` cover children?; how branch switching is triggered (user defines keys; was `:branch <name>`)
+- In-orb trust flow (see Decisions: Workspace trust). Resolved in M5's manual check: trust is inherited from a parent directory, so trusting `~/.orb/worktrees` once covers every worktree (research §10).
+- Open questions: how branch switching is triggered (user defines keys; was `:branch <name>`); the trust flow's key
 
 ### 7. Drafts
 - `␣n` → project picker → `✎` draft → form (workspace, base branch, model, permission) with pickers; per-project last-used defaults + global fallback; Start → worktree → `claude --bg -n <name> [--model] [--permission-mode]` idle → attach; drafts persist.
@@ -289,7 +291,7 @@ PR status via `gh` + settle on merge · snooze · undo · project filter (T3's p
 - **Transcript format is undocumented** → lenient parsing + real-transcript fixtures; each line carries `version`.
 - **Background supervisor is a research preview** → everything behind `SessionHost`.
 - **Claude keys while attached**: `←` on an empty prompt opens Claude's agent view inside the pane; `Ctrl+Z` exits `attach` — orb treats the attach process exiting as "back to orb".
-- **Workspace-trust dialog** may appear per new worktree → surfaces as "needs input"; investigated in M6.
+- **Workspace trust**: `claude --bg` refuses an untrusted directory (a new project, or `~/.orb/worktrees` before its first trust) → M6's in-orb trust flow; trust is inherited, so worktrees need it once.
 
 ## Acceptance criteria (MVP)
 
