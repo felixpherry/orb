@@ -238,7 +238,7 @@ mod tests {
     use super::{BACKGROUND, layout, render};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::keymap::{Keys, keymap, press};
+    use crate::keymap::{Keys, Scope, keymap, press};
     use crate::picker::PickerScroll;
     use crate::preview::PreviewCache;
     use crate::sidebar::SidebarScroll;
@@ -277,7 +277,7 @@ mod tests {
 
     /// Draws `state` on an 80x8 screen.
     fn draw(state: &AppState) -> Buffer {
-        draw_with(state, &Keys::new(keymap(), Focus::Sidebar))
+        draw_with(state, &Keys::new(keymap(), Scope::Sidebar))
     }
 
     /// Draws `state` on an 80x8 screen with `keys` pending.
@@ -336,7 +336,7 @@ mod tests {
     /// thread.
     fn draw_with_pane(state: &AppState, pane: &Pane) -> Buffer {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-        let keys = Keys::new(keymap(), Focus::Sidebar);
+        let keys = Keys::new(keymap(), Scope::Sidebar);
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
@@ -406,7 +406,7 @@ mod tests {
 
     /// The keymap in Sidebar focus with `c` pressed once.
     fn pending(c: char) -> Keys {
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
         press(
             &mut keys,
             KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
@@ -615,7 +615,7 @@ mod tests {
     fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
         // Given Space pressed on a two-row screen, too short for the popup.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 2));
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
         press(
             &mut keys,
             KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),

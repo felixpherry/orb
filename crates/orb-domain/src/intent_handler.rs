@@ -2293,10 +2293,10 @@ mod tests {
 
     #[rstest::rstest]
     fn pick_model_on_a_draft_selects_its_model() {
-        // Given a selected draft on sonnet.
+        // Given a selected draft on Claude Sonnet 5.
         let mut state = drafting(
             Draft {
-                model: Some("sonnet".into()),
+                model: Some("claude-sonnet-5".into()),
                 ..draft(DraftWorkspace::Local)
             },
             vec![],
@@ -2305,17 +2305,18 @@ mod tests {
         // When handling PickModel.
         IntentHandler::handle(&Intent::PickModel, &mut state);
 
-        // Then sonnet is selected.
+        // Then Claude Sonnet 5 is selected.
         assert_eq!(
             state.picker.as_ref().and_then(PickerState::selected),
-            Some(&PickerItem::Setting(Some("sonnet"))),
+            Some(&PickerItem::Setting(Some("claude-sonnet-5"))),
             "the draft's model should be selected"
         );
     }
 
     #[rstest::rstest]
     fn picking_a_model_sets_the_drafts_model() {
-        // Given a draft's model picker with opus, after Default, highlighted.
+        // Given a draft's model picker with Claude Opus 5.5, after Default,
+        // highlighted.
         let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
         IntentHandler::handle(&Intent::PickModel, &mut state);
         IntentHandler::handle(&Intent::PickerNext, &mut state);
@@ -2323,17 +2324,17 @@ mod tests {
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the draft runs opus.
+        // Then the draft runs claude-opus-5-5.
         assert_eq!(
             the_draft(&state).and_then(|draft| draft.model.as_deref()),
-            Some("opus"),
+            Some("claude-opus-5-5"),
             "the picked model should be the draft's"
         );
     }
 
     #[rstest::rstest]
     fn picking_a_model_returns_save_draft() {
-        // Given a draft's model picker with opus highlighted.
+        // Given a draft's model picker with Claude Opus 5.5 highlighted.
         let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
         IntentHandler::handle(&Intent::PickModel, &mut state);
         IntentHandler::handle(&Intent::PickerNext, &mut state);

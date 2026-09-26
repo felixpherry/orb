@@ -2,7 +2,9 @@
 //! defined are bound.
 //!
 //! In the sidebar and the preview, keys go through a which-key keymap whose
-//! scope is the focus; `<Space>` is the leader and shows a popup. While
+//! scope is the focus; `<Space>` is the leader and shows a popup. While a
+//! draft is selected the preview's block keys aren't bound, so the popups
+//! don't offer keys that do nothing there. While
 //! attached, every key goes to Claude except `<C-\>`. An open picker takes
 //! typed characters as filter text and has its own fixed keys.
 
@@ -34,15 +36,38 @@ impl fmt::Display for KeyCategory {
     }
 }
 
+/// Which bindings apply: the sidebar's, or the preview's, which lose their
+/// block keys while a draft is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Scope {
+    Sidebar,
+    /// The preview of a thread.
+    Preview,
+    /// The preview side while a draft is selected: its form has no blocks to
+    /// move through, fold or yank.
+    DraftForm,
+}
+
+impl Scope {
+    /// The scope for keys in `focus`, with a draft selected or not.
+    pub(crate) fn new(focus: Focus, draft: bool) -> Self {
+        match (focus, draft) {
+            (Focus::Preview, false) => Self::Preview,
+            (Focus::Preview, true) => Self::DraftForm,
+            (Focus::Sidebar | Focus::Attached | Focus::Picker, _) => Self::Sidebar,
+        }
+    }
+}
+
 /// The keymap with its current scope and pending key sequence.
-pub(crate) type Keys = WhichKeyState<KeyEvent, Focus, Intent, KeyCategory>;
+pub(crate) type Keys = WhichKeyState<KeyEvent, Scope, Intent, KeyCategory>;
 
 /// The sidebar and preview bindings, scoped by focus.
 #[expect(
     clippy::too_many_lines,
     reason = "one binding per key keeps the whole keymap in one place"
 )]
-pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
+pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     let mut keymap = Keymap::new();
     keymap
         .describe_group("<leader>", "leader")
@@ -50,147 +75,146 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
             "j",
             Intent::SelectNext,
             KeyCategory::Navigation,
-            Focus::Sidebar,
+            Scope::Sidebar,
         )
         .bind(
             "k",
             Intent::SelectPrev,
             KeyCategory::Navigation,
-            Focus::Sidebar,
+            Scope::Sidebar,
         )
         .bind(
             "<c-l>",
             Intent::FocusPreview,
             KeyCategory::Navigation,
-            Focus::Sidebar,
+            Scope::Sidebar,
         )
         .bind(
             "<enter>",
             Intent::Attach,
             KeyCategory::Sessions,
-            Focus::Sidebar,
+            Scope::Sidebar,
         )
-        .bind("q", Intent::Quit, KeyCategory::General, Focus::Sidebar)
-        .bind("p", Intent::TogglePin, KeyCategory::Threads, Focus::Sidebar)
+        .bind("q", Intent::Quit, KeyCategory::General, Scope::Sidebar)
+        .bind("p", Intent::TogglePin, KeyCategory::Threads, Scope::Sidebar)
         .bind(
             "ss",
             Intent::ToggleSettle,
             KeyCategory::Threads,
-            Focus::Sidebar,
+            Scope::Sidebar,
         )
         .bind(
             "xx",
             Intent::DeleteThread,
             KeyCategory::Threads,
-            Focus::Sidebar,
+            Scope::Sidebar,
         )
         .bind(
             "l",
             Intent::OpenShelf,
             KeyCategory::Navigation,
-            Focus::Sidebar,
+            Scope::Sidebar,
         )
         .bind(
             "h",
             Intent::CloseShelf,
             KeyCategory::Navigation,
-            Focus::Sidebar,
+            Scope::Sidebar,
         )
         .bind(
             "<leader>n",
             Intent::NewSession,
             KeyCategory::Sessions,
-            Focus::Sidebar,
+            Scope::Sidebar,
         )
         .bind(
             "<leader>p",
             Intent::AddProject,
             KeyCategory::Sessions,
-            Focus::Sidebar,
-        )
-        .bind(
-            "<c-h>",
-            Intent::FocusSidebar,
-            KeyCategory::Navigation,
-            Focus::Preview,
-        )
-        .bind(
-            "<enter>",
-            Intent::Attach,
-            KeyCategory::Sessions,
-            Focus::Preview,
-        )
-        .bind(
-            "<leader>n",
-            Intent::NewSession,
-            KeyCategory::Sessions,
-            Focus::Preview,
-        )
-        .bind(
-            "<leader>p",
-            Intent::AddProject,
-            KeyCategory::Sessions,
-            Focus::Preview,
-        )
+            Scope::Sidebar,
+        );
+    for scope in [Scope::Preview, Scope::DraftForm] {
+        keymap
+            .bind(
+                "<c-h>",
+                Intent::FocusSidebar,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind("<enter>", Intent::Attach, KeyCategory::Sessions, scope)
+            .bind(
+                "<leader>n",
+                Intent::NewSession,
+                KeyCategory::Sessions,
+                scope,
+            )
+            .bind(
+                "<leader>p",
+                Intent::AddProject,
+                KeyCategory::Sessions,
+                scope,
+            );
+    }
+    keymap
         .bind(
             "j",
             Intent::NextBlock,
             KeyCategory::Navigation,
-            Focus::Preview,
+            Scope::Preview,
         )
         .bind(
             "k",
             Intent::PrevBlock,
             KeyCategory::Navigation,
-            Focus::Preview,
+            Scope::Preview,
         )
         .bind(
             "<c-d>",
             Intent::HalfPageDown,
             KeyCategory::Navigation,
-            Focus::Preview,
+            Scope::Preview,
         )
         .bind(
             "<c-u>",
             Intent::HalfPageUp,
             KeyCategory::Navigation,
-            Focus::Preview,
+            Scope::Preview,
         )
-        .bind("gg", Intent::Top, KeyCategory::Navigation, Focus::Preview)
-        .bind("G", Intent::Bottom, KeyCategory::Navigation, Focus::Preview)
-        .bind("y", Intent::Yank, KeyCategory::Preview, Focus::Preview)
+        .bind("gg", Intent::Top, KeyCategory::Navigation, Scope::Preview)
+        .bind("G", Intent::Bottom, KeyCategory::Navigation, Scope::Preview)
+        .bind("y", Intent::Yank, KeyCategory::Preview, Scope::Preview)
         .bind(
             "za",
             Intent::ToggleFold,
             KeyCategory::Preview,
-            Focus::Preview,
+            Scope::Preview,
         )
         .bind(
             "<tab>",
             Intent::ToggleFold,
             KeyCategory::Preview,
-            Focus::Preview,
+            Scope::Preview,
         );
-    for focus in [Focus::Sidebar, Focus::Preview] {
+    for scope in [Scope::Sidebar, Scope::Preview, Scope::DraftForm] {
         keymap
             .bind(
                 "<leader>w",
                 Intent::ChangeWorkspace,
                 KeyCategory::Sessions,
-                focus,
+                scope,
             )
             .bind(
                 "<leader>b",
                 Intent::SwitchBranch,
                 KeyCategory::Sessions,
-                focus,
+                scope,
             )
-            .bind("<leader>m", Intent::PickModel, KeyCategory::Sessions, focus)
+            .bind("<leader>m", Intent::PickModel, KeyCategory::Sessions, scope)
             .bind(
                 "<leader>a",
                 Intent::PickPermission,
                 KeyCategory::Sessions,
-                focus,
+                scope,
             );
     }
     keymap
@@ -214,7 +238,7 @@ pub(crate) fn press(keys: &mut Keys, key: KeyEvent) -> Option<Intent> {
 pub(crate) fn pending_confirm(keys: &Keys) -> Option<char> {
     match (keys.scope(), keys.current_sequence.as_slice()) {
         (
-            Focus::Sidebar,
+            Scope::Sidebar,
             [
                 KeyEvent {
                     code: KeyCode::Char(c @ ('s' | 'x')),
@@ -276,7 +300,7 @@ mod tests {
     use orb_domain::{Focus, Intent};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-    use super::{Keys, Route, attached_route, keymap, picker_route, press};
+    use super::{Keys, Route, Scope, attached_route, keymap, picker_route, press};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -289,7 +313,7 @@ mod tests {
     #[rstest::rstest]
     fn space_opens_the_leader_popup_in_the_sidebar() {
         // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
 
         // When pressing Space.
         press(&mut keys, key(KeyCode::Char(' ')));
@@ -301,7 +325,7 @@ mod tests {
     #[rstest::rstest]
     fn space_then_n_starts_a_session_in_the_sidebar() {
         // Given Space already pressed in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `n`.
@@ -316,11 +340,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Sidebar)]
-    #[case(Focus::Preview)]
-    fn space_then_p_adds_a_project(#[case] focus: Focus) {
+    #[case(Scope::Sidebar)]
+    #[case(Scope::Preview)]
+    fn space_then_p_adds_a_project(#[case] scope: Scope) {
         // Given Space already pressed.
-        let mut keys = Keys::new(keymap(), focus);
+        let mut keys = Keys::new(keymap(), scope);
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `p`.
@@ -330,14 +354,14 @@ mod tests {
         assert_eq!(
             intent,
             Some(Intent::AddProject),
-            "Space p should add a project in {focus:?}"
+            "Space p should add a project in {scope:?}"
         );
     }
 
     #[rstest::rstest]
     fn leader_w_in_preview_changes_workspace() {
         // Given Space already pressed in Preview focus.
-        let mut keys = Keys::new(keymap(), Focus::Preview);
+        let mut keys = Keys::new(keymap(), Scope::Preview);
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `w`.
@@ -354,7 +378,7 @@ mod tests {
     #[rstest::rstest]
     fn leader_b_in_preview_switches_branch() {
         // Given Space already pressed in Preview focus.
-        let mut keys = Keys::new(keymap(), Focus::Preview);
+        let mut keys = Keys::new(keymap(), Scope::Preview);
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `b`.
@@ -369,19 +393,19 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Sidebar, 'w', Intent::ChangeWorkspace)]
-    #[case(Focus::Sidebar, 'b', Intent::SwitchBranch)]
-    #[case(Focus::Sidebar, 'm', Intent::PickModel)]
-    #[case(Focus::Sidebar, 'a', Intent::PickPermission)]
-    #[case(Focus::Preview, 'm', Intent::PickModel)]
-    #[case(Focus::Preview, 'a', Intent::PickPermission)]
+    #[case(Scope::Sidebar, 'w', Intent::ChangeWorkspace)]
+    #[case(Scope::Sidebar, 'b', Intent::SwitchBranch)]
+    #[case(Scope::Sidebar, 'm', Intent::PickModel)]
+    #[case(Scope::Sidebar, 'a', Intent::PickPermission)]
+    #[case(Scope::Preview, 'm', Intent::PickModel)]
+    #[case(Scope::Preview, 'a', Intent::PickPermission)]
     fn leader_keys_open_the_session_setup_pickers(
-        #[case] focus: Focus,
+        #[case] scope: Scope,
         #[case] pressed: char,
         #[case] expected: Intent,
     ) {
         // Given Space already pressed.
-        let mut keys = Keys::new(keymap(), focus);
+        let mut keys = Keys::new(keymap(), scope);
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing the key.
@@ -391,7 +415,7 @@ mod tests {
         assert_eq!(
             intent.as_ref(),
             Some(&expected),
-            "Space {pressed} in {focus:?}"
+            "Space {pressed} in {scope:?}"
         );
     }
 
@@ -440,7 +464,7 @@ mod tests {
     #[rstest::rstest]
     fn q_is_ignored_in_the_preview() {
         // Given the keymap in Preview focus.
-        let mut keys = Keys::new(keymap(), Focus::Preview);
+        let mut keys = Keys::new(keymap(), Scope::Preview);
 
         // When pressing `q`.
         let intent = press(&mut keys, key(KeyCode::Char('q')));
@@ -460,7 +484,7 @@ mod tests {
     #[case(key(KeyCode::Char('h')), Intent::CloseShelf)]
     fn sidebar_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
 
         // When pressing the key.
         let intent = press(&mut keys, pressed);
@@ -490,7 +514,7 @@ mod tests {
     #[case(vec![key(KeyCode::Tab)], Intent::ToggleFold)]
     fn preview_keys_map_to_their_intents(#[case] pressed: Vec<KeyEvent>, #[case] expected: Intent) {
         // Given the keymap in Preview focus.
-        let mut keys = Keys::new(keymap(), Focus::Preview);
+        let mut keys = Keys::new(keymap(), Scope::Preview);
 
         // When pressing the keys in order (Shift+G as kitty reports it).
         let intent = pressed
@@ -508,9 +532,99 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case(Focus::Sidebar, false, Scope::Sidebar)]
+    #[case(Focus::Sidebar, true, Scope::Sidebar)]
+    #[case(Focus::Preview, false, Scope::Preview)]
+    #[case(Focus::Preview, true, Scope::DraftForm)]
+    fn scope_follows_focus_and_a_selected_draft(
+        #[case] focus: Focus,
+        #[case] draft: bool,
+        #[case] expected: Scope,
+    ) {
+        // Given / When / Then the preview on a draft gets the form's scope.
+        assert_eq!(
+            Scope::new(focus, draft),
+            expected,
+            "the scope in {focus:?} (draft: {draft})"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(vec![key(KeyCode::Char('j'))])]
+    #[case(vec![key(KeyCode::Char('k'))])]
+    #[case(vec![ctrl('d')])]
+    #[case(vec![ctrl('u')])]
+    #[case(vec![key(KeyCode::Char('g')), key(KeyCode::Char('g'))])]
+    #[case(vec![KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)])]
+    #[case(vec![key(KeyCode::Char('y'))])]
+    #[case(vec![key(KeyCode::Char('z')), key(KeyCode::Char('a'))])]
+    #[case(vec![key(KeyCode::Tab)])]
+    fn block_keys_are_unbound_on_a_draft_form(#[case] pressed: Vec<KeyEvent>) {
+        // Given the keymap on a draft's form.
+        let mut keys = Keys::new(keymap(), Scope::DraftForm);
+
+        // When pressing a preview block key.
+        let intents: Vec<Option<Intent>> = pressed
+            .into_iter()
+            .map(|pressed| press(&mut keys, pressed))
+            .collect();
+
+        // Then nothing happens.
+        assert!(
+            intents.iter().all(Option::is_none),
+            "a block key did something on a draft: {intents:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case('g')]
+    #[case('z')]
+    fn block_prefix_opens_no_popup_on_a_draft_form(#[case] pressed: char) {
+        // Given the keymap on a draft's form.
+        let mut keys = Keys::new(keymap(), Scope::DraftForm);
+
+        // When pressing the first key of `gg` or `za`.
+        press(&mut keys, key(KeyCode::Char(pressed)));
+
+        // Then which-key waits for nothing.
+        assert!(!keys.is_pending(), "{pressed} shouldn't open a popup");
+    }
+
+    #[rstest::rstest]
+    #[case(vec![ctrl('h')], Intent::FocusSidebar)]
+    #[case(vec![key(KeyCode::Enter)], Intent::Attach)]
+    #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('n'))], Intent::NewSession)]
+    #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('p'))], Intent::AddProject)]
+    #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('w'))], Intent::ChangeWorkspace)]
+    #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('b'))], Intent::SwitchBranch)]
+    #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('m'))], Intent::PickModel)]
+    #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('a'))], Intent::PickPermission)]
+    fn draft_form_keys_map_to_their_intents(
+        #[case] pressed: Vec<KeyEvent>,
+        #[case] expected: Intent,
+    ) {
+        // Given the keymap on a draft's form.
+        let mut keys = Keys::new(keymap(), Scope::DraftForm);
+
+        // When pressing the keys in order.
+        let intent = pressed
+            .into_iter()
+            .map(|pressed| press(&mut keys, pressed))
+            .last()
+            .flatten();
+
+        // Then it yields its intent.
+        assert_eq!(
+            intent.as_ref(),
+            Some(&expected),
+            "the key for {expected} on a draft's form"
+        );
+    }
+
+    #[rstest::rstest]
     fn s_then_s_toggles_settle() {
         // Given `s` already pressed in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
         press(&mut keys, key(KeyCode::Char('s')));
 
         // When pressing `s` again.
@@ -523,7 +637,7 @@ mod tests {
     #[rstest::rstest]
     fn x_then_x_deletes() {
         // Given `x` already pressed in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
         press(&mut keys, key(KeyCode::Char('x')));
 
         // When pressing `x` again.
@@ -536,7 +650,7 @@ mod tests {
     #[rstest::rstest]
     fn s_then_j_does_nothing() {
         // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
 
         // When pressing `s` then `j`.
         let intents =
@@ -549,7 +663,7 @@ mod tests {
     #[rstest::rstest]
     fn held_j_selects_the_next_thread() {
         // Given a held `j` as the kitty protocol reports it.
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
         let held = KeyEvent::new_with_kind_and_state(
             KeyCode::Char('j'),
             KeyModifiers::NONE,
