@@ -51,6 +51,22 @@ impl IntentHandler {
                 state.sessions.select_prev();
                 with_visit(state, vec![Command::ShowPreview])
             }
+            Intent::SelectFirst => {
+                state.sessions.select_first();
+                with_visit(state, vec![Command::ShowPreview])
+            }
+            Intent::SelectLast => {
+                state.sessions.select_last();
+                with_visit(state, vec![Command::ShowPreview])
+            }
+            Intent::SelectHalfPageDown => {
+                state.sessions.half_page_down(&state.sidebar.layout);
+                with_visit(state, vec![Command::ShowPreview])
+            }
+            Intent::SelectHalfPageUp => {
+                state.sessions.half_page_up(&state.sidebar.layout);
+                with_visit(state, vec![Command::ShowPreview])
+            }
             Intent::FocusPreview => {
                 state.focus = Focus::Preview;
                 vec![]
@@ -448,7 +464,9 @@ impl IntentHandler {
                     )
                 }
                 (Ok(()), Some(item @ SidebarItem::Thread(id))) => {
-                    state.sessions.cursor = state.sessions.row_neighbour(item);
+                    let neighbour = state.sessions.row_neighbour(item);
+                    state.sessions.deleting.insert(id);
+                    state.sessions.cursor = neighbour;
                     with_visit(state, vec![Command::Delete(id), Command::ShowPreview])
                 }
                 _ => vec![],
@@ -698,8 +716,8 @@ mod tests {
     use crate::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
     use crate::feat::preview::state::{Preview, PreviewLayout};
     use crate::feat::sessions::state::{
-        AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus,
+        AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, SidebarRow,
+        Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
@@ -2007,6 +2025,61 @@ mod tests {
             state.sessions.cursor,
             Some(SidebarItem::Thread(ThreadId(3))),
             "delete should select the next thread row below"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::SelectFirst, 3)]
+    #[case(Intent::SelectLast, 1)]
+    #[case(Intent::SelectHalfPageDown, 1)]
+    #[case(Intent::SelectHalfPageUp, 3)]
+    fn sidebar_jumps_show_and_visit_the_thread_they_land_on(
+        #[case] intent: Intent,
+        #[case] expected: i64,
+    ) {
+        // Given threads 3, 2 and 1 in sidebar order, with thread 2 selected.
+        let mut state = state_with(
+            vec![
+                thread(1, ThreadStatus::Idle),
+                thread(2, ThreadStatus::Idle),
+                thread(3, ThreadStatus::Idle),
+            ],
+            2,
+        );
+
+        // When handling the jump.
+        let commands = IntentHandler::handle(&intent, &mut state);
+
+        // Then the preview shows the thread it lands on, which is visited.
+        assert_eq!(
+            commands,
+            vec![Command::ShowPreview, Command::Visit(ThreadId(expected))],
+            "{intent:?} should show and visit thread {expected}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_hides_the_thread_from_the_sidebar() {
+        // Given threads 2 and 1, with thread 1 selected.
+        let mut state = state_with(
+            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+            1,
+        );
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then only thread 2 is listed, while its session is removed.
+        let listed: Vec<SidebarItem> = state
+            .sessions
+            .sidebar()
+            .iter()
+            .map(SidebarRow::item)
+            .collect();
+        assert_eq!(
+            listed,
+            vec![SidebarItem::Thread(ThreadId(2))],
+            "a deleted thread should leave the sidebar at once"
         );
     }
 

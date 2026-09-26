@@ -13,6 +13,7 @@
 use std::time::{Duration, SystemTime};
 
 use orb_domain::feat::sessions::state::{Project, Sessions, SidebarRow, Thread, ThreadStatus};
+use orb_domain::feat::sidebar::state::SidebarLayout;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
@@ -29,18 +30,22 @@ pub(crate) struct SidebarScroll {
 
 /// Draws the sidebar into `area`, with a border on its right edge, scrolled
 /// so the cursor's row is in view. Returns the y of the selected row's top
-/// line (a card's outline) when it's on screen.
+/// line (a card's outline) when it's on screen, and the list's layout.
 pub(crate) fn render(
     sessions: &Sessions,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut SidebarScroll,
-) -> Option<u16> {
+) -> (Option<u16>, SidebarLayout) {
     let block = Block::new().borders(Borders::RIGHT);
     let inner = block.inner(area);
     block.render(area, buf);
     let rows = sessions.sidebar();
+    let layout = SidebarLayout {
+        rows: inner.height,
+        heights: rows.iter().map(height).collect(),
+    };
     // Each row with its top line in the list. A list of cards opens with a
     // blank line for the first card's outline. Blank lines above the shelf
     // header keep the shelf at the bottom while the list is short.
@@ -93,10 +98,11 @@ pub(crate) fn render(
             }
         }
     }
-    selected
+    let selected_y = selected
         .map(|(top, _)| top)
         .filter(|top| (scroll.offset..scroll.offset.saturating_add(inner.height)).contains(top))
-        .map(|top| inner.y + top - scroll.offset)
+        .map(|top| inner.y + top - scroll.offset);
+    (selected_y, layout)
 }
 
 /// How many lines a row takes: a card's 3 and the blank line below it, else 1.
@@ -435,6 +441,7 @@ mod tests {
         Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
         ThreadStatus,
     };
+    use orb_domain::feat::sidebar::state::SidebarLayout;
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
 
@@ -806,6 +813,36 @@ mod tests {
                 .all(|line| line.trim_end_matches('│').trim().is_empty()),
             "lines were {:#?}",
             lines(&buf)
+        );
+    }
+
+    #[rstest::rstest]
+    fn render_reports_the_list_height_and_each_rows_height() {
+        // Given two cards and a collapsed shelf.
+        let sessions = sessions(vec![
+            thread(1, ThreadStatus::Idle),
+            thread(2, ThreadStatus::Idle),
+            settled(3, 10),
+        ]);
+
+        // When rendering a 10-line sidebar.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
+        let (_, layout) = render(
+            &sessions,
+            at(1000),
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+        );
+
+        // Then it reports the 10 lines and each row's height.
+        assert_eq!(
+            layout,
+            SidebarLayout {
+                rows: 10,
+                heights: vec![4, 4, 1],
+            },
+            "the layout should be the list height and one height per row"
         );
     }
 

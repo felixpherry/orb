@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use orb_domain::feat::preview::state::PreviewLayout;
 use orb_domain::feat::sessions::state::SidebarItem;
 use orb_domain::feat::sessions::validator::{ToggleSettleError, validate_toggle_settle};
+use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::{AppState, Focus};
 use orb_term::Pane;
 use ratatui::Frame;
@@ -45,7 +46,7 @@ pub(crate) fn layout(area: Rect) -> [Rect; 3] {
 /// one running; it's drawn only while attached, and otherwise the right side
 /// shows the selected thread's preview, with `pane_error` saying why the
 /// session couldn't start. Returns the preview's layout when it was drawn,
-/// and how many rows the picker fits when it's open.
+/// the sidebar's layout, and how many rows the picker fits when it's open.
 #[expect(
     clippy::too_many_arguments,
     reason = "the frame's inputs and the three frontend view states it updates"
@@ -60,9 +61,9 @@ pub(crate) fn render(
     cache: &mut PreviewCache,
     scroll: &mut SidebarScroll,
     picker_scroll: &mut PickerScroll,
-) -> (Option<PreviewLayout>, Option<usize>) {
+) -> (Option<PreviewLayout>, SidebarLayout, Option<usize>) {
     let [sidebar_area, right, mode_line] = layout(frame.area());
-    let selected_y = sidebar::render(
+    let (selected_y, sidebar_layout) = sidebar::render(
         &state.sessions,
         now,
         sidebar_area,
@@ -133,7 +134,7 @@ pub(crate) fn render(
             cell.bg = BACKGROUND;
         }
     }
-    (preview_layout, picker_page)
+    (preview_layout, sidebar_layout, picker_page)
 }
 
 /// What `⏎` does on the Settled header: `▸ Settled (N) · ⏎ open`, or

@@ -2,9 +2,12 @@
 //! order, and its cursor.
 
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::SystemTime;
+
+use crate::feat::sidebar::state::SidebarLayout;
 
 /// Identifies a thread across launches (its row in orb's store).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -171,10 +174,11 @@ impl SidebarRow<'_> {
 ///
 /// Written by the sessions actor (projects and their drafts, `error`,
 /// `starting` when a start ends, `trust`, `attach`, the cursor after a
-/// restore or when a still-selected draft becomes a thread) and by the intent
-/// handler (the cursor on navigation, settle and delete, `shelf_open`,
-/// `starting` when a start begins, a draft's fields when the user picks them).
-/// The frontend loop takes `attach`.
+/// restore or when a still-selected draft becomes a thread, removing a
+/// thread from `deleting`) and by the intent handler (the cursor on
+/// navigation, settle and delete, `shelf_open`, `starting` when a start
+/// begins, a draft's fields when the user picks them, adding a thread to
+/// `deleting`). The frontend loop takes `attach`.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
@@ -192,6 +196,9 @@ pub struct Sessions {
     pub trust: Option<PathBuf>,
     /// A started draft's thread for the frontend to attach to.
     pub attach: Option<ThreadId>,
+    /// Threads hidden while their `claude rm` runs. The intent handler
+    /// inserts; the sessions actor removes.
+    pub deleting: HashSet<ThreadId>,
 }
 
 impl Sessions {
@@ -222,7 +229,7 @@ impl Sessions {
     /// first), active cards (newest created or un-settled first), then, if
     /// anything is settled, the shelf header and the settled rows (newest
     /// settle first). A collapsed shelf still lists the cursor's settled
-    /// thread. Ties go to the higher id.
+    /// thread. Ties go to the higher id. Threads being deleted aren't listed.
     pub fn sidebar(&self) -> Vec<SidebarRow<'_>> {
         let mut drafts: Vec<_> = self
             .projects
@@ -234,6 +241,7 @@ impl Sessions {
             .projects
             .iter()
             .flat_map(|project| project.threads.iter().map(move |thread| (project, thread)))
+            .filter(|(_, thread)| !self.deleting.contains(&thread.id))
             .partition(|(_, thread)| thread.settled_at.is_some());
         let (mut pinned, mut active): (Vec<_>, Vec<_>) = live
             .into_iter()
@@ -335,6 +343,51 @@ impl Sessions {
         }
     }
 
+    /// Move the cursor to the first row.
+    pub fn select_first(&mut self) {
+        if let Some(&first) = self.items().first() {
+            self.cursor = Some(first);
+        }
+    }
+
+    /// Move the cursor to the last row.
+    pub fn select_last(&mut self) {
+        if let Some(&last) = self.items().last() {
+            self.cursor = Some(last);
+        }
+    }
+
+    /// Move the cursor down by as many rows as fit in half the sidebar's
+    /// visible height, at least one; stays put on the last row. Without a
+    /// cursor, or with one on a row that's gone, selects the first row.
+    pub fn half_page_down(&mut self, layout: &SidebarLayout) {
+        let items = self.items();
+        let target = match self.position(&items) {
+            None => items.first(),
+            Some(at) => {
+                let steps = half_page(layout, at + 1..items.len());
+                items.get((at + steps).min(items.len() - 1))
+            }
+        };
+        if let Some(&target) = target {
+            self.cursor = Some(target);
+        }
+    }
+
+    /// Move the cursor up by as many rows as fit in half the sidebar's
+    /// visible height, at least one; stays put on the first row. Without a
+    /// cursor, or with one on a row that's gone, selects the first row.
+    pub fn half_page_up(&mut self, layout: &SidebarLayout) {
+        let items = self.items();
+        let target = match self.position(&items) {
+            None => items.first(),
+            Some(at) => items.get(at.saturating_sub(half_page(layout, (0..at).rev()))),
+        };
+        if let Some(&target) = target {
+            self.cursor = Some(target);
+        }
+    }
+
     /// Where the cursor goes when thread `id` is settled: the next card below,
     /// else the nearest card above, else the shelf header the settle creates.
     pub fn card_neighbour(&self, id: ThreadId) -> Option<SidebarItem> {
@@ -350,7 +403,7 @@ impl Sessions {
     pub fn row_neighbour(&self, item: SidebarItem) -> Option<SidebarItem> {
         self.neighbour(item, |row| !matches!(row, SidebarRow::ShelfHeader { .. }))
             .or_else(|| {
-                self.threads()
+                self.shown_threads()
                     .any(|thread| {
                         SidebarItem::Thread(thread.id) != item && thread.settled_at.is_some()
                     })
@@ -369,16 +422,24 @@ impl Sessions {
         self.cursor = Some(SidebarItem::SettledShelf);
     }
 
-    /// How many threads are running a turn right now.
+    /// How many threads are running a turn right now, not counting threads
+    /// being deleted.
     pub fn working_count(&self) -> usize {
-        self.threads()
+        self.shown_threads()
             .filter(|thread| thread.status == ThreadStatus::Working)
             .count()
     }
 
-    /// Whether any thread has a turn underway.
+    /// Whether any thread not being deleted has a turn underway.
     pub fn any_in_progress(&self) -> bool {
-        self.threads().any(|thread| thread.status.in_progress())
+        self.shown_threads()
+            .any(|thread| thread.status.in_progress())
+    }
+
+    /// Every thread but those being deleted.
+    fn shown_threads(&self) -> impl Iterator<Item = &Thread> {
+        self.threads()
+            .filter(|thread| !self.deleting.contains(&thread.id))
     }
 
     /// What each sidebar row's cursor rests on, in display order.
@@ -413,6 +474,27 @@ impl Sessions {
     }
 }
 
+/// How many of the rows at `indices`, walked in order, fit in half of
+/// `layout`'s visible height; at least one. A row the layout doesn't know
+/// counts as one line.
+fn half_page<I>(layout: &SidebarLayout, indices: I) -> usize
+where
+    I: Iterator<Item = usize>,
+{
+    let half = usize::from(layout.rows / 2).max(1);
+    indices
+        .scan(0, |lines, at| {
+            *lines += layout
+                .heights
+                .get(at)
+                .map_or(1, |&height| usize::from(height));
+            Some(*lines)
+        })
+        .take_while(|&lines| lines <= half)
+        .count()
+        .max(1)
+}
+
 /// What the frontend needs to attach to a thread's session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachTarget {
@@ -429,6 +511,7 @@ mod tests {
         Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread,
         ThreadId, ThreadStatus,
     };
+    use crate::feat::sidebar::state::SidebarLayout;
 
     fn at(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -540,6 +623,22 @@ mod tests {
 
     fn on(id: i64) -> SidebarItem {
         SidebarItem::Thread(ThreadId(id))
+    }
+
+    /// Seven cards, listed 7 down to 1, with the cursor on thread `cursor`.
+    fn seven_cards(cursor: i64) -> Sessions {
+        sessions(
+            (1..=7).map(|id| active(id, id.unsigned_abs())).collect(),
+            Some(on(cursor)),
+        )
+    }
+
+    /// A sidebar `rows` lines tall showing seven 4-line cards.
+    fn cards_in(rows: u16) -> SidebarLayout {
+        SidebarLayout {
+            rows,
+            heights: vec![4; 7],
+        }
     }
 
     #[rstest::rstest]
@@ -883,5 +982,231 @@ mod tests {
             Some(ProjectId(2)),
             "the selected draft should be the cursor's"
         );
+    }
+
+    #[rstest::rstest]
+    fn select_first_selects_the_top_row() {
+        // Given a draft above two cards, with the cursor on the last card.
+        let mut sessions = Sessions {
+            projects: vec![
+                drafted(1, 5),
+                project(2, vec![active(1, 10), active(2, 20)]),
+            ],
+            cursor: Some(on(1)),
+            ..Sessions::default()
+        };
+
+        // When selecting the first row.
+        sessions.select_first();
+
+        // Then the draft is selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(on_draft(1)),
+            "the first row should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_last_on_a_collapsed_shelf_selects_its_header() {
+        // Given an active thread, selected, and a collapsed shelf.
+        let mut sessions = sessions(vec![active(1, 10), settled(2, 20)], Some(on(1)));
+
+        // When selecting the last row.
+        sessions.select_last();
+
+        // Then the shelf's header is selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(SidebarItem::SettledShelf),
+            "a collapsed shelf's header is the last row"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(10, 6)]
+    #[case(40, 2)]
+    fn half_page_down_moves_the_cards_that_fit_in_half_the_height(
+        #[case] rows: u16,
+        #[case] expected: i64,
+    ) {
+        // Given seven cards with the top one selected.
+        let mut sessions = seven_cards(7);
+
+        // When moving half a page down on a sidebar `rows` lines tall.
+        sessions.half_page_down(&cards_in(rows));
+
+        // Then the cursor moved by as many cards as fit in half of it.
+        assert_eq!(sessions.cursor, Some(on(expected)), "half of {rows} lines");
+    }
+
+    #[rstest::rstest]
+    #[case(10, 2)]
+    #[case(40, 6)]
+    fn half_page_up_moves_the_cards_that_fit_in_half_the_height(
+        #[case] rows: u16,
+        #[case] expected: i64,
+    ) {
+        // Given seven cards with the bottom one selected.
+        let mut sessions = seven_cards(1);
+
+        // When moving half a page up on a sidebar `rows` lines tall.
+        sessions.half_page_up(&cards_in(rows));
+
+        // Then the cursor moved by as many cards as fit in half of it.
+        assert_eq!(sessions.cursor, Some(on(expected)), "half of {rows} lines");
+    }
+
+    #[rstest::rstest]
+    fn half_page_down_on_the_last_row_stays() {
+        // Given seven cards with the bottom one selected.
+        let mut sessions = seven_cards(1);
+
+        // When moving half a page down.
+        sessions.half_page_down(&cards_in(40));
+
+        // Then the cursor stays.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(1)),
+            "there is nothing below the last row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn half_page_up_on_the_first_row_stays() {
+        // Given seven cards with the top one selected.
+        let mut sessions = seven_cards(7);
+
+        // When moving half a page up.
+        sessions.half_page_up(&cards_in(40));
+
+        // Then the cursor stays.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(7)),
+            "there is nothing above the first row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn half_page_down_moves_one_row_when_a_card_is_taller_than_half() {
+        // Given seven cards with the top one selected, on a 4-line sidebar.
+        let mut sessions = seven_cards(7);
+
+        // When moving half a page down.
+        sessions.half_page_down(&cards_in(4));
+
+        // Then the cursor still moves one row.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(6)),
+            "a half page should move at least one row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn half_page_down_counts_an_unknown_row_as_one_line() {
+        // Given seven cards with the top one selected, and a 4-line layout
+        // that knows no row heights.
+        let mut sessions = seven_cards(7);
+        let layout = SidebarLayout {
+            rows: 4,
+            heights: vec![],
+        };
+
+        // When moving half a page down.
+        sessions.half_page_down(&layout);
+
+        // Then the cursor moves two rows, one line each.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(5)),
+            "a row without a height should count as one line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn half_page_down_without_a_cursor_selects_the_first_row() {
+        // Given seven cards and no cursor.
+        let mut sessions = Sessions {
+            cursor: None,
+            ..seven_cards(7)
+        };
+
+        // When moving half a page down.
+        sessions.half_page_down(&cards_in(40));
+
+        // Then the first row is selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(7)),
+            "without a cursor the first row should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn sidebar_skips_threads_being_deleted() {
+        // Given two active threads, one being deleted.
+        let sessions = Sessions {
+            deleting: [ThreadId(1)].into(),
+            ..sessions(vec![active(1, 10), active(2, 20)], None)
+        };
+
+        // When listing the sidebar.
+        let items = items(&sessions);
+
+        // Then only the other thread shows.
+        assert_eq!(
+            items,
+            vec![on(2)],
+            "a thread being deleted should be hidden"
+        );
+    }
+
+    #[rstest::rstest]
+    fn working_count_skips_threads_being_deleted() {
+        // Given two working threads, one being deleted.
+        let working = |id| Thread {
+            status: ThreadStatus::Working,
+            ..thread(id)
+        };
+        let sessions = Sessions {
+            deleting: [ThreadId(1)].into(),
+            ..sessions(vec![working(1), working(2)], None)
+        };
+
+        // When counting the working threads.
+        let count = sessions.working_count();
+
+        // Then only the other one counts.
+        assert_eq!(
+            count, 1,
+            "a thread being deleted shouldn't count as running"
+        );
+    }
+
+    #[rstest::rstest]
+    fn any_in_progress_skips_threads_being_deleted() {
+        // Given a working thread being deleted and an idle one.
+        let sessions = Sessions {
+            deleting: [ThreadId(1)].into(),
+            ..sessions(
+                vec![
+                    Thread {
+                        status: ThreadStatus::Working,
+                        ..thread(1)
+                    },
+                    thread(2),
+                ],
+                None,
+            )
+        };
+
+        // When asking whether a turn is underway.
+        let busy = sessions.any_in_progress();
+
+        // Then none is.
+        assert!(!busy, "a thread being deleted shouldn't keep the poll fast");
     }
 }
