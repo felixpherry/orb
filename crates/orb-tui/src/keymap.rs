@@ -2,14 +2,16 @@
 //! defined are bound.
 //!
 //! In the sidebar and the preview, keys go through a which-key keymap whose
-//! scope is the focus; `<Space>` is the leader and shows a popup. While a
-//! draft is selected the preview's block keys aren't bound, so the popups
-//! don't offer keys that do nothing there. While
+//! scope is the focus and what the sidebar cursor is on; `<Space>` is the
+//! leader and shows a popup. A key that does nothing for the selection isn't
+//! bound there (the preview's block keys on a draft, `␣m`/`␣a` on a thread,
+//! `␣w`/`␣b` with nothing selected), so the popups don't offer it. While
 //! attached, every key goes to Claude except `<C-\>`. An open picker takes
 //! typed characters as filter text and has its own fixed keys.
 
 use std::fmt;
 
+use orb_domain::feat::sessions::state::Sessions;
 use orb_domain::{Focus, Intent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_which_key::{Keymap, WhichKeyState};
@@ -36,25 +38,59 @@ impl fmt::Display for KeyCategory {
     }
 }
 
-/// Which bindings apply: the sidebar's, or the preview's, which lose their
-/// block keys while a draft is selected.
+/// What the sidebar cursor is on, which decides the keys that do something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Selection {
+    Thread,
+    Draft,
+    /// No row, or the settled shelf's header.
+    Nothing,
+}
+
+impl Selection {
+    /// What `sessions`' cursor is on.
+    pub(crate) fn of(sessions: &Sessions) -> Self {
+        match (sessions.selected_draft(), sessions.selected_thread()) {
+            (Some(_), _) => Self::Draft,
+            (None, Some(_)) => Self::Thread,
+            (None, None) => Self::Nothing,
+        }
+    }
+}
+
+/// Which bindings apply: the focused side's, less the keys that do nothing
+/// for the selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Scope {
+    /// The sidebar on a thread.
     Sidebar,
+    /// The sidebar on a draft: no pin or settle, but its setting pickers.
+    SidebarDraft,
+    /// The sidebar with no thread or draft selected.
+    SidebarEmpty,
     /// The preview of a thread.
     Preview,
     /// The preview side while a draft is selected: its form has no blocks to
     /// move through, fold or yank.
     DraftForm,
+    /// The preview with no thread or draft selected.
+    PreviewEmpty,
 }
 
 impl Scope {
-    /// The scope for keys in `focus`, with a draft selected or not.
-    pub(crate) fn new(focus: Focus, draft: bool) -> Self {
-        match (focus, draft) {
-            (Focus::Preview, false) => Self::Preview,
-            (Focus::Preview, true) => Self::DraftForm,
-            (Focus::Sidebar | Focus::Attached | Focus::Picker, _) => Self::Sidebar,
+    /// The scope for keys in `focus` with `selection`.
+    pub(crate) fn new(focus: Focus, selection: Selection) -> Self {
+        match (focus, selection) {
+            (Focus::Preview, Selection::Thread) => Self::Preview,
+            (Focus::Preview, Selection::Draft) => Self::DraftForm,
+            (Focus::Preview, Selection::Nothing) => Self::PreviewEmpty,
+            (Focus::Sidebar | Focus::Attached | Focus::Picker, Selection::Thread) => Self::Sidebar,
+            (Focus::Sidebar | Focus::Attached | Focus::Picker, Selection::Draft) => {
+                Self::SidebarDraft
+            }
+            (Focus::Sidebar | Focus::Attached | Focus::Picker, Selection::Nothing) => {
+                Self::SidebarEmpty
+            }
         }
     }
 }
@@ -62,78 +98,53 @@ impl Scope {
 /// The keymap with its current scope and pending key sequence.
 pub(crate) type Keys = WhichKeyState<KeyEvent, Scope, Intent, KeyCategory>;
 
-/// The sidebar and preview bindings, scoped by focus.
+/// The sidebar and preview bindings, scoped by focus and selection.
 #[expect(
     clippy::too_many_lines,
     reason = "one binding per key keeps the whole keymap in one place"
 )]
 pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     let mut keymap = Keymap::new();
+    keymap.describe_group("<leader>", "leader");
+    for scope in [Scope::Sidebar, Scope::SidebarDraft, Scope::SidebarEmpty] {
+        keymap
+            .bind("j", Intent::SelectNext, KeyCategory::Navigation, scope)
+            .bind("k", Intent::SelectPrev, KeyCategory::Navigation, scope)
+            .bind(
+                "<c-l>",
+                Intent::FocusPreview,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind("<enter>", Intent::Attach, KeyCategory::Sessions, scope)
+            .bind("q", Intent::Quit, KeyCategory::General, scope)
+            .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
+            .bind("h", Intent::CloseShelf, KeyCategory::Navigation, scope)
+            .bind(
+                "<leader>n",
+                Intent::NewSession,
+                KeyCategory::Sessions,
+                scope,
+            )
+            .bind(
+                "<leader>p",
+                Intent::AddProject,
+                KeyCategory::Sessions,
+                scope,
+            );
+    }
     keymap
-        .describe_group("<leader>", "leader")
-        .bind(
-            "j",
-            Intent::SelectNext,
-            KeyCategory::Navigation,
-            Scope::Sidebar,
-        )
-        .bind(
-            "k",
-            Intent::SelectPrev,
-            KeyCategory::Navigation,
-            Scope::Sidebar,
-        )
-        .bind(
-            "<c-l>",
-            Intent::FocusPreview,
-            KeyCategory::Navigation,
-            Scope::Sidebar,
-        )
-        .bind(
-            "<enter>",
-            Intent::Attach,
-            KeyCategory::Sessions,
-            Scope::Sidebar,
-        )
-        .bind("q", Intent::Quit, KeyCategory::General, Scope::Sidebar)
         .bind("p", Intent::TogglePin, KeyCategory::Threads, Scope::Sidebar)
         .bind(
             "ss",
             Intent::ToggleSettle,
             KeyCategory::Threads,
             Scope::Sidebar,
-        )
-        .bind(
-            "xx",
-            Intent::DeleteThread,
-            KeyCategory::Threads,
-            Scope::Sidebar,
-        )
-        .bind(
-            "l",
-            Intent::OpenShelf,
-            KeyCategory::Navigation,
-            Scope::Sidebar,
-        )
-        .bind(
-            "h",
-            Intent::CloseShelf,
-            KeyCategory::Navigation,
-            Scope::Sidebar,
-        )
-        .bind(
-            "<leader>n",
-            Intent::NewSession,
-            KeyCategory::Sessions,
-            Scope::Sidebar,
-        )
-        .bind(
-            "<leader>p",
-            Intent::AddProject,
-            KeyCategory::Sessions,
-            Scope::Sidebar,
         );
-    for scope in [Scope::Preview, Scope::DraftForm] {
+    for scope in [Scope::Sidebar, Scope::SidebarDraft] {
+        keymap.bind("xx", Intent::DeleteThread, KeyCategory::Threads, scope);
+    }
+    for scope in [Scope::Preview, Scope::DraftForm, Scope::PreviewEmpty] {
         keymap
             .bind(
                 "<c-h>",
@@ -195,7 +206,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             KeyCategory::Preview,
             Scope::Preview,
         );
-    for scope in [Scope::Sidebar, Scope::Preview, Scope::DraftForm] {
+    for scope in [
+        Scope::Sidebar,
+        Scope::SidebarDraft,
+        Scope::Preview,
+        Scope::DraftForm,
+    ] {
         keymap
             .bind(
                 "<leader>w",
@@ -208,7 +224,10 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 Intent::SwitchBranch,
                 KeyCategory::Sessions,
                 scope,
-            )
+            );
+    }
+    for scope in [Scope::SidebarDraft, Scope::DraftForm] {
+        keymap
             .bind("<leader>m", Intent::PickModel, KeyCategory::Sessions, scope)
             .bind(
                 "<leader>a",
@@ -238,7 +257,7 @@ pub(crate) fn press(keys: &mut Keys, key: KeyEvent) -> Option<Intent> {
 pub(crate) fn pending_confirm(keys: &Keys) -> Option<char> {
     match (keys.scope(), keys.current_sequence.as_slice()) {
         (
-            Scope::Sidebar,
+            Scope::Sidebar | Scope::SidebarDraft,
             [
                 KeyEvent {
                     code: KeyCode::Char(c @ ('s' | 'x')),
@@ -300,7 +319,9 @@ mod tests {
     use orb_domain::{Focus, Intent};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-    use super::{Keys, Route, Scope, attached_route, keymap, picker_route, press};
+    use super::{
+        Keys, Route, Scope, Selection, attached_route, keymap, pending_confirm, picker_route, press,
+    };
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -395,10 +416,10 @@ mod tests {
     #[rstest::rstest]
     #[case(Scope::Sidebar, 'w', Intent::ChangeWorkspace)]
     #[case(Scope::Sidebar, 'b', Intent::SwitchBranch)]
-    #[case(Scope::Sidebar, 'm', Intent::PickModel)]
-    #[case(Scope::Sidebar, 'a', Intent::PickPermission)]
-    #[case(Scope::Preview, 'm', Intent::PickModel)]
-    #[case(Scope::Preview, 'a', Intent::PickPermission)]
+    #[case(Scope::SidebarDraft, 'w', Intent::ChangeWorkspace)]
+    #[case(Scope::SidebarDraft, 'b', Intent::SwitchBranch)]
+    #[case(Scope::SidebarDraft, 'm', Intent::PickModel)]
+    #[case(Scope::SidebarDraft, 'a', Intent::PickPermission)]
     fn leader_keys_open_the_session_setup_pickers(
         #[case] scope: Scope,
         #[case] pressed: char,
@@ -532,20 +553,116 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Sidebar, false, Scope::Sidebar)]
-    #[case(Focus::Sidebar, true, Scope::Sidebar)]
-    #[case(Focus::Preview, false, Scope::Preview)]
-    #[case(Focus::Preview, true, Scope::DraftForm)]
-    fn scope_follows_focus_and_a_selected_draft(
+    #[case(Focus::Sidebar, Selection::Thread, Scope::Sidebar)]
+    #[case(Focus::Sidebar, Selection::Draft, Scope::SidebarDraft)]
+    #[case(Focus::Sidebar, Selection::Nothing, Scope::SidebarEmpty)]
+    #[case(Focus::Preview, Selection::Thread, Scope::Preview)]
+    #[case(Focus::Preview, Selection::Draft, Scope::DraftForm)]
+    #[case(Focus::Preview, Selection::Nothing, Scope::PreviewEmpty)]
+    fn scope_follows_focus_and_the_selection(
         #[case] focus: Focus,
-        #[case] draft: bool,
+        #[case] selection: Selection,
         #[case] expected: Scope,
     ) {
-        // Given / When / Then the preview on a draft gets the form's scope.
+        // Given / When / Then the scope matches the focused side and selection.
         assert_eq!(
-            Scope::new(focus, draft),
+            Scope::new(focus, selection),
             expected,
-            "the scope in {focus:?} (draft: {draft})"
+            "the scope in {focus:?} on {selection:?}"
+        );
+    }
+
+    /// The keys the leader popup lists in `scope`.
+    fn leader_popup(scope: Scope) -> Vec<KeyEvent> {
+        keymap()
+            .get_children_at_path(&[key(KeyCode::Char(' '))], &scope)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::Sidebar, false)]
+    #[case(Scope::Preview, false)]
+    #[case(Scope::SidebarEmpty, false)]
+    #[case(Scope::PreviewEmpty, false)]
+    #[case(Scope::SidebarDraft, true)]
+    #[case(Scope::DraftForm, true)]
+    fn leader_popup_lists_model_and_permission_only_on_a_draft(
+        #[case] scope: Scope,
+        #[case] listed: bool,
+    ) {
+        // Given the leader popup's keys in the scope.
+        let keys = leader_popup(scope);
+
+        // When looking for `m` and `a`.
+        let found = [
+            keys.contains(&key(KeyCode::Char('m'))),
+            keys.contains(&key(KeyCode::Char('a'))),
+        ];
+
+        // Then both are listed exactly when a draft is selected.
+        assert_eq!(found, [listed; 2], "m/a in the {scope:?} leader popup");
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::SidebarEmpty, false)]
+    #[case(Scope::PreviewEmpty, false)]
+    #[case(Scope::Sidebar, true)]
+    #[case(Scope::Preview, true)]
+    #[case(Scope::SidebarDraft, true)]
+    #[case(Scope::DraftForm, true)]
+    fn leader_popup_lists_workspace_and_branch_only_with_a_selection(
+        #[case] scope: Scope,
+        #[case] listed: bool,
+    ) {
+        // Given the leader popup's keys in the scope.
+        let keys = leader_popup(scope);
+
+        // When looking for `w` and `b`.
+        let found = [
+            keys.contains(&key(KeyCode::Char('w'))),
+            keys.contains(&key(KeyCode::Char('b'))),
+        ];
+
+        // Then both are listed exactly when a thread or draft is selected.
+        assert_eq!(found, [listed; 2], "w/b in the {scope:?} leader popup");
+    }
+
+    #[rstest::rstest]
+    #[case(vec![key(KeyCode::Char('p'))])]
+    #[case(vec![key(KeyCode::Char('s')), key(KeyCode::Char('s'))])]
+    fn pin_and_settle_are_unbound_on_a_draft_in_the_sidebar(#[case] pressed: Vec<KeyEvent>) {
+        // Given the keymap in the sidebar on a draft.
+        let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
+
+        // When pressing `p` or `ss`.
+        let intents: Vec<Option<Intent>> = pressed
+            .into_iter()
+            .map(|pressed| press(&mut keys, pressed))
+            .collect();
+
+        // Then nothing happens.
+        assert!(
+            intents.iter().all(Option::is_none),
+            "a thread key did something on a draft: {intents:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn x_waits_for_its_repeat_on_a_draft_in_the_sidebar() {
+        // Given the keymap in the sidebar on a draft.
+        let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
+
+        // When pressing `x` once.
+        press(&mut keys, key(KeyCode::Char('x')));
+
+        // Then the discard waits for the second `x`.
+        assert_eq!(
+            pending_confirm(&keys),
+            Some('x'),
+            "x on a draft should wait for xx"
         );
     }
 
