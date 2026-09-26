@@ -14,7 +14,9 @@
 //!
 //! When a session start waits for the user to trust a directory, the pane
 //! runs an interactive `claude` there instead. Leaving it, by its exit or
-//! `<C-\>`, asks the sessions actor to try the start again.
+//! `<C-\>`, asks the sessions actor to try the start again. When a started
+//! draft's thread comes up still selected, the loop attaches to it, unless
+//! the user is in a picker or already attached.
 
 use std::ffi::OsString;
 use std::fs;
@@ -31,7 +33,7 @@ use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::preview::preview_actor::{self, PreviewActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
-use orb_domain::{Command, Focus, IntentHandler, State, Wake};
+use orb_domain::{Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
@@ -139,6 +141,12 @@ impl PaneOwner {
 /// its pane was already opened.
 fn trust_to_open(trust: Option<&Path>, opened: Option<&Path>) -> Option<PathBuf> {
     trust.filter(|&dir| Some(dir) != opened).map(Path::to_owned)
+}
+
+/// Whether to attach to `started`, a started draft's thread: only while it's
+/// the selected thread and the user is neither in a picker nor attached.
+fn attaches(started: Option<ThreadId>, selected: Option<ThreadId>, focus: Focus) -> bool {
+    started.is_some() && started == selected && !matches!(focus, Focus::Picker | Focus::Attached)
 }
 
 /// A running pane and what it is for.
@@ -270,6 +278,7 @@ impl App {
             }
             self.reconcile(terminal.backend_mut())?;
             self.open_trust(terminal.backend_mut())?;
+            self.open_started(terminal.backend_mut())?;
             if let Some(attached) = &self.pane {
                 attached.pane.flush_expired_sync(Instant::now());
             }
@@ -607,6 +616,30 @@ impl App {
         }
     }
 
+    /// Attaches to a started draft's thread if it's still selected. The
+    /// request is taken either way, so it never fires later. A failure the
+    /// start still reported (saving the store) stays on the mode line.
+    fn open_started<W>(&mut self, out: &mut W) -> io::Result<()>
+    where
+        W: Write,
+    {
+        let commands = {
+            let mut state = self.state.write();
+            let started = state.sessions.attach.take();
+            if !attaches(started, state.sessions.selected_id(), state.focus) {
+                return Ok(());
+            }
+            let error = state.sessions.error.take();
+            let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+            state.sessions.error = error;
+            commands
+        };
+        for command in &commands {
+            self.execute(command, out)?;
+        }
+        Ok(())
+    }
+
     /// Closes the trust pane, returns to the preview, and tries the waiting
     /// session start again.
     fn leave_trust<W>(&mut self, out: &mut W) -> io::Result<()>
@@ -710,9 +743,10 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
 
+    use orb_domain::Focus;
     use orb_domain::feat::sessions::state::ThreadId;
 
-    use super::{PaneOwner, list_directories, trust_to_open};
+    use super::{PaneOwner, attaches, list_directories, trust_to_open};
 
     #[rstest::rstest]
     fn list_directories_keeps_directories_and_links_to_them() -> io::Result<()> {
@@ -798,5 +832,56 @@ mod tests {
 
         // Then nothing opens.
         assert_eq!(open, None, "the same request shouldn't reopen the pane");
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Sidebar)]
+    #[case(Focus::Preview)]
+    fn started_thread_still_selected_is_attached(#[case] focus: Focus) {
+        // Given thread 1 started from a draft and still selected.
+        let started = Some(ThreadId(1));
+
+        // When deciding whether to attach in `focus`.
+        let attach = attaches(started, started, focus);
+
+        // Then orb attaches.
+        assert!(attach, "a still-selected started thread should attach");
+    }
+
+    #[rstest::rstest]
+    fn started_thread_is_not_attached_after_the_selection_moved() {
+        // Given thread 1 started from a draft while thread 2 is selected.
+        let started = Some(ThreadId(1));
+
+        // When deciding whether to attach.
+        let attach = attaches(started, Some(ThreadId(2)), Focus::Sidebar);
+
+        // Then orb stays where the user is.
+        assert!(!attach, "a moved selection shouldn't attach");
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Picker)]
+    #[case(Focus::Attached)]
+    fn started_thread_is_not_attached_from_a_picker_or_a_pane(#[case] focus: Focus) {
+        // Given thread 1 started from a draft and still selected.
+        let started = Some(ThreadId(1));
+
+        // When deciding whether to attach in `focus`.
+        let attach = attaches(started, started, focus);
+
+        // Then orb leaves the user where they are.
+        assert!(!attach, "no attach while in {focus:?}");
+    }
+
+    #[rstest::rstest]
+    fn nothing_started_attaches_nothing() {
+        // Given no started thread and nothing selected.
+
+        // When deciding whether to attach.
+        let attach = attaches(None, None, Focus::Sidebar);
+
+        // Then orb doesn't attach.
+        assert!(!attach, "no started thread, no attach");
     }
 }

@@ -306,7 +306,7 @@ fn branch_badge(git_ref: &GitRef, cwd: &Path) -> Option<&'static str> {
 }
 
 /// `path` with `home` shown as `~`.
-fn tilde(path: &Path, home: &Path) -> String {
+pub(crate) fn tilde(path: &Path, home: &Path) -> String {
     match path.strip_prefix(home) {
         Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
         _ => path.display().to_string(),
@@ -315,7 +315,7 @@ fn tilde(path: &Path, home: &Path) -> String {
 
 /// `text` if it fits in `width` columns, else `…` and as much of its end as
 /// fits.
-fn cut_left(text: &str, width: usize) -> String {
+pub(crate) fn cut_left(text: &str, width: usize) -> String {
     if Line::raw(text).width() <= width {
         return text.to_owned();
     }
@@ -962,5 +962,47 @@ mod tests {
             .and_then(|(x, y)| buf.cell((x - 1, y)))
             .map(|cell| cell.bg);
         assert_ne!(bg, Some(SELECTED), "the disabled row's background");
+    }
+
+    #[rstest::rstest]
+    #[case(PickerState::models(ProjectId(1), None, Focus::Preview), "Models")]
+    #[case(
+        PickerState::permissions(ProjectId(1), None, Focus::Preview),
+        "Permission modes"
+    )]
+    fn setting_picker_is_labelled_by_its_setting(#[case] picker: PickerState, #[case] label: &str) {
+        // Given a model or permission picker.
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 20);
+
+        // Then its section label names the setting.
+        let lines = lines(&buf);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("  {label} "))),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn model_picker_lists_default_first() {
+        // Given a model picker.
+        let picker = PickerState::models(ProjectId(1), Some("sonnet"), Focus::Preview);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 20);
+
+        // Then the row under the label is Default.
+        let lines = lines(&buf);
+        let first = lines
+            .iter()
+            .skip_while(|line| !line.contains("Models"))
+            .nth(1);
+        assert!(
+            first.is_some_and(|line| line.trim_matches(['│', ' ']) == "Default"),
+            "screen was {lines:#?}"
+        );
     }
 }

@@ -70,18 +70,6 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
             KeyCategory::Sessions,
             Focus::Sidebar,
         )
-        .bind(
-            "<leader>w",
-            Intent::ChangeWorkspace,
-            KeyCategory::Sessions,
-            Focus::Preview,
-        )
-        .bind(
-            "<leader>b",
-            Intent::SwitchBranch,
-            KeyCategory::Sessions,
-            Focus::Preview,
-        )
         .bind("q", Intent::Quit, KeyCategory::General, Focus::Sidebar)
         .bind("p", Intent::TogglePin, KeyCategory::Threads, Focus::Sidebar)
         .bind(
@@ -183,6 +171,28 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
             KeyCategory::Preview,
             Focus::Preview,
         );
+    for focus in [Focus::Sidebar, Focus::Preview] {
+        keymap
+            .bind(
+                "<leader>w",
+                Intent::ChangeWorkspace,
+                KeyCategory::Sessions,
+                focus,
+            )
+            .bind(
+                "<leader>b",
+                Intent::SwitchBranch,
+                KeyCategory::Sessions,
+                focus,
+            )
+            .bind("<leader>m", Intent::PickModel, KeyCategory::Sessions, focus)
+            .bind(
+                "<leader>a",
+                Intent::PickPermission,
+                KeyCategory::Sessions,
+                focus,
+            );
+    }
     keymap
 }
 
@@ -359,16 +369,30 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_w_in_sidebar_is_unbound() {
-        // Given Space already pressed in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+    #[case(Focus::Sidebar, 'w', Intent::ChangeWorkspace)]
+    #[case(Focus::Sidebar, 'b', Intent::SwitchBranch)]
+    #[case(Focus::Sidebar, 'm', Intent::PickModel)]
+    #[case(Focus::Sidebar, 'a', Intent::PickPermission)]
+    #[case(Focus::Preview, 'm', Intent::PickModel)]
+    #[case(Focus::Preview, 'a', Intent::PickPermission)]
+    fn leader_keys_open_the_session_setup_pickers(
+        #[case] focus: Focus,
+        #[case] pressed: char,
+        #[case] expected: Intent,
+    ) {
+        // Given Space already pressed.
+        let mut keys = Keys::new(keymap(), focus);
         press(&mut keys, key(KeyCode::Char(' ')));
 
-        // When pressing `w`.
-        let intent = press(&mut keys, key(KeyCode::Char('w')));
+        // When pressing the key.
+        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
 
-        // Then nothing happens.
-        assert_eq!(intent, None, "Space w should do nothing in the sidebar");
+        // Then it yields its picker's intent.
+        assert_eq!(
+            intent.as_ref(),
+            Some(&expected),
+            "Space {pressed} in {focus:?}"
+        );
     }
 
     #[rstest::rstest]

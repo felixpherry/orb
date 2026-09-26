@@ -1,8 +1,8 @@
-//! Draws a frame: the sidebar on the left, the attached session or the
-//! selected thread's preview on the right, the mode line at the bottom, and the
-//! which-key popup on top while a key sequence is pending. While `s` or `x`
-//! waits for its repeat, a banner above the selected thread says what the
-//! repeat will do instead of the popup. An open picker is drawn over
+//! Draws a frame: the sidebar on the left, the attached session, the selected
+//! thread's preview or the selected draft's form on the right, the mode line at
+//! the bottom, and the which-key popup on top while a key sequence is pending.
+//! While `s` or `x` waits for its repeat, a banner above the selected row says
+//! what the repeat will do instead of the popup. An open picker is drawn over
 //! everything but the mode line, with neither the popup nor the banner.
 //! Whatever is left on the terminal's default background gets orb's navy, so
 //! a transparent terminal doesn't show through.
@@ -22,6 +22,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use ratatui_which_key::WhichKey;
 
+use crate::draft;
 use crate::keymap::{self, Keys};
 use crate::picker::{self, PickerScroll};
 use crate::preview::{self, PreviewCache};
@@ -75,8 +76,11 @@ pub(crate) fn render(
             }
             None
         }
-        _ => match state.sessions.selected_thread() {
-            Some(thread) => Some(preview::render(
+        _ => match (
+            state.sessions.selected_thread(),
+            state.sessions.selected_draft(),
+        ) {
+            (Some(thread), _) => Some(preview::render(
                 state,
                 thread,
                 pane_error,
@@ -84,7 +88,11 @@ pub(crate) fn render(
                 frame.buffer_mut(),
                 cache,
             )),
-            None => {
+            (None, Some((project, draft))) => {
+                draft::render(project, draft, &state.home, right, frame.buffer_mut());
+                None
+            }
+            (None, None) => {
                 let hint = match state.sessions.cursor {
                     Some(SidebarItem::SettledShelf) => shelf_hint(state),
                     _ => "␣n new session · ␣p add project".to_owned(),
@@ -145,21 +153,27 @@ fn shelf_hint(state: &AppState) -> String {
 
 /// jinn's confirm banner, on the line above the selected row (the row itself
 /// at the top), against the frame's right edge: yellow when repeating
-/// `confirm` will act, red when it would be refused.
+/// `confirm` will act, red when it would be refused. On a draft only `x`
+/// has one.
 fn render_banner(state: &AppState, confirm: char, selected_y: u16, buf: &mut Buffer) {
-    let Some(thread) = state.sessions.selected_thread() else {
-        return;
-    };
-    let (text, colour) = match (confirm, validate_toggle_settle(state)) {
-        ('x', _) => (" Press x again to delete ", Color::Yellow),
-        (_, Ok(())) if thread.settled_at.is_some() => {
+    let sessions = &state.sessions;
+    let (text, colour) = match (
+        confirm,
+        validate_toggle_settle(state),
+        sessions.selected_thread(),
+    ) {
+        ('x', _, None) if sessions.selected_draft().is_some() => {
+            (" Press x again to discard ", Color::Yellow)
+        }
+        (_, _, None) | (_, Err(ToggleSettleError::NoThread), _) => return,
+        ('x', _, Some(_)) => (" Press x again to delete ", Color::Yellow),
+        (_, Ok(()), Some(thread)) if thread.settled_at.is_some() => {
             (" Press s again to un-settle ", Color::Yellow)
         }
-        (_, Ok(())) => (" Press s again to settle ", Color::Yellow),
-        (_, Err(ToggleSettleError::InProgress)) => {
+        (_, Ok(()), Some(_)) => (" Press s again to settle ", Color::Yellow),
+        (_, Err(ToggleSettleError::InProgress), Some(_)) => {
             (" Can't settle while Claude is working ", Color::Red)
         }
-        (_, Err(ToggleSettleError::NoThread)) => return,
     };
     let banner = Line::styled(text, Style::new().fg(Color::Black).bg(colour));
     let area = buf.area;
@@ -172,15 +186,16 @@ fn render_banner(state: &AppState, confirm: char, selected_y: u16, buf: &mut Buf
     );
 }
 
-/// The mode and its keys on the left; on the right, a session being started,
-/// else the latest `claude` failure, else how many threads are working. A
-/// right side too long for the line is cut at its end, two cells after the
-/// keys.
+/// The mode and its keys on the left (`DRAFT` while a draft is selected); on
+/// the right, a session being started, else the latest `claude` failure, else
+/// how many threads are working. A right side too long for the line is cut
+/// at its end, two cells after the keys.
 fn render_mode_line(state: &AppState, area: Rect, buf: &mut Buffer) {
-    let mode = match state.focus {
-        Focus::Attached => "ATTACHED   <C-\\> back",
-        Focus::Sidebar | Focus::Preview => "NORMAL   ⏎ attach · ␣ leader",
-        Focus::Picker => "PICKER",
+    let mode = match (state.focus, state.sessions.selected_draft()) {
+        (Focus::Attached, _) => "ATTACHED   <C-\\> back",
+        (Focus::Sidebar | Focus::Preview, Some(_)) => "DRAFT   ⏎ start · ␣ leader",
+        (Focus::Sidebar | Focus::Preview, None) => "NORMAL   ⏎ attach · ␣ leader",
+        (Focus::Picker, _) => "PICKER",
     };
     let sessions = &state.sessions;
     let status = Line::raw(
@@ -210,7 +225,8 @@ mod tests {
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::preview::state::Preview;
     use orb_domain::feat::sessions::state::{
-        Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
+        ThreadStatus,
     };
     use orb_domain::{AppState, Focus};
     use orb_term::{Pane, PaneCommand, PaneSize};
@@ -347,6 +363,33 @@ mod tests {
             },
             ..AppState::default()
         }
+    }
+
+    /// orb's local draft, selected, with the given focus.
+    fn drafted(focus: Focus) -> AppState {
+        let mut sessions = Sessions {
+            cursor: Some(SidebarItem::Draft(ProjectId(1))),
+            ..sessions(vec![])
+        };
+        if let Some(project) = sessions.projects.first_mut() {
+            project.draft = Some(Draft {
+                workspace: DraftWorkspace::Local,
+                branch: Some("dev".to_owned()),
+                model: None,
+                permission: None,
+                created_at: SystemTime::UNIX_EPOCH,
+            });
+        }
+        AppState {
+            focus,
+            sessions,
+            ..AppState::default()
+        }
+    }
+
+    fn right_side(buffer: &Buffer) -> String {
+        let [_, right, _] = layout(buffer.area);
+        text(buffer, right)
     }
 
     /// The text inside `area`, row by row.
@@ -713,5 +756,88 @@ mod tests {
                 .is_some_and(|right| right.contains("PANE-TEXT")),
             "right side was {right:?}"
         );
+    }
+
+    #[rstest::rstest]
+    fn selected_draft_draws_its_form() {
+        // Given orb's draft selected.
+        let state = drafted(Focus::Sidebar);
+
+        // When drawing a frame.
+        let right = right_side(&draw(&state));
+
+        // Then the right side is the draft's form.
+        assert!(
+            right.starts_with("New thread · OB orb") && right.contains("⏎ start"),
+            "right side was '{right}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn draft_cursor_before_its_draft_exists_shows_the_hint() {
+        // Given the cursor on orb's draft before the actor made it.
+        let state = AppState {
+            sessions: Sessions {
+                cursor: Some(SidebarItem::Draft(ProjectId(1))),
+                ..sessions(vec![])
+            },
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let right = right_side(&draw(&state));
+
+        // Then the right side shows the no-selection hint.
+        assert!(
+            right.starts_with("␣n new session · ␣p add project"),
+            "right side was '{right}'"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Sidebar)]
+    #[case(Focus::Preview)]
+    fn mode_line_shows_draft_on_a_draft(#[case] focus: Focus) {
+        // Given orb's draft selected.
+        let state = drafted(focus);
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the mode line says ⏎ starts it.
+        let mode_line = mode_line(&buffer);
+        assert!(
+            mode_line.starts_with("DRAFT   ⏎ start · ␣ leader"),
+            "mode line was '{mode_line}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pending_x_on_a_draft_shows_the_discard_banner() {
+        // Given orb's draft selected and `x` pressed once.
+        let state = drafted(Focus::Sidebar);
+
+        // When drawing a frame.
+        let buffer = draw_with(&state, &pending('x'));
+
+        // Then the banner asks for the second `x` to discard it.
+        let screen = text(&buffer, buffer.area);
+        assert!(
+            screen.contains(" Press x again to discard "),
+            "screen was '{screen}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pending_s_on_a_draft_shows_no_banner() {
+        // Given orb's draft selected and `s` pressed once.
+        let state = drafted(Focus::Sidebar);
+
+        // When drawing a frame.
+        let buffer = draw_with(&state, &pending('s'));
+
+        // Then no banner is drawn.
+        let screen = text(&buffer, buffer.area);
+        assert!(!screen.contains("Press s again"), "screen was '{screen}'");
     }
 }
