@@ -117,14 +117,27 @@ impl IntentHandler {
                 state.sessions.selected_project(),
                 state.sessions.selected_thread(),
             ) {
+                (Ok(()), Some((project, draft)), _, _) if !draft.repo => {
+                    open_picker(state, PickerState::init_git(project.id, state.focus));
+                    vec![]
+                }
                 (Ok(()), Some((project, draft)), _, _) => {
-                    let cwd = match &draft.workspace {
-                        DraftWorkspace::Existing(path) => path,
-                        DraftWorkspace::Local | DraftWorkspace::NewWorktree => &project.root,
+                    let (cwd, worktree) = match &draft.workspace {
+                        DraftWorkspace::Existing(path) => (path, true),
+                        DraftWorkspace::Local | DraftWorkspace::NewWorktree => {
+                            (&project.root, false)
+                        }
                     };
-                    let items = workspace_items(project, cwd, false, None);
-                    let target = PickTarget::Draft(project.id);
-                    open_picker(state, PickerState::workspace(target, items, state.focus));
+                    let items = workspace_items(project, cwd, worktree, None);
+                    let picker = {
+                        let target = PickTarget::Draft(project.id);
+                        let mut picker = PickerState::workspace(target, items, state.focus);
+                        if draft.workspace == DraftWorkspace::NewWorktree {
+                            picker.select(&PickerItem::Workspace(WorkspaceChoice::NewWorktree));
+                        }
+                        picker
+                    };
+                    open_picker(state, picker);
                     vec![]
                 }
                 (Ok(()), None, Some(project), Some(thread)) => {
@@ -191,18 +204,31 @@ impl IntentHandler {
                 state.sessions.selected_draft(),
                 state.sessions.selected_thread(),
             ) {
-                (Ok(()), Some((project, _)), _) => {
-                    let root = project.root.clone();
+                (Ok(()), Some((project, draft)), _) if !draft.repo => {
+                    open_picker(state, PickerState::init_git(project.id, state.focus));
+                    vec![]
+                }
+                (Ok(()), Some((project, draft)), _) => {
+                    let cwd = match &draft.workspace {
+                        DraftWorkspace::Existing(path) => path.clone(),
+                        DraftWorkspace::Local | DraftWorkspace::NewWorktree => project.root.clone(),
+                    };
+                    let base = match draft.workspace {
+                        DraftWorkspace::NewWorktree => draft.branch.clone(),
+                        DraftWorkspace::Local | DraftWorkspace::Existing(_) => None,
+                    };
                     let target = PickTarget::Draft(project.id);
-                    let picker = PickerState::branches(target, root.clone(), true, state.focus);
+                    let picker =
+                        PickerState::branches(target, cwd.clone(), true, base, state.focus);
                     open_picker(state, picker);
-                    vec![Command::ListBranches(root)]
+                    vec![Command::ListBranches(cwd)]
                 }
                 (Ok(()), None, Some(thread)) => {
                     let cwd = thread.cwd.clone();
                     let unstarted = thread.transcript.is_none() && !thread.status.in_progress();
                     let target = PickTarget::Thread(thread.id);
-                    let picker = PickerState::branches(target, cwd.clone(), unstarted, state.focus);
+                    let picker =
+                        PickerState::branches(target, cwd.clone(), unstarted, None, state.focus);
                     open_picker(state, picker);
                     vec![Command::ListBranches(cwd)]
                 }
@@ -268,17 +294,17 @@ impl IntentHandler {
                 Some(&PickerKind::Workspace {
                     target: PickTarget::Draft(project),
                 }) => match close_picker(state).as_ref().and_then(PickerState::selected) {
-                    Some(PickerItem::Workspace(choice)) => edit_draft(state, project, |draft| {
-                        (draft.workspace, draft.branch) = match choice {
-                            WorkspaceChoice::Current { .. } => (DraftWorkspace::Local, None),
-                            WorkspaceChoice::NewWorktree => (DraftWorkspace::NewWorktree, None),
-                            WorkspaceChoice::Previous { path, branch } => {
-                                (DraftWorkspace::Existing(path.clone()), branch.clone())
-                            }
-                        };
-                    }),
+                    Some(PickerItem::Workspace(choice)) => {
+                        pick_draft_workspace(state, project, choice)
+                    }
                     _ => vec![],
                 },
+                Some(&PickerKind::InitGit { project }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::InitGit) => vec![Command::InitGit(project)],
+                        _ => vec![],
+                    }
+                }
                 Some(&PickerKind::Model { project }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(&PickerItem::Setting(value)) => edit_draft(state, project, |draft| {
@@ -474,12 +500,15 @@ fn pick_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command> {
 }
 
 /// What picking the selected branch of `picker`, a draft's closed branch
-/// picker listing the project's root, asks for:
+/// picker listing the draft's directory (the project's root, or its
+/// worktree), asks for, as T3 Code's `resolveBranchSelectionTarget` decides:
 /// - a new-worktree draft: record the branch as the base, nothing else;
-/// - a local draft, the current branch: nothing;
-/// - a local draft, a branch checked out in another worktree: move the draft
-///   into that worktree;
-/// - a local draft, otherwise: check the branch out in the root.
+/// - the branch checked out there already: nothing;
+/// - a branch checked out in another worktree or the root: move the draft
+///   there;
+/// - from a worktree, the default branch: check it out in the root and move
+///   the draft there;
+/// - otherwise: check the branch out in the draft's directory.
 fn pick_draft_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command> {
     let (
         &PickerKind::Branches {
@@ -492,26 +521,75 @@ fn pick_draft_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command>
     else {
         return vec![];
     };
+    let Some(root) = state
+        .sessions
+        .projects
+        .iter()
+        .find(|p| p.id == project)
+        .map(|p| p.root.clone())
+    else {
+        return vec![];
+    };
     let Some(draft) = state.sessions.draft_mut(project) else {
         return vec![];
     };
-    let elsewhere = git_ref.worktree.as_ref().filter(|path| *path != cwd);
-    match (&draft.workspace, git_ref.current, elsewhere) {
-        (DraftWorkspace::NewWorktree, _, _) => {
-            draft.branch = Some(git_ref.name.clone());
-            vec![Command::SaveDraft(project)]
-        }
-        (DraftWorkspace::Local, false, Some(path)) => {
-            draft.workspace = DraftWorkspace::Existing(path.clone());
-            draft.branch = Some(git_ref.name.clone());
-            vec![Command::SaveDraft(project)]
-        }
-        (DraftWorkspace::Local, false, None) => vec![Command::CheckoutDraft {
+    let checkout = |cwd: &Path| {
+        vec![Command::CheckoutDraft {
             project,
             git_ref: git_ref.clone(),
-        }],
-        (DraftWorkspace::Local, true, _) | (DraftWorkspace::Existing(_), _, _) => vec![],
+            cwd: cwd.to_owned(),
+        }]
+    };
+    match (&draft.workspace, &git_ref.worktree) {
+        (DraftWorkspace::NewWorktree, _) => {
+            draft.branch = Some(git_ref.name.clone());
+            draft.from = None;
+            vec![Command::SaveDraft(project)]
+        }
+        _ if git_ref.current => vec![],
+        (_, Some(path)) if path == cwd => vec![],
+        (_, Some(path)) => {
+            draft.workspace = if *path == root {
+                DraftWorkspace::Local
+            } else {
+                DraftWorkspace::Existing(path.clone())
+            };
+            draft.branch = Some(git_ref.name.clone());
+            vec![Command::SaveDraft(project)]
+        }
+        (DraftWorkspace::Existing(_), None) if git_ref.default => checkout(&root),
+        (DraftWorkspace::Local | DraftWorkspace::Existing(_), None) => checkout(cwd),
     }
+}
+
+/// What picking `choice` in `project`'s draft's workspace picker asks for.
+/// The draft's own workspace (`Current worktree` for a draft in a worktree)
+/// changes nothing, as re-picking a value does in T3 Code's selector; another
+/// one is set on the draft, with its branch to be filled in unless it's a
+/// previous worktree's, and saved.
+fn pick_draft_workspace(
+    state: &mut AppState,
+    project: ProjectId,
+    choice: &WorkspaceChoice,
+) -> Vec<Command> {
+    let Some(draft) = state.sessions.draft_mut(project) else {
+        return vec![];
+    };
+    let (workspace, branch) = match choice {
+        WorkspaceChoice::Current { worktree: true } => return vec![],
+        WorkspaceChoice::Current { worktree: false } => (DraftWorkspace::Local, None),
+        WorkspaceChoice::NewWorktree => (DraftWorkspace::NewWorktree, None),
+        WorkspaceChoice::Previous { path, branch } => {
+            (DraftWorkspace::Existing(path.clone()), branch.clone())
+        }
+    };
+    if draft.workspace == workspace {
+        return vec![];
+    }
+    draft.workspace = workspace;
+    draft.branch = branch;
+    draft.from = None;
+    vec![Command::SaveDraft(project)]
 }
 
 /// The workspace picker's rows for a thread or draft running in `cwd`: stay
@@ -594,7 +672,7 @@ mod tests {
 
     use crate::command::Workspace;
     use crate::feat::git::git_service::GitRef;
-    use crate::feat::picker::list::{PERMISSION_MODES, PickerItem};
+    use crate::feat::picker::list::{BranchRow, PERMISSION_MODES, PickerItem, WorkspaceChoice};
     use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
     use crate::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
     use crate::feat::preview::state::{Preview, PreviewLayout};
@@ -1936,6 +2014,8 @@ mod tests {
             model: None,
             permission: None,
             created_at: SystemTime::UNIX_EPOCH,
+            repo: true,
+            from: None,
         }
     }
 
@@ -2020,7 +2100,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(0, DraftWorkspace::Local, None)]
+    #[case(0, DraftWorkspace::Local, Some("main"))]
     #[case(1, DraftWorkspace::NewWorktree, None)]
     #[case(2, DraftWorkspace::Existing("/work/2".into()), Some("orb/feat"))]
     fn picking_a_draft_workspace_sets_it(
@@ -2048,7 +2128,8 @@ mod tests {
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the draft has that workspace and branch.
+        // Then the draft has that workspace and branch; its own workspace,
+        // Current checkout, keeps main.
         assert_eq!(
             the_draft(&state).map(|draft| (&draft.workspace, draft.branch.as_deref())),
             Some((&workspace, branch)),
@@ -2095,17 +2176,193 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn switch_branch_on_an_existing_worktree_draft_opens_no_picker() {
+    fn switch_branch_on_an_existing_worktree_draft_opens_its_worktrees_branch_picker() {
         // Given a selected draft in an existing worktree.
-        let mut state = drafting(draft(DraftWorkspace::Existing("/wt/feat".into())), vec![]);
+        let mut state = drafting(draft(existing_feat()), vec![]);
 
         // When handling SwitchBranch.
         IntentHandler::handle(&Intent::SwitchBranch, &mut state);
 
-        // Then no picker opens.
-        assert!(
-            state.picker.is_none(),
-            "an existing worktree's branch is read-only on a draft"
+        // Then the draft's branch picker lists the worktree.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Branches {
+                target: PickTarget::Draft(ProjectId(1)),
+                cwd: "/wt/feat".into(),
+                unstarted: true,
+            }),
+            "␣b on an existing-worktree draft should list its worktree's refs"
+        );
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_on_an_existing_worktree_draft_lists_the_worktrees_refs() {
+        // Given a selected draft in an existing worktree.
+        let mut state = drafting(draft(existing_feat()), vec![]);
+
+        // When handling SwitchBranch.
+        let commands = IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+
+        // Then the worktree's refs are listed.
+        assert_eq!(
+            commands,
+            vec![Command::ListBranches("/wt/feat".into())],
+            "the refs come from the draft's worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::ChangeWorkspace)]
+    #[case(Intent::SwitchBranch)]
+    fn workspace_or_branch_on_a_non_git_draft_offers_git_init(#[case] intent: Intent) {
+        // Given a selected draft of a project that isn't a git repository.
+        let mut state = drafting(
+            Draft {
+                repo: false,
+                ..draft(DraftWorkspace::Local)
+            },
+            vec![],
+        );
+
+        // When handling ␣w or ␣b.
+        IntentHandler::handle(&intent, &mut state);
+
+        // Then the picker offers only Initialize Git.
+        assert_eq!(
+            state.picker.as_ref().map(|picker| (
+                picker.kind().clone(),
+                picker
+                    .shown()
+                    .map(|(item, _)| item.clone())
+                    .collect::<Vec<_>>()
+            )),
+            Some((
+                PickerKind::InitGit {
+                    project: ProjectId(1)
+                },
+                vec![PickerItem::InitGit]
+            )),
+            "{intent:?} on a non-git draft should offer git init"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_initialize_git_returns_init_git() {
+        // Given a non-git draft's Initialize Git picker.
+        let mut state = drafting(
+            Draft {
+                repo: false,
+                ..draft(DraftWorkspace::Local)
+            },
+            vec![],
+        );
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to run git init.
+        assert_eq!(
+            commands,
+            vec![Command::InitGit(ProjectId(1))],
+            "⏎ on Initialize Git should init the project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn existing_worktree_drafts_workspace_picker_offers_its_worktree_new_and_previous() {
+        // Given a draft in the worktree `/work/2`, whose project also has a
+        // worktree thread 3 on `orb/other`.
+        let mut state = drafting(
+            draft(DraftWorkspace::Existing("/work/2".into())),
+            vec![
+                thread(2, ThreadStatus::Idle),
+                Thread {
+                    branch: Some("orb/other".into()),
+                    ..thread(3, ThreadStatus::Idle)
+                },
+            ],
+        );
+
+        // When handling ChangeWorkspace.
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+
+        // Then the rows are Current worktree, New worktree, and the other
+        // worktree, with no row for the root.
+        assert_eq!(
+            state.picker.as_ref().map(|picker| picker
+                .shown()
+                .filter_map(|(item, _)| match item {
+                    PickerItem::Workspace(choice) => Some(choice.label()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()),
+            Some(vec![
+                "Current worktree".to_owned(),
+                "New worktree".to_owned(),
+                "Previous worktree (orb/other)".to_owned(),
+            ]),
+            "the workspace rows of a draft in a worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_current_worktree_keeps_an_existing_worktree_draft() {
+        // Given a draft in `/wt/feat` on feat, its workspace picker just
+        // opened.
+        let mut state = drafting(
+            Draft {
+                branch: Some("feat".into()),
+                ..draft(existing_feat())
+            },
+            vec![],
+        );
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+
+        // When confirming straight away.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft still runs in its worktree, on feat.
+        assert_eq!(
+            the_draft(&state).map(|draft| (&draft.workspace, draft.branch.as_deref())),
+            Some((&existing_feat(), Some("feat"))),
+            "Current worktree should keep the draft where it is"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_new_worktree_keeps_a_new_worktree_drafts_base() {
+        // Given a new-worktree draft based on feat, its workspace picker just
+        // opened on New worktree.
+        let mut state = drafting(
+            Draft {
+                branch: Some("feat".into()),
+                ..draft(DraftWorkspace::NewWorktree)
+            },
+            vec![],
+        );
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+
+        // When confirming straight away.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing changes, so the base isn't reset.
+        assert!(commands.is_empty(), "re-picking the draft's workspace");
+    }
+
+    #[rstest::rstest]
+    fn new_worktree_drafts_workspace_picker_opens_on_new_worktree() {
+        // Given a selected new-worktree draft.
+        let mut state = drafting(draft(DraftWorkspace::NewWorktree), vec![]);
+
+        // When handling ChangeWorkspace.
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+
+        // Then New worktree is selected.
+        assert_eq!(
+            state.picker.as_ref().and_then(PickerState::selected),
+            Some(&PickerItem::Workspace(WorkspaceChoice::NewWorktree)),
+            "the picker should open on the draft's workspace"
         );
     }
 
@@ -2132,15 +2389,167 @@ mod tests {
     }
 
     /// The branch picker of a draft in `workspace`, showing `refs` listed in
-    /// the root `/work`, with the second ref highlighted when there is one.
+    /// the draft's directory, with the second ref highlighted when there is
+    /// one.
     fn choosing_draft_branch(workspace: DraftWorkspace, refs: Vec<GitRef>) -> AppState {
         let mut state = drafting(draft(workspace), vec![]);
         IntentHandler::handle(&Intent::SwitchBranch, &mut state);
-        if let Some(picker) = &mut state.picker {
-            picker.show_branches(Path::new("/work"), refs);
+        if let Some(picker) = &mut state.picker
+            && let PickerKind::Branches { cwd, .. } = picker.kind().clone()
+        {
+            picker.show_branches(&cwd, refs);
         }
         IntentHandler::handle(&Intent::PickerNext, &mut state);
         state
+    }
+
+    /// The worktree `/wt/feat`'s refs: its current `feat`, then `refs`.
+    fn in_feat_worktree(refs: Vec<GitRef>) -> Vec<GitRef> {
+        std::iter::once(branch("feat", true, Some("/wt/feat")))
+            .chain(refs)
+            .collect()
+    }
+
+    fn existing_feat() -> DraftWorkspace {
+        DraftWorkspace::Existing("/wt/feat".into())
+    }
+
+    #[rstest::rstest]
+    fn picking_the_roots_branch_moves_an_existing_worktree_draft_to_the_root() {
+        // Given a draft in the worktree `/wt/feat` whose branch picker has
+        // `main`, checked out in the root, highlighted.
+        let mut state = choosing_draft_branch(
+            existing_feat(),
+            in_feat_worktree(vec![branch("main", false, Some("/work"))]),
+        );
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft runs in the root, on main.
+        assert_eq!(
+            the_draft(&state).map(|draft| (&draft.workspace, draft.branch.as_deref())),
+            Some((&DraftWorkspace::Local, Some("main"))),
+            "a branch checked out in the root takes the draft back there"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_branch_in_another_worktree_moves_an_existing_worktree_draft_there() {
+        // Given a draft in `/wt/feat` whose branch picker has `dev`, checked
+        // out in `/wt/dev`, highlighted.
+        let mut state = choosing_draft_branch(
+            existing_feat(),
+            in_feat_worktree(vec![branch("dev", false, Some("/wt/dev"))]),
+        );
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft runs in `/wt/dev`, on dev.
+        assert_eq!(
+            the_draft(&state).map(|draft| (&draft.workspace, draft.branch.as_deref())),
+            Some((&DraftWorkspace::Existing("/wt/dev".into()), Some("dev"))),
+            "the draft should follow the branch into its worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_the_free_default_branch_for_an_existing_worktree_draft_checks_it_out_in_the_root() {
+        // Given a draft in `/wt/feat` whose branch picker has the default
+        // branch `main`, checked out nowhere, highlighted.
+        let main = GitRef {
+            default: true,
+            ..branch("main", false, None)
+        };
+        let mut state =
+            choosing_draft_branch(existing_feat(), in_feat_worktree(vec![main.clone()]));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then main is checked out in the root.
+        assert_eq!(
+            commands,
+            vec![Command::CheckoutDraft {
+                project: ProjectId(1),
+                git_ref: main,
+                cwd: "/work".into(),
+            }],
+            "the default branch takes the draft back to the root"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_free_branch_for_an_existing_worktree_draft_checks_it_out_there() {
+        // Given a draft in `/wt/feat` whose branch picker has `dev`, checked
+        // out nowhere, highlighted.
+        let mut state = choosing_draft_branch(
+            existing_feat(),
+            in_feat_worktree(vec![branch("dev", false, None)]),
+        );
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then dev is checked out in the worktree.
+        assert_eq!(
+            commands,
+            vec![Command::CheckoutDraft {
+                project: ProjectId(1),
+                git_ref: branch("dev", false, None),
+                cwd: "/wt/feat".into(),
+            }],
+            "any other branch is checked out in the draft's worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_the_worktrees_own_branch_for_an_existing_worktree_draft_returns_no_command() {
+        // Given a draft in `/wt/feat` whose branch picker has its current
+        // `feat` highlighted.
+        let mut state = choosing_draft_branch(existing_feat(), in_feat_worktree(vec![]));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing happens.
+        assert!(commands.is_empty(), "the current branch needs no checkout");
+    }
+
+    #[rstest::rstest]
+    fn new_worktree_drafts_branch_picker_selects_its_base() {
+        // Given a new-worktree draft based on `feat`, its branch picker open.
+        let mut state = drafting(
+            Draft {
+                branch: Some("feat".into()),
+                ..draft(DraftWorkspace::NewWorktree)
+            },
+            vec![],
+        );
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+
+        // When the root's refs arrive, its current `main` first.
+        if let Some(picker) = &mut state.picker {
+            picker.show_branches(
+                Path::new("/work"),
+                vec![
+                    branch("main", true, Some("/work")),
+                    branch("dev", false, None),
+                    branch("feat", false, None),
+                ],
+            );
+        }
+
+        // Then feat, the base, is selected.
+        assert_eq!(
+            state.picker.as_ref().and_then(PickerState::selected),
+            Some(&PickerItem::Branch(BranchRow {
+                git_ref: branch("feat", false, None),
+                disabled: false,
+            })),
+            "the picker should open on the draft's base"
+        );
     }
 
     /// The root's current `main`, then `feat` checked out in `worktree`.
@@ -2234,6 +2643,7 @@ mod tests {
             vec![Command::CheckoutDraft {
                 project: ProjectId(1),
                 git_ref: branch("feat", false, None),
+                cwd: "/work".into(),
             }],
             "a local draft checks the branch out in the root"
         );

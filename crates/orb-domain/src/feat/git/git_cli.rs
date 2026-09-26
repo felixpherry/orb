@@ -188,6 +188,16 @@ impl Git for GitCli {
         self.succeeds(repo, ["show-ref", "--verify", "--quiet", &refname])
     }
 
+    fn has_remote_branch(&self, repo: &Path, branch: &str) -> bool {
+        let refname = format!("refs/remotes/origin/{branch}");
+        self.succeeds(repo, ["show-ref", "--verify", "--quiet", &refname])
+    }
+
+    fn init(&self, dir: &Path) -> Result<(), Report<GitError>> {
+        self.run(dir, ["init", "--quiet"])?;
+        Ok(())
+    }
+
     fn checkout(&self, cwd: &Path, git_ref: &GitRef) -> Result<String, Report<GitError>> {
         let name = git_ref.name.as_str();
         match (git_ref.remote, name.split_once('/')) {
@@ -262,6 +272,7 @@ fn checked_out(porcelain: &str) -> Vec<(String, PathBuf)> {
 
 /// The refs in `for-each-ref`'s `listed` output, in T3's order: current,
 /// default, other local branches newest first, then remote refs newest first.
+/// A current branch with no commit yet is listed too.
 /// Symbolic refs (`origin/HEAD`) and `origin/<b>` where a local `<b>` exists
 /// are left out.
 fn ordered(
@@ -312,6 +323,22 @@ fn ordered(
             }
         })
         .partition::<Vec<(i64, GitRef)>, _>(|(_, git_ref)| !git_ref.remote);
+    // A new repository's branch has no commit yet, so `for-each-ref` skips it.
+    if let Some(unborn) = current.filter(|name| !locals.iter().any(|(_, l)| l.name == *name)) {
+        locals.push((
+            0,
+            GitRef {
+                name: unborn.to_owned(),
+                remote: false,
+                current: true,
+                default: default == Some(unborn),
+                worktree: worktrees
+                    .iter()
+                    .find(|(branch, _)| branch == unborn)
+                    .map(|(_, path)| path.clone()),
+            },
+        ));
+    }
     remotes.retain(|(_, remote)| {
         remote
             .name
@@ -619,6 +646,84 @@ mod tests {
             default, "feature",
             "the default should fall back to the current branch"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn refs_list_the_branch_of_a_repository_with_no_commits() -> Result<(), Report<GitError>> {
+        // Given a repository just made with `git init`, on the unborn `trunk`.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.path("fresh");
+        fs::create_dir_all(&repo).change_context(GitError)?;
+        sandbox.run(&repo, ["init", "-q", "-b", "trunk"])?;
+
+        // When listing the refs.
+        let refs = sandbox.git().refs(&repo)?;
+
+        // Then `trunk` is the one, current branch.
+        assert_eq!(
+            refs.iter()
+                .map(|git_ref| (git_ref.name.as_str(), git_ref.current))
+                .collect::<Vec<_>>(),
+            [("trunk", true)],
+            "the unborn branch should be listed as current"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn init_makes_a_directory_a_repository() -> Result<(), Report<GitError>> {
+        // Given a plain directory.
+        let sandbox = Sandbox::new()?;
+        let dir = sandbox.path("plain");
+        fs::create_dir_all(&dir).change_context(GitError)?;
+
+        // When initializing git there.
+        sandbox.git().init(&dir)?;
+
+        // Then git can list its refs.
+        assert!(
+            sandbox.git().refs(&dir).is_ok(),
+            "the directory should be a repository"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn refs_fail_outside_a_repository() -> Result<(), Report<GitError>> {
+        // Given a plain directory.
+        let sandbox = Sandbox::new()?;
+        let dir = sandbox.path("plain");
+        fs::create_dir_all(&dir).change_context(GitError)?;
+
+        // When listing its refs.
+        let refs = sandbox.git().refs(&dir);
+
+        // Then git refuses.
+        assert!(refs.is_err(), "a plain directory has no refs");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case("main", true)]
+    #[case("local-only", false)]
+    fn has_remote_branch_tells_whether_origin_had_it_at_the_last_fetch(
+        #[case] branch: &str,
+        #[case] expected: bool,
+    ) -> Result<(), Report<GitError>> {
+        // Given a clone-like repo that fetched origin's `main`, and a branch
+        // only it has.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.repo("repo", "main")?;
+        sandbox.run(&repo, ["branch", "local-only"])?;
+        let origin = sandbox.repo("origin", "main")?;
+        sandbox.add_remote(&repo, "origin", &origin)?;
+
+        // When asking whether origin has `branch`.
+        let known = sandbox.git().has_remote_branch(&repo, branch);
+
+        // Then only origin's branch is known.
+        assert_eq!(known, expected, "origin/{branch} known");
         Ok(())
     }
 

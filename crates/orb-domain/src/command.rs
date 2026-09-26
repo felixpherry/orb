@@ -22,8 +22,15 @@ pub enum Command {
     CreateDraft(ProjectId),
     /// Save the project's draft as it now is in the app state.
     SaveDraft(ProjectId),
-    /// Check the branch out in the project's root for its local draft.
-    CheckoutDraft { project: ProjectId, git_ref: GitRef },
+    /// Check the branch out in `cwd` for the project's draft: the draft's
+    /// directory, or the project's root, which the draft then moves to.
+    CheckoutDraft {
+        project: ProjectId,
+        git_ref: GitRef,
+        cwd: PathBuf,
+    },
+    /// Make the project's root a git repository (`git init`) for its draft.
+    InitGit(ProjectId),
     /// Start a Claude session from the project's draft, which becomes a
     /// thread.
     StartDraft(ProjectId),

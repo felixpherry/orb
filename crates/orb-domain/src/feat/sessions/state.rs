@@ -95,6 +95,13 @@ pub struct Draft {
     /// The `--permission-mode`; `None` = Claude's default.
     pub permission: Option<String>,
     pub created_at: SystemTime,
+    /// Whether the project's root is in a git repository, as the sessions
+    /// actor last found. Not saved.
+    pub repo: bool,
+    /// New worktree: the ref it would start from as git last knew it,
+    /// `origin/<base>` when origin has the base, else the base as is. `None`
+    /// until the sessions actor has looked. Not saved.
+    pub from: Option<String>,
 }
 
 /// A directory the user starts sessions in.
@@ -506,6 +513,8 @@ mod tests {
                 model: None,
                 permission: None,
                 created_at: at(secs),
+                repo: true,
+                from: None,
             }),
             ..project(id, vec![])
         }

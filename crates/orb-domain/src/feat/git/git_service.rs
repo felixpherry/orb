@@ -1,6 +1,6 @@
 //! What orb asks of git: the branches a thread could switch to, a project's
-//! default branch, and making, checking out, renaming and removing worktrees
-//! and branches.
+//! default branch, making, checking out, renaming and removing worktrees and
+//! branches, and making a directory a repository.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -97,6 +97,16 @@ pub trait Git: Send + Sync {
 
     /// Whether the local branch exists.
     fn branch_exists(&self, repo: &Path, branch: &str) -> bool;
+
+    /// Whether `origin/<branch>` is known, as of the last fetch.
+    fn has_remote_branch(&self, repo: &Path, branch: &str) -> bool;
+
+    /// Makes `dir` a new, empty git repository (`git init`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git refuses.
+    fn init(&self, dir: &Path) -> Result<(), Report<GitError>>;
 
     /// Checks out `git_ref` in `cwd`; a remote ref gets a local branch that
     /// tracks it. Returns the local branch's name.
@@ -212,6 +222,20 @@ impl GitService {
     /// Whether the local branch exists.
     pub fn branch_exists(&self, repo: &Path, branch: &str) -> bool {
         self.git.branch_exists(repo, branch)
+    }
+
+    /// Whether `origin/<branch>` is known, as of the last fetch.
+    pub fn has_remote_branch(&self, repo: &Path, branch: &str) -> bool {
+        self.git.has_remote_branch(repo, branch)
+    }
+
+    /// Makes `dir` a new, empty git repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git refuses.
+    pub fn init(&self, dir: &Path) -> Result<(), Report<GitError>> {
+        self.git.init(dir)
     }
 
     /// Checks out `git_ref` in `cwd`. Returns the local branch's name.

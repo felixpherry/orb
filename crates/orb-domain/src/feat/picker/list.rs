@@ -31,14 +31,22 @@ pub enum PickerItem {
     /// A section label between rows. It can't be selected, and it's hidden
     /// while a filter is typed.
     Heading(&'static str),
+    /// Make the draft's project a git repository. Matched on its label.
+    InitGit,
 }
 
-/// A Claude model a draft can pick: the full ID passed as `--model`, and the
-/// name shown for it.
+/// The text of the [`PickerItem::InitGit`] row, as in T3 Code.
+pub const INIT_GIT: &str = "Initialize Git";
+
+/// A Claude model a draft can pick: the full ID passed as `--model`, the
+/// name shown for it, and the other values T3 Code's manifest maps to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Model {
     pub id: &'static str,
     pub name: &'static str,
+    /// Other names for the model, such as `opus`, that a draft or thread may
+    /// have stored.
+    pub aliases: &'static [&'static str],
 }
 
 /// The current models, in T3 Code's order.
@@ -46,18 +54,27 @@ pub const MODELS: [Model; 4] = [
     Model {
         id: "claude-opus-5-5",
         name: "Claude Opus 5.5",
+        aliases: &["opus-5.5", "claude-opus-5.5"],
     },
     Model {
         id: "claude-fable-5-1",
         name: "Claude Fable 5.1",
+        aliases: &["fable", "fable-5.1", "claude-fable-5.1"],
     },
     Model {
         id: "claude-opus-5",
         name: "Claude Opus 5",
+        aliases: &["opus", "opus-5", "claude-opus-5.0", "claude-opus-5-0"],
     },
     Model {
         id: "claude-sonnet-5",
         name: "Claude Sonnet 5",
+        aliases: &[
+            "sonnet",
+            "sonnet-5",
+            "claude-sonnet-5.0",
+            "claude-sonnet-5-0",
+        ],
     },
 ];
 
@@ -66,30 +83,46 @@ pub const LEGACY_MODELS: [Model; 7] = [
     Model {
         id: "claude-fable-5",
         name: "Claude Fable 5",
+        aliases: &[],
     },
     Model {
         id: "claude-opus-4-8",
         name: "Claude Opus 4.8",
+        aliases: &["opus-4.8", "claude-opus-4.8"],
     },
     Model {
         id: "claude-opus-4-7",
         name: "Claude Opus 4.7",
+        aliases: &["opus-4.7", "claude-opus-4.7"],
     },
     Model {
         id: "claude-opus-4-6",
         name: "Claude Opus 4.6",
+        aliases: &["opus-4.6", "claude-opus-4.6", "claude-opus-4-6-20251117"],
     },
     Model {
         id: "claude-opus-4-5",
         name: "Claude Opus 4.5",
+        aliases: &[],
     },
     Model {
         id: "claude-sonnet-4-6",
         name: "Claude Sonnet 4.6",
+        aliases: &[
+            "sonnet-4.6",
+            "claude-sonnet-4.6",
+            "claude-sonnet-4-6-20251117",
+        ],
     },
     Model {
         id: "claude-haiku-4-5",
         name: "Claude Haiku 4.5",
+        aliases: &[
+            "haiku",
+            "haiku-4.5",
+            "claude-haiku-4.5",
+            "claude-haiku-4-5-20251001",
+        ],
     },
 ];
 
@@ -103,16 +136,20 @@ pub const PERMISSION_MODES: [&str; 6] = [
     "plan",
 ];
 
-/// A model's or permission mode's text: a known model's name, else the value
-/// as stored, or `Default` for none.
+/// The model `value` names, by its ID or one of its aliases.
+pub fn model(value: &str) -> Option<&'static Model> {
+    MODELS
+        .iter()
+        .chain(&LEGACY_MODELS)
+        .find(|model| model.id == value || model.aliases.contains(&value))
+}
+
+/// A model's or permission mode's text: a known model's name (also for an
+/// alias), else the value as stored, or `Default` for none.
 pub fn setting_label(value: Option<&str>) -> &str {
     match value {
         None => "Default",
-        Some(value) => MODELS
-            .iter()
-            .chain(&LEGACY_MODELS)
-            .find(|model| model.id == value)
-            .map_or(value, |model| model.name),
+        Some(value) => model(value).map_or(value, |model| model.name),
     }
 }
 
@@ -407,7 +444,8 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         PickerItem::Project { .. }
         | PickerItem::Workspace(_)
         | PickerItem::Branch(_)
-        | PickerItem::Setting(_) => false,
+        | PickerItem::Setting(_)
+        | PickerItem::InitGit => false,
     }
 }
 
@@ -424,6 +462,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::Branch(row) => (row.git_ref.name.clone(), None),
         PickerItem::Setting(value) => (setting_label(*value).to_owned(), None),
         PickerItem::Heading(text) => ((*text).to_owned(), None),
+        PickerItem::InitGit => (INIT_GIT.to_owned(), None),
     };
     let bytes: Vec<usize> = label.char_indices().map(|(at, _)| at).collect();
     let mut total = 0;
@@ -489,6 +528,7 @@ mod tests {
                 PickerItem::Branch(row) => row.git_ref.name.clone(),
                 PickerItem::Setting(value) => setting_label(*value).to_owned(),
                 PickerItem::Heading(text) => (*text).to_owned(),
+                PickerItem::InitGit => super::INIT_GIT.to_owned(),
             })
             .collect()
     }
@@ -577,7 +617,8 @@ mod tests {
                 | PickerItem::Workspace(_)
                 | PickerItem::Branch(_)
                 | PickerItem::Setting(_)
-                | PickerItem::Heading(_) => None,
+                | PickerItem::Heading(_)
+                | PickerItem::InitGit => None,
             })
             .collect();
         assert_eq!(
@@ -790,13 +831,19 @@ mod tests {
     #[case(None, "Default")]
     #[case(Some("claude-opus-5-5"), "Claude Opus 5.5")]
     #[case(Some("claude-haiku-4-5"), "Claude Haiku 4.5")]
-    #[case(Some("opus"), "opus")]
+    #[case(Some("opus"), "Claude Opus 5")]
+    #[case(Some("sonnet"), "Claude Sonnet 5")]
+    #[case(Some("haiku"), "Claude Haiku 4.5")]
+    #[case(Some("fable"), "Claude Fable 5.1")]
+    #[case(Some("claude-haiku-4-5-20251001"), "Claude Haiku 4.5")]
+    #[case(Some("opus[1m]"), "opus[1m]")]
     #[case(Some("plan"), "plan")]
     fn setting_label_names_known_models_and_keeps_other_values(
         #[case] value: Option<&str>,
         #[case] label: &str,
     ) {
-        // Given / When / Then a model shows its name, and anything else as is.
+        // Given / When / Then a model, by ID or alias, shows its name, and
+        // anything else shows as is.
         assert_eq!(setting_label(value), label, "the setting's label");
     }
 }

@@ -62,8 +62,6 @@ pub enum SwitchBranchError {
     NoSelection,
     /// A session is already being started.
     Starting,
-    /// The draft runs in an existing worktree, whose branch it only shows.
-    ReadOnly,
     /// A thread in the directory the checkout would change is working or
     /// waiting.
     Busy,
@@ -71,14 +69,14 @@ pub enum SwitchBranchError {
 
 /// Allow switching the selected thread's or draft's branch unless a start is
 /// in flight or a turn is underway in the directory a checkout would change.
-/// A local draft checks out in the project's root; a new-worktree draft only
-/// records its base; an existing-worktree draft can't switch.
+/// A local draft checks out in the project's root, and an existing-worktree
+/// draft in its worktree; a new-worktree draft only records its base, and a
+/// draft whose project isn't a git repository is offered `git init` instead.
 ///
 /// # Errors
 ///
 /// Returns [`SwitchBranchError::NoSelection`] without a selected thread or
-/// draft, [`SwitchBranchError::Starting`] while a start is in flight,
-/// [`SwitchBranchError::ReadOnly`] for an existing-worktree draft, and
+/// draft, [`SwitchBranchError::Starting`] while a start is in flight, and
 /// [`SwitchBranchError::Busy`] while any thread in the same directory is in
 /// progress.
 pub fn validate_switch_branch(state: &AppState) -> Result<(), SwitchBranchError> {
@@ -86,8 +84,9 @@ pub fn validate_switch_branch(state: &AppState) -> Result<(), SwitchBranchError>
     match (sessions.selected_draft(), sessions.selected_thread()) {
         (None, None) => Err(SwitchBranchError::NoSelection),
         _ if sessions.starting => Err(SwitchBranchError::Starting),
-        (Some((project, draft)), _) => match draft.workspace {
-            DraftWorkspace::Existing(_) => Err(SwitchBranchError::ReadOnly),
+        (Some((_, draft)), _) if !draft.repo => Ok(()),
+        (Some((project, draft)), _) => match &draft.workspace {
+            DraftWorkspace::Existing(path) => not_busy(sessions, path),
             DraftWorkspace::NewWorktree => Ok(()),
             DraftWorkspace::Local => not_busy(sessions, &project.root),
         },
@@ -256,6 +255,8 @@ mod tests {
                 model: None,
                 permission: None,
                 created_at: SystemTime::UNIX_EPOCH,
+                repo: true,
+                from: None,
             });
         }
         state.sessions.cursor = Some(SidebarItem::Draft(ProjectId(1)));
@@ -295,19 +296,70 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn switch_branch_rejected_on_an_existing_worktree_draft() {
-        // Given a selected draft in an existing worktree.
+    fn switch_branch_allowed_on_an_existing_worktree_draft_while_the_root_is_busy() {
+        // Given a selected draft in an existing worktree and a thread working
+        // in the root.
         let state = draft_beside_busy_root(DraftWorkspace::Existing("/wt/feat".into()));
 
         // When validating a branch switch.
         let result = validate_switch_branch(&state);
 
-        // Then validation fails with ReadOnly.
+        // Then it is allowed.
         assert_eq!(
             result,
-            Err(SwitchBranchError::ReadOnly),
-            "an existing worktree's branch is read-only on a draft"
+            Ok(()),
+            "the draft's checkout happens in its worktree, not the busy root"
         );
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_rejected_on_an_existing_worktree_draft_while_that_worktree_is_busy() {
+        // Given a selected draft in `/work-tree`, where a thread is working.
+        let state = {
+            let mut state = with_working_thread("/work-tree");
+            if let Some(project) = state.sessions.projects.first_mut() {
+                project.draft = Some(Draft {
+                    workspace: DraftWorkspace::Existing("/work-tree".into()),
+                    branch: None,
+                    model: None,
+                    permission: None,
+                    created_at: SystemTime::UNIX_EPOCH,
+                    repo: true,
+                    from: None,
+                });
+            }
+            state.sessions.cursor = Some(SidebarItem::Draft(ProjectId(1)));
+            state
+        };
+
+        // When validating a branch switch.
+        let result = validate_switch_branch(&state);
+
+        // Then validation fails with Busy.
+        assert_eq!(
+            result,
+            Err(SwitchBranchError::Busy),
+            "a checkout would change files under the worktree's running turn"
+        );
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_allowed_on_a_non_git_draft_while_the_root_is_busy() {
+        // Given a selected local draft of a project that isn't a git
+        // repository, and a thread working in the root.
+        let state = {
+            let mut state = draft_beside_busy_root(DraftWorkspace::Local);
+            if let Some(draft) = state.sessions.draft_mut(ProjectId(1)) {
+                draft.repo = false;
+            }
+            state
+        };
+
+        // When validating a branch switch.
+        let result = validate_switch_branch(&state);
+
+        // Then it is allowed: it only offers `git init`.
+        assert_eq!(result, Ok(()), "a non-git draft is offered git init");
     }
 
     #[rstest::rstest]

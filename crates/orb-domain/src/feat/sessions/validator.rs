@@ -211,6 +211,8 @@ mod tests {
                         model: None,
                         permission: None,
                         created_at: SystemTime::UNIX_EPOCH,
+                        repo: true,
+                        from: None,
                     }),
                     threads: vec![],
                 }],

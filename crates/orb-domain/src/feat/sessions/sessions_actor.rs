@@ -23,10 +23,11 @@
 //! ends in a worktree still on orb's `orb/<hex>` branch, and Claude or the
 //! user has titled the thread, the branch is renamed after that title.
 //!
-//! It checks branches out in a thread's directory or for a local draft,
-//! unless a turn is underway there. Before the first prompt, picking the
-//! default branch from a worktree checks it out in the project's root and
-//! moves the thread there.
+//! It checks branches out in a thread's directory or in a draft's (the
+//! project's root, or the draft's existing worktree), unless a turn is
+//! underway there. Before the first prompt, picking the default branch from a
+//! worktree checks it out in the project's root and moves the thread, or the
+//! draft, there. It makes a draft's project a git repository when asked.
 //!
 //! When Claude refuses to start in a directory it hasn't been trusted in, the
 //! start waits: the actor asks the frontend for an interactive `claude` there,
@@ -134,12 +135,18 @@ pub struct CreateDraft(pub ProjectId);
 #[derive(Debug)]
 pub struct SaveDraft(pub ProjectId);
 
-/// Check a branch out in a project's root for its local draft.
+/// Check a branch out for a project's draft in `cwd`: the draft's directory,
+/// or the project's root, which the draft then moves to.
 #[derive(Debug)]
 pub struct CheckoutDraft {
     pub project: ProjectId,
     pub git_ref: GitRef,
+    pub cwd: PathBuf,
 }
+
+/// Make a project's root a git repository for its draft.
+#[derive(Debug)]
+pub struct InitGit(pub ProjectId);
 
 /// Start a session from a project's draft, which becomes a thread.
 #[derive(Debug)]
@@ -302,10 +309,26 @@ impl Message<CheckoutDraft> for SessionsActor {
 
     async fn handle(
         &mut self,
-        CheckoutDraft { project, git_ref }: CheckoutDraft,
+        CheckoutDraft {
+            project,
+            git_ref,
+            cwd,
+        }: CheckoutDraft,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.checkout_draft(project, &git_ref);
+        self.checkout_draft(project, &git_ref, &cwd);
+    }
+}
+
+impl Message<InitGit> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        InitGit(id): InitGit,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.init_git(id);
     }
 }
 
@@ -471,7 +494,7 @@ impl Message<Visit> for SessionsActor {
 
 impl SessionsActor {
     /// Shows the saved projects, threads and drafts, and selects the sidebar's
-    /// first row.
+    /// first row. Each draft learns what git says about it.
     fn restore(deps: SessionsActorDeps) -> Self {
         let SessionsActorDeps {
             services,
@@ -501,7 +524,7 @@ impl SessionsActor {
                 draft: drafts
                     .iter()
                     .find(|draft| draft.project_id == project.id)
-                    .map(draft_of),
+                    .map(|row| with_git(&services.git, &project.root, draft_of(row))),
                 id: project.id,
                 title: project.title,
                 root: project.root,
@@ -617,7 +640,7 @@ impl SessionsActor {
     /// and permission in a local checkout. A remembered previous worktree the
     /// project no longer has falls back to a local checkout. The branch is the
     /// one checked out in the draft's directory, or for a new worktree the
-    /// default branch.
+    /// default branch; see [`with_git`].
     fn create_draft(&mut self, id: ProjectId) {
         let seeds = self
             .state
@@ -642,13 +665,19 @@ impl SessionsActor {
             _ => (DraftWorkspace::Local, None),
         };
         let settings = last.or_else(|| self.store.latest_last_used().ok().flatten());
-        let draft = Draft {
-            branch: branch.or_else(|| self.draft_branch(&root, &workspace)),
-            workspace,
-            model: settings.as_ref().and_then(|used| used.model.clone()),
-            permission: settings.and_then(|used| used.permission_mode),
-            created_at: from_ms(now_ms()),
-        };
+        let draft = with_git(
+            &self.services.git,
+            &root,
+            Draft {
+                branch,
+                workspace,
+                model: settings.as_ref().and_then(|used| used.model.clone()),
+                permission: settings.and_then(|used| used.permission_mode),
+                created_at: from_ms(now_ms()),
+                repo: true,
+                from: None,
+            },
+        );
         let saved = self.store.save_draft(&draft_row(id, &draft));
         {
             let mut app = self.state.write();
@@ -663,23 +692,23 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Saves project `id`'s draft as the app state has it, first filling in
-    /// its branch when it has none.
+    /// Saves project `id`'s draft as the app state has it, first bringing
+    /// what git says about it up to date; see [`with_git`].
     fn save_draft(&mut self, id: ProjectId) {
         let Some((root, draft)) = self.draft(id) else {
             return;
         };
-        let branch = match draft.branch {
-            Some(_) => None,
-            None => self.draft_branch(&root, &draft.workspace),
-        };
+        let seen = with_git(&self.services.git, &root, draft.clone());
         let row = {
             let mut app = self.state.write();
             let Some(shown) = app.sessions.draft_mut(id) else {
                 return;
             };
-            if shown.branch.is_none() && shown.workspace == draft.workspace {
-                shown.branch = branch;
+            shown.repo = seen.repo;
+            // The user may have changed it meanwhile; a later save follows.
+            if shown.workspace == draft.workspace && shown.branch == draft.branch {
+                shown.branch = seen.branch;
+                shown.from = seen.from;
             }
             draft_row(id, shown)
         };
@@ -689,10 +718,57 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Checks `git_ref` out in project `id`'s root for its local draft.
-    fn checkout_draft(&mut self, id: ProjectId, git_ref: &GitRef) {
-        if let Some(root) = self.project_root(id) {
-            self.check_out_in(&root, git_ref);
+    /// Checks `git_ref` out in `cwd` for project `id`'s draft. A checkout in
+    /// the project's root moves a draft in a worktree back to the root.
+    fn checkout_draft(&mut self, id: ProjectId, git_ref: &GitRef, cwd: &Path) {
+        let Some(root) = self.project_root(id) else {
+            return;
+        };
+        if let Some(local) = self.check_out_in(cwd, git_ref)
+            && cwd == root
+        {
+            self.draft_to_root(id, local);
+        }
+    }
+
+    /// Moves project `id`'s draft from its worktree to the project's root,
+    /// on `branch`, and saves it.
+    fn draft_to_root(&mut self, id: ProjectId, branch: String) {
+        let row = {
+            let mut app = self.state.write();
+            let Some(draft) = app
+                .sessions
+                .draft_mut(id)
+                .filter(|draft| matches!(draft.workspace, DraftWorkspace::Existing(_)))
+            else {
+                return;
+            };
+            draft.workspace = DraftWorkspace::Local;
+            draft.branch = Some(branch);
+            draft.from = None;
+            draft_row(id, draft)
+        };
+        if self.store.save_draft(&row).is_err() {
+            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+        }
+        (self.wake)();
+    }
+
+    /// Runs `git init` in project `id`'s root, then shows its draft as a git
+    /// project's. A failure shows why.
+    fn init_git(&mut self, id: ProjectId) {
+        let Some(root) = self.project_root(id) else {
+            return;
+        };
+        match self.services.git.init(&root) {
+            Ok(()) => self.save_draft(id),
+            Err(report) => {
+                self.state.write().sessions.error = Some(format!(
+                    "Git initialization failed: {}",
+                    git_reason(&report)
+                ));
+                (self.wake)();
+            }
         }
     }
 
@@ -714,7 +790,8 @@ impl SessionsActor {
 
     /// Starts a session from project `id`'s draft, with its model and
     /// permission: in the project's root, in its existing worktree, or in a
-    /// new worktree made now from the draft's base branch.
+    /// new worktree made now from the draft's base branch. A draft of a
+    /// project that isn't a git repository always starts in the root.
     async fn start_draft(&mut self, id: ProjectId) {
         let Some((root, draft)) = self.draft(id) else {
             return self.end_start(Err("the draft is gone".to_owned()));
@@ -723,7 +800,12 @@ impl SessionsActor {
             model: draft.model,
             permission_mode: draft.permission,
         };
-        let (workspace, cwd, made) = match draft.workspace {
+        let workspace = if draft.repo {
+            draft.workspace
+        } else {
+            DraftWorkspace::Local
+        };
+        let (workspace, cwd, made) = match workspace {
             DraftWorkspace::Local => (LastWorkspace::Local, root, None),
             DraftWorkspace::Existing(path) if path.is_dir() => {
                 (LastWorkspace::Previous, path, None)
@@ -768,18 +850,6 @@ impl SessionsActor {
             .iter()
             .find(|project| project.id == id)
             .and_then(|project| Some((project.root.clone(), project.draft.clone()?)))
-    }
-
-    /// The branch a draft in `workspace` of the project at `root` shows: the
-    /// one checked out in its directory, or for a new worktree the default
-    /// branch. `None` when git can't tell.
-    fn draft_branch(&self, root: &Path, workspace: &DraftWorkspace) -> Option<String> {
-        let git = &self.services.git;
-        match workspace {
-            DraftWorkspace::Local => current_branch(git, root),
-            DraftWorkspace::Existing(path) => current_branch(git, path),
-            DraftWorkspace::NewWorktree => git.default_branch(root).ok(),
-        }
     }
 
     /// Starts a session for `pending` and finishes what it was for. If Claude
@@ -978,17 +1048,7 @@ impl SessionsActor {
             Some(base) => base.to_owned(),
             None => git.default_branch(repo)?,
         };
-        let on_origin = match base.strip_prefix("origin/") {
-            Some(branch) => Some(branch),
-            None if !base.contains('/') || git.branch_exists(repo, &base) => Some(base.as_str()),
-            None => None,
-        };
-        let base = match on_origin {
-            Some(branch) if git.has_origin(repo) && git.fetch(repo, branch)? => {
-                format!("origin/{branch}")
-            }
-            _ => base.clone(),
-        };
+        let base = start_point(git, repo, &base, |branch| git.fetch(repo, branch))?;
         let (path, branch) = (0..WORKTREE_NAME_ATTEMPTS)
             .map(|attempt| {
                 let hex = hex(attempt);
@@ -1076,23 +1136,28 @@ impl SessionsActor {
             .find(|row| row.id == id)
             .map(|row| row.cwd.clone());
         if let Some(cwd) = cwd {
-            self.check_out_in(&cwd, git_ref);
+            let _ = self.check_out_in(&cwd, git_ref);
         }
     }
 
     /// Checks `git_ref` out in `cwd` and shows the branch there. Refused while
-    /// a turn is underway in it.
-    fn check_out_in(&mut self, cwd: &Path, git_ref: &GitRef) {
+    /// a turn is underway in it. Returns the branch checked out, if it was.
+    fn check_out_in(&mut self, cwd: &Path, git_ref: &GitRef) -> Option<String> {
         let result = if self.busy_in(cwd) {
             Err(BUSY_DIRECTORY.to_owned())
         } else {
             match self.services.git.checkout(cwd, git_ref) {
-                Ok(local) => self.show_branch(cwd, &local),
+                Ok(local) => self.show_branch(cwd, &local).map(|()| local),
                 Err(report) => Err(git_reason(&report)),
             }
         };
-        self.state.write().sessions.error = result.err();
+        let (checked_out, error) = match result {
+            Ok(local) => (Some(local), None),
+            Err(error) => (None, Some(error)),
+        };
+        self.state.write().sessions.error = error;
         (self.wake)();
+        checked_out
     }
 
     /// Checks the default branch out in the project's root and moves the
@@ -1130,8 +1195,9 @@ impl SessionsActor {
         }
     }
 
-    /// Saves and shows `branch` on every thread in `cwd`, and on the local
-    /// draft of a project rooted there.
+    /// Saves and shows `branch` on every thread in `cwd`, and on the draft
+    /// there: a local draft of a project rooted there, or one in that
+    /// worktree.
     fn show_branch(&mut self, cwd: &Path, branch: &str) -> Result<(), String> {
         let mut saved = Ok(());
         let mut app = self.state.write();
@@ -1145,11 +1211,16 @@ impl SessionsActor {
                 show(thread, row, status);
             }
         }
-        for project in app.sessions.projects.iter_mut().filter(|p| p.root == cwd) {
+        for project in &mut app.sessions.projects {
+            let root = project.root.as_path();
             if let Some(draft) = project
                 .draft
                 .as_mut()
-                .filter(|draft| draft.workspace == DraftWorkspace::Local)
+                .filter(|draft| match &draft.workspace {
+                    DraftWorkspace::Local => root == cwd,
+                    DraftWorkspace::Existing(path) => path == cwd,
+                    DraftWorkspace::NewWorktree => false,
+                })
             {
                 draft.branch = Some(branch.to_owned());
                 if self
@@ -1609,7 +1680,69 @@ fn draft_row(project_id: ProjectId, draft: &Draft) -> DraftRow {
     }
 }
 
-/// How a saved draft looks.
+/// The branch a draft in `workspace` of the project at `root` shows: the one
+/// checked out in its directory, or for a new worktree the default branch.
+/// `None` when git can't tell.
+fn draft_branch(git: &GitService, root: &Path, workspace: &DraftWorkspace) -> Option<String> {
+    match workspace {
+        DraftWorkspace::Local => current_branch(git, root),
+        DraftWorkspace::Existing(path) => current_branch(git, path),
+        DraftWorkspace::NewWorktree => git.default_branch(root).ok(),
+    }
+}
+
+/// `draft` of the project at `root` with what git now says about it: whether
+/// the root is in a repository, its branch when it has none (see
+/// [`draft_branch`]), and for a new worktree the ref it would start from
+/// (see [`start_point`]), judged by what origin had at the last fetch.
+fn with_git(git: &GitService, root: &Path, draft: Draft) -> Draft {
+    let repo = git.refs(root).is_ok();
+    let branch = match draft.branch {
+        Some(branch) => Some(branch),
+        None if repo => draft_branch(git, root, &draft.workspace),
+        None => None,
+    };
+    let from = match (&draft.workspace, &branch) {
+        (DraftWorkspace::NewWorktree, Some(base)) if repo => {
+            start_point(git, root, base, |b| Ok(git.has_remote_branch(root, b))).ok()
+        }
+        _ => None,
+    };
+    Draft {
+        branch,
+        repo,
+        from,
+        ..draft
+    }
+}
+
+/// The ref a new worktree of `repo` starts from for `base`: `origin/<b>` when
+/// the repository has an origin and `origin_has` says it has `b` (a fetch at
+/// Start, a look at the last fetch for the draft form), else `base` as is.
+/// Only `origin/<b>`, a name without `/`, or an existing local branch is
+/// looked for on origin; another remote's ref, like `upstream/x`, is used as
+/// is.
+fn start_point<F>(
+    git: &GitService,
+    repo: &Path,
+    base: &str,
+    origin_has: F,
+) -> Result<String, Report<GitError>>
+where
+    F: FnOnce(&str) -> Result<bool, Report<GitError>>,
+{
+    let on_origin = match base.strip_prefix("origin/") {
+        Some(branch) => Some(branch),
+        None if !base.contains('/') || git.branch_exists(repo, base) => Some(base),
+        None => None,
+    };
+    Ok(match on_origin {
+        Some(branch) if git.has_origin(repo) && origin_has(branch)? => format!("origin/{branch}"),
+        _ => base.to_owned(),
+    })
+}
+
+/// How a saved draft looks, before git is asked about it.
 fn draft_of(row: &DraftRow) -> Draft {
     Draft {
         workspace: row.workspace.clone(),
@@ -1617,6 +1750,8 @@ fn draft_of(row: &DraftRow) -> Draft {
         model: row.model.clone(),
         permission: row.permission_mode.clone(),
         created_at: from_ms(row.created_at),
+        repo: true,
+        from: None,
     }
 }
 
@@ -1685,6 +1820,8 @@ mod tests {
     const CURRENT_BRANCH: &str = "dev";
     const NO_CLAUDE_DIR: &str = "/nonexistent/claude";
     const WORKTREES_ROOT: &str = "/nonexistent/worktrees";
+    /// Why git refuses outside a repository.
+    const NOT_A_REPO: &str = "fatal: not a git repository";
     const UNTRUSTED: &str =
         "Workspace not trusted. Run `claude` in /tmp/orb once and accept the trust prompt";
     const HOUR_MS: i64 = 60 * 60 * 1000;
@@ -1881,6 +2018,7 @@ mod tests {
             old: String,
             new: String,
         },
+        Init(PathBuf),
     }
 
     /// A git whose default branch is `main`, with [`CURRENT_BRANCH`] checked
@@ -1891,18 +2029,32 @@ mod tests {
         fetch: Result<bool, String>,
         /// The one branch that already exists.
         existing: Option<String>,
+        /// Whether the project is a git repository before any `init`.
+        repo: bool,
+        /// How `init` answers.
+        init: Result<(), String>,
+        /// The branches origin had at the last fetch.
+        remote: Vec<String>,
         calls: Mutex<Vec<GitCall>>,
     }
 
     impl FakeGit {
         /// A repository without an `origin`.
-        fn local() -> Arc<Self> {
-            Arc::new(Self {
+        fn answering() -> Self {
+            Self {
                 origin: false,
                 fetch: Ok(true),
                 existing: None,
+                repo: true,
+                init: Ok(()),
+                remote: Vec::new(),
                 calls: Mutex::default(),
-            })
+            }
+        }
+
+        /// A repository without an `origin`.
+        fn local() -> Arc<Self> {
+            Arc::new(Self::answering())
         }
 
         /// A repository with an `origin` that answers fetches with `fetch`.
@@ -1910,19 +2062,46 @@ mod tests {
             Arc::new(Self {
                 origin: true,
                 fetch: fetch.map_err(str::to_owned),
-                existing: None,
-                calls: Mutex::default(),
+                ..Self::answering()
+            })
+        }
+
+        /// A repository with an `origin` that had `branches` at the last
+        /// fetch.
+        fn tracking(branches: &[&str]) -> Arc<Self> {
+            Arc::new(Self {
+                origin: true,
+                remote: branches.iter().map(|&branch| branch.to_owned()).collect(),
+                ..Self::answering()
             })
         }
 
         /// A repository without an `origin` where `branch` already exists.
         fn having(branch: &str) -> Arc<Self> {
             Arc::new(Self {
-                origin: false,
-                fetch: Ok(true),
                 existing: Some(branch.to_owned()),
-                calls: Mutex::default(),
+                ..Self::answering()
             })
+        }
+
+        /// A directory that isn't a git repository until `init` answers
+        /// `init`.
+        fn plain(init: Result<(), &str>) -> Arc<Self> {
+            Arc::new(Self {
+                repo: false,
+                init: init.map_err(str::to_owned),
+                ..Self::answering()
+            })
+        }
+
+        /// Whether the directory is a repository now.
+        fn is_repo(&self) -> bool {
+            self.repo
+                || (self.init.is_ok()
+                    && self
+                        .calls()
+                        .iter()
+                        .any(|call| matches!(call, GitCall::Init(_))))
         }
 
         fn calls(&self) -> Vec<GitCall> {
@@ -1962,6 +2141,9 @@ mod tests {
         }
 
         fn refs(&self, _cwd: &Path) -> Result<Vec<GitRef>, Report<GitError>> {
+            if !self.is_repo() {
+                return Err(Report::new(GitError).attach(NOT_A_REPO.to_owned()));
+            }
             Ok(vec![GitRef {
                 current: true,
                 ..git_ref(CURRENT_BRANCH, false)
@@ -1969,6 +2151,9 @@ mod tests {
         }
 
         fn default_branch(&self, _repo: &Path) -> Result<String, Report<GitError>> {
+            if !self.is_repo() {
+                return Err(Report::new(GitError).attach(NOT_A_REPO.to_owned()));
+            }
             Ok("main".to_owned())
         }
 
@@ -2026,6 +2211,17 @@ mod tests {
 
         fn branch_exists(&self, _repo: &Path, branch: &str) -> bool {
             self.existing.as_deref() == Some(branch)
+        }
+
+        fn has_remote_branch(&self, _repo: &Path, branch: &str) -> bool {
+            self.remote.iter().any(|remote| remote == branch)
+        }
+
+        fn init(&self, dir: &Path) -> Result<(), Report<GitError>> {
+            self.record(GitCall::Init(dir.to_owned()));
+            self.init
+                .clone()
+                .map_err(|reason| Report::new(GitError).attach(reason))
         }
 
         fn checkout(&self, _cwd: &Path, git_ref: &GitRef) -> Result<String, Report<GitError>> {
@@ -2821,7 +3017,10 @@ mod tests {
             Path::new(NO_CLAUDE_DIR),
         );
 
-        // When saving it.
+        // When saving it after its branch was cleared.
+        if let Some(draft) = state.write().sessions.draft_mut(id) {
+            draft.branch = None;
+        }
         actor.save_draft(id);
 
         // Then its base branch is the default branch.
@@ -2846,7 +3045,7 @@ mod tests {
         );
 
         // When checking out origin/feat for it.
-        actor.checkout_draft(id, &git_ref("origin/feat", true));
+        actor.checkout_draft(id, &git_ref("origin/feat", true), Path::new(PROJECT_ROOT));
 
         // Then the draft shows the local branch feat.
         assert_eq!(
@@ -2870,7 +3069,7 @@ mod tests {
         );
 
         // When checking out feat for it.
-        actor.checkout_draft(id, &git_ref("feat", false));
+        actor.checkout_draft(id, &git_ref("feat", false), Path::new(PROJECT_ROOT));
 
         // Then the saved draft is on feat.
         assert_eq!(
@@ -2895,7 +3094,7 @@ mod tests {
         actor.poll().await;
 
         // When checking out feat for the draft.
-        actor.checkout_draft(id, &git_ref("feat", false));
+        actor.checkout_draft(id, &git_ref("feat", false), Path::new(PROJECT_ROOT));
 
         // Then the mode line says Claude is working there.
         assert_eq!(
@@ -2921,7 +3120,7 @@ mod tests {
         actor.poll().await;
 
         // When checking out feat for the draft.
-        actor.checkout_draft(id, &git_ref("feat", false));
+        actor.checkout_draft(id, &git_ref("feat", false), Path::new(PROJECT_ROOT));
 
         // Then the draft is still on main.
         assert_eq!(
@@ -3044,6 +3243,351 @@ mod tests {
         assert!(
             host.created_in().is_empty() && host.stopped().is_empty() && host.removed().is_empty(),
             "a draft has no session to remove"
+        );
+        Ok(())
+    }
+
+    /// Project `id`'s draft as the sidebar shows it: its workspace and branch.
+    fn draft_place(state: &State, id: ProjectId) -> Option<(DraftWorkspace, Option<String>)> {
+        shown_draft(state, id).map(|draft| (draft.workspace, draft.branch))
+    }
+
+    /// The worktree the existing-worktree draft tests' draft is in.
+    const DRAFT_WORKTREE: &str = "/tmp/orb-wt";
+
+    #[rstest::rstest]
+    fn checkout_draft_in_its_worktree_shows_the_branch_on_the_draft()
+    -> Result<(), Report<StoreError>> {
+        // Given a draft in an existing worktree on feat.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            branch: Some("feat".to_owned()),
+            ..draft_row(id, DraftWorkspace::Existing(DRAFT_WORKTREE.into()))
+        })?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When checking out dev in that worktree for it.
+        actor.checkout_draft(id, &git_ref("dev", false), Path::new(DRAFT_WORKTREE));
+
+        // Then the draft stays in the worktree, on dev.
+        assert_eq!(
+            draft_place(&state, id),
+            Some((
+                DraftWorkspace::Existing(DRAFT_WORKTREE.into()),
+                Some("dev".to_owned())
+            )),
+            "the draft should show the branch checked out in its worktree"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn checkout_draft_in_the_root_moves_an_existing_worktree_draft_there()
+    -> Result<(), Report<StoreError>> {
+        // Given a draft in an existing worktree on feat.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            branch: Some("feat".to_owned()),
+            ..draft_row(id, DraftWorkspace::Existing(DRAFT_WORKTREE.into()))
+        })?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When checking out the default branch main in the root for it.
+        actor.checkout_draft(id, &git_ref("main", false), Path::new(PROJECT_ROOT));
+
+        // Then the draft is a local draft on main.
+        assert_eq!(
+            draft_place(&state, id),
+            Some((DraftWorkspace::Local, Some("main".to_owned()))),
+            "a checkout in the root should take the draft back there"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn checkout_draft_in_the_root_saves_the_draft_as_local() -> Result<(), Report<StoreError>> {
+        // Given a draft in an existing worktree on feat.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            branch: Some("feat".to_owned()),
+            ..draft_row(id, DraftWorkspace::Existing(DRAFT_WORKTREE.into()))
+        })?;
+        let (mut actor, _state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When checking out main in the root for it.
+        actor.checkout_draft(id, &git_ref("main", false), Path::new(PROJECT_ROOT));
+
+        // Then the saved draft is local, on main.
+        assert_eq!(
+            saved_draft(&actor.store, id)?.map(|draft| (draft.workspace, draft.branch)),
+            Some((DraftWorkspace::Local, Some("main".to_owned()))),
+            "the draft's move to the root should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn checkout_draft_refused_while_its_worktree_is_busy() -> Result<(), Report<StoreError>> {
+        // Given a draft in the worktree where thread `aa` is working.
+        let (store, _) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            cwd: PathBuf::from(DRAFT_WORKTREE),
+            ..row
+        })?;
+        let id = orb_project(&store)?;
+        store.save_draft(&draft_row(
+            id,
+            DraftWorkspace::Existing(DRAFT_WORKTREE.into()),
+        ))?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When checking out dev in the worktree for the draft.
+        actor.checkout_draft(id, &git_ref("dev", false), Path::new(DRAFT_WORKTREE));
+
+        // Then the mode line says Claude is working there.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some(BUSY_DIRECTORY),
+            "a checkout under a running turn should be refused"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn thread_checkout_in_a_worktree_updates_the_draft_there() -> Result<(), Report<StoreError>> {
+        // Given thread `aa` in a worktree and a draft in the same worktree on
+        // feat.
+        let (store, thread) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            cwd: PathBuf::from(DRAFT_WORKTREE),
+            ..row
+        })?;
+        let id = orb_project(&store)?;
+        store.save_draft(&DraftRow {
+            branch: Some("feat".to_owned()),
+            ..draft_row(id, DraftWorkspace::Existing(DRAFT_WORKTREE.into()))
+        })?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When switching the thread to dev.
+        actor.check_out(thread, &git_ref("dev", false));
+
+        // Then the draft follows its worktree onto dev.
+        assert_eq!(
+            shown_draft(&state, id).and_then(|draft| draft.branch),
+            Some("dev".to_owned()),
+            "a draft should follow checkouts in its worktree"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::fetched_from_origin(&["main"], "origin/main")]
+    #[case::not_on_origin(&[], "main")]
+    fn new_worktree_draft_says_where_it_starts_from(
+        #[case] on_origin: &[&str],
+        #[case] from: &str,
+    ) -> Result<(), Report<StoreError>> {
+        // Given a project with an origin that had `on_origin` at the last
+        // fetch, last started in a new worktree.
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        store.record_last_used(id, &used(LastWorkspace::NewWorktree), 10)?;
+        let (mut actor, state) = start_with(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &FakeGit::tracking(on_origin),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When creating its draft, based on the default branch main.
+        actor.create_draft(id);
+
+        // Then it starts from `from`.
+        assert_eq!(
+            shown_draft(&state, id).and_then(|draft| draft.from),
+            Some(from.to_owned()),
+            "the ref the new worktree would start from"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_worktree_draft_without_origin_starts_from_its_base() -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft based on main in a repository without an
+        // origin.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            branch: Some("main".to_owned()),
+            ..draft_row(id, DraftWorkspace::NewWorktree)
+        })?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When saving it.
+        actor.save_draft(id);
+
+        // Then it starts from main as it is.
+        assert_eq!(
+            shown_draft(&state, id).and_then(|draft| draft.from),
+            Some("main".to_owned()),
+            "without an origin the base is used as it is"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn draft_of_a_non_git_project_is_not_a_repository() -> Result<(), Report<StoreError>> {
+        // Given a project whose root isn't a git repository.
+        let store = Store::open_in_memory()?;
+        let id = orb_project(&store)?;
+        let (mut actor, state) = start_with(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &FakeGit::plain(Ok(())),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When creating its draft.
+        actor.create_draft(id);
+
+        // Then the draft knows it isn't in a repository.
+        assert_eq!(
+            shown_draft(&state, id).map(|draft| draft.repo),
+            Some(false),
+            "a plain directory isn't a git repository"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restored_draft_of_a_non_git_project_is_not_a_repository() -> Result<(), Report<StoreError>> {
+        // Given a saved draft of a project whose root isn't a git repository.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+
+        // When the actor starts.
+        let (_actor, state) = start_with(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &FakeGit::plain(Ok(())),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the draft knows it isn't in a repository.
+        assert_eq!(
+            shown_draft(&state, id).map(|draft| draft.repo),
+            Some(false),
+            "a restored draft should learn its project isn't a repository"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn init_git_runs_git_init_in_the_root() -> Result<(), Report<StoreError>> {
+        // Given a local draft of a project that isn't a git repository.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let git = FakeGit::plain(Ok(()));
+        let (mut actor, _state) = start_with(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &git,
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When initializing git for it.
+        actor.init_git(id);
+
+        // Then git init ran in the project's root.
+        assert_eq!(
+            git.calls(),
+            vec![GitCall::Init(PathBuf::from(PROJECT_ROOT))],
+            "git init should run in the root"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn initialized_draft_is_a_repository_on_the_roots_branch() -> Result<(), Report<StoreError>> {
+        // Given a local draft of a project that isn't a git repository.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (mut actor, state) = start_with(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &FakeGit::plain(Ok(())),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When initializing git for it.
+        actor.init_git(id);
+
+        // Then the draft is in a repository, on the branch git reports.
+        assert_eq!(
+            shown_draft(&state, id).map(|draft| (draft.repo, draft.branch)),
+            Some((true, Some(CURRENT_BRANCH.to_owned()))),
+            "the draft should now behave as a git project's"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn failed_git_init_shows_why() -> Result<(), Report<StoreError>> {
+        // Given a draft of a non-git project where git init fails.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (mut actor, state) = start_with(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &FakeGit::plain(Err("fatal: cannot mkdir .git: Permission denied")),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When initializing git for it.
+        actor.init_git(id);
+
+        // Then the mode line says why.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("Git initialization failed: fatal: cannot mkdir .git: Permission denied"),
+            "a failed git init should show git's reason"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn non_git_new_worktree_draft_starts_in_the_root() -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft of a project that isn't a git repository.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start_with(
+            store,
+            &host,
+            &FakeGit::plain(Ok(())),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When starting it.
+        actor.start_draft(id).await;
+
+        // Then the session runs in the root.
+        assert_eq!(
+            host.created_in(),
+            vec![PathBuf::from(PROJECT_ROOT)],
+            "a non-git project's draft always starts local"
         );
         Ok(())
     }
@@ -3950,6 +4494,8 @@ mod tests {
                 model: Some("opus".to_owned()),
                 permission: None,
                 created_at: SystemTime::UNIX_EPOCH + Duration::from_millis(2_000),
+                repo: true,
+                from: Some("main".to_owned()),
             })],
             "a saved draft should be restored onto its project"
         );

@@ -8,14 +8,15 @@
 //! a thread's session could run, each with its glyph; the branch picker shows
 //! each branch with its badge, dimming the ones checked out where the thread
 //! can't follow and saying where; the model picker shows each model's name,
-//! with its legacy models under their own label. Where the filter matched is
+//! with its legacy models under their own label; a draft whose project isn't
+//! a git repository gets one row, `Initialize Git`. Where the filter matched is
 //! bold and underlined, and the rows scroll to keep the selection in view.
 
 use std::path::Path;
 
 use orb_domain::feat::git::git_service::GitRef;
 use orb_domain::feat::picker::list::{
-    BranchRow, Matches, PickerItem, WorkspaceChoice, setting_label,
+    BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, setting_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
 use ratatui::buffer::Buffer;
@@ -102,6 +103,7 @@ fn section_label(kind: &PickerKind) -> &'static str {
         PickerKind::Branches { .. } => "Branches",
         PickerKind::Model { .. } => "Models",
         PickerKind::Permission { .. } => "Permission modes",
+        PickerKind::InitGit { .. } => "Not a git repository",
     }
 }
 
@@ -251,6 +253,9 @@ fn render_item(
         }
         PickerItem::Heading(text) => {
             Line::styled(*text, Style::new().fg(GRAY)).render(area, buf);
+        }
+        PickerItem::InitGit => {
+            Line::from_iter(highlight(INIT_GIT, &matches.name, Style::new())).render(area, buf);
         }
     }
 }
@@ -806,6 +811,7 @@ mod tests {
             PickTarget::Thread(ThreadId(1)),
             "/tmp/repo".into(),
             false,
+            None,
             Focus::Preview,
         );
 
@@ -839,6 +845,7 @@ mod tests {
             PickTarget::Thread(ThreadId(1)),
             REPO.into(),
             false,
+            None,
             Focus::Preview,
         );
         picker.show_branches(Path::new(REPO), refs);
@@ -1046,6 +1053,26 @@ mod tests {
             .nth(1);
         assert!(
             after.is_some_and(|line| line.trim_matches(['│', ' ']) == "Legacy models"),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn init_git_picker_offers_initialize_git() {
+        // Given the picker a non-git draft's ␣w or ␣b opens.
+        let picker = PickerState::init_git(ProjectId(1), Focus::Preview);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 20);
+
+        // Then its one row, under the label, is Initialize Git.
+        let lines = lines(&buf);
+        let first = lines
+            .iter()
+            .skip_while(|line| !line.contains("Not a git repository"))
+            .nth(1);
+        assert!(
+            first.is_some_and(|line| line.trim_matches(['│', ' ']) == "Initialize Git"),
             "screen was {lines:#?}"
         );
     }
