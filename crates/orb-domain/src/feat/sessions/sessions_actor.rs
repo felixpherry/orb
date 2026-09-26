@@ -741,9 +741,11 @@ impl SessionsActor {
                 }
             }
         };
-        let branch = made
-            .as_ref()
-            .map_or(draft.branch, |made| Some(made.branch.clone()));
+        // The draft's branch can be stale (a checkout outside orb, a restart).
+        let branch = match &made {
+            Some(made) => Some(made.branch.clone()),
+            None => current_branch(&self.services.git, &cwd),
+        };
         let pending = PendingStart {
             kind: StartKind::Draft {
                 project: id,
@@ -3138,6 +3140,30 @@ mod tests {
             saved(&actor.store, "bb")?.branch,
             git.added().map(|(_, branch)| branch),
             "the new thread should be saved on its worktree's branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn local_thread_is_saved_on_the_roots_branch_at_start() -> Result<(), Report<StoreError>>
+    {
+        // Given a local draft still showing main, while the root is on dev.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            branch: Some("main".to_owned()),
+            ..draft_row(id, DraftWorkspace::Local)
+        })?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the saved thread is on dev.
+        assert_eq!(
+            saved(&actor.store, "bb")?.branch.as_deref(),
+            Some(CURRENT_BRANCH),
+            "the new thread should be saved on the branch its root has at start"
         );
         Ok(())
     }
