@@ -5,6 +5,11 @@
 //! carries `ZELLIJ_SESSION_NAME` and `ZELLIJ_PANE_ID`, so each action targets
 //! orb's session and client. When zellij fails, the first line it printed to
 //! stderr becomes the reason.
+//!
+//! zellij runs a new pane's command under its server's environment, not
+//! orb's, so the command goes through `env` to carry orb's own `NO_COLOR`:
+//! a `NO_COLOR` the server picked up from the terminal that started it would
+//! otherwise turn lazygit monochrome.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -16,8 +21,18 @@ use serde::Deserialize;
 use super::zellij_service::{Zellij, ZellijError, ZellijPane};
 
 /// Runs the `zellij` on `PATH`.
-#[derive(Debug, Clone, Copy)]
-pub struct ZellijCli;
+#[derive(Debug, Clone)]
+pub struct ZellijCli {
+    /// orb's own `NO_COLOR`, which a new pane's command gets in place of the
+    /// zellij server's.
+    no_color: Option<OsString>,
+}
+
+impl ZellijCli {
+    pub fn new(no_color: Option<OsString>) -> Self {
+        Self { no_color }
+    }
+}
 
 impl Zellij for ZellijCli {
     fn name(&self) -> &'static str {
@@ -40,7 +55,7 @@ impl Zellij for ZellijCli {
     }
 
     fn open(&self, name: &str, cwd: &Path, argv: &[OsString]) -> Result<(), Report<ZellijError>> {
-        run(new_pane_args(name, cwd, argv))?;
+        run(new_pane_args(name, cwd, self.no_color.as_deref(), argv))?;
         Ok(())
     }
 }
@@ -104,7 +119,17 @@ pub fn parse_panes(json: &str) -> Result<Vec<ZellijPane>, serde_json::Error> {
 
 /// The `zellij action` arguments that open a floating pane named `name` in
 /// `cwd` running `argv`, filling the tab and closing when `argv` exits.
-pub fn new_pane_args(name: &str, cwd: &Path, argv: &[OsString]) -> Vec<OsString> {
+/// `argv` runs with `NO_COLOR` set to `no_color`, or unset without one.
+pub fn new_pane_args(
+    name: &str,
+    cwd: &Path,
+    no_color: Option<&OsStr>,
+    argv: &[OsString],
+) -> Vec<OsString> {
+    let no_color = match no_color {
+        Some(value) => vec![OsString::from_iter([OsStr::new("NO_COLOR="), value])],
+        None => vec!["-u".into(), "NO_COLOR".into()],
+    };
     ["new-pane", "--floating", "--close-on-exit", "--name", name]
         .into_iter()
         .map(OsString::from)
@@ -115,6 +140,8 @@ pub fn new_pane_args(name: &str, cwd: &Path, argv: &[OsString]) -> Vec<OsString>
             ]
             .map(OsString::from),
         )
+        .chain([OsString::from("env")])
+        .chain(no_color)
         .chain(argv.iter().cloned())
         .collect()
 }
@@ -125,7 +152,7 @@ pub fn new_pane_args(name: &str, cwd: &Path, argv: &[OsString]) -> Vec<OsString>
     reason = "tests propagate parse failures with `?` and assert on the outcome"
 )]
 mod tests {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::path::Path;
 
     use super::{new_pane_args, parse_panes};
@@ -170,17 +197,32 @@ mod tests {
         assert!(parsed.is_err(), "non-JSON output should not parse");
     }
 
-    #[rstest::rstest]
-    fn new_pane_args_open_a_named_full_screen_floating_pane_running_the_command() {
-        // Given / When building the arguments for lazygit in ~/dev/orb.
+    /// The `new-pane` arguments for lazygit in ~/dev/orb, split at `--` into
+    /// the pane's options and its command.
+    fn lazygit_pane_args(no_color: Option<&str>) -> (Vec<OsString>, Vec<OsString>) {
         let args = new_pane_args(
             "orb:~/dev/orb:lazygit",
             Path::new("/Users/me/dev/orb"),
+            no_color.map(OsStr::new),
             &["lazygit".into()],
         );
+        let start = args.iter().position(|arg| arg == "--").map_or(0, |i| i + 1);
+        let options = args.iter().take(start).cloned().collect();
+        let command = args.into_iter().skip(start).collect();
+        (options, command)
+    }
 
-        // Then they float a pane over the whole tab that closes on exit, with the command after `--`.
-        let expected: Vec<OsString> = [
+    fn os_strings(strs: &[&str]) -> Vec<OsString> {
+        strs.iter().map(OsString::from).collect()
+    }
+
+    #[rstest::rstest]
+    fn new_pane_args_open_a_named_full_screen_floating_pane() {
+        // Given / When building the arguments for lazygit in ~/dev/orb.
+        let (options, _) = lazygit_pane_args(None);
+
+        // Then they float a pane over the whole tab that closes on exit, ending at `--`.
+        let expected = os_strings(&[
             "new-pane",
             "--floating",
             "--close-on-exit",
@@ -197,11 +239,21 @@ mod tests {
             "--height",
             "100%",
             "--",
-            "lazygit",
-        ]
-        .iter()
-        .map(OsString::from)
-        .collect();
-        assert_eq!(args, expected, "new-pane arguments");
+        ]);
+        assert_eq!(options, expected, "new-pane options");
+    }
+
+    #[rstest::rstest]
+    #[case(None, &["env", "-u", "NO_COLOR", "lazygit"])]
+    #[case(Some("1"), &["env", "NO_COLOR=1", "lazygit"])]
+    fn new_pane_command_runs_with_orbs_own_no_color(
+        #[case] no_color: Option<&str>,
+        #[case] expected: &[&str],
+    ) {
+        // Given / When building the arguments for lazygit with orb's NO_COLOR.
+        let (_, command) = lazygit_pane_args(no_color);
+
+        // Then the command runs through `env` with that NO_COLOR, whatever the server's is.
+        assert_eq!(command, os_strings(expected), "the pane's command");
     }
 }
