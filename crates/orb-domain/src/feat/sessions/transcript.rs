@@ -105,12 +105,15 @@ pub struct TitleScan {
     pub custom_title: Option<String>,
     /// The git branch the latest user line named.
     pub branch: Option<String>,
+    /// An `ai-title` line gave a title in these lines.
+    pub ai_titled: bool,
     /// Bytes read so far; pass it to the next scan.
     pub offset: u64,
 }
 
 /// Reads the complete lines added to the transcript since `offset` and
-/// updates `title`, `custom_title`, and `branch` from them.
+/// updates `title`, `custom_title`, and `branch` from them, noting whether
+/// Claude generated a title.
 ///
 /// # Errors
 ///
@@ -123,49 +126,46 @@ pub fn scan_title(
     branch: Option<String>,
 ) -> io::Result<TitleScan> {
     let new = read_new_lines(path, offset)?;
-    let (title, custom_title, branch) = new
-        .text
-        .lines()
-        .fold((title, custom_title, branch), next_title);
-    Ok(TitleScan {
+    let scan = TitleScan {
         title,
         custom_title,
         branch,
+        ai_titled: false,
         offset: new.offset,
-    })
+    };
+    Ok(new.text.lines().fold(scan, next_title))
 }
 
 /// The titles and branch after one transcript line.
-fn next_title(
-    (title, custom_title, branch): (Option<String>, Option<String>, Option<String>),
-    line: &str,
-) -> (Option<String>, Option<String>, Option<String>) {
+fn next_title(scan: TitleScan, line: &str) -> TitleScan {
     if !line.contains(r#""type":"user""#)
         && !line.contains(r#""type":"ai-title""#)
         && !line.contains(r#""type":"custom-title""#)
     {
-        return (title, custom_title, branch);
+        return scan;
     }
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return (title, custom_title, branch);
+        return scan;
     };
     match value.get("type").and_then(Value::as_str) {
-        Some("ai-title") => (
-            text_field(&value, "aiTitle").or(title),
-            custom_title,
-            branch,
-        ),
-        Some("custom-title") => (
-            title,
-            text_field(&value, "customTitle").or(custom_title),
-            branch,
-        ),
-        Some("user") => (
-            title.or_else(|| prompt(&value)),
-            custom_title,
-            text_field(&value, "gitBranch").or(branch),
-        ),
-        _ => (title, custom_title, branch),
+        Some("ai-title") => match text_field(&value, "aiTitle") {
+            Some(title) => TitleScan {
+                title: Some(title),
+                ai_titled: true,
+                ..scan
+            },
+            None => scan,
+        },
+        Some("custom-title") => TitleScan {
+            custom_title: text_field(&value, "customTitle").or(scan.custom_title),
+            ..scan
+        },
+        Some("user") => TitleScan {
+            title: scan.title.or_else(|| prompt(&value)),
+            branch: text_field(&value, "gitBranch").or(scan.branch),
+            ..scan
+        },
+        _ => scan,
     }
 }
 
@@ -313,6 +313,23 @@ mod tests {
             Some("Fix last-line drop in parser"),
             "the latest ai-title should win"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn ai_title_line_marks_the_scan_ai_titled() -> io::Result<()> {
+        // Given a prompt followed by a generated title.
+        let dir = tempdir()?;
+        let path = write_transcript(
+            dir.path(),
+            &[PROMPT, r#"{"type":"ai-title","aiTitle":"Parser fix"}"#],
+        )?;
+
+        // When scanning it.
+        let scan = scan_title(&path, 0, None, None, None)?;
+
+        // Then the scan notes that Claude titled the thread.
+        assert!(scan.ai_titled, "an ai-title line should mark the scan");
         Ok(())
     }
 
@@ -465,6 +482,7 @@ mod tests {
                 title: Some("Fix the parser".to_owned()),
                 custom_title: None,
                 branch: None,
+                ai_titled: false,
                 offset: PROMPT.len() as u64 + 1
             },
             "the offset should stop after the last newline"
@@ -494,6 +512,7 @@ mod tests {
                 title: Some("Parser fix".to_owned()),
                 custom_title: None,
                 branch: None,
+                ai_titled: true,
                 offset: fs::metadata(&path)?.len()
             },
             "the completed line should be parsed once"
@@ -532,6 +551,7 @@ mod tests {
                 title: Some("Fix the parser".to_owned()),
                 custom_title: None,
                 branch: None,
+                ai_titled: false,
                 offset: fs::metadata(&path)?.len()
             },
             "a replaced file should be read from the start"

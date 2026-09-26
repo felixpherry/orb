@@ -11,7 +11,9 @@
 //! a new worktree of the project, or a directory that already exists. The new
 //! session starts first, and only then is the old one removed; a worktree orb
 //! made for a start that failed is removed again, and an orb worktree no
-//! thread uses after a move is removed unless it has changes.
+//! thread uses after a move is removed unless it has changes. When a turn
+//! ends in a worktree still on orb's `orb/<hex>` branch, and Claude or the
+//! user has titled the thread, the branch is renamed after that title.
 //!
 //! It checks branches out in a thread's directory, unless a turn is underway
 //! there. Before the first prompt, picking the default branch from a worktree
@@ -50,9 +52,11 @@ use super::transcript::{locate, scan_title};
 use crate::Focus;
 use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
-use crate::feat::git::git_service::{GitError, GitRef, git_reason};
+use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
 use crate::feat::git::validator::BUSY_DIRECTORY;
-use crate::feat::git::worktree::{hex, is_orb_worktree, new_worktree_path, trust_dir};
+use crate::feat::git::worktree::{
+    hex, hex_branch, is_orb_worktree, new_worktree_path, slug, trust_dir,
+};
 
 /// How long to wait between polls while a turn is underway or orb is attached.
 const FAST_POLL: Duration = Duration::from_secs(1);
@@ -486,6 +490,9 @@ impl SessionsActor {
             let before = row.clone();
             let was_in_progress = row.turn_started_at.is_some();
             update_row(row, record, status, now, &self.claude_dir);
+            if was_in_progress && !status.in_progress() {
+                rename_hex_branch(&self.services.git, &self.worktrees_root, row);
+            }
             let selected = cursor == Some(SidebarItem::Thread(row.id));
             if follow_activity(row, status, was_in_progress, selected, attached, now) {
                 to_stop.push(row.short_id.clone());
@@ -1183,7 +1190,26 @@ fn update_row(
         row.title = scan.title;
         row.custom_title = scan.custom_title;
         row.branch = scan.branch;
+        row.ai_titled |= scan.ai_titled;
         row.transcript_offset = scan.offset;
+    }
+}
+
+/// Renames the `orb/<hex>` branch of the orb worktree `row` is in to
+/// `orb/<slug>` of its title, once Claude or the user titled it. The old name
+/// stays when that branch already exists or git refuses.
+fn rename_hex_branch(git: &GitService, worktrees_root: &Path, row: &mut ThreadRow) {
+    if let Some(old) = hex_branch(worktrees_root, &row.cwd)
+        && row.branch.as_deref() == Some(old.as_str())
+        && (row.custom_title.is_some() || row.ai_titled)
+        && let Some(new) = display_title(row)
+            .as_deref()
+            .and_then(slug)
+            .map(|slug| format!("orb/{slug}"))
+        && !git.branch_exists(&row.cwd, &new)
+        && git.rename_branch(&row.cwd, &old, &new).is_ok()
+    {
+        row.branch = Some(new);
     }
 }
 
@@ -1466,6 +1492,10 @@ mod tests {
             branch: String,
             force: bool,
         },
+        RenameBranch {
+            old: String,
+            new: String,
+        },
     }
 
     /// A git whose default branch is `main`, whose answers the test scripts,
@@ -1473,6 +1503,8 @@ mod tests {
     struct FakeGit {
         origin: bool,
         fetch: Result<bool, String>,
+        /// The one branch that already exists.
+        existing: Option<String>,
         calls: Mutex<Vec<GitCall>>,
     }
 
@@ -1482,6 +1514,7 @@ mod tests {
             Arc::new(Self {
                 origin: false,
                 fetch: Ok(true),
+                existing: None,
                 calls: Mutex::default(),
             })
         }
@@ -1491,6 +1524,17 @@ mod tests {
             Arc::new(Self {
                 origin: true,
                 fetch: fetch.map_err(str::to_owned),
+                existing: None,
+                calls: Mutex::default(),
+            })
+        }
+
+        /// A repository without an `origin` where `branch` already exists.
+        fn having(branch: &str) -> Arc<Self> {
+            Arc::new(Self {
+                origin: false,
+                fetch: Ok(true),
+                existing: Some(branch.to_owned()),
                 calls: Mutex::default(),
             })
         }
@@ -1507,6 +1551,14 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(call);
+        }
+
+        /// The branch the actor renamed, and its new name.
+        fn renamed(&self) -> Option<(String, String)> {
+            self.calls().into_iter().find_map(|call| match call {
+                GitCall::RenameBranch { old, new } => Some((old, new)),
+                _ => None,
+            })
         }
 
         /// The worktree the actor added, and its branch.
@@ -1583,8 +1635,8 @@ mod tests {
             Ok(())
         }
 
-        fn branch_exists(&self, _repo: &Path, _branch: &str) -> bool {
-            false
+        fn branch_exists(&self, _repo: &Path, branch: &str) -> bool {
+            self.existing.as_deref() == Some(branch)
         }
 
         fn checkout(&self, _cwd: &Path, git_ref: &GitRef) -> Result<String, Report<GitError>> {
@@ -1595,12 +1647,11 @@ mod tests {
             Ok(local.to_owned())
         }
 
-        fn rename_branch(
-            &self,
-            _cwd: &Path,
-            _old: &str,
-            _new: &str,
-        ) -> Result<(), Report<GitError>> {
+        fn rename_branch(&self, _cwd: &Path, old: &str, new: &str) -> Result<(), Report<GitError>> {
+            self.record(GitCall::RenameBranch {
+                old: old.to_owned(),
+                new: new.to_owned(),
+            });
             Ok(())
         }
     }
@@ -1720,6 +1771,48 @@ mod tests {
             .threads()
             .find(|thread| thread.id == id)
             .and_then(|thread| thread.turn_started_at)
+    }
+
+    /// The orb worktree the rename tests' thread is in, and its branch.
+    const HEX_WORKTREE: &str = "/nonexistent/worktrees/orb/orb-1a2b3c4d";
+    const HEX_BRANCH: &str = "orb/1a2b3c4d";
+    const PROMPT_LINE: &str = "{\"type\":\"user\",\"message\":{\"content\":\"Fix the parser\"}}\n";
+    const AI_TITLE_LINE: &str = "{\"type\":\"ai-title\",\"aiTitle\":\"Parser fix\"}\n";
+
+    /// A Claude directory holding `lines` as the transcript of session `s1`
+    /// in [`HEX_WORKTREE`], and a store whose thread `aa` is there on `branch`.
+    fn worktree_thread(
+        lines: &str,
+        branch: &str,
+    ) -> Result<(tempfile::TempDir, Store, ThreadId), Report<StoreError>> {
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(HEX_WORKTREE), "s1");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(&path, lines).change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            cwd: PathBuf::from(HEX_WORKTREE),
+            branch: Some(branch.to_owned()),
+            ..row
+        })?;
+        Ok((claude_dir, store, id))
+    }
+
+    /// Thread `aa`'s record in session `s1` with `status`.
+    fn in_session(status: ThreadStatus) -> SessionRecord {
+        SessionRecord {
+            session_id: Some("s1".to_owned()),
+            ..record("aa", status)
+        }
+    }
+
+    /// Polls once while thread `aa` works, then once after its turn ended.
+    async fn end_turn(actor: &mut SessionsActor, host: &FakeHost) {
+        host.set_list(Ok(vec![in_session(ThreadStatus::Working)]));
+        actor.poll().await;
+        host.set_list(Ok(vec![in_session(ThreadStatus::Idle)]));
+        actor.poll().await;
     }
 
     #[rstest::rstest]
@@ -3715,6 +3808,105 @@ mod tests {
             vec![root.path().to_owned()],
             "the thread should move back to the root checkout"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_renames_the_hex_branch_to_the_title_slug() -> Result<(), Report<StoreError>> {
+        // Given a thread in an orb worktree on its hex branch, titled by Claude.
+        let (claude_dir, store, id) =
+            worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start_with(store, &host, &FakeGit::local(), claude_dir.path());
+
+        // When a poll sees its turn end.
+        end_turn(&mut actor, &host).await;
+
+        // Then the thread shows the branch named after its title.
+        assert_eq!(
+            shown(&state, id)
+                .and_then(|thread| thread.branch)
+                .as_deref(),
+            Some("orb/parser-fix"),
+            "the hex branch should be renamed to the title's slug"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn no_rename_when_the_branch_is_not_the_hex_branch() -> Result<(), Report<StoreError>> {
+        // Given a Claude-titled thread in an orb worktree on another branch.
+        let (claude_dir, store, _) =
+            worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), "main")?;
+        let host = FakeHost::listing(Vec::new());
+        let git = FakeGit::local();
+        let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
+
+        // When a poll sees its turn end.
+        end_turn(&mut actor, &host).await;
+
+        // Then no branch was renamed.
+        assert_eq!(git.renamed(), None, "only orb's hex branch is renamed");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn no_rename_with_only_a_prompt_title() -> Result<(), Report<StoreError>> {
+        // Given a thread on its hex branch titled only by its first prompt.
+        let (claude_dir, store, _) = worktree_thread(PROMPT_LINE, HEX_BRANCH)?;
+        let host = FakeHost::listing(Vec::new());
+        let git = FakeGit::local();
+        let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
+
+        // When a poll sees its turn end.
+        end_turn(&mut actor, &host).await;
+
+        // Then no branch was renamed.
+        assert_eq!(git.renamed(), None, "a prompt title isn't enough to rename");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn no_rename_when_the_slug_branch_exists() -> Result<(), Report<StoreError>> {
+        // Given a Claude-titled thread on its hex branch, and `orb/parser-fix` taken.
+        let (claude_dir, store, _) =
+            worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
+        let host = FakeHost::listing(Vec::new());
+        let git = FakeGit::having("orb/parser-fix");
+        let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
+
+        // When a poll sees its turn end.
+        end_turn(&mut actor, &host).await;
+
+        // Then no branch was renamed.
+        assert_eq!(
+            git.renamed(),
+            None,
+            "an existing slug branch keeps the old name"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn no_rename_without_a_turn_end() -> Result<(), Report<StoreError>> {
+        // Given a Claude-titled thread on its hex branch.
+        let (claude_dir, store, _) =
+            worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
+        let host = FakeHost::listing(vec![in_session(ThreadStatus::Working)]);
+        let git = FakeGit::local();
+        let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
+
+        // When polls see its turn still underway.
+        actor.poll().await;
+        actor.poll().await;
+
+        // Then no branch was renamed.
+        assert_eq!(git.renamed(), None, "the rename waits for the turn to end");
         Ok(())
     }
 }
