@@ -3035,6 +3035,34 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn picking_new_worktree_for_a_draft_adds_no_worktree() -> Result<(), Report<StoreError>> {
+        // Given a local draft the user switched to a new worktree.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let git = FakeGit::local();
+        let (mut actor, state) = start_with(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &git,
+            Path::new(NO_CLAUDE_DIR),
+        );
+        if let Some(draft) = state.write().sessions.draft_mut(id) {
+            draft.workspace = DraftWorkspace::NewWorktree;
+            draft.branch = None;
+        }
+
+        // When saving it.
+        actor.save_draft(id);
+
+        // Then no worktree is added before Start.
+        assert_eq!(
+            git.added(),
+            None,
+            "a new-worktree draft should add its worktree only when started"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn checkout_draft_shows_the_branch_on_the_local_draft() -> Result<(), Report<StoreError>> {
         // Given a local draft.
         let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;

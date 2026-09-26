@@ -46,10 +46,10 @@ Entries are added or amended **only with human approval**.
 - (sessions) Session status is read by polling `claude agents --json --all` every second while a thread is busy or waiting or orb is attached, and every 5 seconds otherwise.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
 - (sessions) A thread's title is its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
-- (sidebar) The sidebar lists only sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.
+- (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.
 - (keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
-- (keybinds) `␣n` opens the project picker; picking a project starts a Claude session in its directory.
+- (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
 - (preview) The preview renders the selected thread from its Claude transcript JSONL as navigable blocks, without spawning a process.
 - (preview) The preview shows only the transcript's newest branch and continues across compaction boundaries.
@@ -76,13 +76,23 @@ Entries are added or amended **only with human approval**.
 - (picker) The picker popup is only as tall as its rows, at most 90 columns wide, and keeps its top edge fixed while filtering.
 - (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`.
-- (worktrees) A new worktree starts from the project's default branch fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
+- (worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w`) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
 - (worktrees) A session start that fails removes the worktree and branch orb created for it.
 - (worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from Claude's title; the directory keeps its name.
 - (worktrees) Deleting a thread leaves its worktree on disk.
-- (worktrees) A thread's workspace can change only before its first prompt; orb then starts a new session in the new workspace and removes the old one.
-- (keybinds) `␣w` in the preview opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.
-- (keybinds) `␣b` in the preview opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.
+- (worktrees) A thread's workspace can change only before its first prompt; orb then starts a new session in the new workspace, with the same model and permission, and removes the old one.
+- (keybinds) `␣w` in the sidebar or preview opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.
+- (keybinds) `␣b` in the sidebar or preview opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.
 - (branches) After a thread's first prompt, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any thread in the same directory is working or waiting.
 - (trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>`.
+- (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session with those settings and attaches while the draft is still selected.
+- (drafts) Each project has at most one draft; drafts persist to orb's store and sit above pinned threads in the sidebar.
+- (drafts) Draft settings default to the project's last-used workspace, model and permission, falling back to the last-used model and permission from any project and a local checkout; a new worktree's base branch defaults to the project's default branch.
+- (drafts) A new-worktree draft creates its worktree only when started; its form shows the ref it will start from as `From <ref>`.
+- (drafts) In a draft on the project's root or in an existing worktree, picking a branch checks it out there right away; a branch checked out in the root or another worktree moves the draft there instead, and in a worktree the default branch takes the draft back to the root.
+- (drafts) A draft of a project that isn't a git repository has no workspace or base branch, starts in the project's directory, and `␣w`/`␣b` offer to initialize git.
+- (drafts) The model picker lists `Default`, then T3 Code's current Claude models by name, then its legacy models under a `Legacy models` heading; orb passes the picked model's full ID to `--model`.
+- (keybinds) On a draft, in the sidebar or its form, `⏎` starts it and `␣w`/`␣b`/`␣m`/`␣a` pick its workspace, base branch, model, and permission.
+- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` only on a draft, `␣w`/`␣b` only on a thread or draft, and `p`/`ss` only on a thread.
+- (preview) The preview header names the thread's model as the model picker does (e.g. Claude Opus 5.5), else shows its ID without `claude-`.

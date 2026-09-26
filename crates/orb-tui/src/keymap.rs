@@ -651,6 +651,22 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn enter_on_a_draft_in_the_sidebar_attaches() {
+        // Given the keymap in the sidebar on a draft.
+        let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
+
+        // When pressing Enter.
+        let intent = press(&mut keys, key(KeyCode::Enter));
+
+        // Then it yields Attach, which starts the draft.
+        assert_eq!(
+            intent,
+            Some(Intent::Attach),
+            "Enter on a draft in the sidebar should start it"
+        );
+    }
+
+    #[rstest::rstest]
     fn x_waits_for_its_repeat_on_a_draft_in_the_sidebar() {
         // Given the keymap in the sidebar on a draft.
         let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
