@@ -4,10 +4,16 @@
 //! stays put while the filter narrows them.
 //!
 //! The project picker shows each project's badge and name over its path; the
-//! directory picker shows one folder per row. Where the filter matched is
-//! bold and underlined, and the rows scroll to keep the selection in view.
+//! directory picker shows one folder per row; the workspace picker shows where
+//! a thread's session could run, each with its glyph; the branch picker shows
+//! each branch with its badge, dimming the ones checked out where the thread
+//! can't follow and saying where. Where the filter matched is bold and
+//! underlined, and the rows scroll to keep the selection in view.
 
-use orb_domain::feat::picker::list::{Matches, PickerItem};
+use std::path::Path;
+
+use orb_domain::feat::git::git_service::GitRef;
+use orb_domain::feat::picker::list::{BranchRow, Matches, PickerItem, WorkspaceChoice};
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
@@ -18,10 +24,16 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::sidebar::{DARK_GRAY, GRAY, OUTLINE, SELECTED, badge};
 
-/// Nerd Font's search glyph, before the project picker's input.
+/// Nerd Font's search glyph, before every picker's input but the directory
+/// picker's.
 const SEARCH: &str = "\u{f002}";
-/// Nerd Font's folder glyph, before the directory picker's input and rows.
+/// Nerd Font's folder glyph, before the directory picker's input and rows, and
+/// the current checkout's workspace row.
 const FOLDER: &str = "\u{f07b}";
+/// Nerd Font's code-fork glyph, before the worktree workspace rows.
+const WORKTREE: &str = "\u{f126}";
+/// Nerd Font's history glyph, before the previous worktree's workspace row.
+const HISTORY: &str = "\u{f1da}";
 /// The widest the popup gets, in columns.
 const MAX_WIDTH: u16 = 90;
 /// The popup's lines besides its rows: the borders, a blank line inside each,
@@ -35,16 +47,20 @@ pub(crate) struct PickerScroll {
     offset: usize,
 }
 
-/// Draws `picker` in a popup over `area`. Returns how many rows fit, and
-/// where the terminal cursor goes in the input.
+/// Draws `picker` in a popup over `area`; paths under `home` show as `~/`.
+/// Returns how many rows fit, and where the terminal cursor goes in the input.
 pub(crate) fn render(
     picker: &PickerState,
+    home: &Path,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
 ) -> (usize, Position) {
-    let projects = matches!(picker.kind(), PickerKind::Projects);
-    let row_height: u16 = if projects { 2 } else { 1 };
+    let directories = matches!(picker.kind(), PickerKind::Directories { .. });
+    let row_height: u16 = match picker.kind() {
+        PickerKind::Projects => 2,
+        _ => 1,
+    };
     let popup = {
         let rows = u16::try_from(picker.shown().count())
             .unwrap_or(u16::MAX)
@@ -67,15 +83,21 @@ pub(crate) fn render(
         Constraint::Length(1),
     ])
     .areas(inner);
-    let cursor = render_input(picker, projects, pad(input), buf);
-    Line::styled(
-        if projects { "Projects" } else { "Directories" },
-        Style::new().fg(GRAY),
-    )
-    .render(pad(label), buf);
-    let page = render_rows(picker, row_height, rows, buf, scroll);
-    render_footer(projects, pad(footer), buf);
+    let cursor = render_input(picker, directories, pad(input), buf);
+    Line::styled(section_label(picker.kind()), Style::new().fg(GRAY)).render(pad(label), buf);
+    let page = render_rows(picker, home, row_height, rows, buf, scroll);
+    render_footer(directories, pad(footer), buf);
     (page, cursor)
+}
+
+/// The label above the rows.
+fn section_label(kind: &PickerKind) -> &'static str {
+    match kind {
+        PickerKind::Projects => "Projects",
+        PickerKind::Directories { .. } => "Directories",
+        PickerKind::Workspace { .. } => "Workspace",
+        PickerKind::Branches { .. } => "Branches",
+    }
 }
 
 /// jinn's popup, 80% of the width (at least 30 columns) and 75% of the
@@ -105,13 +127,15 @@ fn pad(area: Rect) -> Rect {
 
 /// The glyph and the typed text, or the project picker's placeholder.
 /// Returns the cursor's position.
-fn render_input(picker: &PickerState, projects: bool, area: Rect, buf: &mut Buffer) -> Position {
+fn render_input(picker: &PickerState, directories: bool, area: Rect, buf: &mut Buffer) -> Position {
     let glyph = Span::styled(
-        format!("{} ", if projects { SEARCH } else { FOLDER }),
+        format!("{} ", if directories { FOLDER } else { SEARCH }),
         Style::new().fg(DARK_GRAY),
     );
     let text = match picker.input() {
-        "" if projects => Span::styled("Search projects...", Style::new().fg(DARK_GRAY)),
+        "" if matches!(picker.kind(), PickerKind::Projects) => {
+            Span::styled("Search projects...", Style::new().fg(DARK_GRAY))
+        }
         input => Span::raw(input),
     };
     let before: String = picker
@@ -131,6 +155,7 @@ fn render_input(picker: &PickerState, projects: bool, area: Rect, buf: &mut Buff
 /// Returns how many rows fit.
 fn render_rows(
     picker: &PickerState,
+    home: &Path,
     row_height: u16,
     area: Rect,
     buf: &mut Buffer,
@@ -153,17 +178,24 @@ fn render_rows(
         shown.into_iter().enumerate().skip(scroll.offset).zip(tops)
     {
         let row = Rect::new(area.x, top, area.width, row_height).intersection(area);
-        if index == selection {
+        if index == selection && picker.selected().is_some() {
             buf.set_style(row, Style::new().bg(SELECTED));
         }
-        render_item(item, matches, pad(row), buf);
+        render_item(item, matches, picker.kind(), home, pad(row), buf);
     }
     page
 }
 
-/// A project's badge and name over its path, or a directory's folder and
-/// name.
-fn render_item(item: &PickerItem, matches: &Matches, area: Rect, buf: &mut Buffer) {
+/// A project's badge and name over its path, a directory's folder and name,
+/// or a workspace's glyph and label.
+fn render_item(
+    item: &PickerItem,
+    matches: &Matches,
+    kind: &PickerKind,
+    home: &Path,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     match item {
         PickerItem::Project { title, root, .. } => {
             let [name_area, path_area] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
@@ -189,13 +221,107 @@ fn render_item(item: &PickerItem, matches: &Matches, area: Rect, buf: &mut Buffe
             Line::from_iter(row).render(area, buf);
         }
         PickerItem::Workspace(choice) => {
-            Line::from_iter(highlight(&choice.label(), &matches.name, Style::new()))
-                .render(area, buf);
+            let row = [
+                Span::styled(workspace_glyph(choice), Style::new().fg(GRAY)),
+                Span::raw(" "),
+            ]
+            .into_iter()
+            .chain(highlight(&choice.label(), &matches.name, Style::new()));
+            Line::from_iter(row).render(area, buf);
         }
         PickerItem::Branch(row) => {
-            Line::from_iter(highlight(&row.git_ref.name, &matches.name, Style::new()))
-                .render(area, buf);
+            let cwd = match kind {
+                PickerKind::Branches { cwd, .. } => cwd.as_path(),
+                _ => Path::new(""),
+            };
+            render_branch(row, matches, cwd, home, area, buf);
         }
+    }
+}
+
+/// A branch's name, and on the right its badge, or where it's checked out
+/// when the row is disabled, the whole row dimmed.
+fn render_branch(
+    row: &BranchRow,
+    matches: &Matches,
+    cwd: &Path,
+    home: &Path,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let git_ref = &row.git_ref;
+    let (name_colour, right) = match (row.disabled, &git_ref.worktree) {
+        (true, Some(path)) => (DARK_GRAY, format!("in {}", tilde(path, home))),
+        _ => (
+            Color::White,
+            branch_badge(git_ref, cwd).unwrap_or_default().to_owned(),
+        ),
+    };
+    let name = Line::from_iter(highlight(
+        &git_ref.name,
+        &matches.name,
+        Style::new().fg(name_colour),
+    ));
+    let room = usize::from(area.width).saturating_sub(name.width() + 2);
+    let right = Line::styled(cut_left(&right, room), Style::new().fg(DARK_GRAY));
+    let right_width = u16::try_from(right.width()).unwrap_or(u16::MAX);
+    name.render(area, buf);
+    right.render(
+        Rect {
+            x: area.right().saturating_sub(right_width),
+            width: right_width.min(area.width),
+            ..area
+        },
+        buf,
+    );
+}
+
+/// The badge on a branch row, by T3's priority: the branch this directory is
+/// on, one checked out in another worktree, a remote ref, the default branch.
+fn branch_badge(git_ref: &GitRef, cwd: &Path) -> Option<&'static str> {
+    let elsewhere = git_ref.worktree.as_deref().is_some_and(|path| path != cwd);
+    match git_ref {
+        GitRef { current: true, .. } => Some("current"),
+        _ if elsewhere => Some("worktree"),
+        GitRef { remote: true, .. } => Some("remote"),
+        GitRef { default: true, .. } => Some("default"),
+        _ => None,
+    }
+}
+
+/// `path` with `home` shown as `~`.
+fn tilde(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    }
+}
+
+/// `text` if it fits in `width` columns, else `…` and as much of its end as
+/// fits.
+fn cut_left(text: &str, width: usize) -> String {
+    if Line::raw(text).width() <= width {
+        return text.to_owned();
+    }
+    let mut used = 1;
+    let tail: Vec<&str> = text
+        .graphemes(true)
+        .rev()
+        .take_while(|grapheme| {
+            used += Line::raw(*grapheme).width();
+            used <= width
+        })
+        .collect();
+    std::iter::once("…").chain(tail.into_iter().rev()).collect()
+}
+
+/// The glyph before a workspace row: a folder for the root checkout, a fork
+/// for a worktree, history for the previous worktree.
+fn workspace_glyph(choice: &WorkspaceChoice) -> &'static str {
+    match choice {
+        WorkspaceChoice::Current { worktree: false } => FOLDER,
+        WorkspaceChoice::Current { worktree: true } | WorkspaceChoice::NewWorktree => WORKTREE,
+        WorkspaceChoice::Previous { .. } => HISTORY,
     }
 }
 
@@ -227,21 +353,23 @@ fn empty_hint(picker: &PickerState) -> &'static str {
         }
         (PickerKind::Directories { .. }, None) => "Type a path starting with / or ~/",
         (PickerKind::Directories { .. }, Some((_, ""))) => "No directories",
+        (PickerKind::Branches { .. }, _) if picker.input().is_empty() => "Loading branches…",
+        (PickerKind::Branches { .. }, _) => "No matching branches",
         _ => "No matches",
     }
 }
 
 /// The picker's keys as chips: the key on a filled tile, then what it does.
-fn render_footer(projects: bool, area: Rect, buf: &mut Buffer) {
-    let keys: &[(&str, &str)] = if projects {
-        &[("↑ ↓", "Navigate"), ("Enter", "Select"), ("Esc", "Close")]
-    } else {
+fn render_footer(directories: bool, area: Rect, buf: &mut Buffer) {
+    let keys: &[(&str, &str)] = if directories {
         &[
             ("↑ ↓", "Navigate"),
             ("Tab", "Open"),
             ("Enter", "Add"),
             ("Esc", "Close"),
         ]
+    } else {
+        &[("↑ ↓", "Navigate"), ("Enter", "Select"), ("Esc", "Close")]
     };
     let chips = keys.iter().flat_map(|(key, label)| {
         [
@@ -257,18 +385,22 @@ fn render_footer(projects: bool, area: Rect, buf: &mut Buffer) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use orb_domain::Focus;
-    use orb_domain::feat::picker::list::PickerItem;
+    use orb_domain::feat::git::git_service::GitRef;
+    use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::PickerState;
-    use orb_domain::feat::sessions::state::ProjectId;
+    use orb_domain::feat::sessions::state::{ProjectId, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
     use unicode_segmentation::UnicodeSegmentation;
 
-    use super::{DARK_GRAY, FOLDER, PickerScroll, SELECTED, render};
+    use super::{DARK_GRAY, FOLDER, HISTORY, PickerScroll, SELECTED, render};
+
+    /// The home directory the pickers are drawn with.
+    const HOME: &str = "/Users/me";
 
     fn project(id: i64, title: &str, root: &str) -> PickerItem {
         PickerItem::Project {
@@ -281,7 +413,13 @@ mod tests {
     /// Draws `picker` over a `width`×`height` screen.
     fn draw(picker: &PickerState, width: u16, height: u16) -> Buffer {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
-        render(picker, buf.area, &mut buf, &mut PickerScroll::default());
+        render(
+            picker,
+            Path::new(HOME),
+            buf.area,
+            &mut buf,
+            &mut PickerScroll::default(),
+        );
         buf
     }
 
@@ -572,5 +710,215 @@ mod tests {
             Some([Some(false), Some(false), Some(true)]),
             "the fill beside the left border"
         );
+    }
+
+    fn workspace() -> PickerState {
+        PickerState::workspace(
+            ThreadId(1),
+            vec![
+                PickerItem::Workspace(WorkspaceChoice::Current { worktree: false }),
+                PickerItem::Workspace(WorkspaceChoice::NewWorktree),
+                PickerItem::Workspace(WorkspaceChoice::Previous {
+                    path: "/Users/me/.orb/worktrees/orb/orb-1a2b3c4d".into(),
+                    branch: Some("orb/fix-login".to_owned()),
+                }),
+            ],
+            Focus::Preview,
+        )
+    }
+
+    #[rstest::rstest]
+    fn workspace_picker_is_labelled_workspace() {
+        // Given a workspace picker.
+        let picker = workspace();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then its section label says Workspace.
+        let lines = lines(&buf);
+        assert!(
+            lines.iter().any(|line| line.contains("Workspace")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn previous_worktree_row_shows_its_branch() {
+        // Given a workspace picker offering the previous worktree.
+        let picker = workspace();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then its row is the history glyph and the label with the branch.
+        let lines = lines(&buf);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("{HISTORY} Previous worktree (orb/fix-login)"))),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn workspace_picker_shows_the_select_footer() {
+        // Given a workspace picker.
+        let picker = workspace();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the footer offers Enter to select, not Tab to open.
+        let lines = lines(&buf);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(" Enter  Select") && !line.contains("Tab")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn branch_picker_while_listing_shows_loading() {
+        // Given a branch picker whose refs aren't listed yet.
+        let picker = PickerState::branches(ThreadId(1), "/tmp/repo".into(), false, Focus::Preview);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the rows say the branches are loading.
+        let lines = lines(&buf);
+        assert!(
+            lines.iter().any(|line| line.contains("Loading branches…")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    /// The repository the branch pickers list, and the thread's directory.
+    const REPO: &str = "/Users/me/dev/orb";
+
+    fn branch(name: &str, worktree: Option<&str>) -> GitRef {
+        GitRef {
+            name: name.to_owned(),
+            remote: false,
+            current: false,
+            default: false,
+            worktree: worktree.map(PathBuf::from),
+        }
+    }
+
+    /// A branch picker in `REPO` listing `refs`, after the first prompt.
+    fn branches(refs: Vec<GitRef>) -> PickerState {
+        let mut picker = PickerState::branches(ThreadId(1), REPO.into(), false, Focus::Preview);
+        picker.show_branches(Path::new(REPO), refs);
+        picker
+    }
+
+    /// The line holding `text`.
+    fn line_with(buf: &Buffer, text: &str) -> Option<String> {
+        lines(buf).into_iter().find(|line| line.contains(text))
+    }
+
+    #[rstest::rstest]
+    fn branch_row_shows_its_badge() {
+        // Given a branch picker listing the default branch.
+        let picker = branches(vec![GitRef {
+            default: true,
+            ..branch("main", None)
+        }]);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then main's row ends with the default badge.
+        let line = line_with(&buf, "main");
+        assert!(
+            line.as_deref().is_some_and(|line| line
+                .trim_end()
+                .trim_end_matches('│')
+                .trim_end()
+                .ends_with("default")),
+            "main's row was {line:?}"
+        );
+    }
+
+    /// A branch picker with `feature` checked out in another worktree,
+    /// disabled, under `main`.
+    fn with_disabled() -> PickerState {
+        branches(vec![
+            GitRef {
+                current: true,
+                ..branch("main", Some(REPO))
+            },
+            branch("feature", Some("/Users/me/.orb/worktrees/orb/orb-1a2b3c4d")),
+        ])
+    }
+
+    #[rstest::rstest]
+    fn disabled_branch_row_is_dimmed() {
+        // Given a branch picker with feature disabled.
+        let picker = with_disabled();
+
+        // When drawing it.
+        let buf = draw(&picker, 80, 16);
+
+        // Then feature's name is dark gray.
+        let fg = find(&buf, "feature")
+            .and_then(|at| buf.cell(at))
+            .map(|cell| cell.fg);
+        assert_eq!(fg, Some(DARK_GRAY), "the disabled name's colour");
+    }
+
+    #[rstest::rstest]
+    fn disabled_branch_row_shows_where_it_is_checked_out() {
+        // Given a branch picker with feature disabled.
+        let picker = with_disabled();
+
+        // When drawing it.
+        let buf = draw(&picker, 80, 16);
+
+        // Then feature's row says where it's checked out, under `~`.
+        let line = line_with(&buf, "feature");
+        assert!(
+            line.as_deref()
+                .is_some_and(|line| line.contains("in ~/.orb/worktrees/orb/orb-1a2b3c4d")),
+            "feature's row was {line:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn long_checkout_path_is_cut_from_the_left() {
+        // Given a branch picker with feature disabled.
+        let picker = with_disabled();
+
+        // When drawing it too narrow for the whole path.
+        let buf = draw(&picker, 40, 16);
+
+        // Then feature's row keeps the path's end after an ellipsis.
+        let line = line_with(&buf, "feature");
+        assert!(
+            line.as_deref()
+                .is_some_and(|line| line.contains("…") && line.contains("orb-1a2b3c4d")),
+            "feature's row was {line:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn all_disabled_branch_picker_draws_no_selection_fill() {
+        // Given a branch picker whose only row is disabled.
+        let picker = branches(vec![branch(
+            "feature",
+            Some("/Users/me/.orb/worktrees/orb/orb-1a2b3c4d"),
+        )]);
+
+        // When drawing it.
+        let buf = draw(&picker, 80, 16);
+
+        // Then the cell left of feature isn't filled.
+        let bg = find(&buf, "feature")
+            .and_then(|(x, y)| buf.cell((x - 1, y)))
+            .map(|cell| cell.bg);
+        assert_ne!(bg, Some(SELECTED), "the disabled row's background");
     }
 }

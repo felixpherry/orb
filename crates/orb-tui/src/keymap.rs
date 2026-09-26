@@ -70,6 +70,18 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Focus, Intent, KeyCategory> {
             KeyCategory::Sessions,
             Focus::Sidebar,
         )
+        .bind(
+            "<leader>w",
+            Intent::ChangeWorkspace,
+            KeyCategory::Sessions,
+            Focus::Preview,
+        )
+        .bind(
+            "<leader>b",
+            Intent::SwitchBranch,
+            KeyCategory::Sessions,
+            Focus::Preview,
+        )
         .bind("q", Intent::Quit, KeyCategory::General, Focus::Sidebar)
         .bind("p", Intent::TogglePin, KeyCategory::Threads, Focus::Sidebar)
         .bind(
@@ -310,6 +322,53 @@ mod tests {
             Some(Intent::AddProject),
             "Space p should add a project in {focus:?}"
         );
+    }
+
+    #[rstest::rstest]
+    fn leader_w_in_preview_changes_workspace() {
+        // Given Space already pressed in Preview focus.
+        let mut keys = Keys::new(keymap(), Focus::Preview);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `w`.
+        let intent = press(&mut keys, key(KeyCode::Char('w')));
+
+        // Then it opens the workspace picker.
+        assert_eq!(
+            intent,
+            Some(Intent::ChangeWorkspace),
+            "Space w should change the workspace"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_b_in_preview_switches_branch() {
+        // Given Space already pressed in Preview focus.
+        let mut keys = Keys::new(keymap(), Focus::Preview);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `b`.
+        let intent = press(&mut keys, key(KeyCode::Char('b')));
+
+        // Then it opens the branch picker.
+        assert_eq!(
+            intent,
+            Some(Intent::SwitchBranch),
+            "Space b should switch the branch"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_w_in_sidebar_is_unbound() {
+        // Given Space already pressed in Sidebar focus.
+        let mut keys = Keys::new(keymap(), Focus::Sidebar);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `w`.
+        let intent = press(&mut keys, key(KeyCode::Char('w')));
+
+        // Then nothing happens.
+        assert_eq!(intent, None, "Space w should do nothing in the sidebar");
     }
 
     #[rstest::rstest]
