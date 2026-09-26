@@ -33,8 +33,8 @@ const CLAUDE_SESSION_VARS: [&str; 12] = [
     "CLAUDE_AGENT_SDK_VERSION",
 ];
 
-/// Variables that identify the outer terminal.
-const TERMINAL_VARS: [&str; 10] = [
+/// Variables that identify the outer terminal or force its colours.
+const TERMINAL_VARS: [&str; 11] = [
     "STY",
     "WINDOWID",
     "TERMINATOR_UUID",
@@ -45,6 +45,7 @@ const TERMINAL_VARS: [&str; 10] = [
     "ZED_TERM",
     "COLORFGBG",
     "__CFBundleIdentifier",
+    "FORCE_COLOR",
 ];
 
 /// Prefixes of variables that identify the outer terminal or multiplexer.
@@ -139,6 +140,7 @@ mod tests {
     #[case("WT_SESSION")]
     #[case("VTE_VERSION")]
     #[case("__CFBundleIdentifier")]
+    #[case("FORCE_COLOR")]
     fn outer_terminal_identity_is_removed(#[case] key: &str) {
         // Given orb runs in a terminal that identifies itself.
         let parent = [(key, "1")];
