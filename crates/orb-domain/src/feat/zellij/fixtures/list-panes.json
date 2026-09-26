@@ -1,0 +1,7 @@
+[
+  {"id": 0, "is_plugin": true, "is_floating": false, "title": "tab-bar", "exited": false, "exit_status": null, "is_held": false, "tab_id": 0, "tab_position": 0, "tab_name": "Tab #1", "terminal_command": null, "plugin_url": "tab-bar"},
+  {"id": 0, "is_plugin": false, "is_floating": false, "is_focused": true, "title": "/t/orb-m8-probe", "exited": false, "exit_status": null, "is_held": false, "tab_id": 0, "tab_position": 0, "tab_name": "Tab #1", "terminal_command": null, "plugin_url": null, "pane_command": "fish", "pane_cwd": "/private/tmp/orb-m8-probe"},
+  {"id": 4, "is_plugin": false, "is_floating": true, "is_focused": true, "title": "orb:~/dev/orb:lazygit", "exited": false, "exit_status": null, "is_held": false, "tab_id": 0, "tab_position": 0, "tab_name": "Tab #1", "terminal_command": "lazygit", "plugin_url": null, "pane_command": "lazygit", "pane_cwd": "/Users/felixpherry/dev/orb"},
+  {"id": 5, "is_plugin": false, "is_floating": true, "title": "orb:1:held", "exited": true, "exit_status": 0, "is_held": true, "tab_id": 0, "tab_position": 0, "tab_name": "Tab #1", "terminal_command": "true", "plugin_url": null},
+  {"id": 3, "is_plugin": false, "is_floating": false, "title": "~/d/orb", "exited": false, "exit_status": null, "is_held": false, "tab_id": 1, "tab_position": 1, "tab_name": "Tab #2", "terminal_command": null, "plugin_url": null, "pane_command": "fish", "pane_cwd": "/Users/felixpherry/dev/orb"}
+]
