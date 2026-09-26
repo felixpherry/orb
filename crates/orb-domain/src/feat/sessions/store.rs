@@ -1,19 +1,21 @@
-//! orb's saved projects and threads, kept in SQLite across launches.
+//! orb's saved projects, threads and drafts, kept in SQLite across launches.
 //!
-//! For each project it keeps the directory its sessions start in. For each
+//! For each project it keeps the directory its sessions start in and the
+//! workspace, model and permission mode its last draft started with. For each
 //! thread it keeps the Claude ids, the titles, the git branch, how far the
 //! transcript has been read, when the running turn started, whether it is
-//! pinned or settled, and when it last had activity and was last visited. The
-//! schema grows through an ordered list of migrations. Times are milliseconds
-//! since the Unix epoch.
+//! pinned or settled, when it last had activity and was last visited, and the
+//! model and permission mode its session started with. For each project's
+//! draft it keeps the session setup the user picked. The schema grows through
+//! an ordered list of migrations. Times are milliseconds since the Unix epoch.
 
 use std::path::{Path, PathBuf};
 
 use error_stack::{Report, ResultExt};
-use rusqlite::{Connection, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use wherror::Error;
 
-use super::state::{ProjectId, ThreadId};
+use super::state::{DraftWorkspace, ProjectId, ThreadId};
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -66,6 +68,11 @@ pub struct ThreadRow {
     pub last_visited_at: i64,
     /// Whether Claude has generated a title for the thread.
     pub ai_titled: bool,
+    /// The `--model` its session started with; `None` = Claude's default.
+    pub model: Option<String>,
+    /// The `--permission-mode` its session started with; `None` = Claude's
+    /// default.
+    pub permission_mode: Option<String>,
 }
 
 /// A thread's settle state as set by the user, auto-settle, or activity.
@@ -101,9 +108,68 @@ pub struct NewThread {
     pub short_id: String,
     pub cwd: PathBuf,
     pub created_at: i64,
+    pub model: Option<String>,
+    pub permission_mode: Option<String>,
 }
 
-/// orb's database of projects and threads.
+/// A saved draft: the session setup picked for a project's next thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftRow {
+    /// A project has at most one draft.
+    pub project_id: ProjectId,
+    pub workspace: DraftWorkspace,
+    pub branch: Option<String>,
+    /// `None` = Claude's default.
+    pub model: Option<String>,
+    /// `None` = Claude's default.
+    pub permission_mode: Option<String>,
+    pub created_at: i64,
+}
+
+/// Which kind of workspace a project's last draft started in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastWorkspace {
+    /// The project's root.
+    Local,
+    /// A new worktree.
+    NewWorktree,
+    /// A worktree that already existed.
+    Previous,
+}
+
+impl LastWorkspace {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::NewWorktree => "new_worktree",
+            Self::Previous => "previous",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "local" => Some(Self::Local),
+            "new_worktree" => Some(Self::NewWorktree),
+            "previous" => Some(Self::Previous),
+            _ => None,
+        }
+    }
+}
+
+/// The settings a project's last draft started with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastUsed {
+    pub workspace: LastWorkspace,
+    /// `None` = Claude's default.
+    pub model: Option<String>,
+    /// `None` = Claude's default.
+    pub permission_mode: Option<String>,
+}
+
+/// Everything [`Store::load`] returns: projects, threads, and drafts.
+pub type Saved = (Vec<ProjectRow>, Vec<ThreadRow>, Vec<DraftRow>);
+
+/// orb's database of projects, threads, and drafts.
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
@@ -132,6 +198,19 @@ const MIGRATIONS: &[&str] = &[
     UPDATE threads SET last_activity_at = created_at, last_visited_at = created_at;
 ",
     "ALTER TABLE threads ADD COLUMN ai_titled INTEGER NOT NULL DEFAULT 0;",
+    "
+    CREATE TABLE drafts (
+      project_id INTEGER PRIMARY KEY REFERENCES projects(id),
+      workspace TEXT NOT NULL, workspace_path TEXT,
+      branch TEXT, model TEXT, permission_mode TEXT,
+      created_at INTEGER NOT NULL);
+    ALTER TABLE projects ADD COLUMN last_workspace TEXT;
+    ALTER TABLE projects ADD COLUMN last_model TEXT;
+    ALTER TABLE projects ADD COLUMN last_permission_mode TEXT;
+    ALTER TABLE projects ADD COLUMN last_used_at INTEGER;
+    ALTER TABLE threads ADD COLUMN model TEXT;
+    ALTER TABLE threads ADD COLUMN permission_mode TEXT;
+",
 ];
 
 impl Store {
@@ -174,12 +253,12 @@ impl Store {
         Ok(Self { conn })
     }
 
-    /// Every saved project (oldest first) and thread (newest first).
+    /// Every saved project (oldest first), thread (newest first), and draft.
     ///
     /// # Errors
     ///
     /// Returns an error if the database can't be read.
-    pub fn load(&self) -> Result<(Vec<ProjectRow>, Vec<ThreadRow>), Report<StoreError>> {
+    pub fn load(&self) -> Result<Saved, Report<StoreError>> {
         let projects = self
             .query(
                 "SELECT id, root, title, created_at FROM projects ORDER BY created_at, id",
@@ -191,12 +270,20 @@ impl Store {
                 "SELECT id, project_id, short_id, session_id, title, cwd, transcript_path,
                         transcript_offset, created_at, turn_started_at, custom_title,
                         branch, pinned_at, settled_override, settled_at, unsettled_at,
-                        last_activity_at, last_visited_at, ai_titled
+                        last_activity_at, last_visited_at, ai_titled, model, permission_mode
                  FROM threads ORDER BY created_at DESC, id DESC",
                 thread_row,
             )
             .attach("failed to load threads")?;
-        Ok((projects, threads))
+        let drafts = self
+            .query(
+                "SELECT project_id, workspace, workspace_path, branch, model, permission_mode,
+                        created_at
+                 FROM drafts ORDER BY project_id",
+                draft_row,
+            )
+            .attach("failed to load drafts")?;
+        Ok((projects, threads, drafts))
     }
 
     /// Saves the project rooted at `root` unless one is already saved there,
@@ -235,13 +322,16 @@ impl Store {
         self.conn
             .query_row(
                 "INSERT INTO threads
-                   (project_id, short_id, cwd, created_at, last_activity_at, last_visited_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4, ?4) RETURNING id",
+                   (project_id, short_id, cwd, created_at, last_activity_at, last_visited_at,
+                    model, permission_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?4, ?5, ?6) RETURNING id",
                 params![
                     row.project_id.0,
                     row.short_id,
                     utf8(&row.cwd)?,
-                    row.created_at
+                    row.created_at,
+                    row.model,
+                    row.permission_mode,
                 ],
                 |row| row.get(0),
             )
@@ -253,7 +343,8 @@ impl Store {
     /// Updates everything about a thread that changes after it's created: its
     /// session and directory (a thread can move to another workspace), titles,
     /// branch, transcript position, turn start, pin and settle state, and
-    /// activity and visit stamps.
+    /// activity and visit stamps. Its model and permission mode stay as
+    /// inserted.
     ///
     /// # Errors
     ///
@@ -304,6 +395,125 @@ impl Store {
             .execute("DELETE FROM threads WHERE id = ?1", params![id.0])
             .change_context(StoreError)
             .attach("failed to delete the thread")?;
+        Ok(())
+    }
+
+    /// Saves the project's draft, replacing the one it had.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace path isn't UTF-8, the project doesn't
+    /// exist, or the database can't be written.
+    pub fn save_draft(&self, row: &DraftRow) -> Result<(), Report<StoreError>> {
+        let (workspace, path) = match &row.workspace {
+            DraftWorkspace::Local => ("local", None),
+            DraftWorkspace::NewWorktree => ("new_worktree", None),
+            DraftWorkspace::Existing(path) => ("existing", Some(utf8(path)?)),
+        };
+        self.conn
+            .execute(
+                "INSERT INTO drafts
+                   (project_id, workspace, workspace_path, branch, model, permission_mode,
+                    created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (project_id) DO UPDATE SET
+                   workspace = excluded.workspace, workspace_path = excluded.workspace_path,
+                   branch = excluded.branch, model = excluded.model,
+                   permission_mode = excluded.permission_mode, created_at = excluded.created_at",
+                params![
+                    row.project_id.0,
+                    workspace,
+                    path,
+                    row.branch,
+                    row.model,
+                    row.permission_mode,
+                    row.created_at,
+                ],
+            )
+            .change_context(StoreError)
+            .attach("failed to save the draft")?;
+        Ok(())
+    }
+
+    /// Deletes the project's draft, if it has one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be written.
+    pub fn delete_draft(&self, project: ProjectId) -> Result<(), Report<StoreError>> {
+        self.conn
+            .execute(
+                "DELETE FROM drafts WHERE project_id = ?1",
+                params![project.0],
+            )
+            .change_context(StoreError)
+            .attach("failed to delete the draft")?;
+        Ok(())
+    }
+
+    /// What the project's last draft started with; `None` if none has.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be read.
+    pub fn last_used(&self, project: ProjectId) -> Result<Option<LastUsed>, Report<StoreError>> {
+        self.conn
+            .query_row(
+                "SELECT last_workspace, last_model, last_permission_mode FROM projects
+                 WHERE id = ?1 AND last_used_at IS NOT NULL",
+                params![project.0],
+                last_used_row,
+            )
+            .optional()
+            .change_context(StoreError)
+            .attach("failed to read the project's last-used settings")
+    }
+
+    /// What the most recently started draft of any project started with;
+    /// `None` if no draft has started.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be read.
+    pub fn latest_last_used(&self) -> Result<Option<LastUsed>, Report<StoreError>> {
+        self.conn
+            .query_row(
+                "SELECT last_workspace, last_model, last_permission_mode FROM projects
+                 WHERE last_used_at IS NOT NULL ORDER BY last_used_at DESC, id DESC LIMIT 1",
+                [],
+                last_used_row,
+            )
+            .optional()
+            .change_context(StoreError)
+            .attach("failed to read the latest last-used settings")
+    }
+
+    /// Records what the project's draft started with, at `at_ms`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be written.
+    pub fn record_last_used(
+        &self,
+        project: ProjectId,
+        used: &LastUsed,
+        at_ms: i64,
+    ) -> Result<(), Report<StoreError>> {
+        self.conn
+            .execute(
+                "UPDATE projects SET last_workspace = ?2, last_model = ?3,
+                        last_permission_mode = ?4, last_used_at = ?5
+                 WHERE id = ?1",
+                params![
+                    project.0,
+                    used.workspace.as_str(),
+                    used.model,
+                    used.permission_mode,
+                    at_ms,
+                ],
+            )
+            .change_context(StoreError)
+            .attach("failed to record the project's last-used settings")?;
         Ok(())
     }
 
@@ -391,6 +601,42 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         last_activity_at: row.get(16)?,
         last_visited_at: row.get(17)?,
         ai_titled: row.get(18)?,
+        model: row.get(19)?,
+        permission_mode: row.get(20)?,
+    })
+}
+
+/// A draft row; an unknown workspace, or `existing` without a path, loads as
+/// a local checkout.
+fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
+    let workspace = match (
+        row.get::<_, String>(1)?.as_str(),
+        row.get::<_, Option<String>>(2)?,
+    ) {
+        ("new_worktree", _) => DraftWorkspace::NewWorktree,
+        ("existing", Some(path)) => DraftWorkspace::Existing(PathBuf::from(path)),
+        _ => DraftWorkspace::Local,
+    };
+    Ok(DraftRow {
+        project_id: ProjectId(row.get(0)?),
+        workspace,
+        branch: row.get(3)?,
+        model: row.get(4)?,
+        permission_mode: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
+
+/// A project's last-used settings; an unknown workspace loads as local.
+fn last_used_row(row: &Row<'_>) -> rusqlite::Result<LastUsed> {
+    Ok(LastUsed {
+        workspace: row
+            .get::<_, Option<String>>(0)?
+            .as_deref()
+            .and_then(LastWorkspace::parse)
+            .unwrap_or(LastWorkspace::Local),
+        model: row.get(1)?,
+        permission_mode: row.get(2)?,
     })
 }
 
@@ -405,7 +651,10 @@ mod tests {
     use error_stack::{Report, ResultExt};
     use rusqlite::Connection;
 
-    use super::{MIGRATIONS, NewThread, ProjectId, SettledOverride, Store, StoreError, ThreadRow};
+    use super::{
+        DraftRow, DraftWorkspace, LastUsed, LastWorkspace, MIGRATIONS, NewThread, ProjectId,
+        SettledOverride, Store, StoreError, ThreadRow,
+    };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
         Connection::open(path)
@@ -419,6 +668,20 @@ mod tests {
             short_id: "28bf38e2".to_owned(),
             cwd: PathBuf::from("/tmp/orb"),
             created_at: 1_000,
+            model: None,
+            permission_mode: None,
+        }
+    }
+
+    /// A local draft on `main` for the project, created at 2 s.
+    fn draft(project_id: ProjectId) -> DraftRow {
+        DraftRow {
+            project_id,
+            workspace: DraftWorkspace::Local,
+            branch: Some("main".to_owned()),
+            model: None,
+            permission_mode: None,
+            created_at: 2_000,
         }
     }
 
@@ -496,7 +759,7 @@ mod tests {
         }
 
         // When opening the store and loading.
-        let (_, threads) = Store::open(&path)?.load()?;
+        let (_, threads, _) = Store::open(&path)?.load()?;
 
         // Then it's at the latest version and both stamps are the creation time.
         let stamps: Vec<(i64, i64)> = threads
@@ -534,7 +797,7 @@ mod tests {
         }
 
         // When opening the store and loading.
-        let (_, threads) = Store::open(&path)?.load()?;
+        let (_, threads, _) = Store::open(&path)?.load()?;
 
         // Then it's at the latest version and the thread isn't AI-titled.
         let ai_titled: Vec<bool> = threads.iter().map(|row| row.ai_titled).collect();
@@ -542,6 +805,50 @@ mod tests {
             (user_version(&path)?, ai_titled),
             (MIGRATIONS.len(), vec![false]),
             "migration v4 should add ai_titled, false for existing threads"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_a_v4_database_adds_drafts_and_last_used() -> Result<(), Report<StoreError>> {
+        // Given a database at schema version 4 holding a thread.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        {
+            let conn = Connection::open(&path).change_context(StoreError)?;
+            for sql in MIGRATIONS
+                .get(..4)
+                .ok_or_else(|| Report::new(StoreError).attach("no v4 migrations"))?
+            {
+                conn.execute_batch(sql).change_context(StoreError)?;
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
+                 INSERT INTO threads (project_id, short_id, cwd, created_at)
+                 VALUES (1, '28bf38e2', '/tmp/orb', 1000);
+                 PRAGMA user_version = 4;",
+            )
+            .change_context(StoreError)?;
+        }
+
+        // When opening the store.
+        let (_, threads, _) = Store::open(&path)?.load()?;
+
+        // Then it's at the latest version, the thread survives, and the new
+        // table and columns exist.
+        let conn = Connection::open(&path).change_context(StoreError)?;
+        let has_schema = [
+            "SELECT project_id, workspace, workspace_path, branch, model, permission_mode, created_at FROM drafts",
+            "SELECT last_workspace, last_model, last_permission_mode, last_used_at FROM projects",
+            "SELECT model, permission_mode FROM threads",
+        ]
+        .iter()
+        .all(|sql| conn.prepare(sql).is_ok());
+        let short_ids: Vec<String> = threads.into_iter().map(|row| row.short_id).collect();
+        assert_eq!(
+            (user_version(&path)?, short_ids, has_schema),
+            (MIGRATIONS.len(), vec!["28bf38e2".to_owned()], true),
+            "migration v5 should keep threads and add drafts and last-used columns"
         );
         Ok(())
     }
@@ -577,7 +884,7 @@ mod tests {
         };
 
         // When reopening the store and loading.
-        let (_, threads) = Store::open(&path)?.load()?;
+        let (_, threads, _) = Store::open(&path)?.load()?;
 
         // Then the thread comes back with the fields it was saved with.
         let expected = ThreadRow {
@@ -600,6 +907,8 @@ mod tests {
             last_activity_at: 1_000,
             last_visited_at: 1_000,
             ai_titled: false,
+            model: None,
+            permission_mode: None,
         };
         assert_eq!(threads, vec![expected], "the saved thread should load back");
         Ok(())
@@ -673,11 +982,13 @@ mod tests {
             last_activity_at: 1_000,
             last_visited_at: 1_000,
             ai_titled: false,
+            model: None,
+            permission_mode: None,
         };
         store.save_thread(&updated)?;
 
         // Then loading returns the updated values.
-        let (_, threads) = store.load()?;
+        let (_, threads, _) = store.load()?;
         assert_eq!(threads, vec![updated], "the updates should load back");
         Ok(())
     }
@@ -713,7 +1024,7 @@ mod tests {
         store.save_thread(&updated)?;
 
         // Then loading returns them.
-        let (_, threads) = store.load()?;
+        let (_, threads, _) = store.load()?;
         assert_eq!(threads, vec![updated], "the settle fields should load back");
         Ok(())
     }
@@ -729,7 +1040,7 @@ mod tests {
         store.delete_thread(thread_id)?;
 
         // Then loading no longer returns it.
-        let (_, threads) = store.load()?;
+        let (_, threads, _) = store.load()?;
         assert!(threads.is_empty(), "the deleted thread should not load");
         Ok(())
     }
@@ -744,7 +1055,7 @@ mod tests {
         store.insert_thread(&new_thread(project_id))?;
 
         // Then its last activity and last visit are its creation time.
-        let (_, threads) = store.load()?;
+        let (_, threads, _) = store.load()?;
         let stamps: Vec<(i64, i64)> = threads
             .iter()
             .map(|row| (row.last_activity_at, row.last_visited_at))
@@ -753,6 +1064,161 @@ mod tests {
             stamps,
             vec![(1_000, 1_000)],
             "a new thread should start seen and active at its creation"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn thread_model_and_permission_mode_load_back() -> Result<(), Report<StoreError>> {
+        // Given a store with a project.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+
+        // When inserting a thread started with sonnet in plan mode.
+        store.insert_thread(&NewThread {
+            model: Some("sonnet".to_owned()),
+            permission_mode: Some("plan".to_owned()),
+            ..new_thread(project_id)
+        })?;
+
+        // Then loading returns its model and permission mode.
+        let flags: Vec<(Option<String>, Option<String>)> = store
+            .load()?
+            .1
+            .into_iter()
+            .map(|row| (row.model, row.permission_mode))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![(Some("sonnet".to_owned()), Some("plan".to_owned()))],
+            "a thread's model and permission mode should load back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(DraftWorkspace::Local)]
+    #[case(DraftWorkspace::NewWorktree)]
+    #[case(DraftWorkspace::Existing(PathBuf::from("/wt/orb-0a1b2c3d")))]
+    fn saved_draft_loads_back(#[case] workspace: DraftWorkspace) -> Result<(), Report<StoreError>> {
+        // Given a store with a project.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+
+        // When saving a draft in the workspace.
+        let draft = DraftRow {
+            workspace,
+            ..draft(project_id)
+        };
+        store.save_draft(&draft)?;
+
+        // Then loading returns it.
+        assert_eq!(store.load()?.2, vec![draft], "the draft should load back");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saving_a_draft_again_replaces_it() -> Result<(), Report<StoreError>> {
+        // Given a store with a project that has a local draft.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+        store.save_draft(&draft(project_id))?;
+
+        // When saving the project's draft with a new worktree and opus.
+        let replaced = DraftRow {
+            workspace: DraftWorkspace::NewWorktree,
+            model: Some("opus".to_owned()),
+            ..draft(project_id)
+        };
+        store.save_draft(&replaced)?;
+
+        // Then the project has one draft, the second one.
+        assert_eq!(
+            store.load()?.2,
+            vec![replaced],
+            "a project should keep one draft, the latest saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn deleted_draft_is_gone_after_reload() -> Result<(), Report<StoreError>> {
+        // Given a store with a project that has a draft.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+        store.save_draft(&draft(project_id))?;
+
+        // When deleting the project's draft.
+        store.delete_draft(project_id)?;
+
+        // Then loading no longer returns it.
+        assert!(
+            store.load()?.2.is_empty(),
+            "the deleted draft should not load"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn recorded_last_used_reads_back() -> Result<(), Report<StoreError>> {
+        // Given a store with a project.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+
+        // When recording a new-worktree start with Default model in plan mode.
+        let used = LastUsed {
+            workspace: LastWorkspace::NewWorktree,
+            model: None,
+            permission_mode: Some("plan".to_owned()),
+        };
+        store.record_last_used(project_id, &used, 2_000)?;
+
+        // Then the project's last-used settings are those.
+        assert_eq!(
+            store.last_used(project_id)?,
+            Some(used),
+            "the recorded settings should read back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn unused_project_has_no_last_used() -> Result<(), Report<StoreError>> {
+        // Given a store with a project no draft has started in.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+
+        // When reading its last-used settings.
+        let used = store.last_used(project_id)?;
+
+        // Then there are none.
+        assert_eq!(used, None, "a never-used project should have no last-used");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn latest_last_used_is_the_newest_projects() -> Result<(), Report<StoreError>> {
+        // Given project a used at 3 s with opus and project b used at 2 s with
+        // sonnet.
+        let store = Store::open_in_memory()?;
+        let a = store.add_project(Path::new("/tmp/a"), "a", 500)?;
+        let b = store.add_project(Path::new("/tmp/b"), "b", 500)?;
+        let used = |model: &str| LastUsed {
+            workspace: LastWorkspace::Local,
+            model: Some(model.to_owned()),
+            permission_mode: None,
+        };
+        store.record_last_used(a, &used("opus"), 3_000)?;
+        store.record_last_used(b, &used("sonnet"), 2_000)?;
+
+        // When reading the latest last-used settings.
+        let latest = store.latest_last_used()?;
+
+        // Then they are project a's.
+        assert_eq!(
+            latest,
+            Some(used("opus")),
+            "the most recently used project should win"
         );
         Ok(())
     }

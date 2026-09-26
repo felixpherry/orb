@@ -118,7 +118,7 @@ impl IntentHandler {
                     ]
                     .into_iter()
                     .chain(
-                        previous_worktree(project, thread)
+                        previous_worktree(project, &thread.cwd, Some(thread.id))
                             .map(|(path, branch)| WorkspaceChoice::Previous { path, branch }),
                     )
                     .map(PickerItem::Workspace)
@@ -326,7 +326,7 @@ impl IntentHandler {
             }
             Intent::DeleteThread => match (validate_delete(state), state.sessions.selected_id()) {
                 (Ok(()), Some(id)) => {
-                    state.sessions.cursor = state.sessions.row_neighbour(id);
+                    state.sessions.cursor = state.sessions.row_neighbour(SidebarItem::Thread(id));
                     with_visit(state, vec![Command::Delete(id), Command::ShowPreview])
                 }
                 _ => vec![],
@@ -459,6 +459,7 @@ mod tests {
                     title: "work".into(),
                     root: "/work".into(),
                     created_at: SystemTime::UNIX_EPOCH,
+                    draft: None,
                     threads,
                 }],
                 cursor: Some(cursor),
@@ -480,6 +481,7 @@ mod tests {
                         title: (*title).to_owned(),
                         root: format!("/{title}").into(),
                         created_at: SystemTime::UNIX_EPOCH,
+                        draft: None,
                         threads: vec![],
                     })
                     .collect(),

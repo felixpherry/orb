@@ -252,6 +252,7 @@ mod tests {
                 title: "orb".to_owned(),
                 root: "/Users/me/dev/orb".into(),
                 created_at: SystemTime::UNIX_EPOCH,
+                draft: None,
                 threads,
             }],
             ..Sessions::default()

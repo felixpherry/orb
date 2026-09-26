@@ -106,6 +106,7 @@ mod tests {
                     title: "work".into(),
                     root: "/work".into(),
                     created_at: SystemTime::UNIX_EPOCH,
+                    draft: None,
                     threads: vec![Thread {
                         id: ThreadId(1),
                         title: None,

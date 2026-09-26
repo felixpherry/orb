@@ -44,9 +44,9 @@ use super::session_host::{
     SessionHostError, SessionHostService, SessionRecord, WorkspaceUntrusted,
 };
 use super::state::{
-    Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+    Draft, Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
 };
-use super::store::{NewThread, SettledOverride, Store, ThreadRow};
+use super::store::{DraftRow, NewThread, SettledOverride, Store, ThreadRow};
 use super::transcript::{locate, scan_title};
 use crate::Focus;
 use crate::command::Workspace;
@@ -383,8 +383,8 @@ impl Message<Visit> for SessionsActor {
 }
 
 impl SessionsActor {
-    /// Shows the saved projects and threads, and selects the sidebar's first
-    /// row.
+    /// Shows the saved projects, threads and drafts, and selects the sidebar's
+    /// first row.
     fn restore(deps: SessionsActorDeps) -> Self {
         let SessionsActorDeps {
             services,
@@ -394,9 +394,10 @@ impl SessionsActor {
             worktrees_root,
             wake,
         } = deps;
-        let (projects, rows, error) = match store.load() {
-            Ok((projects, rows)) => (projects, rows, None),
+        let (projects, rows, drafts, error) = match store.load() {
+            Ok((projects, rows, drafts)) => (projects, rows, drafts, None),
             Err(_) => (
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Some("couldn't load orb's saved sessions".to_owned()),
@@ -410,6 +411,10 @@ impl SessionsActor {
                     .filter(|row| row.project_id == project.id)
                     .map(|row| unpolled(&services.session_host, row))
                     .collect(),
+                draft: drafts
+                    .iter()
+                    .find(|draft| draft.project_id == project.id)
+                    .map(draft_of),
                 id: project.id,
                 title: project.title,
                 root: project.root,
@@ -870,6 +875,8 @@ impl SessionsActor {
             short_id: short_id.to_owned(),
             cwd: root.to_owned(),
             created_at: now,
+            model: None,
+            permission_mode: None,
         };
         let Ok(id) = self.store.insert_thread(&new) else {
             return Err(NEW_SESSION_UNSAVED.to_owned());
@@ -894,6 +901,8 @@ impl SessionsActor {
             last_activity_at: now,
             last_visited_at: now,
             ai_titled: false,
+            model: new.model,
+            permission_mode: new.permission_mode,
         };
         let thread = unpolled(&self.services.session_host, &row);
         self.rows.push(row);
@@ -924,6 +933,7 @@ impl SessionsActor {
                             root,
                             created_at: from_ms(now),
                             threads: Vec::new(),
+                            draft: None,
                         });
                     }
                 }
@@ -1261,6 +1271,17 @@ fn unpolled(host: &SessionHostService, row: &ThreadRow) -> Thread {
     thread(row, ThreadStatus::Unknown, host.attach_argv(&row.short_id))
 }
 
+/// How a saved draft looks.
+fn draft_of(row: &DraftRow) -> Draft {
+    Draft {
+        workspace: row.workspace.clone(),
+        branch: row.branch.clone(),
+        model: row.model.clone(),
+        permission: row.permission_mode.clone(),
+        created_at: from_ms(row.created_at),
+    }
+}
+
 /// A project's title: its directory's name, else the whole path.
 fn project_title(root: &Path) -> String {
     root.file_name().map_or_else(
@@ -1309,9 +1330,11 @@ mod tests {
         WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
-        ProjectId, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, ProjectId, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
-    use crate::feat::sessions::store::{NewThread, SettledOverride, Store, StoreError, ThreadRow};
+    use crate::feat::sessions::store::{
+        DraftRow, NewThread, SettledOverride, Store, StoreError, ThreadRow,
+    };
     use crate::feat::sessions::transcript::transcript_path;
 
     const PROJECT_ROOT: &str = "/tmp/orb";
@@ -1687,6 +1710,8 @@ mod tests {
             short_id: short_id.to_owned(),
             cwd: PathBuf::from(PROJECT_ROOT),
             created_at,
+            model: None,
+            permission_mode: None,
         })
     }
 
@@ -2486,6 +2511,8 @@ mod tests {
                 short_id: short_id.to_owned(),
                 cwd: PathBuf::from("/a"),
                 created_at,
+                model: None,
+                permission_mode: None,
             })
         };
         let a_old = insert(a, "a1", 10)?;
@@ -2566,6 +2593,50 @@ mod tests {
             added,
             vec![SystemTime::UNIX_EPOCH + Duration::from_millis(1_500)],
             "a restored project should keep when it was added"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_puts_a_saved_draft_on_its_project() -> Result<(), Report<StoreError>> {
+        // Given a project with a saved new-worktree draft on main, in opus,
+        // created at 2 s.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new(PROJECT_ROOT), "orb", 1_500)?;
+        store.save_draft(&DraftRow {
+            project_id,
+            workspace: DraftWorkspace::NewWorktree,
+            branch: Some("main".to_owned()),
+            model: Some("opus".to_owned()),
+            permission_mode: None,
+            created_at: 2_000,
+        })?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the project shows that draft.
+        let drafts: Vec<Option<Draft>> = state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .map(|project| project.draft.clone())
+            .collect();
+        assert_eq!(
+            drafts,
+            vec![Some(Draft {
+                workspace: DraftWorkspace::NewWorktree,
+                branch: Some("main".to_owned()),
+                model: Some("opus".to_owned()),
+                permission: None,
+                created_at: SystemTime::UNIX_EPOCH + Duration::from_millis(2_000),
+            })],
+            "a saved draft should be restored onto its project"
         );
         Ok(())
     }
@@ -3813,6 +3884,8 @@ mod tests {
                 short_id: "aa".to_owned(),
                 cwd: Path::new(WORKTREES_ROOT).join("orb/orb-0123abcd"),
                 created_at: now_ms() - HOUR_MS,
+                model: None,
+                permission_mode: None,
             })?
         };
         let host = FakeHost::moving(Ok("bb"));
