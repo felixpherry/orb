@@ -71,3 +71,6 @@ Entries are added or amended **only with human approval**.
 - (projects) Projects are added only from the `␣p` directory picker.
 - (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, `<C-d>`/`<C-u>` move half a page, `⏎` picks, and `Esc` cancels.
 - (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
+- (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
+- (tui) The mode line cuts a long status message at its end, so the mode's key hints and a 2-cell gap stay visible.
+- (picker) The picker popup is only as tall as its rows, at most 90 columns wide, and keeps its top edge fixed while filtering.
