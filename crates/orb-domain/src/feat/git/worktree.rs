@@ -50,16 +50,6 @@ pub fn hex_branch(worktrees_root: &Path, cwd: &Path) -> Option<String> {
     is_hex.then(|| format!("orb/{hex}"))
 }
 
-/// The directory to trust so a session can start in `cwd`: the worktrees
-/// root for an orb worktree, since trust covers every directory under it.
-pub fn trust_dir(worktrees_root: &Path, cwd: &Path) -> PathBuf {
-    if is_orb_worktree(worktrees_root, cwd) {
-        worktrees_root.to_owned()
-    } else {
-        cwd.to_owned()
-    }
-}
-
 /// A branch-name slug of `title`: lowercase ASCII letters and digits, with
 /// every run of anything else as one `-`, at most 40 bytes. `None` when
 /// nothing is left.

@@ -20,9 +20,8 @@
 //! checks it out in the project's root and moves the thread there.
 //!
 //! When Claude refuses to start in a directory it hasn't been trusted in, the
-//! start waits: the actor asks the frontend for an interactive `claude` there
-//! (in the worktrees root for a worktree, so one trust covers them all), and
-//! tries the start once more when asked. A second refusal fails the start.
+//! start waits: the actor asks the frontend for an interactive `claude` there,
+//! and tries the start once more when asked. A second refusal fails the start.
 //!
 //! It keeps each thread's place in the sidebar: pinning, settling onto the
 //! Settled shelf (which stops the session), un-settling, and deleting. A turn
@@ -54,9 +53,7 @@ use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
 use crate::feat::git::validator::BUSY_DIRECTORY;
-use crate::feat::git::worktree::{
-    hex, hex_branch, is_orb_worktree, new_worktree_path, slug, trust_dir,
-};
+use crate::feat::git::worktree::{hex, hex_branch, is_orb_worktree, new_worktree_path, slug};
 
 /// How long to wait between polls while a turn is underway or orb is attached.
 const FAST_POLL: Duration = Duration::from_secs(1);
@@ -548,9 +545,8 @@ impl SessionsActor {
             && allow_trust
             && report.contains::<WorkspaceUntrusted>()
         {
-            let dir = trust_dir(&self.worktrees_root, &pending.cwd);
+            self.state.write().sessions.trust = Some(pending.cwd.clone());
             self.pending = Some(pending);
-            self.state.write().sessions.trust = Some(dir);
             return (self.wake)();
         }
         let PendingStart {
@@ -3600,8 +3596,7 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn untrusted_worktree_asks_for_trust_in_the_worktrees_root()
-    -> Result<(), Report<StoreError>> {
+    async fn untrusted_worktree_asks_for_trust_in_the_worktree() -> Result<(), Report<StoreError>> {
         // Given claude refusing a new, untrusted worktree.
         let (store, id) = store_with_thread("aa")?;
         let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
@@ -3610,11 +3605,11 @@ mod tests {
         // When moving a thread to a new worktree.
         actor.move_thread(id, Workspace::NewWorktree).await;
 
-        // Then the start waits for the worktrees root to be trusted.
+        // Then the start waits for the refused worktree itself to be trusted.
         assert_eq!(
             trust_of(&state),
-            Some(PathBuf::from(WORKTREES_ROOT)),
-            "one trust of the worktrees root should cover every worktree"
+            host.created_in().last().cloned(),
+            "the refused worktree should be offered for trust"
         );
         Ok(())
     }
