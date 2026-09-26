@@ -14,26 +14,21 @@ pub enum PickProjectError {
     NoPicker,
     /// No project is highlighted.
     NoProject,
-    /// A new session is already being created.
-    AlreadyStarting,
 }
 
-/// Allow starting a session in the highlighted project, one create at a time.
+/// Allow opening the highlighted project's draft, even while a session
+/// starts.
 ///
 /// # Errors
 ///
 /// Returns [`PickProjectError::NoPicker`] unless the project picker is open,
-/// [`PickProjectError::NoProject`] when nothing is highlighted, and
-/// [`PickProjectError::AlreadyStarting`] while a create is in flight.
+/// and [`PickProjectError::NoProject`] when nothing is highlighted.
 pub fn validate_pick_project(state: &AppState) -> Result<(), PickProjectError> {
     match &state.picker {
-        Some(picker) if *picker.kind() == PickerKind::Projects => {
-            match (picker.selected(), state.sessions.starting) {
-                (None, _) => Err(PickProjectError::NoProject),
-                (Some(_), true) => Err(PickProjectError::AlreadyStarting),
-                (Some(_), false) => Ok(()),
-            }
-        }
+        Some(picker) if *picker.kind() == PickerKind::Projects => match picker.selected() {
+            None => Err(PickProjectError::NoProject),
+            Some(_) => Ok(()),
+        },
         _ => Err(PickProjectError::NoPicker),
     }
 }
@@ -146,8 +141,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn pick_project_is_refused_while_starting() {
-        // Given alpha highlighted while a create is in flight.
+    fn pick_project_is_allowed_while_starting() {
+        // Given alpha highlighted while a session start is in flight.
         let state = AppState {
             picker: Some(PickerState::projects(vec![alpha()], Focus::Sidebar)),
             sessions: Sessions {
@@ -160,11 +155,11 @@ mod tests {
         // When validating a pick.
         let result = validate_pick_project(&state);
 
-        // Then validation fails with AlreadyStarting.
+        // Then it is allowed.
         assert_eq!(
             result,
-            Err(PickProjectError::AlreadyStarting),
-            "a second create can't start while one is in flight"
+            Ok(()),
+            "a draft can be opened while another session starts"
         );
     }
 

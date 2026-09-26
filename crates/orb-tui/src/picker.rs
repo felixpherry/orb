@@ -13,7 +13,9 @@
 use std::path::Path;
 
 use orb_domain::feat::git::git_service::GitRef;
-use orb_domain::feat::picker::list::{BranchRow, Matches, PickerItem, WorkspaceChoice};
+use orb_domain::feat::picker::list::{
+    BranchRow, Matches, PickerItem, WorkspaceChoice, setting_label,
+};
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
@@ -97,6 +99,8 @@ fn section_label(kind: &PickerKind) -> &'static str {
         PickerKind::Directories { .. } => "Directories",
         PickerKind::Workspace { .. } => "Workspace",
         PickerKind::Branches { .. } => "Branches",
+        PickerKind::Model { .. } => "Models",
+        PickerKind::Permission { .. } => "Permission modes",
     }
 }
 
@@ -235,6 +239,14 @@ fn render_item(
                 _ => Path::new(""),
             };
             render_branch(row, matches, cwd, home, area, buf);
+        }
+        PickerItem::Setting(value) => {
+            Line::from_iter(highlight(
+                setting_label(*value),
+                &matches.name,
+                Style::new(),
+            ))
+            .render(area, buf);
         }
     }
 }
@@ -394,7 +406,7 @@ mod tests {
     use orb_domain::Focus;
     use orb_domain::feat::git::git_service::GitRef;
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
-    use orb_domain::feat::picker::state::PickerState;
+    use orb_domain::feat::picker::state::{PickTarget, PickerState};
     use orb_domain::feat::sessions::state::{ProjectId, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
@@ -718,7 +730,7 @@ mod tests {
 
     fn workspace() -> PickerState {
         PickerState::workspace(
-            ThreadId(1),
+            PickTarget::Thread(ThreadId(1)),
             vec![
                 PickerItem::Workspace(WorkspaceChoice::Current { worktree: false }),
                 PickerItem::Workspace(WorkspaceChoice::NewWorktree),
@@ -786,7 +798,12 @@ mod tests {
     #[rstest::rstest]
     fn branch_picker_while_listing_shows_loading() {
         // Given a branch picker whose refs aren't listed yet.
-        let picker = PickerState::branches(ThreadId(1), "/tmp/repo".into(), false, Focus::Preview);
+        let picker = PickerState::branches(
+            PickTarget::Thread(ThreadId(1)),
+            "/tmp/repo".into(),
+            false,
+            Focus::Preview,
+        );
 
         // When drawing it.
         let buf = draw(&picker, 60, 16);
@@ -814,7 +831,12 @@ mod tests {
 
     /// A branch picker in `REPO` listing `refs`, after the first prompt.
     fn branches(refs: Vec<GitRef>) -> PickerState {
-        let mut picker = PickerState::branches(ThreadId(1), REPO.into(), false, Focus::Preview);
+        let mut picker = PickerState::branches(
+            PickTarget::Thread(ThreadId(1)),
+            REPO.into(),
+            false,
+            Focus::Preview,
+        );
         picker.show_branches(Path::new(REPO), refs);
         picker
     }

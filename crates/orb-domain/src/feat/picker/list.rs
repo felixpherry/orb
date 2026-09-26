@@ -25,6 +25,27 @@ pub enum PickerItem {
     Workspace(WorkspaceChoice),
     /// A branch to switch to, matched on its name.
     Branch(BranchRow),
+    /// A model or permission mode for a draft; `None` is Claude's default.
+    /// Matched on its label.
+    Setting(Option<&'static str>),
+}
+
+/// The `--model` values a draft can pick, besides Claude's default.
+pub const MODELS: [&str; 4] = ["opus", "sonnet", "fable", "haiku"];
+
+/// The `--permission-mode` values a draft can pick, besides Claude's default.
+pub const PERMISSION_MODES: [&str; 6] = [
+    "acceptEdits",
+    "auto",
+    "bypassPermissions",
+    "manual",
+    "dontAsk",
+    "plan",
+];
+
+/// A model's or permission mode's text: the value, or `Default` for none.
+pub fn setting_label(value: Option<&str>) -> &str {
+    value.unwrap_or("Default")
 }
 
 impl PickerItem {
@@ -236,6 +257,15 @@ impl PickerList {
         self.items.get(*index).filter(|item| !item.disabled())
     }
 
+    /// Selects the shown row holding `item`; stays put when none does.
+    pub fn select(&mut self, item: &PickerItem) {
+        if let Some(found) = (0..self.shown.len())
+            .find(|&index| self.enabled(index) && self.item_at(index) == Some(item))
+        {
+            self.selection = found;
+        }
+    }
+
     /// The shown items and where they matched, in display order.
     pub fn shown(&self) -> impl Iterator<Item = (&PickerItem, &Matches)> {
         self.shown
@@ -281,10 +311,13 @@ impl PickerList {
 
     /// Whether shown row `index` exists and isn't disabled.
     fn enabled(&self, index: usize) -> bool {
-        self.shown
-            .get(index)
-            .and_then(|(item, _)| self.items.get(*item))
-            .is_some_and(|item| !item.disabled())
+        self.item_at(index).is_some_and(|item| !item.disabled())
+    }
+
+    /// The item on shown row `index`.
+    fn item_at(&self, index: usize) -> Option<&PickerItem> {
+        let (item, _) = self.shown.get(index)?;
+        self.items.get(*item)
     }
 
     /// The byte offset of grapheme `index` in the input, or its end.
@@ -312,6 +345,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::Directory { name } => (name.clone(), None),
         PickerItem::Workspace(choice) => (choice.label(), None),
         PickerItem::Branch(row) => (row.git_ref.name.clone(), None),
+        PickerItem::Setting(value) => (setting_label(*value).to_owned(), None),
     };
     let bytes: Vec<usize> = label.char_indices().map(|(at, _)| at).collect();
     let mut total = 0;
@@ -347,7 +381,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{BranchRow, Matches, PickerItem, PickerList};
+    use super::{BranchRow, Matches, PickerItem, PickerList, setting_label};
     use crate::feat::git::git_service::GitRef;
     use crate::feat::sessions::state::ProjectId;
 
@@ -375,6 +409,7 @@ mod tests {
                 PickerItem::Project { title, .. } => title.clone(),
                 PickerItem::Workspace(choice) => choice.label(),
                 PickerItem::Branch(row) => row.git_ref.name.clone(),
+                PickerItem::Setting(value) => setting_label(*value).to_owned(),
             })
             .collect()
     }
@@ -459,9 +494,10 @@ mod tests {
             .shown()
             .filter_map(|(item, _)| match item {
                 PickerItem::Project { id, .. } => Some(*id),
-                PickerItem::Directory { .. } | PickerItem::Workspace(_) | PickerItem::Branch(_) => {
-                    None
-                }
+                PickerItem::Directory { .. }
+                | PickerItem::Workspace(_)
+                | PickerItem::Branch(_)
+                | PickerItem::Setting(_) => None,
             })
             .collect();
         assert_eq!(

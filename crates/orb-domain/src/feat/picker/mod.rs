@@ -1,6 +1,6 @@
 //! Picker — a popup list the user narrows by typing and picks one item from.
 //!
-//! The project picker (`␣n`) lists orb's projects to start a session in. The
+//! The project picker (`␣n`) lists orb's projects to open a draft in. The
 //! directory picker (`␣p`) browses the filesystem from `~/` to add a project.
 //! Typed text ranks the items by fuzzy score and marks where it matched.
 

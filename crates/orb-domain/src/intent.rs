@@ -16,11 +16,11 @@ pub enum Intent {
     FocusPreview,
     /// Move the keys to the sidebar.
     FocusSidebar,
-    /// Attach to the selected thread's session.
+    /// Attach to the selected thread's session, or start the selected draft.
     Attach,
     /// Return from the attached session to its preview.
     Detach,
-    /// Open the project picker to start a Claude session.
+    /// Open the project picker to open that project's draft.
     NewSession,
     /// Move the preview's cursor to the next block.
     NextBlock,
@@ -50,11 +50,15 @@ pub enum Intent {
     CloseShelf,
     /// Open the directory picker to add a project.
     AddProject,
-    /// Open the workspace picker for the selected thread, before its first
-    /// prompt.
+    /// Open the workspace picker for the selected draft, or the selected
+    /// thread before its first prompt.
     ChangeWorkspace,
-    /// Open the branch picker for the selected thread.
+    /// Open the branch picker for the selected thread or draft.
     SwitchBranch,
+    /// Open the model picker for the selected draft.
+    PickModel,
+    /// Open the permission-mode picker for the selected draft.
+    PickPermission,
     /// Type a character into the picker's filter.
     PickerInput(char),
     /// Delete the grapheme before the picker's cursor.
@@ -73,8 +77,8 @@ pub enum Intent {
     PickerHalfPageDown,
     /// Move the picker's selection half a page up.
     PickerHalfPageUp,
-    /// Pick the selected item: start a session in the project, or add the
-    /// directory.
+    /// Pick the selected item: open the project's draft, add the directory,
+    /// or apply the workspace, branch, model or permission mode.
     PickerConfirm,
     /// Browse into the directory picker's selected directory.
     PickerOpen,
@@ -110,6 +114,8 @@ impl fmt::Display for Intent {
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",
+            Self::PickModel => "model",
+            Self::PickPermission => "permission",
             Self::PickerInput(_) => "type",
             Self::PickerDeleteWord => "delete word",
             Self::PickerCursorLeft => "cursor left",

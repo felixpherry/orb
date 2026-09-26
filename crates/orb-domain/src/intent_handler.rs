@@ -1,6 +1,6 @@
 //! The [`IntentHandler`]: the single decision point for all user input.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::command::Workspace;
 use crate::feat::git::validator::{
@@ -10,15 +10,17 @@ use crate::feat::git::validator::{
 use crate::feat::git::worktree::previous_worktree;
 use crate::feat::pane::validator::validate_attach;
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
-use crate::feat::picker::state::{PickerKind, PickerState};
+use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
 use crate::feat::picker::validator::{
     validate_add_directory, validate_open_directory, validate_pick_project,
 };
 use crate::feat::preview::validator::{validate_toggle_fold, validate_yank};
-use crate::feat::sessions::state::{AttachTarget, SidebarItem};
+use crate::feat::sessions::state::{
+    AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, ThreadId,
+};
 use crate::feat::sessions::validator::{
-    validate_close_shelf, validate_delete, validate_new_session, validate_open_shelf,
-    validate_toggle_pin, validate_toggle_settle,
+    validate_close_shelf, validate_delete, validate_open_shelf, validate_pick_setting,
+    validate_start_draft, validate_toggle_pin, validate_toggle_settle,
 };
 use crate::{AppState, Command, Focus, Intent};
 
@@ -64,6 +66,15 @@ impl IntentHandler {
                 }
                 vec![]
             }
+            Intent::Attach if matches!(state.sessions.cursor, Some(SidebarItem::Draft(_))) => {
+                match (validate_start_draft(state), state.sessions.cursor) {
+                    (Ok(()), Some(SidebarItem::Draft(project))) => {
+                        state.sessions.starting = true;
+                        vec![Command::StartDraft(project)]
+                    }
+                    _ => vec![],
+                }
+            }
             Intent::Attach => match (validate_attach(state), state.sessions.selected_thread()) {
                 (Ok(()), Some(thread)) => {
                     let target = AttachTarget {
@@ -80,24 +91,20 @@ impl IntentHandler {
                 state.focus = Focus::Preview;
                 vec![Command::Detach, Command::RefreshSessions]
             }
-            Intent::NewSession => match validate_new_session(state) {
-                Ok(()) => {
-                    let items = state
-                        .sessions
-                        .projects_by_recency()
-                        .into_iter()
-                        .map(|project| PickerItem::Project {
-                            id: project.id,
-                            title: project.title.clone(),
-                            root: project.root.clone(),
-                        })
-                        .collect();
-                    state.picker = Some(PickerState::projects(items, state.focus));
-                    state.focus = Focus::Picker;
-                    vec![]
-                }
-                Err(_) => vec![],
-            },
+            Intent::NewSession => {
+                let items = state
+                    .sessions
+                    .projects_by_recency()
+                    .into_iter()
+                    .map(|project| PickerItem::Project {
+                        id: project.id,
+                        title: project.title.clone(),
+                        root: project.root.clone(),
+                    })
+                    .collect();
+                open_picker(state, PickerState::projects(items, state.focus));
+                vec![]
+            }
             Intent::AddProject => {
                 let (picker, dir) = PickerState::directories(state.home.clone(), state.focus);
                 state.picker = Some(picker);
@@ -106,29 +113,28 @@ impl IntentHandler {
             }
             Intent::ChangeWorkspace => match (
                 validate_change_workspace(state),
+                state.sessions.selected_draft(),
                 state.sessions.selected_project(),
                 state.sessions.selected_thread(),
             ) {
-                (Ok(()), Some(project), Some(thread)) => {
-                    let items = [
-                        WorkspaceChoice::Current {
-                            worktree: thread.cwd != project.root,
-                        },
-                        WorkspaceChoice::NewWorktree,
-                    ]
-                    .into_iter()
-                    .chain(
-                        previous_worktree(project, &thread.cwd, Some(thread.id))
-                            .map(|(path, branch)| WorkspaceChoice::Previous { path, branch }),
-                    )
-                    .map(PickerItem::Workspace)
-                    .collect();
-                    let picker = PickerState::workspace(thread.id, items, state.focus);
-                    state.picker = Some(picker);
-                    state.focus = Focus::Picker;
+                (Ok(()), Some((project, draft)), _, _) => {
+                    let cwd = match &draft.workspace {
+                        DraftWorkspace::Existing(path) => path,
+                        DraftWorkspace::Local | DraftWorkspace::NewWorktree => &project.root,
+                    };
+                    let items = workspace_items(project, cwd, false, None);
+                    let target = PickTarget::Draft(project.id);
+                    open_picker(state, PickerState::workspace(target, items, state.focus));
                     vec![]
                 }
-                (Err(ChangeWorkspaceError::Locked { worktree }), _, _) => {
+                (Ok(()), None, Some(project), Some(thread)) => {
+                    let worktree = thread.cwd != project.root;
+                    let items = workspace_items(project, &thread.cwd, worktree, Some(thread.id));
+                    let target = PickTarget::Thread(thread.id);
+                    open_picker(state, PickerState::workspace(target, items, state.focus));
+                    vec![]
+                }
+                (Err(ChangeWorkspaceError::Locked { worktree }), ..) => {
                     let workspace = if worktree {
                         "Worktree"
                     } else {
@@ -182,29 +188,66 @@ impl IntentHandler {
             }
             Intent::SwitchBranch => match (
                 validate_switch_branch(state),
+                state.sessions.selected_draft(),
                 state.sessions.selected_thread(),
             ) {
-                (Ok(()), Some(thread)) => {
+                (Ok(()), Some((project, _)), _) => {
+                    let root = project.root.clone();
+                    let target = PickTarget::Draft(project.id);
+                    let picker = PickerState::branches(target, root.clone(), true, state.focus);
+                    open_picker(state, picker);
+                    vec![Command::ListBranches(root)]
+                }
+                (Ok(()), None, Some(thread)) => {
                     let cwd = thread.cwd.clone();
                     let unstarted = thread.transcript.is_none() && !thread.status.in_progress();
-                    let picker =
-                        PickerState::branches(thread.id, cwd.clone(), unstarted, state.focus);
-                    state.picker = Some(picker);
-                    state.focus = Focus::Picker;
+                    let target = PickTarget::Thread(thread.id);
+                    let picker = PickerState::branches(target, cwd.clone(), unstarted, state.focus);
+                    open_picker(state, picker);
                     vec![Command::ListBranches(cwd)]
                 }
-                (Err(SwitchBranchError::Busy), _) => {
+                (Err(SwitchBranchError::Busy), ..) => {
                     state.sessions.error = Some(BUSY_DIRECTORY.to_owned());
                     vec![]
                 }
                 _ => vec![],
             },
+            Intent::PickModel => {
+                match (
+                    validate_pick_setting(state),
+                    state.sessions.selected_draft(),
+                ) {
+                    (Ok(()), Some((project, draft))) => {
+                        let current = draft.model.as_deref();
+                        let picker = PickerState::models(project.id, current, state.focus);
+                        open_picker(state, picker);
+                        vec![]
+                    }
+                    _ => vec![],
+                }
+            }
+            Intent::PickPermission => {
+                match (
+                    validate_pick_setting(state),
+                    state.sessions.selected_draft(),
+                ) {
+                    (Ok(()), Some((project, draft))) => {
+                        let current = draft.permission.as_deref();
+                        let picker = PickerState::permissions(project.id, current, state.focus);
+                        open_picker(state, picker);
+                        vec![]
+                    }
+                    _ => vec![],
+                }
+            }
             Intent::PickerOpen => match validate_open_directory(state) {
                 Ok(()) => list(state.picker.as_mut().and_then(PickerState::open_directory)),
                 Err(_) => vec![],
             },
             Intent::PickerConfirm => match state.picker.as_ref().map(PickerState::kind) {
-                Some(&PickerKind::Workspace { thread }) => {
+                Some(&PickerKind::Workspace {
+                    target: PickTarget::Thread(thread),
+                }) => {
                     let to = match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::Workspace(WorkspaceChoice::NewWorktree)) => {
                             Some(Workspace::NewWorktree)
@@ -222,19 +265,52 @@ impl IntentHandler {
                         None => vec![],
                     }
                 }
-                Some(PickerKind::Branches { .. }) => close_picker(state)
+                Some(&PickerKind::Workspace {
+                    target: PickTarget::Draft(project),
+                }) => match close_picker(state).as_ref().and_then(PickerState::selected) {
+                    Some(PickerItem::Workspace(choice)) => edit_draft(state, project, |draft| {
+                        (draft.workspace, draft.branch) = match choice {
+                            WorkspaceChoice::Current { .. } => (DraftWorkspace::Local, None),
+                            WorkspaceChoice::NewWorktree => (DraftWorkspace::NewWorktree, None),
+                            WorkspaceChoice::Previous { path, branch } => {
+                                (DraftWorkspace::Existing(path.clone()), branch.clone())
+                            }
+                        };
+                    }),
+                    _ => vec![],
+                },
+                Some(&PickerKind::Model { project }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(&PickerItem::Setting(value)) => edit_draft(state, project, |draft| {
+                            draft.model = value.map(str::to_owned);
+                        }),
+                        _ => vec![],
+                    }
+                }
+                Some(&PickerKind::Permission { project }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(&PickerItem::Setting(value)) => edit_draft(state, project, |draft| {
+                            draft.permission = value.map(str::to_owned);
+                        }),
+                        _ => vec![],
+                    }
+                }
+                Some(PickerKind::Branches {
+                    target: PickTarget::Thread(_),
+                    ..
+                }) => close_picker(state)
                     .map(|picker| pick_branch(state, &picker))
+                    .unwrap_or_default(),
+                Some(PickerKind::Branches {
+                    target: PickTarget::Draft(_),
+                    ..
+                }) => close_picker(state)
+                    .map(|picker| pick_draft_branch(state, &picker))
                     .unwrap_or_default(),
                 _ => match (validate_pick_project(state), validate_add_directory(state)) {
                     (Ok(()), _) => {
                         match close_picker(state).as_ref().and_then(PickerState::selected) {
-                            Some(PickerItem::Project { id, root, .. }) => {
-                                state.sessions.starting = true;
-                                vec![Command::CreateSession {
-                                    project: *id,
-                                    root: root.clone(),
-                                }]
-                            }
+                            Some(&PickerItem::Project { id, .. }) => open_draft(state, id),
                             _ => vec![],
                         }
                     }
@@ -324,9 +400,16 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
-            Intent::DeleteThread => match (validate_delete(state), state.sessions.selected_id()) {
-                (Ok(()), Some(id)) => {
-                    state.sessions.cursor = state.sessions.row_neighbour(SidebarItem::Thread(id));
+            Intent::DeleteThread => match (validate_delete(state), state.sessions.cursor) {
+                (Ok(()), Some(item @ SidebarItem::Draft(project))) => {
+                    state.sessions.cursor = state.sessions.row_neighbour(item);
+                    with_visit(
+                        state,
+                        vec![Command::DiscardDraft(project), Command::ShowPreview],
+                    )
+                }
+                (Ok(()), Some(item @ SidebarItem::Thread(id))) => {
+                    state.sessions.cursor = state.sessions.row_neighbour(item);
                     with_visit(state, vec![Command::Delete(id), Command::ShowPreview])
                 }
                 _ => vec![],
@@ -352,7 +435,7 @@ fn list(dir: Option<PathBuf>) -> Vec<Command> {
 fn pick_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command> {
     let (
         &PickerKind::Branches {
-            thread,
+            target: PickTarget::Thread(thread),
             ref cwd,
             unstarted,
         },
@@ -390,6 +473,116 @@ fn pick_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command> {
     }
 }
 
+/// What picking the selected branch of `picker`, a draft's closed branch
+/// picker listing the project's root, asks for:
+/// - a new-worktree draft: record the branch as the base, nothing else;
+/// - a local draft, the current branch: nothing;
+/// - a local draft, a branch checked out in another worktree: move the draft
+///   into that worktree;
+/// - a local draft, otherwise: check the branch out in the root.
+fn pick_draft_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command> {
+    let (
+        &PickerKind::Branches {
+            target: PickTarget::Draft(project),
+            ref cwd,
+            ..
+        },
+        Some(PickerItem::Branch(BranchRow { git_ref, .. })),
+    ) = (picker.kind(), picker.selected())
+    else {
+        return vec![];
+    };
+    let Some(draft) = draft_mut(&mut state.sessions, project) else {
+        return vec![];
+    };
+    let elsewhere = git_ref.worktree.as_ref().filter(|path| *path != cwd);
+    match (&draft.workspace, git_ref.current, elsewhere) {
+        (DraftWorkspace::NewWorktree, _, _) => {
+            draft.branch = Some(git_ref.name.clone());
+            vec![Command::SaveDraft(project)]
+        }
+        (DraftWorkspace::Local, false, Some(path)) => {
+            draft.workspace = DraftWorkspace::Existing(path.clone());
+            draft.branch = Some(git_ref.name.clone());
+            vec![Command::SaveDraft(project)]
+        }
+        (DraftWorkspace::Local, false, None) => vec![Command::CheckoutDraft {
+            project,
+            git_ref: git_ref.clone(),
+        }],
+        (DraftWorkspace::Local, true, _) | (DraftWorkspace::Existing(_), _, _) => vec![],
+    }
+}
+
+/// The workspace picker's rows for a thread or draft running in `cwd`: stay
+/// there (`worktree` is whether that's a worktree), a new worktree, then the
+/// project's previous worktree other than `cwd`, ignoring the thread `except`.
+fn workspace_items(
+    project: &Project,
+    cwd: &Path,
+    worktree: bool,
+    except: Option<ThreadId>,
+) -> Vec<PickerItem> {
+    [
+        WorkspaceChoice::Current { worktree },
+        WorkspaceChoice::NewWorktree,
+    ]
+    .into_iter()
+    .chain(
+        previous_worktree(project, cwd, except)
+            .map(|(path, branch)| WorkspaceChoice::Previous { path, branch }),
+    )
+    .map(PickerItem::Workspace)
+    .collect()
+}
+
+/// Selects `project`'s draft and gives the keys to its form, asking the
+/// sessions actor to create the draft when the project has none.
+fn open_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
+    let exists = state
+        .sessions
+        .projects
+        .iter()
+        .any(|p| p.id == project && p.draft.is_some());
+    state.sessions.cursor = Some(SidebarItem::Draft(project));
+    state.focus = Focus::Preview;
+    (!exists)
+        .then_some(Command::CreateDraft(project))
+        .into_iter()
+        .chain([Command::ShowPreview])
+        .collect()
+}
+
+/// Applies `edit` to `project`'s draft and asks the sessions actor to save it;
+/// nothing when the draft is gone.
+fn edit_draft<F>(state: &mut AppState, project: ProjectId, edit: F) -> Vec<Command>
+where
+    F: FnOnce(&mut Draft),
+{
+    match draft_mut(&mut state.sessions, project) {
+        Some(draft) => {
+            edit(draft);
+            vec![Command::SaveDraft(project)]
+        }
+        None => vec![],
+    }
+}
+
+/// `project`'s draft, if it has one.
+fn draft_mut(sessions: &mut Sessions, project: ProjectId) -> Option<&mut Draft> {
+    sessions
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project)
+        .and_then(|p| p.draft.as_mut())
+}
+
+/// Opens `picker` and gives it the keys.
+fn open_picker(state: &mut AppState, picker: PickerState) {
+    state.picker = Some(picker);
+    state.focus = Focus::Picker;
+}
+
 /// Closes the picker and gives the keys back to where it was opened from.
 fn close_picker(state: &mut AppState) -> Option<PickerState> {
     let picker = state.picker.take()?;
@@ -410,12 +603,13 @@ mod tests {
 
     use crate::command::Workspace;
     use crate::feat::git::git_service::GitRef;
-    use crate::feat::picker::list::PickerItem;
-    use crate::feat::picker::state::{PickerKind, PickerState};
+    use crate::feat::picker::list::{PERMISSION_MODES, PickerItem};
+    use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
     use crate::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
     use crate::feat::preview::state::{Preview, PreviewLayout};
     use crate::feat::sessions::state::{
-        AttachTarget, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
@@ -812,8 +1006,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn new_session_while_starting_opens_no_picker() {
-        // Given a create already in flight.
+    fn new_session_while_starting_opens_the_picker() {
+        // Given a session start already in flight.
         let mut state = AppState {
             sessions: Sessions {
                 starting: true,
@@ -822,13 +1016,14 @@ mod tests {
             ..AppState::default()
         };
 
-        // When handling NewSession again.
+        // When handling NewSession.
         IntentHandler::handle(&Intent::NewSession, &mut state);
 
-        // Then no picker opens.
-        assert!(
-            state.picker.is_none(),
-            "NewSession while starting should not open the picker"
+        // Then the project picker opens anyway.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Projects),
+            "a draft can be opened while another session starts"
         );
     }
 
@@ -876,52 +1071,86 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn picker_confirm_on_a_project_returns_create_session() {
-        // Given the project picker with alpha highlighted.
+    fn picker_confirm_on_a_project_without_a_draft_returns_create_draft() {
+        // Given the project picker with alpha, which has no draft, highlighted.
         let mut state = picking(Focus::Sidebar);
 
         // When handling PickerConfirm.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the sessions actor is asked to start a session in alpha.
+        // Then the sessions actor is asked to create alpha's draft, and the
+        // preview to show the selection.
         assert_eq!(
             commands,
-            vec![Command::CreateSession {
-                project: ProjectId(1),
-                root: "/alpha".into(),
-            }],
-            "PickerConfirm should create a session in the highlighted project"
+            vec![Command::CreateDraft(ProjectId(1)), Command::ShowPreview],
+            "picking a project without a draft should create one"
         );
     }
 
     #[rstest::rstest]
-    fn picker_confirm_on_a_project_sets_starting() {
+    fn picker_confirm_on_a_project_with_a_draft_returns_no_create_draft() {
+        // Given the project picker with alpha, which has a draft, highlighted.
+        let mut state = picking(Focus::Sidebar);
+        if let Some(alpha) = state.sessions.projects.first_mut() {
+            alpha.draft = Some(draft(DraftWorkspace::Local));
+        }
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then only the preview is refreshed.
+        assert_eq!(
+            commands,
+            vec![Command::ShowPreview],
+            "a project keeps its one draft"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_confirm_on_a_project_selects_its_draft() {
         // Given the project picker with alpha highlighted.
         let mut state = picking(Focus::Sidebar);
 
         // When handling PickerConfirm.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then a create is in flight.
-        assert!(
-            state.sessions.starting,
-            "PickerConfirm on a project should set starting"
+        // Then the cursor is on alpha's draft.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Draft(ProjectId(1))),
+            "picking a project should select its draft"
         );
     }
 
     #[rstest::rstest]
-    fn picker_confirm_closes_the_picker_and_restores_its_focus() {
-        // Given the project picker opened from the preview.
-        let mut state = picking(Focus::Preview);
+    fn picker_confirm_on_a_project_focuses_the_draft_form() {
+        // Given the project picker opened from the sidebar.
+        let mut state = picking(Focus::Sidebar);
 
         // When handling PickerConfirm.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the picker is closed and the keys are back on the preview.
+        // Then the picker is closed and the keys are on the right side, where
+        // the draft's form is.
         assert_eq!(
             (state.focus, state.picker.is_none()),
             (Focus::Preview, true),
-            "PickerConfirm should close the picker and return to the preview"
+            "picking a project should hand the keys to its draft form"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_confirm_on_a_project_does_not_set_starting() {
+        // Given the project picker with alpha highlighted.
+        let mut state = picking(Focus::Sidebar);
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then no session is starting.
+        assert!(
+            !state.sessions.starting,
+            "picking a project opens its draft and never starts a session"
         );
     }
 
@@ -987,7 +1216,7 @@ mod tests {
             (
                 Focus::Picker,
                 Some(&PickerKind::Workspace {
-                    thread: ThreadId(1)
+                    target: PickTarget::Thread(ThreadId(1))
                 })
             ),
             "ChangeWorkspace should open the workspace picker"
@@ -1151,7 +1380,7 @@ mod tests {
             (
                 Focus::Picker,
                 Some(&PickerKind::Branches {
-                    thread: ThreadId(1),
+                    target: PickTarget::Thread(ThreadId(1)),
                     cwd: "/work".into(),
                     unstarted: true,
                 })
@@ -1706,5 +1935,501 @@ mod tests {
             commands.contains(&Command::Visit(ThreadId(1))),
             "SelectNext should visit the thread it lands on"
         );
+    }
+
+    /// A draft in `workspace` with no branch, model or permission.
+    fn draft(workspace: DraftWorkspace) -> Draft {
+        Draft {
+            workspace,
+            branch: None,
+            model: None,
+            permission: None,
+            created_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// One project at `/work` holding `threads` and `draft`, with the draft
+    /// selected and the keys on its form.
+    fn drafting(draft: Draft, threads: Vec<Thread>) -> AppState {
+        let mut state = AppState {
+            focus: Focus::Preview,
+            ..state_at(threads, SidebarItem::Draft(ProjectId(1)))
+        };
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.draft = Some(draft);
+        }
+        state
+    }
+
+    /// The selected project's draft.
+    fn the_draft(state: &AppState) -> Option<&Draft> {
+        state.sessions.selected_draft().map(|(_, draft)| draft)
+    }
+
+    #[rstest::rstest]
+    fn attach_on_a_draft_returns_start_draft() {
+        // Given a selected draft.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the sessions actor is asked to start it.
+        assert_eq!(
+            commands,
+            vec![Command::StartDraft(ProjectId(1))],
+            "⏎ on a draft should start it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_on_a_draft_sets_starting() {
+        // Given a selected draft.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then a start is in flight.
+        assert!(
+            state.sessions.starting,
+            "starting a draft should mark the start in flight"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_on_a_draft_while_starting_returns_no_commands() {
+        // Given a selected draft while a start is in flight.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+        state.sessions.starting = true;
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then nothing starts.
+        assert!(commands.is_empty(), "one start at a time");
+    }
+
+    #[rstest::rstest]
+    fn change_workspace_on_a_draft_opens_its_workspace_picker() {
+        // Given a selected draft.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+
+        // When handling ChangeWorkspace.
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+
+        // Then the draft's workspace picker is open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Workspace {
+                target: PickTarget::Draft(ProjectId(1))
+            }),
+            "␣w on a draft should open its workspace picker"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(0, DraftWorkspace::Local, None)]
+    #[case(1, DraftWorkspace::NewWorktree, None)]
+    #[case(2, DraftWorkspace::Existing("/work/2".into()), Some("orb/feat"))]
+    fn picking_a_draft_workspace_sets_it(
+        #[case] row: usize,
+        #[case] workspace: DraftWorkspace,
+        #[case] branch: Option<&str>,
+    ) {
+        // Given a local draft on `main`, whose project has a worktree thread
+        // on `orb/feat`, with workspace row `row` highlighted.
+        let mut state = drafting(
+            Draft {
+                branch: Some("main".into()),
+                ..draft(DraftWorkspace::Local)
+            },
+            vec![Thread {
+                branch: Some("orb/feat".into()),
+                ..thread(2, ThreadStatus::Idle)
+            }],
+        );
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+        for _ in 0..row {
+            IntentHandler::handle(&Intent::PickerNext, &mut state);
+        }
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft has that workspace and branch.
+        assert_eq!(
+            the_draft(&state).map(|draft| (&draft.workspace, draft.branch.as_deref())),
+            Some((&workspace, branch)),
+            "workspace row {row} should set the draft's workspace"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_draft_workspace_returns_save_draft() {
+        // Given a draft's workspace picker with `New worktree` highlighted.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+        IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to save the draft.
+        assert_eq!(
+            commands,
+            vec![Command::SaveDraft(ProjectId(1))],
+            "a workspace pick should be saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_on_a_draft_opens_the_roots_branch_picker() {
+        // Given a selected new-worktree draft.
+        let mut state = drafting(draft(DraftWorkspace::NewWorktree), vec![]);
+
+        // When handling SwitchBranch.
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+
+        // Then the draft's branch picker lists the root, nothing disabled.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Branches {
+                target: PickTarget::Draft(ProjectId(1)),
+                cwd: "/work".into(),
+                unstarted: true,
+            }),
+            "␣b on a draft should open a branch picker over the root"
+        );
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_on_an_existing_worktree_draft_opens_no_picker() {
+        // Given a selected draft in an existing worktree.
+        let mut state = drafting(draft(DraftWorkspace::Existing("/wt/feat".into())), vec![]);
+
+        // When handling SwitchBranch.
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+
+        // Then no picker opens.
+        assert!(
+            state.picker.is_none(),
+            "an existing worktree's branch is read-only on a draft"
+        );
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_on_a_local_draft_with_a_busy_root_shows_the_error() {
+        // Given a selected local draft and a thread working in the root.
+        let mut state = drafting(
+            draft(DraftWorkspace::Local),
+            vec![Thread {
+                cwd: "/work".into(),
+                ..thread(1, ThreadStatus::Working)
+            }],
+        );
+
+        // When handling SwitchBranch.
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+
+        // Then the mode line says Claude is working there.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some("Claude is working in this directory"),
+            "a busy root should refuse a local draft's checkout"
+        );
+    }
+
+    /// The branch picker of a draft in `workspace`, showing `refs` listed in
+    /// the root `/work`, with the second ref highlighted when there is one.
+    fn choosing_draft_branch(workspace: DraftWorkspace, refs: Vec<GitRef>) -> AppState {
+        let mut state = drafting(draft(workspace), vec![]);
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+        if let Some(picker) = &mut state.picker {
+            picker.show_branches(Path::new("/work"), refs);
+        }
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+        state
+    }
+
+    /// The root's current `main`, then `feat` checked out in `worktree`.
+    fn main_then_feat(worktree: Option<&str>) -> Vec<GitRef> {
+        vec![
+            branch("main", true, Some("/work")),
+            branch("feat", false, worktree),
+        ]
+    }
+
+    #[rstest::rstest]
+    fn picking_a_new_worktree_drafts_branch_sets_its_base() {
+        // Given a new-worktree draft's branch picker with `feat` highlighted.
+        let mut state = choosing_draft_branch(DraftWorkspace::NewWorktree, main_then_feat(None));
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then feat is the draft's base branch.
+        assert_eq!(
+            the_draft(&state).and_then(|draft| draft.branch.as_deref()),
+            Some("feat"),
+            "a new worktree draft records the picked base"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_new_worktree_drafts_branch_returns_save_draft() {
+        // Given a new-worktree draft's branch picker with `feat` highlighted.
+        let mut state = choosing_draft_branch(DraftWorkspace::NewWorktree, main_then_feat(None));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft is saved, with no checkout.
+        assert_eq!(
+            commands,
+            vec![Command::SaveDraft(ProjectId(1))],
+            "a base pick is only saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_branch_in_a_worktree_moves_a_local_draft_there() {
+        // Given a local draft's branch picker with `feat`, checked out in
+        // another worktree, highlighted.
+        let mut state =
+            choosing_draft_branch(DraftWorkspace::Local, main_then_feat(Some("/wt/feat")));
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft runs in that worktree, on feat.
+        assert_eq!(
+            the_draft(&state).map(|draft| (&draft.workspace, draft.branch.as_deref())),
+            Some((&DraftWorkspace::Existing("/wt/feat".into()), Some("feat"))),
+            "the draft should follow the branch into its worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_branch_in_a_worktree_for_a_local_draft_returns_save_draft() {
+        // Given a local draft's branch picker with `feat`, checked out in
+        // another worktree, highlighted.
+        let mut state =
+            choosing_draft_branch(DraftWorkspace::Local, main_then_feat(Some("/wt/feat")));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft is saved, with no checkout.
+        assert_eq!(
+            commands,
+            vec![Command::SaveDraft(ProjectId(1))],
+            "moving a draft to a worktree is only saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_free_branch_for_a_local_draft_returns_checkout_draft() {
+        // Given a local draft's branch picker with `feat`, checked out
+        // nowhere, highlighted.
+        let mut state = choosing_draft_branch(DraftWorkspace::Local, main_then_feat(None));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then feat is checked out in the root.
+        assert_eq!(
+            commands,
+            vec![Command::CheckoutDraft {
+                project: ProjectId(1),
+                git_ref: branch("feat", false, None),
+            }],
+            "a local draft checks the branch out in the root"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_the_current_branch_for_a_local_draft_returns_no_command() {
+        // Given a local draft's branch picker with the root's current branch
+        // highlighted.
+        let mut state = choosing_draft_branch(
+            DraftWorkspace::Local,
+            vec![branch("main", true, Some("/work"))],
+        );
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing happens.
+        assert!(commands.is_empty(), "the current branch needs no checkout");
+    }
+
+    #[rstest::rstest]
+    fn pick_model_on_a_thread_opens_no_picker() {
+        // Given a selected thread.
+        let mut state = state_with(vec![in_root(1)], 1);
+
+        // When handling PickModel.
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+
+        // Then no picker opens.
+        assert!(state.picker.is_none(), "only a draft has a model to pick");
+    }
+
+    #[rstest::rstest]
+    fn pick_model_on_a_draft_lists_default_first() {
+        // Given a selected draft.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+
+        // When handling PickModel.
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+
+        // Then the draft's model picker is open with Default first.
+        assert_eq!(
+            state.picker.as_ref().map(|picker| (
+                picker.kind().clone(),
+                picker.shown().next().map(|(item, _)| item.clone())
+            )),
+            Some((
+                PickerKind::Model {
+                    project: ProjectId(1)
+                },
+                Some(PickerItem::Setting(None))
+            )),
+            "␣m on a draft should open its model picker, Default first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pick_model_on_a_draft_selects_its_model() {
+        // Given a selected draft on sonnet.
+        let mut state = drafting(
+            Draft {
+                model: Some("sonnet".into()),
+                ..draft(DraftWorkspace::Local)
+            },
+            vec![],
+        );
+
+        // When handling PickModel.
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+
+        // Then sonnet is selected.
+        assert_eq!(
+            state.picker.as_ref().and_then(PickerState::selected),
+            Some(&PickerItem::Setting(Some("sonnet"))),
+            "the draft's model should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_model_sets_the_drafts_model() {
+        // Given a draft's model picker with opus, after Default, highlighted.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft runs opus.
+        assert_eq!(
+            the_draft(&state).and_then(|draft| draft.model.as_deref()),
+            Some("opus"),
+            "the picked model should be the draft's"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_model_returns_save_draft() {
+        // Given a draft's model picker with opus highlighted.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to save the draft.
+        assert_eq!(
+            commands,
+            vec![Command::SaveDraft(ProjectId(1))],
+            "a model pick should be saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_default_permission_clears_the_drafts_permission() {
+        // Given a draft in plan mode whose permission picker has Default
+        // highlighted.
+        let mut state = drafting(
+            Draft {
+                permission: Some("plan".into()),
+                ..draft(DraftWorkspace::Local)
+            },
+            vec![],
+        );
+        IntentHandler::handle(&Intent::PickPermission, &mut state);
+        for _ in PERMISSION_MODES {
+            IntentHandler::handle(&Intent::PickerPrev, &mut state);
+        }
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft has no permission flag.
+        assert_eq!(
+            the_draft(&state).map(|draft| draft.permission.as_deref()),
+            Some(None),
+            "Default should clear the draft's permission mode"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_on_a_draft_returns_discard_draft() {
+        // Given a selected draft.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+
+        // When handling DeleteThread.
+        let commands = IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then the sessions actor is asked to discard it.
+        assert!(
+            commands.contains(&Command::DiscardDraft(ProjectId(1))),
+            "xx on a draft should discard it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_on_a_draft_selects_the_next_row() {
+        // Given a selected draft above thread 1's card.
+        let mut state = drafting(
+            draft(DraftWorkspace::Local),
+            vec![thread(1, ThreadStatus::Idle)],
+        );
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then the card below is selected.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Thread(ThreadId(1))),
+            "discarding a draft should select the row below"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::TogglePin)]
+    #[case(Intent::ToggleSettle)]
+    fn pin_and_settle_on_a_draft_return_no_commands(#[case] intent: Intent) {
+        // Given a selected draft.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+
+        // When handling the intent.
+        let commands = IntentHandler::handle(&intent, &mut state);
+
+        // Then nothing happens.
+        assert!(commands.is_empty(), "{intent:?} does nothing on a draft");
     }
 }
