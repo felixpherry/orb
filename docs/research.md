@@ -519,3 +519,22 @@ Probed on this machine in throwaway zellij sessions, each kept alive by a small 
 - `hide-floating-panes` without `-t <tab_id>` fails with `Tab not found` (exit 1) from a CLI with no client.
 - `focus-pane-id terminal_<id>` on a tiled pane hides the visible floating panes.
 - `new-tab` prints the new tab's id. `new-tab --layout-string 'layout { pane name="…" cwd="…" command="…" close_on_exit=true; }'` puts a named pane on a new tab.
+
+## 14. Notifications & focus (verified 2026-09-26, zellij 0.45.0, kitty 0.48.2)
+
+The user ran a throwaway probe script inside a zellij pane in kitty on this machine and watched macOS Notification Center. Each step wrote one sequence, with its own text, and waited for Enter. A detached zellij session can't show any of this. Tags as in §6.
+
+### Notifications **[verified: user probe]**
+- None of these, written from a zellij pane, produced a notification, so zellij doesn't pass them on to kitty:
+  - kitty OSC 99 (`ESC ] 99 ; i=1:d=0 ; <title> ESC \`, then `ESC ] 99 ; i=1:p=body ; <body> ESC \`)
+  - OSC 9 (`ESC ] 9 ; <text> BEL`)
+  - OSC 777 (`ESC ] 777 ; notify ; <title> ; <body> BEL`)
+- The probe wasn't run outside zellij, so kitty's own handling of these sequences is unchecked.
+- `osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' <title> <body>` works from the zellij pane. The notification shows the title and body taken from argv, carries Script Editor's icon, and has a "Show" button. What a click does wasn't checked.
+
+### Focus events **[verified: user probe]**
+- A pane that enables focus reporting (`CSI ? 1004 h`) gets `CSI O` when it loses focus and `CSI I` when it regains focus in each of these cases:
+  - switching to another pane in the same tab and back;
+  - switching zellij tab and back;
+  - leaving kitty for another app and back.
+- orb turns on the same mode (crossterm's `EnableFocusChange`), so it should get `FocusLost`/`FocusGained` in all three cases. This follows from the probe; orb itself wasn't run.
