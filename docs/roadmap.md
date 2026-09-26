@@ -64,8 +64,8 @@ Sidebar on the left, preview (or attached Claude) on the right, mode line at the
 
 | Focus | Keys |
 |---|---|
-| Sidebar | `j`/`k` next/prev thread or draft — preview follows instantly · `<C-l>` focus preview · `⏎` attach (on a draft: start it) · `p` pin/unpin · `ss` settle/un-settle · `xx` delete (on a draft: discard it) · on the Settled header: `⏎` open/close, `l` open, `h` close (`h` on a settled thread in the open shelf also closes it) · `␣n` project picker (opens the project's draft) · `␣p` add project · `␣w` workspace · `␣b` branch · on a draft: `␣m` model, `␣a` permission · `q` quit orb |
-| Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach (on a draft's form: start it) · `␣n` project picker · `␣p` add project · `␣w` workspace (a thread: before the first prompt) · `␣b` branch · on a draft's form: `␣m` model, `␣a` permission |
+| Sidebar | `j`/`k` next/prev thread or draft — preview follows instantly · `<C-l>` focus preview · `⏎` attach (on a draft: start it) · `p` pin/unpin · `ss` settle/un-settle · `xx` delete (on a draft: discard it) · on the Settled header: `⏎` open/close, `l` open, `h` close (`h` on a settled thread in the open shelf also closes it) · `␣n` project picker (opens the project's draft) · `␣p` add project · `␣w` workspace · `␣b` branch · `␣t` shell · `␣g` lazygit · `␣v` nvim (on a thread or draft) · on a draft: `␣m` model, `␣a` permission · `q` quit orb |
+| Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach (on a draft's form: start it) · `␣n` project picker · `␣p` add project · `␣w` workspace (a thread: before the first prompt) · `␣b` branch · `␣t` shell · `␣g` lazygit · `␣v` nvim (on a thread or draft) · on a draft's form: `␣m` model, `␣a` permission |
 | Picker | typing filters · `←`/`→` move the filter cursor · `Backspace`/`<C-w>` delete a char/word · `<C-j>`/`<C-k>` or `↑`/`↓` next/prev item (focus stays in the filter input) · `<C-d>`/`<C-u>` half page · `⏎` pick · `Tab` open the highlighted directory (directory picker) · `Esc` cancel |
 | Attached | **every** key → Claude, except `<C-\>` → back to orb |
 
@@ -74,7 +74,7 @@ Sidebar on the left, preview (or attached Claude) on the right, mode line at the
 - `<C-\>` (single key, configurable) was chosen over nvim's `<C-\><C-n>`. Esc must reach Claude (it interrupts turns / is vim-mode Esc).
 - After `<C-\>`: the right side switches to the **same thread's transcript preview**, focus stays right. The attach process stays alive until another thread is selected, so `⏎` re-enters instantly.
 - Leader chords show a which-key popup. `q` quits orb; sessions keep running. There is no `:` command line (backlog).
-- Keys are bound by what's selected, so which-key never lists a key that does nothing there. `␣m`/`␣a` work only on a draft, `␣w`/`␣b` only on a thread or a draft, and `p`/`ss` only on a thread. The preview's block keys (`j`/`k`, `C-d`/`C-u`, `gg`/`G`, `y`, `za`/`<Tab>`) work only on a thread's preview, not on a draft's form. Keys whose effect depends on runtime state stay bound and explain themselves on the mode line (`Workspace locked`, the busy refusal).
+- Keys are bound by what's selected, so which-key never lists a key that does nothing there. `␣m`/`␣a` work only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` only on a thread or a draft, and `p`/`ss` only on a thread. The preview's block keys (`j`/`k`, `C-d`/`C-u`, `gg`/`G`, `y`, `za`/`<Tab>`) work only on a thread's preview, not on a draft's form. Keys whose effect depends on runtime state stay bound and explain themselves on the mode line (`Workspace locked`, the busy refusal).
 
 ### Preview behavior
 
@@ -126,12 +126,16 @@ There is no orb-owned prompt composer (rejected: it would lose Claude's pickers/
 
 | Key | Program |
 |---|---|
-| `␣t` | shell |
-| `␣g` | lazygit |
-| `␣e` | nvim |
+| `␣t` | `$SHELL` (else `sh`) |
+| `␣g` | `lazygit` |
+| `␣v` | `nvim .` |
 
-- Opens a **full-screen floating** zellij pane with `cwd` = thread's worktree, named `orb:<thread>:<tool>`.
-- **De-dupe**: before creating, `zellij action list-panes --json`; if a pane with that name exists, `zellij action focus-pane-id <id>` instead. Re-pressing `␣g` never creates a second lazygit (the problem the user hit with `cwt`).
+- The keys work in the sidebar and the preview while a thread or a draft is selected. They aren't bound with nothing selected, and they don't reach orb while attached.
+- **Directory**: a thread's `cwd`. A draft's worktree, else the project root (local and new-worktree drafts), the same rule the branch picker uses for drafts. A directory that no longer exists shows `<~dir> doesn't exist` on the mode line.
+- Opens a **full-screen floating** zellij pane (`new-pane --floating -x 0 -y 0 --width 100% --height 100%`) that closes when the tool exits (`--close-on-exit`), named `orb:<~dir>:<tool>` (e.g. `orb:~/dev/orb:lazygit`). The name is keyed on the directory, so two threads in one checkout share one pane per tool.
+- The tool runs with orb's own `NO_COLOR` (`env -u NO_COLOR <tool>`, or `env NO_COLOR=<value>` when orb has one), not the zellij server's (research §13).
+- **De-dupe**: before creating, `zellij action list-panes --json`. If a terminal pane with that name exists, orb runs `go-to-tab-by-id <tab>` then `focus-pane-id terminal_<id>` instead, which switches to its tab and shows it if it was hidden. Re-pressing `␣g` never creates a second lazygit (the problem the user hit with `cwt`). orb stores no pane ids.
+- Outside zellij (no `ZELLIJ_SESSION_NAME` at startup) the mode line shows `Not running inside zellij`. A failed zellij call shows its reason there. Each zellij call gets 2 s: after that it's killed and the mode line shows `zellij timed out (session renamed? restart orb)`, since after a session rename orb's session name is stale and zellij never answers.
 
 ### Storage & paths (T3 layout)
 
@@ -244,6 +248,7 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Draft Start | `claude --bg [--model m] [--permission-mode p]` with no `-n`. A local or worktree draft's thread takes its branch from git in that directory at Start. orb attaches only if the cursor is still on the draft when the session comes up. The actor sets `Sessions.attach`, and the frontend loop takes it and runs `Intent::Attach` if that thread is still selected and no picker or pane has focus | `-n <project>` — the thread-title decision rejected fixed names, and `-n` stays in Claude's prompt box. The draft's cached branch — stale after a checkout outside orb or a restart. Always attaching — steals focus after the user moved on. The actor writing `focus` — focus is frontend state. |
 | Draft place in the sidebar | Drafts above Pinned, newest first (T3's `SidebarDraftBlock`) | Inside Active. |
 | Model/permission on threads | Saved on the thread row too, so M6's `␣w` move of a prompt-less thread restarts with the same flags | Dropping them — a moved plan-mode thread would silently restart in default mode. |
+| Tool handoff | `␣t` `$SHELL` (read at startup, else `sh`), `␣g` `lazygit`, `␣v` `nvim .`, on a thread or a draft (a draft's worktree, else the project root). Each is a full-screen floating pane (`-x 0 -y 0 --width 100% --height 100%`, `--close-on-exit`) named `orb:<~dir>:<tool>`; an existing pane of that name is focused with `go-to-tab-by-id <tab>` then `focus-pane-id terminal_<id>`. A sync `Zellij` trait (`ZellijCli` over `zellij action`, inheriting orb's environment) run by the frontend loop like `ListBranches`, passed to `Frontend::run` as `Option<ZellijService>`, built only when `ZELLIJ_SESSION_NAME` is set at startup. The tool gets orb's own `NO_COLOR`, and each zellij call is limited to 2 s | `␣e` for nvim — clashes with the backlog `␣e` sidebar toggle. `orb:<thread-id>:<tool>` — two threads on one checkout would get two lazygits, and `␣w` changes a prompt-less thread's `cwd`. Threads only — the draft rule already exists (branch picker). Plain `nvim` — the user chose `nvim .`. `new-pane` with no command for the shell — zellij ignores `--cwd` without one. The default floating size — a centered 50% pane. Tiled + `toggle-fullscreen` — the roadmap chose floating panes. `focus-pane-id` alone — it doesn't switch tabs. Held panes — they linger as "EXIT CODE … ENTER to re-run". Storing pane ids — the name already survives restarts. Letting `zellij action` fail outside zellij — it exits 0 there. The `SessionsActor` — a `␣g` would queue behind a `git fetch`. A new actor — a second writer of `sessions.error`. In `Services` — no actor uses zellij. `child_env` — it strips `ZELLIJ*`. The server's `NO_COLOR` — a server started from a `NO_COLOR=1` terminal turned lazygit monochrome. No time limit — against a renamed session zellij never exits, freezing orb (research §13). |
 
 ## Milestones
 
@@ -315,10 +320,10 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 
 ### 8. Tool handoff (zellij)
 - `␣t` shell / `␣g` lazygit / `␣e` nvim as full-screen floating panes in the worktree, named `orb:<thread>:<tool>`, de-duped via `list-panes --json` + `focus-pane-id`.
-- Open questions: floating size flags for "full screen"; whether `focus-pane-id` switches tabs or needs `go-to-tab-by-id` first.
+- Resolved in M8's plan: full screen is a floating pane with `-x 0 -y 0 --width 100% --height 100%` (zellij's default is a centered 50% pane); `focus-pane-id` doesn't switch tabs, so orb runs `go-to-tab-by-id` first (research §13); nvim is `␣v`, running `nvim .`, which leaves `␣e` to the backlog sidebar toggle; panes are keyed on the directory (`orb:<~dir>:<tool>`), not the thread; drafts get the tools too, in their worktree or the project root (see Decisions).
 
 ### Backlog
-PR status via `gh` + settle on merge · snooze · undo · project filter (T3's project scope); remove a project from it with `<C-x>` and a `No`/`Yes` confirm picker (soft remove, threads stay) · drag reorder of pinned/active threads (T3's `pin_order_key`/`active_order_key`) · notifications · quick-reply box (hidden attach + paste) · copy mode over the attached pane · remappable keys · project favicons (`ratatui-image`, zellij 0.45 supports kitty graphics) · Claude hooks for instant state · subagent transcript expansion · full-screen zoom of the attached pane · Codex behind `SessionHost` · `:` command line · sidebar `gg`/`G` top/bottom and `<C-d>`/`<C-u>` half page · the Settled header sticks to the bottom of the sidebar while the list scrolls · one key from the attached pane straight to the sidebar (today `<C-\>` then `<C-h>`; key not chosen yet) · optimistic delete: `xx` hides the thread at once instead of after `claude rm` returns (~0.7 s), bringing it back with the reason if `rm` fails · `<C-Left>`/`<C-Right>` resize the sidebar (macOS binds these to Spaces by default) · `␣e` toggles the sidebar (clashes with M8's `␣e` nvim; pick one before binding).
+PR status via `gh` + settle on merge · snooze · undo · project filter (T3's project scope); remove a project from it with `<C-x>` and a `No`/`Yes` confirm picker (soft remove, threads stay) · drag reorder of pinned/active threads (T3's `pin_order_key`/`active_order_key`) · notifications · quick-reply box (hidden attach + paste) · copy mode over the attached pane · remappable keys · project favicons (`ratatui-image`, zellij 0.45 supports kitty graphics) · Claude hooks for instant state · subagent transcript expansion · full-screen zoom of the attached pane · Codex behind `SessionHost` · `:` command line · sidebar `gg`/`G` top/bottom and `<C-d>`/`<C-u>` half page · the Settled header sticks to the bottom of the sidebar while the list scrolls · one key from the attached pane straight to the sidebar (today `<C-\>` then `<C-h>`; key not chosen yet) · optimistic delete: `xx` hides the thread at once instead of after `claude rm` returns (~0.7 s), bringing it back with the reason if `rm` fails · `<C-Left>`/`<C-Right>` resize the sidebar (macOS binds these to Spaces by default) · `␣e` toggles the sidebar.
 
 ## Risks
 
@@ -497,4 +502,11 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 
 ### M8
 
-- (zellij) Tool handoff opens shell, lazygit, and nvim as named floating zellij panes (`orb:<thread>:<tool>`) in the thread's worktree, focusing an existing pane of the same name instead of creating a duplicate.
+**Amend**
+- ``(keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` only on a draft, `␣w`/`␣b` only on a thread or draft, and `p`/`ss` only on a thread.`` → ``(keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` only on a thread or draft, and `p`/`ss` only on a thread.``
+
+**Add**
+- ``(keybinds) `␣t` opens a shell, `␣g` lazygit, and `␣v` `nvim .` in the selected thread's or draft's directory, in the sidebar or preview.``
+- ``(zellij) Tool handoff opens each tool as a full-screen floating zellij pane named `orb:<directory>:<tool>`, which closes when the tool exits.``
+- `(zellij) Tool handoff focuses an existing pane of the same name, switching to its tab, instead of opening a second one.`
+- `(zellij) A draft's tools open in its worktree, or in the project root for a local or new-worktree draft.`

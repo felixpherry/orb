@@ -123,7 +123,7 @@ Source: https://github.com/pingdotgg/t3code (commit f5ef0dd). Local data: `~/.t3
 
 - kitty on macOS, **no** `macos_option_as_alt` (Option types symbols). `kitty.conf` maps `cmd+{h,i,j,k,l,n,o,p,x,1-5,[,],f,+,-,=,arrows}` → `super+…` for zellij.
 - zellij 0.45.0 (`~/.config/zellij/config.kdl`): `keybinds clear-defaults=true`, `default_mode "locked"`, `Ctrl g` toggles lock, navigation on `Super`. Kitty keyboard protocol on (default). Kitty graphics supported since 0.45 (https://zellij.dev/news/nested-sessions-kitty-graphics-new-ui/).
-- zellij CLI used by M8: `zellij action new-pane [--floating] [--name] [--cwd] [--width/--height] -- <cmd>` (returns pane id), `zellij action list-panes --json [-a]`, `zellij action focus-pane-id <id>`, `go-to-tab-by-id`. **[verified: `--help`]**
+- zellij CLI used by M8: `zellij action new-pane [--floating] [--name] [--cwd] [--width/--height] -- <cmd>` (returns pane id), `zellij action list-panes --json [-a]`, `zellij action focus-pane-id <id>`, `go-to-tab-by-id`. **[verified: `--help`]** What they do, as orb uses them, is in §13.
 - Tools: nvim, lazygit, yazi, gh installed; `$EDITOR` unset in non-interactive shells (fall back to `nvim`).
 - Related tool the user runs: `cwt` (worktree manager TUI) — opens duplicate zellij panes on re-entry; orb must de-dupe.
 
@@ -484,3 +484,38 @@ Each entry has `slug`, `name`, `status` (`current` or `legacy`), optional `alias
 ### git 2.54 in a new repository **[verified]**
 - After `git init -b main` with no commit, `git for-each-ref` lists nothing, while `git branch --show-current` prints `main` (the unborn branch).
 - `git worktree add -b orb/x <path> main` fails with `fatal: invalid reference: main`, so a new-worktree start in such a repository fails through orb's normal failure path.
+
+## 13. Tool handoff (verified 2026-09-26, zellij 0.45.0)
+
+Probed on this machine in throwaway zellij sessions, each kept alive by a small Python `pty.fork()` client running `zellij -s <name>` and driven with `zellij -s <name> action …`: first while planning M8, then in M8's manual check (a 180×50 client, so the tab is 180×48 at y=1 between the tab bar and the status bar). Tags as in §6.
+
+### `zellij action new-pane` **[verified]**
+- It prints the new pane's id as `terminal_<id>`.
+- A floating pane's default size is a centered 50% pane. `-x 0 -y 0 --width 100% --height 100%` fills the tab below the tab bar (`pane_x 0`, `pane_y 1`, 180×48).
+- `--cwd` is ignored when there is no command: the pane opens in the focused pane's directory. A shell needs an explicit command (`-- $SHELL`).
+- A `--cwd` that doesn't exist also falls back to the focused pane's directory, with no error.
+- `--name` shows as the pane's `title` in `list-panes --json`, and the program's OSC titles don't overwrite it (fish sets one at every prompt).
+- With `--close-on-exit` the pane closes when its command exits. Without it the pane is held ("EXIT CODE … ENTER to re-run") and `list-panes` shows `exited: true`, `is_held: true`.
+- The command runs under the zellij **server's** environment, not the caller's: a variable set only in the caller didn't reach the pane, and one set only in the server did. `new-pane --help` has no option to pass environment variables. So a `NO_COLOR=1` the server inherited from the terminal that started it reaches the tool, and lazygit then draws no colour (a lazygit pane dumped 0 colour SGRs with the server's `NO_COLOR=1`, 38 as `-- env -u NO_COLOR lazygit`).
+
+### `zellij action list-panes --json` **[verified]**
+- It lists the panes of every tab, each with `tab_id` (plus `tab_position`, `tab_name`).
+- Plugin and terminal panes number their ids separately, so ids overlap (both can be `0`). `is_plugin` tells them apart, and a terminal pane is addressed as `terminal_<id>`.
+- A held pane has no `pane_command` or `pane_cwd`.
+
+### Focus **[verified]**
+- `focus-pane-id` doesn't switch tabs, for tiled or floating panes, whether it's run from outside the session or from inside a pane. It does show hidden floating panes.
+- `go-to-tab-by-id <tab_id>` then `focus-pane-id terminal_<id>` reaches a pane on another tab. `go-to-tab-by-id` on the current tab is a no-op.
+- 0.45 has no `break-pane` CLI action. Breaking a pane out to a new tab is a keybinding action only.
+
+### Sessions **[verified]**
+- Each `zellij action` call takes about 45 ms.
+- Outside a session, `zellij action` prints the session list and exits 0.
+- Inside a pane, zellij sets `ZELLIJ=0`, `ZELLIJ_SESSION_NAME` and `ZELLIJ_PANE_ID`.
+- `current-tab-info` fails from a CLI with no client.
+- A pane keeps its `ZELLIJ_SESSION_NAME` after `rename-session`. `zellij action` against a stale or unknown session name prints nothing and never exits: it was killed after 8 s against a renamed session, and against a name that never existed it still hung after 120 s.
+
+### Driving zellij from a CLI **[verified]**
+- `hide-floating-panes` without `-t <tab_id>` fails with `Tab not found` (exit 1) from a CLI with no client.
+- `focus-pane-id terminal_<id>` on a tiled pane hides the visible floating panes.
+- `new-tab` prints the new tab's id. `new-tab --layout-string 'layout { pane name="…" cwd="…" command="…" close_on_exit=true; }'` puts a named pane on a new tab.
