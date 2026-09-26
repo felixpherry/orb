@@ -324,3 +324,30 @@ T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913
 
 ### Transcript `gitBranch` **[verified]**
 - Present on `user` and `assistant` lines. An empty string means "no branch". The preview already takes the latest non-empty value (`Conversation::branch`).
+
+## 10. Projects & picker (verified 2026-09-26; T3 f5ef0dd)
+
+T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913e7b8a5df30ffc` (paths relative to the repo). Tags as in §6.
+
+### T3 palette (`apps/web/src/components/CommandPalette{.tsx,.logic.ts}`, `packages/client-runtime/src/state/{projects,filesystem,threadSort}.ts`, `apps/web/src/components/Sidebar.logic.ts`) **[verified: source]**
+- **Browse trigger.** `isFilesystemBrowseQuery`: the query starts with `./`, `../`, `/` or `~/` (plus `.\`/`..\` and drive paths on Windows). The directory is the query up to its last separator; the leaf filter is the part after it.
+- **Browse filter.** `filterFilesystemBrowseEntries`: a case-insensitive `startsWith` on the leaf. Dot-entries are hidden unless the leaf starts with `.`.
+- **Browse keys.** `⏎` on a highlighted directory browses into it; `⏎` with nothing highlighted, or `⌘⏎`, adds the typed path. "Add project" opens with `~/`, or the `addProjectBaseDirectory` setting.
+- **Project order.** `sidebarProjectSortOrder` defaults to `updated_at`. `getProjectSortTimestamp` takes the max of `getThreadSortTimestamp(thread, "updated_at")` over the project's non-archived threads — the latest user message, else `updatedAt`, else `createdAt`. A project with no threads uses `updatedAt ?? createdAt`. Ties go by `title.localeCompare`, then key.
+- **Project search terms.** `displayName`, `title`, `workspaceRoot`, plus the environment label.
+- **Project row.** Favicon/monogram, title, and a description of `Local · <workspaceRoot>`, plus `⌘N` jump shortcuts.
+
+### T3 `projection_projects` **[verified]**
+- Columns: `project_id TEXT PK, title TEXT, workspace_root TEXT, scripts_json, created_at TEXT, updated_at TEXT, deleted_at TEXT, …`. Timestamps are ISO 8601 (`2026-09-15T06:29:19.155Z`); SQLite's `julianday` parses them.
+- `~/.t3/userdata/state.sqlite` is in WAL mode (`-wal` and `-shm` files present). Open it read-only (`sqlite3 -readonly`, or `ATTACH 'file:…?mode=ro'`).
+- 9 live rows (`deleted_at IS NULL`) on 2026-09-26, including `orb`.
+
+### Libraries
+- **fuzzy-matcher 0.3.7** **[verified: source]**:
+  - `SkimMatcherV2::default().fuzzy_indices(choice, pattern) -> Option<(i64, Vec<usize>)>`.
+  - The indices are **char indices** (it iterates `choice.chars()`), not byte offsets. jinn's picker treats them as bytes, which is wrong for non-ASCII.
+  - The default case matching is smart: an uppercase letter in the pattern makes the match case-sensitive.
+  - Its only dependency is `thread_local` 1.x, not yet in orb's `Cargo.lock`.
+
+### `claude --bg` and trust **[verified]**
+- `claude --bg` refuses in a directory Claude hasn't trusted: "Workspace not trusted. Run `claude` in … once and accept the trust prompt" (§6, §7). A newly added project fails its first session start with that message until `claude` has been run there once.
