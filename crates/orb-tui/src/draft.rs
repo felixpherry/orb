@@ -1,65 +1,67 @@
 //! The draft form: what the right side shows while a draft is selected.
 //!
-//! It names the project and lists the four settings the draft's session will
+//! It names the project and lists the settings the draft's session will
 //! start with — workspace, base branch, model (by name) and permission — then
 //! how to start. An existing worktree shows its path, cut from the left when
-//! it's too long; its branch is its own and can't be picked, so that row is
-//! dimmed.
+//! it's too long. A new worktree's base reads `From <ref>`, the ref orb will
+//! start it from, as in T3 Code. A project that isn't a git repository has no
+//! workspace or base branch to show, again as in T3 Code.
 
 use std::path::Path;
 
 use orb_domain::feat::picker::list::setting_label;
 use orb_domain::feat::sessions::state::{Draft, DraftWorkspace, Project};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::picker::{cut_left, tilde};
-use crate::sidebar::{DARK_GRAY, GRAY, badge};
+use crate::sidebar::{GRAY, badge};
 
 /// Draws `project`'s `draft` into `area`; paths under `home` show as `~/`.
 pub(crate) fn render(project: &Project, draft: &Draft, home: &Path, area: Rect, buf: &mut Buffer) {
-    let [header, workspace, branch, model, permission, _, start] =
-        Layout::vertical([Constraint::Length(1); 7]).areas(area);
-    Line::from(vec![
+    let header = Line::from(vec![
         Span::raw("New thread · "),
         badge(&project.title, true),
         Span::raw(" "),
         Span::raw(project.title.as_str()),
-    ])
-    .render(header, buf);
-    let place = match &draft.workspace {
-        DraftWorkspace::Existing(path) => tilde(path, home),
-        DraftWorkspace::Local | DraftWorkspace::NewWorktree => {
-            workspace_label(&draft.workspace).to_owned()
-        }
-    };
-    let read_only = matches!(draft.workspace, DraftWorkspace::Existing(_));
-    render_field("Workspace", &place, false, workspace, buf);
-    render_field(
-        "Base branch",
-        draft.branch.as_deref().unwrap_or("unknown"),
-        read_only,
-        branch,
-        buf,
-    );
-    render_field(
-        "Model",
-        setting_label(draft.model.as_deref()),
-        false,
-        model,
-        buf,
-    );
-    render_field(
-        "Permission",
-        setting_label(draft.permission.as_deref()),
-        false,
-        permission,
-        buf,
-    );
-    Line::raw("⏎ start").render(start, buf);
+    ]);
+    let git = draft.repo.then(|| {
+        let place = match &draft.workspace {
+            DraftWorkspace::Existing(path) => tilde(path, home),
+            DraftWorkspace::Local | DraftWorkspace::NewWorktree => {
+                workspace_label(&draft.workspace).to_owned()
+            }
+        };
+        [
+            field("Workspace", &place, area),
+            field("Base branch", &branch_label(draft), area),
+        ]
+    });
+    let settings = [
+        field("Model", setting_label(draft.model.as_deref()), area),
+        field(
+            "Permission",
+            setting_label(draft.permission.as_deref()),
+            area,
+        ),
+    ];
+    let lines = std::iter::once(header)
+        .chain(git.into_iter().flatten())
+        .chain(settings)
+        .chain([Line::default(), Line::raw("⏎ start")]);
+    for (line, y) in lines.zip(area.top()..area.bottom()) {
+        line.render(
+            Rect {
+                y,
+                height: 1,
+                ..area
+            },
+            buf,
+        );
+    }
 }
 
 /// Where a draft's session will run, in a word or two.
@@ -71,23 +73,29 @@ fn workspace_label(workspace: &DraftWorkspace) -> &'static str {
     }
 }
 
+/// T3 Code's branch label: the checked-out branch, or for a new worktree
+/// `From <ref>`; `Select ref` when git couldn't tell.
+fn branch_label(draft: &Draft) -> String {
+    match (&draft.workspace, &draft.branch) {
+        (_, None) => "Select ref".to_owned(),
+        (DraftWorkspace::NewWorktree, Some(base)) => {
+            format!("From {}", draft.from.as_ref().unwrap_or(base))
+        }
+        (DraftWorkspace::Local | DraftWorkspace::Existing(_), Some(branch)) => branch.clone(),
+    }
+}
+
 /// The column a field's value starts at.
 const VALUE_X: usize = 13;
 
-/// A setting's label and value, both dimmed when it can't be picked. A value
-/// too long for the row is cut from the left.
-fn render_field(label: &str, value: &str, dim: bool, area: Rect, buf: &mut Buffer) {
-    let (label_colour, value_colour) = if dim {
-        (DARK_GRAY, DARK_GRAY)
-    } else {
-        (GRAY, Color::White)
-    };
+/// A setting's gray label and its value, as wide as `area`. A value too long
+/// for the row is cut from the left.
+fn field(label: &str, value: &str, area: Rect) -> Line<'static> {
     let room = usize::from(area.width).saturating_sub(VALUE_X);
     Line::from(vec![
-        Span::styled(format!("{label:<VALUE_X$}"), Style::new().fg(label_colour)),
-        Span::styled(cut_left(value, room), Style::new().fg(value_colour)),
+        Span::styled(format!("{label:<VALUE_X$}"), Style::new().fg(GRAY)),
+        Span::styled(cut_left(value, room), Style::new().fg(Color::White)),
     ])
-    .render(area, buf);
 }
 
 #[cfg(test)]
@@ -100,7 +108,6 @@ mod tests {
     use ratatui::style::Color;
 
     use super::render;
-    use crate::sidebar::DARK_GRAY;
 
     fn orb() -> Project {
         Project {
@@ -122,6 +129,8 @@ mod tests {
             model: None,
             permission: Some("plan".to_owned()),
             created_at: SystemTime::UNIX_EPOCH,
+            repo: true,
+            from: None,
         }
     }
 
@@ -181,7 +190,8 @@ mod tests {
 
     #[rstest::rstest]
     #[case("claude-opus-5-5", "Model        Claude Opus 5.5")]
-    #[case("opus", "Model        opus")]
+    #[case("opus", "Model        Claude Opus 5")]
+    #[case("opus[1m]", "Model        opus[1m]")]
     fn model_row_names_a_known_model_and_shows_others_as_stored(
         #[case] model: &str,
         #[case] expected: &str,
@@ -234,8 +244,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn existing_worktree_dims_the_base_branch() {
-        // Given a draft in an existing worktree.
+    fn existing_worktree_base_branch_is_not_dimmed() {
+        // Given a draft in an existing worktree, whose branch can be picked.
         let draft = draft(DraftWorkspace::Existing(
             "/Users/me/.orb/worktrees/orb/orb-1a2b".into(),
         ));
@@ -243,8 +253,59 @@ mod tests {
         // When drawing its form.
         let buf = draw(&draft);
 
-        // Then the base branch's value is dimmed.
-        assert_eq!(branch_colour(&buf), Some(DARK_GRAY), "the branch colour");
+        // Then the base branch's value is drawn in white.
+        assert_eq!(branch_colour(&buf), Some(Color::White), "the branch colour");
+    }
+
+    #[rstest::rstest]
+    #[case(Some("origin/main"), "Base branch  From origin/main")]
+    #[case(None, "Base branch  From main")]
+    fn new_worktree_base_says_where_it_starts_from(
+        #[case] from: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        // Given a new-worktree draft based on main, starting from `from`.
+        let draft = Draft {
+            branch: Some("main".to_owned()),
+            from: from.map(str::to_owned),
+            ..draft(DraftWorkspace::NewWorktree)
+        };
+
+        // When drawing its form.
+        let row = line(&draw(&draft), 2);
+
+        // Then the base row names the ref the worktree starts from.
+        assert_eq!(row.trim_end(), expected, "the base branch row");
+    }
+
+    #[rstest::rstest]
+    fn non_git_draft_shows_no_workspace_or_base_branch() {
+        // Given a local draft of a project that isn't a git repository.
+        let draft = Draft {
+            repo: false,
+            ..draft(DraftWorkspace::Local)
+        };
+
+        // When drawing its form.
+        let rows: Vec<String> = lines(&draw(&draft))
+            .iter()
+            .map(|row| row.trim_end().to_owned())
+            .collect();
+
+        // Then only the model and permission follow the header.
+        assert_eq!(
+            rows,
+            [
+                "New thread · OB orb",
+                "Model        Default",
+                "Permission   plan",
+                "",
+                "⏎ start",
+                "",
+                "",
+            ],
+            "a non-git draft's form"
+        );
     }
 
     #[rstest::rstest]
@@ -270,8 +331,11 @@ mod tests {
         // When drawing its form.
         let row = line(&draw(&draft), 2);
 
-        // Then the base branch is unknown.
-        assert!(row.starts_with("Base branch  unknown"), "row was '{row}'");
+        // Then it asks for a ref, as T3 Code does.
+        assert!(
+            row.starts_with("Base branch  Select ref"),
+            "row was '{row}'"
+        );
     }
 
     #[rstest::rstest]

@@ -11,6 +11,7 @@ use crate::Focus;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::picker::list::{
     BranchRow, LEGACY_MODELS, MODELS, Matches, Model, PERMISSION_MODES, PickerItem, PickerList,
+    model,
 };
 use crate::feat::sessions::state::{ProjectId, ThreadId};
 
@@ -42,6 +43,9 @@ pub enum PickerKind {
     },
     /// `␣m`: pick the model of `project`'s draft.
     Model { project: ProjectId },
+    /// `␣w` or `␣b` on a draft whose project isn't a git repository: make it
+    /// one.
+    InitGit { project: ProjectId },
     /// `␣a`: pick the permission mode of `project`'s draft.
     Permission { project: ProjectId },
 }
@@ -57,6 +61,8 @@ pub struct PickerState {
     home: PathBuf,
     /// How many items fit on screen, as the frontend last drew it.
     page: usize,
+    /// The branch to select when the refs are listed with nothing typed.
+    wanted: Option<String>,
 }
 
 impl PickerState {
@@ -68,6 +74,7 @@ impl PickerState {
             return_to,
             home: PathBuf::new(),
             page: 0,
+            wanted: None,
         }
     }
 
@@ -79,11 +86,19 @@ impl PickerState {
             return_to,
             home: PathBuf::new(),
             page: 0,
+            wanted: None,
         }
     }
 
-    /// A branch picker for `target` in `cwd`, empty until its refs are listed.
-    pub fn branches(target: PickTarget, cwd: PathBuf, unstarted: bool, return_to: Focus) -> Self {
+    /// A branch picker for `target` in `cwd`, empty until its refs are
+    /// listed; then `wanted` is selected if listed, else the first branch.
+    pub fn branches(
+        target: PickTarget,
+        cwd: PathBuf,
+        unstarted: bool,
+        wanted: Option<String>,
+        return_to: Focus,
+    ) -> Self {
         Self {
             kind: PickerKind::Branches {
                 target,
@@ -94,12 +109,25 @@ impl PickerState {
             return_to,
             home: PathBuf::new(),
             page: 0,
+            wanted,
+        }
+    }
+
+    /// The one-row picker that offers to make `project` a git repository.
+    pub fn init_git(project: ProjectId, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::InitGit { project },
+            list: PickerList::new(vec![PickerItem::InitGit]),
+            return_to,
+            home: PathBuf::new(),
+            page: 0,
+            wanted: None,
         }
     }
 
     /// A model picker for `project`'s draft: `Default`, then [`MODELS`], then
     /// a `Legacy models` heading over [`LEGACY_MODELS`], with `current`
-    /// selected.
+    /// selected, also when it's one of a model's aliases.
     pub fn models(project: ProjectId, current: Option<&str>, return_to: Focus) -> Self {
         let ids = |models: &[Model]| {
             models
@@ -112,6 +140,7 @@ impl PickerState {
             .chain(std::iter::once(PickerItem::Heading("Legacy models")))
             .chain(ids(&LEGACY_MODELS))
             .collect();
+        let current = current.map(|value| model(value).map_or(value, |model| model.id));
         Self::settings(PickerKind::Model { project }, items, current, return_to)
     }
 
@@ -155,6 +184,7 @@ impl PickerState {
             return_to,
             home: PathBuf::new(),
             page: 0,
+            wanted: None,
         }
     }
 
@@ -173,6 +203,7 @@ impl PickerState {
             return_to,
             home: home.clone(),
             page: 0,
+            wanted: None,
         };
         (picker, home)
     }
@@ -222,9 +253,10 @@ impl PickerState {
         self.list.set_items(items, &leaf);
     }
 
-    /// Shows `refs`, listed in `cwd`, filtered by the typed text. Ignored
-    /// unless this is `cwd`'s branch picker. Once the thread has had a prompt,
-    /// a branch checked out in another worktree is disabled.
+    /// Shows `refs`, listed in `cwd`, filtered by the typed text, selecting
+    /// the wanted branch when nothing is typed. Ignored unless this is `cwd`'s
+    /// branch picker. Once the thread has had a prompt, a branch checked out
+    /// in another worktree is disabled.
     pub fn show_branches(&mut self, cwd: &Path, refs: Vec<GitRef>) {
         let PickerKind::Branches {
             cwd: picker_cwd,
@@ -246,9 +278,23 @@ impl PickerState {
                     git_ref,
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let wanted = items
+            .iter()
+            .find(|item| {
+                matches!(item, PickerItem::Branch(row) if Some(&row.git_ref.name) == self.wanted.as_ref())
+            })
+            .cloned();
         let pattern = self.list.input().to_owned();
         self.list.set_items(items, &pattern);
+        if let Some(wanted) = wanted.filter(|_| pattern.is_empty()) {
+            self.list.select(&wanted);
+        }
+    }
+
+    /// Selects the shown row holding `item`; stays put when none does.
+    pub fn select(&mut self, item: &PickerItem) {
+        self.list.select(item);
     }
 
     /// Browses into the selected directory. Returns it to list.
@@ -277,7 +323,8 @@ impl PickerState {
                 | PickerItem::Workspace(_)
                 | PickerItem::Branch(_)
                 | PickerItem::Setting(_)
-                | PickerItem::Heading(_),
+                | PickerItem::Heading(_)
+                | PickerItem::InitGit,
             ) => None,
             None => leaf.is_empty().then_some(dir),
         }
@@ -693,6 +740,7 @@ mod tests {
             PickTarget::Thread(ThreadId(1)),
             CWD.into(),
             unstarted,
+            None,
             Focus::Preview,
         );
         picker.show_branches(Path::new(CWD), refs);
@@ -829,9 +877,29 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case("opus", "claude-opus-5")]
+    #[case("sonnet", "claude-sonnet-5")]
+    #[case("haiku", "claude-haiku-4-5")]
+    #[case("fable", "claude-fable-5-1")]
+    fn model_picker_selects_the_model_an_alias_names(
+        #[case] alias: &str,
+        #[case] id: &'static str,
+    ) {
+        // Given / When opening a model picker for a draft on an alias.
+        let picker = PickerState::models(ProjectId(1), Some(alias), Focus::Preview);
+
+        // Then that model is selected.
+        assert_eq!(
+            picker.selected(),
+            Some(&PickerItem::Setting(Some(id))),
+            "{alias} should select {id}"
+        );
+    }
+
+    #[rstest::rstest]
     fn model_picker_selects_default_for_an_unknown_model() {
-        // Given / When opening a model picker for a draft on an old alias.
-        let picker = PickerState::models(ProjectId(1), Some("opus"), Focus::Preview);
+        // Given / When opening a model picker for a draft on a value no model has.
+        let picker = PickerState::models(ProjectId(1), Some("opus[1m]"), Focus::Preview);
 
         // Then Default is selected.
         assert_eq!(

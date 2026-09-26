@@ -447,13 +447,25 @@ impl App {
                     .try_send();
                 Ok(())
             }
-            Command::CheckoutDraft { project, git_ref } => {
+            Command::CheckoutDraft {
+                project,
+                git_ref,
+                cwd,
+            } => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::CheckoutDraft {
                         project: *project,
                         git_ref: git_ref.clone(),
+                        cwd: cwd.clone(),
                     })
+                    .try_send();
+                Ok(())
+            }
+            Command::InitGit(project) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::InitGit(*project))
                     .try_send();
                 Ok(())
             }
