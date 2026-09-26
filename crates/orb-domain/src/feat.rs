@@ -5,3 +5,4 @@ pub mod pane;
 pub mod picker;
 pub mod preview;
 pub mod sessions;
+pub mod zellij;

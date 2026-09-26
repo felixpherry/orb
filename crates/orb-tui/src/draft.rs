@@ -11,13 +11,14 @@ use std::path::Path;
 
 use orb_domain::feat::picker::list::setting_label;
 use orb_domain::feat::sessions::state::{Draft, DraftWorkspace, Project};
+use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use crate::picker::{cut_left, tilde};
+use crate::picker::cut_left;
 use crate::sidebar::{GRAY, badge};
 
 /// Draws `project`'s `draft` into `area`; paths under `home` show as `~/`.

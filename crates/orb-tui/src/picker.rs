@@ -19,6 +19,7 @@ use orb_domain::feat::picker::list::{
     BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, setting_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
+use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -311,14 +312,6 @@ fn branch_badge(git_ref: &GitRef, cwd: &Path) -> Option<&'static str> {
         GitRef { remote: true, .. } => Some("remote"),
         GitRef { default: true, .. } => Some("default"),
         _ => None,
-    }
-}
-
-/// `path` with `home` shown as `~`.
-pub(crate) fn tilde(path: &Path, home: &Path) -> String {
-    match path.strip_prefix(home) {
-        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
-        _ => path.display().to_string(),
     }
 }
 
