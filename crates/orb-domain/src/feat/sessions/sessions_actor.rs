@@ -271,6 +271,7 @@ impl SessionsActor {
                 id: project.id,
                 title: project.title,
                 root: project.root,
+                created_at: from_ms(project.created_at),
             })
             .collect();
         {
@@ -391,6 +392,7 @@ impl SessionsActor {
                             id: project_id,
                             title: project_title(&self.launch_dir),
                             root: self.launch_dir.clone(),
+                            created_at: SystemTime::now(),
                             threads: vec![thread],
                         }),
                     }

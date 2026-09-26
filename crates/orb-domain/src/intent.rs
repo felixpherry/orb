@@ -20,7 +20,7 @@ pub enum Intent {
     Attach,
     /// Return from the attached session to its preview.
     Detach,
-    /// Start a Claude session in orb's working directory.
+    /// Open the project picker to start a Claude session.
     NewSession,
     /// Move the preview's cursor to the next block.
     NextBlock,
@@ -48,6 +48,33 @@ pub enum Intent {
     OpenShelf,
     /// Hide the Settled shelf's threads.
     CloseShelf,
+    /// Open the directory picker to add a project.
+    AddProject,
+    /// Type a character into the picker's filter.
+    PickerInput(char),
+    /// Delete the grapheme before the picker's cursor.
+    PickerBackspace,
+    /// Delete the word before the picker's cursor.
+    PickerDeleteWord,
+    /// Move the picker's cursor one grapheme left.
+    PickerCursorLeft,
+    /// Move the picker's cursor one grapheme right.
+    PickerCursorRight,
+    /// Select the picker's next item.
+    PickerNext,
+    /// Select the picker's previous item.
+    PickerPrev,
+    /// Move the picker's selection half a page down.
+    PickerHalfPageDown,
+    /// Move the picker's selection half a page up.
+    PickerHalfPageUp,
+    /// Pick the selected item: start a session in the project, or add the
+    /// directory.
+    PickerConfirm,
+    /// Browse into the directory picker's selected directory.
+    PickerOpen,
+    /// Close the picker without picking.
+    PickerCancel,
 }
 
 /// The label the which-key popup shows for the intent.
@@ -64,17 +91,27 @@ impl fmt::Display for Intent {
             Self::NewSession => "new session",
             Self::NextBlock => "next block",
             Self::PrevBlock => "previous block",
-            Self::HalfPageDown => "half page down",
-            Self::HalfPageUp => "half page up",
+            Self::HalfPageDown | Self::PickerHalfPageDown => "half page down",
+            Self::HalfPageUp | Self::PickerHalfPageUp => "half page up",
             Self::Top => "top",
             Self::Bottom => "bottom",
             Self::ToggleFold => "fold",
             Self::Yank => "yank",
             Self::TogglePin => "pin",
             Self::ToggleSettle => "settle",
-            Self::DeleteThread => "delete",
+            Self::DeleteThread | Self::PickerBackspace => "delete",
             Self::OpenShelf => "open settled",
             Self::CloseShelf => "close settled",
+            Self::AddProject => "add project",
+            Self::PickerInput(_) => "type",
+            Self::PickerDeleteWord => "delete word",
+            Self::PickerCursorLeft => "cursor left",
+            Self::PickerCursorRight => "cursor right",
+            Self::PickerNext => "next item",
+            Self::PickerPrev => "previous item",
+            Self::PickerConfirm => "pick",
+            Self::PickerOpen => "open directory",
+            Self::PickerCancel => "cancel",
         })
     }
 }

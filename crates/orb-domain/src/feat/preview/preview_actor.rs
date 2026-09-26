@@ -257,6 +257,7 @@ mod tests {
                     id: ProjectId(1),
                     title: "demo".into(),
                     root: "/work/demo".into(),
+                    created_at: SystemTime::UNIX_EPOCH,
                     threads,
                 }],
                 cursor: Some(SidebarItem::Thread(ThreadId(selected))),

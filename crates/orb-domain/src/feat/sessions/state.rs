@@ -71,12 +71,14 @@ pub struct Thread {
     pub unseen: bool,
 }
 
-/// A directory orb started sessions in.
+/// A directory the user starts sessions in.
 #[derive(Debug, Clone)]
 pub struct Project {
     pub id: ProjectId,
     pub title: String,
     pub root: PathBuf,
+    /// When the project was added.
+    pub created_at: SystemTime,
     /// Newest first.
     pub threads: Vec<Thread>,
 }
@@ -143,6 +145,22 @@ pub struct Sessions {
 }
 
 impl Sessions {
+    /// The projects, most recently active first: by their threads' latest
+    /// activity, else when they were added. Ties go by title, then id.
+    pub fn projects_by_recency(&self) -> Vec<&Project> {
+        let mut projects: Vec<&Project> = self.projects.iter().collect();
+        projects.sort_by_key(|&project| {
+            let latest = project
+                .threads
+                .iter()
+                .map(|thread| thread.last_activity_at)
+                .max()
+                .unwrap_or(project.created_at);
+            (Reverse(latest), &project.title, project.id.0)
+        });
+        projects
+    }
+
     /// Every thread in sidebar order: project by project, newest first.
     pub fn threads(&self) -> impl Iterator<Item = &Thread> {
         self.projects
@@ -363,11 +381,29 @@ mod tests {
         }
     }
 
+    /// Thread `id`, last active at second `secs`.
+    fn last_active(id: i64, secs: u64) -> Thread {
+        Thread {
+            last_activity_at: at(secs),
+            ..thread(id)
+        }
+    }
+
+    /// The ids of `sessions`' projects, most recently active first.
+    fn by_recency(sessions: &Sessions) -> Vec<i64> {
+        sessions
+            .projects_by_recency()
+            .iter()
+            .map(|project| project.id.0)
+            .collect()
+    }
+
     fn project(id: i64, threads: Vec<Thread>) -> Project {
         Project {
             id: ProjectId(id),
             title: format!("project-{id}"),
             root: "/tmp".into(),
+            created_at: SystemTime::UNIX_EPOCH,
             threads,
         }
     }
@@ -388,6 +424,78 @@ mod tests {
 
     fn on(id: i64) -> SidebarItem {
         SidebarItem::Thread(ThreadId(id))
+    }
+
+    #[rstest::rstest]
+    fn projects_by_recency_puts_newer_thread_activity_first() {
+        // Given project 1 last active at 10 s and project 2 at 20 s.
+        let sessions = Sessions {
+            projects: vec![
+                project(1, vec![last_active(1, 10)]),
+                project(2, vec![last_active(2, 20)]),
+            ],
+            ..Sessions::default()
+        };
+
+        // When ordering the projects by recency.
+        let ids = by_recency(&sessions);
+
+        // Then the more recently active project comes first.
+        assert_eq!(ids, vec![2, 1], "newer thread activity should come first");
+    }
+
+    #[rstest::rstest]
+    fn projects_by_recency_uses_created_at_without_threads() {
+        // Given project 1 last active at 10 s, and project 2 with no threads,
+        // added at 20 s.
+        let sessions = Sessions {
+            projects: vec![
+                project(1, vec![last_active(1, 10)]),
+                Project {
+                    created_at: at(20),
+                    ..project(2, vec![])
+                },
+            ],
+            ..Sessions::default()
+        };
+
+        // When ordering the projects by recency.
+        let ids = by_recency(&sessions);
+
+        // Then the project added later comes first.
+        assert_eq!(
+            ids,
+            vec![2, 1],
+            "a project without threads should rank by when it was added"
+        );
+    }
+
+    #[rstest::rstest]
+    fn projects_by_recency_breaks_ties_by_title() {
+        // Given projects zeta (1) and alpha (2), equally recent.
+        let sessions = Sessions {
+            projects: vec![
+                Project {
+                    title: "zeta".into(),
+                    ..project(1, vec![])
+                },
+                Project {
+                    title: "alpha".into(),
+                    ..project(2, vec![])
+                },
+            ],
+            ..Sessions::default()
+        };
+
+        // When ordering the projects by recency.
+        let ids = by_recency(&sessions);
+
+        // Then alpha comes first.
+        assert_eq!(
+            ids,
+            vec![2, 1],
+            "equally recent projects should sort by title"
+        );
     }
 
     #[rstest::rstest]

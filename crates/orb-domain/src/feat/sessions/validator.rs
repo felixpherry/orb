@@ -163,6 +163,7 @@ mod tests {
                     id: ProjectId(1),
                     title: "work".into(),
                     root: "/work".into(),
+                    created_at: SystemTime::UNIX_EPOCH,
                     threads: vec![Thread {
                         id: ThreadId(1),
                         title: None,

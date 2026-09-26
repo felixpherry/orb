@@ -148,6 +148,7 @@ fn render_mode_line(state: &AppState, area: Rect, buf: &mut Buffer) {
     let mode = match state.focus {
         Focus::Attached => "ATTACHED   <C-\\> back",
         Focus::Sidebar | Focus::Preview => "NORMAL   ⏎ attach · ␣ leader",
+        Focus::Picker => "PICKER",
     };
     let sessions = &state.sessions;
     let status = Line::raw(
@@ -212,6 +213,7 @@ mod tests {
                 id: ProjectId(1),
                 title: "orb".to_owned(),
                 root: "/Users/me/dev/orb".into(),
+                created_at: SystemTime::UNIX_EPOCH,
                 threads,
             }],
             ..Sessions::default()
