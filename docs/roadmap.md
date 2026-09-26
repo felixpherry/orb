@@ -65,7 +65,7 @@ Sidebar on the left, preview (or attached Claude) on the right, mode line at the
 | Focus | Keys |
 |---|---|
 | Sidebar | `j`/`k` next/prev thread — preview follows instantly · `<C-l>` focus preview · `⏎` attach · `p` pin/unpin · `ss` settle/un-settle · `xx` delete · on the Settled header: `⏎` open/close, `l` open, `h` close (`h` on a settled thread in the open shelf also closes it) · `␣n` project picker (new session; M7: new draft) · `␣p` add project · `q` quit orb |
-| Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach · `␣p` add project |
+| Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach · `␣p` add project · `␣w` workspace (before the first prompt) · `␣b` branch |
 | Picker | typing filters · `←`/`→` move the filter cursor · `Backspace`/`<C-w>` delete a char/word · `<C-j>`/`<C-k>` or `↑`/`↓` next/prev item (focus stays in the filter input) · `<C-d>`/`<C-u>` half page · `⏎` pick · `Tab` open the highlighted directory (directory picker) · `Esc` cancel |
 | Attached | **every** key → Claude, except `<C-\>` → back to orb |
 
@@ -210,7 +210,18 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Directory listing | The frontend loop runs `Command::ListDirectories(dir)` synchronously (as it does for `Yank` and `Attach`) and writes the names into `AppState.picker`, only when the directory part of the path changes | The `IntentHandler` reading the directory — it must not do I/O. A kameo actor — an async hop plus stale-reply handling for a ~1 ms `read_dir`. |
 | T3 import method | A one-off SQL statement (`ATTACH` T3's DB read-only, `INSERT … ON CONFLICT (root) DO NOTHING`) run by hand in M5's manual check | Import code that runs on every launch or once behind a flag — it's seeding, not a feature. |
 | Project removal | Deferred to the backlog project filter (T3's project-scope modal): `<C-x>` with a `No`/`Yes` confirm picker, soft remove (threads stay) | In M5's `␣n` picker — the user wants removal in the filter modal. Hard delete — refused while any thread exists, so an old Settled shelf would block it. |
-| Workspace trust | M5 shows Claude's "Workspace not trusted" refusal on the mode line. M6 adds an in-orb trust flow: on the refusal, orb opens an interactive `claude` in that directory in a pane, the user accepts Claude's own prompt and exits, and orb retries the start (key chosen in M6's plan). It covers new projects and, once, `~/.orb/worktrees` | Writing `hasTrustDialogAccepted` into `~/.claude.json` — an undocumented format that every running Claude rewrites, and it silently skips a security prompt. Headless, as T3 does — rejected with the Agent SDK (see Claude integration). |
+| Workspace trust | M5 shows Claude's "Workspace not trusted" refusal on the mode line. M6 adds an in-orb trust flow: on the refusal, orb opens an interactive `claude` in that directory in a pane, the user accepts Claude's own prompt and exits, and orb retries the start when that `claude` exits or the user presses `<C-\>`. The pane opens automatically on the refusal; there is no trust key. A retry refused again shows the error and doesn't reopen the pane. In practice only new projects need it: a worktree takes its trust from its main repo (research §11) | Writing `hasTrustDialogAccepted` into `~/.claude.json` — an undocumented format that every running Claude rewrites, and it silently skips a security prompt. Headless, as T3 does — rejected with the Agent SDK (see Claude integration). |
+| Workspace change (M6, before drafts) | `␣w` on the selected thread, only before its first prompt: a pick starts a new `claude --bg` in the target, and only once that succeeds `claude rm`s the old prompt-less session; the thread keeps its row and sidebar place. After the first prompt the mode line shows `Workspace locked · Worktree`/`Local checkout` (T3's `canOverrideServerThreadEnvMode` exception) | A second picker step after `␣n`. Temporary keys M7 would delete. T3's strict lock ("session not stopped") — every orb thread has a live idle session, so `␣w` would always be locked. Moving a started thread (`--resume` in a new cwd) — unverified. |
+| "No prompt yet" | The thread has no transcript file (a prompt-less session writes none); the actor re-polls before `claude rm` | The `agents --json` status — idle looks the same before and after a prompt. |
+| Workspace rows | T3's: `Current checkout`/`Current worktree`, `New worktree`, `Previous worktree (<branch>)` when the project has a seed (the other thread with the latest activity whose cwd is a worktree other than this one) | Listing every worktree — not T3. |
+| New worktree base | The default branch (`origin/HEAD`'s, else the root's current), fetched from `origin` and started from `origin/<b>`; the local branch when there's no `origin` or origin lacks it. A failed fetch fails the start with git's reason (T3) | Falling back to the last fetched ref with a warning — more code, and not T3. A base-branch choice — M7's draft form. |
+| Branch switching | `␣b` any time, refused with a mode-line error while any thread whose cwd is the same directory is working or waiting; `⏎` runs `git checkout` (`--track` for a remote ref) | Only the selected thread's status — local-checkout threads share the root, so a checkout would change files under a sibling's turn. No guard, like T3. |
+| Branch checked out in another worktree | After the first prompt the row is disabled: dimmed, `in <path>` on the row, skipped by selection. Before it, the pick moves the thread there, and the default branch from a worktree moves it back to the root (T3's `resolveBranchSelectionTarget`) | Refusing on pick — the reason should be visible up front. Always moving, like T3 — after the first prompt the transcript is tied to the cwd. |
+| Branch list | T3's refs, dedupe, order and badges (research §11); fuzzy filter with the shared picker matcher; no paging | Local branches only. T3's substring match — the only picker that would work differently. T3's 100-ref pages. |
+| Git plumbing | A sync `Git` trait (`GitCli` over `std::process::Command`) in `Services`; the `SessionsActor` runs worktree/fetch/checkout/rename inline, and the frontend loop lists refs synchronously like `ListDirectories` | An async trait like `SessionHost` — the frontend couldn't call it. The actor listing refs — an async hop plus stale-reply handling for a ~10 ms call. |
+| Worktree cleanup | A failed start removes the worktree (`--force`) and branch (`-D`) orb just made. A move out of an orb worktree no thread uses removes it with a non-forced `git worktree remove` (the branch stays). `xx` leaves worktrees | Keeping failed-start worktrees — junk `orb/<hex>` branches. Forced removal after a move — could lose work. Removing on delete — "previous worktree" can still offer it. |
+| Branch rename | On a poll that sees a turn end, only if the branch is exactly `orb/<hex>` of its `orb-<hex>` directory and the thread has an `ai-title` or `custom-title`: `git branch -m` to `orb/<slug>` (lowercase `[a-z0-9-]`, ≤40). A clash keeps the old name silently | Retrying every poll — a clash would run `git branch -m` every second. The first-prompt title — long, and T3 renames from a generated title. |
+| Mode-line refusals | The `IntentHandler` writes `sessions.error` for the lock and busy refusals (a user-approved exception to "validation failure = no-op"); every error stays until the next key, and polls write it only when a save failed | A no-op — the user wants to know why. Clearing on the next poll — gone within 1 s while any turn runs. A notification system — YAGNI. |
 
 ## Milestones
 
@@ -273,8 +284,8 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Previous-worktree reuse (T3: most recently updated non-archived thread in the project with a different worktree).
 - Branch switch: reuse a worktree already on that branch, else checkout in the thread's worktree; refused while the session is running.
 - Rename `orb/<hex>` → `orb/<slug>` after the first turn using Claude's session title.
-- In-orb trust flow (see Decisions: Workspace trust). Resolved in M5's manual check: trust is inherited from a parent directory, so trusting `~/.orb/worktrees` once covers every worktree (research §10).
-- Open questions: how branch switching is triggered (user defines keys; was `:branch <name>`); the trust flow's key
+- In-orb trust flow (see Decisions: Workspace trust). Resolved in M5's manual check: trust is inherited from a parent directory, so trusting `~/.orb/worktrees` once covers every worktree (research §10). *Corrected in M6: that holds only for plain directories; a worktree takes its trust from its main repo (research §11).*
+- Resolved in M6's plan: `␣w` (workspace, before the first prompt) and `␣b` (branch) in preview focus; branch switching is refused only while a thread in the same directory is working or waiting, and branches checked out elsewhere are disabled after the first prompt; the trust flow opens on Claude's refusal with no key, and worktrees need no trust of their own (research §11); a failed fetch fails the start (see Decisions).
 
 ### 7. Drafts
 - `␣n` → project picker → `✎` draft → form (workspace, base branch, model, permission) with pickers; per-project last-used defaults + global fallback; Start → worktree → `claude --bg -n <name> [--model] [--permission-mode]` idle → attach; drafts persist.
@@ -425,8 +436,19 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 
 ### M6
 
-- (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
-- (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`.
+**Add**
+- `(identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).`
+- ``(worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`.``
+- ``(worktrees) A new worktree starts from the project's default branch fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.``
+- `(worktrees) A session start that fails removes the worktree and branch orb created for it.`
+- ``(worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from Claude's title; the directory keeps its name.``
+- `(worktrees) Deleting a thread leaves its worktree on disk.`
+- `(worktrees) A thread's workspace can change only before its first prompt; orb then starts a new session in the new workspace and removes the old one.`
+- ``(keybinds) `␣w` in the preview opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.``
+- ``(keybinds) `␣b` in the preview opens a branch picker of local and `origin` branches; `⏎` checks the branch out in the thread's directory.``
+- `(branches) After a thread's first prompt, the branch picker disables branches checked out in another worktree and shows where.`
+- `(branches) Switching branch is refused while any thread in the same directory is working or waiting.`
+- ``(trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane (in `~/.orb/worktrees` for a worktree) and retries the start when it exits or the user presses `<C-\>`.``
 
 ### M7
 
