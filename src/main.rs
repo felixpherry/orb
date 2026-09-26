@@ -1,5 +1,5 @@
 //! Binary entry point for orb. This is the only place that reads process state
-//! (the working directory and the environment).
+//! (the environment).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,7 +21,6 @@ use wherror::Error;
 struct OrbError;
 
 fn main() -> Result<(), Report<OrbError>> {
-    let launch_dir = std::env::current_dir().change_context(OrbError)?;
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| Report::new(OrbError).attach("HOME is not set"))?;
@@ -31,7 +30,10 @@ fn main() -> Result<(), Report<OrbError>> {
     let store = Store::open(&home.join(".orb/userdata/state.sqlite")).change_context(OrbError)?;
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
     let _context = runtime.enter();
-    let state = State::new(AppState::default());
+    let state = State::new(AppState {
+        home,
+        ..AppState::default()
+    });
     let frontend = Frontend::default();
     let services = Services {
         session_host: SessionHostService::new(Arc::new(ClaudeSupervisor::new(claude_env.clone()))),
@@ -41,7 +43,6 @@ fn main() -> Result<(), Report<OrbError>> {
         state: state.clone(),
         store,
         claude_dir,
-        launch_dir,
         wake: frontend.waker(),
     });
     let preview = spawn_preview_actor(PreviewActorDeps {

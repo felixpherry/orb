@@ -353,11 +353,24 @@ impl App {
                 }
                 self.leave_pane(out)
             }
-            Command::CreateSession { .. } => {
-                let _ = self.sessions.tell(sessions_actor::CreateSession).try_send();
+            Command::CreateSession { project, root } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::CreateSession {
+                        project: *project,
+                        root: root.clone(),
+                    })
+                    .try_send();
                 Ok(())
             }
-            Command::AddProject(_) | Command::ListDirectories(_) => Ok(()),
+            Command::AddProject(root) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::AddProject(root.clone()))
+                    .try_send();
+                Ok(())
+            }
+            Command::ListDirectories(_) => Ok(()),
             Command::RefreshSessions => {
                 let _ = self
                     .sessions

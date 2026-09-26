@@ -1,6 +1,6 @@
 //! orb's saved projects and threads, kept in SQLite across launches.
 //!
-//! For each project it keeps the directory orb started sessions in. For each
+//! For each project it keeps the directory its sessions start in. For each
 //! thread it keeps the Claude ids, the titles, the git branch, how far the
 //! transcript has been read, when the running turn started, whether it is
 //! pinned or settled, and when it last had activity and was last visited. The
@@ -23,7 +23,7 @@ pub struct StoreError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectRow {
     pub id: ProjectId,
-    /// The directory orb started the project's sessions in.
+    /// The directory the project's sessions start in.
     pub root: PathBuf,
     pub title: String,
     pub created_at: i64,
@@ -196,13 +196,14 @@ impl Store {
         Ok((projects, threads))
     }
 
-    /// Saves the project rooted at `root`, or retitles it if it exists.
-    /// The same root always gets the same id.
+    /// Saves the project rooted at `root` unless one is already saved there,
+    /// which keeps its title and creation time. The same root always gets the
+    /// same id.
     ///
     /// # Errors
     ///
     /// Returns an error if `root` isn't UTF-8 or the database can't be written.
-    pub fn upsert_project(
+    pub fn add_project(
         &self,
         root: &Path,
         title: &str,
@@ -211,7 +212,7 @@ impl Store {
         self.conn
             .query_row(
                 "INSERT INTO projects (root, title, created_at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (root) DO UPDATE SET title = excluded.title
+                 ON CONFLICT (root) DO UPDATE SET root = excluded.root
                  RETURNING id",
                 params![utf8(root)?, title, now_ms],
                 |row| row.get(0),
@@ -527,7 +528,7 @@ mod tests {
         let path = dir.path().join("state.sqlite");
         let (project_id, thread_id) = {
             let store = Store::open(&path)?;
-            let project_id = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
+            let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
             (project_id, store.insert_thread(&new_thread(project_id))?)
         };
 
@@ -560,13 +561,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn upserting_the_same_root_twice_returns_the_same_id() -> Result<(), Report<StoreError>> {
+    fn adding_the_same_root_twice_returns_the_same_id() -> Result<(), Report<StoreError>> {
         // Given a store with a project rooted at /tmp/orb.
         let store = Store::open_in_memory()?;
-        let first = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
+        let first = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
 
-        // When upserting the same root again.
-        let second = store.upsert_project(Path::new("/tmp/orb"), "orb", 900)?;
+        // When adding the same root again.
+        let second = store.add_project(Path::new("/tmp/orb"), "orb", 900)?;
 
         // Then it gets the same id.
         assert_eq!(first, second, "one root should be one project");
@@ -574,10 +575,34 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn adding_an_existing_root_keeps_its_title() -> Result<(), Report<StoreError>> {
+        // Given a store with a project titled "T3 orb" rooted at /tmp/orb.
+        let store = Store::open_in_memory()?;
+        store.add_project(Path::new("/tmp/orb"), "T3 orb", 500)?;
+
+        // When adding the same root under the title "orb".
+        store.add_project(Path::new("/tmp/orb"), "orb", 900)?;
+
+        // Then the project keeps its first title.
+        let titles: Vec<String> = store
+            .load()?
+            .0
+            .into_iter()
+            .map(|project| project.title)
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["T3 orb".to_owned()],
+            "adding an existing root shouldn't retitle it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn saved_thread_updates_load_back() -> Result<(), Report<StoreError>> {
         // Given a store with one thread.
         let store = Store::open_in_memory()?;
-        let project_id = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
         let thread_id = store.insert_thread(&new_thread(project_id))?;
 
         // When saving its session id, titles, transcript cursor, and turn start.
@@ -619,7 +644,7 @@ mod tests {
     ) -> Result<(), Report<StoreError>> {
         // Given a store with one thread.
         let store = Store::open_in_memory()?;
-        let project_id = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
         store.insert_thread(&new_thread(project_id))?;
         let inserted = store
             .load()?
@@ -650,7 +675,7 @@ mod tests {
     fn deleted_thread_is_gone_after_reload() -> Result<(), Report<StoreError>> {
         // Given a store with one thread.
         let store = Store::open_in_memory()?;
-        let project_id = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
         let thread_id = store.insert_thread(&new_thread(project_id))?;
 
         // When deleting it.
@@ -666,7 +691,7 @@ mod tests {
     fn inserted_thread_starts_seen_and_active_at_creation() -> Result<(), Report<StoreError>> {
         // Given a store with a project.
         let store = Store::open_in_memory()?;
-        let project_id = store.upsert_project(Path::new("/tmp/orb"), "orb", 500)?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
 
         // When inserting a thread created at 1 s.
         store.insert_thread(&new_thread(project_id))?;
