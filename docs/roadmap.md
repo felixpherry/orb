@@ -407,7 +407,7 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 - ``(keybinds) In the sidebar, `p` pins or unpins the selected thread, `ss` settles or un-settles it, and `xx` deletes it.``
 - ``(keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled thread closes the shelf.``
 
-### M5
+### M5 (written)
 
 **Amend**
 - ``(keybinds) `␣n` starts a Claude session in orb's working directory.`` → ``(keybinds) `␣n` opens the project picker; picking a project starts a Claude session in its directory.``

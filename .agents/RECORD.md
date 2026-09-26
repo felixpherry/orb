@@ -49,7 +49,7 @@ Entries are added or amended **only with human approval**.
 - (sidebar) The sidebar lists only sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.
 - (keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
-- (keybinds) `␣n` starts a Claude session in orb's working directory.
+- (keybinds) `␣n` opens the project picker; picking a project starts a Claude session in its directory.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
 - (preview) The preview renders the selected thread from its Claude transcript JSONL as navigable blocks, without spawning a process.
 - (preview) The preview shows only the transcript's newest branch and continues across compaction boundaries.
@@ -65,3 +65,9 @@ Entries are added or amended **only with human approval**.
 - (sessions) Deleting a thread runs `claude rm` and removes it from orb; its transcript stays in Claude's projects directory.
 - (keybinds) In the sidebar, `p` pins or unpins the selected thread, `ss` settles or un-settles it, and `xx` deletes it.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled thread closes the shelf.
+- (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order.
+- (projects) The project picker lists projects by their threads' latest activity, else when they were added, until filter text is typed.
+- (projects) The project picker filters on each project's name and path.
+- (projects) Projects are added only from the `␣p` directory picker.
+- (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, `<C-d>`/`<C-u>` move half a page, `⏎` picks, and `Esc` cancels.
+- (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
