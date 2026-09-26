@@ -30,6 +30,8 @@ pub struct ProjectRow {
     pub root: PathBuf,
     pub title: String,
     pub created_at: i64,
+    /// When the project was removed; `None` = not removed.
+    pub removed_at: Option<i64>,
 }
 
 /// A saved thread.
@@ -278,7 +280,7 @@ impl Store {
     pub fn load(&self) -> Result<Saved, Report<StoreError>> {
         let projects = self
             .query(
-                "SELECT id, root, title, created_at FROM projects ORDER BY created_at, id",
+                "SELECT id, root, title, created_at, removed_at FROM projects ORDER BY created_at, id",
                 project_row,
             )
             .attach("failed to load projects")?;
@@ -304,8 +306,8 @@ impl Store {
     }
 
     /// Saves the project rooted at `root` unless one is already saved there,
-    /// which keeps its title and creation time. The same root always gets the
-    /// same id.
+    /// which keeps its title and creation time and is no longer removed. The
+    /// same root always gets the same id.
     ///
     /// # Errors
     ///
@@ -319,7 +321,7 @@ impl Store {
         self.conn
             .query_row(
                 "INSERT INTO projects (root, title, created_at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (root) DO UPDATE SET root = excluded.root
+                 ON CONFLICT (root) DO UPDATE SET removed_at = NULL
                  RETURNING id",
                 params![utf8(root)?, title, now_ms],
                 |row| row.get(0),
@@ -466,6 +468,39 @@ impl Store {
             .change_context(StoreError)
             .attach("failed to delete the draft")?;
         Ok(())
+    }
+
+    /// Marks the project removed at `now_ms` and deletes its draft, both or
+    /// neither. Its threads stay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be written.
+    pub fn remove_project(
+        &self,
+        project: ProjectId,
+        now_ms: i64,
+    ) -> Result<(), Report<StoreError>> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .change_context(StoreError)
+            .attach("failed to start removing the project")?;
+        tx.execute(
+            "UPDATE projects SET removed_at = ?2 WHERE id = ?1",
+            params![project.0, now_ms],
+        )
+        .change_context(StoreError)
+        .attach("failed to mark the project removed")?;
+        tx.execute(
+            "DELETE FROM drafts WHERE project_id = ?1",
+            params![project.0],
+        )
+        .change_context(StoreError)
+        .attach("failed to delete the removed project's draft")?;
+        tx.commit()
+            .change_context(StoreError)
+            .attach("failed to commit removing the project")
     }
 
     /// What the project's last draft started with; `None` if none has.
@@ -628,6 +663,7 @@ fn project_row(row: &Row<'_>) -> rusqlite::Result<ProjectRow> {
         root: PathBuf::from(row.get::<_, String>(1)?),
         title: row.get(2)?,
         created_at: row.get(3)?,
+        removed_at: row.get(4)?,
     })
 }
 
@@ -1063,6 +1099,99 @@ mod tests {
             vec!["T3 orb".to_owned()],
             "adding an existing root shouldn't retitle it"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn removed_project_loads_with_when_it_was_removed() -> Result<(), Report<StoreError>> {
+        // Given a store with a project.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+
+        // When removing it at 2 s.
+        store.remove_project(project_id, 2_000)?;
+
+        // Then it loads as removed at 2 s.
+        let removed: Vec<Option<i64>> = store
+            .load()?
+            .0
+            .into_iter()
+            .map(|project| project.removed_at)
+            .collect();
+        assert_eq!(removed, vec![Some(2_000)], "the removal should be saved");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn removing_a_project_deletes_its_draft() -> Result<(), Report<StoreError>> {
+        // Given a store with a project that has a draft.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+        store.save_draft(&draft(project_id))?;
+
+        // When removing the project.
+        store.remove_project(project_id, 2_000)?;
+
+        // Then its draft no longer loads.
+        assert!(
+            store.load()?.2.is_empty(),
+            "a removed project's draft should be deleted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn removing_a_project_keeps_its_threads() -> Result<(), Report<StoreError>> {
+        // Given a store with a project that has a thread.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+        store.insert_thread(&new_thread(project_id))?;
+
+        // When removing the project.
+        store.remove_project(project_id, 2_000)?;
+
+        // Then the thread still loads.
+        assert_eq!(
+            store.load()?.1.len(),
+            1,
+            "a removed project's threads should stay"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_a_removed_root_restores_it() -> Result<(), Report<StoreError>> {
+        // Given a store whose project at /tmp/orb was removed.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+        store.remove_project(project_id, 2_000)?;
+
+        // When adding the same root again.
+        store.add_project(Path::new("/tmp/orb"), "orb", 3_000)?;
+
+        // Then it's no longer removed.
+        let removed: Vec<Option<i64>> = store
+            .load()?
+            .0
+            .into_iter()
+            .map(|project| project.removed_at)
+            .collect();
+        assert_eq!(removed, vec![None], "re-adding should restore the project");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_a_removed_root_keeps_its_id() -> Result<(), Report<StoreError>> {
+        // Given a store whose project at /tmp/orb was removed.
+        let store = Store::open_in_memory()?;
+        let first = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+        store.remove_project(first, 2_000)?;
+
+        // When adding the same root again.
+        let second = store.add_project(Path::new("/tmp/orb"), "orb", 3_000)?;
+
+        // Then it's the same project.
+        assert_eq!(first, second, "a restored project should keep its id");
         Ok(())
     }
 

@@ -3,20 +3,23 @@
 //! footer of keys. The box is only as tall as its rows need, and its top
 //! stays put while the filter narrows them.
 //!
-//! The project picker shows each project's badge and name over its path; the
-//! directory picker shows one folder per row; the workspace picker shows where
-//! a thread's session could run, each with its glyph; the branch picker shows
-//! each branch with its badge, dimming the ones checked out where the thread
-//! can't follow and saying where; the model picker shows each model's name,
-//! with its legacy models under their own label; a draft whose project isn't
-//! a git repository gets one row, `Initialize Git`. Where the filter matched is
-//! bold and underlined, and the rows scroll to keep the selection in view.
+//! The project picker shows each project's badge and name over its path, and
+//! so does the project filter, under an `All projects` row; confirming a
+//! project's removal offers `No` and `Yes`. The directory picker shows one
+//! folder per row; the workspace picker shows where a thread's session could
+//! run, each with its glyph; the branch picker shows each branch with its
+//! badge, dimming the ones checked out where the thread can't follow and
+//! saying where; the model picker shows each model's name, with its legacy
+//! models under their own label; a draft whose project isn't a git repository
+//! gets one row, `Initialize Git`. Where the filter matched is bold and
+//! underlined, and the rows scroll to keep the selection in view.
 
 use std::path::Path;
 
 use orb_domain::feat::git::git_service::GitRef;
 use orb_domain::feat::picker::list::{
-    BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, setting_label,
+    ALL_PROJECTS, BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
+    setting_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
 use orb_domain::tilde;
@@ -63,7 +66,7 @@ pub(crate) fn render(
 ) -> (usize, Position) {
     let directories = matches!(picker.kind(), PickerKind::Directories { .. });
     let row_height: u16 = match picker.kind() {
-        PickerKind::Projects => 2,
+        PickerKind::Projects | PickerKind::ProjectFilter => 2,
         _ => 1,
     };
     let popup = {
@@ -98,13 +101,14 @@ pub(crate) fn render(
 /// The label above the rows.
 fn section_label(kind: &PickerKind) -> &'static str {
     match kind {
-        PickerKind::Projects => "Projects",
+        PickerKind::Projects | PickerKind::ProjectFilter => "Projects",
         PickerKind::Directories { .. } => "Directories",
         PickerKind::Workspace { .. } => "Workspace",
         PickerKind::Branches { .. } => "Branches",
         PickerKind::Model { .. } => "Models",
         PickerKind::Permission { .. } => "Permission modes",
         PickerKind::InitGit { .. } => "Not a git repository",
+        PickerKind::RemoveProject { .. } => "Remove project?",
     }
 }
 
@@ -141,7 +145,11 @@ fn render_input(picker: &PickerState, directories: bool, area: Rect, buf: &mut B
         Style::new().fg(DARK_GRAY),
     );
     let text = match picker.input() {
-        "" if matches!(picker.kind(), PickerKind::Projects) => {
+        "" if matches!(
+            picker.kind(),
+            PickerKind::Projects | PickerKind::ProjectFilter
+        ) =>
+        {
             Span::styled("Search projects...", Style::new().fg(DARK_GRAY))
         }
         input => Span::raw(input),
@@ -257,6 +265,13 @@ fn render_item(
         }
         PickerItem::InitGit => {
             Line::from_iter(highlight(INIT_GIT, &matches.name, Style::new())).render(area, buf);
+        }
+        PickerItem::AllProjects => {
+            Line::from_iter(highlight(ALL_PROJECTS, &matches.name, Style::new())).render(area, buf);
+        }
+        PickerItem::Confirm(yes) => {
+            Line::from_iter(highlight(confirm_label(*yes), &matches.name, Style::new()))
+                .render(area, buf);
         }
     }
 }
@@ -1067,6 +1082,61 @@ mod tests {
         assert!(
             first.is_some_and(|line| line.trim_matches(['│', ' ']) == "Initialize Git"),
             "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn project_filter_lists_all_projects_above_the_projects() {
+        // Given the project filter over All projects and orb.
+        let picker = PickerState::project_filter(
+            vec![
+                PickerItem::AllProjects,
+                project(1, "orb", "/Users/me/dev/orb"),
+            ],
+            None,
+            Focus::Sidebar,
+        );
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then All projects is drawn above orb.
+        let rows = (find(&buf, "All projects"), find(&buf, "OB orb"));
+        assert!(
+            matches!(rows, (Some((_, all)), Some((_, orb))) if all < orb),
+            "rows were at {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_confirm_asks_to_remove_the_project() {
+        // Given the confirm for removing project 1.
+        let picker = PickerState::remove_project(ProjectId(1), Focus::Sidebar);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then its section label asks.
+        let lines = lines(&buf);
+        assert!(
+            lines.iter().any(|line| line.contains("Remove project?")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_confirm_lists_no_above_yes() {
+        // Given the confirm for removing project 1.
+        let picker = PickerState::remove_project(ProjectId(1), Focus::Sidebar);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then No is drawn on the line above Yes.
+        let rows = (find(&buf, "No"), find(&buf, "Yes"));
+        assert!(
+            matches!(rows, (Some((_, no)), Some((_, yes))) if no + 1 == yes),
+            "rows were at {rows:?}"
         );
     }
 }

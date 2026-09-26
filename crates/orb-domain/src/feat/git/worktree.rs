@@ -118,6 +118,7 @@ mod tests {
             title: "orb".to_owned(),
             root: PathBuf::from(ROOT),
             created_at: SystemTime::UNIX_EPOCH,
+            removed: false,
             threads,
             draft: None,
         }

@@ -1,5 +1,7 @@
-//! Checks whether the open picker's `⏎` or `Tab` can proceed: picking a
-//! project, opening a directory, or adding one.
+//! Checks whether the open picker's keys can proceed: `⏎` picking a project
+//! or adding a directory, `Tab` opening one, and `<C-x>` removing a project.
+
+use crate::feat::picker::list::PickerItem;
 
 use wherror::Error;
 
@@ -90,13 +92,41 @@ pub fn validate_add_directory(state: &AppState) -> Result<(), AddDirectoryError>
     }
 }
 
+/// Why removing a project can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum RemoveProjectError {
+    /// No project filter picker is open.
+    NoPicker,
+    /// The highlighted row isn't a project.
+    NotAProject,
+}
+
+/// Allow asking to remove the project highlighted in the project filter.
+///
+/// # Errors
+///
+/// Returns [`RemoveProjectError::NoPicker`] unless the project filter picker
+/// is open, and [`RemoveProjectError::NotAProject`] when `All projects`, or
+/// nothing, is highlighted.
+pub fn validate_remove_project(state: &AppState) -> Result<(), RemoveProjectError> {
+    match &state.picker {
+        Some(picker) if *picker.kind() == PickerKind::ProjectFilter => match picker.selected() {
+            Some(PickerItem::Project { .. }) => Ok(()),
+            _ => Err(RemoveProjectError::NotAProject),
+        },
+        _ => Err(RemoveProjectError::NoPicker),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AddDirectoryError, OpenDirectoryError, PickProjectError, validate_add_directory,
-        validate_open_directory, validate_pick_project,
+        AddDirectoryError, OpenDirectoryError, PickProjectError, RemoveProjectError,
+        validate_add_directory, validate_open_directory, validate_pick_project,
+        validate_remove_project,
     };
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
@@ -204,5 +234,66 @@ mod tests {
             Err(AddDirectoryError::NothingToAdd),
             "an unmatched filter has nothing to add"
         );
+    }
+
+    #[rstest::rstest]
+    fn remove_project_is_refused_on_all_projects() {
+        // Given the project filter with All projects highlighted.
+        let state = AppState {
+            picker: Some(PickerState::project_filter(
+                vec![PickerItem::AllProjects, alpha()],
+                None,
+                Focus::Sidebar,
+            )),
+            ..AppState::default()
+        };
+
+        // When validating a removal.
+        let result = validate_remove_project(&state);
+
+        // Then validation fails with NotAProject.
+        assert_eq!(
+            result,
+            Err(RemoveProjectError::NotAProject),
+            "All projects can't be removed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_project_is_refused_outside_the_project_filter() {
+        // Given the ␣n project picker with alpha highlighted.
+        let state = AppState {
+            picker: Some(PickerState::projects(vec![alpha()], Focus::Sidebar)),
+            ..AppState::default()
+        };
+
+        // When validating a removal.
+        let result = validate_remove_project(&state);
+
+        // Then validation fails with NoPicker.
+        assert_eq!(
+            result,
+            Err(RemoveProjectError::NoPicker),
+            "only the project filter removes projects"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_project_is_allowed_on_a_project_row() {
+        // Given the project filter with alpha highlighted.
+        let state = AppState {
+            picker: Some(PickerState::project_filter(
+                vec![PickerItem::AllProjects, alpha()],
+                Some(ProjectId(1)),
+                Focus::Sidebar,
+            )),
+            ..AppState::default()
+        };
+
+        // When validating a removal.
+        let result = validate_remove_project(&state);
+
+        // Then it is allowed.
+        assert_eq!(result, Ok(()), "a project row can be removed");
     }
 }

@@ -48,6 +48,10 @@ pub enum PickerKind {
     InitGit { project: ProjectId },
     /// `␣a`: pick the permission mode of `project`'s draft.
     Permission { project: ProjectId },
+    /// `␣f`: pick the project the sidebar is filtered to, or all of them.
+    ProjectFilter,
+    /// `<C-x>` in the project filter: confirm removing `project`.
+    RemoveProject { project: ProjectId },
 }
 
 /// The open picker.
@@ -71,6 +75,46 @@ impl PickerState {
         Self {
             kind: PickerKind::Projects,
             list: PickerList::new(items),
+            return_to,
+            home: PathBuf::new(),
+            page: 0,
+            wanted: None,
+        }
+    }
+
+    /// A project filter picker over `items`, in the order given, with
+    /// `current`'s project selected, else the first item.
+    pub fn project_filter(
+        items: Vec<PickerItem>,
+        current: Option<ProjectId>,
+        return_to: Focus,
+    ) -> Self {
+        let list = {
+            let selected = items
+                .iter()
+                .find(|item| matches!(item, PickerItem::Project { id, .. } if Some(*id) == current))
+                .cloned();
+            let mut list = PickerList::new(items);
+            if let Some(selected) = selected {
+                list.select(&selected);
+            }
+            list
+        };
+        Self {
+            kind: PickerKind::ProjectFilter,
+            list,
+            return_to,
+            home: PathBuf::new(),
+            page: 0,
+            wanted: None,
+        }
+    }
+
+    /// The `No`/`Yes` confirm for removing `project`, with `No` selected.
+    pub fn remove_project(project: ProjectId, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::RemoveProject { project },
+            list: PickerList::new(vec![PickerItem::Confirm(false), PickerItem::Confirm(true)]),
             return_to,
             home: PathBuf::new(),
             page: 0,
@@ -324,7 +368,9 @@ impl PickerState {
                 | PickerItem::Branch(_)
                 | PickerItem::Setting(_)
                 | PickerItem::Heading(_)
-                | PickerItem::InitGit,
+                | PickerItem::InitGit
+                | PickerItem::AllProjects
+                | PickerItem::Confirm(_),
             ) => None,
             None => leaf.is_empty().then_some(dir),
         }
@@ -919,6 +965,33 @@ mod tests {
             picker.selected(),
             Some(&PickerItem::Setting(Some("plan"))),
             "the draft's current mode should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_project_confirm_lists_no_then_yes() {
+        // Given / When opening the confirm for removing project 1.
+        let picker = PickerState::remove_project(ProjectId(1), Focus::Sidebar);
+
+        // Then it lists No, then Yes.
+        let rows: Vec<&PickerItem> = picker.shown().map(|(item, _)| item).collect();
+        assert_eq!(
+            rows,
+            vec![&PickerItem::Confirm(false), &PickerItem::Confirm(true)],
+            "the confirm's rows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_project_confirm_selects_no() {
+        // Given / When opening the confirm for removing project 1.
+        let picker = PickerState::remove_project(ProjectId(1), Focus::Sidebar);
+
+        // Then No is highlighted, so ⏎ alone removes nothing.
+        assert_eq!(
+            picker.selected(),
+            Some(&PickerItem::Confirm(false)),
+            "No should be the default"
         );
     }
 }

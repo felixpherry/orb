@@ -33,10 +33,22 @@ pub enum PickerItem {
     Heading(&'static str),
     /// Make the draft's project a git repository. Matched on its label.
     InitGit,
+    /// The project filter's row for no filter. Matched on its label.
+    AllProjects,
+    /// A confirm picker's answer: `Yes` or `No`. Matched on its label.
+    Confirm(bool),
 }
 
 /// The text of the [`PickerItem::InitGit`] row, as in T3 Code.
 pub const INIT_GIT: &str = "Initialize Git";
+
+/// The text of the [`PickerItem::AllProjects`] row.
+pub const ALL_PROJECTS: &str = "All projects";
+
+/// The text of a [`PickerItem::Confirm`] row.
+pub fn confirm_label(yes: bool) -> &'static str {
+    if yes { "Yes" } else { "No" }
+}
 
 /// A Claude model a draft can pick: the full ID passed as `--model`, the
 /// name shown for it, and the other values T3 Code's manifest maps to it.
@@ -445,7 +457,9 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         | PickerItem::Workspace(_)
         | PickerItem::Branch(_)
         | PickerItem::Setting(_)
-        | PickerItem::InitGit => false,
+        | PickerItem::InitGit
+        | PickerItem::AllProjects
+        | PickerItem::Confirm(_) => false,
     }
 }
 
@@ -463,6 +477,8 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::Setting(value) => (setting_label(*value).to_owned(), None),
         PickerItem::Heading(text) => ((*text).to_owned(), None),
         PickerItem::InitGit => (INIT_GIT.to_owned(), None),
+        PickerItem::AllProjects => (ALL_PROJECTS.to_owned(), None),
+        PickerItem::Confirm(yes) => (confirm_label(*yes).to_owned(), None),
     };
     let bytes: Vec<usize> = label.char_indices().map(|(at, _)| at).collect();
     let mut total = 0;
@@ -529,6 +545,8 @@ mod tests {
                 PickerItem::Setting(value) => setting_label(*value).to_owned(),
                 PickerItem::Heading(text) => (*text).to_owned(),
                 PickerItem::InitGit => super::INIT_GIT.to_owned(),
+                PickerItem::AllProjects => super::ALL_PROJECTS.to_owned(),
+                PickerItem::Confirm(yes) => super::confirm_label(*yes).to_owned(),
             })
             .collect()
     }
@@ -618,7 +636,9 @@ mod tests {
                 | PickerItem::Branch(_)
                 | PickerItem::Setting(_)
                 | PickerItem::Heading(_)
-                | PickerItem::InitGit => None,
+                | PickerItem::InitGit
+                | PickerItem::AllProjects
+                | PickerItem::Confirm(_) => None,
             })
             .collect();
         assert_eq!(
