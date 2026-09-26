@@ -26,7 +26,7 @@ pub struct Preview {
     pub blocks: Arc<[Block]>,
     /// The git branch the session last ran on.
     pub branch: Option<String>,
-    /// The model that last replied, without its `claude-` prefix.
+    /// The ID of the model that last replied, as the transcript records it.
     pub model: Option<String>,
     /// Transcript lines that couldn't be read.
     pub skipped: usize,
