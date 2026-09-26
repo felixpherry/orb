@@ -42,6 +42,7 @@ fn main() -> Result<(), Report<OrbError>> {
         session_host: SessionHostService::new(Arc::new(ClaudeSupervisor::new(claude_env.clone()))),
         git: GitService::new(Arc::new(GitCli::new(claude_env.clone()))),
     };
+    let git = services.git.clone();
     let sessions = spawn_sessions_actor(SessionsActorDeps {
         services,
         state: state.clone(),
@@ -55,6 +56,6 @@ fn main() -> Result<(), Report<OrbError>> {
         wake: frontend.waker(),
     });
     frontend
-        .run(state, sessions, preview, claude_env)
+        .run(state, sessions, preview, git, claude_env)
         .change_context(OrbError)
 }

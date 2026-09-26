@@ -53,6 +53,8 @@ pub enum Intent {
     /// Open the workspace picker for the selected thread, before its first
     /// prompt.
     ChangeWorkspace,
+    /// Open the branch picker for the selected thread.
+    SwitchBranch,
     /// Type a character into the picker's filter.
     PickerInput(char),
     /// Delete the grapheme before the picker's cursor.
@@ -107,6 +109,7 @@ impl fmt::Display for Intent {
             Self::CloseShelf => "close settled",
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
+            Self::SwitchBranch => "branch",
             Self::PickerInput(_) => "type",
             Self::PickerDeleteWord => "delete word",
             Self::PickerCursorLeft => "cursor left",

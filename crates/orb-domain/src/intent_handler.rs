@@ -3,10 +3,13 @@
 use std::path::PathBuf;
 
 use crate::command::Workspace;
-use crate::feat::git::validator::{ChangeWorkspaceError, validate_change_workspace};
+use crate::feat::git::validator::{
+    BUSY_DIRECTORY, ChangeWorkspaceError, SwitchBranchError, validate_change_workspace,
+    validate_switch_branch,
+};
 use crate::feat::git::worktree::previous_worktree;
 use crate::feat::pane::validator::validate_attach;
-use crate::feat::picker::list::{PickerItem, WorkspaceChoice};
+use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
 use crate::feat::picker::state::{PickerKind, PickerState};
 use crate::feat::picker::validator::{
     validate_add_directory, validate_open_directory, validate_pick_project,
@@ -175,6 +178,25 @@ impl IntentHandler {
                 }
                 vec![]
             }
+            Intent::SwitchBranch => match (
+                validate_switch_branch(state),
+                state.sessions.selected_thread(),
+            ) {
+                (Ok(()), Some(thread)) => {
+                    let cwd = thread.cwd.clone();
+                    let unstarted = thread.transcript.is_none() && !thread.status.in_progress();
+                    let picker =
+                        PickerState::branches(thread.id, cwd.clone(), unstarted, state.focus);
+                    state.picker = Some(picker);
+                    state.focus = Focus::Picker;
+                    vec![Command::ListBranches(cwd)]
+                }
+                (Err(SwitchBranchError::Busy), _) => {
+                    state.sessions.error = Some(BUSY_DIRECTORY.to_owned());
+                    vec![]
+                }
+                _ => vec![],
+            },
             Intent::PickerOpen => match validate_open_directory(state) {
                 Ok(()) => list(state.picker.as_mut().and_then(PickerState::open_directory)),
                 Err(_) => vec![],
@@ -198,6 +220,9 @@ impl IntentHandler {
                         None => vec![],
                     }
                 }
+                Some(PickerKind::Branches { .. }) => close_picker(state)
+                    .map(|picker| pick_branch(state, &picker))
+                    .unwrap_or_default(),
                 _ => match (validate_pick_project(state), validate_add_directory(state)) {
                     (Ok(()), _) => {
                         match close_picker(state).as_ref().and_then(PickerState::selected) {
@@ -313,6 +338,56 @@ fn list(dir: Option<PathBuf>) -> Vec<Command> {
     dir.map(Command::ListDirectories).into_iter().collect()
 }
 
+/// What picking the selected branch of `picker`, a closed branch picker, asks
+/// for:
+/// - the current branch: nothing;
+/// - before the first prompt, a branch checked out in another worktree: move
+///   the thread there;
+/// - before the first prompt, the local default branch checked out nowhere,
+///   from outside the root: check it out in the root and move the thread
+///   there;
+/// - otherwise: check it out in the thread's directory.
+fn pick_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command> {
+    let (
+        &PickerKind::Branches {
+            thread,
+            ref cwd,
+            unstarted,
+        },
+        Some(PickerItem::Branch(BranchRow { git_ref, .. })),
+    ) = (picker.kind(), picker.selected())
+    else {
+        return vec![];
+    };
+    let elsewhere = git_ref.worktree.as_ref().filter(|path| *path != cwd);
+    match (git_ref.current, unstarted, elsewhere) {
+        (true, _, _) => vec![],
+        (false, true, Some(path)) => {
+            state.sessions.starting = true;
+            vec![Command::MoveThread {
+                thread,
+                to: Workspace::Existing(path.clone()),
+            }]
+        }
+        _ => {
+            let outside_root = state.sessions.projects.iter().any(|project| {
+                project.root != *cwd && project.threads.iter().any(|t| t.id == thread)
+            });
+            let to_root = unstarted
+                && git_ref.default
+                && !git_ref.remote
+                && git_ref.worktree.is_none()
+                && outside_root;
+            state.sessions.starting |= to_root;
+            vec![Command::SwitchBranch {
+                thread,
+                git_ref: git_ref.clone(),
+                to_root,
+            }]
+        }
+    }
+}
+
 /// Closes the picker and gives the keys back to where it was opened from.
 fn close_picker(state: &mut AppState) -> Option<PickerState> {
     let picker = state.picker.take()?;
@@ -328,10 +403,11 @@ fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
     use crate::command::Workspace;
+    use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::{PickerKind, PickerState};
     use crate::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
@@ -1031,6 +1107,161 @@ mod tests {
 
         // Then nothing happens.
         assert!(commands.is_empty(), "staying put needs no command");
+    }
+
+    /// Local branch `name`, checked out in `worktree` if any.
+    fn branch(name: &str, current: bool, worktree: Option<&str>) -> GitRef {
+        GitRef {
+            name: name.to_owned(),
+            remote: false,
+            current,
+            default: false,
+            worktree: worktree.map(PathBuf::from),
+        }
+    }
+
+    /// The branch picker opened on thread 1 of `threads`, showing `refs`.
+    fn choosing_branch(threads: Vec<Thread>, refs: Vec<GitRef>) -> AppState {
+        let mut state = AppState {
+            focus: Focus::Preview,
+            ..state_with(threads, 1)
+        };
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+        if let Some(picker) = &mut state.picker {
+            picker.show_branches(Path::new("/work"), refs);
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_opens_the_branch_picker() {
+        // Given a selected prompt-less thread in the root.
+        let mut state = state_with(vec![in_root(1)], 1);
+
+        // When handling SwitchBranch.
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+
+        // Then its branch picker is open and takes the keys.
+        assert_eq!(
+            (state.focus, state.picker.as_ref().map(PickerState::kind)),
+            (
+                Focus::Picker,
+                Some(&PickerKind::Branches {
+                    thread: ThreadId(1),
+                    cwd: "/work".into(),
+                    unstarted: true,
+                })
+            ),
+            "SwitchBranch should open the branch picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_returns_list_branches_for_the_cwd() {
+        // Given a selected thread in the root.
+        let mut state = state_with(vec![in_root(1)], 1);
+
+        // When handling SwitchBranch.
+        let commands = IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+
+        // Then the root's refs are listed.
+        assert_eq!(
+            commands,
+            [Command::ListBranches("/work".into())],
+            "the picker's refs come from the thread's directory"
+        );
+    }
+
+    #[rstest::rstest]
+    fn busy_directory_shows_the_error() {
+        // Given a working sibling in the selected thread's directory.
+        let mut state = state_with(
+            vec![
+                in_root(1),
+                Thread {
+                    cwd: "/work".into(),
+                    ..thread(2, ThreadStatus::Working)
+                },
+            ],
+            1,
+        );
+
+        // When handling SwitchBranch.
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+
+        // Then the mode line says Claude is working there.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some("Claude is working in this directory"),
+            "a busy directory should refuse the switch"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_free_branch_returns_switch_branch() {
+        // Given the branch picker with `feat`, checked out nowhere, highlighted.
+        let mut state = choosing_branch(
+            vec![in_root(1)],
+            vec![
+                branch("main", true, Some("/work")),
+                branch("feat", false, None),
+            ],
+        );
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then feat is checked out in the thread's directory.
+        assert_eq!(
+            commands,
+            [Command::SwitchBranch {
+                thread: ThreadId(1),
+                git_ref: branch("feat", false, None),
+                to_root: false,
+            }],
+            "a free branch should be checked out"
+        );
+    }
+
+    #[rstest::rstest]
+    fn unstarted_pick_of_a_branch_in_another_worktree_returns_move_thread() {
+        // Given a prompt-less thread's branch picker with `feat`, checked out
+        // in another worktree, highlighted.
+        let mut state = choosing_branch(
+            vec![in_root(1)],
+            vec![
+                branch("main", true, Some("/work")),
+                branch("feat", false, Some("/wt/feat")),
+            ],
+        );
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the thread moves into that worktree.
+        assert_eq!(
+            commands,
+            [Command::MoveThread {
+                thread: ThreadId(1),
+                to: Workspace::Existing("/wt/feat".into()),
+            }],
+            "a prompt-less thread follows the branch into its worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_the_current_branch_returns_no_command() {
+        // Given the branch picker with the current branch highlighted.
+        let mut state =
+            choosing_branch(vec![in_root(1)], vec![branch("main", true, Some("/work"))]);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing happens.
+        assert!(commands.is_empty(), "the current branch needs no checkout");
     }
 
     #[rstest::rstest]

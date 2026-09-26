@@ -9,8 +9,8 @@
 //! Each thread gets its own `claude attach` pane; selecting another thread
 //! drops it (the session keeps running). While attached, input goes straight
 //! to Claude; otherwise keys go through the [`keymap`]. The loop reads the
-//! directory picker's listings itself, since a listing takes about a
-//! millisecond.
+//! directory picker's listings and the branch picker's refs itself, since
+//! each takes milliseconds.
 //!
 //! When a session start waits for the user to trust a directory, the pane
 //! runs an interactive `claude` there instead. Leaving it, by its exit or
@@ -27,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
 use kameo::prelude::ActorRef;
+use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::preview::preview_actor::{self, PreviewActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
@@ -72,8 +73,9 @@ impl Frontend {
     }
 
     /// Runs orb's TUI until the user quits. Session commands go to
-    /// `sessions` and preview commands to `preview`; attached sessions run
-    /// with `claude_env`. The terminal is restored on exit and on panic.
+    /// `sessions` and preview commands to `preview`; the branch picker's refs
+    /// come from `git`; attached sessions run with `claude_env`. The terminal
+    /// is restored on exit and on panic.
     ///
     /// # Errors
     ///
@@ -84,13 +86,14 @@ impl Frontend {
         state: State,
         sessions: ActorRef<SessionsActor>,
         preview: ActorRef<PreviewActor>,
+        git: GitService,
         claude_env: Vec<(OsString, OsString)>,
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx } = self;
         ratatui::run(|terminal| -> io::Result<()> {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook();
-            let result = App::new(state, sessions, preview, claude_env, tx).run(terminal, &rx);
+            let result = App::new(state, sessions, preview, git, claude_env, tx).run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
             result.and(restored)
         })
@@ -148,6 +151,7 @@ struct App {
     state: State,
     sessions: ActorRef<SessionsActor>,
     preview: ActorRef<PreviewActor>,
+    git: GitService,
     keys: Keys,
     pane: Option<AttachedPane>,
     /// Shown under the preview header when `claude attach` couldn't start.
@@ -170,6 +174,7 @@ impl App {
         state: State,
         sessions: ActorRef<SessionsActor>,
         preview: ActorRef<PreviewActor>,
+        git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         tx: Sender<LoopEvent>,
     ) -> Self {
@@ -178,6 +183,7 @@ impl App {
             state,
             sessions,
             preview,
+            git,
             keys: Keys::new(keymap::keymap(), focus),
             pane: None,
             pane_error: None,
@@ -428,6 +434,39 @@ impl App {
                         to: to.clone(),
                     })
                     .try_send();
+                Ok(())
+            }
+            Command::SwitchBranch {
+                thread,
+                git_ref,
+                to_root,
+            } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::SwitchBranch {
+                        thread: *thread,
+                        git_ref: git_ref.clone(),
+                        to_root: *to_root,
+                    })
+                    .try_send();
+                Ok(())
+            }
+            Command::ListBranches(cwd) => {
+                let refs = self.git.refs(cwd);
+                let mut app = self.state.write();
+                match refs {
+                    Ok(refs) => {
+                        if let Some(picker) = &mut app.picker {
+                            picker.show_branches(cwd, refs);
+                        }
+                    }
+                    Err(report) => {
+                        if let Some(picker) = app.picker.take() {
+                            app.focus = picker.return_to();
+                        }
+                        app.sessions.error = Some(git_reason(&report));
+                    }
+                }
                 Ok(())
             }
             Command::AddProject(root) => {

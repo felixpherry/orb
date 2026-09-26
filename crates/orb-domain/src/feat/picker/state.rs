@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::Focus;
-use crate::feat::picker::list::{Matches, PickerItem, PickerList};
+use crate::feat::git::git_service::GitRef;
+use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList};
 use crate::feat::sessions::state::ThreadId;
 
 /// What an open picker picks.
@@ -22,6 +23,14 @@ pub enum PickerKind {
     Directories { listed: Option<String> },
     /// `␣w`: pick where `thread`'s session runs.
     Workspace { thread: ThreadId },
+    /// `␣b`: pick a branch for `thread`, whose session runs in `cwd`.
+    /// `unstarted` is whether it has had no prompt yet, so it can still
+    /// follow a branch into another worktree.
+    Branches {
+        thread: ThreadId,
+        cwd: PathBuf,
+        unstarted: bool,
+    },
 }
 
 /// The open picker.
@@ -54,6 +63,21 @@ impl PickerState {
         Self {
             kind: PickerKind::Workspace { thread },
             list: PickerList::new(items),
+            return_to,
+            home: PathBuf::new(),
+            page: 0,
+        }
+    }
+
+    /// A branch picker for `thread` in `cwd`, empty until its refs are listed.
+    pub fn branches(thread: ThreadId, cwd: PathBuf, unstarted: bool, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::Branches {
+                thread,
+                cwd,
+                unstarted,
+            },
+            list: PickerList::default(),
             return_to,
             home: PathBuf::new(),
             page: 0,
@@ -124,6 +148,35 @@ impl PickerState {
         self.list.set_items(items, &leaf);
     }
 
+    /// Shows `refs`, listed in `cwd`, filtered by the typed text. Ignored
+    /// unless this is `cwd`'s branch picker. Once the thread has had a prompt,
+    /// a branch checked out in another worktree is disabled.
+    pub fn show_branches(&mut self, cwd: &Path, refs: Vec<GitRef>) {
+        let PickerKind::Branches {
+            cwd: picker_cwd,
+            unstarted,
+            ..
+        } = &self.kind
+        else {
+            return;
+        };
+        if picker_cwd != cwd {
+            return;
+        }
+        let items = refs
+            .into_iter()
+            .map(|git_ref| {
+                let elsewhere = git_ref.worktree.as_ref().is_some_and(|path| path != cwd);
+                PickerItem::Branch(BranchRow {
+                    disabled: elsewhere && !unstarted,
+                    git_ref,
+                })
+            })
+            .collect();
+        let pattern = self.list.input().to_owned();
+        self.list.set_items(items, &pattern);
+    }
+
     /// Browses into the selected directory. Returns it to list.
     pub fn open_directory(&mut self) -> Option<PathBuf> {
         let (dir_text, _) = split_path(self.list.input())?;
@@ -145,7 +198,9 @@ impl PickerState {
         let dir = expand(dir_text, &self.home);
         match self.list.selected() {
             Some(PickerItem::Directory { name }) => Some(dir.join(name)),
-            Some(PickerItem::Project { .. } | PickerItem::Workspace(_)) => None,
+            Some(PickerItem::Project { .. } | PickerItem::Workspace(_) | PickerItem::Branch(_)) => {
+                None
+            }
             None => leaf.is_empty().then_some(dir),
         }
     }
@@ -275,7 +330,9 @@ mod tests {
 
     use super::{PickerState, expand, split_path};
     use crate::Focus;
+    use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::PickerItem;
+    use crate::feat::sessions::state::ThreadId;
 
     const HOME: &str = "/home/u";
 
@@ -288,7 +345,7 @@ mod tests {
             .shown()
             .filter_map(|(item, _)| match item {
                 PickerItem::Directory { name } => Some(name.clone()),
-                PickerItem::Project { .. } | PickerItem::Workspace(_) => None,
+                _ => None,
             })
             .collect()
     }
@@ -526,5 +583,78 @@ mod tests {
 
         // Then there is nothing to add.
         assert_eq!(added, None, "an unmatched filter adds nothing");
+    }
+
+    const CWD: &str = "/work";
+
+    /// Local branch `feat`, checked out in another worktree.
+    fn feat_elsewhere() -> GitRef {
+        GitRef {
+            name: "feat".to_owned(),
+            remote: false,
+            current: false,
+            default: false,
+            worktree: Some(PathBuf::from("/wt/feat")),
+        }
+    }
+
+    /// Whether each shown branch row is disabled.
+    fn disabled_rows(picker: &PickerState) -> Vec<bool> {
+        picker
+            .shown()
+            .filter_map(|(item, _)| match item {
+                PickerItem::Branch(row) => Some(row.disabled),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Thread 1's branch picker in [`CWD`], showing `refs`.
+    fn branches_listing(unstarted: bool, refs: Vec<GitRef>) -> PickerState {
+        let mut picker = PickerState::branches(ThreadId(1), CWD.into(), unstarted, Focus::Preview);
+        picker.show_branches(Path::new(CWD), refs);
+        picker
+    }
+
+    #[rstest::rstest]
+    fn branch_elsewhere_is_disabled_after_the_first_prompt() {
+        // Given / When listing a branch checked out elsewhere for a prompted thread.
+        let picker = branches_listing(false, vec![feat_elsewhere()]);
+
+        // Then its row is disabled.
+        assert_eq!(
+            disabled_rows(&picker),
+            [true],
+            "a prompted thread can't follow a branch into another worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn branch_elsewhere_is_enabled_before_the_first_prompt() {
+        // Given / When listing a branch checked out elsewhere for a prompt-less thread.
+        let picker = branches_listing(true, vec![feat_elsewhere()]);
+
+        // Then its row is enabled.
+        assert_eq!(
+            disabled_rows(&picker),
+            [false],
+            "a prompt-less thread can move to the branch's worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn stale_branch_listing_is_ignored() {
+        // Given a branch picker in `/work`.
+        let mut picker = branches_listing(true, vec![]);
+
+        // When refs listed in another directory arrive.
+        picker.show_branches(Path::new("/elsewhere"), vec![feat_elsewhere()]);
+
+        // Then nothing is shown.
+        assert_eq!(
+            picker.shown().count(),
+            0,
+            "a listing for another directory should be ignored"
+        );
     }
 }
