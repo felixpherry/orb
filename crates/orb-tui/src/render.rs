@@ -46,9 +46,10 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 }
 
 /// Draws the whole frame. `pane` is the selected thread's session, if orb has
-/// one running; it's drawn only while attached, and otherwise the right side
-/// shows the selected thread's preview, with `pane_error` saying why the
-/// session couldn't start. Returns the preview's layout when it was drawn,
+/// one running; it's drawn while attached, and while `<C-h>` left it shown for
+/// the sidebar (without its cursor). Otherwise the right side shows the
+/// selected thread's preview, with `pane_error` saying why the session
+/// couldn't start. Returns the preview's layout when it was drawn,
 /// the sidebar's layout unless it's hidden, and how many rows the picker fits
 /// when it's open.
 #[expect(
@@ -79,14 +80,19 @@ pub(crate) fn render(
         );
         (selected_y, Some(sidebar_layout))
     };
-    let preview_layout = match (pane, state.focus) {
-        (Some(pane), Focus::Attached) => {
-            if let Some(cursor) = pane.render(right, frame.buffer_mut()) {
+    let attached = state.focus == Focus::Attached;
+    let pane_shown = attached
+        || state
+            .pane_shown
+            .is_some_and(|id| state.sessions.selected_id() == Some(id));
+    let preview_layout = match pane.filter(|_| pane_shown) {
+        Some(pane) => {
+            if let Some(cursor) = pane.render(right, frame.buffer_mut()).filter(|_| attached) {
                 frame.set_cursor_position(cursor);
             }
             None
         }
-        _ => match (
+        None => match (
             state.sessions.selected_thread(),
             state.sessions.selected_draft(),
         ) {
@@ -760,6 +766,62 @@ mod tests {
                 .is_some_and(|right| right.contains("PANE-TEXT")),
             "right side was {right:?}"
         );
+    }
+
+    /// Thread 1, selected in the sidebar, with its pane left shown by `<C-h>`.
+    fn left_pane() -> AppState {
+        AppState {
+            pane_shown: Some(ThreadId(1)),
+            ..selected(Focus::Sidebar)
+        }
+    }
+
+    #[rstest::rstest]
+    fn sidebar_focus_draws_the_pane_left_shown() {
+        // Given a live pane for the selected thread, left shown for the sidebar.
+        let pane = pane_with_text();
+        let state = left_pane();
+
+        // When drawing a frame.
+        let right = pane.as_ref().map(|pane| right_side_with_pane(&state, pane));
+
+        // Then the pane's output is on the right side.
+        assert!(
+            right
+                .as_deref()
+                .is_some_and(|right| right.contains("PANE-TEXT")),
+            "right side was {right:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn sidebar_focus_hides_the_left_panes_cursor() {
+        // Given a live pane for the selected thread, left shown for the sidebar.
+        let pane = pane_with_text();
+        let state = left_pane();
+
+        // When drawing a frame.
+        let cursor = pane.as_ref().map(|pane| {
+            let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
+            let keys = Keys::new(keymap(), Scope::Sidebar);
+            let Ok(_) = terminal.draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    Some(pane),
+                    None,
+                    &keys,
+                    SystemTime::UNIX_EPOCH,
+                    &mut PreviewCache::default(),
+                    &mut SidebarScroll::default(),
+                    &mut PickerScroll::default(),
+                );
+            });
+            terminal.backend().cursor_visible()
+        });
+
+        // Then the terminal's cursor stays hidden.
+        assert_eq!(cursor, Some(false), "the pane's cursor outside the pane");
     }
 
     #[rstest::rstest]

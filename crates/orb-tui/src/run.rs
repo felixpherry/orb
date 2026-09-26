@@ -12,11 +12,15 @@
 //! The loop itself reads the directory picker's listings and the branch
 //! picker's refs, and hands tools to zellij, since each takes milliseconds.
 //!
+//! `<C-h>` moves the keys from the pane to the sidebar and leaves the pane
+//! drawn on the right, so `<C-l>` goes back into it; `<C-\>` shows the
+//! preview instead.
+//!
 //! When a session start waits for the user to trust a directory, the pane
-//! runs an interactive `claude` there instead. Leaving it, by its exit or
-//! `<C-\>`, asks the sessions actor to try the start again. When a started
-//! draft's thread comes up still selected, the loop attaches to it, unless
-//! the user is in a picker or already attached.
+//! runs an interactive `claude` there instead. Leaving it, by its exit,
+//! `<C-\>` or `<C-h>`, asks the sessions actor to try the start again. When
+//! a started draft's thread comes up still selected, the loop attaches to it,
+//! unless the user is in a picker or already attached.
 
 use std::ffi::OsString;
 use std::fs;
@@ -151,6 +155,15 @@ fn trust_to_open(trust: Option<&Path>, opened: Option<&Path>) -> Option<PathBuf>
 /// the selected thread and the user is neither in a picker nor attached.
 fn attaches(started: Option<ThreadId>, selected: Option<ThreadId>, focus: Focus) -> bool {
     started.is_some() && started == selected && !matches!(focus, Focus::Picker | Focus::Attached)
+}
+
+/// Where the keys go once the pane is gone: from the pane to the preview;
+/// anywhere else (the sidebar after `<C-h>`, the preview, a picker) they stay.
+fn after_pane(focus: Focus) -> Focus {
+    match focus {
+        Focus::Attached => Focus::Preview,
+        Focus::Sidebar | Focus::Preview | Focus::Picker => focus,
+    }
 }
 
 /// A running pane and what it is for.
@@ -403,7 +416,11 @@ impl App {
                 match exited {
                     Some(true) => self.leave_trust(out)?,
                     Some(false) => {
-                        self.state.write().focus = Focus::Preview;
+                        {
+                            let mut app = self.state.write();
+                            app.focus = after_pane(app.focus);
+                            app.pane_shown = None;
+                        }
                         self.leave_pane(out)?;
                     }
                     None => {}
@@ -433,7 +450,9 @@ impl App {
                         }
                         None => {
                             self.pane_error = Some("couldn't start claude attach".to_owned());
-                            self.state.write().focus = Focus::Preview;
+                            let mut app = self.state.write();
+                            app.focus = Focus::Preview;
+                            app.pane_shown = None;
                             return Ok(());
                         }
                     }
@@ -633,6 +652,7 @@ impl App {
             return Ok(());
         }
         self.pane = None;
+        self.state.write().pane_shown = None;
         if focus == Focus::Attached {
             self.state.write().focus = Focus::Preview;
             self.leave_pane(out)?;
@@ -695,14 +715,19 @@ impl App {
         Ok(())
     }
 
-    /// Closes the trust pane, returns to the preview, and tries the waiting
-    /// session start again.
+    /// Closes the trust pane, returns to the preview unless `<C-h>` already
+    /// moved the keys to the sidebar, and tries the waiting session start
+    /// again.
     fn leave_trust<W>(&mut self, out: &mut W) -> io::Result<()>
     where
         W: Write,
     {
         self.pane = None;
-        self.state.write().focus = Focus::Preview;
+        {
+            let mut app = self.state.write();
+            app.focus = after_pane(app.focus);
+            app.pane_shown = None;
+        }
         self.retry_start();
         self.leave_pane(out)
     }
@@ -801,7 +826,7 @@ mod tests {
     use orb_domain::Focus;
     use orb_domain::feat::sessions::state::ThreadId;
 
-    use super::{PaneOwner, attaches, list_directories, trust_to_open};
+    use super::{PaneOwner, after_pane, attaches, list_directories, trust_to_open};
 
     #[rstest::rstest]
     fn list_directories_keeps_directories_and_links_to_them() -> io::Result<()> {
@@ -858,6 +883,22 @@ mod tests {
             owner.retries_start(),
             expected,
             "only a trust pane retries the waiting start"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Attached, Focus::Preview)]
+    #[case(Focus::Sidebar, Focus::Sidebar)]
+    #[case(Focus::Preview, Focus::Preview)]
+    #[case(Focus::Picker, Focus::Picker)]
+    fn keys_leave_a_gone_pane_for_the_preview_only_from_the_pane(
+        #[case] focus: Focus,
+        #[case] expected: Focus,
+    ) {
+        assert_eq!(
+            after_pane(focus),
+            expected,
+            "focus after the pane goes from {focus:?}"
         );
     }
 

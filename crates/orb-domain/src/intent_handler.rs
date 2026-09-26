@@ -68,10 +68,7 @@ impl IntentHandler {
                 state.sessions.half_page_up(&state.sidebar.layout);
                 with_visit(state, vec![Command::ShowPreview])
             }
-            Intent::FocusPreview => {
-                state.focus = Focus::Preview;
-                vec![]
-            }
+            Intent::FocusPreview => focus_right(state),
             Intent::FocusSidebar => match validate_focus_sidebar(state) {
                 Ok(()) => {
                     state.focus = Focus::Sidebar;
@@ -79,18 +76,21 @@ impl IntentHandler {
                 }
                 Err(_) => vec![],
             },
-            Intent::ToggleSidebar => {
-                if state.sidebar.hidden {
+            Intent::ToggleSidebar => match (state.sidebar.hidden, state.focus) {
+                (true, _) => {
                     state.sidebar.hidden = false;
                     state.focus = Focus::Sidebar;
-                } else {
-                    state.sidebar.hidden = true;
-                    if state.focus == Focus::Sidebar {
-                        state.focus = Focus::Preview;
-                    }
+                    vec![]
                 }
-                vec![]
-            }
+                (false, Focus::Sidebar) => {
+                    state.sidebar.hidden = true;
+                    focus_right(state)
+                }
+                (false, _) => {
+                    state.sidebar.hidden = true;
+                    vec![]
+                }
+            },
             Intent::WidenFocused | Intent::NarrowFocused => {
                 // Widening the right side narrows the sidebar.
                 let changed = match (validate_resize(state), state.focus, intent) {
@@ -118,22 +118,19 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
-            Intent::Attach => match (validate_attach(state), state.sessions.selected_thread()) {
-                (Ok(()), Some(thread)) => {
-                    let target = AttachTarget {
-                        thread: thread.id,
-                        argv: thread.attach_argv.clone(),
-                        cwd: thread.cwd.clone(),
-                    };
-                    state.focus = Focus::Attached;
-                    vec![Command::Attach(target), Command::RefreshSessions]
-                }
-                _ => vec![],
-            },
+            Intent::Attach => attach_thread(state),
             Intent::Detach => {
                 state.focus = Focus::Preview;
+                state.pane_shown = None;
                 vec![Command::Detach, Command::RefreshSessions]
             }
+            Intent::LeavePane => match validate_focus_sidebar(state) {
+                Ok(()) => {
+                    state.focus = Focus::Sidebar;
+                    vec![Command::Detach, Command::RefreshSessions]
+                }
+                Err(_) => vec![],
+            },
             Intent::NewSession => {
                 let items = state
                     .sessions
@@ -724,6 +721,39 @@ fn close_picker(state: &mut AppState) -> Option<PickerState> {
     Some(picker)
 }
 
+/// Attaches to the selected thread's session and shows its pane, unless the
+/// thread can't be attached to.
+fn attach_thread(state: &mut AppState) -> Vec<Command> {
+    match (validate_attach(state), state.sessions.selected_thread()) {
+        (Ok(()), Some(thread)) => {
+            let target = AttachTarget {
+                thread: thread.id,
+                argv: thread.attach_argv.clone(),
+                cwd: thread.cwd.clone(),
+            };
+            state.focus = Focus::Attached;
+            state.pane_shown = Some(target.thread);
+            vec![Command::Attach(target), Command::RefreshSessions]
+        }
+        _ => vec![],
+    }
+}
+
+/// Moves the keys to the right-hand area: back into the Claude pane while
+/// it's shown for the selected thread and can still be attached to, else to
+/// the preview.
+fn focus_right(state: &mut AppState) -> Vec<Command> {
+    match state.pane_shown {
+        Some(id) if state.sessions.selected_id() == Some(id) && validate_attach(state).is_ok() => {
+            attach_thread(state)
+        }
+        _ => {
+            state.focus = Focus::Preview;
+            vec![]
+        }
+    }
+}
+
 /// `commands`, then a visit to the thread under the cursor, if any.
 fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
     commands.extend(state.sessions.selected_id().map(Command::Visit));
@@ -1276,6 +1306,211 @@ mod tests {
             commands,
             vec![Command::Detach, Command::RefreshSessions],
             "Detach should detach, then refresh"
+        );
+    }
+
+    #[rstest::rstest]
+    fn detach_stops_showing_the_pane() {
+        // Given keys going to thread 1's attached session.
+        let mut state = AppState {
+            focus: Focus::Attached,
+            pane_shown: Some(ThreadId(1)),
+            ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
+        };
+
+        // When handling Detach.
+        IntentHandler::handle(&Intent::Detach, &mut state);
+
+        // Then the right side goes back to the preview.
+        assert_eq!(
+            state.pane_shown, None,
+            "Detach should stop showing the pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_shows_the_threads_pane() {
+        // Given a selected idle thread.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then its pane is the one shown.
+        assert_eq!(
+            state.pane_shown,
+            Some(ThreadId(1)),
+            "Attach should show the thread's pane"
+        );
+    }
+
+    /// Keys going to thread 1's attached session.
+    fn attached() -> AppState {
+        AppState {
+            focus: Focus::Attached,
+            pane_shown: Some(ThreadId(1)),
+            ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
+        }
+    }
+
+    /// Thread 1's pane left shown for the sidebar, with `selected` selected.
+    fn left_pane(selected: i64) -> AppState {
+        AppState {
+            pane_shown: Some(ThreadId(1)),
+            ..state_with(
+                vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+                selected,
+            )
+        }
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_focuses_the_sidebar() {
+        // Given keys going to an attached session.
+        let mut state = attached();
+
+        // When handling LeavePane.
+        IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then keys drive the sidebar.
+        assert_eq!(
+            state.focus,
+            Focus::Sidebar,
+            "LeavePane should focus the sidebar"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_keeps_the_pane_shown() {
+        // Given keys going to thread 1's attached session.
+        let mut state = attached();
+
+        // When handling LeavePane.
+        IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then thread 1's pane stays on the right.
+        assert_eq!(
+            state.pane_shown,
+            Some(ThreadId(1)),
+            "LeavePane should keep the pane shown"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_returns_detach_and_refresh() {
+        // Given keys going to an attached session.
+        let mut state = attached();
+
+        // When handling LeavePane.
+        let commands = IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then the loop stops sending the pane input and the statuses are
+        // refreshed.
+        assert_eq!(
+            commands,
+            vec![Command::Detach, Command::RefreshSessions],
+            "LeavePane should detach, then refresh"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leave_pane_while_the_sidebar_is_hidden_does_nothing() {
+        // Given keys going to an attached session, with the sidebar hidden.
+        let mut state = AppState {
+            sidebar: SidebarView {
+                hidden: true,
+                ..SidebarView::default()
+            },
+            ..attached()
+        };
+
+        // When handling LeavePane.
+        let commands = IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then the session stays attached and nothing else happens.
+        assert_eq!(
+            (state.focus, commands),
+            (Focus::Attached, vec![]),
+            "LeavePane should do nothing while the sidebar is hidden"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_preview_with_the_pane_shown_attaches() {
+        // Given thread 1's pane shown and thread 1 selected in the sidebar.
+        let mut state = left_pane(1);
+
+        // When handling FocusPreview.
+        IntentHandler::handle(&Intent::FocusPreview, &mut state);
+
+        // Then keys go back to the session.
+        assert_eq!(
+            state.focus,
+            Focus::Attached,
+            "FocusPreview should go back into the shown pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_preview_with_the_pane_shown_returns_attach_and_refresh() {
+        // Given thread 1's pane shown and thread 1 selected in the sidebar.
+        let mut state = left_pane(1);
+
+        // When handling FocusPreview.
+        let commands = IntentHandler::handle(&Intent::FocusPreview, &mut state);
+
+        // Then the loop attaches to thread 1 again and the statuses are
+        // refreshed.
+        assert_eq!(
+            commands,
+            vec![
+                Command::Attach(AttachTarget {
+                    thread: ThreadId(1),
+                    argv: vec!["claude".into(), "attach".into(), "t1".into()],
+                    cwd: "/work/1".into(),
+                }),
+                Command::RefreshSessions,
+            ],
+            "FocusPreview should attach to the shown pane's thread, then refresh"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(None)]
+    #[case(Some(ThreadId(1)))]
+    fn focus_preview_without_the_selected_threads_pane_focuses_the_preview(
+        #[case] pane_shown: Option<ThreadId>,
+    ) {
+        // Given thread 2 selected, with no pane shown or thread 1's.
+        let mut state = AppState {
+            pane_shown,
+            ..left_pane(2)
+        };
+
+        // When handling FocusPreview.
+        IntentHandler::handle(&Intent::FocusPreview, &mut state);
+
+        // Then keys drive thread 2's preview.
+        assert_eq!(
+            state.focus,
+            Focus::Preview,
+            "FocusPreview with {pane_shown:?} shown should focus the preview"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hiding_the_sidebar_with_the_pane_shown_focuses_the_pane() {
+        // Given thread 1's pane shown and thread 1 selected in the sidebar.
+        let mut state = left_pane(1);
+
+        // When handling ToggleSidebar.
+        IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
+
+        // Then keys go to the session, which takes the full width.
+        assert_eq!(
+            state.focus,
+            Focus::Attached,
+            "hiding the sidebar should focus the shown pane"
         );
     }
 
