@@ -45,6 +45,39 @@ impl ThreadStatus {
     }
 }
 
+/// Why a thread needs the user, as a notification says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    /// A turn ended.
+    Finished,
+    /// Claude started waiting for an approval.
+    NeedsApproval,
+    /// Claude started waiting for an answer.
+    NeedsInput,
+}
+
+impl NoticeKind {
+    /// What the notification's body says.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Finished => "Finished",
+            Self::NeedsApproval => "Needs approval",
+            Self::NeedsInput => "Needs input",
+        }
+    }
+}
+
+/// A status change the frontend announces as a notification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub thread: ThreadId,
+    pub kind: NoticeKind,
+    /// The thread's project's title.
+    pub project: String,
+    /// The thread's title, else "New thread".
+    pub title: String,
+}
+
 /// One Claude session orb started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thread {
@@ -177,10 +210,11 @@ impl SidebarRow<'_> {
 /// Written by the sessions actor (projects and their drafts, `error`,
 /// `starting` when a start ends, `trust`, `attach`, the cursor and `filter`
 /// after a restore, the cursor when a still-selected draft becomes a thread,
-/// removing a thread from `deleting`) and by the intent handler (the cursor on
-/// navigation, settle and delete, `shelf_open`, `starting` when a start
-/// begins, a draft's fields when the user picks them, adding a thread to
-/// `deleting`, `filter`). The frontend loop takes `attach`.
+/// removing a thread from `deleting`, pushing `notices`) and by the intent
+/// handler (the cursor on navigation, settle and delete, `shelf_open`,
+/// `starting` when a start begins, a draft's fields when the user picks them,
+/// adding a thread to `deleting`, `filter`). The frontend loop takes `attach`
+/// and `notices`.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
@@ -203,6 +237,9 @@ pub struct Sessions {
     pub deleting: HashSet<ThreadId>,
     /// The project the sidebar is filtered to; `None` = all projects.
     pub filter: Option<ProjectId>,
+    /// Status changes for the frontend to announce; the sessions actor
+    /// pushes, the frontend takes.
+    pub notices: Vec<Notice>,
 }
 
 impl Sessions {
