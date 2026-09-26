@@ -7,6 +7,8 @@ use std::sync::Arc;
 use error_stack::{Report, ResultExt};
 use orb_domain::feat::git::git_cli::GitCli;
 use orb_domain::feat::git::git_service::GitService;
+use orb_domain::feat::notify::notifier::NotifierService;
+use orb_domain::feat::notify::osascript::OsascriptNotifier;
 use orb_domain::feat::preview::preview_actor::{PreviewActorDeps, spawn_preview_actor};
 use orb_domain::feat::sessions::child_env::child_env;
 use orb_domain::feat::sessions::claude_supervisor::ClaudeSupervisor;
@@ -64,6 +66,14 @@ fn main() -> Result<(), Report<OrbError>> {
         wake: frontend.waker(),
     });
     frontend
-        .run(state, sessions, preview, git, claude_env, zellij)
+        .run(
+            state,
+            sessions,
+            preview,
+            git,
+            claude_env,
+            zellij,
+            NotifierService::new(Arc::new(OsascriptNotifier)),
+        )
         .change_context(OrbError)
 }

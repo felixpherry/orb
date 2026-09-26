@@ -16,6 +16,10 @@
 //! drawn on the right, so `<C-l>` goes back into it; `<C-\>` shows the
 //! preview instead.
 //!
+//! When a thread finishes a turn or starts needing an approval or an answer
+//! while orb's pane isn't focused, the loop announces it as a desktop
+//! notification; notices that arrive while it is focused are dropped.
+//!
 //! When a session start waits for the user to trust a directory, the pane
 //! runs an interactive `claude` there instead. Leaving it, by its exit,
 //! `<C-\>` or `<C-h>`, asks the sessions actor to try the start again. When
@@ -25,6 +29,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -34,9 +39,10 @@ use std::time::{Duration, Instant, SystemTime};
 use error_stack::{Report, ResultExt};
 use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
+use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::preview::preview_actor::{self, PreviewActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
-use orb_domain::feat::sessions::state::ThreadId;
+use orb_domain::feat::sessions::state::{Notice, ThreadId};
 use orb_domain::feat::zellij::zellij_service::{NOT_IN_ZELLIJ, ZellijService, zellij_reason};
 use orb_domain::{Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
@@ -82,7 +88,8 @@ impl Frontend {
     /// Runs orb's TUI until the user quits. Session commands go to
     /// `sessions` and preview commands to `preview`; the branch picker's refs
     /// come from `git`; attached sessions run with `claude_env`; tools open
-    /// through `zellij`, `None` outside zellij. The terminal is restored on
+    /// through `zellij`, `None` outside zellij; notices are announced through
+    /// `notifier` while orb's pane isn't focused. The terminal is restored on
     /// exit and on panic.
     ///
     /// # Errors
@@ -97,13 +104,16 @@ impl Frontend {
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
+        notifier: NotifierService,
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx } = self;
         ratatui::run(|terminal| -> io::Result<()> {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook();
-            let result =
-                App::new(state, sessions, preview, git, claude_env, zellij, tx).run(terminal, &rx);
+            let result = App::new(
+                state, sessions, preview, git, claude_env, zellij, notifier, tx,
+            )
+            .run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
             result.and(restored)
         })
@@ -166,6 +176,12 @@ fn after_pane(focus: Focus) -> Focus {
     }
 }
 
+/// The notices to announce: none while orb's pane is focused, where the
+/// sidebar already shows each status, else all of them.
+fn to_announce(notices: Vec<Notice>, focused: bool) -> Vec<Notice> {
+    if focused { Vec::new() } else { notices }
+}
+
 /// A running pane and what it is for.
 struct AttachedPane {
     owner: PaneOwner,
@@ -187,6 +203,8 @@ struct App {
     claude_env: Vec<(OsString, OsString)>,
     /// Opens tools; `None` outside zellij.
     zellij: Option<ZellijService>,
+    /// Announces the sessions actor's notices.
+    notifier: NotifierService,
     tx: Sender<LoopEvent>,
     pane_area: Rect,
     /// The cursor style last sent to the outer terminal.
@@ -194,6 +212,9 @@ struct App {
     preview_cache: PreviewCache,
     sidebar_scroll: SidebarScroll,
     picker_scroll: PickerScroll,
+    /// orb's pane has the outer terminal's focus, as its last focus event
+    /// said; `true` until one arrives.
+    focused: bool,
 }
 
 impl App {
@@ -204,6 +225,7 @@ impl App {
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
+        notifier: NotifierService,
         tx: Sender<LoopEvent>,
     ) -> Self {
         let scope = {
@@ -221,12 +243,14 @@ impl App {
             opened_trust: None,
             claude_env,
             zellij,
+            notifier,
             tx,
             pane_area: Rect::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
             preview_cache: PreviewCache::default(),
             sidebar_scroll: SidebarScroll::default(),
             picker_scroll: PickerScroll::default(),
+            focused: true,
         }
     }
 
@@ -306,6 +330,7 @@ impl App {
             for event in first.into_iter().chain(rx.try_iter()) {
                 self.handle(event, terminal.backend_mut())?;
             }
+            self.announce();
             self.reconcile(terminal.backend_mut())?;
             self.open_trust(terminal.backend_mut())?;
             self.open_started(terminal.backend_mut())?;
@@ -390,11 +415,13 @@ impl App {
                 }
             }
             LoopEvent::Input(Event::FocusGained) => {
+                self.focused = true;
                 if let Some(pane) = self.attached_pane() {
                     pane.focus(true);
                 }
             }
             LoopEvent::Input(Event::FocusLost) => {
+                self.focused = false;
                 if let Some(pane) = self.attached_pane() {
                     pane.focus(false);
                 }
@@ -739,6 +766,16 @@ impl App {
         self.leave_pane(out)
     }
 
+    /// Takes the sessions actor's notices and announces them if orb's pane
+    /// isn't focused; while it is, they're dropped. A notice that can't be
+    /// sent is dropped too.
+    fn announce(&self) {
+        let notices = mem::take(&mut self.state.write().sessions.notices);
+        for notice in to_announce(notices, self.focused) {
+            let _ = self.notifier.announce(&notice);
+        }
+    }
+
     fn retry_start(&self) {
         let _ = self.sessions.tell(sessions_actor::RetryStart).try_send();
     }
@@ -831,9 +868,49 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use orb_domain::Focus;
-    use orb_domain::feat::sessions::state::ThreadId;
+    use orb_domain::feat::sessions::state::{Notice, NoticeKind, ThreadId};
 
-    use super::{PaneOwner, after_pane, attaches, list_directories, trust_to_open};
+    use super::{PaneOwner, after_pane, attaches, list_directories, to_announce, trust_to_open};
+
+    fn finished(thread: i64) -> Notice {
+        Notice {
+            thread: ThreadId(thread),
+            kind: NoticeKind::Finished,
+            project: "orb".to_owned(),
+            title: "Parser fix".to_owned(),
+        }
+    }
+
+    #[rstest::rstest]
+    fn notices_are_not_announced_while_orb_is_focused() {
+        // Given two threads that finished.
+        let notices = vec![finished(1), finished(2)];
+
+        // When deciding what to announce while orb's pane is focused.
+        let announced = to_announce(notices, true);
+
+        // Then nothing is announced.
+        assert!(
+            announced.is_empty(),
+            "a focused orb shows statuses in the sidebar"
+        );
+    }
+
+    #[rstest::rstest]
+    fn every_notice_is_announced_while_orb_isnt_focused() {
+        // Given two threads that finished.
+        let notices = vec![finished(1), finished(2)];
+
+        // When deciding what to announce while orb's pane isn't focused.
+        let announced = to_announce(notices, false);
+
+        // Then both are announced, in order.
+        assert_eq!(
+            announced,
+            [finished(1), finished(2)],
+            "an unfocused orb announces every notice"
+        );
+    }
 
     #[rstest::rstest]
     fn list_directories_keeps_directories_and_links_to_them() -> io::Result<()> {

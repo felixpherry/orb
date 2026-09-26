@@ -46,6 +46,10 @@
 //!
 //! It restores the sidebar's saved width and project filter at start, and
 //! saves them when asked.
+//!
+//! It queues a notice for the frontend to announce when a thread it has
+//! polled since orb started finishes a turn, or starts needing an approval or
+//! an answer, in any project, unless the thread is being deleted.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -61,8 +65,8 @@ use super::session_host::{
     SessionHostError, SessionHostService, SessionOptions, SessionRecord, WorkspaceUntrusted,
 };
 use super::state::{
-    Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
-    ThreadStatus,
+    Draft, DraftWorkspace, Notice, NoticeKind, Project, ProjectId, Sessions, SidebarItem, Thread,
+    ThreadId, ThreadStatus,
 };
 use super::store::{
     DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, ThreadRow, Ui,
@@ -90,6 +94,8 @@ const SAVE_FAILED: &str = "couldn't save orb's state";
 const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
 /// How many random worktree names to try before giving up.
 const WORKTREE_NAME_ATTEMPTS: u32 = 8;
+/// What a notice calls a thread Claude hasn't titled yet.
+const NEW_THREAD: &str = "New thread";
 
 /// What the sessions actor needs to start.
 pub struct SessionsActorDeps {
@@ -673,6 +679,10 @@ impl SessionsActor {
                 sessions.error = Some(error);
             }
             for (row, status) in self.rows.iter().zip(statuses) {
+                if let Some(notice) = notice(sessions, row, status) {
+                    sessions.notices.push(notice);
+                    changed = true;
+                }
                 if let Some(thread) = thread_mut(sessions, row.id) {
                     changed |= show(thread, row, status);
                 }
@@ -1719,6 +1729,46 @@ fn show(thread: &mut Thread, row: &ThreadRow, status: ThreadStatus) -> bool {
     changed
 }
 
+/// Why a thread that was `old` and is now `new` needs the user, if it does:
+/// a turn ended, or Claude started waiting for an approval or an answer. A
+/// thread not polled since orb started never does, so states that existed at
+/// launch don't notify.
+fn notice_kind(old: ThreadStatus, new: ThreadStatus) -> Option<NoticeKind> {
+    match (old, new) {
+        (ThreadStatus::Unknown, _) => None,
+        (old, ThreadStatus::Idle) if old.in_progress() => Some(NoticeKind::Finished),
+        (old, ThreadStatus::NeedsApproval) if old != ThreadStatus::NeedsApproval => {
+            Some(NoticeKind::NeedsApproval)
+        }
+        (old, ThreadStatus::NeedsInput) if old != ThreadStatus::NeedsInput => {
+            Some(NoticeKind::NeedsInput)
+        }
+        _ => None,
+    }
+}
+
+/// The notice for the saved thread `row` now being `status`, if its shown
+/// status changes in a way that needs the user; never for a thread being
+/// deleted. The title is the row's, already updated by this poll.
+fn notice(sessions: &Sessions, row: &ThreadRow, status: ThreadStatus) -> Option<Notice> {
+    if sessions.deleting.contains(&row.id) {
+        return None;
+    }
+    let (project, thread) = sessions.projects.iter().find_map(|project| {
+        project
+            .threads
+            .iter()
+            .find(|thread| thread.id == row.id)
+            .map(|thread| (project, thread))
+    })?;
+    Some(Notice {
+        thread: row.id,
+        kind: notice_kind(thread.status, status)?,
+        project: project.title.clone(),
+        title: display_title(row).unwrap_or_else(|| NEW_THREAD.to_owned()),
+    })
+}
+
 /// The title the sidebar shows: the user's `/rename`, else the transcript's.
 fn display_title(row: &ThreadRow) -> Option<String> {
     row.custom_title.clone().or_else(|| row.title.clone())
@@ -1896,7 +1946,7 @@ mod tests {
     use async_trait::async_trait;
     use error_stack::{Report, ResultExt};
 
-    use super::{FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps, now_ms};
+    use super::{FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms};
     use crate::Focus;
     use crate::command::Workspace;
     use crate::common::{Services, State};
@@ -1908,7 +1958,8 @@ mod tests {
         SessionRecord, WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, ProjectId, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Notice, NoticeKind, ProjectId, SidebarItem, SidebarRow, Thread,
+        ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::store::{
         DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, StoreError,
@@ -6411,6 +6462,143 @@ mod tests {
 
         // Then no branch was renamed.
         assert_eq!(git.renamed(), None, "the rename waits for the turn to end");
+        Ok(())
+    }
+
+    fn notices_of(state: &State) -> Vec<Notice> {
+        state.read().sessions.notices.clone()
+    }
+
+    #[rstest::rstest]
+    #[case(ThreadStatus::Unknown, ThreadStatus::Idle, None)]
+    #[case(ThreadStatus::Unknown, ThreadStatus::NeedsApproval, None)]
+    #[case(ThreadStatus::Working, ThreadStatus::Idle, Some(NoticeKind::Finished))]
+    #[case(
+        ThreadStatus::NeedsApproval,
+        ThreadStatus::Idle,
+        Some(NoticeKind::Finished)
+    )]
+    #[case(
+        ThreadStatus::Working,
+        ThreadStatus::NeedsApproval,
+        Some(NoticeKind::NeedsApproval)
+    )]
+    #[case(
+        ThreadStatus::Working,
+        ThreadStatus::NeedsInput,
+        Some(NoticeKind::NeedsInput)
+    )]
+    #[case(ThreadStatus::NeedsApproval, ThreadStatus::NeedsApproval, None)]
+    #[case(
+        ThreadStatus::NeedsApproval,
+        ThreadStatus::NeedsInput,
+        Some(NoticeKind::NeedsInput)
+    )]
+    #[case(ThreadStatus::Idle, ThreadStatus::Idle, None)]
+    #[case(ThreadStatus::Working, ThreadStatus::Failed, None)]
+    #[case(ThreadStatus::Working, ThreadStatus::Stopped, None)]
+    fn notice_kind_names_why_a_status_change_needs_the_user(
+        #[case] old: ThreadStatus,
+        #[case] new: ThreadStatus,
+        #[case] expected: Option<NoticeKind>,
+    ) {
+        assert_eq!(notice_kind(old, new), expected, "{old:?} → {new:?}");
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn first_poll_after_restore_queues_no_notice() -> Result<(), Report<StoreError>> {
+        // Given a saved thread that was already waiting for an approval at launch.
+        let (store, _) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::NeedsApproval)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling for the first time.
+        actor.poll().await;
+
+        // Then no notice is queued.
+        assert_eq!(
+            notices_of(&state),
+            [],
+            "a state that existed at launch shouldn't notify"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_queues_a_finished_notice_naming_project_and_thread()
+    -> Result<(), Report<StoreError>> {
+        // Given orb's thread titled "Parser fix".
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            custom_title: Some("Parser fix".to_owned()),
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polls see its turn run and then end.
+        end_turn(&mut actor, &host).await;
+
+        // Then one Finished notice names the project and the thread.
+        assert_eq!(
+            notices_of(&state),
+            [Notice {
+                thread: id,
+                kind: NoticeKind::Finished,
+                project: "orb".to_owned(),
+                title: "Parser fix".to_owned(),
+            }],
+            "the ended turn's notice"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_of_a_thread_being_deleted_queues_no_notice() -> Result<(), Report<StoreError>>
+    {
+        // Given a thread whose turn is running, then marked for deletion.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![in_session(ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        state.write().sessions.deleting.insert(id);
+
+        // When a poll sees its turn end.
+        host.set_list(Ok(vec![in_session(ThreadStatus::Idle)]));
+        actor.poll().await;
+
+        // Then no notice is queued.
+        assert_eq!(
+            notices_of(&state),
+            [],
+            "a thread being deleted shouldn't notify"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_outside_the_project_filter_still_queues_a_notice()
+    -> Result<(), Report<StoreError>> {
+        // Given orb's thread, with the sidebar filtered to another project.
+        let (store, id) = store_with_thread("aa")?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.filter = Some(web);
+
+        // When polls see its turn run and then end.
+        end_turn(&mut actor, &host).await;
+
+        // Then its notice is queued anyway.
+        let notified: Vec<ThreadId> = notices_of(&state)
+            .into_iter()
+            .map(|notice| notice.thread)
+            .collect();
+        assert_eq!(notified, [id], "the filter shouldn't hide notices");
         Ok(())
     }
 }
