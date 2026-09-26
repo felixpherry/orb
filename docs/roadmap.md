@@ -473,7 +473,7 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 - `(branches) Switching branch is refused while any thread in the same directory is working or waiting.`
 - ``(trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>`.``
 
-### M7
+### M7 (written)
 
 **Amend**
 - ``(keybinds) `␣n` opens the project picker; picking a project starts a Claude session in its directory.`` → ``(keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.``
