@@ -64,9 +64,9 @@ Sidebar on the left, preview (or attached Claude) on the right, mode line at the
 
 | Focus | Keys |
 |---|---|
-| Sidebar | `j`/`k` next/prev thread — preview follows instantly · `<C-l>` focus preview · `⏎` attach · `p` pin/unpin · `ss` settle/un-settle · `xx` delete · on the Settled header: `⏎` open/close, `l` open, `h` close (`h` on a settled thread in the open shelf also closes it) · `␣n` new draft · `q` quit orb |
-| Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach |
-| Picker | typing filters · `<C-j>`/`<C-k>` next/prev item (focus stays in the filter input) · `⏎` pick · `Esc` cancel |
+| Sidebar | `j`/`k` next/prev thread — preview follows instantly · `<C-l>` focus preview · `⏎` attach · `p` pin/unpin · `ss` settle/un-settle · `xx` delete · on the Settled header: `⏎` open/close, `l` open, `h` close (`h` on a settled thread in the open shelf also closes it) · `␣n` project picker (new session; M7: new draft) · `␣p` add project · `q` quit orb |
+| Preview | `j`/`k` next/prev block · `C-d`/`C-u` half page · `gg`/`G` top/bottom · `y` yank block raw text · `za`/`<Tab>` fold tool output · `<C-h>` back to sidebar · `⏎` attach · `␣p` add project |
+| Picker | typing filters · `←`/`→` move the filter cursor · `Backspace`/`<C-w>` delete a char/word · `<C-j>`/`<C-k>` or `↑`/`↓` next/prev item (focus stays in the filter input) · `<C-d>`/`<C-u>` half page · `⏎` pick · `Tab` open the highlighted directory (directory picker) · `Esc` cancel |
 | Attached | **every** key → Claude, except `<C-\>` → back to orb |
 
 - Keys not listed here are defined by the user in that milestone's `/plan`. Agents don't invent bindings.
@@ -87,6 +87,9 @@ Sidebar on the left, preview (or attached Claude) on the right, mode line at the
 - Empty filter → ordered by **recency** (most recently used first).
 - Typing → ordered by **fuzzy score**, recency breaks ties.
 - `<C-j>`/`<C-k>` move the selection (new; jinn doesn't have these).
+- **Look** (T3's command palette): a centered rounded popup; an input row with a search or folder glyph and a `Search projects...` placeholder; a section label (`Projects` / `Directories`); the selected row filled; matched characters bold + underlined; a footer of key chips (`↑ ↓` Navigate · `Enter` Select · `Esc` Close; the directory picker has `Tab` Open · `Enter` Add).
+- **`␣n`, the project picker.** Two-line rows: the monogram badge and name, then the full path, dimmed. Order is T3's: the project whose threads have the newest last activity (`last_activity_at`) first, a project with no threads by when it was added, ties by title. The filter matches name **and** path. `⏎` starts a local session in the project's directory and selects the new thread, without attaching.
+- **`␣p`, the directory picker** (T3's browse mode). Opens with `~/` typed; rows are a folder glyph and the name, sorted alphabetically ignoring case. Dot-directories are hidden unless the last part of the path starts with `.`. The last part is fuzzy-filtered. `Tab` opens the highlighted directory, and backspacing past a `/` goes up a level. `⏎` adds the highlighted directory as a project (or the typed directory when nothing is highlighted and the last part is empty); it doesn't start a session, and the new project sits first in `␣n`.
 
 ### New thread flow (drafts)
 
@@ -199,6 +202,14 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Delete | `xx` runs `claude rm` on any thread, running or not, then deletes orb's row; the transcript stays. On failure the thread stays and the reason shows; a `✗` gone thread skips `rm` | Refusing while working — the confirm already guards it. Soft delete (`deleted_at`) — nothing would read it. Always removing the row — a live session would keep running unseen, because orb lists only sessions it started. |
 | Branch source | The latest non-empty `gitBranch` on transcript `user` lines, found by the existing title scan and stored in `threads.branch` | Reading `.git/HEAD` each poll — worktree/detached-HEAD parsing that M6 owns. |
 | Visits | Selecting a thread stamps `last_visited_at` (`Command::Visit`), and each poll marks the selected thread seen; unseen = `last_activity_at > last_visited_at` | Stamping only on polls — `✓` would linger up to 5 s on a selected thread, and a short visit wouldn't count. |
+| Picker port scope | The list picker only, in `orb-domain` (state, `feat/picker/`) and `orb-tui` (widget), no new crate; the item is an enum (`PickerItem::Project`/`Directory`); fuzzy scoring via `fuzzy-matcher` 0.3 (SkimMatcherV2, multi-term AND, ties by list order) | The whole jinn crate (tree picker, preview widget, `PickerOps`) as `orb-picker`. A generic `T: PickerItem` with `render_row` — orb-domain has no ratatui, and the renderer can match one enum. |
+| Picker key routing | A plain `keymap::picker_route(key)` match under `Focus::Picker`, like the attached fast path | A which-key scope with `catch_all` — Space is the leader and could be swallowed, and the picker has no sequences and no popup. |
+| Project order | T3's default `updated_at` rule: the newest `last_activity_at` among the project's threads, else the project's `created_at`, ties by title then id. orb has no user-message times, so it uses the last turn end it saw (else the thread's creation). No new column | A `last_used_at` column — more code, and not T3's rule. |
+| Adding projects | Only from the `␣p` directory picker (T3's browse mode): prefilled `~/`, `Tab` opens, `⏎` adds without starting a session. No `orb [path]`, and orb doesn't register its launch directory | Registering the cwd on every launch — junk projects (`~`, wherever orb starts). `orb <path>` — a CLI surface nobody asked for once `␣p` exists. Exact-path entry only — tedious. T3's `⏎` opens / `⌘⏎` adds — `⌘` is zellij's. Add and start — `␣n` is the start path, and M7's drafts will own starting. |
+| Directory filter | Fuzzy on the last part of the path, the same matcher as `␣n`; dot-directories hidden unless that part starts with `.` | T3's prefix-only rule — `front` wouldn't find `itemku-frontend-next-v2`. |
+| Directory listing | The frontend loop runs `Command::ListDirectories(dir)` synchronously (as it does for `Yank` and `Attach`) and writes the names into `AppState.picker`, only when the directory part of the path changes | The `IntentHandler` reading the directory — it must not do I/O. A kameo actor — an async hop plus stale-reply handling for a ~1 ms `read_dir`. |
+| T3 import method | A one-off SQL statement (`ATTACH` T3's DB read-only, `INSERT … ON CONFLICT (root) DO NOTHING`) run by hand in M5's manual check | Import code that runs on every launch or once behind a flag — it's seeding, not a feature. |
+| Project removal | Deferred to the backlog project filter (T3's project-scope modal): `<C-x>` with a `No`/`Yes` confirm picker, soft remove (threads stay) | In M5's `␣n` picker — the user wants removal in the filter modal. Hard delete — refused while any thread exists, so an old Settled shelf would block it. |
 
 ## Milestones
 
@@ -251,10 +262,10 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Resolved in M4's plan: keys — `p` pin/unpin, `ss` settle/un-settle, `xx` delete, and `⏎`/`l`/`h` on the Settled header (see Keys); Active order — `max(created_at, unsettled_at)` desc, T3's keyless rule, with no drag order keys (see Decisions).
 
 ### 5. Projects & picker
-- Port `jinn-selection-widget` + `<C-j>`/`<C-k>`; recency order → fuzzy score when typing.
-- `orb [path]` registers a project; remove project.
-- One-time import of T3 projects from `~/.t3/userdata/state.sqlite` → `projection_projects` (title, workspace_root); idempotent.
-- `␣n` opens the picker and starts a local-checkout session (M7 replaces with drafts).
+- Port the list picker from `jinn-selection-widget` + `<C-j>`/`<C-k>`; recency order → fuzzy score when typing.
+- `␣n` opens the project picker and starts a local-checkout session (M7 replaces with drafts).
+- `␣p` opens the directory picker and adds a project.
+- Resolved in M5's plan: no `orb [path]` and no launch-directory registration — projects are added only from `␣p`; remove project moves to the backlog project filter; the T3 projects import is a one-off SQL statement run by hand in the manual check, not code (see Decisions).
 
 ### 6. Worktrees & branches
 - `git worktree add -b orb/<hex> ~/.orb/worktrees/<repo>/orb-<hex> <base>` from an up-to-date origin base (T3's `startFromOrigin` default).
@@ -271,7 +282,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Open questions: floating size flags for "full screen"; whether `focus-pane-id` switches tabs or needs `go-to-tab-by-id` first.
 
 ### Backlog
-PR status via `gh` + settle on merge · snooze · undo · project filter (T3's project scope) · drag reorder of pinned/active threads (T3's `pin_order_key`/`active_order_key`) · notifications · quick-reply box (hidden attach + paste) · copy mode over the attached pane · remappable keys · project favicons (`ratatui-image`, zellij 0.45 supports kitty graphics) · Claude hooks for instant state · subagent transcript expansion · full-screen zoom of the attached pane · Codex behind `SessionHost` · `:` command line · sidebar `gg`/`G` top/bottom and `<C-d>`/`<C-u>` half page · the Settled header sticks to the bottom of the sidebar while the list scrolls · one key from the attached pane straight to the sidebar (today `<C-\>` then `<C-h>`; key not chosen yet) · optimistic delete: `xx` hides the thread at once instead of after `claude rm` returns (~0.7 s), bringing it back with the reason if `rm` fails · `<C-Left>`/`<C-Right>` resize the sidebar (macOS binds these to Spaces by default) · `␣e` toggles the sidebar (clashes with M8's `␣e` nvim; pick one before binding).
+PR status via `gh` + settle on merge · snooze · undo · project filter (T3's project scope); remove a project from it with `<C-x>` and a `No`/`Yes` confirm picker (soft remove, threads stay) · drag reorder of pinned/active threads (T3's `pin_order_key`/`active_order_key`) · notifications · quick-reply box (hidden attach + paste) · copy mode over the attached pane · remappable keys · project favicons (`ratatui-image`, zellij 0.45 supports kitty graphics) · Claude hooks for instant state · subagent transcript expansion · full-screen zoom of the attached pane · Codex behind `SessionHost` · `:` command line · sidebar `gg`/`G` top/bottom and `<C-d>`/`<C-u>` half page · the Settled header sticks to the bottom of the sidebar while the list scrolls · one key from the attached pane straight to the sidebar (today `<C-\>` then `<C-h>`; key not chosen yet) · optimistic delete: `xx` hides the thread at once instead of after `claude rm` returns (~0.7 s), bringing it back with the reason if `rm` fails · `<C-Left>`/`<C-Right>` resize the sidebar (macOS binds these to Spaces by default) · `␣e` toggles the sidebar (clashes with M8's `␣e` nvim; pick one before binding).
 
 ## Risks
 
@@ -310,14 +321,15 @@ PR status via `gh` + settle on merge · snooze · undo · project filter (T3's p
 | 13 | 4 | New prompt in a settled thread | Moves to Active |
 | 14 | 4 | Manually un-settled, idle 3 days | Not auto-settled until activity |
 | 15 | 5 | Picker, empty filter | Recency order; `<C-j>`/`<C-k>` move selection |
-| 16 | 5 | Picker, typing | Fuzzy-score order; recency tie-break |
-| 17 | 5 | T3 import twice | Projects appear once |
-| 18 | 6 | New worktree thread | `~/.orb/worktrees/<repo>/orb-<hex>` on `orb/<hex>` from origin base |
-| 19 | 6 | Branch switch while running | Refused with reason |
-| 20 | 7 | Draft in a used project | Prefilled with that project's last settings |
-| 21 | 7 | Draft in a new project | Last model + permission; local; default branch |
-| 22 | 7 | Quit with a draft | Draft restored |
-| 23 | 8 | `␣g` twice on one thread | Second press focuses the existing pane |
+| 16 | 5 | Picker, typing | Fuzzy score over name + path; recency tie-break |
+| 17 | 5 | T3 import SQL run twice (manual) | Projects appear once |
+| 18 | 5 | `␣p`, `Tab` into `~/dev`, `⏎` on a repo | Added; first in `␣n` |
+| 19 | 6 | New worktree thread | `~/.orb/worktrees/<repo>/orb-<hex>` on `orb/<hex>` from origin base |
+| 20 | 6 | Branch switch while running | Refused with reason |
+| 21 | 7 | Draft in a used project | Prefilled with that project's last settings |
+| 22 | 7 | Draft in a new project | Last model + permission; local; default branch |
+| 23 | 7 | Quit with a draft | Draft restored |
+| 24 | 8 | `␣g` twice on one thread | Second press focuses the existing pane |
 
 ## Record updates
 
@@ -395,7 +407,16 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 
 ### M5
 
-- (picker) The picker is ported from jinn's `jinn-selection-widget`; it lists by recency until filter text is typed, then by fuzzy score, and `<C-j>`/`<C-k>` move the selection.
+**Amend**
+- ``(keybinds) `␣n` starts a Claude session in orb's working directory.`` → ``(keybinds) `␣n` opens the project picker; picking a project starts a Claude session in its directory.``
+
+**Add**
+- ``(picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order.``
+- `(projects) The project picker lists projects by their threads' latest activity, else when they were added, until filter text is typed.`
+- `(projects) The project picker filters on each project's name and path.`
+- ``(projects) Projects are added only from the `␣p` directory picker.``
+- ``(keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, `<C-d>`/`<C-u>` move half a page, `⏎` picks, and `Esc` cancels.``
+- ``(keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.``
 
 ### M6
 
