@@ -14,6 +14,14 @@ pub enum Intent {
     SelectNext,
     /// Move the sidebar's cursor to the row above.
     SelectPrev,
+    /// Move the sidebar's cursor to the first row.
+    SelectFirst,
+    /// Move the sidebar's cursor to the last row.
+    SelectLast,
+    /// Move the sidebar's cursor down half its visible height.
+    SelectHalfPageDown,
+    /// Move the sidebar's cursor up half its visible height.
+    SelectHalfPageUp,
     /// Move the keys to the selected thread's preview.
     FocusPreview,
     /// Move the keys to the sidebar.
@@ -104,10 +112,12 @@ impl fmt::Display for Intent {
             Self::NewSession => "new session",
             Self::NextBlock => "next block",
             Self::PrevBlock => "previous block",
-            Self::HalfPageDown | Self::PickerHalfPageDown => "half page down",
-            Self::HalfPageUp | Self::PickerHalfPageUp => "half page up",
-            Self::Top => "top",
-            Self::Bottom => "bottom",
+            Self::HalfPageDown | Self::PickerHalfPageDown | Self::SelectHalfPageDown => {
+                "half page down"
+            }
+            Self::HalfPageUp | Self::PickerHalfPageUp | Self::SelectHalfPageUp => "half page up",
+            Self::Top | Self::SelectFirst => "top",
+            Self::Bottom | Self::SelectLast => "bottom",
             Self::ToggleFold => "fold",
             Self::Yank => "yank",
             Self::TogglePin => "pin",

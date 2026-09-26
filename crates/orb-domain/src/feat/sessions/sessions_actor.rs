@@ -38,7 +38,8 @@
 //! un-settles its thread, and a thread idle for three days settles itself
 //! unless it is pinned, was just un-settled, or orb is attached to it. A turn
 //! that ends while the user is on another thread shows as unseen until they
-//! select it.
+//! select it. A thread being deleted is hidden from the sidebar until its
+//! session is removed; if the removal fails, it shows again.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -1372,15 +1373,23 @@ impl SessionsActor {
 
     /// Removes a thread's session, then forgets the thread. A session Claude
     /// no longer knows isn't removed first. If the removal fails, the thread
-    /// stays and the reason shows.
+    /// stays, shown again, and the reason shows. However it ends, the thread
+    /// is no longer hidden as being deleted.
     async fn delete(&mut self, id: ThreadId) {
         let (Some(short_id), Some(status)) = (self.short_id(id), self.status(id)) else {
+            self.state.write().sessions.deleting.remove(&id);
+            (self.wake)();
             return;
         };
         if status != ThreadStatus::Gone
             && let Err(report) = self.services.session_host.remove(&short_id).await
         {
-            self.fail(&report);
+            {
+                let mut app = self.state.write();
+                app.sessions.deleting.remove(&id);
+                app.sessions.error = Some(reason(&report));
+            }
+            (self.wake)();
             return;
         }
         let deleted = self.store.delete_thread(id);
@@ -1391,6 +1400,7 @@ impl SessionsActor {
             for project in &mut sessions.projects {
                 project.threads.retain(|thread| thread.id != id);
             }
+            sessions.deleting.remove(&id);
             if deleted.is_err() {
                 sessions.error = Some(SAVE_FAILED.to_owned());
             }
@@ -5138,6 +5148,105 @@ mod tests {
         assert!(
             shown(&state, id).is_none(),
             "a gone thread should be deleted directly"
+        );
+        Ok(())
+    }
+
+    /// Hides thread `id` as being deleted, as the intent handler does.
+    fn hide(state: &State, id: ThreadId) {
+        state.write().sessions.deleting.insert(id);
+    }
+
+    /// Whether any thread is still hidden as being deleted.
+    fn any_hidden(state: &State) -> bool {
+        !state.read().sessions.deleting.is_empty()
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_unhides_the_thread() -> Result<(), Report<StoreError>> {
+        // Given an idle thread hidden as being deleted.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        hide(&state, id);
+
+        // When deleting it.
+        actor.delete(id).await;
+
+        // Then nothing is left hidden.
+        assert!(
+            !any_hidden(&state),
+            "a deleted thread shouldn't stay marked as being deleted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_remove_shows_the_thread_again() -> Result<(), Report<StoreError>> {
+        // Given an idle thread hidden as being deleted, whose session can't
+        // be removed.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        hide(&state, id);
+
+        // When deleting it.
+        actor.delete(id).await;
+
+        // Then the sidebar lists it again.
+        let listed = state
+            .read()
+            .sessions
+            .sidebar()
+            .iter()
+            .any(|row| row.item() == SidebarItem::Thread(id));
+        assert!(listed, "a thread whose delete failed should come back");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_gone_thread_unhides_it() -> Result<(), Report<StoreError>> {
+        // Given a thread Claude no longer knows, hidden as being deleted.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        hide(&state, id);
+
+        // When deleting it.
+        actor.delete(id).await;
+
+        // Then nothing is left hidden.
+        assert!(
+            !any_hidden(&state),
+            "a deleted gone thread shouldn't stay marked as being deleted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_an_unknown_thread_unhides_it() -> Result<(), Report<StoreError>> {
+        // Given a thread orb doesn't know, hidden as being deleted.
+        let (store, _id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        let unknown = ThreadId(999);
+        hide(&state, unknown);
+
+        // When deleting it.
+        actor.delete(unknown).await;
+
+        // Then nothing is left hidden.
+        assert!(
+            !any_hidden(&state),
+            "a delete with nothing to delete should still unhide the thread"
         );
         Ok(())
     }

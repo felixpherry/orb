@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::feat::picker::state::PickerState;
 use crate::feat::preview::state::Preview;
 use crate::feat::sessions::state::Sessions;
+use crate::feat::sidebar::state::SidebarView;
 
 /// Which part of orb receives the user's keys. Ordered so it can key the
 /// which-key scopes.
@@ -33,6 +34,8 @@ pub struct AppState {
     pub sessions: Sessions,
     /// The selected thread's transcript preview.
     pub preview: Preview,
+    /// The sidebar's width, visibility and last layout.
+    pub sidebar: SidebarView,
     /// The open picker, if any.
     pub picker: Option<PickerState>,
     /// The user's home directory; what the directory picker's `~/` means.

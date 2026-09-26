@@ -114,6 +114,20 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         keymap
             .bind("j", Intent::SelectNext, KeyCategory::Navigation, scope)
             .bind("k", Intent::SelectPrev, KeyCategory::Navigation, scope)
+            .bind("gg", Intent::SelectFirst, KeyCategory::Navigation, scope)
+            .bind("G", Intent::SelectLast, KeyCategory::Navigation, scope)
+            .bind(
+                "<c-d>",
+                Intent::SelectHalfPageDown,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<c-u>",
+                Intent::SelectHalfPageUp,
+                KeyCategory::Navigation,
+                scope,
+            )
             .bind(
                 "<c-l>",
                 Intent::FocusPreview,
@@ -538,6 +552,36 @@ mod tests {
             intent.as_ref(),
             Some(&expected),
             "the key for {expected} in the sidebar"
+        );
+    }
+
+    #[rstest::rstest]
+    fn sidebar_jump_keys_map_to_their_intents(
+        #[values(Scope::Sidebar, Scope::SidebarDraft, Scope::SidebarEmpty)] scope: Scope,
+        #[values(
+            (vec![key(KeyCode::Char('g')), key(KeyCode::Char('g'))], Intent::SelectFirst),
+            (vec![KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)], Intent::SelectLast),
+            (vec![ctrl('d')], Intent::SelectHalfPageDown),
+            (vec![ctrl('u')], Intent::SelectHalfPageUp),
+        )]
+        binding: (Vec<KeyEvent>, Intent),
+    ) {
+        // Given the keymap in a sidebar scope.
+        let (pressed, expected) = binding;
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing the keys in order (Shift+G as kitty reports it).
+        let intent = pressed
+            .into_iter()
+            .map(|pressed| press(&mut keys, pressed))
+            .last()
+            .flatten();
+
+        // Then it yields its jump.
+        assert_eq!(
+            intent.as_ref(),
+            Some(&expected),
+            "the key for {expected} in {scope:?}"
         );
     }
 

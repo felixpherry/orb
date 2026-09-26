@@ -33,6 +33,7 @@ use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::preview::preview_actor::{self, PreviewActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
+use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::zellij::zellij_service::{NOT_IN_ZELLIJ, ZellijService, zellij_reason};
 use orb_domain::{Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
@@ -226,7 +227,7 @@ impl App {
                 attached.pane.resize(PaneSize::from(pane_area));
             }
             let now = SystemTime::now();
-            let mut drawn = (None, None);
+            let mut drawn = (None, SidebarLayout::default(), None);
             terminal.draw(|frame| {
                 let state = self.state.read();
                 let pane = self
@@ -250,11 +251,14 @@ impl App {
                 );
             })?;
             // Navigation scrolls by what was just drawn.
-            let (preview_layout, picker_page) = drawn;
+            let (preview_layout, sidebar_layout, picker_page) = drawn;
             if let Some(layout) = preview_layout
                 && self.state.read().preview.layout != layout
             {
                 self.state.write().preview.layout = layout;
+            }
+            if self.state.read().sidebar.layout != sidebar_layout {
+                self.state.write().sidebar.layout = sidebar_layout;
             }
             if let Some(page) = picker_page
                 && self
