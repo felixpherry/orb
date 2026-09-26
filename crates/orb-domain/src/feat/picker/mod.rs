@@ -6,3 +6,4 @@
 
 pub mod list;
 pub mod state;
+pub mod validator;

@@ -1,6 +1,13 @@
 //! The [`IntentHandler`]: the single decision point for all user input.
 
+use std::path::PathBuf;
+
 use crate::feat::pane::validator::validate_attach;
+use crate::feat::picker::list::PickerItem;
+use crate::feat::picker::state::PickerState;
+use crate::feat::picker::validator::{
+    validate_add_directory, validate_open_directory, validate_pick_project,
+};
 use crate::feat::preview::validator::{validate_toggle_fold, validate_yank};
 use crate::feat::sessions::state::{AttachTarget, SidebarItem};
 use crate::feat::sessions::validator::{
@@ -67,11 +74,99 @@ impl IntentHandler {
             }
             Intent::NewSession => match validate_new_session(state) {
                 Ok(()) => {
-                    state.sessions.starting = true;
-                    vec![Command::CreateSession]
+                    let items = state
+                        .sessions
+                        .projects_by_recency()
+                        .into_iter()
+                        .map(|project| PickerItem::Project {
+                            id: project.id,
+                            title: project.title.clone(),
+                            root: project.root.clone(),
+                        })
+                        .collect();
+                    state.picker = Some(PickerState::projects(items, state.focus));
+                    state.focus = Focus::Picker;
+                    vec![]
                 }
                 Err(_) => vec![],
             },
+            Intent::AddProject => {
+                let (picker, dir) = PickerState::directories(state.home.clone(), state.focus);
+                state.picker = Some(picker);
+                state.focus = Focus::Picker;
+                vec![Command::ListDirectories(dir)]
+            }
+            Intent::PickerInput(ch) => list(state.picker.as_mut().and_then(|p| p.insert(*ch))),
+            Intent::PickerBackspace => list(state.picker.as_mut().and_then(PickerState::backspace)),
+            Intent::PickerDeleteWord => {
+                list(state.picker.as_mut().and_then(PickerState::delete_word))
+            }
+            Intent::PickerCursorLeft => {
+                if let Some(picker) = &mut state.picker {
+                    picker.cursor_left();
+                }
+                vec![]
+            }
+            Intent::PickerCursorRight => {
+                if let Some(picker) = &mut state.picker {
+                    picker.cursor_right();
+                }
+                vec![]
+            }
+            Intent::PickerNext => {
+                if let Some(picker) = &mut state.picker {
+                    picker.next();
+                }
+                vec![]
+            }
+            Intent::PickerPrev => {
+                if let Some(picker) = &mut state.picker {
+                    picker.prev();
+                }
+                vec![]
+            }
+            Intent::PickerHalfPageDown => {
+                if let Some(picker) = &mut state.picker {
+                    picker.half_page_down();
+                }
+                vec![]
+            }
+            Intent::PickerHalfPageUp => {
+                if let Some(picker) = &mut state.picker {
+                    picker.half_page_up();
+                }
+                vec![]
+            }
+            Intent::PickerOpen => match validate_open_directory(state) {
+                Ok(()) => list(state.picker.as_mut().and_then(PickerState::open_directory)),
+                Err(_) => vec![],
+            },
+            Intent::PickerConfirm => {
+                match (validate_pick_project(state), validate_add_directory(state)) {
+                    (Ok(()), _) => {
+                        match close_picker(state).as_ref().and_then(PickerState::selected) {
+                            Some(PickerItem::Project { id, root, .. }) => {
+                                state.sessions.starting = true;
+                                vec![Command::CreateSession {
+                                    project: *id,
+                                    root: root.clone(),
+                                }]
+                            }
+                            _ => vec![],
+                        }
+                    }
+                    (_, Ok(())) => close_picker(state)
+                        .and_then(|picker| picker.directory_to_add())
+                        .map(Command::AddProject)
+                        .into_iter()
+                        .collect(),
+                    _ => vec![],
+                }
+            }
+            Intent::PickerCancel => {
+                close_picker(state);
+                vec![]
+            }
             Intent::NextBlock => {
                 state.preview.next_block();
                 vec![]
@@ -157,6 +252,18 @@ impl IntentHandler {
     }
 }
 
+/// Asks the frontend to list `dir` into the directory picker, if there is one.
+fn list(dir: Option<PathBuf>) -> Vec<Command> {
+    dir.map(Command::ListDirectories).into_iter().collect()
+}
+
+/// Closes the picker and gives the keys back to where it was opened from.
+fn close_picker(state: &mut AppState) -> Option<PickerState> {
+    let picker = state.picker.take()?;
+    state.focus = picker.return_to();
+    Some(picker)
+}
+
 /// `commands`, then a visit to the thread under the cursor, if any.
 fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
     commands.extend(state.sessions.selected_id().map(Command::Visit));
@@ -165,8 +272,11 @@ fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::{Duration, SystemTime};
 
+    use crate::feat::picker::list::PickerItem;
+    use crate::feat::picker::state::{PickerKind, PickerState};
     use crate::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
     use crate::feat::preview::state::{Preview, PreviewLayout};
     use crate::feat::sessions::state::{
@@ -213,6 +323,7 @@ mod tests {
                     id: ProjectId(1),
                     title: "work".into(),
                     root: "/work".into(),
+                    created_at: SystemTime::UNIX_EPOCH,
                     threads,
                 }],
                 cursor: Some(cursor),
@@ -220,6 +331,55 @@ mod tests {
             },
             ..AppState::default()
         }
+    }
+
+    /// One project per title, ids from 1, rooted at `/<title>`, with no
+    /// threads, all added at the same time.
+    fn with_projects(titles: &[&str]) -> AppState {
+        AppState {
+            sessions: Sessions {
+                projects: (1..)
+                    .zip(titles)
+                    .map(|(id, title)| Project {
+                        id: ProjectId(id),
+                        title: (*title).to_owned(),
+                        root: format!("/{title}").into(),
+                        created_at: SystemTime::UNIX_EPOCH,
+                        threads: vec![],
+                    })
+                    .collect(),
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        }
+    }
+
+    const HOME: &str = "/home/me";
+
+    /// Projects alpha (1, `/alpha`) and beta (2, `/beta`), with the project
+    /// picker opened from `from`.
+    fn picking(from: Focus) -> AppState {
+        let mut state = AppState {
+            focus: from,
+            ..with_projects(&["alpha", "beta"])
+        };
+        IntentHandler::handle(&Intent::NewSession, &mut state);
+        state
+    }
+
+    /// The directory picker opened from the sidebar at `~/`, which lists
+    /// `names`.
+    fn browsing(names: &[&str]) -> AppState {
+        let mut state = AppState {
+            home: HOME.into(),
+            ..AppState::default()
+        };
+        IntentHandler::handle(&Intent::AddProject, &mut state);
+        if let Some(picker) = &mut state.picker {
+            let names = names.iter().map(|name| (*name).to_owned()).collect();
+            picker.show_directories(Path::new(HOME), names);
+        }
+        state
     }
 
     /// One project holding `threads`, with thread `selected` selected.
@@ -442,51 +602,225 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn new_session_sets_starting() {
-        // Given no create in flight.
-        let mut state = AppState::default();
+    fn new_session_opens_the_project_picker() {
+        // Given projects alpha and beta, and no create in flight.
+        let mut state = with_projects(&["alpha", "beta"]);
 
         // When handling NewSession.
         IntentHandler::handle(&Intent::NewSession, &mut state);
 
-        // Then a create is in flight.
-        assert!(state.sessions.starting, "NewSession should set starting");
-    }
-
-    #[rstest::rstest]
-    fn new_session_returns_create_session() {
-        // Given no create in flight.
-        let mut state = AppState::default();
-
-        // When handling NewSession.
-        let commands = IntentHandler::handle(&Intent::NewSession, &mut state);
-
-        // Then the sessions actor is asked to create one.
+        // Then a project picker is open and takes the keys.
         assert_eq!(
-            commands,
-            vec![Command::CreateSession],
-            "NewSession should return CreateSession"
+            (state.focus, state.picker.as_ref().map(PickerState::kind)),
+            (Focus::Picker, Some(&PickerKind::Projects)),
+            "NewSession should open the project picker"
         );
     }
 
     #[rstest::rstest]
-    fn new_session_while_starting_returns_no_commands() {
+    fn new_session_returns_no_commands() {
+        // Given projects alpha and beta, and no create in flight.
+        let mut state = with_projects(&["alpha", "beta"]);
+
+        // When handling NewSession.
+        let commands = IntentHandler::handle(&Intent::NewSession, &mut state);
+
+        // Then nothing is created until a project is picked.
+        assert!(commands.is_empty(), "NewSession should return no commands");
+    }
+
+    #[rstest::rstest]
+    fn new_session_does_not_set_starting() {
+        // Given projects alpha and beta, and no create in flight.
+        let mut state = with_projects(&["alpha", "beta"]);
+
+        // When handling NewSession.
+        IntentHandler::handle(&Intent::NewSession, &mut state);
+
+        // Then no create is in flight yet.
+        assert!(
+            !state.sessions.starting,
+            "NewSession should not set starting"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_session_while_starting_opens_no_picker() {
         // Given a create already in flight.
         let mut state = AppState {
             sessions: Sessions {
                 starting: true,
-                ..Sessions::default()
+                ..with_projects(&["alpha"]).sessions
             },
             ..AppState::default()
         };
 
         // When handling NewSession again.
-        let commands = IntentHandler::handle(&Intent::NewSession, &mut state);
+        IntentHandler::handle(&Intent::NewSession, &mut state);
 
-        // Then no second create is requested.
+        // Then no picker opens.
         assert!(
-            commands.is_empty(),
-            "NewSession while starting should return no commands"
+            state.picker.is_none(),
+            "NewSession while starting should not open the picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_project_opens_the_directory_picker_at_home() {
+        // Given no picker open.
+        let mut state = AppState {
+            home: HOME.into(),
+            ..AppState::default()
+        };
+
+        // When handling AddProject.
+        IntentHandler::handle(&Intent::AddProject, &mut state);
+
+        // Then a directory picker at `~/` is open and takes the keys.
+        assert_eq!(
+            (state.focus, state.picker.as_ref().map(PickerState::kind)),
+            (
+                Focus::Picker,
+                Some(&PickerKind::Directories {
+                    listed: Some("~/".into())
+                })
+            ),
+            "AddProject should open the directory picker at ~/"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_project_returns_list_directories_for_home() {
+        // Given no picker open.
+        let mut state = AppState {
+            home: HOME.into(),
+            ..AppState::default()
+        };
+
+        // When handling AddProject.
+        let commands = IntentHandler::handle(&Intent::AddProject, &mut state);
+
+        // Then the loop is asked to list the home directory.
+        assert_eq!(
+            commands,
+            vec![Command::ListDirectories(HOME.into())],
+            "AddProject should list the home directory"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_confirm_on_a_project_returns_create_session() {
+        // Given the project picker with alpha highlighted.
+        let mut state = picking(Focus::Sidebar);
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to start a session in alpha.
+        assert_eq!(
+            commands,
+            vec![Command::CreateSession {
+                project: ProjectId(1),
+                root: "/alpha".into(),
+            }],
+            "PickerConfirm should create a session in the highlighted project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_confirm_on_a_project_sets_starting() {
+        // Given the project picker with alpha highlighted.
+        let mut state = picking(Focus::Sidebar);
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then a create is in flight.
+        assert!(
+            state.sessions.starting,
+            "PickerConfirm on a project should set starting"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_confirm_closes_the_picker_and_restores_its_focus() {
+        // Given the project picker opened from the preview.
+        let mut state = picking(Focus::Preview);
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the picker is closed and the keys are back on the preview.
+        assert_eq!(
+            (state.focus, state.picker.is_none()),
+            (Focus::Preview, true),
+            "PickerConfirm should close the picker and return to the preview"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_confirm_in_the_directory_picker_returns_add_project() {
+        // Given the directory picker at `~/` with `dev` highlighted.
+        let mut state = browsing(&["dev"]);
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to add `~/dev`.
+        assert_eq!(
+            commands,
+            vec![Command::AddProject(Path::new(HOME).join("dev"))],
+            "PickerConfirm should add the highlighted directory"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_open_returns_list_directories_for_the_child() {
+        // Given the directory picker at `~/` with `dev` highlighted.
+        let mut state = browsing(&["dev"]);
+
+        // When handling PickerOpen.
+        let commands = IntentHandler::handle(&Intent::PickerOpen, &mut state);
+
+        // Then the loop is asked to list `~/dev`.
+        assert_eq!(
+            commands,
+            vec![Command::ListDirectories(Path::new(HOME).join("dev"))],
+            "PickerOpen should list the highlighted directory"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_cancel_closes_the_picker_and_restores_its_focus() {
+        // Given the project picker opened from the preview.
+        let mut state = picking(Focus::Preview);
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the picker is closed and the keys are back on the preview.
+        assert_eq!(
+            (state.focus, state.picker.is_none()),
+            (Focus::Preview, true),
+            "PickerCancel should close the picker and return to the preview"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_input_filters_the_project_picker() {
+        // Given the project picker with alpha highlighted.
+        let mut state = picking(Focus::Sidebar);
+
+        // When typing `b`.
+        IntentHandler::handle(&Intent::PickerInput('b'), &mut state);
+
+        // Then only beta matches, so it's highlighted.
+        assert!(
+            matches!(
+                state.picker.as_ref().and_then(PickerState::selected),
+                Some(PickerItem::Project { title, .. }) if title == "beta"
+            ),
+            "typing b should narrow the picker to beta"
         );
     }
 

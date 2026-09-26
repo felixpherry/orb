@@ -1,10 +1,12 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
-//! has updated [`AppState`](crate::AppState). Pane commands and `Yank` are
-//! carried out by the frontend loop; session commands (create, refresh, pin,
-//! settle, delete, visit) go to the sessions actor; `ShowPreview` goes to the
-//! preview actor.
+//! has updated [`AppState`](crate::AppState). Pane commands, `Yank` and
+//! `ListDirectories` are carried out by the frontend loop; session commands
+//! (create, add project, refresh, pin, settle, delete, visit) go to the
+//! sessions actor; `ShowPreview` goes to the preview actor.
 
-use crate::feat::sessions::state::{AttachTarget, ThreadId};
+use std::path::PathBuf;
+
+use crate::feat::sessions::state::{AttachTarget, ProjectId, ThreadId};
 
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,8 +15,12 @@ pub enum Command {
     Attach(AttachTarget),
     /// Stop sending input to the terminal pane.
     Detach,
-    /// Start a new Claude session.
-    CreateSession,
+    /// Start a new Claude session in the project's directory.
+    CreateSession { project: ProjectId, root: PathBuf },
+    /// Add the directory as a project.
+    AddProject(PathBuf),
+    /// List the directory's subdirectories into the open directory picker.
+    ListDirectories(PathBuf),
     /// Poll the sessions' statuses now instead of waiting for the next tick.
     RefreshSessions,
     /// Show the selected thread's transcript now instead of waiting for the

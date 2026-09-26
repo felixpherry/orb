@@ -256,6 +256,7 @@ impl App {
                         }
                         keymap::press(&mut self.keys, key)
                     }
+                    Focus::Picker => None,
                 };
                 if let Some(intent) = intent {
                     let commands = IntentHandler::handle(&intent, &mut self.state.write());
@@ -352,10 +353,11 @@ impl App {
                 }
                 self.leave_pane(out)
             }
-            Command::CreateSession => {
+            Command::CreateSession { .. } => {
                 let _ = self.sessions.tell(sessions_actor::CreateSession).try_send();
                 Ok(())
             }
+            Command::AddProject(_) | Command::ListDirectories(_) => Ok(()),
             Command::RefreshSessions => {
                 let _ = self
                     .sessions

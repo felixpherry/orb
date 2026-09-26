@@ -1,6 +1,9 @@
 //! Shared application state: written by the [`IntentHandler`](crate::IntentHandler)
 //! and the actors, read by the renderer.
 
+use std::path::PathBuf;
+
+use crate::feat::picker::state::PickerState;
 use crate::feat::preview::state::Preview;
 use crate::feat::sessions::state::Sessions;
 
@@ -15,6 +18,8 @@ pub enum Focus {
     Preview,
     /// Keys go to the attached Claude session.
     Attached,
+    /// Keys edit the open picker's filter and move its selection.
+    Picker,
 }
 
 /// Everything the frontend needs to draw a frame and decide whether to exit.
@@ -28,4 +33,8 @@ pub struct AppState {
     pub sessions: Sessions,
     /// The selected thread's transcript preview.
     pub preview: Preview,
+    /// The open picker, if any.
+    pub picker: Option<PickerState>,
+    /// The user's home directory; what the directory picker's `~/` means.
+    pub home: PathBuf,
 }
