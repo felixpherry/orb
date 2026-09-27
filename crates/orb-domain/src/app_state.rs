@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::feat::picker::state::PickerState;
 use crate::feat::preview::state::Preview;
 use crate::feat::sessions::state::{Sessions, ThreadId};
-use crate::feat::sidebar::state::SidebarView;
+use crate::feat::sidebar::state::{Rename, SidebarView};
 
 /// Which part of orb receives the user's keys. Ordered so it can key the
 /// which-key scopes.
@@ -49,6 +49,9 @@ pub struct AppState {
     pub pane_shown: Option<ThreadId>,
     /// The open picker, if any.
     pub picker: Option<PickerState>,
+    /// The open rename box, if any. Written by the intent handler, and
+    /// cleared by the frontend when it gives the keys to a pane.
+    pub rename: Option<Rename>,
     /// The user's home directory; what the directory picker's `~/` means.
     pub home: PathBuf,
 }

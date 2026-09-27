@@ -22,9 +22,10 @@ use crate::feat::sessions::validator::{
     validate_close_shelf, validate_delete, validate_open_shelf, validate_pick_setting,
     validate_start_draft, validate_toggle_pin, validate_toggle_settle,
 };
-use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_resize};
+use crate::feat::sidebar::state::Rename;
+use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
 use crate::feat::zellij::validator::validate_open_tool;
-use crate::{AppState, Command, Focus, Intent};
+use crate::{AppState, Command, Focus, Intent, TextInput};
 
 /// Applies each [`Intent`] to [`AppState`] in one match block.
 pub struct IntentHandler;
@@ -208,6 +209,23 @@ impl IntentHandler {
                 }
                 _ => vec![],
             },
+            Intent::PickerInput(_)
+            | Intent::PickerBackspace
+            | Intent::PickerDeleteWord
+            | Intent::PickerCursorLeft
+            | Intent::PickerCursorRight
+            | Intent::PickerNext
+            | Intent::PickerPrev
+            | Intent::PickerHalfPageDown
+            | Intent::PickerHalfPageUp
+            | Intent::PickerConfirm
+            | Intent::PickerOpen
+            | Intent::PickerCancel
+            | Intent::PickerRemove
+                if state.focus == Focus::Rename =>
+            {
+                rename_key(intent, state)
+            }
             Intent::PickerInput(ch) => list(state.picker.as_mut().and_then(|p| p.insert(*ch))),
             Intent::PickerBackspace => list(state.picker.as_mut().and_then(PickerState::backspace)),
             Intent::PickerDeleteWord => {
@@ -499,6 +517,18 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
+            Intent::Rename => match (validate_rename(state), state.sessions.selected_thread()) {
+                (Ok(()), Some(thread)) => {
+                    let rename = Rename {
+                        thread: thread.id,
+                        input: TextInput::new(thread.title.as_deref().unwrap_or_default()),
+                    };
+                    state.rename = Some(rename);
+                    state.focus = Focus::Rename;
+                    vec![]
+                }
+                _ => vec![],
+            },
             Intent::ToggleSettle => {
                 match (
                     validate_toggle_settle(state),
@@ -836,6 +866,40 @@ fn focus_right(state: &mut AppState) -> Vec<Command> {
     }
 }
 
+/// What a picker key does in the rename box: edit the name, save it (a blank
+/// name goes back to Claude's title) or cancel, both giving the sidebar back
+/// the keys. The picker's other keys do nothing.
+fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
+    match (intent, &mut state.rename) {
+        (Intent::PickerInput(ch), Some(rename)) => rename.input.insert(*ch),
+        (Intent::PickerBackspace, Some(rename)) => rename.input.backspace(),
+        (Intent::PickerDeleteWord, Some(rename)) => rename.input.delete_word(),
+        (Intent::PickerCursorLeft, Some(rename)) => rename.input.cursor_left(),
+        (Intent::PickerCursorRight, Some(rename)) => rename.input.cursor_right(),
+        (Intent::PickerConfirm, _) => {
+            state.focus = Focus::Sidebar;
+            return state
+                .rename
+                .take()
+                .map(|rename| {
+                    let title = rename.input.text().trim();
+                    Command::RenameThread {
+                        thread: rename.thread,
+                        title: (!title.is_empty()).then(|| title.to_owned()),
+                    }
+                })
+                .into_iter()
+                .collect();
+        }
+        (Intent::PickerCancel, _) => {
+            state.rename = None;
+            state.focus = Focus::Sidebar;
+        }
+        _ => {}
+    }
+    vec![]
+}
+
 /// `commands`, then a visit to the thread under the cursor, if any.
 fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
     commands.extend(state.sessions.selected_id().map(Command::Visit));
@@ -857,9 +921,9 @@ mod tests {
         AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, SidebarRow,
         Thread, ThreadId, ThreadStatus,
     };
-    use crate::feat::sidebar::state::SidebarView;
+    use crate::feat::sidebar::state::{Rename, SidebarView};
     use crate::feat::zellij::zellij_service::Tool;
-    use crate::{AppState, Command, Focus, Intent, IntentHandler};
+    use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
 
     fn thread(id: i64, status: ThreadStatus) -> Thread {
         Thread {
@@ -3881,6 +3945,190 @@ mod tests {
                 vec![Command::CreateDraft(ProjectId(1)), Command::ShowPreview],
             ),
             "a project inside the filter leaves it alone"
+        );
+    }
+
+    /// Thread 1, titled `title`, selected in the sidebar.
+    fn titled(title: Option<&str>) -> AppState {
+        state_with(
+            vec![Thread {
+                title: title.map(str::to_owned),
+                ..thread(1, ThreadStatus::Idle)
+            }],
+            1,
+        )
+    }
+
+    /// Thread 1 selected, with the rename box open on it holding `text`.
+    fn renaming(text: &str) -> AppState {
+        AppState {
+            focus: Focus::Rename,
+            rename: Some(Rename {
+                thread: ThreadId(1),
+                input: TextInput::new(text),
+            }),
+            ..titled(Some("Fix the sidebar"))
+        }
+    }
+
+    /// The text in the open rename box, if it's open.
+    fn rename_text(state: &AppState) -> Option<&str> {
+        state.rename.as_ref().map(|rename| rename.input.text())
+    }
+
+    #[rstest::rstest]
+    fn rename_opens_the_box_filled_with_the_threads_title() {
+        // Given a selected thread titled "Fix the sidebar".
+        let mut state = titled(Some("Fix the sidebar"));
+
+        // When handling Rename.
+        IntentHandler::handle(&Intent::Rename, &mut state);
+
+        // Then the rename box holds its title.
+        assert_eq!(
+            rename_text(&state),
+            Some("Fix the sidebar"),
+            "the rename box should start from the thread's title"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_on_an_untitled_thread_opens_an_empty_box() {
+        // Given a selected thread with no title yet.
+        let mut state = titled(None);
+
+        // When handling Rename.
+        IntentHandler::handle(&Intent::Rename, &mut state);
+
+        // Then the rename box is empty, not "New thread".
+        assert_eq!(
+            rename_text(&state),
+            Some(""),
+            "an untitled thread's rename box should start empty"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_moves_the_keys_to_the_rename_box() {
+        // Given a selected thread with the sidebar focused.
+        let mut state = titled(Some("Fix the sidebar"));
+
+        // When handling Rename.
+        IntentHandler::handle(&Intent::Rename, &mut state);
+
+        // Then the keys go to the rename box.
+        assert_eq!(state.focus, Focus::Rename, "Rename should focus the box");
+    }
+
+    #[rstest::rstest]
+    fn rename_on_a_draft_opens_nothing() {
+        // Given the cursor on a draft.
+        let mut state = state_at(vec![], SidebarItem::Draft(ProjectId(1)));
+
+        // When handling Rename.
+        IntentHandler::handle(&Intent::Rename, &mut state);
+
+        // Then no rename box opens.
+        assert!(state.rename.is_none(), "a draft can't be renamed");
+    }
+
+    #[rstest::rstest]
+    fn typing_in_the_rename_box_edits_the_name() {
+        // Given the rename box holding "Fix".
+        let mut state = renaming("Fix");
+
+        // When typing `!`.
+        IntentHandler::handle(&Intent::PickerInput('!'), &mut state);
+
+        // Then the name is "Fix!".
+        assert_eq!(
+            rename_text(&state),
+            Some("Fix!"),
+            "typing should edit the rename box"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_confirm_returns_rename_thread_with_the_trimmed_text() {
+        // Given the rename box holding " Sidebar search ".
+        let mut state = renaming(" Sidebar search ");
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the thread is renamed to the trimmed text.
+        assert_eq!(
+            commands,
+            vec![Command::RenameThread {
+                thread: ThreadId(1),
+                title: Some("Sidebar search".to_owned()),
+            }],
+            "⏎ should rename the thread"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::empty("")]
+    #[case::whitespace("   ")]
+    fn blank_rename_confirm_returns_rename_thread_with_no_title(#[case] text: &str) {
+        // Given the rename box holding nothing but whitespace.
+        let mut state = renaming(text);
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then orb's name is cleared.
+        assert_eq!(
+            commands,
+            vec![Command::RenameThread {
+                thread: ThreadId(1),
+                title: None,
+            }],
+            "a blank ⏎ should go back to Claude's title"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_confirm_gives_the_sidebar_back_the_keys() {
+        // Given the rename box open.
+        let mut state = renaming("Sidebar search");
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the box is closed and the sidebar has the keys.
+        assert_eq!(
+            (state.focus, state.rename.is_none()),
+            (Focus::Sidebar, true),
+            "⏎ should close the rename box"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_cancel_returns_no_command() {
+        // Given the rename box open.
+        let mut state = renaming("Sidebar search");
+
+        // When handling PickerCancel.
+        let commands = IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then nothing is renamed.
+        assert!(commands.is_empty(), "Esc shouldn't rename: {commands:?}");
+    }
+
+    #[rstest::rstest]
+    fn rename_cancel_gives_the_sidebar_back_the_keys() {
+        // Given the rename box open.
+        let mut state = renaming("Sidebar search");
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the box is closed and the sidebar has the keys.
+        assert_eq!(
+            (state.focus, state.rename.is_none()),
+            (Focus::Sidebar, true),
+            "Esc should close the rename box"
         );
     }
 }

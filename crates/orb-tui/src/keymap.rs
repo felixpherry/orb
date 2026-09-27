@@ -5,12 +5,14 @@
 //! scope is the focus and what the sidebar cursor is on; `<Space>` is the
 //! leader and shows a popup. A key that does nothing for the selection isn't
 //! bound there (the preview's block keys on a draft, `␣m`/`␣a` on a thread,
-//! `␣w`/`␣b` and the tool keys `␣t`/`␣g`/`␣v` with nothing selected), so the
+//! `p`/`ss`/`r` off a thread, `␣w`/`␣b` and the tool keys `␣t`/`␣g`/`␣v`
+//! with nothing selected), so the
 //! popups don't offer it. `<C-Right>`/`<C-Left>` resize the focused side
 //! outside which-key, which can't name them. While attached, every key goes
 //! to Claude except `<C-\>` and `<C-h>`. An open picker takes typed
 //! characters as filter text and has its own fixed keys, `<C-x>` among them
-//! for removing a project from the project filter.
+//! for removing a project from the project filter. The rename box (`r`) uses
+//! the picker's keys.
 
 use std::fmt;
 
@@ -166,6 +168,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     }
     keymap
         .bind("p", Intent::TogglePin, KeyCategory::Threads, Scope::Sidebar)
+        .bind("r", Intent::Rename, KeyCategory::Threads, Scope::Sidebar)
         .bind(
             "ss",
             Intent::ToggleSettle,
@@ -617,6 +620,7 @@ mod tests {
     #[case(key(KeyCode::Enter), Intent::Attach)]
     #[case(key(KeyCode::Char('q')), Intent::Quit)]
     #[case(key(KeyCode::Char('p')), Intent::TogglePin)]
+    #[case(key(KeyCode::Char('r')), Intent::Rename)]
     #[case(key(KeyCode::Char('l')), Intent::OpenShelf)]
     #[case(key(KeyCode::Char('h')), Intent::CloseShelf)]
     fn sidebar_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
@@ -880,11 +884,12 @@ mod tests {
     #[rstest::rstest]
     #[case(vec![key(KeyCode::Char('p'))])]
     #[case(vec![key(KeyCode::Char('s')), key(KeyCode::Char('s'))])]
-    fn pin_and_settle_are_unbound_on_a_draft_in_the_sidebar(#[case] pressed: Vec<KeyEvent>) {
+    #[case(vec![key(KeyCode::Char('r'))])]
+    fn thread_keys_are_unbound_on_a_draft_in_the_sidebar(#[case] pressed: Vec<KeyEvent>) {
         // Given the keymap in the sidebar on a draft.
         let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
 
-        // When pressing `p` or `ss`.
+        // When pressing `p`, `ss` or `r`.
         let intents: Vec<Option<Intent>> = pressed
             .into_iter()
             .map(|pressed| press(&mut keys, pressed))
@@ -895,6 +900,18 @@ mod tests {
             intents.iter().all(Option::is_none),
             "a thread key did something on a draft: {intents:?}"
         );
+    }
+
+    #[rstest::rstest]
+    fn r_is_unbound_on_the_settled_header_or_no_row() {
+        // Given the keymap in the sidebar with no thread or draft selected.
+        let mut keys = Keys::new(keymap(), Scope::SidebarEmpty);
+
+        // When pressing `r`.
+        let intent = press(&mut keys, key(KeyCode::Char('r')));
+
+        // Then nothing happens.
+        assert_eq!(intent, None, "only a thread can be renamed");
     }
 
     #[rstest::rstest]

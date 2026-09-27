@@ -2,9 +2,9 @@
 //! has updated [`AppState`](crate::AppState). Pane commands, `Yank`,
 //! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
 //! frontend loop; session commands (drafts, add or remove a project, move to
-//! another workspace, switch branch, refresh, pin, settle, delete, visit, save
-//! the sidebar's width and filter) go to the sessions actor; `ShowPreview`
-//! goes to the preview actor.
+//! another workspace, switch branch, refresh, pin, rename, settle, delete,
+//! visit, save the sidebar's width and filter) go to the sessions actor;
+//! `ShowPreview` goes to the preview actor.
 
 use std::path::PathBuf;
 
@@ -68,6 +68,12 @@ pub enum Command {
     Pin(ThreadId),
     /// Unpin the thread.
     Unpin(ThreadId),
+    /// Give the thread orb's own name, or with `None` go back to Claude's
+    /// title.
+    RenameThread {
+        thread: ThreadId,
+        title: Option<String>,
+    },
     /// Move the thread to the Settled shelf and stop its session.
     Settle(ThreadId),
     /// Bring the thread back from the Settled shelf and keep it active.
