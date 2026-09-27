@@ -16,10 +16,12 @@
 //! included, with the matched characters highlighted as in the pickers.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use orb_domain::feat::sessions::state::{
-    Draft, DraftWorkspace, NEW_THREAD, Project, Sessions, SidebarRow, Thread, ThreadStatus,
+    Draft, DraftWorkspace, NEW_THREAD, Project, Sessions, SidebarRow, Thread, ThreadId,
+    ThreadStatus,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use ratatui::buffer::Buffer;
@@ -41,9 +43,11 @@ pub(crate) struct SidebarScroll {
 /// Draws the sidebar into `area`, a blank column short of its right edge: the
 /// input box, then the list, scrolled so the cursor's row is in view. Returns
 /// the y of the selected row's first line when it's on screen, the list's
-/// layout, and the search text's cursor while there is a search.
+/// layout, and the search text's cursor while there is a search. An idle
+/// thread in `attached` shows a filled circle.
 pub(crate) fn render(
     sessions: &Sessions,
+    attached: &HashSet<ThreadId>,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -61,7 +65,7 @@ pub(crate) fn render(
         rows: list.height,
         heights: rows.iter().map(height).collect(),
     };
-    let selected_y = render_list(sessions, rows, now, list, buf, scroll);
+    let selected_y = render_list(sessions, attached, rows, now, list, buf, scroll);
     (selected_y, layout, search_cursor)
 }
 
@@ -167,6 +171,7 @@ fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
 /// screen, and returns the y of its first line when it's there.
 fn render_list(
     sessions: &Sessions,
+    attached: &HashSet<ThreadId>,
     rows: Vec<SidebarRow<'_>>,
     now: SystemTime,
     area: Rect,
@@ -202,7 +207,9 @@ fn render_list(
             }
             let ends_shelf =
                 !matches!(placed.get(index + 1), Some((SidebarRow::Settled { .. }, _)));
-            render_row(sessions, row, ends_shelf, now, row_area, &mut list);
+            render_row(
+                sessions, attached, row, ends_shelf, now, row_area, &mut list,
+            );
         }
         list
     };
@@ -252,6 +259,7 @@ fn height(row: &SidebarRow<'_>) -> u16 {
 /// the search matched them.
 fn render_row(
     sessions: &Sessions,
+    attached: &HashSet<ThreadId>,
     row: &SidebarRow<'_>,
     ends_shelf: bool,
     now: SystemTime,
@@ -264,7 +272,15 @@ fn render_row(
             render_draft(project, draft, &matched(NEW_THREAD), area, buf);
         }
         SidebarRow::Card { project, thread } => {
-            render_card(project, thread, &matched(title(thread)), now, area, buf);
+            render_card(
+                project,
+                thread,
+                attached.contains(&thread.id),
+                &matched(title(thread)),
+                now,
+                area,
+                buf,
+            );
         }
         SidebarRow::ShelfHeader { count, open } => render_shelf_header(*count, *open, area, buf),
         SidebarRow::Settled { thread, .. } => {
@@ -279,13 +295,14 @@ fn render_row(
 fn render_card(
     project: &Project,
     thread: &Thread,
+    attached: bool,
     matched: &[usize],
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
 ) {
     let [heading, place, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
-    let (glyph, word, colour) = status(thread, now);
+    let (glyph, word, colour) = status(thread, attached, now);
     let pin = if thread.pinned_at.is_some() { PIN } else { "" };
     render_split(
         Line::from(
@@ -401,7 +418,7 @@ fn render_settled(
     let guide = if ends_shelf { LAST_GUIDE } else { GUIDE };
     let (glyph, colour) = match thread.status {
         ThreadStatus::Failed | ThreadStatus::Gone => {
-            let (glyph, _, colour) = status(thread, now);
+            let (glyph, _, colour) = status(thread, false, now);
             (glyph, colour)
         }
         _ => (COMPLETED_ICON, DARK3),
@@ -420,8 +437,12 @@ fn render_settled(
 }
 
 /// A thread's status as its icon, its short word (none while idle), and
-/// their colour.
-fn status(thread: &Thread, now: SystemTime) -> (&'static str, Option<&'static str>, Color) {
+/// their colour; `attached` fills the idle circle.
+fn status(
+    thread: &Thread,
+    attached: bool,
+    now: SystemTime,
+) -> (&'static str, Option<&'static str>, Color) {
     match thread.status {
         ThreadStatus::NeedsApproval => (APPROVAL_ICON, Some("approval"), YELLOW),
         ThreadStatus::NeedsInput => (INPUT_ICON, Some("input"), MAGENTA),
@@ -430,6 +451,7 @@ fn status(thread: &Thread, now: SystemTime) -> (&'static str, Option<&'static st
         ThreadStatus::Gone => (GONE_ICON, Some("gone"), RED),
         ThreadStatus::Idle if thread.unseen => (COMPLETED_ICON, Some("done"), GREEN),
         ThreadStatus::Stopped => (STOPPED_ICON, Some("stopped"), COMMENT),
+        ThreadStatus::Idle | ThreadStatus::Unknown if attached => (ATTACHED_ICON, None, FG),
         ThreadStatus::Idle | ThreadStatus::Unknown => (IDLE_ICON, None, DARK3),
     }
 }
@@ -628,8 +650,8 @@ pub(crate) const VISUAL: Color = Color::Rgb(0x2d, 0x3f, 0x76);
 /// The tree guides, behind the lit shelf badge, and behind the mode line's
 /// branch and position blocks (`fg_gutter`).
 pub(crate) const GUTTER: Color = Color::Rgb(0x3b, 0x42, 0x61);
-/// Titles, the filtered project's name, the picker's input and rows, and
-/// the rename box's text (`fg`).
+/// Titles, the filtered project's name and an attached idle thread's
+/// circle; the picker's input and rows, and the rename box's text (`fg`).
 pub(crate) const FG: Color = Color::Rgb(0xc8, 0xd3, 0xf5);
 /// Project names, and the keys in the picker's hints (`fg_dark`).
 pub(crate) const FG_DARK: Color = Color::Rgb(0x82, 0x8b, 0xb8);
@@ -688,6 +710,8 @@ const COMPLETED_ICON: &str = "\u{f058}";
 const STOPPED_ICON: &str = "\u{f04d}";
 /// Idle, or a status orb doesn't know (`nf-fa-circle_o`).
 const IDLE_ICON: &str = "\u{f10c}";
+/// Idle while orb is attached (`nf-fa-circle`).
+const ATTACHED_ICON: &str = "\u{f111}";
 /// How long each spinner frame shows; the loop redraws this often while a
 /// thread works or a session starts.
 pub(crate) const SPINNER_FRAME: Duration = Duration::from_millis(100);
@@ -715,6 +739,7 @@ const LAST_GUIDE: &str = " └╴";
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::time::{Duration, SystemTime};
 
     use orb_domain::TextInput;
@@ -728,10 +753,10 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::{
-        APPROVAL_ICON, BG_DARK, BLUE, BLUE1, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, COMPLETED_ICON,
-        CYAN, DARK3, FAILED_ICON, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GUIDE, GUTTER, IDLE_ICON,
-        INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PENCIL, PIN, RED, STOPPED_ICON, SidebarScroll,
-        VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
+        APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT,
+        COMPLETED_ICON, CYAN, DARK3, FAILED_ICON, FG, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GUIDE,
+        GUTTER, IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PENCIL, PIN, RED, STOPPED_ICON,
+        SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
     };
 
     fn at(secs: u64) -> SystemTime {
@@ -831,6 +856,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
         let (selected_y, layout, _) = render(
             sessions,
+            &HashSet::new(),
             now,
             buf.area,
             &mut buf,
@@ -843,6 +869,30 @@ mod tests {
     /// first node takes lines 3 to 5, and its right edge is column 30.
     fn draw(sessions: &Sessions, now: SystemTime, height: u16) -> Buffer {
         render_sized(sessions, now, 32, height).0
+    }
+
+    /// Draws a 32-column sidebar `height` lines tall at `now`, with `attached`'s threads attached.
+    fn draw_attached(
+        sessions: &Sessions,
+        attached: &[i64],
+        now: SystemTime,
+        height: u16,
+    ) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, height));
+        let attached = attached
+            .iter()
+            .copied()
+            .map(ThreadId)
+            .collect::<HashSet<_>>();
+        render(
+            sessions,
+            &attached,
+            now,
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+        );
+        buf
     }
 
     /// The sidebar's lines, top to bottom.
@@ -1093,6 +1143,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
         let (_, _, cursor) = render(
             &sessions,
+            &HashSet::new(),
             at(1000),
             buf.area,
             &mut buf,
@@ -1205,20 +1256,54 @@ mod tests {
         #[case] icon: &str,
         #[case] colour: Color,
     ) {
-        // Given a thread in `status`.
+        // Given a thread in `status`, not attached.
         let sessions = sessions(vec![Thread {
             unseen,
             ..thread(1, status)
         }]);
 
         // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 8);
+        let buf = draw_attached(&sessions, &[], at(1000), 8);
 
         // Then its icon is the status's, in the status's colour.
         assert_eq!(
             glyph(&buf, 1, 3),
             Some((icon.to_owned(), colour)),
             "the icon for {status:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::idle(ThreadStatus::Idle)]
+    #[case::unknown(ThreadStatus::Unknown)]
+    fn status_icon_of_an_attached_idle_thread_is_a_filled_circle(#[case] status: ThreadStatus) {
+        // Given an attached thread in `status`.
+        let sessions = sessions(vec![thread(1, status)]);
+
+        // When rendering the sidebar.
+        let buf = draw_attached(&sessions, &[1], at(1000), 8);
+
+        // Then its icon is the filled circle, in the foreground colour.
+        assert_eq!(
+            glyph(&buf, 1, 3),
+            Some((ATTACHED_ICON.to_owned(), FG)),
+            "the icon for an attached {status:?} thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attached_working_thread_keeps_the_spinner() {
+        // Given an attached Working thread whose turn started 134.3 s before now.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
+
+        // When rendering the sidebar.
+        let buf = draw_attached(&sessions, &[1], at(1000) + Duration::from_millis(300), 8);
+
+        // Then its icon is still the spinner's fourth frame, in blue.
+        assert_eq!(
+            glyph(&buf, 1, 3),
+            Some(("⠸".to_owned(), BLUE)),
+            "the spinner of an attached Working thread"
         );
     }
 
