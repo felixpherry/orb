@@ -4,8 +4,8 @@
 //! changes all feed one channel. The loop sleeps until something arrives,
 //! handles everything pending, and then draws a single frame, so bursts of
 //! output cost one redraw. The only tick is every spinner frame (100 ms)
-//! while a thread is working, so its spinner turns and its elapsed time
-//! counts up.
+//! while a thread is working or a session is starting, so the spinners turn
+//! and a working thread's elapsed time counts up.
 //!
 //! Each thread gets its own `claude attach` pane; selecting another thread
 //! drops it (the session keeps running). While attached, input goes straight
@@ -381,9 +381,13 @@ impl App {
 
     /// When the loop must wake without an event: the pane's synchronized
     /// update times out, or a spinner frame passes while a thread is working
-    /// so its spinner and elapsed time tick.
+    /// or a session is starting, so the spinners and elapsed time tick.
     fn deadline(&self) -> Option<Instant> {
-        let tick = (self.state.read().sessions.working_count() > 0)
+        let tick = self
+            .state
+            .read()
+            .sessions
+            .spinning()
             .then(|| Instant::now() + SPINNER_FRAME);
         let sync = self
             .pane
