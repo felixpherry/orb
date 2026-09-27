@@ -191,16 +191,16 @@ fn after_pane(focus: Focus) -> Focus {
 }
 
 /// The outer terminal's cursor shape with the keys in `focus`: a steady
-/// block on the sidebar's selected row, a steady bar in a text input (a
-/// picker's filter, the rename box, the sidebar search), the
-/// child's own shape (`pane`) while attached, and the user's default
-/// elsewhere, where no cursor is drawn.
+/// block on the sidebar's selected row or the dashboard's highlighted item, a
+/// steady bar in a text input (a picker's filter, the rename box, the sidebar
+/// search), the child's own shape (`pane`) while attached, and the user's
+/// default while attached without a pane.
 fn cursor_style(focus: Focus, pane: Option<SetCursorStyle>) -> SetCursorStyle {
     match (focus, pane) {
-        (Focus::Sidebar, _) => SetCursorStyle::SteadyBlock,
+        (Focus::Sidebar | Focus::Dashboard, _) => SetCursorStyle::SteadyBlock,
         (Focus::Picker | Focus::Rename | Focus::Search, _) => SetCursorStyle::SteadyBar,
         (Focus::Attached, Some(style)) => style,
-        (Focus::Attached, None) | (Focus::Dashboard, _) => SetCursorStyle::DefaultUserShape,
+        (Focus::Attached, None) => SetCursorStyle::DefaultUserShape,
     }
 }
 
@@ -934,7 +934,7 @@ mod tests {
         Some(SetCursorStyle::BlinkingUnderScore),
         SetCursorStyle::BlinkingUnderScore
     )]
-    #[case::dashboard_default(Focus::Dashboard, None, SetCursorStyle::DefaultUserShape)]
+    #[case::dashboard_block(Focus::Dashboard, None, SetCursorStyle::SteadyBlock)]
     fn cursor_shape_follows_where_the_keys_are(
         #[case] focus: Focus,
         #[case] pane: Option<SetCursorStyle>,

@@ -1900,7 +1900,7 @@ fn with_git(git: &GitService, root: &Path, draft: Draft) -> Draft {
 
 /// The ref a new worktree of `repo` starts from for `base`: `origin/<b>` when
 /// the repository has an origin and `origin_has` says it has `b` (a fetch at
-/// Start, a look at the last fetch for the draft form), else `base` as is.
+/// Start, a look at the last fetch for the dashboard), else `base` as is.
 /// Only `origin/<b>`, a name without `/`, or an existing local branch is
 /// looked for on origin; another remote's ref, like `upstream/x`, is used as
 /// is.

@@ -476,7 +476,7 @@ fn project_colour(name: &str) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// The Settled shelf's label in the right side's hint: `▸ Settled (N)`
+/// The Settled shelf's label in the dashboard's shelf hint: `▸ Settled (N)`
 /// closed, `▾ Settled` open.
 pub(crate) fn shelf_label(count: usize, open: bool) -> String {
     if open {
@@ -616,9 +616,6 @@ const BADGE: [(u8, u8, u8); 18] = [
     (0xf4, 0x72, 0xb6),
     (0xfb, 0x71, 0x85),
 ];
-/// Neutral-400: labels in the draft form.
-pub(crate) const GRAY: Color = Color::Rgb(0xa3, 0xa3, 0xa3);
-
 /// Behind the whole sidebar and the picker (tokyonight-moon's `bg_dark`),
 /// darker than the right side, so the sidebar needs no border.
 pub(crate) const BG_DARK: Color = Color::Rgb(0x1e, 0x20, 0x30);

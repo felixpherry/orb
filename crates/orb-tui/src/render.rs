@@ -1,6 +1,6 @@
-//! Draws a frame: the sidebar on the left, the attached session, a hint or the
-//! selected draft's form on the right, the mode line at
-//! the bottom, and the which-key popup on top while a key sequence is pending.
+//! Draws a frame: the sidebar on the left, the attached session or the
+//! dashboard on the right, the mode line at the bottom, and the which-key
+//! popup on top while a key sequence is pending.
 //! While the sidebar is hidden, the right side takes the full width.
 //! While `s` or `x` waits for its repeat, a banner above the selected row says
 //! what the repeat will do instead of the popup. An open picker is drawn over
@@ -8,13 +8,13 @@
 //! is the rename box while it has the keys.
 //! The terminal's cursor is shown only where the keys are: on the sidebar's
 //! selected row, at the text cursor of the picker, the rename box or the
-//! sidebar search, or in the attached pane. The right-hand hint shows none.
+//! sidebar search, on the dashboard's highlighted item, or in the attached
+//! pane.
 //! Whatever is left on the terminal's default background gets orb's navy, so
 //! a transparent terminal doesn't show through.
 
 use std::time::SystemTime;
 
-use orb_domain::feat::sessions::state::{SidebarItem, SidebarRow};
 use orb_domain::feat::sessions::validator::{ToggleSettleError, validate_toggle_settle};
 use orb_domain::feat::sidebar::state::{SidebarLayout, SidebarView};
 use orb_domain::{AppState, Focus};
@@ -27,7 +27,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use ratatui_which_key::WhichKey;
 
-use crate::draft;
+use crate::dashboard;
 use crate::keymap::{self, Keys};
 use crate::picker::{self, PickerScroll};
 use crate::rename;
@@ -51,10 +51,11 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// Draws the whole frame. `pane` is the selected thread's session, if orb has
 /// one running; it's drawn while attached, and while `<C-h>` left it shown for
 /// the sidebar (without its cursor). Otherwise the right side shows the
-/// selected draft's form, or a hint with `pane_error` under it saying why the
-/// session couldn't start. While the sidebar has the keys, the cursor sits on
-/// the first cell of its selected row. Returns the sidebar's layout unless
-/// it's hidden, and how many rows the picker fits when it's open.
+/// dashboard, with `pane_error` saying why the session couldn't start. While
+/// the sidebar or the dashboard has the keys, the cursor sits on the first
+/// cell of its selected row or highlighted item's label. Returns the
+/// sidebar's layout unless it's hidden, and how many rows the picker fits
+/// when it's open.
 #[expect(
     clippy::too_many_arguments,
     reason = "the frame's inputs and the two frontend view states it updates"
@@ -93,12 +94,12 @@ pub(crate) fn render(
                 frame.set_cursor_position(cursor);
             }
         }
-        None => match state.sessions.selected_draft() {
-            Some((project, draft)) => {
-                draft::render(project, draft, &state.home, right, frame.buffer_mut());
+        None => {
+            let at = dashboard::render(state, pane_error, right, frame.buffer_mut());
+            if state.focus == Focus::Dashboard && right.contains(at) {
+                frame.set_cursor_position(at);
             }
-            None => render_hint(state, pane_error, right, frame.buffer_mut()),
-        },
+        }
     }
     render_mode_line(state, mode_line, frame.buffer_mut());
     let renaming = state
@@ -146,40 +147,6 @@ pub(crate) fn render(
         }
     }
     (sidebar_layout, picker_page)
-}
-
-/// The right side's one line while no pane or draft is shown: the shelf hint
-/// on the Settled header, else how to start a session, with `pane_error` in
-/// red on the line under it.
-fn render_hint(state: &AppState, pane_error: Option<&str>, area: Rect, buf: &mut Buffer) {
-    let hint = match state.sessions.cursor {
-        Some(SidebarItem::SettledShelf) => shelf_hint(state),
-        _ => "␣n new session · ␣p add project".to_owned(),
-    };
-    Line::raw(hint).render(area, buf);
-    if let Some(error) = pane_error {
-        let [_, below] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
-        Line::styled(error, Style::new().fg(Color::Red)).render(below, buf);
-    }
-}
-
-/// What `⏎` does on the Settled header: `▸ Settled (N) · ⏎ open`, or
-/// `▾ Settled · ⏎ close` while the shelf is open.
-fn shelf_hint(state: &AppState) -> String {
-    let sessions = &state.sessions;
-    let count = sessions
-        .sidebar()
-        .iter()
-        .find_map(|row| match row {
-            SidebarRow::ShelfHeader { count, .. } => Some(*count),
-            _ => None,
-        })
-        .unwrap_or_default();
-    let action = if sessions.shelf_open { "close" } else { "open" };
-    format!(
-        "{} · ⏎ {action}",
-        sidebar::shelf_label(count, sessions.shelf_open)
-    )
 }
 
 /// jinn's confirm banner, on the line above the selected row (the row itself
@@ -314,20 +281,40 @@ mod tests {
 
     /// Draws `state` on an 80x8 screen with `keys` pending.
     fn draw_with(state: &AppState, keys: &Keys) -> Buffer {
-        let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
+        frame(state, None, keys, 8).backend().buffer().clone()
+    }
+
+    /// Draws `state` on an 80x40 screen, tall enough for the whole dashboard.
+    fn draw_tall(state: &AppState, pane_error: Option<&str>) -> Buffer {
+        let keys = Keys::new(keymap(), Scope::Dashboard);
+        frame(state, pane_error, &keys, 40)
+            .backend()
+            .buffer()
+            .clone()
+    }
+
+    /// The terminal after drawing `state` on an 80-column screen `height`
+    /// rows tall, with `pane_error` and `keys` pending.
+    fn frame(
+        state: &AppState,
+        pane_error: Option<&str>,
+        keys: &Keys,
+        height: u16,
+    ) -> Terminal<TestBackend> {
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(80, height));
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
                 state,
                 None,
-                None,
+                pane_error,
                 keys,
                 SystemTime::UNIX_EPOCH,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
         });
-        terminal.backend().buffer().clone()
+        terminal
     }
 
     /// A live pane that printed `PANE-TEXT`, once the text is on its screen.
@@ -420,8 +407,13 @@ mod tests {
     }
 
     fn right_side(buffer: &Buffer) -> String {
+        text(buffer, right_of(buffer))
+    }
+
+    /// The right side's area with the default sidebar.
+    fn right_of(buffer: &Buffer) -> Rect {
         let [_, right, _] = layout(buffer.area, &SidebarView::default());
-        text(buffer, right)
+        right
     }
 
     /// The text inside `area`, row by row.
@@ -452,47 +444,31 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn selected_thread_shows_the_new_session_hint() {
+    fn selected_thread_shows_the_dashboard() {
         // Given a selected thread.
         let state = selected(Focus::Sidebar);
 
         // When drawing a frame.
-        let buffer = draw(&state);
+        let buffer = draw_tall(&state, None);
 
-        // Then the right side says how to start a session.
-        let right = right_side(&buffer);
-        assert!(
-            right.contains("␣n new session · ␣p add project"),
-            "right side was '{right}'"
-        );
+        // Then the right side is the dashboard's thread menu.
+        let right = text(&buffer, right_of(&buffer));
+        assert!(right.contains("Open session"), "right side was\n{right}");
     }
 
     #[rstest::rstest]
-    fn pane_error_shows_under_the_hint() {
+    fn pane_error_shows_on_the_dashboard() {
         // Given a selected thread whose session couldn't start.
         let state = selected(Focus::Dashboard);
 
         // When drawing a frame with the pane's error.
-        let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-        let Ok(_) = terminal.draw(|frame| {
-            render(
-                frame,
-                &state,
-                None,
-                Some("claude attach failed"),
-                &Keys::new(keymap(), Scope::Dashboard),
-                SystemTime::UNIX_EPOCH,
-                &mut SidebarScroll::default(),
-                &mut PickerScroll::default(),
-            );
-        });
+        let buffer = draw_tall(&state, Some("claude attach failed"));
 
-        // Then the error is on the right side's second line.
-        let right = right_side(terminal.backend().buffer());
-        assert_eq!(
-            right.lines().nth(1).map(str::trim_end),
-            Some("claude attach failed"),
-            "right side was '{right}'"
+        // Then the error is on the right side.
+        let right = text(&buffer, right_of(&buffer));
+        assert!(
+            right.contains("claude attach failed"),
+            "right side was\n{right}"
         );
     }
 
@@ -817,73 +793,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn shelf_header_selected_shows_the_open_hint() {
-        // Given a collapsed shelf with one settled thread, its header selected.
-        let state = AppState {
-            sessions: Sessions {
-                cursor: Some(SidebarItem::SettledShelf),
-                ..sessions(vec![Thread {
-                    settled_at: Some(SystemTime::UNIX_EPOCH),
-                    ..thread(1, ThreadStatus::Stopped)
-                }])
-            },
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the right side says ⏎ opens the shelf.
-        let [_, right, _] = layout(buffer.area, &SidebarView::default());
-        let right = text(&buffer, right);
-        assert!(
-            right.contains("▸ Settled (1) · ⏎ open"),
-            "right side was '{right}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn shelf_hint_counts_only_the_filtered_projects_threads() {
-        // Given orb's settled thread 1 and web's settled thread 2, filtered to
-        // orb, with the shelf header selected.
-        let state = AppState {
-            sessions: {
-                let mut sessions = sessions(vec![Thread {
-                    settled_at: Some(SystemTime::UNIX_EPOCH),
-                    ..thread(1, ThreadStatus::Stopped)
-                }]);
-                sessions.projects.push(Project {
-                    id: ProjectId(2),
-                    title: "web".to_owned(),
-                    root: "/Users/me/dev/web".into(),
-                    created_at: SystemTime::UNIX_EPOCH,
-                    removed: false,
-                    draft: None,
-                    threads: vec![Thread {
-                        settled_at: Some(SystemTime::UNIX_EPOCH),
-                        ..thread(2, ThreadStatus::Stopped)
-                    }],
-                });
-                sessions.filter = Some(ProjectId(1));
-                sessions.cursor = Some(SidebarItem::SettledShelf);
-                sessions
-            },
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the hint counts orb's one settled thread.
-        let [_, right, _] = layout(buffer.area, &SidebarView::default());
-        let right = text(&buffer, right);
-        assert!(
-            right.contains("▸ Settled (1) · ⏎ open"),
-            "right side was '{right}'"
-        );
-    }
-
-    #[rstest::rstest]
     fn dashboard_focus_hides_a_live_pane() {
         // Given a live pane for the selected thread, with the dashboard focused.
         let pane = pane_with_text();
@@ -892,11 +801,11 @@ mod tests {
         // When drawing a frame.
         let right = pane.as_ref().map(|pane| right_side_with_pane(&state, pane));
 
-        // Then the right side is the hint, not the pane.
+        // Then the right side is the dashboard's banner, not the pane.
         assert!(
-            right.as_deref().is_some_and(
-                |right| right.contains("␣n new session") && !right.contains("PANE-TEXT")
-            ),
+            right
+                .as_deref()
+                .is_some_and(|right| right.contains("██╔═══██╗") && !right.contains("PANE-TEXT")),
             "right side was {right:?}"
         );
     }
@@ -1058,34 +967,45 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn dashboard_focus_shows_no_cursor() {
+    fn dashboard_focus_puts_the_cursor_on_the_highlighted_label() {
         // Given thread 1 selected with the dashboard focused.
         let state = selected(Focus::Dashboard);
 
-        // When drawing a frame.
-        let cursor = cursor_of(&state, None);
+        // When drawing a frame tall enough for the dashboard.
+        let mut terminal = frame(&state, None, &Keys::new(keymap(), Scope::Dashboard), 40);
 
-        // Then no cursor is shown.
-        assert_eq!(cursor, None, "the cursor with the dashboard focused");
-    }
-
-    #[rstest::rstest]
-    fn selected_draft_draws_its_form() {
-        // Given orb's draft selected.
-        let state = drafted(Focus::Sidebar);
-
-        // When drawing a frame.
-        let right = right_side(&draw(&state));
-
-        // Then the right side is the draft's form.
+        // Then the cursor is shown on the first cell of Open session's label.
+        let cursor = terminal
+            .backend()
+            .cursor_visible()
+            .then(|| terminal.get_cursor_position().ok())
+            .flatten();
+        let label = cursor.map(|at| {
+            let buffer = terminal.backend().buffer();
+            text(buffer, Rect::new(at.x, at.y, buffer.area.right() - at.x, 1))
+        });
         assert!(
-            right.starts_with("New thread · OB orb") && right.contains("⏎ start"),
-            "right side was '{right}'"
+            label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Open session")),
+            "the cursor's row from the cursor was {label:?}"
         );
     }
 
     #[rstest::rstest]
-    fn draft_cursor_before_its_draft_exists_shows_the_hint() {
+    fn selected_draft_shows_the_dashboard() {
+        // Given orb's draft selected.
+        let state = drafted(Focus::Sidebar);
+
+        // When drawing a frame.
+        let right = right_side(&draw_tall(&state, None));
+
+        // Then the right side is the dashboard's draft menu.
+        assert!(right.contains("Start session"), "right side was\n{right}");
+    }
+
+    #[rstest::rstest]
+    fn draft_cursor_before_its_draft_exists_shows_nothing_selected() {
         // Given the cursor on orb's draft before the actor made it.
         let state = AppState {
             sessions: Sessions {
@@ -1096,12 +1016,12 @@ mod tests {
         };
 
         // When drawing a frame.
-        let right = right_side(&draw(&state));
+        let right = right_side(&draw_tall(&state, None));
 
-        // Then the right side shows the no-selection hint.
+        // Then the dashboard says nothing is selected.
         assert!(
-            right.starts_with("␣n new session · ␣p add project"),
-            "right side was '{right}'"
+            right.contains("no session selected"),
+            "right side was\n{right}"
         );
     }
 
@@ -1178,19 +1098,16 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn hidden_sidebar_draws_the_right_side_from_the_left_edge() {
+    fn hidden_sidebar_centres_the_dashboard_on_the_whole_width() {
         // Given orb's draft selected with the sidebar hidden.
         let state = hidden(drafted(Focus::Dashboard));
 
-        // When drawing a frame.
+        // When drawing a frame 80 columns wide.
         let buffer = draw(&state);
 
-        // Then the draft's form starts in the first column.
-        let screen = text(&buffer, buffer.area);
-        assert!(
-            screen.starts_with("New thread · OB orb"),
-            "screen was '{screen}'"
-        );
+        // Then the 25-column banner's second row starts in column 27.
+        let row = text(&buffer, Rect::new(27, 1, 25, 1));
+        assert_eq!(row, "██╔═══██╗██╔══██╗██╔══██╗", "the banner's second row");
     }
 
     #[rstest::rstest]

@@ -1832,19 +1832,19 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn picker_confirm_on_a_project_focuses_the_draft_form() {
+    fn picker_confirm_on_a_project_focuses_the_dashboard() {
         // Given the project picker opened from the sidebar.
         let mut state = picking(Focus::Sidebar);
 
         // When handling PickerConfirm.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the picker is closed and the keys are on the right side, where
-        // the draft's form is.
+        // Then the picker is closed and the keys are on the dashboard, which
+        // shows the draft.
         assert_eq!(
             (state.focus, state.picker.is_none()),
             (Focus::Dashboard, true),
-            "picking a project should hand the keys to its draft form"
+            "picking a project should hand the keys to the dashboard"
         );
     }
 
