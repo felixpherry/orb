@@ -642,7 +642,7 @@ Written in the dashboard's Verification step (not a milestone; it replaced M3's 
 - ``(dashboard) When the Claude pane fails to start, the reason shows in red under the dashboard's footer; other errors, such as a failed `claude --bg` or `claude agents`, show on the mode line.``
 - `(dashboard) While the dashboard has the keys, a steady block cursor sits on the first cell of the highlighted item's label.`
 
-### Multi-attach
+### Multi-attach (written)
 
 Written in multi-attach's Verification step (not a milestone).
 
