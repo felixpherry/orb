@@ -4,7 +4,6 @@
 use std::path::PathBuf;
 
 use crate::feat::picker::state::PickerState;
-use crate::feat::preview::state::Preview;
 use crate::feat::sessions::state::{Sessions, ThreadId};
 use crate::feat::sidebar::state::{Rename, SidebarView};
 
@@ -15,8 +14,8 @@ pub enum Focus {
     /// Keys move through the sidebar's threads.
     #[default]
     Sidebar,
-    /// Keys act on the selected thread's preview on the right.
-    Preview,
+    /// Keys act on the dashboard on the right.
+    Dashboard,
     /// Keys go to the attached Claude session.
     Attached,
     /// Keys edit the open picker's filter and move its selection.
@@ -36,12 +35,10 @@ pub struct AppState {
     pub focus: Focus,
     /// orb's projects and their Claude sessions.
     pub sessions: Sessions,
-    /// The selected thread's transcript preview.
-    pub preview: Preview,
     /// The sidebar's width, visibility and last layout.
     pub sidebar: SidebarView,
-    /// The thread whose Claude pane the right-hand area shows instead of its
-    /// preview while focus isn't `Attached`: set on attach, kept by `<C-h>`,
+    /// The thread whose Claude pane the right-hand area shows instead of the
+    /// dashboard while focus isn't `Attached`: set on attach, kept by `<C-h>`,
     /// cleared by `<C-\>`, the pane's exit, a dropped pane, a failed spawn and
     /// leaving the trust pane. Holding the thread, not a bool, keeps a stale
     /// value from re-attaching another thread. Written by the intent handler

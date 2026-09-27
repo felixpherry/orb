@@ -14,7 +14,6 @@ use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
 use crate::feat::picker::validator::{
     validate_add_directory, validate_open_directory, validate_pick_project, validate_remove_project,
 };
-use crate::feat::preview::validator::{validate_toggle_fold, validate_yank};
 use crate::feat::sessions::state::{
     AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Search, SidebarItem, ThreadId,
 };
@@ -47,29 +46,29 @@ impl IntentHandler {
             }
             Intent::SelectNext => {
                 state.sessions.select_next();
-                with_visit(state, vec![Command::ShowPreview])
+                with_visit(state, vec![])
             }
             Intent::SelectPrev => {
                 state.sessions.select_prev();
-                with_visit(state, vec![Command::ShowPreview])
+                with_visit(state, vec![])
             }
             Intent::SelectFirst => {
                 state.sessions.select_first();
-                with_visit(state, vec![Command::ShowPreview])
+                with_visit(state, vec![])
             }
             Intent::SelectLast => {
                 state.sessions.select_last();
-                with_visit(state, vec![Command::ShowPreview])
+                with_visit(state, vec![])
             }
             Intent::SelectHalfPageDown => {
                 state.sessions.half_page_down(&state.sidebar.layout);
-                with_visit(state, vec![Command::ShowPreview])
+                with_visit(state, vec![])
             }
             Intent::SelectHalfPageUp => {
                 state.sessions.half_page_up(&state.sidebar.layout);
-                with_visit(state, vec![Command::ShowPreview])
+                with_visit(state, vec![])
             }
-            Intent::FocusPreview => focus_right(state),
+            Intent::FocusRight => focus_right(state),
             Intent::FocusSidebar => match validate_focus_sidebar(state) {
                 Ok(()) => {
                     state.focus = Focus::Sidebar;
@@ -96,8 +95,8 @@ impl IntentHandler {
                 // Widening the right side narrows the sidebar.
                 let changed = match (validate_resize(state), state.focus, intent) {
                     (Ok(()), Focus::Sidebar, Intent::WidenFocused)
-                    | (Ok(()), Focus::Preview, Intent::NarrowFocused) => state.sidebar.widen(),
-                    (Ok(()), Focus::Sidebar | Focus::Preview, _) => state.sidebar.narrow(),
+                    | (Ok(()), Focus::Dashboard, Intent::NarrowFocused) => state.sidebar.widen(),
+                    (Ok(()), Focus::Sidebar | Focus::Dashboard, _) => state.sidebar.narrow(),
                     _ => false,
                 };
                 changed.then_some(Command::SaveUi).into_iter().collect()
@@ -121,7 +120,7 @@ impl IntentHandler {
             }
             Intent::Attach => attach_thread(state),
             Intent::Detach => {
-                state.focus = Focus::Preview;
+                state.focus = Focus::Dashboard;
                 state.pane_shown = None;
                 vec![Command::Detach, Command::RefreshSessions]
             }
@@ -476,41 +475,6 @@ impl IntentHandler {
                 }
                 _ => vec![],
             },
-            Intent::NextBlock => {
-                state.preview.next_block();
-                vec![]
-            }
-            Intent::PrevBlock => {
-                state.preview.prev_block();
-                vec![]
-            }
-            Intent::HalfPageDown => {
-                state.preview.half_page_down();
-                vec![]
-            }
-            Intent::HalfPageUp => {
-                state.preview.half_page_up();
-                vec![]
-            }
-            Intent::Top => {
-                state.preview.top();
-                vec![]
-            }
-            Intent::Bottom => {
-                state.preview.bottom();
-                vec![]
-            }
-            Intent::ToggleFold => match validate_toggle_fold(state) {
-                Ok(()) => {
-                    state.preview.toggle_fold();
-                    vec![]
-                }
-                Err(_) => vec![],
-            },
-            Intent::Yank => match (validate_yank(state), state.preview.cursor_block()) {
-                (Ok(()), Some(block)) => vec![Command::Yank(block.raw_text())],
-                _ => vec![],
-            },
             Intent::OpenShelf => match validate_open_shelf(state) {
                 Ok(()) => {
                     state.sessions.open_shelf();
@@ -521,7 +485,7 @@ impl IntentHandler {
             Intent::CloseShelf => match validate_close_shelf(state) {
                 Ok(()) => {
                     state.sessions.close_shelf();
-                    vec![Command::ShowPreview]
+                    vec![]
                 }
                 Err(_) => vec![],
             },
@@ -565,7 +529,7 @@ impl IntentHandler {
                     (Ok(()), Some(thread)) => {
                         let id = thread.id;
                         state.sessions.cursor = state.sessions.card_neighbour(id);
-                        with_visit(state, vec![Command::Settle(id), Command::ShowPreview])
+                        with_visit(state, vec![Command::Settle(id)])
                     }
                     _ => vec![],
                 }
@@ -573,16 +537,13 @@ impl IntentHandler {
             Intent::DeleteThread => match (validate_delete(state), state.sessions.cursor) {
                 (Ok(()), Some(item @ SidebarItem::Draft(project))) => {
                     state.sessions.cursor = state.sessions.row_neighbour(item);
-                    with_visit(
-                        state,
-                        vec![Command::DiscardDraft(project), Command::ShowPreview],
-                    )
+                    with_visit(state, vec![Command::DiscardDraft(project)])
                 }
                 (Ok(()), Some(item @ SidebarItem::Thread(id))) => {
                     let neighbour = state.sessions.row_neighbour(item);
                     state.sessions.deleting.insert(id);
                     state.sessions.cursor = neighbour;
-                    with_visit(state, vec![Command::Delete(id), Command::ShowPreview])
+                    with_visit(state, vec![Command::Delete(id)])
                 }
                 _ => vec![],
             },
@@ -781,7 +742,7 @@ fn workspace_items(
 /// for the filter to be saved.
 fn filter_to(state: &mut AppState, filter: Option<ProjectId>) -> Vec<Command> {
     state.sessions.filter_to(filter);
-    with_visit(state, vec![Command::SaveUi, Command::ShowPreview])
+    with_visit(state, vec![Command::SaveUi])
 }
 
 /// Asks for `project` to be removed. A filter to it goes back to all
@@ -796,11 +757,7 @@ fn remove_project(state: &mut AppState, project: ProjectId) -> Vec<Command> {
     }
     with_visit(
         state,
-        vec![
-            Command::RemoveProject(project),
-            Command::SaveUi,
-            Command::ShowPreview,
-        ],
+        vec![Command::RemoveProject(project), Command::SaveUi],
     )
 }
 
@@ -821,11 +778,10 @@ fn open_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
         state.sessions.filter = None;
     }
     state.sessions.cursor = Some(SidebarItem::Draft(project));
-    state.focus = Focus::Preview;
+    state.focus = Focus::Dashboard;
     (!exists)
         .then_some(Command::CreateDraft(project))
         .into_iter()
-        .chain([Command::ShowPreview])
         .chain(outside.then_some(Command::SaveUi))
         .collect()
 }
@@ -878,14 +834,14 @@ fn attach_thread(state: &mut AppState) -> Vec<Command> {
 
 /// Moves the keys to the right-hand area: back into the Claude pane while
 /// it's shown for the selected thread and can still be attached to, else to
-/// the preview.
+/// the dashboard.
 fn focus_right(state: &mut AppState) -> Vec<Command> {
     match state.pane_shown {
         Some(id) if state.sessions.selected_id() == Some(id) && validate_attach(state).is_ok() => {
             attach_thread(state)
         }
         _ => {
-            state.focus = Focus::Preview;
+            state.focus = Focus::Dashboard;
             vec![]
         }
     }
@@ -965,7 +921,7 @@ fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         }
         _ => return vec![],
     }
-    with_visit(state, vec![Command::ShowPreview])
+    with_visit(state, vec![])
 }
 
 /// `commands`, then a visit to the thread under the cursor, if any.
@@ -983,8 +939,6 @@ mod tests {
     use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::{BranchRow, PERMISSION_MODES, PickerItem, WorkspaceChoice};
     use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
-    use crate::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
-    use crate::feat::preview::state::{Preview, PreviewLayout};
     use crate::feat::sessions::state::{
         AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem,
         SidebarRow, Thread, ThreadId, ThreadStatus,
@@ -1111,7 +1065,7 @@ mod tests {
     /// The workspace picker opened on thread 1 of `threads`.
     fn choosing_workspace(threads: Vec<Thread>) -> AppState {
         let mut state = AppState {
-            focus: Focus::Preview,
+            focus: Focus::Dashboard,
             ..state_with(threads, 1)
         };
         IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
@@ -1128,30 +1082,6 @@ mod tests {
                 _ => None,
             })
             .collect()
-    }
-
-    /// A preview showing one block of `kind`, followed.
-    fn previewing(kind: BlockKind) -> AppState {
-        AppState {
-            preview: Preview {
-                blocks: vec![Block {
-                    id: BlockId(0),
-                    parts: 1,
-                    kind,
-                }]
-                .into(),
-                ..Preview::default()
-            },
-            ..AppState::default()
-        }
-    }
-
-    fn cargo_test(output: Option<&str>) -> BlockKind {
-        BlockKind::Tool(ToolCall {
-            summary: "$ cargo test".into(),
-            status: ToolStatus::Ok,
-            output: output.map(str::to_owned),
-        })
     }
 
     #[rstest::rstest]
@@ -1205,8 +1135,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Intent::FocusPreview, Focus::Sidebar, Focus::Preview)]
-    #[case(Intent::FocusSidebar, Focus::Preview, Focus::Sidebar)]
+    #[case(Intent::FocusRight, Focus::Sidebar, Focus::Dashboard)]
+    #[case(Intent::FocusSidebar, Focus::Dashboard, Focus::Sidebar)]
     fn focus_intents_move_focus(#[case] intent: Intent, #[case] from: Focus, #[case] to: Focus) {
         // Given orb focused on `from`.
         let mut state = AppState {
@@ -1237,7 +1167,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Focus::Sidebar)]
-    #[case(Focus::Preview)]
+    #[case(Focus::Dashboard)]
     fn toggle_sidebar_hides_a_shown_sidebar(#[case] focus: Focus) {
         // Given a shown sidebar.
         let mut state = laid_out(focus, 32, false);
@@ -1251,7 +1181,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Focus::Sidebar)]
-    #[case(Focus::Preview)]
+    #[case(Focus::Dashboard)]
     fn hiding_the_sidebar_focuses_the_right_side(#[case] focus: Focus) {
         // Given a shown sidebar, with `focus` focused.
         let mut state = laid_out(focus, 32, false);
@@ -1262,7 +1192,7 @@ mod tests {
         // Then the right side has the keys.
         assert_eq!(
             state.focus,
-            Focus::Preview,
+            Focus::Dashboard,
             "hiding from {focus:?} should focus the right side"
         );
     }
@@ -1270,7 +1200,7 @@ mod tests {
     #[rstest::rstest]
     fn toggle_sidebar_shows_a_hidden_sidebar() {
         // Given a hidden sidebar.
-        let mut state = laid_out(Focus::Preview, 32, true);
+        let mut state = laid_out(Focus::Dashboard, 32, true);
 
         // When handling ToggleSidebar.
         IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
@@ -1281,8 +1211,8 @@ mod tests {
 
     #[rstest::rstest]
     fn showing_the_sidebar_focuses_it() {
-        // Given a hidden sidebar, with the preview focused.
-        let mut state = laid_out(Focus::Preview, 32, true);
+        // Given a hidden sidebar, with the dashboard focused.
+        let mut state = laid_out(Focus::Dashboard, 32, true);
 
         // When handling ToggleSidebar.
         IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
@@ -1296,17 +1226,17 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn focus_sidebar_while_hidden_keeps_the_preview_focused() {
-        // Given a hidden sidebar, with the preview focused.
-        let mut state = laid_out(Focus::Preview, 32, true);
+    fn focus_sidebar_while_hidden_keeps_the_dashboard_focused() {
+        // Given a hidden sidebar, with the dashboard focused.
+        let mut state = laid_out(Focus::Dashboard, 32, true);
 
         // When handling FocusSidebar (`<C-h>`).
         IntentHandler::handle(&Intent::FocusSidebar, &mut state);
 
-        // Then the preview keeps the keys.
+        // Then the dashboard keeps the keys.
         assert_eq!(
             state.focus,
-            Focus::Preview,
+            Focus::Dashboard,
             "<C-h> should do nothing while the sidebar is hidden"
         );
     }
@@ -1314,8 +1244,8 @@ mod tests {
     #[rstest::rstest]
     #[case(Intent::WidenFocused, Focus::Sidebar, 36)]
     #[case(Intent::NarrowFocused, Focus::Sidebar, 28)]
-    #[case(Intent::WidenFocused, Focus::Preview, 28)]
-    #[case(Intent::NarrowFocused, Focus::Preview, 36)]
+    #[case(Intent::WidenFocused, Focus::Dashboard, 28)]
+    #[case(Intent::NarrowFocused, Focus::Dashboard, 36)]
     fn resize_moves_the_sidebars_edge_a_step(
         #[case] intent: Intent,
         #[case] focus: Focus,
@@ -1352,9 +1282,9 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Intent::NarrowFocused, Focus::Sidebar, 24)]
-    #[case(Intent::WidenFocused, Focus::Preview, 24)]
+    #[case(Intent::WidenFocused, Focus::Dashboard, 24)]
     #[case(Intent::WidenFocused, Focus::Sidebar, 80)]
-    #[case(Intent::NarrowFocused, Focus::Preview, 80)]
+    #[case(Intent::NarrowFocused, Focus::Dashboard, 80)]
     fn resize_stops_at_the_sidebars_bounds(
         #[case] intent: Intent,
         #[case] focus: Focus,
@@ -1389,8 +1319,8 @@ mod tests {
     #[case(Intent::WidenFocused)]
     #[case(Intent::NarrowFocused)]
     fn resize_while_hidden_keeps_the_width(#[case] intent: Intent) {
-        // Given a hidden 32-column sidebar, with the preview focused.
-        let mut state = laid_out(Focus::Preview, 32, true);
+        // Given a hidden 32-column sidebar, with the dashboard focused.
+        let mut state = laid_out(Focus::Dashboard, 32, true);
 
         // When handling the resize.
         IntentHandler::handle(&intent, &mut state);
@@ -1488,7 +1418,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn detach_sets_focus_preview() {
+    fn detach_sets_focus_dashboard() {
         // Given keys going to an attached session.
         let mut state = AppState {
             focus: Focus::Attached,
@@ -1498,11 +1428,11 @@ mod tests {
         // When handling Detach.
         IntentHandler::handle(&Intent::Detach, &mut state);
 
-        // Then keys drive the thread's preview.
+        // Then keys drive the dashboard.
         assert_eq!(
             state.focus,
-            Focus::Preview,
-            "Detach should return to the preview"
+            Focus::Dashboard,
+            "Detach should return to the dashboard"
         );
     }
 
@@ -1537,7 +1467,7 @@ mod tests {
         // When handling Detach.
         IntentHandler::handle(&Intent::Detach, &mut state);
 
-        // Then the right side goes back to the preview.
+        // Then the right side goes back to the dashboard.
         assert_eq!(
             state.pane_shown, None,
             "Detach should stop showing the pane"
@@ -1652,28 +1582,28 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn focus_preview_with_the_pane_shown_attaches() {
+    fn focus_right_with_the_pane_shown_attaches() {
         // Given thread 1's pane shown and thread 1 selected in the sidebar.
         let mut state = left_pane(1);
 
-        // When handling FocusPreview.
-        IntentHandler::handle(&Intent::FocusPreview, &mut state);
+        // When handling FocusRight.
+        IntentHandler::handle(&Intent::FocusRight, &mut state);
 
         // Then keys go back to the session.
         assert_eq!(
             state.focus,
             Focus::Attached,
-            "FocusPreview should go back into the shown pane"
+            "FocusRight should go back into the shown pane"
         );
     }
 
     #[rstest::rstest]
-    fn focus_preview_with_the_pane_shown_returns_attach_and_refresh() {
+    fn focus_right_with_the_pane_shown_returns_attach_and_refresh() {
         // Given thread 1's pane shown and thread 1 selected in the sidebar.
         let mut state = left_pane(1);
 
-        // When handling FocusPreview.
-        let commands = IntentHandler::handle(&Intent::FocusPreview, &mut state);
+        // When handling FocusRight.
+        let commands = IntentHandler::handle(&Intent::FocusRight, &mut state);
 
         // Then the loop attaches to thread 1 again and the statuses are
         // refreshed.
@@ -1687,14 +1617,14 @@ mod tests {
                 }),
                 Command::RefreshSessions,
             ],
-            "FocusPreview should attach to the shown pane's thread, then refresh"
+            "FocusRight should attach to the shown pane's thread, then refresh"
         );
     }
 
     #[rstest::rstest]
     #[case(None)]
     #[case(Some(ThreadId(1)))]
-    fn focus_preview_without_the_selected_threads_pane_focuses_the_preview(
+    fn focus_right_without_the_selected_threads_pane_focuses_the_dashboard(
         #[case] pane_shown: Option<ThreadId>,
     ) {
         // Given thread 2 selected, with no pane shown or thread 1's.
@@ -1703,14 +1633,14 @@ mod tests {
             ..left_pane(2)
         };
 
-        // When handling FocusPreview.
-        IntentHandler::handle(&Intent::FocusPreview, &mut state);
+        // When handling FocusRight.
+        IntentHandler::handle(&Intent::FocusRight, &mut state);
 
-        // Then keys drive thread 2's preview.
+        // Then keys drive the dashboard.
         assert_eq!(
             state.focus,
-            Focus::Preview,
-            "FocusPreview with {pane_shown:?} shown should focus the preview"
+            Focus::Dashboard,
+            "FocusRight with {pane_shown:?} shown should focus the dashboard"
         );
     }
 
@@ -1846,11 +1776,10 @@ mod tests {
         // When handling PickerConfirm.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the sessions actor is asked to create alpha's draft, and the
-        // preview to show the selection.
+        // Then the sessions actor is asked to create alpha's draft.
         assert_eq!(
             commands,
-            vec![Command::CreateDraft(ProjectId(1)), Command::ShowPreview],
+            vec![Command::CreateDraft(ProjectId(1))],
             "picking a project without a draft should create one"
         );
     }
@@ -1866,12 +1795,8 @@ mod tests {
         // When handling PickerConfirm.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then only the preview is refreshed.
-        assert_eq!(
-            commands,
-            vec![Command::ShowPreview],
-            "a project keeps its one draft"
-        );
+        // Then no draft is created.
+        assert!(commands.is_empty(), "a project keeps its one draft");
     }
 
     #[rstest::rstest]
@@ -1902,7 +1827,7 @@ mod tests {
         // the draft's form is.
         assert_eq!(
             (state.focus, state.picker.is_none()),
-            (Focus::Preview, true),
+            (Focus::Dashboard, true),
             "picking a project should hand the keys to its draft form"
         );
     }
@@ -1956,17 +1881,17 @@ mod tests {
 
     #[rstest::rstest]
     fn picker_cancel_closes_the_picker_and_restores_its_focus() {
-        // Given the project picker opened from the preview.
-        let mut state = picking(Focus::Preview);
+        // Given the project picker opened from the dashboard.
+        let mut state = picking(Focus::Dashboard);
 
         // When handling PickerCancel.
         IntentHandler::handle(&Intent::PickerCancel, &mut state);
 
-        // Then the picker is closed and the keys are back on the preview.
+        // Then the picker is closed and the keys are back on the dashboard.
         assert_eq!(
             (state.focus, state.picker.is_none()),
-            (Focus::Preview, true),
-            "PickerCancel should close the picker and return to the preview"
+            (Focus::Dashboard, true),
+            "PickerCancel should close the picker and return to the dashboard"
         );
     }
 
@@ -2124,7 +2049,7 @@ mod tests {
     /// The branch picker opened on thread 1 of `threads`, showing `refs`.
     fn choosing_branch(threads: Vec<Thread>, refs: Vec<GitRef>) -> AppState {
         let mut state = AppState {
-            focus: Focus::Preview,
+            focus: Focus::Dashboard,
             ..state_with(threads, 1)
         };
         IntentHandler::handle(&Intent::SwitchBranch, &mut state);
@@ -2297,145 +2222,6 @@ mod tests {
             ),
             "typing b should narrow the picker to beta"
         );
-    }
-
-    #[rstest::rstest]
-    #[case(Intent::SelectNext)]
-    #[case(Intent::SelectPrev)]
-    fn selecting_a_thread_returns_show_preview(#[case] intent: Intent) {
-        // Given threads 1 and 2 with the first one selected.
-        let mut state = state_with(
-            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
-            1,
-        );
-
-        // When handling the selection intent.
-        let commands = IntentHandler::handle(&intent, &mut state);
-
-        // Then the preview actor is asked to show the selection.
-        assert!(
-            commands.contains(&Command::ShowPreview),
-            "{intent:?} should return ShowPreview"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(Intent::NextBlock, Some(3), 6)]
-    #[case(Intent::PrevBlock, Some(1), 4)]
-    #[case(Intent::HalfPageDown, Some(3), 11)]
-    #[case(Intent::HalfPageUp, Some(1), 1)]
-    #[case(Intent::Top, Some(0), 0)]
-    #[case(Intent::Bottom, None, 6)]
-    fn preview_navigation_intents_move_the_cursor(
-        #[case] intent: Intent,
-        #[case] cursor: Option<u32>,
-        #[case] offset: usize,
-    ) {
-        // Given eight 4-row blocks in a 10-row viewport, the cursor on block 2
-        // and rows 6..16 in view.
-        let mut state = AppState {
-            preview: Preview {
-                blocks: (0..8)
-                    .map(|i| Block {
-                        id: BlockId(i),
-                        parts: 1,
-                        kind: BlockKind::You(format!("prompt {i}")),
-                    })
-                    .collect(),
-                cursor: Some(BlockId(2)),
-                offset: 6,
-                layout: PreviewLayout {
-                    rows: 10,
-                    heights: vec![4; 8],
-                },
-                ..Preview::default()
-            },
-            ..AppState::default()
-        };
-
-        // When handling the navigation intent.
-        IntentHandler::handle(&intent, &mut state);
-
-        // Then the cursor and view moved where that intent goes.
-        assert_eq!(
-            (state.preview.cursor, state.preview.offset),
-            (cursor.map(BlockId), offset),
-            "{intent:?} should move the preview"
-        );
-    }
-
-    #[rstest::rstest]
-    fn toggle_fold_on_tool_block_with_output_opens_it() {
-        // Given a tool block with output under the cursor.
-        let mut state = previewing(cargo_test(Some("test result: ok")));
-
-        // When handling ToggleFold.
-        IntentHandler::handle(&Intent::ToggleFold, &mut state);
-
-        // Then the block is open.
-        assert!(
-            state.preview.expanded.contains(&BlockId(0)),
-            "ToggleFold should open the tool block"
-        );
-    }
-
-    #[rstest::rstest]
-    fn toggle_fold_on_claude_block_leaves_folds_unchanged() {
-        // Given a Claude block under the cursor.
-        let mut state = previewing(BlockKind::Claude("Fixed **the** bug.".into()));
-
-        // When handling ToggleFold.
-        IntentHandler::handle(&Intent::ToggleFold, &mut state);
-
-        // Then nothing is open.
-        assert!(
-            state.preview.expanded.is_empty(),
-            "a Claude block doesn't fold"
-        );
-    }
-
-    #[rstest::rstest]
-    fn yank_on_tool_block_returns_summary_and_output() {
-        // Given a tool block with output under the cursor.
-        let mut state = previewing(cargo_test(Some("test result: ok")));
-
-        // When handling Yank.
-        let commands = IntentHandler::handle(&Intent::Yank, &mut state);
-
-        // Then its summary line and output are copied.
-        assert_eq!(
-            commands,
-            vec![Command::Yank("$ cargo test\ntest result: ok".into())],
-            "Yank should copy the summary and output"
-        );
-    }
-
-    #[rstest::rstest]
-    fn yank_on_claude_block_returns_its_markdown() {
-        // Given a Claude block under the cursor.
-        let mut state = previewing(BlockKind::Claude("Fixed **the** bug.".into()));
-
-        // When handling Yank.
-        let commands = IntentHandler::handle(&Intent::Yank, &mut state);
-
-        // Then its markdown source is copied.
-        assert_eq!(
-            commands,
-            vec![Command::Yank("Fixed **the** bug.".into())],
-            "Yank should copy Claude's markdown"
-        );
-    }
-
-    #[rstest::rstest]
-    fn yank_without_blocks_returns_no_commands() {
-        // Given a preview with no blocks.
-        let mut state = AppState::default();
-
-        // When handling Yank.
-        let commands = IntentHandler::handle(&Intent::Yank, &mut state);
-
-        // Then nothing is copied.
-        assert!(commands.is_empty(), "Yank needs a block to copy");
     }
 
     #[rstest::rstest]
@@ -2709,11 +2495,11 @@ mod tests {
         // When handling the jump.
         let commands = IntentHandler::handle(&intent, &mut state);
 
-        // Then the preview shows the thread it lands on, which is visited.
+        // Then the thread it lands on is visited.
         assert_eq!(
             commands,
-            vec![Command::ShowPreview, Command::Visit(ThreadId(expected))],
-            "{intent:?} should show and visit thread {expected}"
+            vec![Command::Visit(ThreadId(expected))],
+            "{intent:?} should visit thread {expected}"
         );
     }
 
@@ -2777,7 +2563,7 @@ mod tests {
     /// selected and the keys on its form.
     fn drafting(draft: Draft, threads: Vec<Thread>) -> AppState {
         let mut state = AppState {
-            focus: Focus::Preview,
+            focus: Focus::Dashboard,
             ..state_at(threads, SidebarItem::Draft(ProjectId(1)))
         };
         if let Some(project) = state.sessions.projects.first_mut() {
@@ -3802,15 +3588,10 @@ mod tests {
         // When handling PickerConfirm.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the filter is saved, the preview refreshed and thread 21
-        // visited.
+        // Then the filter is saved and thread 21 visited.
         assert_eq!(
             commands,
-            vec![
-                Command::SaveUi,
-                Command::ShowPreview,
-                Command::Visit(ThreadId(21)),
-            ],
+            vec![Command::SaveUi, Command::Visit(ThreadId(21))],
             "filtering should save the filter"
         );
     }
@@ -3872,13 +3653,12 @@ mod tests {
         // When handling PickerConfirm.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then alpha is removed, the filter saved, and the preview refreshed.
+        // Then alpha is removed and the filter saved.
         assert_eq!(
             commands,
             vec![
                 Command::RemoveProject(ProjectId(1)),
                 Command::SaveUi,
-                Command::ShowPreview,
                 Command::Visit(ThreadId(21)),
             ],
             "Yes should remove the project"
@@ -3986,11 +3766,7 @@ mod tests {
         // Then alpha's draft is created and the cleared filter saved.
         assert_eq!(
             commands,
-            vec![
-                Command::CreateDraft(ProjectId(1)),
-                Command::ShowPreview,
-                Command::SaveUi,
-            ],
+            vec![Command::CreateDraft(ProjectId(1)), Command::SaveUi],
             "clearing the filter should save it"
         );
     }
@@ -4008,10 +3784,7 @@ mod tests {
         // Then the filter stays, and isn't saved.
         assert_eq!(
             (state.sessions.filter, commands),
-            (
-                Some(ProjectId(1)),
-                vec![Command::CreateDraft(ProjectId(1)), Command::ShowPreview],
-            ),
+            (Some(ProjectId(1)), vec![Command::CreateDraft(ProjectId(1))]),
             "a project inside the filter leaves it alone"
         );
     }
@@ -4266,18 +4039,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn typing_in_the_search_previews_and_visits_the_first_match() {
+    fn typing_in_the_search_visits_the_first_match() {
         // Given an empty search begun on thread 2.
         let mut state = searching("", Some(2));
 
         // When typing `l`.
         let commands = IntentHandler::handle(&Intent::PickerInput('l'), &mut state);
 
-        // Then the preview follows and the match is visited.
+        // Then the match is visited.
         assert_eq!(
             commands,
-            vec![Command::ShowPreview, Command::Visit(ThreadId(3))],
-            "typing should preview and visit the first match"
+            vec![Command::Visit(ThreadId(3))],
+            "typing should visit the first match"
         );
     }
 

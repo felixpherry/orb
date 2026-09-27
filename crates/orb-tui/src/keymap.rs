@@ -1,10 +1,10 @@
 //! Key routing: which keys do what in each focus. Only keys the user has
 //! defined are bound.
 //!
-//! In the sidebar and the preview, keys go through a which-key keymap whose
+//! In the sidebar and the dashboard, keys go through a which-key keymap whose
 //! scope is the focus and what the sidebar cursor is on; `<Space>` is the
 //! leader and shows a popup. A key that does nothing for the selection isn't
-//! bound there (the preview's block keys on a draft, `␣m`/`␣a` on a thread,
+//! bound there (`␣m`/`␣a` on a thread,
 //! `p`/`ss`/`r` off a thread, `␣w`/`␣b` and the tool keys `␣t`/`␣g`/`␣v`
 //! with nothing selected), so the
 //! popups don't offer it. `<C-Right>`/`<C-Left>` resize the focused side
@@ -29,7 +29,6 @@ pub(crate) enum KeyCategory {
     Navigation,
     Sessions,
     Threads,
-    Preview,
     Tools,
 }
 
@@ -40,7 +39,6 @@ impl fmt::Display for KeyCategory {
             Self::Navigation => "navigation",
             Self::Sessions => "sessions",
             Self::Threads => "threads",
-            Self::Preview => "preview",
             Self::Tools => "tools",
         })
     }
@@ -76,22 +74,21 @@ pub(crate) enum Scope {
     SidebarDraft,
     /// The sidebar with no thread or draft selected.
     SidebarEmpty,
-    /// The preview of a thread.
-    Preview,
-    /// The preview side while a draft is selected: its form has no blocks to
-    /// move through, fold or yank.
-    DraftForm,
-    /// The preview with no thread or draft selected.
-    PreviewEmpty,
+    /// The dashboard on a thread.
+    Dashboard,
+    /// The dashboard on a draft: its setting pickers too.
+    DashboardDraft,
+    /// The dashboard with no thread or draft selected.
+    DashboardEmpty,
 }
 
 impl Scope {
     /// The scope for keys in `focus` with `selection`.
     pub(crate) fn new(focus: Focus, selection: Selection) -> Self {
         match (focus, selection) {
-            (Focus::Preview, Selection::Thread) => Self::Preview,
-            (Focus::Preview, Selection::Draft) => Self::DraftForm,
-            (Focus::Preview, Selection::Nothing) => Self::PreviewEmpty,
+            (Focus::Dashboard, Selection::Thread) => Self::Dashboard,
+            (Focus::Dashboard, Selection::Draft) => Self::DashboardDraft,
+            (Focus::Dashboard, Selection::Nothing) => Self::DashboardEmpty,
             (
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::Thread,
@@ -111,7 +108,7 @@ impl Scope {
 /// The keymap with its current scope and pending key sequence.
 pub(crate) type Keys = WhichKeyState<KeyEvent, Scope, Intent, KeyCategory>;
 
-/// The sidebar and preview bindings, scoped by focus and selection.
+/// The sidebar and dashboard bindings, scoped by focus and selection.
 #[expect(
     clippy::too_many_lines,
     reason = "one binding per key keeps the whole keymap in one place"
@@ -137,12 +134,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 KeyCategory::Navigation,
                 scope,
             )
-            .bind(
-                "<c-l>",
-                Intent::FocusPreview,
-                KeyCategory::Navigation,
-                scope,
-            )
+            .bind("<c-l>", Intent::FocusRight, KeyCategory::Navigation, scope)
             .bind("<enter>", Intent::Attach, KeyCategory::Sessions, scope)
             .bind("q", Intent::Quit, KeyCategory::General, scope)
             .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
@@ -180,7 +172,11 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     for scope in [Scope::Sidebar, Scope::SidebarDraft] {
         keymap.bind("xx", Intent::DeleteThread, KeyCategory::Threads, scope);
     }
-    for scope in [Scope::Preview, Scope::DraftForm, Scope::PreviewEmpty] {
+    for scope in [
+        Scope::Dashboard,
+        Scope::DashboardDraft,
+        Scope::DashboardEmpty,
+    ] {
         keymap
             .bind(
                 "<c-h>",
@@ -206,9 +202,9 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         Scope::Sidebar,
         Scope::SidebarDraft,
         Scope::SidebarEmpty,
-        Scope::Preview,
-        Scope::DraftForm,
-        Scope::PreviewEmpty,
+        Scope::Dashboard,
+        Scope::DashboardDraft,
+        Scope::DashboardEmpty,
     ] {
         keymap.bind(
             "<leader>e",
@@ -217,51 +213,11 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             scope,
         );
     }
-    keymap
-        .bind(
-            "j",
-            Intent::NextBlock,
-            KeyCategory::Navigation,
-            Scope::Preview,
-        )
-        .bind(
-            "k",
-            Intent::PrevBlock,
-            KeyCategory::Navigation,
-            Scope::Preview,
-        )
-        .bind(
-            "<c-d>",
-            Intent::HalfPageDown,
-            KeyCategory::Navigation,
-            Scope::Preview,
-        )
-        .bind(
-            "<c-u>",
-            Intent::HalfPageUp,
-            KeyCategory::Navigation,
-            Scope::Preview,
-        )
-        .bind("gg", Intent::Top, KeyCategory::Navigation, Scope::Preview)
-        .bind("G", Intent::Bottom, KeyCategory::Navigation, Scope::Preview)
-        .bind("y", Intent::Yank, KeyCategory::Preview, Scope::Preview)
-        .bind(
-            "za",
-            Intent::ToggleFold,
-            KeyCategory::Preview,
-            Scope::Preview,
-        )
-        .bind(
-            "<tab>",
-            Intent::ToggleFold,
-            KeyCategory::Preview,
-            Scope::Preview,
-        );
     for scope in [
         Scope::Sidebar,
         Scope::SidebarDraft,
-        Scope::Preview,
-        Scope::DraftForm,
+        Scope::Dashboard,
+        Scope::DashboardDraft,
     ] {
         keymap
             .bind(
@@ -295,7 +251,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             );
     }
-    for scope in [Scope::SidebarDraft, Scope::DraftForm] {
+    for scope in [Scope::SidebarDraft, Scope::DashboardDraft] {
         keymap
             .bind("<leader>m", Intent::PickModel, KeyCategory::Sessions, scope)
             .bind(
@@ -360,7 +316,7 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
     }
 }
 
-/// The resize `key` asks for in the sidebar or preview: `<C-Right>` widens
+/// The resize `key` asks for in the sidebar or dashboard: `<C-Right>` widens
 /// the focused side and `<C-Left>` narrows it. `None` for any other key.
 pub(crate) fn layout_route(key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
@@ -446,7 +402,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Scope::Sidebar)]
-    #[case(Scope::Preview)]
+    #[case(Scope::Dashboard)]
     fn space_then_p_adds_a_project(#[case] scope: Scope) {
         // Given Space already pressed.
         let mut keys = Keys::new(keymap(), scope);
@@ -464,9 +420,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_w_in_preview_changes_workspace() {
-        // Given Space already pressed in Preview focus.
-        let mut keys = Keys::new(keymap(), Scope::Preview);
+    fn leader_w_on_the_dashboard_changes_workspace() {
+        // Given Space already pressed on a thread's dashboard.
+        let mut keys = Keys::new(keymap(), Scope::Dashboard);
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `w`.
@@ -481,9 +437,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_b_in_preview_switches_branch() {
-        // Given Space already pressed in Preview focus.
-        let mut keys = Keys::new(keymap(), Scope::Preview);
+    fn leader_b_on_the_dashboard_switches_branch() {
+        // Given Space already pressed on a thread's dashboard.
+        let mut keys = Keys::new(keymap(), Scope::Dashboard);
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `b`.
@@ -590,10 +546,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_popup_lists_no_filter_in_the_preview(
-        #[values(Scope::Preview, Scope::DraftForm, Scope::PreviewEmpty)] scope: Scope,
+    fn leader_popup_lists_no_filter_on_the_dashboard(
+        #[values(Scope::Dashboard, Scope::DashboardDraft, Scope::DashboardEmpty)] scope: Scope,
     ) {
-        // Given the leader popup's keys in a preview scope.
+        // Given the leader popup's keys in a dashboard scope.
         let keys = leader_popup(scope);
 
         // When looking for `f`.
@@ -604,9 +560,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn q_is_ignored_in_the_preview() {
-        // Given the keymap in Preview focus.
-        let mut keys = Keys::new(keymap(), Scope::Preview);
+    fn q_is_ignored_on_the_dashboard() {
+        // Given the keymap on a thread's dashboard.
+        let mut keys = Keys::new(keymap(), Scope::Dashboard);
 
         // When pressing `q`.
         let intent = press(&mut keys, key(KeyCode::Char('q')));
@@ -618,7 +574,7 @@ mod tests {
     #[rstest::rstest]
     #[case(key(KeyCode::Char('j')), Intent::SelectNext)]
     #[case(key(KeyCode::Char('k')), Intent::SelectPrev)]
-    #[case(ctrl('l'), Intent::FocusPreview)]
+    #[case(ctrl('l'), Intent::FocusRight)]
     #[case(key(KeyCode::Enter), Intent::Attach)]
     #[case(key(KeyCode::Char('q')), Intent::Quit)]
     #[case(key(KeyCode::Char('p')), Intent::TogglePin)]
@@ -695,9 +651,9 @@ mod tests {
             Scope::Sidebar,
             Scope::SidebarDraft,
             Scope::SidebarEmpty,
-            Scope::Preview,
-            Scope::DraftForm,
-            Scope::PreviewEmpty
+            Scope::Dashboard,
+            Scope::DashboardDraft,
+            Scope::DashboardEmpty
         )]
         scope: Scope,
     ) {
@@ -723,7 +679,7 @@ mod tests {
         // Given Ctrl with an arrow.
         let pressed = KeyEvent::new(code, KeyModifiers::CONTROL);
 
-        // When routing it in the sidebar or preview.
+        // When routing it in the sidebar or dashboard.
         let intent = layout_route(pressed);
 
         // Then it resizes.
@@ -740,7 +696,7 @@ mod tests {
     fn other_keys_do_not_resize(#[case] pressed: KeyEvent) {
         // Given a key other than Ctrl+Left/Right.
 
-        // When routing it in the sidebar or preview.
+        // When routing it in the sidebar or dashboard.
         let intent = layout_route(pressed);
 
         // Then it's left to the keymap.
@@ -750,23 +706,14 @@ mod tests {
     #[rstest::rstest]
     #[case(vec![ctrl('h')], Intent::FocusSidebar)]
     #[case(vec![key(KeyCode::Enter)], Intent::Attach)]
-    #[case(vec![key(KeyCode::Char('j'))], Intent::NextBlock)]
-    #[case(vec![key(KeyCode::Char('k'))], Intent::PrevBlock)]
-    #[case(vec![ctrl('d')], Intent::HalfPageDown)]
-    #[case(vec![ctrl('u')], Intent::HalfPageUp)]
-    #[case(vec![key(KeyCode::Char('g')), key(KeyCode::Char('g'))], Intent::Top)]
-    #[case(
-        vec![KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)],
-        Intent::Bottom
-    )]
-    #[case(vec![key(KeyCode::Char('y'))], Intent::Yank)]
-    #[case(vec![key(KeyCode::Char('z')), key(KeyCode::Char('a'))], Intent::ToggleFold)]
-    #[case(vec![key(KeyCode::Tab)], Intent::ToggleFold)]
-    fn preview_keys_map_to_their_intents(#[case] pressed: Vec<KeyEvent>, #[case] expected: Intent) {
-        // Given the keymap in Preview focus.
-        let mut keys = Keys::new(keymap(), Scope::Preview);
+    fn dashboard_keys_map_to_their_intents(
+        #[case] pressed: Vec<KeyEvent>,
+        #[case] expected: Intent,
+    ) {
+        // Given the keymap on a thread's dashboard.
+        let mut keys = Keys::new(keymap(), Scope::Dashboard);
 
-        // When pressing the keys in order (Shift+G as kitty reports it).
+        // When pressing the keys in order.
         let intent = pressed
             .into_iter()
             .map(|pressed| press(&mut keys, pressed))
@@ -777,7 +724,7 @@ mod tests {
         assert_eq!(
             intent.as_ref(),
             Some(&expected),
-            "the key for {expected} in the preview"
+            "the key for {expected} on the dashboard"
         );
     }
 
@@ -785,9 +732,9 @@ mod tests {
     #[case(Focus::Sidebar, Selection::Thread, Scope::Sidebar)]
     #[case(Focus::Sidebar, Selection::Draft, Scope::SidebarDraft)]
     #[case(Focus::Sidebar, Selection::Nothing, Scope::SidebarEmpty)]
-    #[case(Focus::Preview, Selection::Thread, Scope::Preview)]
-    #[case(Focus::Preview, Selection::Draft, Scope::DraftForm)]
-    #[case(Focus::Preview, Selection::Nothing, Scope::PreviewEmpty)]
+    #[case(Focus::Dashboard, Selection::Thread, Scope::Dashboard)]
+    #[case(Focus::Dashboard, Selection::Draft, Scope::DashboardDraft)]
+    #[case(Focus::Dashboard, Selection::Nothing, Scope::DashboardEmpty)]
     fn scope_follows_focus_and_the_selection(
         #[case] focus: Focus,
         #[case] selection: Selection,
@@ -813,11 +760,11 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Scope::Sidebar, false)]
-    #[case(Scope::Preview, false)]
+    #[case(Scope::Dashboard, false)]
     #[case(Scope::SidebarEmpty, false)]
-    #[case(Scope::PreviewEmpty, false)]
+    #[case(Scope::DashboardEmpty, false)]
     #[case(Scope::SidebarDraft, true)]
-    #[case(Scope::DraftForm, true)]
+    #[case(Scope::DashboardDraft, true)]
     fn leader_popup_lists_model_and_permission_only_on_a_draft(
         #[case] scope: Scope,
         #[case] listed: bool,
@@ -837,11 +784,11 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Scope::SidebarEmpty, false)]
-    #[case(Scope::PreviewEmpty, false)]
+    #[case(Scope::DashboardEmpty, false)]
     #[case(Scope::Sidebar, true)]
-    #[case(Scope::Preview, true)]
+    #[case(Scope::Dashboard, true)]
     #[case(Scope::SidebarDraft, true)]
-    #[case(Scope::DraftForm, true)]
+    #[case(Scope::DashboardDraft, true)]
     fn leader_popup_lists_workspace_and_branch_only_with_a_selection(
         #[case] scope: Scope,
         #[case] listed: bool,
@@ -861,7 +808,12 @@ mod tests {
 
     #[rstest::rstest]
     fn leader_keys_open_tools(
-        #[values(Scope::Sidebar, Scope::SidebarDraft, Scope::Preview, Scope::DraftForm)]
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarDraft,
+            Scope::Dashboard,
+            Scope::DashboardDraft
+        )]
         scope: Scope,
         #[values(('t', Tool::Shell), ('g', Tool::Lazygit), ('v', Tool::Nvim))] binding: (
             char,
@@ -886,11 +838,11 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Scope::SidebarEmpty, false)]
-    #[case(Scope::PreviewEmpty, false)]
+    #[case(Scope::DashboardEmpty, false)]
     #[case(Scope::Sidebar, true)]
-    #[case(Scope::Preview, true)]
+    #[case(Scope::Dashboard, true)]
     #[case(Scope::SidebarDraft, true)]
-    #[case(Scope::DraftForm, true)]
+    #[case(Scope::DashboardDraft, true)]
     fn leader_popup_lists_tools_only_with_a_selection(#[case] scope: Scope, #[case] listed: bool) {
         // Given the leader popup's keys in the scope.
         let keys = leader_popup(scope);
@@ -968,47 +920,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(vec![key(KeyCode::Char('j'))])]
-    #[case(vec![key(KeyCode::Char('k'))])]
-    #[case(vec![ctrl('d')])]
-    #[case(vec![ctrl('u')])]
-    #[case(vec![key(KeyCode::Char('g')), key(KeyCode::Char('g'))])]
-    #[case(vec![KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)])]
-    #[case(vec![key(KeyCode::Char('y'))])]
-    #[case(vec![key(KeyCode::Char('z')), key(KeyCode::Char('a'))])]
-    #[case(vec![key(KeyCode::Tab)])]
-    fn block_keys_are_unbound_on_a_draft_form(#[case] pressed: Vec<KeyEvent>) {
-        // Given the keymap on a draft's form.
-        let mut keys = Keys::new(keymap(), Scope::DraftForm);
-
-        // When pressing a preview block key.
-        let intents: Vec<Option<Intent>> = pressed
-            .into_iter()
-            .map(|pressed| press(&mut keys, pressed))
-            .collect();
-
-        // Then nothing happens.
-        assert!(
-            intents.iter().all(Option::is_none),
-            "a block key did something on a draft: {intents:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case('g')]
-    #[case('z')]
-    fn block_prefix_opens_no_popup_on_a_draft_form(#[case] pressed: char) {
-        // Given the keymap on a draft's form.
-        let mut keys = Keys::new(keymap(), Scope::DraftForm);
-
-        // When pressing the first key of `gg` or `za`.
-        press(&mut keys, key(KeyCode::Char(pressed)));
-
-        // Then which-key waits for nothing.
-        assert!(!keys.is_pending(), "{pressed} shouldn't open a popup");
-    }
-
-    #[rstest::rstest]
     #[case(vec![ctrl('h')], Intent::FocusSidebar)]
     #[case(vec![key(KeyCode::Enter)], Intent::Attach)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('n'))], Intent::NewSession)]
@@ -1017,12 +928,12 @@ mod tests {
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('b'))], Intent::SwitchBranch)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('m'))], Intent::PickModel)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('a'))], Intent::PickPermission)]
-    fn draft_form_keys_map_to_their_intents(
+    fn dashboard_draft_keys_map_to_their_intents(
         #[case] pressed: Vec<KeyEvent>,
         #[case] expected: Intent,
     ) {
-        // Given the keymap on a draft's form.
-        let mut keys = Keys::new(keymap(), Scope::DraftForm);
+        // Given the keymap on a draft's dashboard.
+        let mut keys = Keys::new(keymap(), Scope::DashboardDraft);
 
         // When pressing the keys in order.
         let intent = pressed
@@ -1035,7 +946,7 @@ mod tests {
         assert_eq!(
             intent.as_ref(),
             Some(&expected),
-            "the key for {expected} on a draft's form"
+            "the key for {expected} on a draft's dashboard"
         );
     }
 

@@ -15,7 +15,7 @@
 //!
 //! `<C-h>` moves the keys from the pane to the sidebar and leaves the pane
 //! drawn on the right, so `<C-l>` goes back into it; `<C-\>` shows the
-//! preview instead.
+//! dashboard instead.
 //!
 //! When a thread finishes a turn or starts needing an approval or an answer
 //! while orb's pane isn't focused, the loop announces it as a desktop
@@ -50,7 +50,6 @@ use error_stack::{Report, ResultExt};
 use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::notify::notifier::NotifierService;
-use orb_domain::feat::preview::preview_actor::{self, PreviewActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
 use orb_domain::feat::zellij::zellij_service::{
@@ -66,7 +65,6 @@ use wherror::Error;
 
 use crate::keymap::{self, Keys, Route, Scope, Selection};
 use crate::picker::PickerScroll;
-use crate::preview::PreviewCache;
 use crate::sidebar::{SPINNER_FRAME, SidebarScroll};
 use crate::{outer_terminal, render};
 
@@ -98,7 +96,7 @@ impl Frontend {
     }
 
     /// Runs orb's TUI until the user quits. Session commands go to
-    /// `sessions` and preview commands to `preview`; the branch picker's refs
+    /// `sessions`; the branch picker's refs
     /// come from `git`; attached sessions run with `claude_env`; tools open
     /// through `zellij`, `None` outside zellij; notices are announced through
     /// `notifier` while orb's pane isn't focused, or while zellij says no
@@ -112,7 +110,6 @@ impl Frontend {
         self,
         state: State,
         sessions: ActorRef<SessionsActor>,
-        preview: ActorRef<PreviewActor>,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
@@ -122,10 +119,8 @@ impl Frontend {
         ratatui::run(|terminal| -> io::Result<()> {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook();
-            let result = App::new(
-                state, sessions, preview, git, claude_env, zellij, notifier, tx,
-            )
-            .run(terminal, &rx);
+            let result =
+                App::new(state, sessions, git, claude_env, zellij, notifier, tx).run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
             result.and(restored)
         })
@@ -185,13 +180,13 @@ fn attaches(started: Option<ThreadId>, selected: Option<ThreadId>, focus: Focus)
         )
 }
 
-/// Where the keys go once the pane is gone: from the pane to the preview;
-/// anywhere else (the sidebar after `<C-h>`, the preview, a text input) they
+/// Where the keys go once the pane is gone: from the pane to the dashboard;
+/// anywhere else (the sidebar after `<C-h>`, the dashboard, a text input) they
 /// stay.
 fn after_pane(focus: Focus) -> Focus {
     match focus {
-        Focus::Attached => Focus::Preview,
-        Focus::Sidebar | Focus::Preview | Focus::Picker | Focus::Rename | Focus::Search => focus,
+        Focus::Attached => Focus::Dashboard,
+        Focus::Sidebar | Focus::Dashboard | Focus::Picker | Focus::Rename | Focus::Search => focus,
     }
 }
 
@@ -205,7 +200,7 @@ fn cursor_style(focus: Focus, pane: Option<SetCursorStyle>) -> SetCursorStyle {
         (Focus::Sidebar, _) => SetCursorStyle::SteadyBlock,
         (Focus::Picker | Focus::Rename | Focus::Search, _) => SetCursorStyle::SteadyBar,
         (Focus::Attached, Some(style)) => style,
-        (Focus::Attached, None) | (Focus::Preview, _) => SetCursorStyle::DefaultUserShape,
+        (Focus::Attached, None) | (Focus::Dashboard, _) => SetCursorStyle::DefaultUserShape,
     }
 }
 
@@ -230,11 +225,10 @@ struct AttachedPane {
 struct App {
     state: State,
     sessions: ActorRef<SessionsActor>,
-    preview: ActorRef<PreviewActor>,
     git: GitService,
     keys: Keys,
     pane: Option<AttachedPane>,
-    /// Shown under the preview header when `claude attach` couldn't start.
+    /// Shown on the right when `claude attach` couldn't start.
     pane_error: Option<String>,
     /// The directory a trust pane was opened for, while its start waits.
     opened_trust: Option<PathBuf>,
@@ -248,7 +242,6 @@ struct App {
     pane_area: Rect,
     /// The cursor style last sent to the outer terminal.
     cursor_style: SetCursorStyle,
-    preview_cache: PreviewCache,
     sidebar_scroll: SidebarScroll,
     picker_scroll: PickerScroll,
     /// orb's pane has the outer terminal's focus, as its last focus event
@@ -260,7 +253,6 @@ impl App {
     fn new(
         state: State,
         sessions: ActorRef<SessionsActor>,
-        preview: ActorRef<PreviewActor>,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
@@ -274,7 +266,6 @@ impl App {
         Self {
             state,
             sessions,
-            preview,
             git,
             keys: Keys::new(keymap::keymap(), scope),
             pane: None,
@@ -286,7 +277,6 @@ impl App {
             tx,
             pane_area: Rect::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
-            preview_cache: PreviewCache::default(),
             sidebar_scroll: SidebarScroll::default(),
             picker_scroll: PickerScroll::default(),
             focused: true,
@@ -303,7 +293,7 @@ impl App {
                 attached.pane.resize(PaneSize::from(pane_area));
             }
             let now = SystemTime::now();
-            let mut drawn = (None, None, None);
+            let mut drawn = (None, None);
             terminal.draw(|frame| {
                 let state = self.state.read();
                 let pane = self
@@ -321,18 +311,12 @@ impl App {
                     self.pane_error.as_deref(),
                     &self.keys,
                     now,
-                    &mut self.preview_cache,
                     &mut self.sidebar_scroll,
                     &mut self.picker_scroll,
                 );
             })?;
             // Navigation scrolls by what was just drawn.
-            let (preview_layout, sidebar_layout, picker_page) = drawn;
-            if let Some(layout) = preview_layout
-                && self.state.read().preview.layout != layout
-            {
-                self.state.write().preview.layout = layout;
-            }
+            let (sidebar_layout, picker_page) = drawn;
             if let Some(layout) = sidebar_layout
                 && self.state.read().sidebar.layout != layout
             {
@@ -417,7 +401,7 @@ impl App {
                             None
                         }
                     },
-                    Focus::Sidebar | Focus::Preview => match keymap::layout_route(key) {
+                    Focus::Sidebar | Focus::Dashboard => match keymap::layout_route(key) {
                         Some(intent) => {
                             // A resize ends any key sequence in progress.
                             self.keys.dismiss();
@@ -518,7 +502,7 @@ impl App {
                         None => {
                             self.pane_error = Some("couldn't start claude attach".to_owned());
                             let mut app = self.state.write();
-                            app.focus = Focus::Preview;
+                            app.focus = Focus::Dashboard;
                             app.pane_shown = None;
                             return Ok(());
                         }
@@ -664,11 +648,6 @@ impl App {
                     .try_send();
                 Ok(())
             }
-            Command::ShowPreview => {
-                let _ = self.preview.tell(preview_actor::ShowPreview).try_send();
-                Ok(())
-            }
-            Command::Yank(text) => outer_terminal::copy_to_clipboard(out, text),
             Command::Pin(id) => {
                 let _ = self.sessions.tell(sessions_actor::Pin(*id)).try_send();
                 Ok(())
@@ -738,7 +717,7 @@ impl App {
         self.pane = None;
         self.state.write().pane_shown = None;
         if focus == Focus::Attached {
-            self.state.write().focus = Focus::Preview;
+            self.state.write().focus = Focus::Dashboard;
             outer_terminal::set_mouse_capture(out, false)?;
         }
         Ok(())
@@ -805,7 +784,7 @@ impl App {
         Ok(())
     }
 
-    /// Closes the trust pane, returns to the preview unless `<C-h>` already
+    /// Closes the trust pane, returns to the dashboard unless `<C-h>` already
     /// moved the keys to the sidebar, and tries the waiting session start
     /// again.
     fn leave_trust<W>(&mut self, out: &mut W) -> io::Result<()>
@@ -955,7 +934,7 @@ mod tests {
         Some(SetCursorStyle::BlinkingUnderScore),
         SetCursorStyle::BlinkingUnderScore
     )]
-    #[case::preview_default(Focus::Preview, None, SetCursorStyle::DefaultUserShape)]
+    #[case::dashboard_default(Focus::Dashboard, None, SetCursorStyle::DefaultUserShape)]
     fn cursor_shape_follows_where_the_keys_are(
         #[case] focus: Focus,
         #[case] pane: Option<SetCursorStyle>,
@@ -1066,11 +1045,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Attached, Focus::Preview)]
+    #[case(Focus::Attached, Focus::Dashboard)]
     #[case(Focus::Sidebar, Focus::Sidebar)]
-    #[case(Focus::Preview, Focus::Preview)]
+    #[case(Focus::Dashboard, Focus::Dashboard)]
     #[case(Focus::Picker, Focus::Picker)]
-    fn keys_leave_a_gone_pane_for_the_preview_only_from_the_pane(
+    fn keys_leave_a_gone_pane_for_the_dashboard_only_from_the_pane(
         #[case] focus: Focus,
         #[case] expected: Focus,
     ) {
@@ -1111,7 +1090,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Focus::Sidebar)]
-    #[case(Focus::Preview)]
+    #[case(Focus::Dashboard)]
     fn started_thread_still_selected_is_attached(#[case] focus: Focus) {
         // Given thread 1 started from a draft and still selected.
         let started = Some(ThreadId(1));

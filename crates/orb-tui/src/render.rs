@@ -1,5 +1,5 @@
-//! Draws a frame: the sidebar on the left, the attached session, the selected
-//! thread's preview or the selected draft's form on the right, the mode line at
+//! Draws a frame: the sidebar on the left, the attached session, a hint or the
+//! selected draft's form on the right, the mode line at
 //! the bottom, and the which-key popup on top while a key sequence is pending.
 //! While the sidebar is hidden, the right side takes the full width.
 //! While `s` or `x` waits for its repeat, a banner above the selected row says
@@ -8,13 +8,12 @@
 //! is the rename box while it has the keys.
 //! The terminal's cursor is shown only where the keys are: on the sidebar's
 //! selected row, at the text cursor of the picker, the rename box or the
-//! sidebar search, or in the attached pane. The preview shows none.
+//! sidebar search, or in the attached pane. The right-hand hint shows none.
 //! Whatever is left on the terminal's default background gets orb's navy, so
 //! a transparent terminal doesn't show through.
 
 use std::time::SystemTime;
 
-use orb_domain::feat::preview::state::PreviewLayout;
 use orb_domain::feat::sessions::state::{SidebarItem, SidebarRow};
 use orb_domain::feat::sessions::validator::{ToggleSettleError, validate_toggle_settle};
 use orb_domain::feat::sidebar::state::{SidebarLayout, SidebarView};
@@ -31,7 +30,6 @@ use ratatui_which_key::WhichKey;
 use crate::draft;
 use crate::keymap::{self, Keys};
 use crate::picker::{self, PickerScroll};
-use crate::preview::{self, PreviewCache};
 use crate::rename;
 use crate::sidebar::{self, SidebarScroll};
 
@@ -53,14 +51,13 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// Draws the whole frame. `pane` is the selected thread's session, if orb has
 /// one running; it's drawn while attached, and while `<C-h>` left it shown for
 /// the sidebar (without its cursor). Otherwise the right side shows the
-/// selected thread's preview, with `pane_error` saying why the session
-/// couldn't start. While the sidebar has the keys, the cursor sits on the
-/// first cell of its selected row. Returns the preview's layout when it was drawn,
-/// the sidebar's layout unless it's hidden, and how many rows the picker fits
-/// when it's open.
+/// selected draft's form, or a hint with `pane_error` under it saying why the
+/// session couldn't start. While the sidebar has the keys, the cursor sits on
+/// the first cell of its selected row. Returns the sidebar's layout unless
+/// it's hidden, and how many rows the picker fits when it's open.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the frame's inputs and the three frontend view states it updates"
+    reason = "the frame's inputs and the two frontend view states it updates"
 )]
 pub(crate) fn render(
     frame: &mut Frame,
@@ -69,10 +66,9 @@ pub(crate) fn render(
     pane_error: Option<&str>,
     keys: &Keys,
     now: SystemTime,
-    cache: &mut PreviewCache,
     scroll: &mut SidebarScroll,
     picker_scroll: &mut PickerScroll,
-) -> (Option<PreviewLayout>, Option<SidebarLayout>, Option<usize>) {
+) -> (Option<SidebarLayout>, Option<usize>) {
     let [sidebar_area, right, mode_line] = layout(frame.area(), &state.sidebar);
     let (selected_y, sidebar_layout, search_cursor) = if state.sidebar.hidden {
         (None, None, None)
@@ -91,39 +87,19 @@ pub(crate) fn render(
         || state
             .pane_shown
             .is_some_and(|id| state.sessions.selected_id() == Some(id));
-    let preview_layout = match pane.filter(|_| pane_shown) {
+    match pane.filter(|_| pane_shown) {
         Some(pane) => {
             if let Some(cursor) = pane.render(right, frame.buffer_mut()).filter(|_| attached) {
                 frame.set_cursor_position(cursor);
             }
-            None
         }
-        None => match (
-            state.sessions.selected_thread(),
-            state.sessions.selected_draft(),
-        ) {
-            (Some(thread), _) => Some(preview::render(
-                state,
-                thread,
-                pane_error,
-                right,
-                frame.buffer_mut(),
-                cache,
-            )),
-            (None, Some((project, draft))) => {
+        None => match state.sessions.selected_draft() {
+            Some((project, draft)) => {
                 draft::render(project, draft, &state.home, right, frame.buffer_mut());
-                None
             }
-            (None, None) => {
-                let hint = match state.sessions.cursor {
-                    Some(SidebarItem::SettledShelf) => shelf_hint(state),
-                    _ => "␣n new session · ␣p add project".to_owned(),
-                };
-                Line::raw(hint).render(right, frame.buffer_mut());
-                None
-            }
+            None => render_hint(state, pane_error, right, frame.buffer_mut()),
         },
-    };
+    }
     render_mode_line(state, mode_line, frame.buffer_mut());
     let renaming = state
         .rename
@@ -169,7 +145,22 @@ pub(crate) fn render(
             cell.bg = BACKGROUND;
         }
     }
-    (preview_layout, sidebar_layout, picker_page)
+    (sidebar_layout, picker_page)
+}
+
+/// The right side's one line while no pane or draft is shown: the shelf hint
+/// on the Settled header, else how to start a session, with `pane_error` in
+/// red on the line under it.
+fn render_hint(state: &AppState, pane_error: Option<&str>, area: Rect, buf: &mut Buffer) {
+    let hint = match state.sessions.cursor {
+        Some(SidebarItem::SettledShelf) => shelf_hint(state),
+        _ => "␣n new session · ␣p add project".to_owned(),
+    };
+    Line::raw(hint).render(area, buf);
+    if let Some(error) = pane_error {
+        let [_, below] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+        Line::styled(error, Style::new().fg(Color::Red)).render(below, buf);
+    }
 }
 
 /// What `⏎` does on the Settled header: `▸ Settled (N) · ⏎ open`, or
@@ -233,8 +224,8 @@ fn render_banner(state: &AppState, confirm: char, selected_y: u16, buf: &mut Buf
 fn render_mode_line(state: &AppState, area: Rect, buf: &mut Buffer) {
     let mode = match (state.focus, state.sessions.selected_draft()) {
         (Focus::Attached, _) => "ATTACHED",
-        (Focus::Sidebar | Focus::Preview, Some(_)) => "DRAFT",
-        (Focus::Sidebar | Focus::Preview, None) => "NORMAL",
+        (Focus::Sidebar | Focus::Dashboard, Some(_)) => "DRAFT",
+        (Focus::Sidebar | Focus::Dashboard, None) => "NORMAL",
         (Focus::Picker, _) => "PICKER",
         (Focus::Rename | Focus::Search, _) => "INSERT",
     };
@@ -264,7 +255,6 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use orb_domain::feat::picker::state::PickerState;
-    use orb_domain::feat::preview::state::Preview;
     use orb_domain::feat::sessions::state::{
         Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem, Thread, ThreadId,
         ThreadStatus,
@@ -282,7 +272,6 @@ mod tests {
 
     use crate::keymap::{Keys, Scope, keymap, press};
     use crate::picker::PickerScroll;
-    use crate::preview::PreviewCache;
     use crate::sidebar::SidebarScroll;
 
     fn thread(id: i64, status: ThreadStatus) -> Thread {
@@ -334,7 +323,6 @@ mod tests {
                 None,
                 keys,
                 SystemTime::UNIX_EPOCH,
-                &mut PreviewCache::default(),
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
@@ -388,7 +376,6 @@ mod tests {
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
-                &mut PreviewCache::default(),
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
@@ -465,28 +452,46 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn selected_thread_without_messages_shows_how_to_attach() {
-        // Given a selected thread whose transcript has no blocks yet.
-        let state = AppState {
-            sessions: Sessions {
-                cursor: Some(SidebarItem::Thread(ThreadId(1))),
-                ..sessions(vec![thread(1, ThreadStatus::Idle)])
-            },
-            preview: Preview {
-                thread: Some(ThreadId(1)),
-                ..Preview::default()
-            },
-            ..AppState::default()
-        };
+    fn selected_thread_shows_the_new_session_hint() {
+        // Given a selected thread.
+        let state = selected(Focus::Sidebar);
 
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the right side offers to attach (cut at the 48-column edge).
-        let [_, right, _] = layout(buffer.area, &SidebarView::default());
-        let right = text(&buffer, right);
+        // Then the right side says how to start a session.
+        let right = right_side(&buffer);
         assert!(
-            right.contains("No messages yet · ⏎ attach"),
+            right.contains("␣n new session · ␣p add project"),
+            "right side was '{right}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_error_shows_under_the_hint() {
+        // Given a selected thread whose session couldn't start.
+        let state = selected(Focus::Dashboard);
+
+        // When drawing a frame with the pane's error.
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
+        let Ok(_) = terminal.draw(|frame| {
+            render(
+                frame,
+                &state,
+                None,
+                Some("claude attach failed"),
+                &Keys::new(keymap(), Scope::Dashboard),
+                SystemTime::UNIX_EPOCH,
+                &mut SidebarScroll::default(),
+                &mut PickerScroll::default(),
+            );
+        });
+
+        // Then the error is on the right side's second line.
+        let right = right_side(terminal.backend().buffer());
+        assert_eq!(
+            right.lines().nth(1).map(str::trim_end),
+            Some("claude attach failed"),
             "right side was '{right}'"
         );
     }
@@ -730,7 +735,6 @@ mod tests {
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
-                &mut PreviewCache::default(),
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
@@ -880,19 +884,19 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn preview_focus_hides_a_live_pane() {
-        // Given a live pane for the selected thread, with the preview focused.
+    fn dashboard_focus_hides_a_live_pane() {
+        // Given a live pane for the selected thread, with the dashboard focused.
         let pane = pane_with_text();
-        let state = selected(Focus::Preview);
+        let state = selected(Focus::Dashboard);
 
         // When drawing a frame.
         let right = pane.as_ref().map(|pane| right_side_with_pane(&state, pane));
 
-        // Then the right side is the preview, not the pane.
+        // Then the right side is the hint, not the pane.
         assert!(
-            right
-                .as_deref()
-                .is_some_and(|right| right.contains("Fix the bug") && !right.contains("PANE-TEXT")),
+            right.as_deref().is_some_and(
+                |right| right.contains("␣n new session") && !right.contains("PANE-TEXT")
+            ),
             "right side was {right:?}"
         );
     }
@@ -971,7 +975,6 @@ mod tests {
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
-                &mut PreviewCache::default(),
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
@@ -1055,15 +1058,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn preview_focus_shows_no_cursor() {
-        // Given thread 1 selected with the preview focused.
-        let state = selected(Focus::Preview);
+    fn dashboard_focus_shows_no_cursor() {
+        // Given thread 1 selected with the dashboard focused.
+        let state = selected(Focus::Dashboard);
 
         // When drawing a frame.
         let cursor = cursor_of(&state, None);
 
         // Then no cursor is shown.
-        assert_eq!(cursor, None, "the cursor with the preview focused");
+        assert_eq!(cursor, None, "the cursor with the dashboard focused");
     }
 
     #[rstest::rstest]
@@ -1104,7 +1107,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Focus::Sidebar)]
-    #[case(Focus::Preview)]
+    #[case(Focus::Dashboard)]
     fn mode_line_shows_draft_on_a_draft(#[case] focus: Focus) {
         // Given orb's draft selected.
         let state = drafted(focus);
@@ -1177,7 +1180,7 @@ mod tests {
     #[rstest::rstest]
     fn hidden_sidebar_draws_the_right_side_from_the_left_edge() {
         // Given orb's draft selected with the sidebar hidden.
-        let state = hidden(drafted(Focus::Preview));
+        let state = hidden(drafted(Focus::Dashboard));
 
         // When drawing a frame.
         let buffer = draw(&state);
@@ -1214,20 +1217,19 @@ mod tests {
     #[rstest::rstest]
     fn hidden_sidebar_returns_no_layout() {
         // Given a selected thread with the sidebar hidden.
-        let state = hidden(selected(Focus::Preview));
+        let state = hidden(selected(Focus::Dashboard));
 
         // When drawing a frame.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
         let mut sidebar_layout = None;
         let Ok(_) = terminal.draw(|frame| {
-            (_, sidebar_layout, _) = render(
+            (sidebar_layout, _) = render(
                 frame,
                 &state,
                 None,
                 None,
-                &Keys::new(keymap(), Scope::Preview),
+                &Keys::new(keymap(), Scope::Dashboard),
                 SystemTime::UNIX_EPOCH,
-                &mut PreviewCache::default(),
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
