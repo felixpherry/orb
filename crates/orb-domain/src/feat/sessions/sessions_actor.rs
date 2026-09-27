@@ -66,11 +66,11 @@ use super::session_host::{
     SessionHostError, SessionHostService, SessionOptions, SessionRecord, WorkspaceUntrusted,
 };
 use super::state::{
-    Draft, DraftWorkspace, NEW_THREAD, Notice, NoticeKind, Project, ProjectId, Sessions,
-    SidebarItem, Thread, ThreadId, ThreadStatus,
+    Draft, DraftWorkspace, Group, GroupDraft, NEW_THREAD, Notice, NoticeKind, Project, ProjectId,
+    ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
 };
 use super::store::{
-    DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, ThreadRow, Ui,
+    DraftRow, GroupRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, ThreadRow, Ui,
 };
 use super::transcript::{locate, scan_title};
 use crate::command::Workspace;
@@ -569,9 +569,10 @@ impl SessionsActor {
             worktrees_root,
             wake,
         } = deps;
-        let (projects, rows, drafts, error) = match store.load() {
-            Ok((projects, rows, drafts)) => (projects, rows, drafts, None),
+        let (projects, rows, drafts, groups, error) = match store.load() {
+            Ok((projects, rows, drafts, groups)) => (projects, rows, drafts, groups, None),
             Err(_) => (
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -595,6 +596,12 @@ impl SessionsActor {
                 root: project.root,
                 created_at: from_ms(project.created_at),
                 removed: project.removed_at.is_some(),
+                kind: project.kind,
+                groups: groups
+                    .iter()
+                    .filter(|row| row.project_id == project.id)
+                    .map(|row| group(row, &rows))
+                    .collect(),
             })
             .collect();
         let ui = store.ui().unwrap_or_default();
@@ -1347,6 +1354,7 @@ impl SessionsActor {
             created_at: now,
             model: options.model.clone(),
             permission_mode: options.permission_mode.clone(),
+            group_id: None,
         };
         let Ok(id) = self.store.insert_thread(&new) else {
             return Err(NEW_SESSION_UNSAVED.to_owned());
@@ -1374,6 +1382,7 @@ impl SessionsActor {
             model: new.model,
             permission_mode: new.permission_mode,
             renamed_title: None,
+            group_id: new.group_id,
         };
         if row.branch.is_some() && self.store.save_thread(&row).is_err() {
             return Err(NEW_SESSION_UNSAVED.to_owned());
@@ -1390,7 +1399,7 @@ impl SessionsActor {
         let title = project_title(&root);
         let added = if root.is_dir() {
             self.store
-                .add_project(&root, &title, now)
+                .add_project(&root, &title, ProjectKind::Normal, now)
                 .map_err(|_report| SAVE_FAILED.to_owned())
         } else {
             Err(format!("not a directory: {}", root.display()))
@@ -1415,6 +1424,8 @@ impl SessionsActor {
                             threads: Vec::new(),
                             draft: None,
                             removed: false,
+                            kind: ProjectKind::Normal,
+                            groups: Vec::new(),
                         }),
                     }
                 }
@@ -1841,6 +1852,33 @@ fn thread(row: &ThreadRow, status: ThreadStatus, attach_argv: Vec<OsString>) -> 
         active_since: from_ms(row.created_at.max(row.unsettled_at.unwrap_or(0))),
         last_activity_at: from_ms(row.last_activity_at),
         unseen: row.last_activity_at > row.last_visited_at,
+        group: row.group_id,
+        model: row.model.clone(),
+        permission: row.permission_mode.clone(),
+    }
+}
+
+/// How a saved group looks: a draft exactly while no saved thread is in it.
+fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
+    Group {
+        id: row.id,
+        kind: row.kind,
+        name: row.name.clone(),
+        dir: row.dir.clone(),
+        branch: row.branch.clone(),
+        created_at: from_ms(row.created_at),
+        pinned_at: row.pinned_at.map(from_ms),
+        settled_at: row
+            .settled_at
+            .filter(|_| row.settled_override == Some(SettledOverride::Settled))
+            .map(from_ms),
+        active_since: from_ms(row.created_at.max(row.unsettled_at.unwrap_or(0))),
+        draft: (!threads.iter().any(|thread| thread.group_id == Some(row.id))).then(|| {
+            GroupDraft {
+                model: row.draft_model.clone(),
+                permission: row.draft_permission_mode.clone(),
+            }
+        }),
     }
 }
 
@@ -1998,11 +2036,11 @@ mod tests {
         SessionRecord, WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Notice, NoticeKind, ProjectId, SidebarItem, SidebarRow, Thread,
-        ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, GroupDraft, GroupKind, Notice, NoticeKind, ProjectId, ProjectKind,
+        SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::store::{
-        DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, StoreError,
+        DraftRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store, StoreError,
         ThreadRow, Ui,
     };
     use crate::feat::sessions::transcript::transcript_path;
@@ -2450,7 +2488,7 @@ mod tests {
 
     /// Saves the orb project rooted at [`PROJECT_ROOT`].
     fn orb_project(store: &Store) -> Result<ProjectId, Report<StoreError>> {
-        store.add_project(Path::new(PROJECT_ROOT), "orb", 0)
+        store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 0)
     }
 
     /// Saves a thread created at `created_at` in the orb project.
@@ -2467,6 +2505,7 @@ mod tests {
             created_at,
             model: None,
             permission_mode: None,
+            group_id: None,
         })
     }
 
@@ -2987,7 +3026,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let orb = orb_project(&store)?;
         store.record_last_used(orb, &used(LastWorkspace::NewWorktree), 10)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
         let (mut actor, state) = start(
             store,
             &FakeHost::listing(Vec::new()),
@@ -3969,7 +4008,7 @@ mod tests {
         // Given saved orb and web projects, web with a local draft.
         let store = Store::open_in_memory()?;
         orb_project(&store)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
         store.save_draft(&draft_row(web, DraftWorkspace::Local))?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -4214,7 +4253,7 @@ mod tests {
         // Given saved orb and web projects, web with a local draft.
         let store = Store::open_in_memory()?;
         orb_project(&store)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
         store.save_draft(&draft_row(web, DraftWorkspace::Local))?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -4403,7 +4442,7 @@ mod tests {
         // Given a directory that's already a saved project.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
-        store.add_project(dir.path(), "web", 0)?;
+        store.add_project(dir.path(), "web", ProjectKind::Normal, 0)?;
         let (mut actor, state) = start(
             store,
             &FakeHost::listing(Vec::new()),
@@ -4776,8 +4815,8 @@ mod tests {
         // Given project B saved before project A but first used after it,
         // with A's threads created at 10 and 30 and B's at 20.
         let store = Store::open_in_memory()?;
-        let b = store.add_project(Path::new("/b"), "b", 2)?;
-        let a = store.add_project(Path::new("/a"), "a", 1)?;
+        let b = store.add_project(Path::new("/b"), "b", ProjectKind::Normal, 2)?;
+        let a = store.add_project(Path::new("/a"), "a", ProjectKind::Normal, 1)?;
         let insert = |project_id, short_id: &str, created_at| {
             store.insert_thread(&NewThread {
                 project_id,
@@ -4786,6 +4825,7 @@ mod tests {
                 created_at,
                 model: None,
                 permission_mode: None,
+                group_id: None,
             })
         };
         let a_old = insert(a, "a1", 10)?;
@@ -5006,7 +5046,7 @@ mod tests {
         // Given a directory that's a removed project.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
-        let id = store.add_project(dir.path(), "web", 0)?;
+        let id = store.add_project(dir.path(), "web", ProjectKind::Normal, 0)?;
         store.remove_project(id, 1_000)?;
         let (mut actor, state) = start(
             store,
@@ -5031,7 +5071,7 @@ mod tests {
     fn store_filtered_to_web() -> Result<(Store, ProjectId, ThreadId), Report<StoreError>> {
         let store = Store::open_in_memory()?;
         add_thread(&store, "aa", 1_000)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
         let thread = store.insert_thread(&NewThread {
             project_id: web,
             short_id: "bb".to_owned(),
@@ -5039,6 +5079,7 @@ mod tests {
             created_at: 500,
             model: None,
             permission_mode: None,
+            group_id: None,
         })?;
         store.save_ui(&Ui {
             sidebar_width: None,
@@ -5140,7 +5181,7 @@ mod tests {
     fn restore_shows_when_each_project_was_added() -> Result<(), Report<StoreError>> {
         // Given a project saved at 1.5 s.
         let store = Store::open_in_memory()?;
-        store.add_project(Path::new(PROJECT_ROOT), "orb", 1_500)?;
+        store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1_500)?;
 
         // When the actor starts.
         let (_actor, state) = start(
@@ -5166,11 +5207,55 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn restore_gives_a_group_without_threads_a_draft() -> Result<(), Report<StoreError>> {
+        // Given a project with a saved Feature group in opus and no threads.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1_500)?;
+        store.insert_group(&NewGroup {
+            project_id,
+            kind: GroupKind::Feature,
+            name: "GT-514-login".to_owned(),
+            dir: None,
+            branch: Some("GT-514-login".to_owned()),
+            created_at: 2_000,
+            draft_model: Some("opus".to_owned()),
+            draft_permission_mode: None,
+        })?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the group shows a draft with its saved settings.
+        let drafts: Vec<Option<GroupDraft>> = state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .flat_map(|project| project.groups.iter().map(|group| group.draft.clone()))
+            .collect();
+        assert_eq!(
+            drafts,
+            vec![Some(GroupDraft {
+                model: Some("opus".to_owned()),
+                permission: None,
+            })],
+            "a group without threads should be restored with its draft"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn restore_puts_a_saved_draft_on_its_project() -> Result<(), Report<StoreError>> {
         // Given a project with a saved new-worktree draft on main, in opus,
         // created at 2 s.
         let store = Store::open_in_memory()?;
-        let project_id = store.add_project(Path::new(PROJECT_ROOT), "orb", 1_500)?;
+        let project_id =
+            store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1_500)?;
         store.save_draft(&DraftRow {
             project_id,
             workspace: DraftWorkspace::NewWorktree,
@@ -6326,6 +6411,7 @@ mod tests {
             created_at: now_ms() - HOUR_MS,
             model: Some("sonnet".to_owned()),
             permission_mode: Some("plan".to_owned()),
+            group_id: None,
         })?;
         let host = FakeHost::moving(Ok("bb"));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -6575,7 +6661,7 @@ mod tests {
         let root = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
         let id = {
-            let project_id = store.add_project(root.path(), "orb", 0)?;
+            let project_id = store.add_project(root.path(), "orb", ProjectKind::Normal, 0)?;
             store.insert_thread(&NewThread {
                 project_id,
                 short_id: "aa".to_owned(),
@@ -6583,6 +6669,7 @@ mod tests {
                 created_at: now_ms() - HOUR_MS,
                 model: None,
                 permission_mode: None,
+                group_id: None,
             })?
         };
         let host = FakeHost::moving(Ok("bb"));
@@ -6874,7 +6961,7 @@ mod tests {
     -> Result<(), Report<StoreError>> {
         // Given orb's thread, with the sidebar filtered to another project.
         let (store, id) = store_with_thread("aa")?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", 0)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
         let host = FakeHost::listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state.write().sessions.filter = Some(web);

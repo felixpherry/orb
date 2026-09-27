@@ -16,7 +16,8 @@ use crate::feat::picker::validator::{
     validate_add_directory, validate_open_directory, validate_pick_project, validate_remove_project,
 };
 use crate::feat::sessions::state::{
-    AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Search, SidebarItem, ThreadId,
+    AttachTarget, Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Search, SidebarItem,
+    ThreadId,
 };
 use crate::feat::sessions::validator::{
     SETTLE_IN_PROGRESS, ToggleSettleError, validate_close_shelf, validate_delete,
@@ -179,6 +180,18 @@ impl IntentHandler {
                             .sessions
                             .projects_by_recency()
                             .into_iter()
+                            .map(project_item),
+                    )
+                    .chain(
+                        [ProjectKind::Research, ProjectKind::Learn]
+                            .into_iter()
+                            .filter_map(|kind| {
+                                state
+                                    .sessions
+                                    .projects
+                                    .iter()
+                                    .find(|project| project.kind == kind && !project.removed)
+                            })
                             .map(project_item),
                     )
                     .collect();
@@ -831,7 +844,7 @@ fn settle(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
     ) {
         (Ok(()), Some(selected)) if selected.id == thread && selected.settled_at.is_none() => {
             state.attached.remove(&thread);
-            state.sessions.cursor = state.sessions.card_neighbour(thread);
+            state.sessions.cursor = state.sessions.card_neighbour(SidebarItem::Thread(thread));
             with_visit(state, vec![Command::Settle(thread)])
         }
         (Err(ToggleSettleError::InProgress), Some(selected)) if selected.id == thread => {
@@ -1045,8 +1058,8 @@ mod tests {
     use crate::feat::picker::list::{BranchRow, PERMISSION_MODES, PickerItem, WorkspaceChoice};
     use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
-        AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem,
-        SidebarRow, Thread, ThreadId, ThreadStatus,
+        AttachTarget, Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Search, Sessions,
+        SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::feat::sidebar::state::{Rename, SidebarView};
@@ -1068,6 +1081,9 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
+            group: None,
+            model: None,
+            permission: None,
         }
     }
 
@@ -1096,6 +1112,8 @@ mod tests {
                     removed: false,
                     draft: None,
                     threads,
+                    groups: vec![],
+                    kind: ProjectKind::Normal,
                 }],
                 cursor: Some(cursor),
                 ..Sessions::default()
@@ -1119,6 +1137,8 @@ mod tests {
                         removed: false,
                         draft: None,
                         threads: vec![],
+                        groups: vec![],
+                        kind: ProjectKind::Normal,
                     })
                     .collect(),
                 ..Sessions::default()
@@ -3951,6 +3971,41 @@ mod tests {
                 project_row(2, "beta"),
             ],
             "the project filter's rows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filter_projects_lists_research_and_learn_after_the_projects() {
+        // Given Learn, alpha, Research and beta, in that order.
+        let mut state = with_projects(&["learn", "alpha", "research", "beta"]);
+        for (project, kind) in state.sessions.projects.iter_mut().zip([
+            ProjectKind::Learn,
+            ProjectKind::Normal,
+            ProjectKind::Research,
+        ]) {
+            project.kind = kind;
+        }
+
+        // When handling FilterProjects.
+        IntentHandler::handle(&Intent::FilterProjects, &mut state);
+
+        // Then Research and Learn follow the projects, once each.
+        let rows: Vec<PickerItem> = state
+            .picker
+            .iter()
+            .flat_map(PickerState::shown)
+            .map(|(item, _)| item.clone())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                PickerItem::AllProjects,
+                project_row(2, "alpha"),
+                project_row(4, "beta"),
+                project_row(3, "research"),
+                project_row(1, "learn"),
+            ],
+            "Research and Learn should end the project filter"
         );
     }
 

@@ -61,7 +61,7 @@ mod tests {
     use super::{AttachError, DetachError, validate_attach, validate_detach};
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
     #[rstest::rstest]
@@ -122,7 +122,12 @@ mod tests {
                         active_since: SystemTime::UNIX_EPOCH,
                         last_activity_at: SystemTime::UNIX_EPOCH,
                         unseen: false,
+                        group: None,
+                        model: None,
+                        permission: None,
                     }],
+                    groups: vec![],
+                    kind: ProjectKind::Normal,
                 }],
                 cursor: Some(SidebarItem::Thread(ThreadId(1))),
                 ..Sessions::default()

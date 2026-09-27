@@ -144,8 +144,8 @@ mod tests {
     use jiff::tz::TimeZone;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem, Thread, ThreadId,
-        ThreadStatus,
+        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem,
+        Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::{Rename, SidebarView};
     use orb_domain::{AppState, Focus, TextInput};
@@ -177,6 +177,9 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
+            group: None,
+            model: None,
+            permission: None,
         }
     }
 
@@ -190,6 +193,8 @@ mod tests {
                 removed: false,
                 draft: None,
                 threads,
+                groups: vec![],
+                kind: ProjectKind::Normal,
             }],
             ..Sessions::default()
         }

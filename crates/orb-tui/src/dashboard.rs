@@ -381,8 +381,8 @@ mod tests {
 
     use orb_domain::AppState;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
-        ThreadStatus,
+        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus,
     };
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
@@ -404,6 +404,9 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
+            group: None,
+            model: None,
+            permission: None,
         }
     }
 
@@ -416,6 +419,8 @@ mod tests {
             removed: false,
             draft,
             threads,
+            groups: vec![],
+            kind: ProjectKind::Normal,
         }
     }
 

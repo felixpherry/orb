@@ -197,8 +197,8 @@ mod tests {
 
     use jiff::tz::{self, TimeZone};
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
-        ThreadStatus,
+        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus,
     };
     use orb_domain::{AppState, Focus};
     use ratatui::buffer::{Buffer, Cell};
@@ -226,6 +226,9 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
+            group: None,
+            model: None,
+            permission: None,
         }
     }
 
@@ -238,6 +241,8 @@ mod tests {
             removed: false,
             draft: None,
             threads,
+            groups: vec![],
+            kind: ProjectKind::Normal,
         }
     }
 

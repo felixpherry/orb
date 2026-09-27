@@ -194,8 +194,8 @@ mod tests {
     };
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
-        ThreadStatus,
+        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus,
     };
 
     /// One project whose local draft is selected, with a start in flight if
@@ -219,6 +219,8 @@ mod tests {
                         from: None,
                     }),
                     threads: vec![],
+                    groups: vec![],
+                    kind: ProjectKind::Normal,
                 }],
                 cursor: Some(SidebarItem::Draft(ProjectId(1))),
                 starting,
@@ -358,7 +360,12 @@ mod tests {
                         active_since: SystemTime::UNIX_EPOCH,
                         last_activity_at: SystemTime::UNIX_EPOCH,
                         unseen: false,
+                        group: None,
+                        model: None,
+                        permission: None,
                     }],
+                    groups: vec![],
+                    kind: ProjectKind::Normal,
                 }],
                 cursor: Some(SidebarItem::Thread(ThreadId(1))),
                 ..Sessions::default()
