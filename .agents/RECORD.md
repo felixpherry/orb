@@ -59,7 +59,7 @@ Entries are added or amended **only with human approval**.
 - (settle) An unpinned thread auto-settles after 3 days without turn activity, unless the user un-settled it since that activity or orb is attached to it.
 - (settle) Settling a thread stops its Claude session (`claude stop`); attaching resumes it.
 - (sessions) Deleting a thread runs `claude rm` and removes it from orb; its transcript stays in Claude's projects directory.
-- (keybinds) In the sidebar, `p` pins or unpins the selected thread, `ss` settles or un-settles it, and `xx` deletes it.
+- (keybinds) In the sidebar, `p` pins or unpins the selected thread, `s` settles or un-settles it, and `d` deletes it (on a draft, discards it); settling, deleting and discarding ask a `No`/`Yes` confirm first.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled thread closes the shelf.
 - (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order.
 - (projects) The project picker lists projects by their threads' latest activity, else when they were added, until filter text is typed.
@@ -72,7 +72,7 @@ Entries are added or amended **only with human approval**.
 - (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
 - (picker) Every picker is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide with its name centred in the top border, a > prompt over an orange rule, numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
-- (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · <C-x> remove · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove and Initialize Git confirms, and `⏎ select · Esc close` otherwise.
+- (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · <C-x> remove · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, discard and Initialize Git confirms, and `⏎ select · Esc close` otherwise.
 - (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`.
 - (worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w`) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
@@ -93,7 +93,7 @@ Entries are added or amended **only with human approval**.
 - (drafts) A draft of a project that isn't a git repository has no workspace or base branch, starts in the project's directory, and `␣w`/`␣b` offer to initialize git.
 - (drafts) The model picker lists `Default`, then T3 Code's current Claude models by name, then its legacy models under a `Legacy models` heading; orb passes the picked model's full ID to `--model`.
 - (keybinds) On a draft, `⏎` in the sidebar or on the dashboard's Start item starts it, and `␣w`/`␣b`/`␣m`/`␣a` in either pick its workspace, base branch, model, and permission.
-- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` and the dashboard's `m`/`a` only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` and the dashboard's `o`/`w`/`b`/`t`/`g`/`v` only on a thread or draft, and `p`/`ss`/`r` in the sidebar only on a thread.
+- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` and the dashboard's `m`/`a` only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` and the dashboard's `o`/`w`/`b`/`t`/`g`/`v` only on a thread or draft, and `p`/`s`/`r` in the sidebar only on a thread.
 - (keybinds) `␣t` opens a shell, `␣g` lazygit, and `␣v` `nvim .` in the selected thread's or draft's directory, in the sidebar or dashboard.
 - (zellij) Tool handoff opens each tool as a full-screen floating zellij pane named `orb:<directory>:<tool>`, which closes when the tool exits.
 - (zellij) Tool handoff focuses an existing pane of the same name, switching to its tab, instead of opening a second one.
