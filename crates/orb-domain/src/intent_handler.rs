@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn select_next_on_last_thread_keeps_selection() {
+    fn select_next_on_last_thread_wraps_to_the_first() {
         // Given threads 2 and 1 in sidebar order, with the last one selected.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
@@ -1045,16 +1045,16 @@ mod tests {
         // When handling SelectNext.
         IntentHandler::handle(&Intent::SelectNext, &mut state);
 
-        // Then the selection stays on the last thread.
+        // Then the first thread is selected.
         assert_eq!(
             state.sessions.selected_id(),
-            Some(ThreadId(1)),
-            "SelectNext should not wrap past the last thread"
+            Some(ThreadId(2)),
+            "SelectNext should wrap to the first thread"
         );
     }
 
     #[rstest::rstest]
-    fn select_prev_on_first_thread_keeps_selection() {
+    fn select_prev_on_first_thread_wraps_to_the_last() {
         // Given threads 2 and 1 in sidebar order, with the first one selected.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
@@ -1064,11 +1064,11 @@ mod tests {
         // When handling SelectPrev.
         IntentHandler::handle(&Intent::SelectPrev, &mut state);
 
-        // Then the selection stays on the first thread.
+        // Then the last thread is selected.
         assert_eq!(
             state.sessions.selected_id(),
-            Some(ThreadId(2)),
-            "SelectPrev should not wrap past the first thread"
+            Some(ThreadId(1)),
+            "SelectPrev should wrap to the last thread"
         );
     }
 
