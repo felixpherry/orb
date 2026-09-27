@@ -1,5 +1,6 @@
 //! What orb asks of zellij: open a tool in a directory as its own pane, or
-//! focus that pane if it's already open.
+//! focus that pane if it's already open, and whether anyone is looking at
+//! orb's own pane.
 //!
 //! A tool's pane is found again by its name, `orb:<directory>:<tool>`, so
 //! every thread in one checkout shares one pane per tool, and orb keeps no
@@ -98,6 +99,14 @@ pub trait Zellij: Send + Sync {
     ///
     /// Returns an error if zellij refuses.
     fn open(&self, name: &str, cwd: &Path, argv: &[OsString]) -> Result<(), Report<ZellijError>>;
+
+    /// The terminal pane each client of the session has focused; a client
+    /// on a plugin pane is left out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if zellij can't list its clients.
+    fn focused_panes(&self) -> Result<Vec<u32>, Report<ZellijError>>;
 }
 
 /// The name of `tool`'s pane for `cwd`: `orb:<cwd, with home as ~>:<tool>`,
@@ -114,15 +123,31 @@ pub struct ZellijService {
     shell: OsString,
     /// Shown as `~` in pane names and reasons.
     home: PathBuf,
+    /// orb's own terminal pane, `terminal_<id>`; `None` if zellij didn't say.
+    pane: Option<u32>,
 }
 
 impl ZellijService {
-    pub fn new(zellij: Arc<dyn Zellij>, shell: OsString, home: PathBuf) -> Self {
+    pub fn new(zellij: Arc<dyn Zellij>, shell: OsString, home: PathBuf, pane: Option<u32>) -> Self {
         Self {
             zellij,
             shell,
             home,
+            pane,
         }
+    }
+
+    /// Whether any client of the session has orb's own pane focused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if orb's pane is unknown, before any zellij call, or
+    /// if zellij can't list its clients.
+    pub fn pane_focused(&self) -> Result<bool, Report<ZellijError>> {
+        let pane = self.pane.ok_or_else(|| {
+            Report::new(ZellijError).attach("orb's zellij pane is unknown".to_owned())
+        })?;
+        Ok(self.zellij.focused_panes()?.contains(&pane))
     }
 
     /// Focuses `tool`'s pane for `cwd`, else opens it.
@@ -171,6 +196,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Call {
         Panes,
+        FocusedPanes,
         Focus(ZellijPane),
         Open {
             name: String,
@@ -179,9 +205,11 @@ mod tests {
         },
     }
 
-    /// A zellij session holding `panes` that records every call.
+    /// A zellij session holding `panes`, whose clients have `focused` focused
+    /// (`None`: listing them fails), that records every call.
     struct FakeZellij {
         panes: Vec<ZellijPane>,
+        focused: Option<Vec<u32>>,
         calls: Mutex<Vec<Call>>,
     }
 
@@ -189,6 +217,15 @@ mod tests {
         fn holding(panes: Vec<ZellijPane>) -> Arc<Self> {
             Arc::new(Self {
                 panes,
+                focused: Some(Vec::new()),
+                calls: Mutex::default(),
+            })
+        }
+
+        fn focusing(focused: Option<Vec<u32>>) -> Arc<Self> {
+            Arc::new(Self {
+                panes: Vec::new(),
+                focused,
                 calls: Mutex::default(),
             })
         }
@@ -244,6 +281,13 @@ mod tests {
             });
             Ok(())
         }
+
+        fn focused_panes(&self) -> Result<Vec<u32>, Report<ZellijError>> {
+            self.record(Call::FocusedPanes);
+            self.focused.clone().ok_or_else(|| {
+                Report::new(ZellijError).attach("There is no active session!".to_owned())
+            })
+        }
     }
 
     /// A home directory holding the checkout `orb`.
@@ -255,7 +299,85 @@ mod tests {
     }
 
     fn service(zellij: &Arc<FakeZellij>, home: &Path) -> ZellijService {
-        ZellijService::new(zellij.clone(), "fish".into(), home.to_owned())
+        ZellijService::new(zellij.clone(), "fish".into(), home.to_owned(), None)
+    }
+
+    /// A service over `zellij` whose own pane is `terminal_<pane>`.
+    fn service_in_pane(zellij: &Arc<FakeZellij>, pane: Option<u32>) -> ZellijService {
+        ZellijService::new(
+            zellij.clone(),
+            "fish".into(),
+            PathBuf::from("/Users/me"),
+            pane,
+        )
+    }
+
+    #[rstest::rstest]
+    #[case::the_only_client_is_on_it(vec![4], true)]
+    #[case::the_only_client_is_elsewhere(vec![2], false)]
+    #[case::one_of_two_clients_is_on_it(vec![2, 4], true)]
+    #[case::neither_of_two_clients_is_on_it(vec![2, 3], false)]
+    #[case::no_client_is_attached(Vec::new(), false)]
+    fn pane_focused_says_whether_a_client_is_on_orbs_pane(
+        #[case] focused: Vec<u32>,
+        #[case] expected: bool,
+    ) -> Result<(), Report<ZellijError>> {
+        // Given orb in terminal_4 and clients focused on `focused`.
+        let zellij = FakeZellij::focusing(Some(focused));
+
+        // When asking whether orb's pane is focused.
+        let answer = service_in_pane(&zellij, Some(4)).pane_focused()?;
+
+        // Then it is only if some client is on terminal_4.
+        assert_eq!(answer, expected, "whether a client has orb's pane focused");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pane_focused_fails_when_zellij_cant_list_clients() {
+        // Given orb in terminal_4 and a zellij that can't list its clients.
+        let zellij = FakeZellij::focusing(None);
+
+        // When asking whether orb's pane is focused.
+        let answer = service_in_pane(&zellij, Some(4)).pane_focused();
+
+        // Then the answer is zellij's failure.
+        assert_eq!(
+            answer.err().as_ref().map(zellij_reason),
+            Some("There is no active session!".to_owned()),
+            "a failed listing should not pass for an answer"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_focused_fails_when_orbs_pane_is_unknown() {
+        // Given a zellij whose client is on terminal_4, and no pane for orb.
+        let zellij = FakeZellij::focusing(Some(vec![4]));
+
+        // When asking whether orb's pane is focused.
+        let answer = service_in_pane(&zellij, None).pane_focused();
+
+        // Then it fails, saying why.
+        assert_eq!(
+            answer.err().as_ref().map(zellij_reason),
+            Some("orb's zellij pane is unknown".to_owned()),
+            "an unknown pane can't be looked up"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_focused_for_an_unknown_pane_calls_no_zellij() {
+        // Given a zellij whose client is on terminal_4, and no pane for orb.
+        let zellij = FakeZellij::focusing(Some(vec![4]));
+
+        // When asking whether orb's pane is focused.
+        let _unknown = service_in_pane(&zellij, None).pane_focused();
+
+        // Then zellij was never called.
+        assert!(
+            zellij.calls().is_empty(),
+            "an unknown pane should not reach zellij"
+        );
     }
 
     #[rstest::rstest]

@@ -520,9 +520,9 @@ Probed on this machine in throwaway zellij sessions, each kept alive by a small 
 - `focus-pane-id terminal_<id>` on a tiled pane hides the visible floating panes.
 - `new-tab` prints the new tab's id. `new-tab --layout-string 'layout { pane name="…" cwd="…" command="…" close_on_exit=true; }'` puts a named pane on a new tab.
 
-## 14. Notifications & focus (verified 2026-09-26, zellij 0.45.0, kitty 0.48.2)
+## 14. Notifications & focus (verified 2026-09-26/27, zellij 0.45.0, kitty 0.48.2)
 
-The user ran a throwaway probe script inside a zellij pane in kitty on this machine and watched macOS Notification Center. Each step wrote one sequence, with its own text, and waited for Enter. A detached zellij session can't show any of this. Tags as in §6.
+The user ran a throwaway probe script inside a zellij pane in kitty on this machine and watched macOS Notification Center. Each step wrote one sequence, with its own text, and waited for Enter. A detached zellij session can't show any of this. The tab-switch correction and `list-clients` were then checked in a throwaway zellij 0.45.0 session held by a Python `pty.fork()` client (a 200×50 client, driven with `zellij --session <name> action …` and keys written to the client's PTY), and in zellij's v0.45.0 source. Tags as in §6.
 
 ### Notifications **[verified: user probe]**
 - None of these, written from a zellij pane, produced a notification, so zellij doesn't pass them on to kitty:
@@ -532,9 +532,25 @@ The user ran a throwaway probe script inside a zellij pane in kitty on this mach
 - The probe wasn't run outside zellij, so kitty's own handling of these sequences is unchecked.
 - `osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' <title> <body>` works from the zellij pane. The notification shows the title and body taken from argv, carries Script Editor's icon, and has a "Show" button. What a click does wasn't checked.
 
-### Focus events **[verified: user probe]**
-- A pane that enables focus reporting (`CSI ? 1004 h`) gets `CSI O` when it loses focus and `CSI I` when it regains focus in each of these cases:
+### Focus events **[verified: user probe; tab switch corrected 2026-09-27]**
+- A pane that enables focus reporting (`CSI ? 1004 h`) gets `CSI O` when it loses focus and `CSI I` when it regains focus when:
   - switching to another pane in the same tab and back;
-  - switching zellij tab and back;
-  - leaving kitty for another app and back.
-- orb turns on the same mode (crossterm's `EnableFocusChange`), so it should get `FocusLost`/`FocusGained` in all three cases. This follows from the probe; orb itself wasn't run.
+  - leaving kitty for another app and back (kitty's own focus-out reaches the pane).
+- **A zellij tab switch sends nothing to the pane in the tab you leave.** On return it gets `CSI O CSI I` back to back. The earlier user probe's `CSI O` on a tab switch was most likely the first half of this pair, logged on return. Re-checked with the probe pane logging raw input: `go-to-tab-by-id` away logged nothing, and coming back logged `b'\x1b[O\x1b[I'` in one read. In the v0.45.0 source, `Screen::switch_active_tab` → `move_clients_between_tabs` → `Tab::drain_connected_clients` removes the client from the old tab without unfocusing its pane. **[verified: source + headless probe]**
+- orb turns on the same mode (crossterm's `EnableFocusChange`), so while the user is on another zellij tab, orb's last focus event still says it is focused. orb therefore asks `list-clients` (below) before dropping a notice while it seems focused.
+
+### `zellij action list-clients` **[verified]**
+- It takes no options (`--help` lists only `-h`). Run with `--session <name>` from outside, or with the pane's own `ZELLIJ_SESSION_NAME` from inside a pane; the output was the same both ways, and it exits 0.
+- Output is a header line, then one row per attached client, each ending in `\n`:
+  ```
+  CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND
+  1         terminal_4     /bin/sh /tmp/orbfocus/inside.sh
+  ```
+  Columns are left-aligned and padded to 9, 14 and 15 characters, with one space between them (`format!("{0: <9}")` etc. in `ClientMetadata::render_many`, `zellij-server/src/session_layout_metadata.rs`). A short command keeps its trailing padding (`sleep 3600     `); a long one runs past it. The command column can hold spaces, so only the first two columns are safe to split on whitespace.
+- The pane column is the client's focused pane on the client's **current tab**:
+  - the client on another tab: that tab's pane (`terminal_2`), never the pane it left;
+  - a floating pane focused: the floating pane (`terminal_3`); after `hide-floating-panes`, the tiled pane again;
+  - two clients: two rows (`1 …`, `2 …`), each naming its client's focused pane (both `terminal_2` there, as the second client joined the first one's tab).
+  - A command run from inside a pane saw its own `terminal_<ZELLIJ_PANE_ID>` while the client was on that pane, and the other tab's pane after `go-to-tab-by-id` away.
+- The CLI caller isn't listed as a client. `focus-pane-id` from a CLI with no client didn't change the client's row; moving focus with the client's own keys (`Alt l`) did.
+- From source, not seen: a client on a plugin pane shows `plugin_<id>`, and a pane with no known command shows `N/A`. With no clients attached, only the header is printed.

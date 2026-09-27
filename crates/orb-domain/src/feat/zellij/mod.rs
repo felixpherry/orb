@@ -5,6 +5,9 @@
 //! the tool exits. Asking for the same tool in the same directory again
 //! focuses that pane, on whichever tab it is, instead of opening another.
 //! A tool needs a selected thread or draft, whose directory it opens in.
+//!
+//! orb also asks zellij whether any client has orb's own pane focused, since
+//! zellij tells a pane nothing when the user switches tab away from it.
 
 pub mod validator;
 pub mod zellij_cli;
