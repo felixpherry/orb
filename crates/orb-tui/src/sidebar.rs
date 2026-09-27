@@ -1135,6 +1135,42 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn search_highlights_the_matched_characters_of_a_draft() {
+        // Given a draft, searching for "N".
+        let sessions = searching(draft(DraftWorkspace::Local, None), "N");
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then the `N` of `New thread` is blue and bold.
+        let n = (0..buf.area.width)
+            .filter_map(|x| buf.cell((x, 3)))
+            .find(|cell| cell.symbol() == "N")
+            .map(|cell| (cell.fg, cell.modifier.contains(Modifier::BOLD)));
+        assert_eq!(n, Some((BLUE1, true)), "the draft's matched `N`");
+    }
+
+    #[rstest::rstest]
+    fn search_highlights_the_matched_characters_of_a_settled_thread() {
+        // Given settled "Thread 7" with the shelf closed, searching for "7".
+        let sessions = searching(sessions(vec![settled(7, 10)]), "7");
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then the settled row's `7` is blue and bold.
+        let seven = (0..buf.area.height)
+            .find(|&y| line(&buf, usize::from(y)).contains("Thread 7"))
+            .and_then(|y| {
+                (0..buf.area.width)
+                    .filter_map(|x| buf.cell((x, y)))
+                    .find(|cell| cell.symbol() == "7")
+            })
+            .map(|cell| (cell.fg, cell.modifier.contains(Modifier::BOLD)));
+        assert_eq!(seven, Some((BLUE1, true)), "the settled row's matched `7`");
+    }
+
+    #[rstest::rstest]
     fn node_first_line_is_the_status_icon_and_title() {
         // Given an idle thread.
         let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);

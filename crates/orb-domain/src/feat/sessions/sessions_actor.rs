@@ -4677,6 +4677,55 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn saved_orb_name_is_the_title_after_a_restart() -> Result<(), Report<StoreError>> {
+        // Given a store holding a thread Claude titled and the user renamed.
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            title: Some("Fix the sidebar".to_owned()),
+            renamed_title: Some("Sidebar search".to_owned()),
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When orb starts on that store.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then the sidebar shows the orb name.
+        assert_eq!(
+            shown(&state, id).and_then(|thread| thread.title).as_deref(),
+            Some("Sidebar search"),
+            "the orb name should survive a restart"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_notice_names_the_thread_by_its_orb_name() -> Result<(), Report<StoreError>> {
+        // Given a thread `/rename`d "Parser fix" and renamed "Lexer" with `r`.
+        let (store, _) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            custom_title: Some("Parser fix".to_owned()),
+            renamed_title: Some("Lexer".to_owned()),
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polls see its turn run and then end.
+        end_turn(&mut actor, &host).await;
+
+        // Then the notice names the thread by its orb name.
+        let titles: Vec<_> = notices_of(&state)
+            .into_iter()
+            .map(|notice| notice.title)
+            .collect();
+        assert_eq!(titles, ["Lexer"], "the notice's thread title");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn poll_shows_the_located_transcript_on_the_thread() -> Result<(), Report<StoreError>> {
         // Given a thread whose session has a transcript.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
