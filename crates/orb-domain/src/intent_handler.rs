@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::command::Workspace;
+use crate::feat::dashboard::items;
 use crate::feat::git::validator::{
     BUSY_DIRECTORY, ChangeWorkspaceError, SwitchBranchError, validate_change_workspace,
     validate_switch_branch,
@@ -69,6 +70,21 @@ impl IntentHandler {
                 with_visit(state, vec![])
             }
             Intent::FocusRight => focus_right(state),
+            Intent::DashboardNext => {
+                state.dashboard.next(&state.sessions);
+                vec![]
+            }
+            Intent::DashboardPrev => {
+                state.dashboard.prev(&state.sessions);
+                vec![]
+            }
+            Intent::DashboardRun => {
+                let items = items(&state.sessions);
+                match items.get(state.dashboard.index(&state.sessions, items.len())) {
+                    Some(item) => Self::handle(&item.intent(), state),
+                    None => vec![],
+                }
+            }
             Intent::FocusSidebar => match validate_focus_sidebar(state) {
                 Ok(()) => {
                     state.focus = Focus::Sidebar;
@@ -4141,6 +4157,108 @@ mod tests {
             ),
             (true, Focus::Sidebar, Some(SidebarItem::Thread(ThreadId(2)))),
             "Esc should end the search where it began"
+        );
+    }
+
+    /// The dashboard cursor's index on `state`'s selection.
+    fn dashboard_index(state: &AppState) -> usize {
+        let len = crate::feat::dashboard::items(&state.sessions).len();
+        state.dashboard.index(&state.sessions, len)
+    }
+
+    #[rstest::rstest]
+    fn dashboard_next_on_the_last_item_wraps_to_the_first() {
+        // Given a thread's dashboard with the cursor on its last item.
+        let mut state = AppState {
+            focus: Focus::Dashboard,
+            ..state_with(vec![in_root(1)], 1)
+        };
+        IntentHandler::handle(&Intent::DashboardPrev, &mut state);
+
+        // When handling DashboardNext.
+        IntentHandler::handle(&Intent::DashboardNext, &mut state);
+
+        // Then the first item is highlighted.
+        assert_eq!(dashboard_index(&state), 0, "next on the last item wraps");
+    }
+
+    #[rstest::rstest]
+    fn dashboard_prev_on_the_first_item_wraps_to_the_last() {
+        // Given a thread's dashboard with the cursor on its first item.
+        let mut state = AppState {
+            focus: Focus::Dashboard,
+            ..state_with(vec![in_root(1)], 1)
+        };
+
+        // When handling DashboardPrev.
+        IntentHandler::handle(&Intent::DashboardPrev, &mut state);
+
+        // Then the last of the thread's ten items is highlighted.
+        assert_eq!(
+            dashboard_index(&state),
+            9,
+            "previous on the first item wraps"
+        );
+    }
+
+    #[rstest::rstest]
+    fn dashboard_run_on_model_opens_the_drafts_model_picker() {
+        // Given a git draft's dashboard with the cursor on Model, its fourth
+        // item.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+        for _ in 0..3 {
+            IntentHandler::handle(&Intent::DashboardNext, &mut state);
+        }
+
+        // When handling DashboardRun.
+        IntentHandler::handle(&Intent::DashboardRun, &mut state);
+
+        // Then the draft's model picker is open, as PickModel opens it.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Model {
+                project: ProjectId(1)
+            }),
+            "⏎ on Model should open the model picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn dashboard_run_with_nothing_selected_opens_the_project_picker() {
+        // Given the dashboard with no thread or draft selected.
+        let mut state = AppState {
+            focus: Focus::Dashboard,
+            ..with_projects(&["alpha"])
+        };
+
+        // When handling DashboardRun on its first item.
+        IntentHandler::handle(&Intent::DashboardRun, &mut state);
+
+        // Then New session's project picker is open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Projects),
+            "⏎ with nothing selected should run New session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn dashboard_cursor_goes_back_to_the_first_item_on_a_new_selection() {
+        // Given thread 2's dashboard with the cursor moved down.
+        let mut state = AppState {
+            focus: Focus::Dashboard,
+            ..state_with(vec![in_root(1), in_root(2)], 2)
+        };
+        IntentHandler::handle(&Intent::DashboardNext, &mut state);
+
+        // When selecting the next thread.
+        IntentHandler::handle(&Intent::SelectNext, &mut state);
+
+        // Then the first item is highlighted.
+        assert_eq!(
+            dashboard_index(&state),
+            0,
+            "a new selection should start on Open"
         );
     }
 }
