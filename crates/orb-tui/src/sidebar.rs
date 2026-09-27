@@ -1,7 +1,7 @@
 //! The sidebar: one list of orb's drafts and threads across projects, drawn
 //! like LazyVim's file explorer (snacks.nvim) in tokyonight-moon.
 //!
-//! An input box heads it: `Sessions`, with an `s` badge lit while the
+//! An input box heads it: `Sessions`, with an `i` badge lit while the
 //! Settled shelf is open, the filtered project after the `>` prompt, and how
 //! many drafts and threads are listed out of all of them. Below it, drafts
 //! come first, then pinned threads, then active ones, each a three-line tree
@@ -84,7 +84,7 @@ fn render_input(
         .border_style(Style::new().fg(ORANGE))
         .title(Line::from(vec![
             span(" Sessions ", ORANGE),
-            Span::styled(" s ", badge),
+            Span::styled(" i ", badge),
             Span::raw(" "),
         ]));
     let inner = block.inner(area);
@@ -936,7 +936,7 @@ mod tests {
         let top = line(&draw(&sessions, at(1000), 5), 0);
 
         // Then the box's top border carries the title and the shelf badge.
-        assert!(top.starts_with("╭ Sessions  s  ─"), "line was '{top}'");
+        assert!(top.starts_with("╭ Sessions  i  ─"), "line was '{top}'");
     }
 
     #[rstest::rstest]
@@ -971,13 +971,13 @@ mod tests {
         // When rendering the sidebar.
         let buf = draw(&sessions, at(1000), 8);
 
-        // Then the badge's `s` has the shelf's colours.
+        // Then the badge's `i` has the shelf's colours.
         let badge = buf
             .cell((12, 0))
             .map(|cell| (cell.symbol().to_owned(), (cell.fg, cell.bg)));
         assert_eq!(
             badge,
-            Some(("s".to_owned(), expected)),
+            Some(("i".to_owned(), expected)),
             "the badge with the shelf open: {shelf_open}"
         );
     }
