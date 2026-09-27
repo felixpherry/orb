@@ -6,15 +6,15 @@
 //! orb's screen, and a thread of its own waits for it to exit.
 
 use std::ffi::OsString;
-use std::process::{Command, Stdio};
-use std::thread;
 
-use error_stack::{Report, ResultExt};
+use error_stack::Report;
 
-use super::notifier::{Notifier, NotifyError};
+use super::notifier::{Notifier, NotifyError, spawn_detached};
+use crate::feat::sessions::state::ThreadId;
 
 /// Shows notifications with `osascript … display notification`, which macOS
-/// attributes to Script Editor.
+/// attributes to Script Editor: a click opens Script Editor, and a later
+/// notification replaces none.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsascriptNotifier;
 
@@ -23,23 +23,14 @@ impl Notifier for OsascriptNotifier {
         "osascript"
     }
 
-    fn notify(&self, title: &str, body: &str) -> Result<(), Report<NotifyError>> {
-        let mut child = Command::new("osascript")
-            .args(osascript_args(title, body))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .change_context(NotifyError)
-            .attach("couldn't run osascript")?;
-        thread::Builder::new()
-            .name("orb-notify".into())
-            .spawn(move || {
-                let _ = child.wait();
-            })
-            .map(drop)
-            .change_context(NotifyError)
-            .attach("couldn't wait for osascript")
+    fn notify(
+        &self,
+        title: &str,
+        body: &str,
+        _thread: ThreadId,
+        _tab: Option<u64>,
+    ) -> Result<(), Report<NotifyError>> {
+        spawn_detached("osascript", osascript_args(title, body))
     }
 }
 

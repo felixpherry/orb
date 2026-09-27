@@ -7,7 +7,8 @@
 //! A tool needs a selected thread or draft, whose directory it opens in.
 //!
 //! orb also asks zellij whether any client has orb's own pane focused, since
-//! zellij tells a pane nothing when the user switches tab away from it.
+//! zellij tells a pane nothing when the user switches tab away from it, and
+//! which tab orb's pane is on, so a notification's click can go back there.
 
 pub mod validator;
 pub mod zellij_cli;

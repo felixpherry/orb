@@ -1,6 +1,6 @@
 //! What orb asks of zellij: open a tool in a directory as its own pane, or
-//! focus that pane if it's already open, and whether anyone is looking at
-//! orb's own pane.
+//! focus that pane if it's already open, whether anyone is looking at orb's
+//! own pane, and which tab that pane is on.
 //!
 //! A tool's pane is found again by its name, `orb:<directory>:<tool>`, so
 //! every thread in one checkout shares one pane per tool, and orb keeps no
@@ -144,10 +144,32 @@ impl ZellijService {
     /// Returns an error if orb's pane is unknown, before any zellij call, or
     /// if zellij can't list its clients.
     pub fn pane_focused(&self) -> Result<bool, Report<ZellijError>> {
-        let pane = self.pane.ok_or_else(|| {
-            Report::new(ZellijError).attach("orb's zellij pane is unknown".to_owned())
-        })?;
+        let pane = self.own_pane()?;
         Ok(self.zellij.focused_panes()?.contains(&pane))
+    }
+
+    /// The stable id of the tab orb's own pane is on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if orb's pane is unknown, before any zellij call, if
+    /// zellij can't list its panes, or if orb's pane isn't among them.
+    pub fn pane_tab(&self) -> Result<u64, Report<ZellijError>> {
+        let pane = self.own_pane()?;
+        self.zellij
+            .panes()?
+            .into_iter()
+            .find(|listed| listed.id == pane)
+            .map(|listed| listed.tab)
+            .ok_or_else(|| {
+                Report::new(ZellijError).attach("zellij doesn't list orb's pane".to_owned())
+            })
+    }
+
+    fn own_pane(&self) -> Result<u32, Report<ZellijError>> {
+        self.pane.ok_or_else(|| {
+            Report::new(ZellijError).attach("orb's zellij pane is unknown".to_owned())
+        })
     }
 
     /// Focuses `tool`'s pane for `cwd`, else opens it.
@@ -377,6 +399,43 @@ mod tests {
         assert!(
             zellij.calls().is_empty(),
             "an unknown pane should not reach zellij"
+        );
+    }
+
+    fn terminal(id: u32, tab: u64) -> ZellijPane {
+        ZellijPane {
+            id,
+            name: format!("pane {id}"),
+            tab,
+        }
+    }
+
+    #[rstest::rstest]
+    fn pane_tab_is_the_tab_orbs_pane_is_on() -> Result<(), Report<ZellijError>> {
+        // Given orb in terminal_4 on tab 7, beside terminal_2 on tab 1.
+        let zellij = FakeZellij::holding(vec![terminal(2, 1), terminal(4, 7)]);
+
+        // When asking which tab orb's pane is on.
+        let tab = service_in_pane(&zellij, Some(4)).pane_tab()?;
+
+        // Then it is tab 7.
+        assert_eq!(tab, 7, "the tab of terminal_4");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pane_tab_fails_when_zellij_doesnt_list_orbs_pane() {
+        // Given orb in terminal_4, and a session listing only terminal_2.
+        let zellij = FakeZellij::holding(vec![terminal(2, 1)]);
+
+        // When asking which tab orb's pane is on.
+        let tab = service_in_pane(&zellij, Some(4)).pane_tab();
+
+        // Then it fails, saying why.
+        assert_eq!(
+            tab.err().as_ref().map(zellij_reason),
+            Some("zellij doesn't list orb's pane".to_owned()),
+            "another pane's tab should not stand in for orb's"
         );
     }
 
