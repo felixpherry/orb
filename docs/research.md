@@ -520,17 +520,18 @@ Probed on this machine in throwaway zellij sessions, each kept alive by a small 
 - `focus-pane-id terminal_<id>` on a tiled pane hides the visible floating panes.
 - `new-tab` prints the new tab's id. `new-tab --layout-string 'layout { pane name="…" cwd="…" command="…" close_on_exit=true; }'` puts a named pane on a new tab.
 
-## 14. Notifications & focus (verified 2026-09-26/27, zellij 0.45.0, kitty 0.48.2)
+## 14. Notifications & focus (verified 2026-09-26/27, macOS Darwin 25.6, kitty 0.48.2, zellij 0.45.0, terminal-notifier 3.1.0)
 
-The user ran a throwaway probe script inside a zellij pane in kitty on this machine and watched macOS Notification Center. Each step wrote one sequence, with its own text, and waited for Enter. A detached zellij session can't show any of this. The tab-switch correction and `list-clients` were then checked in a throwaway zellij 0.45.0 session held by a Python `pty.fork()` client (a 200×50 client, driven with `zellij --session <name> action …` and keys written to the client's PTY), and in zellij's v0.45.0 source. Tags as in §6.
+The user ran a throwaway probe script inside a zellij pane in kitty on this machine and watched macOS Notification Center. Each step wrote one sequence, with its own text, and waited for Enter. A detached zellij session can't show any of this. The tab-switch correction and `list-clients` were then checked in a throwaway zellij 0.45.0 session held by a Python `pty.fork()` client (a 200×50 client, driven with `zellij --session <name> action …` and keys written to the client's PTY), and in zellij's v0.45.0 source. Finally the user walked orb itself in kitty → zellij (M9's manual check, 2026-09-27, orb at `f8224b9`). Tags as in §6.
 
 ### Notifications **[verified: user probe]**
 - None of these, written from a zellij pane, produced a notification, so zellij doesn't pass them on to kitty:
   - kitty OSC 99 (`ESC ] 99 ; i=1:d=0 ; <title> ESC \`, then `ESC ] 99 ; i=1:p=body ; <body> ESC \`)
   - OSC 9 (`ESC ] 9 ; <text> BEL`)
   - OSC 777 (`ESC ] 777 ; notify ; <title> ; <body> BEL`)
-- The probe wasn't run outside zellij, so kitty's own handling of these sequences is unchecked.
+- The first probe wrote them only from inside a zellij pane. A later probe wrote OSC 99 straight to the zellij client's tty, bypassing zellij; see Notification clicks below. OSC 9 and OSC 777 weren't tried that way.
 - `osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' <title> <body>` works from the zellij pane. The notification shows the title and body taken from argv, carries Script Editor's icon, and has a "Show" button. Clicking it (or "Show") opens Script Editor with an empty `Untitled` document (below).
+- orb puts `--` between the script and the text. Without it, a title starting with `-` makes `osascript` exit 2 with "illegal option". `--` is consumed, so `argv` still holds only the title and body. **[verified: shell, 2026-09-26, with a `return` script that shows nothing]**
 
 ### Focus events **[verified: user probe; tab switch corrected 2026-09-27]**
 - A pane that enables focus reporting (`CSI ? 1004 h`) gets `CSI O` when it loses focus and `CSI I` when it regains focus when:
@@ -538,6 +539,7 @@ The user ran a throwaway probe script inside a zellij pane in kitty on this mach
   - leaving kitty for another app and back (kitty's own focus-out reaches the pane).
 - **A zellij tab switch sends nothing to the pane in the tab you leave.** On return it gets `CSI O CSI I` back to back. The earlier user probe's `CSI O` on a tab switch was most likely the first half of this pair, logged on return. Re-checked with the probe pane logging raw input: `go-to-tab-by-id` away logged nothing, and coming back logged `b'\x1b[O\x1b[I'` in one read. In the v0.45.0 source, `Screen::switch_active_tab` → `move_clients_between_tabs` → `Tab::drain_connected_clients` removes the client from the old tab without unfocusing its pane. **[verified: source + headless probe]**
 - orb turns on the same mode (crossterm's `EnableFocusChange`), so while the user is on another zellij tab, orb's last focus event still says it is focused. orb therefore asks `list-clients` (below) before dropping a notice while it seems focused.
+- The walk confirmed that crossterm's `FocusLost` reaches orb through zellij. Leaving kitty for another app produced orb's notification, although `list-clients` still names orb's pane then (the client stays on it), so the focus-out must have done it. A pane switch and a tab switch each produced one too. Staying in orb's focused pane produced none. **[verified: user walk]**
 
 ### `zellij action list-clients` **[verified]**
 - It takes no options (`--help` lists only `-h`). Run with `--session <name>` from outside, or with the pane's own `ZELLIJ_SESSION_NAME` from inside a pane; the output was the same both ways, and it exits 0.
@@ -554,6 +556,7 @@ The user ran a throwaway probe script inside a zellij pane in kitty on this mach
   - A command run from inside a pane saw its own `terminal_<ZELLIJ_PANE_ID>` while the client was on that pane, and the other tab's pane after `go-to-tab-by-id` away.
 - The CLI caller isn't listed as a client. `focus-pane-id` from a CLI with no client didn't change the client's row; moving focus with the client's own keys (`Alt l`) did.
 - From source, not seen: a client on a plugin pane shows `plugin_<id>`, and a pane with no known command shows `N/A`. With no clients attached, only the header is printed.
+- orb runs it under its 2 s limit for zellij calls (§13), on its `orb-notice` thread, never in the frontend loop. After a `rename-session`, orb's session name is stale and the call hangs until it's killed (§13). orb then drops the batch, as it does for any zellij failure.
 
 ### Notification clicks (verified 2026-09-27, macOS Darwin 25.6, kitty 0.48.2, zellij 0.45.0, terminal-notifier 3.1.0)
 - **osascript:** clicking an `osascript` notification, or its "Show" button, opens Script Editor with an empty `Untitled` document. `display notification` takes no click target; Apple's Mac Automation Scripting Guide says clicking opens the app that displayed it. **[verified: user walk + docs]**
@@ -565,7 +568,12 @@ The user ran a throwaway probe script inside a zellij pane in kitty on this mach
   - The same line with no notification, run from inside a zellij pane and from outside zellij (`env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID /bin/sh -c …`), also brought kitty forward and moved the user's client to the tab and pane. `focus-pane-id` exits 2 with `Pane … is already focused` when it already is, which is harmless.
   - `-activate net.kovidgoyal.kitty` only brings kitty forward, not the zellij tab or pane. It activates the first running kitty by bundle id, and this machine runs two kitty instances, one windowless.
   - `-group ID` makes `ID` the notification's identifier: a new notification with the same group first removes the delivered and pending ones with it, so it replaces them. **[verified: source]**
+  - orb's own `Finished` notice, clicked after switching zellij tab and then app, brought kitty forward on orb's original tab and pane. The line matched kitty's window by title, as below. **[verified: user walk, 2026-09-27]**
 - **The backslash quirk.** terminal-notifier reads every option through `NSUserDefaults`' argument domain, which parses a value that looks like a property list (`(1, 2)`, `{a = b;}`, `"…"`) into an array, dictionary or string, and drops a value starting with `-` (it reads as nil). terminal-notifier's `objectForKeyedSubscript` strips exactly one leading `\` from every string value, so a value prefixed with `\` reaches it verbatim, with any later backslashes, quotes and braces intact. **[verified: source at tag 3.1.0 + a Foundation test program reading `NSUserDefaults` from argv on this machine]**
 - **kitty OSC 99** written to the zellij client's tty only brings kitty forward (kitty focuses the window that wrote it); it can't switch the zellij tab or pane. **[verified: user probe]**
 - **kitty window match.** zellij titles the kitty window `<session> | <focused pane's title>` (e.g. `exquisite-triceratops | ~`). kitty 0.48.2's `--match title:<regex>` takes a Python regex: `\x2d`, `\u002d` and `\U0000002d` all match `-`. Its match syntax splits on whitespace, so an unquoted `title:^s \|` fails with `No location specified before \|`; spelling the space `\x20` (or `\U00000020`) works. **[verified: `kitten @ ls --match` on this machine]**
-- orb therefore uses `terminal-notifier -execute` when `terminal-notifier` is on `PATH` at startup, with the kitty window matched by its zellij session title, and falls back to `osascript` otherwise.
+- **Why orb matches kitty's window by title inside zellij.** orb's `KITTY_WINDOW_ID` and `KITTY_LISTEN_ON` come from the environment of the pane it runs in, which zellij starts with the server's environment (§13). That names the kitty window that started the zellij server, which isn't necessarily the one showing the session now. The title zellij gives the window follows the session. So orb uses `KITTY_WINDOW_ID` (`--match id:`) only outside zellij. *(reasoning from §13, not probed)*
+- The `kitten @` step needs kitty's remote control on a socket (`allow_remote_control` and `listen_on` in `kitty.conf`, which set `KITTY_LISTEN_ON`). This machine's `kitty.conf` has `allow_remote_control socket-only` and `listen_on unix:/tmp/kitty-{kitty_pid}`. **[verified: config]**
+- When orb's pane is tiled, the click's closing `focus-pane-id` also hides the floating panes on orb's tab. *(from §13 "Driving zellij from a CLI"; not seen in the walk)*
+- Not tried: alerter, which is reported to steal clicks and to post as Terminal **[reported]**, and Hammerspoon, which the user declined.
+- orb therefore uses `terminal-notifier -execute` when `terminal-notifier` is on `PATH` at startup, with the kitty window matched by its zellij session title, and falls back to `osascript` otherwise. The choice is made once, at startup: a terminal-notifier that isn't allowed in System Settings fails every notice with exit 3, and orb, which ignores notify failures, then shows nothing.
