@@ -30,7 +30,7 @@ impl Notifier for OsascriptNotifier {
         _thread: ThreadId,
         _tab: Option<u64>,
     ) -> Result<(), Report<NotifyError>> {
-        spawn_detached("osascript", osascript_args(title, body))
+        spawn_detached("osascript", osascript_args(title, body), || {})
     }
 }
 

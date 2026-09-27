@@ -51,10 +51,15 @@ impl NotifierService {
     }
 
     /// The desktop's notifier: `terminal-notifier` if `path` (a `PATH`
-    /// value) has it, whose click goes to `click`; else `osascript`.
+    /// value) has it, whose click goes to `click` and which falls back to
+    /// `osascript` when it fails; else `osascript`.
     pub fn desktop(path: &OsStr, click: ClickTarget) -> Self {
         match on_path("terminal-notifier", path) {
-            Some(program) => Self::new(Arc::new(TerminalNotifierNotifier::new(program, click))),
+            Some(program) => Self::new(Arc::new(TerminalNotifierNotifier::new(
+                program,
+                click,
+                Arc::new(OsascriptNotifier),
+            ))),
             None => Self::new(Arc::new(OsascriptNotifier)),
         }
     }
@@ -75,14 +80,19 @@ impl NotifierService {
 
 /// Runs `program` with `args` and no stdin, stdout or stderr, so it never
 /// writes into orb's screen, without waiting for it: a thread of its own
-/// waits for it to exit.
+/// waits for it to exit, and runs `on_failure` if it doesn't exit 0.
 ///
 /// # Errors
 ///
 /// Returns an error if `program` can't start.
-pub fn spawn_detached<P>(program: P, args: Vec<OsString>) -> Result<(), Report<NotifyError>>
+pub fn spawn_detached<P, F>(
+    program: P,
+    args: Vec<OsString>,
+    on_failure: F,
+) -> Result<(), Report<NotifyError>>
 where
     P: AsRef<OsStr>,
+    F: FnOnce() + Send + 'static,
 {
     let program = program.as_ref();
     let mut child = Command::new(program)
@@ -96,7 +106,9 @@ where
     thread::Builder::new()
         .name("orb-notify".into())
         .spawn(move || {
-            let _ = child.wait();
+            if !child.wait().is_ok_and(|status| status.success()) {
+                on_failure();
+            }
         })
         .map(drop)
         .change_context(NotifyError)
