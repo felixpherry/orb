@@ -619,14 +619,18 @@ const BADGE: [(u8, u8, u8); 18] = [
 /// Neutral-400: labels in the draft form.
 pub(crate) const GRAY: Color = Color::Rgb(0xa3, 0xa3, 0xa3);
 
-/// Behind the whole sidebar and the picker (tokyonight-moon's `bg_dark`),
-/// darker than the right side, so the sidebar needs no border.
+/// The text on the mode line's mode and clock blocks (`black`).
+pub(crate) const BLACK: Color = Color::Rgb(0x1b, 0x1d, 0x2b);
+/// Behind the whole sidebar, the picker and the mode line (tokyonight-moon's
+/// `bg_dark`, lualine's `bg_statusline`), darker than the right side, so the
+/// sidebar needs no border.
 pub(crate) const BG_DARK: Color = Color::Rgb(0x1e, 0x20, 0x30);
 /// Behind the selected row's first line, and the picker's selected row
 /// (`bg_visual`, the explorer's cursorline).
 pub(crate) const VISUAL: Color = Color::Rgb(0x2d, 0x3f, 0x76);
-/// The tree guides, and behind the lit shelf badge (`fg_gutter`).
-const GUTTER: Color = Color::Rgb(0x3b, 0x42, 0x61);
+/// The tree guides, behind the lit shelf badge, and behind the mode line's
+/// branch and position blocks (`fg_gutter`).
+pub(crate) const GUTTER: Color = Color::Rgb(0x3b, 0x42, 0x61);
 /// Titles, the filtered project's name, the picker's input and rows, and
 /// the rename box's text (`fg`).
 pub(crate) const FG: Color = Color::Rgb(0xc8, 0xd3, 0xf5);
@@ -644,17 +648,19 @@ pub(crate) const BLUE: Color = Color::Rgb(0x82, 0xaa, 0xff);
 /// The `>` prompt, here and in the picker, and the picker's `default`
 /// branch badge (`cyan`).
 pub(crate) const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
-/// A completed turn; the picker's current branch and new worktree
-/// (`green`).
+/// A completed turn; the picker's current branch and new worktree; the mode
+/// line's INSERT (`green`).
 pub(crate) const GREEN: Color = Color::Rgb(0xc3, 0xe8, 0x8d);
+/// The mode line's ATTACHED (`green1`, lualine's terminal mode).
+pub(crate) const GREEN1: Color = Color::Rgb(0x4f, 0xd6, 0xbe);
 /// Needing approval, and a draft's pencil; the picker's permission shield
 /// and `worktree` branch badge; the rename box (`yellow`).
 pub(crate) const YELLOW: Color = Color::Rgb(0xff, 0xc7, 0x77);
 /// The input box and the pin; the rule under the picker's input and its
 /// git icon (`orange`).
 pub(crate) const ORANGE: Color = Color::Rgb(0xff, 0x96, 0x6c);
-/// Failed and gone (`red`).
-const RED: Color = Color::Rgb(0xff, 0x75, 0x7f);
+/// Failed and gone, and the mode line's error (`red`).
+pub(crate) const RED: Color = Color::Rgb(0xff, 0x75, 0x7f);
 /// Needing input; the picker's remote branches and previous worktree
 /// (`magenta`).
 pub(crate) const MAGENTA: Color = Color::Rgb(0xc0, 0x99, 0xff);
@@ -668,12 +674,13 @@ pub(crate) const BORDER: Color = Color::Rgb(0x58, 0x9e, 0xd7);
 /// The ✳ logo, here and before the picker's models (Claude orange).
 pub(crate) const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
 
-/// Needing approval (Nerd Font `nf-fa-warning`).
-const APPROVAL_ICON: &str = "\u{f071}";
-/// Needing input (`nf-fa-question_circle`).
-const INPUT_ICON: &str = "\u{f059}";
-/// Failed (`nf-fa-times_circle`).
-const FAILED_ICON: &str = "\u{f057}";
+/// Needing approval, here and in the mode line's count (Nerd Font
+/// `nf-fa-warning`).
+pub(crate) const APPROVAL_ICON: &str = "\u{f071}";
+/// Needing input, here and in the mode line's count (`nf-fa-question_circle`).
+pub(crate) const INPUT_ICON: &str = "\u{f059}";
+/// Failed, and before the mode line's error (`nf-fa-times_circle`).
+pub(crate) const FAILED_ICON: &str = "\u{f057}";
 /// Gone (`nf-fa-ban`).
 const GONE_ICON: &str = "\u{f05e}";
 /// A completed turn, and a settled thread that didn't fail
@@ -684,10 +691,10 @@ const STOPPED_ICON: &str = "\u{f04d}";
 /// Idle, or a status orb doesn't know (`nf-fa-circle_o`).
 const IDLE_ICON: &str = "\u{f10c}";
 /// How long each spinner frame shows; the loop redraws this often while a
-/// thread works.
+/// thread works or a session starts.
 pub(crate) const SPINNER_FRAME: Duration = Duration::from_millis(100);
-/// The working spinner's frames.
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// The spinner's frames, here and in the mode line's activity.
+pub(crate) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// A pinned thread (`nf-fa-thumb_tack`).
 const PIN: &str = "\u{f08d}";
 /// Before a branch, here and in the picker (`nf-pl-branch`).

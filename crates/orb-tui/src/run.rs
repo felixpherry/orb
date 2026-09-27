@@ -47,6 +47,7 @@ use std::thread;
 use std::time::{Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
+use jiff::tz::TimeZone;
 use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::notify::notifier::NotifierService;
@@ -79,16 +80,17 @@ pub struct TuiRunError;
 pub struct Frontend {
     tx: Sender<LoopEvent>,
     rx: Receiver<LoopEvent>,
-}
-
-impl Default for Frontend {
-    fn default() -> Self {
-        let (tx, rx) = mpsc::channel();
-        Self { tx, rx }
-    }
+    /// The zone the mode line's clock shows.
+    tz: TimeZone,
 }
 
 impl Frontend {
+    /// A frontend whose mode line shows the time in `tz`.
+    pub fn new(tz: TimeZone) -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self { tx, rx, tz }
+    }
+
     /// Wakes the loop to redraw after an actor changed the state.
     pub fn waker(&self) -> Wake {
         let tx = self.tx.clone();
@@ -118,12 +120,12 @@ impl Frontend {
         zellij: Option<ZellijService>,
         notifier: NotifierService,
     ) -> Result<(), Report<TuiRunError>> {
-        let Self { tx, rx } = self;
+        let Self { tx, rx, tz } = self;
         ratatui::run(|terminal| -> io::Result<()> {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook();
             let result = App::new(
-                state, sessions, preview, git, claude_env, zellij, notifier, tx,
+                state, sessions, preview, git, claude_env, zellij, notifier, tx, tz,
             )
             .run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
@@ -244,6 +246,8 @@ struct App {
     zellij: Option<ZellijService>,
     /// Announces the sessions actor's notices.
     notifier: NotifierService,
+    /// The zone the mode line's clock shows.
+    tz: TimeZone,
     tx: Sender<LoopEvent>,
     pane_area: Rect,
     /// The cursor style last sent to the outer terminal.
@@ -266,6 +270,7 @@ impl App {
         zellij: Option<ZellijService>,
         notifier: NotifierService,
         tx: Sender<LoopEvent>,
+        tz: TimeZone,
     ) -> Self {
         let scope = {
             let state = state.read();
@@ -283,6 +288,7 @@ impl App {
             claude_env,
             zellij,
             notifier,
+            tz,
             tx,
             pane_area: Rect::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
@@ -321,6 +327,7 @@ impl App {
                     self.pane_error.as_deref(),
                     &self.keys,
                     now,
+                    &self.tz,
                     &mut self.preview_cache,
                     &mut self.sidebar_scroll,
                     &mut self.picker_scroll,

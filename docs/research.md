@@ -578,3 +578,14 @@ The user ran a throwaway probe script inside a zellij pane in kitty on this mach
 - When orb's pane is tiled, the click's closing `focus-pane-id` also hides the floating panes on orb's tab. *(from §13 "Driving zellij from a CLI"; not seen in the walk)*
 - Not tried: alerter, which is reported to steal clicks and to post as Terminal **[reported]**, and Hammerspoon, which the user declined.
 - orb therefore uses `terminal-notifier -execute` when `terminal-notifier` is on `PATH` at startup, with the kitty window matched by its zellij session title, and falls back to `osascript` otherwise. The choice is made once, at startup. When a terminal-notifier run exits with anything but 0 (a non-zero code, a signal), the thread that waits for it sends the same notice through `osascript`, so a terminal-notifier that isn't allowed in System Settings (exit 3) still gets the notice shown, with Script Editor's click. A non-zero exit means nothing was posted, so this never shows a notice twice.
+
+## 15. Mode line clock (verified 2026-09-27, jiff 0.2.37)
+
+### Libraries
+- **jiff 0.2.37** **[verified: source, `~/.cargo/registry/src/*/jiff-0.2.37`]**:
+  - The default features are `std`, `tz-system`, `tz-fat`, `tzdb-bundle-platform`, `tzdb-zoneinfo`, `tzdb-concatenated` and `perf-inline`. Its `rust-version` is 1.70. Its only non-optional dependency is `jiff-core` (plus `windows-link` on Windows).
+  - `jiff::tz::TimeZone::system() -> TimeZone` can't fail. `TZ` overrides everything. Otherwise, on Unix, `/etc/localtime` is used: a symlink into `/usr/share/zoneinfo` gives an IANA name, and anything else is read as TZif. If detection fails, it returns the `Etc/Unknown` zone, which behaves like UTC. `TimeZone::try_system()` returns a `Result` instead. It reads the environment, so orb calls it only in `main.rs`.
+  - `TimeZone::UTC` is a const. `TimeZone::fixed(Offset)` and `jiff::tz::offset(hours: i8) -> Offset` are `const fn`s. `TimeZone` is `Clone + Debug + Eq`, not `Copy`.
+  - `impl TryFrom<std::time::SystemTime> for jiff::Timestamp` (`Error = jiff::Error`) fails only outside jiff's range, about years −9999 to 9999.
+  - `TimeZone::to_datetime(&self, Timestamp) -> civil::DateTime` looks up the offset for that instant (`to_offset(timestamp)`), so a zone read once still follows DST transitions.
+  - `civil::DateTime::hour()` and `minute()` return `i8`. `DateTime::strftime("%H:%M")` also exists (it returns a `Display`). orb formats with `format!("{:02}:{:02}", ..)`.
