@@ -677,6 +677,23 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn settle_banner_sits_on_the_line_above_the_selected_node() {
+        // Given an idle selected thread, its node's first line on row 3, and
+        // `s` pressed once.
+        let state = selected(Focus::Sidebar);
+
+        // When drawing a frame.
+        let buffer = draw_with(&state, &pending('s'));
+
+        // Then the banner is on row 2.
+        let row = text(&buffer, Rect::new(0, 2, 80, 1));
+        assert!(
+            row.ends_with(" Press s again to settle "),
+            "row was '{row}'"
+        );
+    }
+
+    #[rstest::rstest]
     fn pending_s_on_a_working_thread_shows_the_refusal() {
         // Given a Working selected thread and `s` pressed once.
         let state = AppState {
