@@ -73,7 +73,8 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, wrapping from the last to the first and back, `<C-d>`/`<C-u>` move half a page, stopping at the ends, `⏎` picks, and `Esc` cancels.
 - (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
-- (tui) The mode line shows only the mode's name on its left and cuts a long status message at its end, so the name and a 2-cell gap stay visible.
+- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, the selected thread's or draft's branch and project, and the latest error in red on the left; `N running` or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
+- (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
 - (picker) Every picker is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide with its name centred in the top border, a > prompt over an orange rule, numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
 - (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · <C-x> remove · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove and Initialize Git confirms, and `⏎ select · Esc close` otherwise.
 - (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
