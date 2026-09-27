@@ -4,7 +4,8 @@
 //! While the sidebar is hidden, the right side takes the full width.
 //! While `s` or `x` waits for its repeat, a banner above the selected row says
 //! what the repeat will do instead of the popup. An open picker is drawn over
-//! everything but the mode line, with neither the popup nor the banner.
+//! everything but the mode line, with neither the popup nor the banner, and so
+//! is the rename box while it has the keys.
 //! Whatever is left on the terminal's default background gets orb's navy, so
 //! a transparent terminal doesn't show through.
 
@@ -28,6 +29,7 @@ use crate::draft;
 use crate::keymap::{self, Keys};
 use crate::picker::{self, PickerScroll};
 use crate::preview::{self, PreviewCache};
+use crate::rename;
 use crate::sidebar::{self, SidebarScroll};
 
 /// Behind everything that doesn't set its own background (tokyonight-moon's
@@ -120,8 +122,12 @@ pub(crate) fn render(
         },
     };
     render_mode_line(state, mode_line, frame.buffer_mut());
-    let picker_page = match (&state.picker, keymap::pending_confirm(keys)) {
-        (Some(picker), _) => {
+    let renaming = state
+        .rename
+        .as_ref()
+        .filter(|_| state.focus == Focus::Rename);
+    let picker_page = match (&state.picker, renaming, keymap::pending_confirm(keys)) {
+        (Some(picker), _, _) => {
             let (rows, cursor) = picker::render(
                 picker,
                 &state.home,
@@ -132,18 +138,23 @@ pub(crate) fn render(
             frame.set_cursor_position(cursor);
             Some(rows)
         }
-        (None, Some(confirm)) => {
+        (None, Some(rename), _) => {
+            let cursor = rename::render(rename, sidebar_area.union(right), frame.buffer_mut());
+            frame.set_cursor_position(cursor);
+            None
+        }
+        (None, None, Some(confirm)) => {
             if let Some(y) = selected_y {
                 render_banner(state, confirm, y, frame.buffer_mut());
             }
             None
         }
         // ratatui-which-key divides by the height inside the popup's borders.
-        (None, None) if frame.area().height > 2 => {
+        (None, None, None) if frame.area().height > 2 => {
             WhichKey::new().render(frame.buffer_mut(), keys);
             None
         }
-        (None, None) => None,
+        (None, None, None) => None,
     };
     if state.focus == Focus::Sidebar
         && let Some(y) = selected_y
@@ -255,8 +266,8 @@ mod tests {
         Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
         ThreadStatus,
     };
-    use orb_domain::feat::sidebar::state::SidebarView;
-    use orb_domain::{AppState, Focus};
+    use orb_domain::feat::sidebar::state::{Rename, SidebarView};
+    use orb_domain::{AppState, Focus, TextInput};
     use orb_term::{Pane, PaneCommand, PaneSize};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -649,6 +660,51 @@ mod tests {
         // Then the mode line shows only the mode's name.
         let mode_line = mode_line(&buffer);
         assert_eq!(mode_line.trim_end(), "INSERT", "the mode line in {focus:?}");
+    }
+
+    /// Thread 1 selected, with the rename box open on it holding "Fix" and
+    /// the keys in `focus`.
+    fn renaming(focus: Focus) -> AppState {
+        AppState {
+            rename: Some(Rename {
+                thread: ThreadId(1),
+                input: TextInput::new("Fix"),
+            }),
+            ..selected(focus)
+        }
+    }
+
+    #[rstest::rstest]
+    fn rename_box_puts_the_cursor_after_the_name() {
+        // Given the rename box holding "Fix" with the keys.
+        let state = renaming(Focus::Rename);
+
+        // When drawing a frame.
+        let cursor = cursor_of(&state, None);
+
+        // Then the cursor is after the name in the box, centred on the
+        // 80-column screen two rows from the top.
+        assert_eq!(
+            cursor,
+            Some(Position::new(18, 3)),
+            "the cursor in the rename box"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_box_is_not_drawn_without_the_keys() {
+        // Given a rename box left open while the sidebar has the keys.
+        let state = renaming(Focus::Sidebar);
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then no rename box is drawn.
+        let screen: String = buffer.content.iter().map(Cell::symbol).collect();
+        assert!(
+            !screen.contains("Rename Session"),
+            "the rename box shows only while it has the keys"
+        );
     }
 
     #[rstest::rstest]

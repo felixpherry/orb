@@ -210,6 +210,13 @@ pub struct Pin(pub ThreadId);
 #[derive(Debug)]
 pub struct Unpin(pub ThreadId);
 
+/// Give a thread orb's own name, or with `None` go back to Claude's title.
+#[derive(Debug)]
+pub struct RenameThread {
+    pub thread: ThreadId,
+    pub title: Option<String>,
+}
+
 /// Settle a thread onto the Settled shelf and stop its session.
 #[derive(Debug)]
 pub struct Settle(pub ThreadId);
@@ -466,6 +473,18 @@ impl Message<Unpin> for SessionsActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.unpin(id);
+    }
+}
+
+impl Message<RenameThread> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        RenameThread { thread, title }: RenameThread,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.rename(thread, title);
     }
 }
 
@@ -1348,6 +1367,7 @@ impl SessionsActor {
             ai_titled: false,
             model: new.model,
             permission_mode: new.permission_mode,
+            renamed_title: None,
         };
         if row.branch.is_some() && self.store.save_thread(&row).is_err() {
             return Err(NEW_SESSION_UNSAVED.to_owned());
@@ -1429,6 +1449,11 @@ impl SessionsActor {
 
     fn unpin(&mut self, id: ThreadId) {
         self.edit(id, |row, _| row.pinned_at = None);
+    }
+
+    /// Gives a thread orb's own name; `None` goes back to Claude's title.
+    fn rename(&mut self, id: ThreadId, title: Option<String>) {
+        self.edit(id, |row, _| row.renamed_title = title);
     }
 
     /// Settles a thread that isn't mid-turn, then stops its session if it's
@@ -1694,6 +1719,11 @@ fn update_row(
             row.branch.clone(),
         )
     {
+        // A new `/rename` replaces the orb name; Claude re-writing its old
+        // name doesn't.
+        if scan.custom_title != row.custom_title {
+            row.renamed_title = None;
+        }
         row.title = scan.title;
         row.custom_title = scan.custom_title;
         row.branch = scan.branch;
@@ -1708,7 +1738,7 @@ fn update_row(
 fn rename_hex_branch(git: &GitService, worktrees_root: &Path, row: &mut ThreadRow) {
     if let Some(old) = hex_branch(worktrees_root, &row.cwd)
         && row.branch.as_deref() == Some(old.as_str())
-        && (row.custom_title.is_some() || row.ai_titled)
+        && (row.renamed_title.is_some() || row.custom_title.is_some() || row.ai_titled)
         && let Some(new) = display_title(row)
             .as_deref()
             .and_then(slug)
@@ -1769,9 +1799,13 @@ fn notice(sessions: &Sessions, row: &ThreadRow, status: ThreadStatus) -> Option<
     })
 }
 
-/// The title the sidebar shows: the user's `/rename`, else the transcript's.
+/// The title the sidebar shows: the user's `r` name, else their `/rename`,
+/// else the transcript's.
 fn display_title(row: &ThreadRow) -> Option<String> {
-    row.custom_title.clone().or_else(|| row.title.clone())
+    row.renamed_title
+        .clone()
+        .or_else(|| row.custom_title.clone())
+        .or_else(|| row.title.clone())
 }
 
 /// The one-line reason a session host failure carries.
@@ -4502,6 +4536,147 @@ mod tests {
         Ok(())
     }
 
+    /// The directory of Claude's transcripts, holding session `s1` of thread
+    /// `aa` with `lines`, and a store where `aa` was given `custom_title`
+    /// by `/rename` and `renamed` with `r`.
+    fn renamed_thread(
+        lines: &str,
+        custom_title: &str,
+        renamed: &str,
+    ) -> Result<(tempfile::TempDir, Store, ThreadId), Report<StoreError>> {
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(&path, lines).change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            custom_title: Some(custom_title.to_owned()),
+            renamed_title: Some(renamed.to_owned()),
+            ..row
+        })?;
+        Ok((claude_dir, store, id))
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn rename_shows_the_orb_name_as_the_title() -> Result<(), Report<StoreError>> {
+        // Given a thread Claude titled.
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            title: Some("Fix the sidebar".to_owned()),
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When renaming it.
+        actor.rename(id, Some("Sidebar search".to_owned()));
+
+        // Then the sidebar shows the orb name.
+        assert_eq!(
+            shown(&state, id).and_then(|thread| thread.title).as_deref(),
+            Some("Sidebar search"),
+            "the orb name should beat Claude's title"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn rename_saves_the_orb_name() -> Result<(), Report<StoreError>> {
+        // Given a thread.
+        let (store, id) = store_with_thread("aa")?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When renaming it.
+        actor.rename(id, Some("Sidebar search".to_owned()));
+
+        // Then the store keeps the orb name.
+        assert_eq!(
+            saved(&actor.store, "aa")?.renamed_title.as_deref(),
+            Some("Sidebar search"),
+            "the orb name should survive a restart"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn rename_to_none_goes_back_to_claudes_title() -> Result<(), Report<StoreError>> {
+        // Given a thread Claude titled and the user renamed.
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            title: Some("Fix the sidebar".to_owned()),
+            renamed_title: Some("Sidebar search".to_owned()),
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When clearing its orb name.
+        actor.rename(id, None);
+
+        // Then the sidebar shows Claude's title again.
+        assert_eq!(
+            shown(&state, id).and_then(|thread| thread.title).as_deref(),
+            Some("Fix the sidebar"),
+            "clearing the orb name should fall back to Claude's title"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn new_custom_title_replaces_the_orb_name() -> Result<(), Report<StoreError>> {
+        // Given a thread renamed with `r` after a `/rename` to `orb-m1`,
+        // whose transcript now has a `/rename` to `orb-m2`.
+        let (claude_dir, store, id) = renamed_thread(
+            "{\"type\":\"custom-title\",\"customTitle\":\"orb-m2\"}\n",
+            "orb-m1",
+            "Sidebar search",
+        )?;
+        let host = FakeHost::listing(vec![in_session(ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, claude_dir.path());
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the thread shows the new `/rename`.
+        assert_eq!(
+            shown(&state, id).and_then(|thread| thread.title).as_deref(),
+            Some("orb-m2"),
+            "a different `/rename` should replace the orb name"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn repeated_custom_title_keeps_the_orb_name() -> Result<(), Report<StoreError>> {
+        // Given a thread renamed with `r` after a `/rename` to `orb-m1`,
+        // whose transcript has Claude writing `orb-m1` again.
+        let (claude_dir, store, id) = renamed_thread(
+            "{\"type\":\"custom-title\",\"customTitle\":\"orb-m1\"}\n",
+            "orb-m1",
+            "Sidebar search",
+        )?;
+        let host = FakeHost::listing(vec![in_session(ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, claude_dir.path());
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the thread keeps the orb name.
+        assert_eq!(
+            shown(&state, id).and_then(|thread| thread.title).as_deref(),
+            Some("Sidebar search"),
+            "Claude re-writing its old name shouldn't replace the orb name"
+        );
+        Ok(())
+    }
+
     #[rstest::rstest]
     #[tokio::test]
     async fn poll_shows_the_located_transcript_on_the_thread() -> Result<(), Report<StoreError>> {
@@ -6385,6 +6560,34 @@ mod tests {
                 .as_deref(),
             Some("orb/parser-fix"),
             "the hex branch should be renamed to the title's slug"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_renames_the_hex_branch_to_the_orb_name_slug() -> Result<(), Report<StoreError>>
+    {
+        // Given a thread on its hex branch titled only by its first prompt,
+        // then renamed with `r`.
+        let (claude_dir, store, id) = worktree_thread(PROMPT_LINE, HEX_BRANCH)?;
+        resave(&store, "aa", |row| ThreadRow {
+            renamed_title: Some("Sidebar search".to_owned()),
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start_with(store, &host, &FakeGit::local(), claude_dir.path());
+
+        // When a poll sees its turn end.
+        end_turn(&mut actor, &host).await;
+
+        // Then the thread shows the branch named after the orb name.
+        assert_eq!(
+            shown(&state, id)
+                .and_then(|thread| thread.branch)
+                .as_deref(),
+            Some("orb/sidebar-search"),
+            "the hex branch should be renamed to the orb name's slug"
         );
         Ok(())
     }

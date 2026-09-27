@@ -1,4 +1,8 @@
-//! The sidebar's size and visibility, and the last frame's row layout.
+//! The sidebar's size and visibility, the last frame's row layout, and the
+//! thread being renamed.
+
+use crate::TextInput;
+use crate::feat::sessions::state::ThreadId;
 
 /// The sidebar's width in columns until the user resizes it.
 pub const DEFAULT_WIDTH: u16 = 32;
@@ -58,6 +62,15 @@ impl SidebarView {
         self.width = width;
         changed
     }
+}
+
+/// A thread being renamed: which one, and the name typed so far.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rename {
+    /// The thread the name is for.
+    pub thread: ThreadId,
+    /// The name being typed, starting from the thread's title.
+    pub input: TextInput,
 }
 
 /// How the last frame laid the sidebar's list out.

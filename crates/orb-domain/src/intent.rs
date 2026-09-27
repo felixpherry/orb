@@ -62,6 +62,8 @@ pub enum Intent {
     Yank,
     /// Pin or unpin the selected thread.
     TogglePin,
+    /// Open the rename box for the selected thread, filled in with its title.
+    Rename,
     /// Settle or un-settle the selected thread.
     ToggleSettle,
     /// Delete the selected thread and its Claude session.
@@ -83,15 +85,15 @@ pub enum Intent {
     PickModel,
     /// Open the permission-mode picker for the selected draft.
     PickPermission,
-    /// Type a character into the picker's filter.
+    /// Type a character into the picker's filter, or the rename box.
     PickerInput(char),
-    /// Delete the grapheme before the picker's cursor.
+    /// Delete the grapheme before the picker's or the rename box's cursor.
     PickerBackspace,
-    /// Delete the word before the picker's cursor.
+    /// Delete the word before the picker's or the rename box's cursor.
     PickerDeleteWord,
-    /// Move the picker's cursor one grapheme left.
+    /// Move the picker's or the rename box's cursor one grapheme left.
     PickerCursorLeft,
-    /// Move the picker's cursor one grapheme right.
+    /// Move the picker's or the rename box's cursor one grapheme right.
     PickerCursorRight,
     /// Select the picker's next item.
     PickerNext,
@@ -102,11 +104,12 @@ pub enum Intent {
     /// Move the picker's selection half a page up.
     PickerHalfPageUp,
     /// Pick the selected item: open the project's draft, add the directory,
-    /// or apply the workspace, branch, model or permission mode.
+    /// or apply the workspace, branch, model or permission mode. In the
+    /// rename box, save the name.
     PickerConfirm,
     /// Browse into the directory picker's selected directory.
     PickerOpen,
-    /// Close the picker without picking.
+    /// Close the picker without picking, or the rename box without renaming.
     PickerCancel,
     /// Ask to remove the project highlighted in the project filter.
     PickerRemove,
@@ -139,6 +142,7 @@ impl fmt::Display for Intent {
             Self::ToggleFold => "fold",
             Self::Yank => "yank",
             Self::TogglePin => "pin",
+            Self::Rename => "rename",
             Self::ToggleSettle => "settle",
             Self::DeleteThread | Self::PickerBackspace => "delete",
             Self::OpenShelf => "open settled",

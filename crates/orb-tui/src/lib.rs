@@ -6,6 +6,7 @@ mod keymap;
 mod outer_terminal;
 mod picker;
 mod preview;
+mod rename;
 mod render;
 mod run;
 mod sidebar;

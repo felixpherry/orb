@@ -47,6 +47,8 @@ pub struct ThreadRow {
     pub title: Option<String>,
     /// The latest title the user gave with `/rename`.
     pub custom_title: Option<String>,
+    /// The name the user gave with `r`; beats every other title.
+    pub renamed_title: Option<String>,
     pub cwd: PathBuf,
     /// The transcript file, once it has been found.
     pub transcript_path: Option<PathBuf>,
@@ -230,6 +232,7 @@ const MIGRATIONS: &[&str] = &[
       sidebar_width INTEGER,
       project_filter INTEGER REFERENCES projects(id));
 ",
+    "ALTER TABLE threads ADD COLUMN renamed_title TEXT;",
 ];
 
 impl Store {
@@ -289,7 +292,8 @@ impl Store {
                 "SELECT id, project_id, short_id, session_id, title, cwd, transcript_path,
                         transcript_offset, created_at, turn_started_at, custom_title,
                         branch, pinned_at, settled_override, settled_at, unsettled_at,
-                        last_activity_at, last_visited_at, ai_titled, model, permission_mode
+                        last_activity_at, last_visited_at, ai_titled, model, permission_mode,
+                        renamed_title
                  FROM threads ORDER BY created_at DESC, id DESC",
                 thread_row,
             )
@@ -377,7 +381,7 @@ impl Store {
                         transcript_offset = ?5, turn_started_at = ?6, custom_title = ?7,
                         branch = ?8, pinned_at = ?9, settled_override = ?10, settled_at = ?11,
                         unsettled_at = ?12, last_activity_at = ?13, last_visited_at = ?14,
-                        short_id = ?15, cwd = ?16, ai_titled = ?17
+                        short_id = ?15, cwd = ?16, ai_titled = ?17, renamed_title = ?18
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -397,6 +401,7 @@ impl Store {
                     row.short_id,
                     utf8(&row.cwd)?,
                     row.ai_titled,
+                    row.renamed_title,
                 ],
             )
             .change_context(StoreError)
@@ -693,6 +698,7 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         ai_titled: row.get(18)?,
         model: row.get(19)?,
         permission_mode: row.get(20)?,
+        renamed_title: row.get(21)?,
     })
 }
 
@@ -1059,6 +1065,7 @@ mod tests {
             ai_titled: false,
             model: None,
             permission_mode: None,
+            renamed_title: None,
         };
         assert_eq!(threads, vec![expected], "the saved thread should load back");
         Ok(())
@@ -1227,6 +1234,7 @@ mod tests {
             ai_titled: false,
             model: None,
             permission_mode: None,
+            renamed_title: None,
         };
         store.save_thread(&updated)?;
 
@@ -1269,6 +1277,39 @@ mod tests {
         // Then loading returns them.
         let (_, threads, _) = store.load()?;
         assert_eq!(threads, vec![updated], "the settle fields should load back");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn renamed_title_loads_back_after_saving() -> Result<(), Report<StoreError>> {
+        // Given a store with one thread.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/orb"), "orb", 500)?;
+        store.insert_thread(&new_thread(project_id))?;
+        let inserted = store
+            .load()?
+            .1
+            .pop()
+            .ok_or_else(|| Report::new(StoreError).attach("the thread wasn't saved"))?;
+
+        // When saving the name the user gave it with `r`.
+        store.save_thread(&ThreadRow {
+            renamed_title: Some("Sidebar search".to_owned()),
+            ..inserted
+        })?;
+
+        // Then loading returns that name.
+        let renamed: Vec<_> = store
+            .load()?
+            .1
+            .into_iter()
+            .map(|row| row.renamed_title)
+            .collect();
+        assert_eq!(
+            renamed,
+            vec![Some("Sidebar search".to_owned())],
+            "the orb name should load back"
+        );
         Ok(())
     }
 

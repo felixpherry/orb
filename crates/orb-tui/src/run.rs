@@ -169,9 +169,15 @@ fn trust_to_open(trust: Option<&Path>, opened: Option<&Path>) -> Option<PathBuf>
 }
 
 /// Whether to attach to `started`, a started draft's thread: only while it's
-/// the selected thread and the user is neither in a picker nor attached.
+/// the selected thread and the user is neither typing (in a picker, the
+/// rename box or the search) nor attached.
 fn attaches(started: Option<ThreadId>, selected: Option<ThreadId>, focus: Focus) -> bool {
-    started.is_some() && started == selected && !matches!(focus, Focus::Picker | Focus::Attached)
+    started.is_some()
+        && started == selected
+        && !matches!(
+            focus,
+            Focus::Picker | Focus::Rename | Focus::Search | Focus::Attached
+        )
 }
 
 /// Where the keys go once the pane is gone: from the pane to the preview;
@@ -666,6 +672,16 @@ impl App {
                 let _ = self.sessions.tell(sessions_actor::Unpin(*id)).try_send();
                 Ok(())
             }
+            Command::RenameThread { thread, title } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::RenameThread {
+                        thread: *thread,
+                        title: title.clone(),
+                    })
+                    .try_send();
+                Ok(())
+            }
             Command::Settle(id) => {
                 let _ = self.sessions.tell(sessions_actor::Settle(*id)).try_send();
                 Ok(())
@@ -724,7 +740,8 @@ impl App {
     }
 
     /// Opens an interactive `claude` in the pane when a session start begins
-    /// waiting for the user to trust its directory, and attaches to it.
+    /// waiting for the user to trust its directory, and attaches to it,
+    /// closing the rename box if it was open.
     fn open_trust<W>(&mut self, out: &mut W) -> io::Result<()>
     where
         W: Write,
@@ -743,7 +760,11 @@ impl App {
                     pane,
                 });
                 self.pane_error = None;
-                self.state.write().focus = Focus::Attached;
+                {
+                    let mut app = self.state.write();
+                    app.rename = None;
+                    app.focus = Focus::Attached;
+                }
                 outer_terminal::set_mouse_capture(out, true)
             }
             None => {
@@ -1110,8 +1131,10 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Focus::Picker)]
+    #[case(Focus::Rename)]
+    #[case(Focus::Search)]
     #[case(Focus::Attached)]
-    fn started_thread_is_not_attached_from_a_picker_or_a_pane(#[case] focus: Focus) {
+    fn started_thread_is_not_attached_while_typing_or_in_a_pane(#[case] focus: Focus) {
         // Given thread 1 started from a draft and still selected.
         let started = Some(ThreadId(1));
 

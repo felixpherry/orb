@@ -1,7 +1,7 @@
 //! Sidebar view — how the sidebar is laid out on screen: its width, whether
 //! it's hidden, and how the last frame drew its rows, which the sidebar's
 //! half-page jumps measure by. While it's hidden, it can't be resized or
-//! focused.
+//! focused. `r` on a thread opens a rename box to give it orb's own name.
 
 pub mod state;
 pub mod validator;

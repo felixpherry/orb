@@ -567,8 +567,8 @@ const BG_DARK: Color = Color::Rgb(0x1e, 0x20, 0x30);
 const VISUAL: Color = Color::Rgb(0x2d, 0x3f, 0x76);
 /// The tree guides, and behind the lit shelf badge (`fg_gutter`).
 const GUTTER: Color = Color::Rgb(0x3b, 0x42, 0x61);
-/// Titles and the filtered project's name (`fg`).
-const FG: Color = Color::Rgb(0xc8, 0xd3, 0xf5);
+/// Titles, the filtered project's name, and the rename box's text (`fg`).
+pub(crate) const FG: Color = Color::Rgb(0xc8, 0xd3, 0xf5);
 /// Project names (`fg_dark`).
 const FG_DARK: Color = Color::Rgb(0x82, 0x8b, 0xb8);
 /// Times, branches, the count, settled titles and the stopped icon
@@ -582,8 +582,8 @@ const BLUE: Color = Color::Rgb(0x82, 0xaa, 0xff);
 const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
 /// A completed turn (`green`).
 const GREEN: Color = Color::Rgb(0xc3, 0xe8, 0x8d);
-/// Needing approval, and a draft's pencil (`yellow`).
-const YELLOW: Color = Color::Rgb(0xff, 0xc7, 0x77);
+/// Needing approval, a draft's pencil, and the rename box (`yellow`).
+pub(crate) const YELLOW: Color = Color::Rgb(0xff, 0xc7, 0x77);
 /// The input box and the pin (`orange`).
 const ORANGE: Color = Color::Rgb(0xff, 0x96, 0x6c);
 /// Failed and gone (`red`).
@@ -592,6 +592,8 @@ const RED: Color = Color::Rgb(0xff, 0x75, 0x7f);
 const MAGENTA: Color = Color::Rgb(0xc0, 0x99, 0xff);
 /// The ✳ logo (Claude orange).
 const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
+/// The rename box's edit icon (`blue1`, snacks' `SnacksInputIcon`).
+pub(crate) const BLUE1: Color = Color::Rgb(0x65, 0xbc, 0xff);
 
 /// Needing approval (Nerd Font `nf-fa-warning`).
 const APPROVAL_ICON: &str = "\u{f071}";

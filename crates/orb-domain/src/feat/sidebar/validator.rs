@@ -1,5 +1,5 @@
-//! Checks whether the user can resize the sidebar or move the keys to it:
-//! neither while it's hidden.
+//! Checks whether the user can resize the sidebar or move the keys to it
+//! (neither while it's hidden), or rename the selected row (only a thread).
 
 use wherror::Error;
 
@@ -47,10 +47,35 @@ pub fn validate_focus_sidebar(state: &AppState) -> Result<(), FocusSidebarError>
     }
 }
 
+/// Why renaming can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum RenameError {
+    /// The cursor isn't on a thread.
+    NoThread,
+}
+
+/// Allow renaming only the selected thread: not a draft or the Settled
+/// header.
+///
+/// # Errors
+///
+/// Returns [`RenameError::NoThread`] without a selected thread.
+pub fn validate_rename(state: &AppState) -> Result<(), RenameError> {
+    match state.sessions.selected_thread() {
+        None => Err(RenameError::NoThread),
+        Some(_) => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FocusSidebarError, ResizeError, validate_focus_sidebar, validate_resize};
+    use super::{
+        FocusSidebarError, RenameError, ResizeError, validate_focus_sidebar, validate_rename,
+        validate_resize,
+    };
     use crate::AppState;
+    use crate::feat::sessions::state::{ProjectId, Sessions, SidebarItem};
     use crate::feat::sidebar::state::SidebarView;
 
     fn hidden() -> AppState {
@@ -92,6 +117,30 @@ mod tests {
             result,
             Err(FocusSidebarError::Hidden),
             "a hidden sidebar can't take the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::draft(SidebarItem::Draft(ProjectId(1)))]
+    #[case::shelf_header(SidebarItem::SettledShelf)]
+    fn rename_rejected_without_a_selected_thread(#[case] cursor: SidebarItem) {
+        // Given the cursor on a draft or the Settled header.
+        let state = AppState {
+            sessions: Sessions {
+                cursor: Some(cursor),
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        };
+
+        // When validating a rename.
+        let result = validate_rename(&state);
+
+        // Then validation fails with NoThread.
+        assert_eq!(
+            result,
+            Err(RenameError::NoThread),
+            "only a thread can be renamed"
         );
     }
 }
