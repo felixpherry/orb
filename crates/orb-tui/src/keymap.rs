@@ -15,7 +15,9 @@
 //! every key goes to Claude except `<C-\>` and `<C-h>`. An open picker takes
 //! typed characters as filter text and has its own fixed keys, `<C-x>` among
 //! them for removing a project from the project filter. The rename box (`r`)
-//! and the sidebar search (`/` or `i`) use the picker's keys.
+//! and the sidebar search (`/` or `i`) use the picker's keys. On a group's
+//! card, draft or threads, `l`/`h` open and close the group, and `␣w`/`␣b`
+//! aren't bound.
 
 use std::fmt;
 
@@ -56,6 +58,12 @@ impl fmt::Display for KeyCategory {
 pub(crate) enum Selection {
     Thread,
     Draft,
+    /// A group's card.
+    GroupCard,
+    /// A thread in a group.
+    GroupThread,
+    /// A group's draft.
+    GroupDraft,
     /// No row, or the settled shelf's header.
     Nothing,
 }
@@ -63,10 +71,18 @@ pub(crate) enum Selection {
 impl Selection {
     /// What `sessions`' cursor is on.
     pub(crate) fn of(sessions: &Sessions) -> Self {
-        match (sessions.selected_draft(), sessions.selected_thread()) {
-            (Some(_), _) => Self::Draft,
-            (None, Some(_)) => Self::Thread,
-            (None, None) => Self::Nothing,
+        match (
+            sessions.selected_draft(),
+            sessions.selected_group_draft(),
+            sessions.selected_thread(),
+            sessions.selected_group(),
+        ) {
+            (Some(_), _, _, _) => Self::Draft,
+            (None, Some(_), _, _) => Self::GroupDraft,
+            (None, None, Some(_), Some(_)) => Self::GroupThread,
+            (None, None, Some(_), None) => Self::Thread,
+            (None, None, None, Some(_)) => Self::GroupCard,
+            (None, None, None, None) => Self::Nothing,
         }
     }
 }
@@ -81,12 +97,24 @@ pub(crate) enum Scope {
     SidebarDraft,
     /// The sidebar with no thread or draft selected.
     SidebarEmpty,
+    /// The sidebar on a group's card: fold keys, but no pin, settle or rename.
+    SidebarGroup,
+    /// The sidebar on a thread in a group: fold keys and rename.
+    SidebarGroupThread,
+    /// The sidebar on a group's draft: fold keys and its setting pickers.
+    SidebarGroupDraft,
     /// The dashboard on a thread.
     Dashboard,
     /// The dashboard on a draft: its setting pickers too.
     DashboardDraft,
     /// The dashboard with no thread or draft selected.
     DashboardEmpty,
+    /// The dashboard on a group's card: the tools only.
+    DashboardGroup,
+    /// The dashboard on a thread in a group: no workspace or branch.
+    DashboardGroupThread,
+    /// The dashboard on a group's draft: its setting pickers too.
+    DashboardGroupDraft,
 }
 
 impl Scope {
@@ -96,6 +124,9 @@ impl Scope {
             (Focus::Dashboard, Selection::Thread) => Self::Dashboard,
             (Focus::Dashboard, Selection::Draft) => Self::DashboardDraft,
             (Focus::Dashboard, Selection::Nothing) => Self::DashboardEmpty,
+            (Focus::Dashboard, Selection::GroupCard) => Self::DashboardGroup,
+            (Focus::Dashboard, Selection::GroupThread) => Self::DashboardGroupThread,
+            (Focus::Dashboard, Selection::GroupDraft) => Self::DashboardGroupDraft,
             (
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::Thread,
@@ -108,6 +139,18 @@ impl Scope {
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::Nothing,
             ) => Self::SidebarEmpty,
+            (
+                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Selection::GroupCard,
+            ) => Self::SidebarGroup,
+            (
+                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Selection::GroupThread,
+            ) => Self::SidebarGroupThread,
+            (
+                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Selection::GroupDraft,
+            ) => Self::SidebarGroupDraft,
         }
     }
 }
@@ -121,9 +164,35 @@ pub(crate) type Keys = WhichKeyState<KeyEvent, Scope, Intent, KeyCategory>;
     reason = "one binding per key keeps the whole keymap in one place"
 )]
 pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
+    const SIDEBAR_GROUPS: [Scope; 3] = [
+        Scope::SidebarGroup,
+        Scope::SidebarGroupThread,
+        Scope::SidebarGroupDraft,
+    ];
+    const DASHBOARD_GROUPS: [Scope; 3] = [
+        Scope::DashboardGroup,
+        Scope::DashboardGroupThread,
+        Scope::DashboardGroupDraft,
+    ];
+    const SIDEBAR: [Scope; 6] = [
+        Scope::Sidebar,
+        Scope::SidebarDraft,
+        Scope::SidebarEmpty,
+        Scope::SidebarGroup,
+        Scope::SidebarGroupThread,
+        Scope::SidebarGroupDraft,
+    ];
+    const DASHBOARD: [Scope; 6] = [
+        Scope::Dashboard,
+        Scope::DashboardDraft,
+        Scope::DashboardEmpty,
+        Scope::DashboardGroup,
+        Scope::DashboardGroupThread,
+        Scope::DashboardGroupDraft,
+    ];
     let mut keymap = Keymap::new();
     keymap.describe_group("<leader>", "leader");
-    for scope in [Scope::Sidebar, Scope::SidebarDraft, Scope::SidebarEmpty] {
+    for scope in SIDEBAR {
         keymap
             .bind("j", Intent::SelectNext, KeyCategory::Navigation, scope)
             .bind("k", Intent::SelectPrev, KeyCategory::Navigation, scope)
@@ -144,8 +213,6 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             .bind("<c-l>", Intent::FocusRight, KeyCategory::Navigation, scope)
             .bind("<enter>", Intent::Attach, KeyCategory::Sessions, scope)
             .bind("q", Intent::Quit, KeyCategory::General, scope)
-            .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
-            .bind("h", Intent::CloseShelf, KeyCategory::Navigation, scope)
             .bind("/", Intent::Search, KeyCategory::Navigation, scope)
             .bind("i", Intent::Search, KeyCategory::Navigation, scope)
             .bind(
@@ -167,9 +234,21 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             );
     }
+    for scope in [Scope::Sidebar, Scope::SidebarDraft, Scope::SidebarEmpty] {
+        keymap
+            .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
+            .bind("h", Intent::CloseShelf, KeyCategory::Navigation, scope);
+    }
+    for scope in SIDEBAR_GROUPS {
+        keymap
+            .bind("l", Intent::OpenGroup, KeyCategory::Navigation, scope)
+            .bind("h", Intent::CloseGroup, KeyCategory::Navigation, scope);
+    }
+    for scope in [Scope::Sidebar, Scope::SidebarGroupThread] {
+        keymap.bind("r", Intent::Rename, KeyCategory::Threads, scope);
+    }
     keymap
         .bind("p", Intent::TogglePin, KeyCategory::Threads, Scope::Sidebar)
-        .bind("r", Intent::Rename, KeyCategory::Threads, Scope::Sidebar)
         .bind(
             "s",
             Intent::ToggleSettle,
@@ -179,11 +258,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     for scope in [Scope::Sidebar, Scope::SidebarDraft] {
         keymap.bind("d", Intent::DeleteThread, KeyCategory::Threads, scope);
     }
-    for scope in [
-        Scope::Dashboard,
-        Scope::DashboardDraft,
-        Scope::DashboardEmpty,
-    ] {
+    for scope in DASHBOARD {
         keymap
             .bind(
                 "<c-h>",
@@ -236,6 +311,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             ],
         ),
         (Scope::DashboardEmpty, &[]),
+        (Scope::DashboardGroup, &[Shell, Lazygit, Neovim]),
+        (Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim]),
+        (
+            Scope::DashboardGroupDraft,
+            &[Start, Model, Permission, Shell, Lazygit, Neovim],
+        ),
     ] {
         for item in items
             .iter()
@@ -249,14 +330,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             keymap.bind(&item.key().to_string(), item.intent(), category, scope);
         }
     }
-    for scope in [
-        Scope::Sidebar,
-        Scope::SidebarDraft,
-        Scope::SidebarEmpty,
-        Scope::Dashboard,
-        Scope::DashboardDraft,
-        Scope::DashboardEmpty,
-    ] {
+    for scope in SIDEBAR.into_iter().chain(DASHBOARD) {
         keymap.bind(
             "<leader>e",
             Intent::ToggleSidebar,
@@ -282,7 +356,19 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 Intent::SwitchBranch,
                 KeyCategory::Sessions,
                 scope,
-            )
+            );
+    }
+    for scope in [
+        Scope::Sidebar,
+        Scope::SidebarDraft,
+        Scope::Dashboard,
+        Scope::DashboardDraft,
+    ]
+    .into_iter()
+    .chain(SIDEBAR_GROUPS)
+    .chain(DASHBOARD_GROUPS)
+    {
+        keymap
             .bind(
                 "<leader>t",
                 Intent::OpenTool(Tool::Shell),
@@ -302,7 +388,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             );
     }
-    for scope in [Scope::SidebarDraft, Scope::DashboardDraft] {
+    for scope in [
+        Scope::SidebarDraft,
+        Scope::DashboardDraft,
+        Scope::SidebarGroupDraft,
+        Scope::DashboardGroupDraft,
+    ] {
         keymap
             .bind("<leader>m", Intent::PickModel, KeyCategory::Sessions, scope)
             .bind(
@@ -400,6 +491,12 @@ mod tests {
     use orb_domain::feat::dashboard::DashboardItem::{
         self, AddProject, Branch, FilterProjects, Lazygit, Model, Neovim, NewSession, Open,
         Permission, Quit, Shell, Start, Workspace,
+    };
+    use std::time::SystemTime;
+
+    use orb_domain::feat::sessions::state::{
+        Group, GroupDraft, GroupId, GroupKind, Project, ProjectId, ProjectKind, Sessions,
+        SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::zellij::zellij_service::Tool;
     use orb_domain::{Focus, Intent};
@@ -652,6 +749,12 @@ mod tests {
         Scope::DashboardDraft,
         &[Start, Workspace, Branch, Model, Permission, Shell, Lazygit, Neovim]
     )]
+    #[case::group(Scope::DashboardGroup, &[Shell, Lazygit, Neovim])]
+    #[case::group_thread(Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim])]
+    #[case::group_draft(
+        Scope::DashboardGroupDraft,
+        &[Start, Model, Permission, Shell, Lazygit, Neovim]
+    )]
     fn dashboard_item_keys_run_their_items(#[case] scope: Scope, #[case] items: &[DashboardItem]) {
         // Given the keymap in a dashboard scope.
         let mut keys = Keys::new(keymap(), scope);
@@ -892,6 +995,12 @@ mod tests {
     #[case(Focus::Dashboard, Selection::Thread, Scope::Dashboard)]
     #[case(Focus::Dashboard, Selection::Draft, Scope::DashboardDraft)]
     #[case(Focus::Dashboard, Selection::Nothing, Scope::DashboardEmpty)]
+    #[case(Focus::Sidebar, Selection::GroupCard, Scope::SidebarGroup)]
+    #[case(Focus::Sidebar, Selection::GroupThread, Scope::SidebarGroupThread)]
+    #[case(Focus::Sidebar, Selection::GroupDraft, Scope::SidebarGroupDraft)]
+    #[case(Focus::Dashboard, Selection::GroupCard, Scope::DashboardGroup)]
+    #[case(Focus::Dashboard, Selection::GroupThread, Scope::DashboardGroupThread)]
+    #[case(Focus::Dashboard, Selection::GroupDraft, Scope::DashboardGroupDraft)]
     fn scope_follows_focus_and_the_selection(
         #[case] focus: Focus,
         #[case] selection: Selection,
@@ -903,6 +1012,131 @@ mod tests {
             expected,
             "the scope in {focus:?} on {selection:?}"
         );
+    }
+
+    /// Group `id` of project 1, drafting if `draft`.
+    fn group(id: i64, draft: bool) -> Group {
+        Group {
+            id: GroupId(id),
+            kind: GroupKind::Feature,
+            name: format!("group-{id}"),
+            dir: None,
+            branch: None,
+            created_at: SystemTime::UNIX_EPOCH,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            draft: draft.then_some(GroupDraft {
+                model: None,
+                permission: None,
+            }),
+        }
+    }
+
+    /// One project holding group 9 with thread 1 and group 10 with a draft,
+    /// with the cursor on `cursor`.
+    fn grouped(cursor: SidebarItem) -> Sessions {
+        Sessions {
+            projects: vec![Project {
+                id: ProjectId(1),
+                title: "orb".into(),
+                root: "/orb".into(),
+                created_at: SystemTime::UNIX_EPOCH,
+                removed: false,
+                draft: None,
+                threads: vec![Thread {
+                    id: ThreadId(1),
+                    title: None,
+                    cwd: "/orb".into(),
+                    transcript: None,
+                    status: ThreadStatus::Idle,
+                    turn_started_at: None,
+                    attach_argv: vec![],
+                    branch: None,
+                    pinned_at: None,
+                    settled_at: None,
+                    active_since: SystemTime::UNIX_EPOCH,
+                    last_activity_at: SystemTime::UNIX_EPOCH,
+                    unseen: false,
+                    group: Some(GroupId(9)),
+                    model: None,
+                    permission: None,
+                }],
+                groups: vec![group(9, false), group(10, true)],
+                kind: ProjectKind::Normal,
+            }],
+            cursor: Some(cursor),
+            ..Sessions::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::card(SidebarItem::Group(GroupId(9)), Selection::GroupCard)]
+    #[case::grouped_thread(SidebarItem::Thread(ThreadId(1)), Selection::GroupThread)]
+    #[case::group_draft(SidebarItem::GroupDraft(GroupId(10)), Selection::GroupDraft)]
+    fn selection_follows_the_cursors_group_row(
+        #[case] cursor: SidebarItem,
+        #[case] expected: Selection,
+    ) {
+        // Given the cursor on a group's row.
+        let sessions = grouped(cursor);
+
+        // When reading the selection.
+        let selection = Selection::of(&sessions);
+
+        // Then it names the kind of group row.
+        assert_eq!(selection, expected, "the selection on {cursor:?}");
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::SidebarGroup, KeyCode::Char('j'), Intent::SelectNext)]
+    #[case(Scope::SidebarGroup, KeyCode::Enter, Intent::Attach)]
+    #[case(Scope::SidebarGroup, KeyCode::Char('l'), Intent::OpenGroup)]
+    #[case(Scope::SidebarGroup, KeyCode::Char('h'), Intent::CloseGroup)]
+    #[case(Scope::SidebarGroupThread, KeyCode::Char('j'), Intent::SelectNext)]
+    #[case(Scope::SidebarGroupThread, KeyCode::Enter, Intent::Attach)]
+    #[case(Scope::SidebarGroupThread, KeyCode::Char('l'), Intent::OpenGroup)]
+    #[case(Scope::SidebarGroupThread, KeyCode::Char('h'), Intent::CloseGroup)]
+    #[case(Scope::SidebarGroupThread, KeyCode::Char('r'), Intent::Rename)]
+    #[case(Scope::SidebarGroupDraft, KeyCode::Char('j'), Intent::SelectNext)]
+    #[case(Scope::SidebarGroupDraft, KeyCode::Enter, Intent::Attach)]
+    #[case(Scope::SidebarGroupDraft, KeyCode::Char('l'), Intent::OpenGroup)]
+    #[case(Scope::SidebarGroupDraft, KeyCode::Char('h'), Intent::CloseGroup)]
+    fn group_scope_keys_map_to_their_intents(
+        #[case] scope: Scope,
+        #[case] code: KeyCode,
+        #[case] expected: Intent,
+    ) {
+        // Given the keymap on a group's row in the sidebar.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing the key.
+        let intent = press(&mut keys, key(code));
+
+        // Then it yields its intent.
+        assert_eq!(intent.as_ref(), Some(&expected), "{code:?} in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    fn leader_w_and_b_are_unbound_in_group_scopes(
+        #[values(
+            Scope::SidebarGroup,
+            Scope::SidebarGroupThread,
+            Scope::SidebarGroupDraft,
+            Scope::DashboardGroup,
+            Scope::DashboardGroupThread,
+            Scope::DashboardGroupDraft
+        )]
+        scope: Scope,
+    ) {
+        // Given the leader popup's keys in a group scope.
+        let keys = leader_popup(scope);
+
+        // When looking for `w` and `b`.
+        let found = ['w', 'b'].map(|c| keys.contains(&key(KeyCode::Char(c))));
+
+        // Then neither is listed.
+        assert_eq!(found, [false; 2], "w/b in the {scope:?} leader popup");
     }
 
     /// The keys the leader popup lists in `scope`.

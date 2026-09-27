@@ -6,10 +6,13 @@
 //! many drafts and threads are listed out of all of them. Below it, drafts
 //! come first, then pinned threads, then active ones, each a three-line tree
 //! node: the status icon and title, then the project and status, then the
-//! branch (a draft's workspace). The selected row's first line is
-//! highlighted. Settled threads fold into a shelf at the bottom, drawn as
-//! one-line rows while it's open. The sidebar scrolls to keep the whole
-//! selected row in view.
+//! branch (a draft's workspace). A group is a three-line node too: its most
+//! urgent child's status and its slug, then its kind and project, then its
+//! branch or folder with an icon per child and a fold chevron; its children
+//! hang below it as one-line rows while it's open. The selected row's first
+//! line is highlighted. Settled threads and groups fold into a shelf at the
+//! bottom, drawn as one-line rows while it's open. The sidebar scrolls to
+//! keep the whole selected row in view.
 //!
 //! While the user searches, the typed text follows the prompt, and only
 //! drafts and threads whose title matches it are listed, settled ones
@@ -20,8 +23,8 @@ use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use orb_domain::feat::sessions::state::{
-    Draft, DraftWorkspace, NEW_THREAD, Project, Sessions, SidebarRow, Thread, ThreadId,
-    ThreadStatus,
+    Draft, DraftWorkspace, Group, GroupKind, NEW_THREAD, Project, Sessions, SidebarRow, Thread,
+    ThreadId, ThreadStatus,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use ratatui::buffer::Buffer;
@@ -143,18 +146,33 @@ fn prompt(sessions: &Sessions, room: usize) -> (Line<'_>, Option<u16>) {
     )
 }
 
-/// `shown/total`, like snacks' match count: the drafts and threads listed,
-/// out of every draft and thread not being deleted.
+/// `shown/total`, like snacks' match count: the drafts and threads listed
+/// (not group cards), out of every draft, group draft and thread not being
+/// deleted.
 fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
     let shown = rows
         .iter()
-        .filter(|row| !matches!(row, SidebarRow::ShelfHeader { .. }))
+        .filter(|row| {
+            !matches!(
+                row,
+                SidebarRow::ShelfHeader { .. }
+                    | SidebarRow::GroupCard { .. }
+                    | SidebarRow::SettledGroup { .. }
+            )
+        })
         .count();
     let drafts = sessions
         .projects
         .iter()
-        .filter(|project| project.draft.is_some())
-        .count();
+        .map(|project| {
+            usize::from(project.draft.is_some())
+                + project
+                    .groups
+                    .iter()
+                    .filter(|group| group.draft.is_some())
+                    .count()
+        })
+        .sum::<usize>();
     let threads = sessions
         .threads()
         .filter(|thread| !sessions.deleting.contains(&thread.id))
@@ -220,8 +238,22 @@ fn render_list(
                     Style::new().bg(VISUAL),
                 );
             }
-            let ends_shelf =
-                !matches!(placed.get(index + 1), Some((SidebarRow::Settled { .. }, _)));
+            let ends_shelf = !placed
+                .iter()
+                .skip(index + 1)
+                .map(|(row, _)| row)
+                .find(|row| {
+                    !matches!(
+                        row,
+                        SidebarRow::GroupThread { .. } | SidebarRow::GroupDraftRow { .. }
+                    )
+                })
+                .is_some_and(|row| {
+                    matches!(
+                        row,
+                        SidebarRow::Settled { .. } | SidebarRow::SettledGroup { .. }
+                    )
+                });
             render_row(
                 sessions, attached, row, ends_shelf, now, row_area, &mut list,
             );
@@ -284,7 +316,7 @@ fn height(row: &SidebarRow<'_>) -> u16 {
     }
 }
 
-/// One row; `ends_shelf` says no settled row follows it. Titles show where
+/// One row; `ends_shelf` says no settled entry follows it. Titles show where
 /// the search matched them.
 fn render_row(
     sessions: &Sessions,
@@ -316,14 +348,90 @@ fn render_row(
             let matched = matched(title(thread));
             render_settled(thread, &matched, ends_shelf, now, area, buf);
         }
-        SidebarRow::GroupCard { group, .. } | SidebarRow::SettledGroup { group, .. } => {
-            Line::from(span(group.name.as_str(), FG)).render(area, buf);
+        SidebarRow::GroupCard {
+            project,
+            group,
+            open,
+        } => render_group_card(
+            sessions,
+            attached,
+            project,
+            group,
+            *open,
+            &matched(&group.name),
+            now,
+            area,
+            buf,
+        ),
+        SidebarRow::GroupThread { thread, last, .. } => render_group_thread(
+            thread,
+            attached.contains(&thread.id),
+            *last,
+            &matched(title(thread)),
+            now,
+            area,
+            buf,
+        ),
+        SidebarRow::GroupDraftRow { .. } => render_split(
+            Line::from(
+                [
+                    span(LAST_CHILD_GUIDE, GUTTER),
+                    span(format!("{PENCIL} "), YELLOW),
+                ]
+                .into_iter()
+                .chain(highlight(NEW_THREAD, &matched(NEW_THREAD), |_| FG))
+                .collect::<Vec<_>>(),
+            ),
+            Line::from(span("draft", DARK3)),
+            area,
+            buf,
+        ),
+        SidebarRow::SettledGroup { project, group, .. } => {
+            let guide = if ends_shelf { LAST_GUIDE } else { GUIDE };
+            let (icon, colour) = kind_look(group.kind);
+            let ago = ago_label(since(now, group.settled_at.unwrap_or(group.created_at)));
+            render_split(
+                Line::from(
+                    [span(guide, GUTTER), span(format!("{icon} "), colour)]
+                        .into_iter()
+                        .chain(highlight(&group.name, &matched(&group.name), |_| COMMENT))
+                        .collect::<Vec<_>>(),
+                ),
+                Line::from(span(
+                    format!("{} · {ago}", members(sessions, project, group).len()),
+                    DARK3,
+                )),
+                area,
+                buf,
+            );
         }
-        SidebarRow::GroupThread { thread, .. } => {
-            Line::from(span(title(thread), FG)).render(area, buf);
-        }
-        SidebarRow::GroupDraftRow { .. } => Line::from(span(NEW_THREAD, FG)).render(area, buf),
     }
+}
+
+/// A group's thread under its card: its guide (`last` ends the group), status
+/// icon, title (`matched` at those byte offsets) and time.
+fn render_group_thread(
+    thread: &Thread,
+    attached: bool,
+    last: bool,
+    matched: &[usize],
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let guide = if last { LAST_CHILD_GUIDE } else { CHILD_GUIDE };
+    let (glyph, _, colour) = status(thread, attached, now);
+    render_split(
+        Line::from(
+            [span(guide, GUTTER), span(format!("{glyph} "), colour)]
+                .into_iter()
+                .chain(highlight(title(thread), matched, |_| FG))
+                .collect::<Vec<_>>(),
+        ),
+        Line::from(span(when(thread, now), COMMENT)),
+        area,
+        buf,
+    );
 }
 
 /// A thread's node: its status icon, title (`matched` at those byte
@@ -373,6 +481,137 @@ fn render_card(
         footer,
         buf,
     );
+}
+
+/// A group's node: its most urgent child's icon, the slug (`matched` at
+/// those byte offsets), pin and time; the kind icon, project and status
+/// word; the branch or folder, one icon per child, and the fold chevron.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the group row's parts plus the frame inputs every node takes"
+)]
+fn render_group_card(
+    sessions: &Sessions,
+    attached: &HashSet<ThreadId>,
+    project: &Project,
+    group: &Group,
+    open: bool,
+    matched: &[usize],
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let [heading, place_area, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
+    let threads = members(sessions, project, group);
+    let urgent = threads.iter().copied().min_by_key(|thread| rank(thread));
+    let (glyph, word, colour) = urgent.map_or((PENCIL, Some("draft"), YELLOW), |thread| {
+        status(thread, attached.contains(&thread.id), now)
+    });
+    let pin = if group.pinned_at.is_some() { PIN } else { "" };
+    let time = match urgent {
+        Some(thread) if thread.status == ThreadStatus::Working => when(thread, now),
+        _ => ago_label(since(
+            now,
+            threads
+                .iter()
+                .map(|thread| thread.last_activity_at)
+                .max()
+                .unwrap_or(group.created_at),
+        )),
+    };
+    render_split(
+        Line::from(
+            [span(format!(" {glyph} "), colour)]
+                .into_iter()
+                .chain(highlight(&group.name, matched, |_| FG))
+                .collect::<Vec<_>>(),
+        ),
+        Line::from(vec![span(format!("{pin} "), ORANGE), span(time, COMMENT)]),
+        heading,
+        buf,
+    );
+    let (icon, kind_colour) = kind_look(group.kind);
+    render_split(
+        Line::from(vec![
+            span(GUIDE, GUTTER),
+            span(format!("{icon} "), kind_colour),
+            span(project.title.as_str(), FG_DARK),
+        ]),
+        word.map(|word| Line::from(span(word, colour)))
+            .unwrap_or_default(),
+        place_area,
+        buf,
+    );
+    let icons = group
+        .draft
+        .iter()
+        .map(|_| (PENCIL, YELLOW))
+        .chain(threads.iter().map(|thread| {
+            let (glyph, _, colour) = status(thread, attached.contains(&thread.id), now);
+            (glyph, colour)
+        }))
+        .collect::<Vec<_>>();
+    let rest = icons.len().saturating_sub(CHILD_ICONS);
+    render_split(
+        Line::from(vec![
+            span(LAST_GUIDE, GUTTER),
+            span(group_place(group), COMMENT),
+        ]),
+        Line::from(
+            icons
+                .into_iter()
+                .take(CHILD_ICONS)
+                .map(|(glyph, colour)| span(format!("{glyph} "), colour))
+                .chain((rest > 0).then(|| span(format!("+{rest} "), COMMENT)))
+                .chain([span(if open { FOLD_OPEN } else { FOLD_CLOSED }, DARK3)])
+                .collect::<Vec<_>>(),
+        ),
+        footer,
+        buf,
+    );
+}
+
+/// A group's threads not being deleted, newest first: every one, not only
+/// those a search lists.
+fn members<'a>(sessions: &Sessions, project: &'a Project, group: &Group) -> Vec<&'a Thread> {
+    project
+        .threads
+        .iter()
+        .filter(|thread| thread.group == Some(group.id) && !sessions.deleting.contains(&thread.id))
+        .collect()
+}
+
+/// How urgent a child's status is for its group's card; the lowest wins.
+fn rank(thread: &Thread) -> u8 {
+    match thread.status {
+        ThreadStatus::NeedsApproval => 0,
+        ThreadStatus::NeedsInput => 1,
+        ThreadStatus::Failed | ThreadStatus::Gone => 2,
+        ThreadStatus::Working => 3,
+        ThreadStatus::Idle if thread.unseen => 4,
+        ThreadStatus::Idle | ThreadStatus::Unknown => 5,
+        ThreadStatus::Stopped => 6,
+    }
+}
+
+/// Where a group's sessions run: a Feature's branch, else its folder under
+/// `~/.orb`.
+fn group_place(group: &Group) -> String {
+    match group.kind {
+        GroupKind::Feature => format!("{BRANCH} {}", group.branch.as_deref().unwrap_or("—")),
+        GroupKind::Research => format!("{FOLDER} ~/.orb/research/{}", group.name),
+        GroupKind::Learn => format!("{FOLDER} ~/.orb/learn/{}", group.name),
+    }
+}
+
+/// A group kind's icon and colour: Feature `nf-fa-code_fork` green1,
+/// Research `nf-fa-flask` blue2, Learn `nf-fa-book` purple.
+pub(crate) fn kind_look(kind: GroupKind) -> (&'static str, Color) {
+    match kind {
+        GroupKind::Feature => ("\u{f126}", GREEN1),
+        GroupKind::Research => ("\u{f0c3}", BLUE2),
+        GroupKind::Learn => ("\u{f02d}", PURPLE),
+    }
 }
 
 /// A draft's node: the pencil and `New thread` (`matched` at those byte
@@ -706,8 +945,13 @@ pub(crate) const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
 /// A completed turn; the picker's current branch and new worktree; the mode
 /// line's INSERT (`green`).
 pub(crate) const GREEN: Color = Color::Rgb(0xc3, 0xe8, 0x8d);
-/// The mode line's ATTACHED (`green1`, lualine's terminal mode).
+/// The mode line's ATTACHED (`green1`, lualine's terminal mode), and a
+/// Feature group's kind icon.
 pub(crate) const GREEN1: Color = Color::Rgb(0x4f, 0xd6, 0xbe);
+/// A Research group's kind icon (`blue2`).
+pub(crate) const BLUE2: Color = Color::Rgb(0x0d, 0xb9, 0xd7);
+/// A Learn group's kind icon (`purple`).
+pub(crate) const PURPLE: Color = Color::Rgb(0xfc, 0xa7, 0xea);
 /// Needing approval, and a draft's pencil; the picker's permission shield
 /// and `worktree` branch badge; the rename box (`yellow`).
 pub(crate) const YELLOW: Color = Color::Rgb(0xff, 0xc7, 0x77);
@@ -765,6 +1009,12 @@ pub(crate) const FOLDER: &str = "\u{f07b}";
 pub(crate) const FOLDER_OPEN: &str = "\u{f07c}";
 /// A draft (`nf-fa-pencil`).
 const PENCIL: &str = "\u{f040}";
+/// An open group, at the end of its card (`nf-oct-chevron_down`).
+const FOLD_OPEN: &str = "\u{f47c}";
+/// A closed group (`nf-oct-chevron_right`).
+const FOLD_CLOSED: &str = "\u{f460}";
+/// How many of a group's children its card shows an icon for.
+const CHILD_ICONS: usize = 8;
 /// Claude's logo, at the end of a thread's node and before the picker's
 /// models.
 pub(crate) const CLAUDE_LOGO: &str = "✳";
@@ -772,6 +1022,10 @@ pub(crate) const CLAUDE_LOGO: &str = "✳";
 const GUIDE: &str = " ├╴";
 /// The tree guide before a node's last line and the last settled row.
 const LAST_GUIDE: &str = " └╴";
+/// The guides before a group's child rows, under the card's tree.
+const CHILD_GUIDE: &str = "    ├╴";
+/// The guide before a group's last child row.
+const LAST_CHILD_GUIDE: &str = "    └╴";
 
 #[cfg(test)]
 mod tests {
@@ -789,9 +1043,10 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::{
-        APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT,
-        COMPLETED_ICON, CYAN, DARK3, FAILED_ICON, FG, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GUIDE,
-        GUTTER, IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PENCIL, PIN, RED, STOPPED_ICON,
+        APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, BRANCH, CHILD_GUIDE, CLAUDE,
+        CLAUDE_LOGO, COMMENT, COMPLETED_ICON, CYAN, DARK3, FAILED_ICON, FG, FOLD_CLOSED, FOLD_OPEN,
+        FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GREEN1, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON,
+        LAST_CHILD_GUIDE, LAST_GUIDE, MAGENTA, ORANGE, PENCIL, PIN, PURPLE, RED, STOPPED_ICON,
         SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
     };
 
@@ -2070,6 +2325,481 @@ mod tests {
             lines(&buf).iter().any(|line| line.contains(expected)),
             "the sidebar should show {expected:?}: {:#?}",
             lines(&buf)
+        );
+    }
+
+    /// orb holding group 9 with `threads` as its children and a draft if
+    /// `draft`: `GT-514-login` on branch `GT-514-login` for a Feature, else
+    /// `tokio-cancel`.
+    fn grouped(kind: GroupKind, threads: Vec<Thread>, draft: bool) -> Sessions {
+        let name = match kind {
+            GroupKind::Feature => "GT-514-login",
+            GroupKind::Research | GroupKind::Learn => "tokio-cancel",
+        };
+        let group = Group {
+            id: GroupId(9),
+            kind,
+            name: name.to_owned(),
+            dir: None,
+            branch: (kind == GroupKind::Feature).then(|| name.to_owned()),
+            created_at: SystemTime::UNIX_EPOCH,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            draft: draft.then_some(GroupDraft {
+                model: None,
+                permission: None,
+            }),
+        };
+        let threads = threads
+            .into_iter()
+            .map(|thread| Thread {
+                group: Some(GroupId(9)),
+                ..thread
+            })
+            .collect();
+        Sessions {
+            projects: vec![Project {
+                groups: vec![group],
+                ..project(1, "orb", threads)
+            }],
+            ..Sessions::default()
+        }
+    }
+
+    /// orb's Feature group `GT-514-login` holding `threads`.
+    fn feature(threads: Vec<Thread>) -> Sessions {
+        grouped(GroupKind::Feature, threads, false)
+    }
+
+    /// The only group in `sessions`.
+    fn group_mut(sessions: &mut Sessions) -> Option<&mut Group> {
+        sessions.projects.first_mut()?.groups.first_mut()
+    }
+
+    #[rstest::rstest]
+    #[case::feature(GroupKind::Feature, "\u{f126}", GREEN1)]
+    #[case::research(GroupKind::Research, "\u{f0c3}", BLUE2)]
+    #[case::learn(GroupKind::Learn, "\u{f02d}", PURPLE)]
+    fn group_card_draws_the_kind_icon_in_its_colour(
+        #[case] kind: GroupKind,
+        #[case] icon: &str,
+        #[case] colour: Color,
+    ) {
+        // Given a `kind` group with one thread.
+        let sessions = grouped(kind, vec![thread(1, ThreadStatus::Idle)], false);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then the card's second line starts with the kind's icon in its colour.
+        assert_eq!(
+            glyph(&buf, 3, 4),
+            Some((icon.to_owned(), colour)),
+            "the kind icon for {kind:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::approval_over_working(
+        thread(1, ThreadStatus::Working),
+        thread(2, ThreadStatus::NeedsApproval),
+        APPROVAL_ICON,
+        YELLOW
+    )]
+    #[case::input_over_failed(
+        thread(1, ThreadStatus::Failed),
+        thread(2, ThreadStatus::NeedsInput),
+        INPUT_ICON,
+        MAGENTA
+    )]
+    #[case::failed_over_working(
+        thread(1, ThreadStatus::Working),
+        thread(2, ThreadStatus::Failed),
+        FAILED_ICON,
+        RED
+    )]
+    #[case::working_over_done(
+        Thread { unseen: true, ..thread(1, ThreadStatus::Idle) },
+        thread(2, ThreadStatus::Working),
+        "⠋",
+        BLUE
+    )]
+    #[case::done_over_idle(
+        thread(1, ThreadStatus::Idle),
+        Thread { unseen: true, ..thread(2, ThreadStatus::Idle) },
+        COMPLETED_ICON,
+        GREEN
+    )]
+    #[case::idle_over_stopped(
+        thread(1, ThreadStatus::Stopped),
+        thread(2, ThreadStatus::Idle),
+        IDLE_ICON,
+        DARK3
+    )]
+    fn group_card_rolls_up_the_most_urgent_status(
+        #[case] first: Thread,
+        #[case] second: Thread,
+        #[case] icon: &str,
+        #[case] colour: Color,
+    ) {
+        // Given a group with two children, the more urgent one second.
+        let sessions = feature(vec![first, second]);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then the card's first line shows the more urgent child's icon.
+        assert_eq!(
+            glyph(&buf, 1, 3),
+            Some((icon.to_owned(), colour)),
+            "the rolled-up icon"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_card_shows_the_rolled_up_status_word() {
+        // Given a group with a working child and one needing approval.
+        let sessions = feature(vec![
+            thread(1, ThreadStatus::Working),
+            thread(2, ThreadStatus::NeedsApproval),
+        ]);
+
+        // When rendering the sidebar.
+        let place = line(&draw(&sessions, at(1000), 12), 4);
+
+        // Then the card's second line ends with `approval`.
+        assert!(place.trim_end().ends_with("approval"), "line was '{place}'");
+    }
+
+    #[rstest::rstest]
+    fn draft_only_group_card_shows_the_pencil_and_draft() {
+        // Given a group holding only its draft.
+        let sessions = grouped(GroupKind::Feature, vec![], true);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then the card's first line has the yellow pencil, and its second
+        // line reads `draft`.
+        assert_eq!(
+            (
+                glyph(&buf, 1, 3),
+                line(&buf, 4).trim_end().ends_with("draft")
+            ),
+            (Some((PENCIL.to_owned(), YELLOW)), true),
+            "the draft card was {:#?}",
+            lines(&buf)
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::feature(GroupKind::Feature, format!("{BRANCH} GT-514-login"))]
+    #[case::research(GroupKind::Research, format!("{FOLDER} ~/.orb/research/tokio-cancel"))]
+    fn group_card_last_line_shows_the_branch_or_folder(
+        #[case] kind: GroupKind,
+        #[case] expected: String,
+    ) {
+        // Given a `kind` group with one thread.
+        let sessions = grouped(kind, vec![thread(1, ThreadStatus::Idle)], false);
+
+        // When rendering a wide sidebar.
+        let footer = line(&render_sized(&sessions, at(1000), 48, 12).0, 5);
+
+        // Then the card's last line shows where it runs.
+        assert!(
+            footer.starts_with(&format!("{LAST_GUIDE}{expected} ")),
+            "line was '{footer}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_card_draws_one_icon_per_child() {
+        // Given a group with an idle child and a stopped one.
+        let sessions = feature(vec![
+            thread(1, ThreadStatus::Idle),
+            thread(2, ThreadStatus::Stopped),
+        ]);
+
+        // When rendering the sidebar.
+        let footer = line(&draw(&sessions, at(1000), 12), 5);
+
+        // Then the card's last line ends with their icons, then the chevron.
+        assert!(
+            footer
+                .trim_end()
+                .ends_with(&format!(" {IDLE_ICON} {STOPPED_ICON} {FOLD_OPEN}")),
+            "line was '{footer}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_card_caps_child_icons_at_eight() {
+        // Given a group with ten idle children.
+        let sessions = feature((1..=10).map(|id| thread(id, ThreadStatus::Idle)).collect());
+
+        // When rendering the sidebar.
+        let footer = line(&draw(&sessions, at(1000), 20), 5);
+
+        // Then the card's last line shows eight icons, then `+2`.
+        assert!(
+            footer
+                .trim_end()
+                .ends_with(&format!("{} +2 {FOLD_OPEN}", [IDLE_ICON; 8].join(" "))),
+            "line was '{footer}'"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::open(false, FOLD_OPEN)]
+    #[case::folded(true, FOLD_CLOSED)]
+    fn group_card_chevron_follows_the_fold(#[case] folded: bool, #[case] chevron: &str) {
+        // Given a group with one thread, folded if `folded`.
+        let sessions = Sessions {
+            folded: if folded {
+                HashSet::from([GroupId(9)])
+            } else {
+                HashSet::new()
+            },
+            ..feature(vec![thread(1, ThreadStatus::Idle)])
+        };
+
+        // When rendering the sidebar.
+        let footer = line(&draw(&sessions, at(1000), 12), 5);
+
+        // Then the card's last line ends with the chevron.
+        assert!(footer.trim_end().ends_with(chevron), "line was '{footer}'");
+    }
+
+    #[rstest::rstest]
+    fn group_card_time_is_the_working_childs_turn() {
+        // Given a group with a child working since 866 s and one idle since
+        // 990 s.
+        let sessions = feature(vec![
+            thread(1, ThreadStatus::Working),
+            Thread {
+                last_activity_at: at(990),
+                ..thread(2, ThreadStatus::Idle)
+            },
+        ]);
+
+        // When rendering the sidebar at 1000 s.
+        let heading = line(&draw(&sessions, at(1000), 12), 3);
+
+        // Then the card's first line ends with the working turn's time.
+        assert!(heading.trim_end().ends_with(" 2m"), "line was '{heading}'");
+    }
+
+    #[rstest::rstest]
+    fn group_card_time_is_the_latest_childs_activity() {
+        // Given a group with idle children last active at 400 s and 700 s.
+        let sessions = feature(vec![
+            Thread {
+                last_activity_at: at(400),
+                ..thread(1, ThreadStatus::Idle)
+            },
+            Thread {
+                last_activity_at: at(700),
+                ..thread(2, ThreadStatus::Idle)
+            },
+        ]);
+
+        // When rendering the sidebar at 1000 s.
+        let heading = line(&draw(&sessions, at(1000), 12), 3);
+
+        // Then the card's first line ends with the time since the latest.
+        assert!(heading.trim_end().ends_with(" 5m"), "line was '{heading}'");
+    }
+
+    #[rstest::rstest]
+    fn pinned_group_card_shows_the_pin() {
+        // Given a pinned group.
+        let sessions = {
+            let mut sessions = feature(vec![thread(1, ThreadStatus::Idle)]);
+            if let Some(group) = group_mut(&mut sessions) {
+                group.pinned_at = Some(at(5));
+            }
+            sessions
+        };
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then its card's first line carries the pin, in orange.
+        let pin = (0..32)
+            .filter_map(|x| glyph(&buf, x, 3))
+            .find(|(symbol, _)| symbol == PIN);
+        assert_eq!(pin, Some((PIN.to_owned(), ORANGE)), "the pin");
+    }
+
+    #[rstest::rstest]
+    fn searched_group_card_highlights_the_matched_slug() {
+        // Given a group `GT-514-login`, searching for "514".
+        let sessions = searching(feature(vec![thread(1, ThreadStatus::Idle)]), "514");
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then the slug's `5` is blue and bold.
+        let five = (0..buf.area.width)
+            .filter_map(|x| buf.cell((x, 3)))
+            .find(|cell| cell.symbol() == "5")
+            .map(|cell| (cell.fg, cell.modifier.contains(Modifier::BOLD)));
+        assert_eq!(five, Some((BLUE1, true)), "the matched `5`");
+    }
+
+    #[rstest::rstest]
+    fn group_thread_rows_end_with_the_last_guide() {
+        // Given a group with two children.
+        let sessions = feature(vec![
+            thread(1, ThreadStatus::Idle),
+            thread(2, ThreadStatus::Idle),
+        ]);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then the first child's guide branches and the last one's ends.
+        let guides: Vec<_> = [6, 7]
+            .into_iter()
+            .map(|y| {
+                [CHILD_GUIDE, LAST_CHILD_GUIDE]
+                    .into_iter()
+                    .find(|guide| line(&buf, y).starts_with(guide))
+            })
+            .collect();
+        assert_eq!(
+            guides,
+            [Some(CHILD_GUIDE), Some(LAST_CHILD_GUIDE)],
+            "lines were {:#?}",
+            lines(&buf)
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_thread_row_shows_its_status_icon_and_title() {
+        // Given a group with a failed child.
+        let sessions = feature(vec![thread(1, ThreadStatus::Failed)]);
+
+        // When rendering the sidebar.
+        let child = line(&draw(&sessions, at(1000), 12), 6);
+
+        // Then its row is the guide, its icon, then its title.
+        assert!(
+            child.starts_with(&format!("{LAST_CHILD_GUIDE}{FAILED_ICON} Thread 1 ")),
+            "line was '{child}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_draft_row_shows_the_pencil_and_new_thread() {
+        // Given a group holding only its draft.
+        let sessions = grouped(GroupKind::Feature, vec![], true);
+
+        // When rendering the sidebar.
+        let child = line(&draw(&sessions, at(1000), 12), 6);
+
+        // Then its draft row is the last guide, the pencil and `New thread`.
+        assert!(
+            child.starts_with(&format!("{LAST_CHILD_GUIDE}{PENCIL} New thread ")),
+            "line was '{child}'"
+        );
+    }
+
+    /// orb's Feature group holding threads 1 and 2, settled at `at_secs` on
+    /// an open shelf.
+    fn settled_group(at_secs: u64) -> Sessions {
+        let mut sessions = Sessions {
+            shelf_open: true,
+            ..feature(vec![
+                thread(1, ThreadStatus::Idle),
+                thread(2, ThreadStatus::Idle),
+            ])
+        };
+        if let Some(group) = group_mut(&mut sessions) {
+            group.settled_at = Some(at(at_secs));
+        }
+        sessions
+    }
+
+    #[rstest::rstest]
+    fn settled_group_row_shows_its_kind_icon_and_slug() {
+        // Given a settled Feature group, with the shelf open.
+        let sessions = settled_group(700);
+
+        // When rendering the sidebar.
+        let settled = settled_lines(&draw(&sessions, at(1000), 8));
+
+        // Then its row is the guide, the kind icon, then the slug.
+        assert!(
+            settled
+                .first()
+                .is_some_and(|row| row.starts_with(&format!("{LAST_GUIDE}\u{f126} GT-514-login "))),
+            "lines were {settled:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settled_group_row_shows_its_thread_count_and_age() {
+        // Given a two-thread group settled 5 minutes before now, with the
+        // shelf open.
+        let sessions = settled_group(700);
+
+        // When rendering the sidebar.
+        let settled = settled_lines(&draw(&sessions, at(1000), 8));
+
+        // Then its row ends with the thread count and the time since.
+        assert!(
+            settled
+                .first()
+                .is_some_and(|row| row.trim_end().ends_with(" 2 · 5m")),
+            "lines were {settled:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::thread_then_group(false)]
+    #[case::open_group_then_thread(true)]
+    fn settled_entry_followed_by_another_draws_the_middle_guide(#[case] group_first: bool) {
+        // Given a settled group and a settled thread on an open shelf, the
+        // group first (and open) if `group_first`.
+        let sessions = {
+            let (group_at, thread_at) = if group_first { (30, 20) } else { (20, 30) };
+            let mut sessions = settled_group(group_at);
+            if let Some(project) = sessions.projects.first_mut() {
+                project.threads.push(settled(5, thread_at));
+            }
+            if group_first {
+                sessions.opened.insert(GroupId(9));
+            }
+            sessions
+        };
+
+        // When rendering the sidebar.
+        let settled = settled_lines(&draw(&sessions, at(1000), 14));
+
+        // Then the first settled entry draws the middle guide.
+        assert!(
+            settled
+                .first()
+                .is_some_and(|row| row.starts_with(GUIDE) && !row.starts_with(LAST_GUIDE)),
+            "lines were {settled:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::two_threads(feature(vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)]), "2/2")]
+    #[case::draft_only(grouped(GroupKind::Feature, vec![], true), "1/1")]
+    fn group_count_leaves_cards_out(#[case] sessions: Sessions, #[case] expected: &str) {
+        // Given a sidebar listing one group.
+
+        // When rendering the sidebar.
+        let prompt = line(&draw(&sessions, at(1000), 12), 1);
+
+        // Then the count covers the group's children, not its card.
+        assert!(
+            prompt.trim_end().ends_with(&format!("{expected}│")),
+            "line was '{prompt}'"
         );
     }
 }

@@ -16,13 +16,13 @@ use crate::feat::picker::validator::{
     validate_add_directory, validate_open_directory, validate_pick_project, validate_remove_project,
 };
 use crate::feat::sessions::state::{
-    AttachTarget, Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Search, SidebarItem,
-    ThreadId,
+    AttachTarget, Draft, DraftWorkspace, GroupId, Project, ProjectId, ProjectKind, Search,
+    SidebarItem, ThreadId,
 };
 use crate::feat::sessions::validator::{
-    SETTLE_IN_PROGRESS, ToggleSettleError, validate_close_shelf, validate_delete,
-    validate_open_shelf, validate_pick_setting, validate_start_draft, validate_toggle_pin,
-    validate_toggle_settle,
+    SETTLE_IN_PROGRESS, ToggleSettleError, validate_close_group, validate_close_shelf,
+    validate_delete, validate_open_group, validate_open_shelf, validate_pick_setting,
+    validate_start_draft, validate_toggle_pin, validate_toggle_settle,
 };
 use crate::feat::sidebar::state::Rename;
 use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
@@ -135,6 +135,12 @@ impl IntentHandler {
                     }
                     _ => vec![],
                 }
+            }
+            Intent::Attach if matches!(state.sessions.cursor, Some(SidebarItem::Group(_))) => {
+                if let Some(SidebarItem::Group(id)) = state.sessions.cursor {
+                    state.sessions.toggle_group(id);
+                }
+                vec![]
             }
             Intent::Attach => attach_thread(state),
             Intent::Detach => {
@@ -559,6 +565,20 @@ impl IntentHandler {
                 }
                 Err(_) => vec![],
             },
+            Intent::OpenGroup => match (validate_open_group(state), selected_group_id(state)) {
+                (Ok(()), Some(id)) => {
+                    state.sessions.open_group(id);
+                    vec![]
+                }
+                _ => vec![],
+            },
+            Intent::CloseGroup => match (validate_close_group(state), selected_group_id(state)) {
+                (Ok(()), Some(id)) => {
+                    state.sessions.close_group(id);
+                    vec![]
+                }
+                _ => vec![],
+            },
             Intent::TogglePin => {
                 match (validate_toggle_pin(state), state.sessions.selected_thread()) {
                     (Ok(()), Some(thread)) => match thread.pinned_at {
@@ -931,6 +951,12 @@ fn close_picker(state: &mut AppState) -> Option<PickerState> {
     Some(picker)
 }
 
+/// The id of the group under the cursor: its card's, its draft's, or its
+/// thread's.
+fn selected_group_id(state: &AppState) -> Option<GroupId> {
+    state.sessions.selected_group().map(|(_, group)| group.id)
+}
+
 /// Attaches to the selected thread's session, adding it to the attached
 /// threads and showing its pane, unless the thread can't be attached to.
 fn attach_thread(state: &mut AppState) -> Vec<Command> {
@@ -1058,8 +1084,8 @@ mod tests {
     use crate::feat::picker::list::{BranchRow, PERMISSION_MODES, PickerItem, WorkspaceChoice};
     use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
-        AttachTarget, Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Search, Sessions,
-        SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        AttachTarget, Draft, DraftWorkspace, Group, GroupId, GroupKind, Project, ProjectId,
+        ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::feat::sidebar::state::{Rename, SidebarView};
@@ -2525,6 +2551,182 @@ mod tests {
             (true, Some(SidebarItem::Thread(ThreadId(1)))),
             "h on a card should do nothing"
         );
+    }
+
+    /// One project holding Feature group 9 with threads 2 and 1, settled if
+    /// `settled`, and the cursor on `cursor`.
+    fn grouped_state(settled: bool, cursor: SidebarItem) -> AppState {
+        let mut state = state_at(
+            [1, 2]
+                .map(|id| Thread {
+                    group: Some(GroupId(9)),
+                    ..thread(id, ThreadStatus::Idle)
+                })
+                .into(),
+            cursor,
+        );
+        let group = Group {
+            id: GroupId(9),
+            kind: GroupKind::Feature,
+            name: "GT-514-login".into(),
+            dir: Some("/work/GT-514-login".into()),
+            branch: Some("GT-514-login".into()),
+            created_at: SystemTime::UNIX_EPOCH,
+            pinned_at: None,
+            settled_at: settled.then(|| at(5)),
+            active_since: SystemTime::UNIX_EPOCH,
+            draft: None,
+        };
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.groups = vec![group];
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn l_on_a_folded_group_opens_it() {
+        // Given the cursor on group 9's card, folded.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        state.sessions.folded.insert(GroupId(9));
+
+        // When handling OpenGroup.
+        IntentHandler::handle(&Intent::OpenGroup, &mut state);
+
+        // Then the group is no longer folded.
+        assert!(
+            !state.sessions.folded.contains(&GroupId(9)),
+            "l on a folded card should open the group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn l_on_a_closed_settled_group_opens_it() {
+        // Given the cursor on settled group 9, closed.
+        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
+
+        // When handling OpenGroup.
+        IntentHandler::handle(&Intent::OpenGroup, &mut state);
+
+        // Then the group is opened.
+        assert!(
+            state.sessions.opened.contains(&GroupId(9)),
+            "l on a settled group should open it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn l_on_a_settled_group_opens_the_shelf() {
+        // Given the cursor on settled group 9 with the shelf closed.
+        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
+
+        // When handling OpenGroup.
+        IntentHandler::handle(&Intent::OpenGroup, &mut state);
+
+        // Then the Settled shelf is open.
+        assert!(
+            state.sessions.shelf_open,
+            "l on a settled group should open the shelf with it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_a_grouped_thread_closes_the_group_onto_its_card() {
+        // Given the cursor on thread 1 in open group 9.
+        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
+
+        // When handling CloseGroup.
+        IntentHandler::handle(&Intent::CloseGroup, &mut state);
+
+        // Then the group is folded with its card selected.
+        assert_eq!(
+            (
+                state.sessions.folded.contains(&GroupId(9)),
+                state.sessions.cursor
+            ),
+            (true, Some(SidebarItem::Group(GroupId(9)))),
+            "h on a child should fold the group onto its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_an_open_settled_group_closes_it_onto_its_card() {
+        // Given the shelf open, settled group 9 opened and the cursor on its thread 1.
+        let mut state = grouped_state(true, SidebarItem::Thread(ThreadId(1)));
+        state.sessions.shelf_open = true;
+        state.sessions.opened.insert(GroupId(9));
+
+        // When handling CloseGroup.
+        IntentHandler::handle(&Intent::CloseGroup, &mut state);
+
+        // Then the group is closed with its row selected.
+        assert_eq!(
+            (
+                state.sessions.opened.contains(&GroupId(9)),
+                state.sessions.cursor
+            ),
+            (false, Some(SidebarItem::Group(GroupId(9)))),
+            "h in an open settled group should close it onto its row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_a_closed_settled_group_closes_the_shelf() {
+        // Given the shelf open and the cursor on settled group 9, closed.
+        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
+        state.sessions.shelf_open = true;
+
+        // When handling CloseGroup.
+        IntentHandler::handle(&Intent::CloseGroup, &mut state);
+
+        // Then the shelf is closed with its header selected.
+        assert_eq!(
+            (state.sessions.shelf_open, state.sessions.cursor),
+            (false, Some(SidebarItem::SettledShelf)),
+            "h on a closed settled group should close the shelf onto its header"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_an_open_card_folds_the_group() {
+        // Given the cursor on open group 9's card.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the group is folded.
+        assert!(
+            state.sessions.folded.contains(&GroupId(9)),
+            "⏎ on an open card should fold the group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_folded_card_opens_the_group() {
+        // Given the cursor on folded group 9's card.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        state.sessions.folded.insert(GroupId(9));
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the group is open.
+        assert!(
+            !state.sessions.folded.contains(&GroupId(9)),
+            "⏎ on a folded card should open the group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_card_returns_no_commands() {
+        // Given the cursor on group 9's card.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then nothing attaches.
+        assert!(commands.is_empty(), "⏎ on a card shouldn't attach");
     }
 
     #[rstest::rstest]
