@@ -377,13 +377,13 @@ impl Sessions {
     }
 
     /// Move the cursor to the next draft or thread the search lists, past
-    /// the shelf header; stays put on the last one. Without a cursor, or with
-    /// one on a row that's gone, selects the first.
+    /// the shelf header; wraps from the last one to the first. Without a
+    /// cursor, or with one on a row that's gone, selects the first.
     pub fn select_next_match(&mut self) {
         let matches = self.matches();
         let next = match self.position(&matches) {
             None => matches.first(),
-            Some(at) => matches.get(at + 1),
+            Some(at) => matches.get((at + 1) % matches.len()),
         };
         if let Some(&next) = next {
             self.cursor = Some(next);
@@ -391,13 +391,13 @@ impl Sessions {
     }
 
     /// Move the cursor to the previous draft or thread the search lists,
-    /// past the shelf header; stays put on the first one. Without a cursor,
-    /// or with one on a row that's gone, selects the first.
+    /// past the shelf header; wraps from the first one to the last. Without a
+    /// cursor, or with one on a row that's gone, selects the first.
     pub fn select_prev_match(&mut self) {
         let matches = self.matches();
         let prev = match self.position(&matches) {
             None => matches.first(),
-            Some(at) => at.checked_sub(1).and_then(|at| matches.get(at)),
+            Some(at) => matches.get((at + matches.len() - 1) % matches.len()),
         };
         if let Some(&prev) = prev {
             self.cursor = Some(prev);
@@ -1827,6 +1827,66 @@ mod tests {
 
         // Then it lands on card 1, past the header.
         assert_eq!(sessions.cursor, Some(on(1)), "the header is skipped");
+    }
+
+    #[rstest::rstest]
+    fn select_next_match_wraps_from_the_last_match_to_the_first() {
+        // Given "fix" matching cards 3 and 1 and settled 4, with the cursor on
+        // settled 4, the last match.
+        let mut sessions = searching(
+            Sessions {
+                cursor: Some(on(4)),
+                ..four_titles()
+            },
+            "fix",
+        );
+
+        // When selecting the next match.
+        sessions.select_next_match();
+
+        // Then it wraps to card 3, the first match.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(3)),
+            "next wraps to the first match"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_prev_match_wraps_from_the_first_match_to_the_last() {
+        // Given "fix" matching cards 3 and 1 and settled 4, with the cursor on
+        // card 3, the first match.
+        let mut sessions = searching(
+            Sessions {
+                cursor: Some(on(3)),
+                ..four_titles()
+            },
+            "fix",
+        );
+
+        // When selecting the previous match.
+        sessions.select_prev_match();
+
+        // Then it wraps to settled 4, the last match.
+        assert_eq!(sessions.cursor, Some(on(4)), "prev wraps to the last match");
+    }
+
+    #[rstest::rstest]
+    fn select_next_match_stays_on_a_single_match() {
+        // Given "logout" matching only card 3, with the cursor on it.
+        let mut sessions = searching(
+            Sessions {
+                cursor: Some(on(3)),
+                ..four_titles()
+            },
+            "logout",
+        );
+
+        // When selecting the next match.
+        sessions.select_next_match();
+
+        // Then the cursor stays on card 3.
+        assert_eq!(sessions.cursor, Some(on(3)), "a lone match stays put");
     }
 
     #[rstest::rstest]
