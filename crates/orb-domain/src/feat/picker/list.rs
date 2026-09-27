@@ -412,9 +412,12 @@ impl PickerList {
     /// when `backwards`, wrapping around the ends; stays when there's none.
     fn cycle(&mut self, backwards: bool) {
         let count = self.shown.len();
-        let index = |offset: usize| match backwards {
-            false => (self.selection + offset) % count,
-            true => (self.selection + count - offset) % count,
+        let index = |offset: usize| {
+            if backwards {
+                (self.selection + count - offset) % count
+            } else {
+                (self.selection + offset) % count
+            }
         };
         if let Some(found) = (1..count).map(index).find(|&index| self.enabled(index)) {
             self.selection = found;
@@ -900,7 +903,11 @@ mod tests {
         list.half_page_down(10);
 
         // Then the last item stays selected.
-        assert_eq!(list.selection(), 2, "half a page should stop at the last item");
+        assert_eq!(
+            list.selection(),
+            2,
+            "half a page should stop at the last item"
+        );
     }
 
     #[rstest::rstest]
