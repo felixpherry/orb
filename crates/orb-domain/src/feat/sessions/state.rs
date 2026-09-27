@@ -362,26 +362,28 @@ impl Sessions {
         self.selected_thread().map(|thread| thread.id)
     }
 
-    /// Move the cursor to the row below; stays put on the last row. Without a
-    /// cursor, or with one on a row that's gone, selects the first row.
+    /// Move the cursor to the row below; wraps from the last row to the first.
+    /// Without a cursor, or with one on a row that's gone, selects the first
+    /// row.
     pub fn select_next(&mut self) {
         let items = self.items();
         let next = match self.position(&items) {
             None => items.first(),
-            Some(at) => items.get(at + 1),
+            Some(at) => items.get((at + 1) % items.len()),
         };
         if let Some(&next) = next {
             self.cursor = Some(next);
         }
     }
 
-    /// Move the cursor to the row above; stays put on the first row. Without a
-    /// cursor, or with one on a row that's gone, selects the first row.
+    /// Move the cursor to the row above; wraps from the first row to the last.
+    /// Without a cursor, or with one on a row that's gone, selects the first
+    /// row.
     pub fn select_prev(&mut self) {
         let items = self.items();
         let prev = match self.position(&items) {
             None => items.first(),
-            Some(at) => at.checked_sub(1).and_then(|at| items.get(at)),
+            Some(at) => items.get((at + items.len() - 1) % items.len()),
         };
         if let Some(&prev) = prev {
             self.cursor = Some(prev);
@@ -898,7 +900,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn select_next_on_a_collapsed_shelf_stays() {
+    fn select_next_on_a_collapsed_shelf_wraps_to_the_first_row() {
         // Given an active thread, a settled thread, and the cursor on the
         // collapsed shelf's header.
         let mut sessions = sessions(
@@ -909,11 +911,11 @@ mod tests {
         // When selecting the next row.
         sessions.select_next();
 
-        // Then the header stays selected.
+        // Then the first row is selected.
         assert_eq!(
             sessions.cursor,
-            Some(SidebarItem::SettledShelf),
-            "the collapsed shelf's header is the last row"
+            Some(SidebarItem::Thread(ThreadId(1))),
+            "the collapsed shelf's header is the last row, so next wraps"
         );
     }
 
