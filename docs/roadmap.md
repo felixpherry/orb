@@ -555,7 +555,7 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 - ``(zellij) Tool panes run with orb's own `NO_COLOR`, not the zellij server's.``
 - ``(zellij) A zellij call that runs longer than 2 s is killed, and the mode line shows `zellij timed out (session renamed? restart orb)`.``
 
-### M9
+### M9 (written)
 
 **Amend**
 - ``(keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview.`` → ``(keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview, and `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden.``
