@@ -10,6 +10,10 @@
 //! highlighted. Settled threads fold into a shelf at the bottom, drawn as
 //! one-line rows while it's open. The sidebar scrolls to keep the whole
 //! selected row in view.
+//!
+//! While the user searches, the typed text follows the prompt, and only
+//! drafts and threads whose title matches it are listed, settled ones
+//! included, with the matched characters highlighted as in the pickers.
 
 use std::borrow::Cow;
 use std::time::{Duration, SystemTime};

@@ -29,7 +29,12 @@
 //! runs an interactive `claude` there instead. Leaving it, by its exit,
 //! `<C-\>` or `<C-h>`, asks the sessions actor to try the start again. When
 //! a started draft's thread comes up still selected, the loop attaches to it,
-//! unless the user is in a picker or already attached.
+//! unless the user is typing in a picker, the rename box or the sidebar
+//! search, or is already attached.
+//!
+//! After each frame the outer terminal's cursor takes the shape of where the
+//! keys are: a block in the sidebar, a bar in a text input, Claude's own
+//! shape while attached.
 
 use std::ffi::OsString;
 use std::fs;
