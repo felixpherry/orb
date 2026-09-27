@@ -49,7 +49,8 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// one running; it's drawn while attached, and while `<C-h>` left it shown for
 /// the sidebar (without its cursor). Otherwise the right side shows the
 /// selected thread's preview, with `pane_error` saying why the session
-/// couldn't start. Returns the preview's layout when it was drawn,
+/// couldn't start. While the sidebar has the keys, the cursor sits on the
+/// first cell of its selected row. Returns the preview's layout when it was drawn,
 /// the sidebar's layout unless it's hidden, and how many rows the picker fits
 /// when it's open.
 #[expect(
@@ -144,6 +145,11 @@ pub(crate) fn render(
         }
         (None, None) => None,
     };
+    if state.focus == Focus::Sidebar
+        && let Some(y) = selected_y
+    {
+        frame.set_cursor_position((sidebar_area.x, y));
+    }
     for cell in &mut frame.buffer_mut().content {
         if cell.bg == Color::Reset {
             cell.bg = BACKGROUND;
@@ -254,7 +260,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
 
     use super::{BACKGROUND, layout, render};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -858,33 +864,69 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn sidebar_focus_hides_the_left_panes_cursor() {
+    fn sidebar_focus_puts_the_cursor_on_the_sidebar_not_the_left_pane() {
         // Given a live pane for the selected thread, left shown for the sidebar.
         let pane = pane_with_text();
         let state = left_pane();
 
         // When drawing a frame.
-        let cursor = pane.as_ref().map(|pane| {
-            let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-            let keys = Keys::new(keymap(), Scope::Sidebar);
-            let Ok(_) = terminal.draw(|frame| {
-                render(
-                    frame,
-                    &state,
-                    Some(pane),
-                    None,
-                    &keys,
-                    SystemTime::UNIX_EPOCH,
-                    &mut PreviewCache::default(),
-                    &mut SidebarScroll::default(),
-                    &mut PickerScroll::default(),
-                );
-            });
-            terminal.backend().cursor_visible()
-        });
+        let cursor = pane.as_ref().map(|pane| cursor_of(&state, Some(pane)));
 
-        // Then the terminal's cursor stays hidden.
-        assert_eq!(cursor, Some(false), "the pane's cursor outside the pane");
+        // Then the cursor is on the selected row's first cell, not in the pane.
+        assert_eq!(
+            cursor,
+            Some(Some(Position::new(0, 3))),
+            "the cursor with the pane left shown"
+        );
+    }
+
+    /// Where the cursor shows once `state` is drawn on an 80x8 screen with
+    /// `pane` running for the selected thread; `None` while it's hidden.
+    fn cursor_of(state: &AppState, pane: Option<&Pane>) -> Option<Position> {
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
+        let keys = Keys::new(keymap(), Scope::Sidebar);
+        let Ok(_) = terminal.draw(|frame| {
+            render(
+                frame,
+                state,
+                pane,
+                None,
+                &keys,
+                SystemTime::UNIX_EPOCH,
+                &mut PreviewCache::default(),
+                &mut SidebarScroll::default(),
+                &mut PickerScroll::default(),
+            );
+        });
+        terminal
+            .backend()
+            .cursor_visible()
+            .then(|| terminal.get_cursor_position().ok())
+            .flatten()
+    }
+
+    #[rstest::rstest]
+    fn sidebar_focus_puts_the_cursor_on_the_selected_rows_first_cell() {
+        // Given thread 1 selected with the sidebar focused.
+        let state = selected(Focus::Sidebar);
+
+        // When drawing a frame.
+        let cursor = cursor_of(&state, None);
+
+        // Then the cursor is on the first cell of the selected row's first line.
+        assert_eq!(cursor, Some(Position::new(0, 3)), "the sidebar cursor");
+    }
+
+    #[rstest::rstest]
+    fn preview_focus_shows_no_cursor() {
+        // Given thread 1 selected with the preview focused.
+        let state = selected(Focus::Preview);
+
+        // When drawing a frame.
+        let cursor = cursor_of(&state, None);
+
+        // Then no cursor is shown.
+        assert_eq!(cursor, None, "the cursor with the preview focused");
     }
 
     #[rstest::rstest]
