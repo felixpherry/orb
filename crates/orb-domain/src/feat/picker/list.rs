@@ -335,15 +335,15 @@ impl PickerList {
         self.cursor = (self.cursor + 1).min(self.input.graphemes(true).count());
     }
 
-    /// Selects the next shown item, stopping at the last. Disabled items are
-    /// skipped here and by every other move.
+    /// Selects the next shown item, wrapping from the last to the first.
+    /// Disabled items are skipped here and by every other move.
     pub fn next(&mut self) {
-        self.move_down(1);
+        self.cycle(false);
     }
 
-    /// Selects the previous shown item, stopping at the first.
+    /// Selects the previous shown item, wrapping from the first to the last.
     pub fn prev(&mut self) {
-        self.move_up(1);
+        self.cycle(true);
     }
 
     /// Moves the selection down half of the `page` items that fit on screen.
@@ -406,6 +406,19 @@ impl PickerList {
     /// Whether no item is shown.
     pub fn is_empty(&self) -> bool {
         self.shown.is_empty()
+    }
+
+    /// Selects the nearest enabled item after the selection, or before it
+    /// when `backwards`, wrapping around the ends; stays when there's none.
+    fn cycle(&mut self, backwards: bool) {
+        let count = self.shown.len();
+        let index = |offset: usize| match backwards {
+            false => (self.selection + offset) % count,
+            true => (self.selection + count - offset) % count,
+        };
+        if let Some(found) = (1..count).map(index).find(|&index| self.enabled(index)) {
+            self.selection = found;
+        }
     }
 
     /// Selects the first enabled item from `step` rows down, else the nearest
@@ -775,7 +788,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn next_stops_at_the_last_item() {
+    fn next_on_the_last_item_wraps_to_the_first() {
         // Given two items with the last selected.
         let mut list = PickerList::new(directories(&["a", "b"]));
         list.next();
@@ -783,8 +796,20 @@ mod tests {
         // When selecting the next item.
         list.next();
 
-        // Then the last item stays selected.
-        assert_eq!(list.selection(), 1, "next should stop at the last item");
+        // Then the first item is selected.
+        assert_eq!(list.selection(), 0, "next should wrap to the first item");
+    }
+
+    #[rstest::rstest]
+    fn prev_on_the_first_item_wraps_to_the_last() {
+        // Given three items with the first selected.
+        let mut list = PickerList::new(directories(&["a", "b", "c"]));
+
+        // When selecting the previous item.
+        list.prev();
+
+        // Then the last item is selected.
+        assert_eq!(list.selection(), 2, "prev should wrap to the last item");
     }
 
     #[rstest::rstest]
@@ -818,6 +843,64 @@ mod tests {
             Some("main"),
             "prev should skip the disabled row"
         );
+    }
+
+    #[rstest::rstest]
+    fn next_wraps_past_a_disabled_first_row() {
+        // Given a disabled first row, then main, then dev selected.
+        let mut list = PickerList::new(branches(&["!taken", "main", "dev"]));
+        list.next();
+
+        // When selecting the next item.
+        list.next();
+
+        // Then main is selected.
+        assert_eq!(
+            selected_name(&list).as_deref(),
+            Some("main"),
+            "next should wrap past the disabled first row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn prev_wraps_past_a_disabled_last_row() {
+        // Given main selected, then dev, then a disabled last row.
+        let mut list = PickerList::new(branches(&["main", "dev", "!taken"]));
+
+        // When selecting the previous item.
+        list.prev();
+
+        // Then dev is selected.
+        assert_eq!(
+            selected_name(&list).as_deref(),
+            Some("dev"),
+            "prev should wrap past the disabled last row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_with_one_item_stays() {
+        // Given a single item.
+        let mut list = PickerList::new(directories(&["a"]));
+
+        // When selecting the next item.
+        list.next();
+
+        // Then it stays selected.
+        assert_eq!(list.selection(), 0, "next with one item should stay");
+    }
+
+    #[rstest::rstest]
+    fn half_page_down_stops_at_the_last_item() {
+        // Given three items with the last selected.
+        let mut list = PickerList::new(directories(&["a", "b", "c"]));
+        list.prev();
+
+        // When moving half of a ten-item page down.
+        list.half_page_down(10);
+
+        // Then the last item stays selected.
+        assert_eq!(list.selection(), 2, "half a page should stop at the last item");
     }
 
     #[rstest::rstest]
