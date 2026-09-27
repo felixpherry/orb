@@ -45,9 +45,9 @@ Entries are added or amended **only with human approval**.
 - (sessions) Claude Code's background supervisor (`claude --bg`) hosts every session; quitting orb does not stop sessions.
 - (sessions) Session status is read by polling `claude agents --json --all` every second while a thread is busy or waiting or orb is attached, and every 5 seconds otherwise.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
-- (sessions) A thread's title is its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
+- (sessions) A thread's title is the name given with `r` in the sidebar, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
 - (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread is a three-line tree node showing its status icon, title, and time, then its project and status word, then its branch.
-- (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an s badge lit while the Settled shelf is open and a shown/total count of drafts and threads, and the selected row's first line highlighted.
+- (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the Settled shelf is open and a shown/total count of drafts and threads, and the selected row's first line highlighted.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
 - (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the preview, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
@@ -80,7 +80,7 @@ Entries are added or amended **only with human approval**.
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`.
 - (worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w`) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
 - (worktrees) A session start that fails removes the worktree and branch orb created for it.
-- (worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from Claude's title; the directory keeps its name.
+- (worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from the thread's title; the directory keeps its name.
 - (worktrees) Deleting a thread leaves its worktree on disk.
 - (worktrees) A thread's workspace can change only before its first prompt; orb then starts a new session in the new workspace, with the same model and permission, and removes the old one.
 - (keybinds) `␣w` in the sidebar or preview opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.
@@ -88,7 +88,7 @@ Entries are added or amended **only with human approval**.
 - (branches) After a thread's first prompt, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any thread in the same directory is working or waiting.
 - (trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>` or `<C-h>`.
-- (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session with those settings and attaches while the draft is still selected.
+- (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session with those settings and attaches while the draft is still selected and no picker, rename box or search has the keys.
 - (drafts) Each project has at most one draft; drafts persist to orb's store and sit above pinned threads in the sidebar.
 - (drafts) Draft settings default to the project's last-used workspace, model and permission, falling back to the last-used model and permission from any project and a local checkout; a new worktree's base branch defaults to the project's default branch.
 - (drafts) A new-worktree draft creates its worktree only when started; its form shows the ref it will start from as `From <ref>`.
@@ -96,7 +96,7 @@ Entries are added or amended **only with human approval**.
 - (drafts) A draft of a project that isn't a git repository has no workspace or base branch, starts in the project's directory, and `␣w`/`␣b` offer to initialize git.
 - (drafts) The model picker lists `Default`, then T3 Code's current Claude models by name, then its legacy models under a `Legacy models` heading; orb passes the picked model's full ID to `--model`.
 - (keybinds) On a draft, in the sidebar or its form, `⏎` starts it and `␣w`/`␣b`/`␣m`/`␣a` pick its workspace, base branch, model, and permission.
-- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` only on a thread or draft, and `p`/`ss` only on a thread.
+- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` only on a thread or draft, and `p`/`ss`/`r` only on a thread.
 - (preview) The preview header names the thread's model as the model picker does (e.g. Claude Opus 5.5), else shows its ID without `claude-`.
 - (keybinds) `␣t` opens a shell, `␣g` lazygit, and `␣v` `nvim .` in the selected thread's or draft's directory, in the sidebar or preview.
 - (zellij) Tool handoff opens each tool as a full-screen floating zellij pane named `orb:<directory>:<tool>`, which closes when the tool exits.
@@ -119,3 +119,12 @@ Entries are added or amended **only with human approval**.
 - (notify) While its last focus event says it's focused, orb still notifies if `zellij action list-clients` shows no client on its pane, because zellij sends no focus-out on a tab switch.
 - (notify) Notifications are delivered through `terminal-notifier` when it's on `PATH` at startup, and through `osascript` otherwise, or when terminal-notifier fails.
 - (notify) Clicking a `terminal-notifier` notification focuses orb's zellij tab and pane, and brings orb's kitty window forward if kitty's remote control is on (`KITTY_LISTEN_ON`).
+- (sessions) An `r` name is kept only in orb's store; Claude's own session name doesn't change.
+- (sessions) A `/rename` to a name different from the thread's previous `custom-title` replaces its `r` name.
+- (keybinds) In the sidebar, `r` opens a Rename Session box filled in with the thread's title; `⏎` saves, an empty `⏎` clears the `r` name, and `Esc` cancels.
+- (keybinds) In the sidebar, `/` or `i` moves the keys to its input box; typing filters, `<C-j>`/`<C-k>` or `↓`/`↑` move between matches, wrapping from the last to the first and back, `⏎` clears the text and keeps the cursor on the match (or, with no match, acts as `Esc`), and `Esc` clears it and puts the cursor back where it was.
+- (sidebar) While searching, the sidebar lists only drafts and threads whose title fuzzy-matches the typed text, in sidebar order and including settled threads, with the matched characters highlighted.
+- (sidebar) The input box shows the search text after the > prompt, after the filtered project if there is one.
+- (sidebar) While the sidebar has the keys, a steady block cursor sits on the first cell of the selected row.
+- (tui) The rename box, the sidebar search and the pickers show a steady bar cursor.
+- (tui) The mode line shows `INSERT` while typing in the rename box or the sidebar search.
