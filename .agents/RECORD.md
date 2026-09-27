@@ -38,7 +38,7 @@ Entries are added or amended **only with human approval**.
 - (pane) While attached, keys, paste, mouse, and focus events are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb captures the mouse only while attached and forwards the child's OSC 52 clipboard writes to its outer terminal.
-- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview.
+- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview, and `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden.
 - (identity) orb supports Claude Code as its only provider.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
@@ -47,8 +47,8 @@ Entries are added or amended **only with human approval**.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
 - (sessions) A thread's title is its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
 - (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.
-- (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.
-- (keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
+- (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
+- (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the preview, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
 - (preview) The preview renders the selected thread from its Claude transcript JSONL as navigable blocks, without spawning a process.
@@ -56,7 +56,7 @@ Entries are added or amended **only with human approval**.
 - (preview) The preview reads new transcript lines within half a second and follows the tail while scrolled to the bottom.
 - (keybinds) In the preview, `j`/`k` move between blocks, `<C-d>`/`<C-u>` move half a page, `gg`/`G` jump to the top/bottom, `za`/`<Tab>` fold or unfold a block, and `y` yanks its raw text.
 - (preview) Yanked text goes to the outer terminal's clipboard via OSC 52.
-- (pane) orb draws the Claude pane only while attached; otherwise the right-hand area shows the selected thread's preview.
+- (pane) orb draws the Claude pane while attached and after `<C-h>` leaves it for the sidebar, until `<C-\>` is pressed, another thread is selected, or Claude exits; otherwise the right-hand area shows the selected thread's preview.
 - (sidebar) Pinned threads come first, then Active threads, then a collapsible Settled shelf at the bottom of the sidebar.
 - (sidebar) A thread shows ✓ Completed when its latest turn ended after the user last selected it.
 - (settle) Any new turn, approval request, or input request un-settles a thread.
@@ -72,7 +72,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, `<C-d>`/`<C-u>` move half a page, `⏎` picks, and `Esc` cancels.
 - (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
-- (tui) The mode line cuts a long status message at its end, so the mode's key hints and a 2-cell gap stay visible.
+- (tui) The mode line shows only the mode's name on its left and cuts a long status message at its end, so the name and a 2-cell gap stay visible.
 - (picker) The picker popup is only as tall as its rows, at most 90 columns wide, and keeps its top edge fixed while filtering.
 - (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`.
@@ -85,7 +85,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `␣b` in the sidebar or preview opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.
 - (branches) After a thread's first prompt, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any thread in the same directory is working or waiting.
-- (trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>`.
+- (trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>` or `<C-h>`.
 - (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session with those settings and attaches while the draft is still selected.
 - (drafts) Each project has at most one draft; drafts persist to orb's store and sit above pinned threads in the sidebar.
 - (drafts) Draft settings default to the project's last-used workspace, model and permission, falling back to the last-used model and permission from any project and a local checkout; a new worktree's base branch defaults to the project's default branch.
@@ -101,4 +101,18 @@ Entries are added or amended **only with human approval**.
 - (zellij) Tool handoff focuses an existing pane of the same name, switching to its tab, instead of opening a second one.
 - (zellij) A draft's tools open in its worktree, or in the project root for a local or new-worktree draft.
 - (zellij) Tool panes run with orb's own `NO_COLOR`, not the zellij server's.
-- (zellij) A zellij call that runs longer than 2 s is killed, and the mode line shows `zellij timed out (session renamed? restart orb)`.
+- (zellij) A zellij call that runs longer than 2 s is killed; when it was opening a tool, the mode line then shows `zellij timed out (session renamed? restart orb)`.
+- (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
+- (keybinds) `␣e` hides or shows the sidebar; while it's hidden the right-hand area takes the full width, and `<C-h>` and resizing do nothing.
+- (keybinds) In the sidebar or preview, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
+- (sidebar) The sidebar's width and project filter persist across restarts.
+- (keybinds) `␣f` in the sidebar opens the project filter: `All projects`, then the projects in `␣n` order.
+- (sidebar) While a project filter is set, the sidebar lists only that project's drafts and threads, under a header naming it.
+- (sidebar) Picking a project in `␣n` outside the project filter clears the filter.
+- (keybinds) `<C-x>` in the project filter removes the highlighted project after a `No`/`Yes` confirm.
+- (projects) A removed project is hidden from `␣n` and the project filter and loses its draft; its threads stay, and adding it again with `␣p` restores it.
+- (sessions) Deleting a thread hides it at once; if `claude rm` fails, it reappears and the mode line shows the reason.
+- (notify) While orb's pane isn't focused, orb sends a macOS notification when a thread finishes a turn, needs approval, or needs input.
+- (notify) While its last focus event says it's focused, orb still notifies if `zellij action list-clients` shows no client on its pane, because zellij sends no focus-out on a tab switch.
+- (notify) Notifications are delivered through `terminal-notifier` when it's on `PATH` at startup, and through `osascript` otherwise, or when terminal-notifier fails.
+- (notify) Clicking a `terminal-notifier` notification focuses orb's zellij tab and pane, and brings orb's kitty window forward if kitty's remote control is on (`KITTY_LISTEN_ON`).
