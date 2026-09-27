@@ -398,6 +398,11 @@ impl PickerList {
         self.shown.len()
     }
 
+    /// How many items there are, shown or not.
+    pub fn total(&self) -> usize {
+        self.items.len()
+    }
+
     /// Whether no item is shown.
     pub fn is_empty(&self) -> bool {
         self.shown.is_empty()
