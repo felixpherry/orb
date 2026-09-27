@@ -507,7 +507,7 @@ mod tests {
     use super::{PickTarget, PickerState, expand, split_path};
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
-    use crate::feat::picker::list::PickerItem;
+    use crate::feat::picker::list::{LEGACY_MODELS, PickerItem};
     use crate::feat::sessions::state::{ProjectId, ThreadId};
 
     const HOME: &str = "/home/u";
@@ -933,6 +933,23 @@ mod tests {
             picker.selected(),
             Some(&PickerItem::Setting(Some("claude-fable-5"))),
             "the heading can't be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn moving_down_from_the_last_model_wraps_to_default() {
+        // Given a model picker on the last legacy model.
+        let last = LEGACY_MODELS.last().map(|model| model.id);
+        let mut picker = PickerState::models(ProjectId(1), last, Focus::Preview);
+
+        // When moving down.
+        picker.next();
+
+        // Then Default, the first row, is selected.
+        assert_eq!(
+            picker.selected(),
+            Some(&PickerItem::Setting(None)),
+            "moving down from the last model should wrap to Default"
         );
     }
 
