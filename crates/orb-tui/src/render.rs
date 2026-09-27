@@ -50,15 +50,14 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
     [sidebar, right, mode_line]
 }
 
-/// Draws the whole frame. `pane` is the selected thread's session, if orb has
-/// one running; it's drawn while attached, and while `<C-h>` left it shown for
-/// the sidebar (without its cursor). Otherwise the right side shows the
-/// dashboard, with `pane_error` saying why the session couldn't start. While
-/// the sidebar or the dashboard has the keys, the cursor sits on the first
-/// cell of its selected row or highlighted item's label. The mode line's
-/// clock shows `now` in `tz`. Returns the sidebar's layout unless it's
-/// hidden, and how many rows the picker fits
-/// when it's open.
+/// Draws the whole frame. `pane` is the pane the frontend shows on the right
+/// (the trust pane, or the selected attached thread's); its cursor shows only
+/// while attached. Without one, the right side shows the dashboard, with
+/// `pane_error` saying why the session couldn't start. While the sidebar or
+/// the dashboard has the keys, the cursor sits on the first cell of its
+/// selected row or highlighted item's label. The mode line's clock shows
+/// `now` in `tz`. Returns the sidebar's layout unless it's hidden, and how
+/// many rows the picker fits when it's open.
 #[expect(
     clippy::too_many_arguments,
     reason = "the frame's inputs and the two frontend view states it updates"
@@ -88,12 +87,7 @@ pub(crate) fn render(
         (selected_y, Some(sidebar_layout), search_cursor)
     };
     let attached = state.focus == Focus::Attached;
-    let shows_pane = attached
-        || state
-            .sessions
-            .selected_id()
-            .is_some_and(|id| state.attached.contains(&id));
-    match pane.filter(|_| shows_pane) {
+    match pane {
         Some(pane) => {
             if let Some(cursor) = pane.render(right, frame.buffer_mut()).filter(|_| attached) {
                 frame.set_cursor_position(cursor);
@@ -666,24 +660,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn dashboard_focus_hides_a_live_pane() {
-        // Given a live pane for the selected thread, with the dashboard focused.
-        let pane = pane_with_text();
-        let state = selected(Focus::Dashboard);
-
-        // When drawing a frame.
-        let right = pane.as_ref().map(|pane| right_side_with_pane(&state, pane));
-
-        // Then the right side is the dashboard's banner, not the pane.
-        assert!(
-            right
-                .as_deref()
-                .is_some_and(|right| right.contains("██╔═══██╗") && !right.contains("PANE-TEXT")),
-            "right side was {right:?}"
-        );
-    }
-
-    #[rstest::rstest]
     fn attached_focus_draws_the_live_pane() {
         // Given a live pane for the selected thread, attached.
         let pane = pane_with_text();
@@ -701,7 +677,7 @@ mod tests {
         );
     }
 
-    /// Thread 1, selected in the sidebar, with its pane left shown by `<C-h>`.
+    /// Thread 1, selected in the sidebar and attached.
     fn left_pane() -> AppState {
         AppState {
             attached: HashSet::from([ThreadId(1)]),
@@ -710,10 +686,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn sidebar_focus_draws_the_pane_left_shown() {
-        // Given a live pane for the selected thread, left shown for the sidebar.
+    fn sidebar_focus_draws_the_passed_pane() {
+        // Given a live pane passed with the sidebar focused on a thread not in `attached`.
         let pane = pane_with_text();
-        let state = left_pane();
+        let state = selected(Focus::Sidebar);
 
         // When drawing a frame.
         let right = pane.as_ref().map(|pane| right_side_with_pane(&state, pane));
@@ -728,10 +704,23 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn sidebar_focus_puts_the_cursor_on_the_sidebar_not_the_left_pane() {
-        // Given a live pane for the selected thread, left shown for the sidebar.
-        let pane = pane_with_text();
+    fn sidebar_focus_without_a_pane_draws_the_dashboard() {
+        // Given thread 1 attached and selected in the sidebar, with no pane passed.
         let state = left_pane();
+
+        // When drawing a frame.
+        let buffer = draw_tall(&state, None);
+
+        // Then the right side is the dashboard's thread menu.
+        let right = right_side(&buffer);
+        assert!(right.contains("Open session"), "right side was\n{right}");
+    }
+
+    #[rstest::rstest]
+    fn sidebar_focus_puts_the_cursor_on_the_sidebar_not_the_left_pane() {
+        // Given a live pane passed for the selected thread, with the sidebar focused.
+        let pane = pane_with_text();
+        let state = selected(Focus::Sidebar);
 
         // When drawing a frame.
         let cursor = pane.as_ref().map(|pane| cursor_of(&state, Some(pane)));
