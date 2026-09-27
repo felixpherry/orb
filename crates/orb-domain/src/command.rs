@@ -1,10 +1,9 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
-//! has updated [`AppState`](crate::AppState). Pane commands, `Yank`,
+//! has updated [`AppState`](crate::AppState). Pane commands,
 //! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
 //! frontend loop; session commands (drafts, add or remove a project, move to
 //! another workspace, switch branch, refresh, pin, rename, settle, delete,
-//! visit, save the sidebar's width and filter) go to the sessions actor;
-//! `ShowPreview` goes to the preview actor.
+//! visit, save the sidebar's width and filter) go to the sessions actor.
 
 use std::path::PathBuf;
 
@@ -59,11 +58,6 @@ pub enum Command {
     ListDirectories(PathBuf),
     /// Poll the sessions' statuses now instead of waiting for the next tick.
     RefreshSessions,
-    /// Show the selected thread's transcript now instead of waiting for the
-    /// next check.
-    ShowPreview,
-    /// Copy text to the clipboard.
-    Yank(String),
     /// Pin the thread to the top of the sidebar.
     Pin(ThreadId),
     /// Unpin the thread.

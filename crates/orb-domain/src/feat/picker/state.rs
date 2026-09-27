@@ -814,7 +814,7 @@ mod tests {
             CWD.into(),
             unstarted,
             None,
-            Focus::Preview,
+            Focus::Dashboard,
         );
         picker.show_branches(Path::new(CWD), refs);
         picker
@@ -876,7 +876,7 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_lists_default_then_the_models() {
         // Given / When opening a model picker for a draft with no model.
-        let picker = PickerState::models(ProjectId(1), None, Focus::Preview);
+        let picker = PickerState::models(ProjectId(1), None, Focus::Dashboard);
 
         // Then Default comes first, then every model ID, current then legacy.
         assert_eq!(
@@ -902,7 +902,7 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_heads_the_legacy_models() {
         // Given / When opening a model picker.
-        let picker = PickerState::models(ProjectId(1), None, Focus::Preview);
+        let picker = PickerState::models(ProjectId(1), None, Focus::Dashboard);
 
         // Then the Legacy models heading sits between Sonnet 5 and Fable 5.
         let rows: Vec<&PickerItem> = picker.shown().map(|(item, _)| item).collect();
@@ -923,7 +923,8 @@ mod tests {
     #[rstest::rstest]
     fn moving_down_skips_the_legacy_heading() {
         // Given a model picker on Claude Sonnet 5, the last current model.
-        let mut picker = PickerState::models(ProjectId(1), Some("claude-sonnet-5"), Focus::Preview);
+        let mut picker =
+            PickerState::models(ProjectId(1), Some("claude-sonnet-5"), Focus::Dashboard);
 
         // When moving down.
         picker.next();
@@ -940,7 +941,7 @@ mod tests {
     fn moving_down_from_the_last_model_wraps_to_default() {
         // Given a model picker on the last legacy model.
         let last = LEGACY_MODELS.last().map(|model| model.id);
-        let mut picker = PickerState::models(ProjectId(1), last, Focus::Preview);
+        let mut picker = PickerState::models(ProjectId(1), last, Focus::Dashboard);
 
         // When moving down.
         picker.next();
@@ -956,7 +957,7 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_selects_the_current_legacy_model() {
         // Given / When opening a model picker for a draft on Claude Haiku 4.5.
-        let picker = PickerState::models(ProjectId(1), Some("claude-haiku-4-5"), Focus::Preview);
+        let picker = PickerState::models(ProjectId(1), Some("claude-haiku-4-5"), Focus::Dashboard);
 
         // Then Claude Haiku 4.5 is selected.
         assert_eq!(
@@ -976,7 +977,7 @@ mod tests {
         #[case] id: &'static str,
     ) {
         // Given / When opening a model picker for a draft on an alias.
-        let picker = PickerState::models(ProjectId(1), Some(alias), Focus::Preview);
+        let picker = PickerState::models(ProjectId(1), Some(alias), Focus::Dashboard);
 
         // Then that model is selected.
         assert_eq!(
@@ -989,7 +990,7 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_selects_default_for_an_unknown_model() {
         // Given / When opening a model picker for a draft on a value no model has.
-        let picker = PickerState::models(ProjectId(1), Some("opus[1m]"), Focus::Preview);
+        let picker = PickerState::models(ProjectId(1), Some("opus[1m]"), Focus::Dashboard);
 
         // Then Default is selected.
         assert_eq!(
@@ -1002,7 +1003,7 @@ mod tests {
     #[rstest::rstest]
     fn permission_picker_selects_the_current_mode() {
         // Given / When opening a permission picker for a draft in plan mode.
-        let picker = PickerState::permissions(ProjectId(1), Some("plan"), Focus::Preview);
+        let picker = PickerState::permissions(ProjectId(1), Some("plan"), Focus::Dashboard);
 
         // Then plan is selected.
         assert_eq!(

@@ -22,8 +22,8 @@ pub enum Intent {
     SelectHalfPageDown,
     /// Move the sidebar's cursor up half its visible height.
     SelectHalfPageUp,
-    /// Move the keys to the selected thread's preview.
-    FocusPreview,
+    /// Move the keys to the right-hand area.
+    FocusRight,
     /// Move the keys to the sidebar.
     FocusSidebar,
     /// Hide the sidebar, giving the right side the full width, or show it
@@ -35,7 +35,7 @@ pub enum Intent {
     NarrowFocused,
     /// Attach to the selected thread's session, or start the selected draft.
     Attach,
-    /// Return from the attached session to its preview.
+    /// Return from the attached session to the dashboard.
     Detach,
     /// Leave the attached session for the sidebar, keeping its pane shown.
     LeavePane,
@@ -44,22 +44,6 @@ pub enum Intent {
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
     FilterProjects,
-    /// Move the preview's cursor to the next block.
-    NextBlock,
-    /// Move the preview's cursor to the previous block.
-    PrevBlock,
-    /// Scroll the preview half a page down.
-    HalfPageDown,
-    /// Scroll the preview half a page up.
-    HalfPageUp,
-    /// Jump to the preview's first block.
-    Top,
-    /// Jump to the preview's bottom and follow new blocks.
-    Bottom,
-    /// Fold or unfold the preview's cursor block.
-    ToggleFold,
-    /// Copy the preview's cursor block to the clipboard.
-    Yank,
     /// Pin or unpin the selected thread.
     TogglePin,
     /// Open the rename box for the selected thread, filled in with its title.
@@ -132,7 +116,7 @@ impl fmt::Display for Intent {
             Self::Quit => "quit",
             Self::SelectNext => "next thread",
             Self::SelectPrev => "previous thread",
-            Self::FocusPreview => "focus preview",
+            Self::FocusRight => "focus right",
             Self::FocusSidebar => "focus sidebar",
             Self::ToggleSidebar | Self::LeavePane => "sidebar",
             Self::WidenFocused => "widen",
@@ -141,16 +125,10 @@ impl fmt::Display for Intent {
             Self::Detach => "back to orb",
             Self::NewSession => "new session",
             Self::FilterProjects => "filter projects",
-            Self::NextBlock => "next block",
-            Self::PrevBlock => "previous block",
-            Self::HalfPageDown | Self::PickerHalfPageDown | Self::SelectHalfPageDown => {
-                "half page down"
-            }
-            Self::HalfPageUp | Self::PickerHalfPageUp | Self::SelectHalfPageUp => "half page up",
-            Self::Top | Self::SelectFirst => "top",
-            Self::Bottom | Self::SelectLast => "bottom",
-            Self::ToggleFold => "fold",
-            Self::Yank => "yank",
+            Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",
+            Self::PickerHalfPageUp | Self::SelectHalfPageUp => "half page up",
+            Self::SelectFirst => "top",
+            Self::SelectLast => "bottom",
             Self::TogglePin => "pin",
             Self::Rename => "rename",
             Self::Search => "search",

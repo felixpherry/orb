@@ -9,7 +9,6 @@ use orb_domain::feat::git::git_cli::GitCli;
 use orb_domain::feat::git::git_service::GitService;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::terminal_notifier::{ClickTarget, Kitty, ZellijTarget, on_path};
-use orb_domain::feat::preview::preview_actor::{PreviewActorDeps, spawn_preview_actor};
 use orb_domain::feat::sessions::child_env::child_env;
 use orb_domain::feat::sessions::claude_supervisor::ClaudeSupervisor;
 use orb_domain::feat::sessions::session_host::SessionHostService;
@@ -95,11 +94,7 @@ fn main() -> Result<(), Report<OrbError>> {
         worktrees_root,
         wake: frontend.waker(),
     });
-    let preview = spawn_preview_actor(PreviewActorDeps {
-        state: state.clone(),
-        wake: frontend.waker(),
-    });
     frontend
-        .run(state, sessions, preview, git, claude_env, zellij, notifier)
+        .run(state, sessions, git, claude_env, zellij, notifier)
         .change_context(OrbError)
 }
