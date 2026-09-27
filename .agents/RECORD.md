@@ -52,7 +52,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the dashboard, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
-- (pane) orb draws the Claude pane while attached and after `<C-h>` leaves it for the sidebar, until `<C-\>` is pressed, another thread is selected, or Claude exits; otherwise the right-hand area shows the dashboard.
+- (pane) The right-hand area shows the selected thread's Claude pane while orb is attached to that thread, except while the dashboard has the keys; otherwise it shows the dashboard.
 - (sidebar) Pinned threads come first, then Active threads, then a collapsible Settled shelf at the bottom of the sidebar.
 - (sidebar) A thread shows a green check and "done" when its latest turn ended after the user last selected it.
 - (settle) Any new turn, approval request, or input request un-settles a thread.
@@ -132,3 +132,7 @@ Entries are added or amended **only with human approval**.
 - (dashboard) While the Settled shelf's header is selected, the dashboard's context line shows the shelf hint.
 - (dashboard) When the Claude pane fails to start, the reason shows in red under the dashboard's footer; other errors, such as a failed `claude --bg` or `claude agents`, show on the mode line.
 - (dashboard) While the dashboard has the keys, a steady block cursor sits on the first cell of the highlighted item's label.
+- (pane) orb keeps a separate `claude attach` pane for each attached thread, and selecting another thread leaves it running.
+- (pane) orb is attached to a thread from `⏎` into its pane until `<C-\>`, settling or deleting the thread detaches it, or its Claude exits.
+- (keybinds) In the sidebar, `<C-\>` on an attached thread detaches it and keeps the keys in the sidebar.
+- (sidebar) An idle thread orb is attached to shows a filled `FG` (`#c8d3f5`) circle in place of the hollow idle circle; with unseen output it still shows the green done check.
