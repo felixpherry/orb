@@ -3577,6 +3577,13 @@ mod tests {
         );
     }
 
+    /// Gives every project `threads`, as a poll would.
+    fn poll(state: &mut AppState, threads: &[Thread]) {
+        for project in &mut state.sessions.projects {
+            project.threads = threads.to_vec();
+        }
+    }
+
     /// The open picker's kind and selected item.
     fn open_confirm(state: &AppState) -> Option<(&PickerKind, Option<&PickerItem>)> {
         state
@@ -3655,7 +3662,7 @@ mod tests {
         // starts a turn in it.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
         answer_yes(&Intent::ToggleSettle, &mut state);
-        state.sessions.projects[0].threads = vec![thread(1, ThreadStatus::Working)];
+        poll(&mut state, &[thread(1, ThreadStatus::Working)]);
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -3673,7 +3680,7 @@ mod tests {
         // starts a turn in it.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
         answer_yes(&Intent::ToggleSettle, &mut state);
-        state.sessions.projects[0].threads = vec![thread(1, ThreadStatus::Working)];
+        poll(&mut state, &[thread(1, ThreadStatus::Working)]);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -3692,7 +3699,7 @@ mod tests {
         // is settled.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
         answer_yes(&Intent::ToggleSettle, &mut state);
-        state.sessions.projects[0].threads = vec![settled(1)];
+        poll(&mut state, &[settled(1)]);
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -3773,7 +3780,7 @@ mod tests {
         // leaves the sidebar.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
         answer_yes(&Intent::DeleteThread, &mut state);
-        state.sessions.projects[0].threads.clear();
+        poll(&mut state, &[]);
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
