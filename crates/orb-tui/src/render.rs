@@ -15,6 +15,7 @@
 
 use std::time::SystemTime;
 
+use jiff::tz::TimeZone;
 use orb_domain::feat::sessions::validator::{ToggleSettleError, validate_toggle_settle};
 use orb_domain::feat::sidebar::state::{SidebarLayout, SidebarView};
 use orb_domain::{AppState, Focus};
@@ -25,13 +26,14 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
-use ratatui_which_key::WhichKey;
 
 use crate::dashboard;
 use crate::keymap::{self, Keys};
+use crate::mode_line;
 use crate::picker::{self, PickerScroll};
 use crate::rename;
 use crate::sidebar::{self, SidebarScroll};
+use crate::which_key;
 
 /// Behind everything that doesn't set its own background (tokyonight-moon's
 /// `bg`).
@@ -53,8 +55,9 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// the sidebar (without its cursor). Otherwise the right side shows the
 /// dashboard, with `pane_error` saying why the session couldn't start. While
 /// the sidebar or the dashboard has the keys, the cursor sits on the first
-/// cell of its selected row or highlighted item's label. Returns the
-/// sidebar's layout unless it's hidden, and how many rows the picker fits
+/// cell of its selected row or highlighted item's label. The mode line's
+/// clock shows `now` in `tz`. Returns the sidebar's layout unless it's
+/// hidden, and how many rows the picker fits
 /// when it's open.
 #[expect(
     clippy::too_many_arguments,
@@ -67,10 +70,11 @@ pub(crate) fn render(
     pane_error: Option<&str>,
     keys: &Keys,
     now: SystemTime,
+    tz: &TimeZone,
     scroll: &mut SidebarScroll,
     picker_scroll: &mut PickerScroll,
 ) -> (Option<SidebarLayout>, Option<usize>) {
-    let [sidebar_area, right, mode_line] = layout(frame.area(), &state.sidebar);
+    let [sidebar_area, right, mode_area] = layout(frame.area(), &state.sidebar);
     let (selected_y, sidebar_layout, search_cursor) = if state.sidebar.hidden {
         (None, None, None)
     } else {
@@ -101,7 +105,7 @@ pub(crate) fn render(
             }
         }
     }
-    render_mode_line(state, mode_line, frame.buffer_mut());
+    mode_line::render(state, now, tz, mode_area, frame.buffer_mut());
     let renaming = state
         .rename
         .as_ref()
@@ -129,12 +133,10 @@ pub(crate) fn render(
             }
             None
         }
-        // ratatui-which-key divides by the height inside the popup's borders.
-        (None, None, None) if frame.area().height > 2 => {
-            WhichKey::new().render(frame.buffer_mut(), keys);
+        (None, None, None) => {
+            which_key::render(keys, sidebar_area.union(right), frame.buffer_mut());
             None
         }
-        (None, None, None) => None,
     };
     match (state.focus, selected_y, search_cursor) {
         (Focus::Sidebar, Some(y), _) => frame.set_cursor_position((sidebar_area.x, y)),
@@ -184,43 +186,12 @@ fn render_banner(state: &AppState, confirm: char, selected_y: u16, buf: &mut Buf
     );
 }
 
-/// The mode's name on the left (`DRAFT` while a draft is selected); on the
-/// right, a session being started, else the latest `claude` failure, else how
-/// many threads are working. A right side too long for the line is cut at its
-/// end, two cells after the name.
-fn render_mode_line(state: &AppState, area: Rect, buf: &mut Buffer) {
-    let mode = match (state.focus, state.sessions.selected_draft()) {
-        (Focus::Attached, _) => "ATTACHED",
-        (Focus::Sidebar | Focus::Dashboard, Some(_)) => "DRAFT",
-        (Focus::Sidebar | Focus::Dashboard, None) => "NORMAL",
-        (Focus::Picker, _) => "PICKER",
-        (Focus::Rename | Focus::Search, _) => "INSERT",
-    };
-    let sessions = &state.sessions;
-    let status = Line::raw(
-        match (sessions.starting, &sessions.error, sessions.working_count()) {
-            (true, _, _) => "starting session…".to_owned(),
-            (false, Some(error), _) => error.clone(),
-            (false, None, 0) => String::new(),
-            (false, None, working) => format!("{working} running"),
-        },
-    );
-    let mode = Line::raw(mode);
-    let status_width = {
-        let room = usize::from(area.width).saturating_sub(mode.width() + 2);
-        u16::try_from(status.width().min(room)).unwrap_or(u16::MAX)
-    };
-    let [mode_area, status_area] =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Length(status_width)]).areas(area);
-    mode.render(mode_area, buf);
-    status.render(status_area, buf);
-}
-
 #[cfg(test)]
 mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime};
 
+    use jiff::tz::TimeZone;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::sessions::state::{
         Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem, Thread, ThreadId,
@@ -310,6 +281,7 @@ mod tests {
                 pane_error,
                 keys,
                 SystemTime::UNIX_EPOCH,
+                &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
@@ -363,6 +335,7 @@ mod tests {
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
+                &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
@@ -473,106 +446,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn mode_line_counts_working_threads() {
-        // Given three Working threads.
-        let state = AppState {
-            sessions: sessions(vec![
-                thread(1, ThreadStatus::Working),
-                thread(2, ThreadStatus::Working),
-                thread(3, ThreadStatus::Working),
-            ]),
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the mode line says how many are running.
-        let mode_line = mode_line(&buffer);
-        assert!(
-            mode_line.contains("3 running"),
-            "mode line was '{mode_line}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn mode_line_shows_the_latest_claude_error() {
-        // Given a failed `claude` call.
-        let state = AppState {
-            sessions: Sessions {
-                error: Some("Workspace not trusted".to_owned()),
-                ..Sessions::default()
-            },
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the mode line shows the reason.
-        let mode_line = mode_line(&buffer);
-        assert!(
-            mode_line.contains("Workspace not trusted"),
-            "mode line was '{mode_line}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn long_claude_error_is_cut_after_the_mode_name() {
-        // Given a `claude` error wider than the 80-column mode line.
-        let state = AppState {
-            sessions: Sessions {
-                error: Some(
-                    "Workspace not trusted. Run `claude` in /Users/me/dev/a-long-project \
-                     once and accept the trust prompt, then retry."
-                        .to_owned(),
-                ),
-                ..Sessions::default()
-            },
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the mode's name stays whole, and the error starts two cells on.
-        let mode_line = mode_line(&buffer);
-        assert!(
-            mode_line.starts_with("NORMAL  Workspace not trusted"),
-            "mode line was '{mode_line}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn mode_line_shows_normal_outside_a_session() {
-        // Given orb in Sidebar focus.
-        let state = AppState::default();
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the mode line shows only the mode's name.
-        let mode_line = mode_line(&buffer);
-        assert_eq!(mode_line.trim_end(), "NORMAL", "the mode line");
-    }
-
-    #[rstest::rstest]
-    fn mode_line_shows_attached_while_attached() {
-        // Given orb attached to a session.
-        let state = AppState {
-            focus: Focus::Attached,
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the mode line shows only the mode's name.
-        let mode_line = mode_line(&buffer);
-        assert_eq!(mode_line.trim_end(), "ATTACHED", "the mode line");
-    }
-
-    #[rstest::rstest]
     #[case::empty_right_side(AppState::default(), (79, 0))]
     #[case::inside_the_picker(
         AppState {
@@ -609,41 +482,6 @@ mod tests {
         let [_, right, _] = layout(Rect::new(0, 0, 80, 8), &SidebarView::default());
         let bg = buffer.and_then(|buffer| buffer.cell((right.x, right.y)).map(|cell| cell.bg));
         assert_eq!(bg, Some(BACKGROUND), "the pane's background");
-    }
-
-    #[rstest::rstest]
-    fn mode_line_shows_picker_while_the_picker_is_open() {
-        // Given an open project picker.
-        let state = AppState {
-            focus: Focus::Picker,
-            picker: Some(PickerState::projects(vec![], Focus::Sidebar)),
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the mode line shows only the mode's name.
-        let mode_line = mode_line(&buffer);
-        assert_eq!(mode_line.trim_end(), "PICKER", "the mode line");
-    }
-
-    #[rstest::rstest]
-    #[case(Focus::Rename)]
-    #[case(Focus::Search)]
-    fn mode_line_shows_insert_while_typing(#[case] focus: Focus) {
-        // Given the keys in the rename box or the sidebar search.
-        let state = AppState {
-            focus,
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the mode line shows only the mode's name.
-        let mode_line = mode_line(&buffer);
-        assert_eq!(mode_line.trim_end(), "INSERT", "the mode line in {focus:?}");
     }
 
     /// Thread 1 selected, with the rename box open on it holding "Fix" and
@@ -711,6 +549,7 @@ mod tests {
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
+                &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
@@ -719,9 +558,41 @@ mod tests {
         // Then the frame is drawn without the popup.
         let mode_line = mode_line(terminal.backend().buffer());
         assert!(
-            mode_line.starts_with("NORMAL"),
+            mode_line.starts_with(" NORMAL"),
             "mode line was '{mode_line}'"
         );
+    }
+
+    #[rstest::rstest]
+    fn leader_popup_sits_above_the_mode_line() {
+        // Given Space pressed on a 20-row screen.
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        press(
+            &mut keys,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+
+        // When drawing a frame.
+        let state = AppState::default();
+        let Ok(_) = terminal.draw(|frame| {
+            render(
+                frame,
+                &state,
+                None,
+                None,
+                &keys,
+                SystemTime::UNIX_EPOCH,
+                &TimeZone::UTC,
+                &mut SidebarScroll::default(),
+                &mut PickerScroll::default(),
+            );
+        });
+
+        // Then the popup's bottom-right corner is on the row above the mode
+        // line.
+        let corner = terminal.backend().buffer().cell((78, 18)).map(Cell::symbol);
+        assert_eq!(corner, Some("╯"), "the popup's bottom-right corner");
     }
 
     #[rstest::rstest]
@@ -787,9 +658,9 @@ mod tests {
         // When drawing a frame.
         let buffer = draw_with(&state, &pending('s'));
 
-        // Then no popup border is drawn.
+        // Then no popup is drawn.
         let screen = text(&buffer, buffer.area);
-        assert!(!screen.contains('┌'), "screen was '{screen}'");
+        assert!(!screen.contains("esc close"), "screen was '{screen}'");
     }
 
     #[rstest::rstest]
@@ -884,6 +755,7 @@ mod tests {
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
+                &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
@@ -1026,21 +898,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Sidebar)]
-    #[case(Focus::Dashboard)]
-    fn mode_line_shows_draft_on_a_draft(#[case] focus: Focus) {
-        // Given orb's draft selected.
-        let state = drafted(focus);
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the mode line shows only the mode's name.
-        let mode_line = mode_line(&buffer);
-        assert_eq!(mode_line.trim_end(), "DRAFT", "the mode line on a draft");
-    }
-
-    #[rstest::rstest]
     fn pending_x_on_a_draft_shows_the_discard_banner() {
         // Given orb's draft selected and `x` pressed once.
         let state = drafted(Focus::Sidebar);
@@ -1147,6 +1004,7 @@ mod tests {
                 None,
                 &Keys::new(keymap(), Scope::Dashboard),
                 SystemTime::UNIX_EPOCH,
+                &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
             );
