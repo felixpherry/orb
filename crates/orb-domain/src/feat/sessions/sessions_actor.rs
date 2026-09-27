@@ -6557,6 +6557,33 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn a_wait_seen_by_two_polls_queues_one_notice() -> Result<(), Report<StoreError>> {
+        // Given a thread whose turn is running.
+        let (store, _) = store_with_thread("aa")?;
+        let host = FakeHost::listing(vec![in_session(ThreadStatus::Working)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When two polls in a row see it waiting for an approval.
+        host.set_list(Ok(vec![in_session(ThreadStatus::NeedsApproval)]));
+        actor.poll().await;
+        actor.poll().await;
+
+        // Then one NeedsApproval notice is queued.
+        let kinds: Vec<NoticeKind> = notices_of(&state)
+            .into_iter()
+            .map(|notice| notice.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [NoticeKind::NeedsApproval],
+            "the same wait should notify once"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn turn_end_of_a_thread_being_deleted_queues_no_notice() -> Result<(), Report<StoreError>>
     {
         // Given a thread whose turn is running, then marked for deletion.

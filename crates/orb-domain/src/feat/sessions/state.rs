@@ -1171,6 +1171,22 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn half_page_up_moves_one_row_when_a_card_is_taller_than_half() {
+        // Given seven cards with the bottom one selected, on a 4-line sidebar.
+        let mut sessions = seven_cards(1);
+
+        // When moving half a page up.
+        sessions.half_page_up(&cards_in(4));
+
+        // Then the cursor still moves one row.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(2)),
+            "a half page should move at least one row"
+        );
+    }
+
+    #[rstest::rstest]
     fn half_page_down_counts_an_unknown_row_as_one_line() {
         // Given seven cards with the top one selected, and a 4-line layout
         // that knows no row heights.
@@ -1294,6 +1310,29 @@ mod tests {
 
         // Then only project 1 is listed.
         assert_eq!(ids, vec![1], "a removed project shouldn't be listed");
+    }
+
+    #[rstest::rstest]
+    fn sidebar_lists_a_removed_projects_threads() {
+        // Given project 1 removed, with an active and a settled thread, the shelf open.
+        let sessions = Sessions {
+            projects: vec![Project {
+                removed: true,
+                ..project(1, vec![active(1, 10), settled(2, 20)])
+            }],
+            shelf_open: true,
+            ..Sessions::default()
+        };
+
+        // When listing the sidebar.
+        let rows = items(&sessions);
+
+        // Then both threads still show.
+        assert_eq!(
+            rows,
+            vec![on(1), SidebarItem::SettledShelf, on(2)],
+            "removing a project should keep its threads listed"
+        );
     }
 
     /// Project 1 with a draft, card 1 and settled thread 2, and project 2

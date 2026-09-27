@@ -995,6 +995,27 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn hidden_sidebar_draws_the_attached_pane_from_the_left_edge() {
+        // Given a live pane for the selected thread, attached, with the sidebar hidden.
+        let pane = pane_with_text();
+        let state = hidden(selected(Focus::Attached));
+
+        // When drawing a frame.
+        let screen = pane.as_ref().map(|pane| {
+            let buffer = draw_with_pane(&state, pane);
+            text(&buffer, buffer.area)
+        });
+
+        // Then the pane's output starts in the first column.
+        assert!(
+            screen
+                .as_deref()
+                .is_some_and(|screen| screen.starts_with("PANE-TEXT")),
+            "screen was {screen:?}"
+        );
+    }
+
+    #[rstest::rstest]
     fn hidden_sidebar_returns_no_layout() {
         // Given a selected thread with the sidebar hidden.
         let state = hidden(selected(Focus::Preview));
