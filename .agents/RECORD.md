@@ -70,7 +70,7 @@ Entries are added or amended **only with human approval**.
 - (projects) The project picker lists projects by their threads' latest activity, else when they were added, until filter text is typed.
 - (projects) The project picker filters on each project's name and path.
 - (projects) Projects are added only from the `␣p` directory picker.
-- (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, `<C-d>`/`<C-u>` move half a page, `⏎` picks, and `Esc` cancels.
+- (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, wrapping from the last to the first and back, `<C-d>`/`<C-u>` move half a page, stopping at the ends, `⏎` picks, and `Esc` cancels.
 - (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
 - (tui) The mode line shows only the mode's name on its left and cuts a long status message at its end, so the name and a 2-cell gap stay visible.
@@ -105,6 +105,7 @@ Entries are added or amended **only with human approval**.
 - (zellij) Tool panes run with orb's own `NO_COLOR`, not the zellij server's.
 - (zellij) A zellij call that runs longer than 2 s is killed; when it was opening a tool, the mode line then shows `zellij timed out (session renamed? restart orb)`.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
+- (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
 - (keybinds) `␣e` hides or shows the sidebar; while it's hidden the right-hand area takes the full width, and `<C-h>` and resizing do nothing.
 - (keybinds) In the sidebar or preview, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
 - (sidebar) The sidebar's width and project filter persist across restarts.
