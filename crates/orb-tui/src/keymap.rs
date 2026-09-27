@@ -4,10 +4,12 @@
 //! In the sidebar and the dashboard, keys go through a which-key keymap whose
 //! scope is the focus and what the sidebar cursor is on; `<Space>` is the
 //! leader and shows a popup. A key that does nothing for the selection isn't
-//! bound there (`␣m`/`␣a` on a thread,
-//! `p`/`ss`/`r` off a thread, `␣w`/`␣b` and the tool keys `␣t`/`␣g`/`␣v`
-//! with nothing selected), so the
-//! popups don't offer it. `<C-Right>`/`<C-Left>` resize the focused side
+//! bound there (`␣m`/`␣a` on a thread, `p`/`ss`/`r` off a thread, `␣w`/`␣b`
+//! and the tool keys `␣t`/`␣g`/`␣v` with nothing selected, and the
+//! dashboard's `m`/`a` off a draft and `o`/`w`/`b`/`t`/`g`/`v` with nothing
+//! selected), so the popups don't offer it. On the dashboard each menu item's
+//! letter runs it, `j`/`k` or `↓`/`↑` move the menu cursor, and `⏎` runs the
+//! highlighted item. `<C-Right>`/`<C-Left>` resize the focused side
 //! outside which-key, which can't name them. While attached, every key goes
 //! to Claude except `<C-\>` and `<C-h>`. An open picker takes typed
 //! characters as filter text and has its own fixed keys, `<C-x>` among them
@@ -16,6 +18,10 @@
 
 use std::fmt;
 
+use orb_domain::feat::dashboard::DashboardItem::{
+    AddProject, Branch, FilterProjects, Lazygit, Model, Neovim, NewSession, Open, Permission, Quit,
+    Shell, Start, Workspace,
+};
 use orb_domain::feat::sessions::state::Sessions;
 use orb_domain::feat::zellij::zellij_service::Tool;
 use orb_domain::{Focus, Intent};
@@ -184,7 +190,26 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 KeyCategory::Navigation,
                 scope,
             )
-            .bind("<enter>", Intent::Attach, KeyCategory::Sessions, scope)
+            .bind("j", Intent::DashboardNext, KeyCategory::Navigation, scope)
+            .bind(
+                "<down>",
+                Intent::DashboardNext,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind("k", Intent::DashboardPrev, KeyCategory::Navigation, scope)
+            .bind(
+                "<up>",
+                Intent::DashboardPrev,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<enter>",
+                Intent::DashboardRun,
+                KeyCategory::Navigation,
+                scope,
+            )
             .bind(
                 "<leader>n",
                 Intent::NewSession,
@@ -197,6 +222,31 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 KeyCategory::Sessions,
                 scope,
             );
+    }
+    for (scope, items) in [
+        (
+            Scope::Dashboard,
+            &[Open, Workspace, Branch, Shell, Lazygit, Neovim][..],
+        ),
+        (
+            Scope::DashboardDraft,
+            &[
+                Start, Workspace, Branch, Model, Permission, Shell, Lazygit, Neovim,
+            ],
+        ),
+        (Scope::DashboardEmpty, &[]),
+    ] {
+        for item in items
+            .iter()
+            .chain(&[NewSession, AddProject, FilterProjects, Quit])
+        {
+            let category = match item {
+                Shell | Lazygit | Neovim => KeyCategory::Tools,
+                Quit => KeyCategory::General,
+                _ => KeyCategory::Sessions,
+            };
+            keymap.bind(&item.key().to_string(), item.intent(), category, scope);
+        }
     }
     for scope in [
         Scope::Sidebar,
@@ -354,6 +404,10 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
 
 #[cfg(test)]
 mod tests {
+    use orb_domain::feat::dashboard::DashboardItem::{
+        self, AddProject, Branch, FilterProjects, Lazygit, Model, Neovim, NewSession, Open,
+        Permission, Quit, Shell, Start, Workspace,
+    };
     use orb_domain::feat::zellij::zellij_service::Tool;
     use orb_domain::{Focus, Intent};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
@@ -560,15 +614,93 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn q_is_ignored_on_the_dashboard() {
-        // Given the keymap on a thread's dashboard.
-        let mut keys = Keys::new(keymap(), Scope::Dashboard);
+    fn q_quits_on_the_dashboard(
+        #[values(Scope::Dashboard, Scope::DashboardDraft, Scope::DashboardEmpty)] scope: Scope,
+    ) {
+        // Given the keymap in a dashboard scope.
+        let mut keys = Keys::new(keymap(), scope);
 
         // When pressing `q`.
         let intent = press(&mut keys, key(KeyCode::Char('q')));
 
+        // Then orb quits.
+        assert_eq!(intent, Some(Intent::Quit), "q should quit in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    fn dashboard_movement_keys_move_the_menu_cursor(
+        #[values(Scope::Dashboard, Scope::DashboardDraft, Scope::DashboardEmpty)] scope: Scope,
+        #[values(
+            (key(KeyCode::Char('j')), Intent::DashboardNext),
+            (key(KeyCode::Down), Intent::DashboardNext),
+            (key(KeyCode::Char('k')), Intent::DashboardPrev),
+            (key(KeyCode::Up), Intent::DashboardPrev),
+            (key(KeyCode::Enter), Intent::DashboardRun),
+        )]
+        binding: (KeyEvent, Intent),
+    ) {
+        // Given the keymap in a dashboard scope.
+        let (pressed, expected) = binding;
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing the key.
+        let intent = press(&mut keys, pressed);
+
+        // Then it moves the cursor or runs the highlighted item.
+        assert_eq!(intent.as_ref(), Some(&expected), "{pressed:?} in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    #[case::general_on_a_thread(Scope::Dashboard, &[NewSession, AddProject, FilterProjects, Quit])]
+    #[case::general_on_a_draft(Scope::DashboardDraft, &[NewSession, AddProject, FilterProjects, Quit])]
+    #[case::general_on_nothing(Scope::DashboardEmpty, &[NewSession, AddProject, FilterProjects, Quit])]
+    #[case::thread(Scope::Dashboard, &[Open, Workspace, Branch, Shell, Lazygit, Neovim])]
+    #[case::draft(
+        Scope::DashboardDraft,
+        &[Start, Workspace, Branch, Model, Permission, Shell, Lazygit, Neovim]
+    )]
+    fn dashboard_item_keys_run_their_items(#[case] scope: Scope, #[case] items: &[DashboardItem]) {
+        // Given the keymap in a dashboard scope.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing each item's key.
+        let intents: Vec<Option<Intent>> = items
+            .iter()
+            .map(|item| press(&mut keys, key(KeyCode::Char(item.key()))))
+            .collect();
+
+        // Then each yields its item's intent.
+        let expected: Vec<Option<Intent>> = items.iter().map(|item| Some(item.intent())).collect();
+        assert_eq!(intents, expected, "the item keys in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::DashboardDraft, Some(Intent::PickModel))]
+    #[case(Scope::Dashboard, None)]
+    fn m_picks_the_model_only_on_a_drafts_dashboard(
+        #[case] scope: Scope,
+        #[case] expected: Option<Intent>,
+    ) {
+        // Given the keymap in a dashboard scope.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing `m`.
+        let intent = press(&mut keys, key(KeyCode::Char('m')));
+
+        // Then it opens the model picker only on a draft.
+        assert_eq!(intent, expected, "m in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    fn o_is_unbound_on_the_dashboard_with_nothing_selected() {
+        // Given the keymap on the dashboard with no thread or draft selected.
+        let mut keys = Keys::new(keymap(), Scope::DashboardEmpty);
+
+        // When pressing `o`.
+        let intent = press(&mut keys, key(KeyCode::Char('o')));
+
         // Then nothing happens.
-        assert_eq!(intent, None, "q should only quit from the sidebar");
+        assert_eq!(intent, None, "o has nothing to open or start");
     }
 
     #[rstest::rstest]
@@ -705,7 +837,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(vec![ctrl('h')], Intent::FocusSidebar)]
-    #[case(vec![key(KeyCode::Enter)], Intent::Attach)]
+    #[case(vec![key(KeyCode::Enter)], Intent::DashboardRun)]
     fn dashboard_keys_map_to_their_intents(
         #[case] pressed: Vec<KeyEvent>,
         #[case] expected: Intent,
@@ -921,7 +1053,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(vec![ctrl('h')], Intent::FocusSidebar)]
-    #[case(vec![key(KeyCode::Enter)], Intent::Attach)]
+    #[case(vec![key(KeyCode::Enter)], Intent::DashboardRun)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('n'))], Intent::NewSession)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('p'))], Intent::AddProject)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('w'))], Intent::ChangeWorkspace)]

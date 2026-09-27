@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use crate::feat::dashboard::state::DashboardCursor;
 use crate::feat::picker::state::PickerState;
 use crate::feat::sessions::state::{Sessions, ThreadId};
 use crate::feat::sidebar::state::{Rename, SidebarView};
@@ -35,6 +36,8 @@ pub struct AppState {
     pub focus: Focus,
     /// orb's projects and their Claude sessions.
     pub sessions: Sessions,
+    /// The dashboard's highlighted menu item.
+    pub dashboard: DashboardCursor,
     /// The sidebar's width, visibility and last layout.
     pub sidebar: SidebarView,
     /// The thread whose Claude pane the right-hand area shows instead of the

@@ -26,6 +26,12 @@ pub enum Intent {
     FocusRight,
     /// Move the keys to the sidebar.
     FocusSidebar,
+    /// Highlight the dashboard's next menu item.
+    DashboardNext,
+    /// Highlight the dashboard's previous menu item.
+    DashboardPrev,
+    /// Run the dashboard's highlighted menu item.
+    DashboardRun,
     /// Hide the sidebar, giving the right side the full width, or show it
     /// again.
     ToggleSidebar,
@@ -118,6 +124,9 @@ impl fmt::Display for Intent {
             Self::SelectPrev => "previous thread",
             Self::FocusRight => "focus right",
             Self::FocusSidebar => "focus sidebar",
+            Self::DashboardNext | Self::PickerNext => "next item",
+            Self::DashboardPrev | Self::PickerPrev => "previous item",
+            Self::DashboardRun => "run item",
             Self::ToggleSidebar | Self::LeavePane => "sidebar",
             Self::WidenFocused => "widen",
             Self::NarrowFocused => "narrow",
@@ -146,8 +155,6 @@ impl fmt::Display for Intent {
             Self::PickerDeleteWord => "delete word",
             Self::PickerCursorLeft => "cursor left",
             Self::PickerCursorRight => "cursor right",
-            Self::PickerNext => "next item",
-            Self::PickerPrev => "previous item",
             Self::PickerConfirm => "pick",
             Self::PickerOpen => "open directory",
             Self::PickerCancel => "cancel",
