@@ -1,15 +1,14 @@
 //! The rename box: a LazyVim-style input titled `Rename Session`, centred at
 //! the top of the screen, where the user types orb's own name for a thread.
 
+use crate::picker::visible;
+use crate::sidebar::{BLUE1, FG, YELLOW};
 use orb_domain::feat::sidebar::state::Rename;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
-use unicode_segmentation::UnicodeSegmentation;
-
-use crate::sidebar::{BLUE1, FG, YELLOW};
 
 /// The box's width, borders included, on a screen wide enough for it.
 const WIDTH: u16 = 60;
@@ -56,24 +55,6 @@ pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer) -> Position 
         .unwrap_or(u16::MAX)
         .min(inner.width.saturating_sub(1));
     Position::new(inner.x + x, inner.y)
-}
-
-/// The part of `text` to show when `room` columns fit before the cursor
-/// (at grapheme `cursor`): everything, or a tail that keeps the cursor in
-/// view. Returns it and its width before the cursor.
-fn visible(text: &str, cursor: usize, room: usize) -> (String, usize) {
-    let graphemes: Vec<&str> = text.graphemes(true).collect();
-    let widths: Vec<usize> = graphemes
-        .iter()
-        .map(|grapheme| Span::raw(*grapheme).width())
-        .collect();
-    let mut before: usize = widths.iter().take(cursor).sum();
-    let mut start = 0;
-    while before > room && start < cursor {
-        before -= widths.get(start).copied().unwrap_or_default();
-        start += 1;
-    }
-    (graphemes.iter().skip(start).copied().collect(), before)
 }
 
 #[cfg(test)]

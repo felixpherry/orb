@@ -190,6 +190,8 @@ pub enum SidebarRow<'a> {
     ShelfHeader {
         /// How many threads are settled.
         count: usize,
+        /// Whether it reads as open: the shelf is, or a search lists its
+        /// matches.
         open: bool,
     },
     /// A settled thread, drawn as a one-line row.
@@ -298,7 +300,7 @@ impl Sessions {
     /// While a project filter is set, only that project's rows are. While a
     /// search has text, only the drafts and threads whose title matches it
     /// are, settled ones even while the shelf is closed, and the shelf header
-    /// only when a settled thread matches.
+    /// only when a settled thread matches, reading as open.
     pub fn sidebar(&self) -> Vec<SidebarRow<'_>> {
         let searching = self.searching();
         let mut drafts: Vec<_> = self
@@ -335,7 +337,7 @@ impl Sessions {
         if !settled.is_empty() {
             rows.push(SidebarRow::ShelfHeader {
                 count: settled.len(),
-                open: self.shelf_open,
+                open: self.shelf_open || searching,
             });
             rows.extend(
                 settled
@@ -1775,6 +1777,29 @@ mod tests {
 
         // Then the header counts only the match.
         assert_eq!(count, Some(1), "the header should count the matches");
+    }
+
+    #[rstest::rstest]
+    #[case::searching("lint", true)]
+    #[case::not_searching("", false)]
+    fn shelf_header_reads_as_open_while_a_search_lists_settled_threads(
+        #[case] text: &str,
+        #[case] expected: bool,
+    ) {
+        // Given a closed shelf holding "fix lint", searching for `text`.
+        let sessions = searching(
+            sessions(vec![titled(settled(1, 10), "fix lint")], None),
+            text,
+        );
+
+        // When listing the sidebar.
+        let open = sessions.sidebar().iter().find_map(|row| match row {
+            SidebarRow::ShelfHeader { open, .. } => Some(*open),
+            _ => None,
+        });
+
+        // Then the header is open only while the search lists the match.
+        assert_eq!(open, Some(expected), "the header searching for '{text}'");
     }
 
     #[rstest::rstest]

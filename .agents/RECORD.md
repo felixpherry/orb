@@ -47,7 +47,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
 - (sessions) A thread's title is the name given with `r` in the sidebar, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
 - (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread is a three-line tree node showing its status icon, title, and time, then its project and status word, then its branch.
-- (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the Settled shelf is open and a shown/total count of drafts and threads, and the selected row's first line highlighted.
+- (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the sidebar search has the keys and a shown/total count of drafts and threads, and the selected row's first line highlighted.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
 - (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the dashboard, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
@@ -136,3 +136,6 @@ Entries are added or amended **only with human approval**.
 - (pane) orb is attached to a thread from `⏎` into its pane until `<C-\>`, settling or deleting the thread detaches it, or its Claude exits.
 - (keybinds) In the sidebar, `<C-\>` on an attached thread detaches it and keeps the keys in the sidebar.
 - (sidebar) An idle thread orb is attached to shows a filled `FG` (`#c8d3f5`) circle in place of the hollow idle circle; with unseen output it still shows the green done check.
+- (sidebar) While the list overflows the sidebar, the Settled header stays on its bottom row until scrolling brings it into view.
+- (sidebar) While a search lists settled matches, the Settled header shows the open folder.
+- (tui) Typed text too long for the sidebar search, a picker's input or the rename box shows its end, keeping the cursor in view.
