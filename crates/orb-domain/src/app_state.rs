@@ -1,6 +1,7 @@
 //! Shared application state: written by the [`IntentHandler`](crate::IntentHandler)
 //! and the actors, read by the renderer.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::feat::dashboard::state::DashboardCursor;
@@ -40,13 +41,11 @@ pub struct AppState {
     pub dashboard: DashboardCursor,
     /// The sidebar's width, visibility and last layout.
     pub sidebar: SidebarView,
-    /// The thread whose Claude pane the right-hand area shows instead of the
-    /// dashboard while focus isn't `Attached`: set on attach, kept by `<C-h>`,
-    /// cleared by `<C-\>`, the pane's exit, a dropped pane, a failed spawn and
-    /// leaving the trust pane. Holding the thread, not a bool, keeps a stale
-    /// value from re-attaching another thread. Written by the intent handler
-    /// and the frontend.
-    pub pane_shown: Option<ThreadId>,
+    /// The threads orb holds a live Claude pane for: added on attach, removed by
+    /// `<C-\>`, settling, deleting, the pane's exit and a failed spawn. The
+    /// right-hand area shows the selected thread's pane while it's in here.
+    /// Written by the intent handler and the frontend.
+    pub attached: HashSet<ThreadId>,
     /// The open picker, if any.
     pub picker: Option<PickerState>,
     /// The open rename box, if any. Written by the intent handler, and

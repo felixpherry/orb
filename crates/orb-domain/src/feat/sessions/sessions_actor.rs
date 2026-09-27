@@ -1,10 +1,11 @@
 //! The sessions actor — the owner of orb's threads, their statuses, and titles.
 //!
 //! At start it restores the saved threads into the shared state. Then it polls
-//! the session host: every second while a turn is underway or orb is attached,
-//! every five seconds otherwise, and right away when asked. Each poll maps the
-//! host's records onto the threads, stamps when a turn starts, reads new
-//! transcript lines for titles and branches, and saves what changed.
+//! the session host: every second while a turn is underway or orb is attached
+//! to any thread, every five seconds otherwise, and right away when asked.
+//! Each poll maps the host's records onto the threads, stamps when a turn
+//! starts, reads new transcript lines for titles and branches, and saves what
+//! changed.
 //!
 //! It keeps each project's draft: created prefilled from the project's
 //! last-used workspace, model and permission (else the latest used project's
@@ -72,7 +73,6 @@ use super::store::{
     DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, ThreadRow, Ui,
 };
 use super::transcript::{locate, scan_title};
-use crate::Focus;
 use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
@@ -82,7 +82,8 @@ use crate::feat::git::worktree::{
 };
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
 
-/// How long to wait between polls while a turn is underway or orb is attached.
+/// How long to wait between polls while a turn is underway or orb is attached
+/// to any thread.
 const FAST_POLL: Duration = Duration::from_secs(1);
 /// How long to wait between polls otherwise.
 const SLOW_POLL: Duration = Duration::from_secs(5);
@@ -632,7 +633,7 @@ impl SessionsActor {
             self.fail(&report);
         }
         let app = self.state.read();
-        if app.sessions.any_in_progress() || app.focus == Focus::Attached {
+        if app.sessions.any_in_progress() || !app.attached.is_empty() {
             FAST_POLL
         } else {
             SLOW_POLL
@@ -658,7 +659,7 @@ impl SessionsActor {
         let now = now_ms();
         let (cursor, attached) = {
             let app = self.state.read();
-            (app.sessions.cursor, app.focus == Focus::Attached)
+            (app.sessions.cursor, app.attached.clone())
         };
         let mut statuses = Vec::with_capacity(self.rows.len());
         let mut to_stop = Vec::new();
@@ -679,7 +680,14 @@ impl SessionsActor {
                 rename_hex_branch(&self.services.git, &self.worktrees_root, row);
             }
             let selected = cursor == Some(SidebarItem::Thread(row.id));
-            if follow_activity(row, status, was_in_progress, selected, attached, now) {
+            if follow_activity(
+                row,
+                status,
+                was_in_progress,
+                selected,
+                attached.contains(&row.id),
+                now,
+            ) {
                 to_stop.push(row.short_id.clone());
             }
             if *row != before && self.store.save_thread(row).is_err() {
@@ -1642,7 +1650,7 @@ fn follow_activity(
     let auto_settle = row.settled_override.is_none()
         && row.pinned_at.is_none()
         && !status.in_progress()
-        && !(selected && attached)
+        && !attached
         && now.saturating_sub(row.last_activity_at) >= AUTO_SETTLE_AFTER;
     if auto_settle {
         settle_row(row, row.last_activity_at);
@@ -2816,10 +2824,14 @@ mod tests {
     #[tokio::test]
     async fn poll_waits_one_second_while_attached() -> Result<(), Report<StoreError>> {
         // Given an idle thread and orb attached.
-        let (store, _) = store_with_thread("aa")?;
+        let (store, id) = store_with_thread("aa")?;
         let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().focus = Focus::Attached;
+        {
+            let mut app = state.write();
+            app.focus = Focus::Sidebar;
+            app.attached.insert(id);
+        }
 
         // When polling.
         let next = actor.poll().await;
@@ -5573,8 +5585,8 @@ mod tests {
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         {
             let mut app = state.write();
-            app.sessions.cursor = Some(SidebarItem::Thread(id));
-            app.focus = Focus::Attached;
+            app.focus = Focus::Sidebar;
+            app.attached.insert(id);
         }
 
         // When polling.
