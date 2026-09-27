@@ -1,25 +1,28 @@
-//! The sidebar: one list of orb's drafts and threads across projects, in T3
-//! Code's style.
+//! The sidebar: one list of orb's drafts and threads across projects, drawn
+//! like LazyVim's file explorer (snacks.nvim) in tokyonight-moon.
 //!
-//! Drafts come first, then pinned threads, then active ones, each a
-//! three-line card. A thread's card shows the project's badge and name with
-//! the thread's status (or the time since its last turn), the title, and the
-//! branch; a draft's shows `✎` before the project and `New thread`, its third
-//! line left empty. A blank line separates the cards,
-//! and the selected one is drawn in a rounded outline. Settled threads fold
-//! into a shelf at the bottom, drawn as one-line rows while it's open. The
-//! sidebar scrolls to keep the selection in view. While it's filtered to a
-//! project, a line naming the project heads the list.
+//! An input box heads it: `Sessions`, with an `s` badge lit while the
+//! Settled shelf is open, the filtered project after the `>` prompt, and how
+//! many drafts and threads are listed out of all of them. Below it, drafts
+//! come first, then pinned threads, then active ones, each a three-line tree
+//! node: the status icon and title, then the project and status, then the
+//! branch (a draft's workspace). The selected row's first line is
+//! highlighted. Settled threads fold into a shelf at the bottom, drawn as
+//! one-line rows while it's open. The sidebar scrolls to keep the whole
+//! selected row in view.
 
+use std::borrow::Cow;
 use std::time::{Duration, SystemTime};
 
-use orb_domain::feat::sessions::state::{Project, Sessions, SidebarRow, Thread, ThreadStatus};
+use orb_domain::feat::sessions::state::{
+    Draft, DraftWorkspace, Project, Sessions, SidebarRow, Thread, ThreadStatus,
+};
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Widget};
+use ratatui::widgets::{Block, BorderType, Widget};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// How far the sidebar is scrolled, kept between frames.
@@ -29,10 +32,10 @@ pub(crate) struct SidebarScroll {
     offset: u16,
 }
 
-/// Draws the sidebar into `area`, with a border on its right edge, under the
-/// filtered project's header if there is one, scrolled so the cursor's row is
-/// in view. Returns the y of the selected row's top line (a card's outline)
-/// when it's on screen, and the list's layout.
+/// Draws the sidebar into `area`, a blank column short of its right edge: the
+/// input box, then the list, scrolled so the cursor's row is in view. Returns
+/// the y of the selected row's first line when it's on screen, and the list's
+/// layout.
 pub(crate) fn render(
     sessions: &Sessions,
     now: SystemTime,
@@ -40,242 +43,374 @@ pub(crate) fn render(
     buf: &mut Buffer,
     scroll: &mut SidebarScroll,
 ) -> (Option<u16>, SidebarLayout) {
-    let block = Block::new().borders(Borders::RIGHT);
+    buf.set_style(area, Style::new().bg(BG_DARK).fg(FG));
+    let area = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let [input, list] = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
+    let rows = sessions.sidebar();
+    render_input(sessions, &rows, input, buf);
+    let layout = SidebarLayout {
+        rows: list.height,
+        heights: rows.iter().map(height).collect(),
+    };
+    let selected_y = render_list(sessions, rows, now, list, buf, scroll);
+    (selected_y, layout)
+}
+
+/// The rounded box at the top: its title and shelf badge, the prompt, and the
+/// count against its right edge.
+fn render_input(sessions: &Sessions, rows: &[SidebarRow<'_>], area: Rect, buf: &mut Buffer) {
+    let badge = if sessions.shelf_open {
+        Style::new().fg(BLUE).bg(GUTTER)
+    } else {
+        Style::new().fg(DARK3)
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ORANGE))
+        .title(Line::from(vec![
+            span(" Sessions ", ORANGE),
+            Span::styled(" s ", badge),
+            Span::raw(" "),
+        ]));
     let inner = block.inner(area);
     block.render(area, buf);
+    render_split(
+        prompt(sessions),
+        Line::from(span(count(sessions, rows), COMMENT)),
+        inner,
+        buf,
+    );
+}
+
+/// `>`, followed by the filtered project's folder and name while there is
+/// one, where snacks shows the query.
+fn prompt(sessions: &Sessions) -> Line<'_> {
     let filtered = sessions
         .filter
         .and_then(|id| sessions.projects.iter().find(|project| project.id == id));
-    let inner = match filtered {
-        Some(project) => {
-            let [header, list] =
-                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
-            render_header(project, header, buf);
-            list
-        }
-        None => inner,
-    };
-    let rows = sessions.sidebar();
-    let layout = SidebarLayout {
-        rows: inner.height,
-        heights: rows.iter().map(height).collect(),
-    };
-    // Each row with its top line in the list. A list of cards opens with a
-    // blank line for the first card's outline. Blank lines above the shelf
-    // header keep the shelf at the bottom while the list is short.
-    let (placed, total) = {
-        let lead = u16::from(matches!(
-            rows.first(),
-            Some(SidebarRow::Draft { .. } | SidebarRow::Card { .. })
-        ));
-        let content = rows.iter().map(height).fold(lead, u16::saturating_add);
-        let gap = inner.height.saturating_sub(content);
-        let mut top = lead;
-        let placed: Vec<(SidebarRow<'_>, u16)> = rows
-            .into_iter()
-            .map(|row| {
-                if matches!(row, SidebarRow::ShelfHeader { .. }) {
-                    top = top.saturating_add(gap);
-                }
-                let row_top = top;
-                top = top.saturating_add(height(&row));
-                (row, row_top)
-            })
-            .collect();
-        (placed, top)
-    };
+    match filtered {
+        Some(project) => Line::from(vec![
+            span("> ", CYAN),
+            span(format!("{FOLDER} "), project_colour(&project.title)),
+            span(project.title.as_str(), FG),
+        ]),
+        None => Line::from(span(">", CYAN)),
+    }
+}
+
+/// `shown/total`, like snacks' match count: the drafts and threads listed,
+/// out of every draft and thread not being deleted.
+fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
+    let shown = rows
+        .iter()
+        .filter(|row| !matches!(row, SidebarRow::ShelfHeader { .. }))
+        .count();
+    let drafts = sessions
+        .projects
+        .iter()
+        .filter(|project| project.draft.is_some())
+        .count();
+    let threads = sessions
+        .threads()
+        .filter(|thread| !sessions.deleting.contains(&thread.id))
+        .count();
+    format!("{shown}/{}", drafts + threads)
+}
+
+/// Draws the rows into `area`, scrolled so the selected one is whole on
+/// screen, and returns the y of its first line when it's there.
+fn render_list(
+    sessions: &Sessions,
+    rows: Vec<SidebarRow<'_>>,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll: &mut SidebarScroll,
+) -> Option<u16> {
+    let (placed, total) = place(rows, area.height);
     let selected = placed
         .iter()
         .find(|(row, _)| Some(row.item()) == sessions.cursor)
-        .map(|(row, top)| extent(row, *top));
+        .map(|(row, top)| (*top, height(row)));
     if let Some((top, rows)) = selected {
         scroll.offset = scroll
             .offset
             .min(top)
-            .max(top.saturating_add(rows).saturating_sub(inner.height));
+            .max(top.saturating_add(rows).saturating_sub(area.height));
     }
-    scroll.offset = scroll.offset.min(total.saturating_sub(inner.height));
+    scroll.offset = scroll.offset.min(total.saturating_sub(area.height));
     // The whole list, then the lines in view.
     let list = {
-        let mut list = Buffer::empty(Rect::new(inner.x, 0, inner.width, total));
-        for (row, top) in &placed {
-            let row_area = Rect::new(inner.x, *top, inner.width, height(row));
-            let is_selected = Some(row.item()) == sessions.cursor;
-            render_row(row, is_selected, now, row_area, &mut list);
+        let mut list = Buffer::empty(Rect::new(area.x, 0, area.width, total));
+        list.set_style(list.area, Style::new().bg(BG_DARK).fg(FG));
+        for (index, (row, top)) in placed.iter().enumerate() {
+            let row_area = Rect::new(area.x, *top, area.width, height(row));
+            if Some(row.item()) == sessions.cursor {
+                list.set_style(
+                    Rect {
+                        height: 1,
+                        ..row_area
+                    },
+                    Style::new().bg(VISUAL),
+                );
+            }
+            let ends_shelf =
+                !matches!(placed.get(index + 1), Some((SidebarRow::Settled { .. }, _)));
+            render_row(row, ends_shelf, now, row_area, &mut list);
         }
         list
     };
-    for (y, line) in (inner.top()..inner.bottom()).zip(scroll.offset..total) {
-        for x in inner.left()..inner.right() {
+    for (y, line) in (area.top()..area.bottom()).zip(scroll.offset..total) {
+        for x in area.left()..area.right() {
             if let (Some(cell), Some(shown)) = (list.cell((x, line)), buf.cell_mut((x, y))) {
                 *shown = cell.clone();
             }
         }
     }
-    let selected_y = selected
+    selected
         .map(|(top, _)| top)
-        .filter(|top| (scroll.offset..scroll.offset.saturating_add(inner.height)).contains(top))
-        .map(|top| inner.y + top - scroll.offset);
-    (selected_y, layout)
+        .filter(|top| (scroll.offset..scroll.offset.saturating_add(area.height)).contains(top))
+        .map(|top| area.y + top - scroll.offset)
 }
 
-/// The filtered project's badge and name, where a row's text would sit.
-fn render_header(project: &Project, area: Rect, buf: &mut Buffer) {
-    let text = Rect {
-        width: area.width.saturating_sub(1),
-        ..area
-    }
-    .inner(Margin::new(2, 0));
-    Line::from(vec![
-        badge(&project.title, true),
-        Span::raw(" "),
-        Span::styled(project.title.as_str(), Style::new().fg(Color::White)),
-    ])
-    .render(text, buf);
+/// Each row with its top line in the list, and the list's height. Blank lines
+/// above the shelf header keep the shelf at the bottom of `lines` while the
+/// list is short.
+fn place(rows: Vec<SidebarRow<'_>>, lines: u16) -> (Vec<(SidebarRow<'_>, u16)>, u16) {
+    let content = rows.iter().map(height).fold(0, u16::saturating_add);
+    let gap = lines.saturating_sub(content);
+    let mut top = 0_u16;
+    let placed = rows
+        .into_iter()
+        .map(|row| {
+            if matches!(row, SidebarRow::ShelfHeader { .. }) {
+                top = top.saturating_add(gap);
+            }
+            let row_top = top;
+            top = top.saturating_add(height(&row));
+            (row, row_top)
+        })
+        .collect();
+    (placed, top)
 }
 
-/// How many lines a row takes: a card's 3 and the blank line below it, else 1.
+/// How many lines a row takes: a draft's or thread's node 3, else 1.
 fn height(row: &SidebarRow<'_>) -> u16 {
     match row {
-        SidebarRow::Draft { .. } | SidebarRow::Card { .. } => 4,
+        SidebarRow::Draft { .. } | SidebarRow::Card { .. } => 3,
         SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } => 1,
     }
 }
 
-/// The top line and height a row fills when selected: a card's outline takes
-/// the blank lines above and below it.
-fn extent(row: &SidebarRow<'_>, top: u16) -> (u16, u16) {
+/// One row; `ends_shelf` says no settled row follows it.
+fn render_row(
+    row: &SidebarRow<'_>,
+    ends_shelf: bool,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     match row {
-        SidebarRow::Draft { .. } | SidebarRow::Card { .. } => (top.saturating_sub(1), 5),
-        SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } => (top, 1),
+        SidebarRow::Draft { project, draft } => render_draft(project, draft, area, buf),
+        SidebarRow::Card { project, thread } => render_card(project, thread, now, area, buf),
+        SidebarRow::ShelfHeader { count, open } => render_shelf_header(*count, *open, area, buf),
+        SidebarRow::Settled { thread, .. } => render_settled(thread, ends_shelf, now, area, buf),
     }
 }
 
-/// One row, a cell short of the sidebar's border. Its text sits two cells in,
-/// inside the selected card's outline and a cell of padding.
-fn render_row(row: &SidebarRow<'_>, selected: bool, now: SystemTime, area: Rect, buf: &mut Buffer) {
-    let area = Rect {
-        width: area.width.saturating_sub(1),
-        ..area
-    };
-    let text = area.inner(Margin::new(2, 0));
-    match row {
-        SidebarRow::Draft { project, .. } => {
-            if selected {
-                render_outline(area, buf);
-            }
-            render_draft(project, text, buf);
-        }
-        SidebarRow::Card { project, thread } => {
-            if selected {
-                render_outline(area, buf);
-            }
-            render_card(project, thread, now, text, buf);
-        }
-        SidebarRow::ShelfHeader { count, open } => {
-            if selected {
-                buf.set_style(area.inner(Margin::new(1, 0)), Style::new().bg(SELECTED));
-            }
-            Line::styled(shelf_label(*count, *open), Style::new().fg(GRAY)).render(text, buf);
-        }
-        SidebarRow::Settled { project, thread } => {
-            if selected {
-                buf.set_style(area.inner(Margin::new(1, 0)), Style::new().bg(SELECTED));
-            }
-            render_settled(project, thread, selected, now, text, buf);
-        }
-    }
-}
-
-/// The selected card's rounded outline, over the blank lines around `card`,
-/// with the selection background inside it.
-fn render_outline(card: Rect, buf: &mut Buffer) {
-    let outline = Rect {
-        y: card.y.saturating_sub(1),
-        height: 5,
-        ..card
-    };
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(OUTLINE))
-        .render(outline, buf);
-    buf.set_style(outline.inner(Margin::new(1, 1)), Style::new().bg(SELECTED));
-}
-
-/// The badge, project, pin marker and status; the title; the branch and ✳.
+/// A thread's node: its status icon, title, pin and time; the project and
+/// status word; the branch and ✳.
 fn render_card(project: &Project, thread: &Thread, now: SystemTime, area: Rect, buf: &mut Buffer) {
-    let [heading, title, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
-    let pin = if thread.pinned_at.is_some() {
-        " ⚑"
-    } else {
-        ""
-    };
-    let project_line = Line::from(vec![
-        badge(&project.title, true),
-        Span::raw(" "),
-        Span::styled(format!("{}{pin}", project.title), Style::new().fg(GRAY)),
-    ]);
-    render_split(project_line, Line::from(status(thread, now)), heading, buf);
-    Line::raw(thread.title.as_deref().unwrap_or("New thread")).render(title, buf);
+    let [heading, place, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
+    let (glyph, word, colour) = status(thread, now);
+    let pin = if thread.pinned_at.is_some() { PIN } else { "" };
     render_split(
-        Line::styled(
-            thread.branch.as_deref().unwrap_or_default(),
-            Style::new().fg(DARK_GRAY),
-        ),
-        Line::styled("✳", Style::new().fg(CLAUDE)),
+        Line::from(vec![
+            span(format!(" {glyph} "), colour),
+            span(title(thread), FG),
+        ]),
+        Line::from(vec![
+            span(format!("{pin} "), ORANGE),
+            span(when(thread, now), COMMENT),
+        ]),
+        heading,
+        buf,
+    );
+    render_split(
+        project_line(project),
+        word.map(|word| Line::from(span(word, colour)))
+            .unwrap_or_default(),
+        place,
+        buf,
+    );
+    render_split(
+        Line::from(vec![
+            span(LAST_GUIDE, GUTTER),
+            span(
+                format!("{BRANCH} {}", thread.branch.as_deref().unwrap_or("—")),
+                COMMENT,
+            ),
+        ]),
+        Line::from(span(CLAUDE_LOGO, CLAUDE)),
         footer,
         buf,
     );
 }
 
-/// `✎`, the badge and project; `New thread`. The third line stays empty so
-/// the card is as tall as a thread's.
-fn render_draft(project: &Project, area: Rect, buf: &mut Buffer) {
-    let [heading, title, _] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
-    Line::from(vec![
-        Span::styled("✎ ", Style::new().fg(DRAFT)),
-        badge(&project.title, true),
-        Span::raw(" "),
-        Span::styled(project.title.as_str(), Style::new().fg(GRAY)),
-    ])
-    .render(heading, buf);
-    Line::raw("New thread").render(title, buf);
+/// A draft's node: the pencil and `New thread`; the project; the workspace
+/// and branch it will start on.
+fn render_draft(project: &Project, draft: &Draft, area: Rect, buf: &mut Buffer) {
+    let [heading, place, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
+    render_split(
+        Line::from(vec![
+            span(format!(" {PENCIL} "), YELLOW),
+            span("New thread", FG),
+        ]),
+        Line::from(span("draft", DARK3)),
+        heading,
+        buf,
+    );
+    render_split(project_line(project), Line::default(), place, buf);
+    render_split(
+        Line::from(vec![
+            span(LAST_GUIDE, GUTTER),
+            span(format!("{BRANCH} {}", workspace(draft)), COMMENT),
+        ]),
+        Line::default(),
+        footer,
+        buf,
+    );
 }
 
-/// A settled thread's row: its badge (lit only while selected), title, and
-/// the time since it settled, after a `✗` if it failed or is gone.
+/// A node's middle line: the project's folder in its badge colour, and its
+/// name.
+fn project_line(project: &Project) -> Line<'_> {
+    Line::from(vec![
+        span(GUIDE, GUTTER),
+        span(format!("{FOLDER} "), project_colour(&project.title)),
+        span(project.title.as_str(), FG_DARK),
+    ])
+}
+
+/// Where a draft will start: `local`, `new worktree` or `worktree`, then its
+/// branch when it has one.
+fn workspace(draft: &Draft) -> String {
+    let place = match draft.workspace {
+        DraftWorkspace::Local => "local",
+        DraftWorkspace::NewWorktree => "new worktree",
+        DraftWorkspace::Existing(_) => "worktree",
+    };
+    match &draft.branch {
+        Some(branch) => format!("{place} · {branch}"),
+        None => place.to_owned(),
+    }
+}
+
+/// The Settled shelf's folder, open or closed, and how many threads it holds.
+fn render_shelf_header(count: usize, open: bool, area: Rect, buf: &mut Buffer) {
+    let folder = if open { FOLDER_OPEN } else { FOLDER };
+    render_split(
+        Line::from(vec![
+            span(format!(" {folder} "), BLUE),
+            span("Settled", BLUE),
+        ]),
+        Line::from(span(count.to_string(), COMMENT)),
+        area,
+        buf,
+    );
+}
+
+/// A settled thread's row under the shelf's folder: its icon (a dim check
+/// unless it failed or is gone), title, and the time since it settled.
 fn render_settled(
-    project: &Project,
     thread: &Thread,
-    selected: bool,
+    ends_shelf: bool,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let title = Line::from(vec![
-        badge(&project.title, selected),
-        Span::raw(" "),
-        Span::styled(
-            thread.title.as_deref().unwrap_or("New thread"),
-            Style::new().fg(GRAY),
-        ),
-    ]);
-    let mark = match thread.status {
-        ThreadStatus::Failed | ThreadStatus::Gone => "✗ ",
-        _ => "",
+    let guide = if ends_shelf { LAST_GUIDE } else { GUIDE };
+    let (glyph, colour) = match thread.status {
+        ThreadStatus::Failed | ThreadStatus::Gone => {
+            let (glyph, _, colour) = status(thread, now);
+            (glyph, colour)
+        }
+        _ => (COMPLETED_ICON, DARK3),
     };
-    let settled = thread
-        .settled_at
-        .map(|at| ago_label(since(now, at)))
-        .unwrap_or_default();
-    let when = Line::from(vec![
-        Span::styled(mark, Style::new().fg(RED)),
-        Span::styled(settled, Style::new().fg(DARK_GRAY)),
-    ]);
-    render_split(title, when, area, buf);
+    render_split(
+        Line::from(vec![
+            span(guide, GUTTER),
+            span(format!("{glyph} "), colour),
+            span(title(thread), COMMENT),
+        ]),
+        Line::from(span(when(thread, now), DARK3)),
+        area,
+        buf,
+    );
 }
 
-/// The Settled shelf header's text: `▸ Settled (N)` closed, `▾ Settled` open.
+/// A thread's status as its icon, its short word (none while idle), and
+/// their colour.
+fn status(thread: &Thread, now: SystemTime) -> (&'static str, Option<&'static str>, Color) {
+    match thread.status {
+        ThreadStatus::NeedsApproval => (APPROVAL_ICON, Some("approval"), YELLOW),
+        ThreadStatus::NeedsInput => (INPUT_ICON, Some("input"), MAGENTA),
+        ThreadStatus::Working => (spinner(thread, now), Some("working"), BLUE),
+        ThreadStatus::Failed => (FAILED_ICON, Some("failed"), RED),
+        ThreadStatus::Gone => (GONE_ICON, Some("gone"), RED),
+        ThreadStatus::Idle if thread.unseen => (COMPLETED_ICON, Some("done"), GREEN),
+        ThreadStatus::Stopped => (STOPPED_ICON, Some("stopped"), COMMENT),
+        ThreadStatus::Idle | ThreadStatus::Unknown => (IDLE_ICON, None, DARK3),
+    }
+}
+
+/// The working spinner's frame: one a second since the turn started, so it
+/// moves with the once-a-second redraw while a thread works.
+fn spinner(thread: &Thread, now: SystemTime) -> &'static str {
+    let secs = thread
+        .turn_started_at
+        .map(|at| since(now, at).as_secs())
+        .unwrap_or_default();
+    SPINNER
+        .get(secs as usize % SPINNER.len())
+        .copied()
+        .unwrap_or_default()
+}
+
+/// How long the turn has run while working, else how long ago the last turn
+/// ended, or the thread settled.
+fn when(thread: &Thread, now: SystemTime) -> String {
+    match (thread.status, thread.turn_started_at) {
+        (ThreadStatus::Working, Some(at)) => working_label(since(now, at)),
+        _ => ago_label(since(
+            now,
+            thread.settled_at.unwrap_or(thread.last_activity_at),
+        )),
+    }
+}
+
+fn title(thread: &Thread) -> &str {
+    thread.title.as_deref().unwrap_or("New thread")
+}
+
+fn span<'a, T>(text: T, fg: Color) -> Span<'a>
+where
+    T: Into<Cow<'a, str>>,
+{
+    Span::styled(text, Style::new().fg(fg))
+}
+
+/// The project's badge colour, lit.
+fn project_colour(name: &str) -> Color {
+    let (r, g, b) = BADGE.get(badge_colour(name)).copied().unwrap_or_default();
+    Color::Rgb(r, g, b)
+}
+
+/// The Settled shelf's label in the right side's hint: `▸ Settled (N)`
+/// closed, `▾ Settled` open.
 pub(crate) fn shelf_label(count: usize, open: bool) -> String {
     if open {
         "▾ Settled".to_owned()
@@ -293,30 +428,6 @@ pub(crate) fn render_split(left: Line<'_>, right: Line<'_>, area: Rect, buf: &mu
     .areas(area);
     left.render(left_area, buf);
     right.right_aligned().render(right_area, buf);
-}
-
-/// A card's status slot: what the thread is doing or waiting for, else how
-/// long ago orb saw its last turn end.
-fn status(thread: &Thread, now: SystemTime) -> Span<'static> {
-    let (text, colour) = match thread.status {
-        ThreadStatus::NeedsApproval => ("◐ Pending Approval".to_owned(), AMBER),
-        ThreadStatus::NeedsInput => ("? Awaiting Input".to_owned(), INDIGO),
-        ThreadStatus::Working => {
-            let elapsed = thread
-                .turn_started_at
-                .map(|started| since(now, started))
-                .unwrap_or_default();
-            (format!("● Working {}", working_label(elapsed)), SKY)
-        }
-        ThreadStatus::Failed => ("✗ Failed".to_owned(), RED),
-        ThreadStatus::Gone => ("✗ Gone".to_owned(), RED),
-        ThreadStatus::Idle if thread.unseen => ("✓ Completed".to_owned(), EMERALD),
-        ThreadStatus::Stopped => ("■ Stopped".to_owned(), GRAY),
-        ThreadStatus::Idle | ThreadStatus::Unknown => {
-            (ago_label(since(now, thread.last_activity_at)), GRAY)
-        }
-    };
-    Span::styled(text, Style::new().fg(colour))
 }
 
 /// How long before `now` `at` was; zero if the clock went backwards.
@@ -438,29 +549,83 @@ const BADGE: [(u8, u8, u8); 18] = [
     (0xf4, 0x72, 0xb6),
     (0xfb, 0x71, 0x85),
 ];
-/// A draft's `✎` (yellow-300).
-const DRAFT: Color = Color::Rgb(0xfd, 0xe0, 0x47);
-/// Pending Approval (amber-300).
-const AMBER: Color = Color::Rgb(0xfc, 0xd3, 0x4d);
-/// Awaiting Input (indigo-300).
-const INDIGO: Color = Color::Rgb(0xa5, 0xb4, 0xfc);
-/// Working (sky-300).
-const SKY: Color = Color::Rgb(0x7d, 0xd3, 0xfc);
-/// Completed (emerald-300).
-const EMERALD: Color = Color::Rgb(0x6e, 0xe7, 0xb7);
-/// Failed and gone (red-300).
-const RED: Color = Color::Rgb(0xfc, 0xa5, 0xa5);
-/// The project name, settled titles, the shelf header, and idle times.
+/// Neutral-400: labels in the draft form and the pickers.
 pub(crate) const GRAY: Color = Color::Rgb(0xa3, 0xa3, 0xa3);
-/// The branch and settled times.
+/// Neutral-500: dim text in the pickers.
 pub(crate) const DARK_GRAY: Color = Color::Rgb(0x73, 0x73, 0x73);
-/// The ✳ logo.
-const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
-/// Behind the selected row (tokyonight's highlight, lighter than the navy
-/// background).
+/// Behind a picker's selected row (tokyonight's highlight, lighter than the
+/// navy background).
 pub(crate) const SELECTED: Color = Color::Rgb(0x2f, 0x33, 0x4d);
-/// The selected card's outline (neutral-600).
+/// A picker's outline (neutral-600).
 pub(crate) const OUTLINE: Color = Color::Rgb(0x52, 0x52, 0x52);
+
+/// Behind the whole sidebar (tokyonight-moon's `bg_dark`), darker than the
+/// right side, so it needs no border.
+const BG_DARK: Color = Color::Rgb(0x1e, 0x20, 0x30);
+/// Behind the selected row's first line (`bg_visual`, the explorer's
+/// cursorline).
+const VISUAL: Color = Color::Rgb(0x2d, 0x3f, 0x76);
+/// The tree guides, and behind the lit shelf badge (`fg_gutter`).
+const GUTTER: Color = Color::Rgb(0x3b, 0x42, 0x61);
+/// Titles and the filtered project's name (`fg`).
+const FG: Color = Color::Rgb(0xc8, 0xd3, 0xf5);
+/// Project names (`fg_dark`).
+const FG_DARK: Color = Color::Rgb(0x82, 0x8b, 0xb8);
+/// Times, branches, the count, settled titles and the stopped icon
+/// (`comment`).
+const COMMENT: Color = Color::Rgb(0x63, 0x6d, 0xa6);
+/// The idle icon, `draft`, the unlit shelf badge and settled marks (`dark3`).
+const DARK3: Color = Color::Rgb(0x54, 0x5c, 0x7e);
+/// Working, the Settled shelf and the lit shelf badge (`blue`).
+const BLUE: Color = Color::Rgb(0x82, 0xaa, 0xff);
+/// The `>` prompt (`cyan`).
+const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
+/// A completed turn (`green`).
+const GREEN: Color = Color::Rgb(0xc3, 0xe8, 0x8d);
+/// Needing approval, and a draft's pencil (`yellow`).
+const YELLOW: Color = Color::Rgb(0xff, 0xc7, 0x77);
+/// The input box and the pin (`orange`).
+const ORANGE: Color = Color::Rgb(0xff, 0x96, 0x6c);
+/// Failed and gone (`red`).
+const RED: Color = Color::Rgb(0xff, 0x75, 0x7f);
+/// Needing input (`magenta`).
+const MAGENTA: Color = Color::Rgb(0xc0, 0x99, 0xff);
+/// The ✳ logo (Claude orange).
+const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
+
+/// Needing approval (Nerd Font `nf-fa-warning`).
+const APPROVAL_ICON: &str = "\u{f071}";
+/// Needing input (`nf-fa-question_circle`).
+const INPUT_ICON: &str = "\u{f059}";
+/// Failed (`nf-fa-times_circle`).
+const FAILED_ICON: &str = "\u{f057}";
+/// Gone (`nf-fa-ban`).
+const GONE_ICON: &str = "\u{f05e}";
+/// A completed turn, and a settled thread that didn't fail
+/// (`nf-fa-check_circle`).
+const COMPLETED_ICON: &str = "\u{f058}";
+/// Stopped (`nf-fa-stop`).
+const STOPPED_ICON: &str = "\u{f04d}";
+/// Idle, or a status orb doesn't know (`nf-fa-circle_o`).
+const IDLE_ICON: &str = "\u{f10c}";
+/// The working spinner's frames.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// A pinned thread (`nf-fa-thumb_tack`).
+const PIN: &str = "\u{f08d}";
+/// Before a branch (`nf-pl-branch`).
+const BRANCH: &str = "\u{e0a0}";
+/// A project, and the closed Settled shelf (`nf-fa-folder`).
+const FOLDER: &str = "\u{f07b}";
+/// The open Settled shelf (`nf-fa-folder_open`).
+const FOLDER_OPEN: &str = "\u{f07c}";
+/// A draft (`nf-fa-pencil`).
+const PENCIL: &str = "\u{f040}";
+/// Claude's logo, at the end of a thread's node.
+const CLAUDE_LOGO: &str = "✳";
+/// The tree guide before a node's middle line and a settled row.
+const GUIDE: &str = " ├╴";
+/// The tree guide before a node's last line and the last settled row.
+const LAST_GUIDE: &str = " └╴";
 
 #[cfg(test)]
 mod tests {
@@ -473,17 +638,20 @@ mod tests {
     use orb_domain::feat::sidebar::state::SidebarLayout;
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
+    use ratatui::style::Color;
 
     use super::{
-        DRAFT, OUTLINE, SELECTED, SKY, SidebarScroll, ago_label, badge_colour, monogram, render,
-        working_label,
+        APPROVAL_ICON, BG_DARK, BLUE, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, COMPLETED_ICON, CYAN,
+        DARK3, FAILED_ICON, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GUIDE, GUTTER, IDLE_ICON,
+        INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PENCIL, PIN, RED, STOPPED_ICON, SidebarScroll,
+        VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
     };
 
     fn at(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
 
-    /// An idle thread titled "Thread <id>" whose turn started at 866 s.
+    /// A thread titled "Thread <id>" whose turn started at 866 s.
     fn thread(id: i64, status: ThreadStatus) -> Thread {
         Thread {
             id: ThreadId(id),
@@ -509,17 +677,21 @@ mod tests {
         }
     }
 
+    fn project(id: i64, title: &str, threads: Vec<Thread>) -> Project {
+        Project {
+            id: ProjectId(id),
+            title: title.to_owned(),
+            root: format!("/Users/me/dev/{title}").into(),
+            created_at: SystemTime::UNIX_EPOCH,
+            removed: false,
+            draft: None,
+            threads,
+        }
+    }
+
     fn sessions(threads: Vec<Thread>) -> Sessions {
         Sessions {
-            projects: vec![Project {
-                id: ProjectId(1),
-                title: "orb".to_owned(),
-                root: "/Users/me/dev/orb".into(),
-                created_at: SystemTime::UNIX_EPOCH,
-                removed: false,
-                draft: None,
-                threads,
-            }],
+            projects: vec![project(1, "orb", threads)],
             ..Sessions::default()
         }
     }
@@ -541,17 +713,49 @@ mod tests {
         sessions
     }
 
-    /// Draws a 32-column sidebar `height` lines tall at `now`.
-    fn draw(sessions: &Sessions, now: SystemTime, height: u16) -> Buffer {
-        let mut buf = Buffer::empty(Rect::new(0, 0, 32, height));
-        render(
+    /// orb's thread 1 and web's thread 2, filtered to orb.
+    fn filtered() -> Sessions {
+        Sessions {
+            projects: vec![
+                project(1, "orb", vec![thread(1, ThreadStatus::Idle)]),
+                project(2, "web", vec![thread(2, ThreadStatus::Idle)]),
+            ],
+            filter: Some(ProjectId(1)),
+            ..Sessions::default()
+        }
+    }
+
+    /// `sessions` with `id`'s thread under the cursor.
+    fn select(sessions: Sessions, id: i64) -> Sessions {
+        Sessions {
+            cursor: Some(SidebarItem::Thread(ThreadId(id))),
+            ..sessions
+        }
+    }
+
+    /// Draws a `width`x`height` sidebar at `now`; returns the buffer and what
+    /// `render` returned.
+    fn render_sized(
+        sessions: &Sessions,
+        now: SystemTime,
+        width: u16,
+        height: u16,
+    ) -> (Buffer, Option<u16>, SidebarLayout) {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        let (selected_y, layout) = render(
             sessions,
             now,
             buf.area,
             &mut buf,
             &mut SidebarScroll::default(),
         );
-        buf
+        (buf, selected_y, layout)
+    }
+
+    /// Draws a 32-column sidebar `height` lines tall at `now`. The list's
+    /// first node takes lines 3 to 5, and its right edge is column 30.
+    fn draw(sessions: &Sessions, now: SystemTime, height: u16) -> Buffer {
+        render_sized(sessions, now, 32, height).0
     }
 
     /// The sidebar's lines, top to bottom.
@@ -567,6 +771,12 @@ mod tests {
 
     fn line(buf: &Buffer, y: usize) -> String {
         lines(buf).swap_remove(y)
+    }
+
+    /// The glyph at `(x, y)` and its colour.
+    fn glyph(buf: &Buffer, x: u16, y: u16) -> Option<(String, Color)> {
+        buf.cell((x, y))
+            .map(|cell| (cell.symbol().to_owned(), cell.fg))
     }
 
     #[rstest::rstest]
@@ -620,117 +830,94 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn working_card_shows_working_and_duration_in_sky() {
-        // Given a Working thread whose turn started 134 s before now.
-        let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
-
-        // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 5);
-
-        // Then its card's first line says how long it has been working.
-        let heading = line(&buf, 1);
-        assert!(heading.contains("● Working 2m"), "line was '{heading}'");
-        // And the status is sky.
-        let dot = (0..32).find_map(|x| buf.cell((x, 1)).filter(|cell| cell.symbol() == "●"));
-        assert_eq!(dot.map(|cell| cell.fg), Some(SKY), "the ● colour");
-    }
-
-    #[rstest::rstest]
-    fn thread_needing_approval_shows_pending_approval() {
-        // Given a thread waiting on a permission prompt.
-        let sessions = sessions(vec![thread(1, ThreadStatus::NeedsApproval)]);
-
-        // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(1000), 5), 1);
-
-        // Then its card says it's pending approval.
-        assert!(
-            heading.contains("◐ Pending Approval"),
-            "line was '{heading}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn idle_card_shows_time_since_last_activity() {
-        // Given an idle thread whose last turn ended 3 h before now.
+    fn sidebar_background_is_tokyonights_bg_dark() {
+        // Given one thread.
         let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
 
         // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(10_800), 5), 1);
+        let buf = draw(&sessions, at(1000), 10);
 
-        // Then its card shows the time since.
-        assert!(heading.contains(" 3h"), "line was '{heading}'");
-    }
-
-    #[rstest::rstest]
-    fn unseen_idle_card_shows_completed() {
-        // Given an idle thread whose turn ended while the user was elsewhere.
-        let sessions = sessions(vec![Thread {
-            unseen: true,
-            ..thread(1, ThreadStatus::Idle)
-        }]);
-
-        // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(1000), 5), 1);
-
-        // Then its card says the turn completed.
-        assert!(heading.contains("✓ Completed"), "line was '{heading}'");
-    }
-
-    #[rstest::rstest]
-    fn untitled_card_is_a_new_thread() {
-        // Given a thread without a title yet.
-        let sessions = sessions(vec![Thread {
-            title: None,
-            ..thread(1, ThreadStatus::Idle)
-        }]);
-
-        // When rendering the sidebar.
-        let title = line(&draw(&sessions, at(1000), 5), 2);
-
-        // Then its card says "New thread".
-        assert!(title.contains("New thread"), "line was '{title}'");
-    }
-
-    #[rstest::rstest]
-    fn card_third_line_shows_branch_and_claude_logo() {
-        // Given a thread on `main`.
-        let sessions = sessions(vec![Thread {
-            branch: Some("main".to_owned()),
-            ..thread(1, ThreadStatus::Idle)
-        }]);
-
-        // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 5);
-
-        // Then the card's third line starts with the branch.
-        let footer = line(&buf, 3);
-        assert!(footer.starts_with("  main"), "line was '{footer}'");
-        // And ends with ✳ before the outline's padding and column.
+        // Then the blank column on its right edge has the dark background.
         assert_eq!(
-            buf.cell((27, 3)).map(Cell::symbol),
-            Some("✳"),
-            "line was '{footer}'"
+            buf.cell((31, 4)).map(|cell| cell.bg),
+            Some(BG_DARK),
+            "the right edge's background"
         );
     }
 
     #[rstest::rstest]
-    fn pinned_card_shows_the_pin_marker() {
-        // Given a pinned thread.
-        let sessions = sessions(vec![Thread {
-            pinned_at: Some(at(5)),
-            ..thread(1, ThreadStatus::Idle)
-        }]);
+    fn input_box_is_titled_sessions() {
+        // Given an empty orb.
+        let sessions = Sessions::default();
 
         // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(1000), 5), 1);
+        let top = line(&draw(&sessions, at(1000), 5), 0);
 
-        // Then its project name carries the pin.
-        assert!(heading.contains("orb ⚑"), "line was '{heading}'");
+        // Then the box's top border carries the title and the shelf badge.
+        assert!(top.starts_with("╭ Sessions  s  ─"), "line was '{top}'");
     }
 
     #[rstest::rstest]
-    fn collapsed_shelf_header_counts_settled_threads() {
+    fn input_box_border_is_orange() {
+        // Given an empty orb.
+        let sessions = Sessions::default();
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 5);
+
+        // Then the box's corner is orange.
+        assert_eq!(
+            glyph(&buf, 0, 0),
+            Some(("╭".to_owned(), ORANGE)),
+            "the box's top-left corner"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::closed(false, (DARK3, BG_DARK))]
+    #[case::open(true, (BLUE, GUTTER))]
+    fn shelf_badge_lights_up_while_the_shelf_is_open(
+        #[case] shelf_open: bool,
+        #[case] expected: (Color, Color),
+    ) {
+        // Given the Settled shelf open or closed.
+        let sessions = Sessions {
+            shelf_open,
+            ..sessions(vec![settled(1, 10)])
+        };
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then the badge's `s` has the shelf's colours.
+        let badge = buf
+            .cell((12, 0))
+            .map(|cell| (cell.symbol().to_owned(), (cell.fg, cell.bg)));
+        assert_eq!(
+            badge,
+            Some(("s".to_owned(), expected)),
+            "the badge with the shelf open: {shelf_open}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn prompt_is_a_cyan_chevron() {
+        // Given an empty orb.
+        let sessions = Sessions::default();
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 5);
+
+        // Then the box's line starts with a cyan `>`.
+        assert_eq!(
+            glyph(&buf, 1, 1),
+            Some((">".to_owned(), CYAN)),
+            "the prompt"
+        );
+    }
+
+    #[rstest::rstest]
+    fn count_reads_listed_out_of_every_thread() {
         // Given one active and two settled threads, with the shelf closed.
         let sessions = sessions(vec![
             thread(1, ThreadStatus::Idle),
@@ -739,116 +926,553 @@ mod tests {
         ]);
 
         // When rendering the sidebar.
-        let lines = lines(&draw(&sessions, at(1000), 10));
+        let prompt = line(&draw(&sessions, at(1000), 10), 1);
 
-        // Then the header counts both settled threads.
+        // Then the count is the one listed thread out of three.
+        assert!(prompt.trim_end().ends_with("1/3│"), "line was '{prompt}'");
+    }
+
+    #[rstest::rstest]
+    fn filtered_prompt_shows_the_project() {
+        // Given the sidebar filtered to orb.
+        let sessions = filtered();
+
+        // When rendering the sidebar.
+        let prompt = line(&draw(&sessions, at(1000), 10), 1);
+
+        // Then the prompt is followed by orb's folder and name.
         assert!(
-            lines.iter().any(|line| line.contains("▸ Settled (2)")),
-            "lines were {lines:#?}"
+            prompt.starts_with(&format!("│> {FOLDER} orb ")),
+            "line was '{prompt}'"
         );
     }
 
     #[rstest::rstest]
-    fn open_shelf_draws_slim_rows() {
-        // Given one active and two settled threads, with the shelf open.
-        let sessions = Sessions {
-            shelf_open: true,
-            ..sessions(vec![
-                thread(1, ThreadStatus::Idle),
-                settled(2, 10),
-                settled(3, 20),
-            ])
-        };
+    fn filtered_count_is_out_of_every_projects_threads() {
+        // Given orb's and web's threads, filtered to orb.
+        let sessions = filtered();
 
         // When rendering the sidebar.
-        let lines = lines(&draw(&sessions, at(1000), 10));
+        let prompt = line(&draw(&sessions, at(1000), 10), 1);
 
-        // Then the header is followed by one line per settled thread, newest
-        // settle first.
-        let after: Vec<&String> = lines
-            .iter()
-            .skip_while(|line| !line.contains("▾ Settled"))
-            .skip(1)
-            .collect();
-        assert!(
-            matches!(
-                after.as_slice(),
-                [first, second] if first.contains("Thread 3") && second.contains("Thread 2")
-            ),
-            "lines were {lines:#?}"
-        );
+        // Then the count is orb's thread out of both.
+        assert!(prompt.trim_end().ends_with("1/2│"), "line was '{prompt}'");
     }
 
     #[rstest::rstest]
-    fn selected_card_has_the_selection_background() {
-        // Given a selected thread.
-        let sessions = Sessions {
-            cursor: Some(SidebarItem::Thread(ThreadId(1))),
-            ..sessions(vec![thread(1, ThreadStatus::Idle)])
-        };
-
-        // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 5);
-
-        // Then all three of its lines have the selection background.
-        let backgrounds: Vec<_> = (1..4)
-            .map(|y| buf.cell((1, y)).map(|cell| cell.bg))
-            .collect();
-        assert_eq!(
-            backgrounds,
-            vec![Some(SELECTED); 3],
-            "the card's left padding"
-        );
-    }
-
-    #[rstest::rstest]
-    fn selected_card_has_a_rounded_outline() {
-        // Given a selected thread.
-        let sessions = Sessions {
-            cursor: Some(SidebarItem::Thread(ThreadId(1))),
-            ..sessions(vec![thread(1, ThreadStatus::Idle)])
-        };
-
-        // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 5);
-
-        // Then its card sits in a rounded outline in the outline colour.
-        let corners: Vec<_> = [(0, 0), (29, 0), (0, 4), (29, 4)]
-            .into_iter()
-            .map(|at| buf.cell(at).map(|cell| (cell.symbol().to_owned(), cell.fg)))
-            .collect();
-        assert_eq!(
-            corners,
-            ["╭", "╮", "╰", "╯"]
-                .map(|corner| Some((corner.to_owned(), OUTLINE)))
-                .to_vec(),
-            "lines were {:#?}",
-            lines(&buf)
-        );
-    }
-
-    #[rstest::rstest]
-    fn unselected_card_has_no_outline() {
-        // Given a thread that isn't selected.
+    fn node_first_line_is_the_status_icon_and_title() {
+        // Given an idle thread.
         let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
 
         // When rendering the sidebar.
+        let heading = line(&draw(&sessions, at(1000), 8), 3);
+
+        // Then its first line is the icon, then the title.
+        assert!(
+            heading.starts_with(&format!(" {IDLE_ICON} Thread 1 ")),
+            "line was '{heading}'"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::approval(ThreadStatus::NeedsApproval, false, APPROVAL_ICON, YELLOW)]
+    #[case::input(ThreadStatus::NeedsInput, false, INPUT_ICON, MAGENTA)]
+    #[case::failed(ThreadStatus::Failed, false, FAILED_ICON, RED)]
+    #[case::gone(ThreadStatus::Gone, false, GONE_ICON, RED)]
+    #[case::completed(ThreadStatus::Idle, true, COMPLETED_ICON, GREEN)]
+    #[case::stopped(ThreadStatus::Stopped, false, STOPPED_ICON, COMMENT)]
+    #[case::idle(ThreadStatus::Idle, false, IDLE_ICON, DARK3)]
+    #[case::unknown(ThreadStatus::Unknown, false, IDLE_ICON, DARK3)]
+    fn status_icon_shows_the_threads_status(
+        #[case] status: ThreadStatus,
+        #[case] unseen: bool,
+        #[case] icon: &str,
+        #[case] colour: Color,
+    ) {
+        // Given a thread in `status`.
+        let sessions = sessions(vec![Thread {
+            unseen,
+            ..thread(1, status)
+        }]);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then its icon is the status's, in the status's colour.
+        assert_eq!(
+            glyph(&buf, 1, 3),
+            Some((icon.to_owned(), colour)),
+            "the icon for {status:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn working_icon_is_the_spinner_frame_for_its_elapsed_seconds() {
+        // Given a Working thread whose turn started 134 s before now.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then its icon is the spinner's fifth frame, in blue.
+        assert_eq!(
+            glyph(&buf, 1, 3),
+            Some(("⠼".to_owned(), BLUE)),
+            "the spinner 134 s in"
+        );
+    }
+
+    #[rstest::rstest]
+    fn working_thread_shows_its_elapsed_time() {
+        // Given a Working thread whose turn started 134 s before now.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
+
+        // When rendering the sidebar.
+        let heading = line(&draw(&sessions, at(1000), 8), 3);
+
+        // Then its first line ends with how long it has been working.
+        assert!(heading.trim_end().ends_with(" 2m"), "line was '{heading}'");
+    }
+
+    #[rstest::rstest]
+    fn idle_thread_shows_time_since_last_activity() {
+        // Given an idle thread whose last turn ended 3 h before now.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+
+        // When rendering the sidebar.
+        let heading = line(&draw(&sessions, at(10_800), 8), 3);
+
+        // Then its first line ends with the time since.
+        assert!(heading.trim_end().ends_with(" 3h"), "line was '{heading}'");
+    }
+
+    #[rstest::rstest]
+    fn untitled_thread_is_a_new_thread() {
+        // Given a thread without a title yet.
+        let sessions = sessions(vec![Thread {
+            title: None,
+            ..thread(1, ThreadStatus::Idle)
+        }]);
+
+        // When rendering the sidebar.
+        let heading = line(&draw(&sessions, at(1000), 8), 3);
+
+        // Then it's called "New thread".
+        assert!(heading.contains(" New thread "), "line was '{heading}'");
+    }
+
+    #[rstest::rstest]
+    fn pinned_thread_shows_an_orange_pin() {
+        // Given a pinned thread.
+        let sessions = sessions(vec![Thread {
+            pinned_at: Some(at(5)),
+            ..thread(1, ThreadStatus::Idle)
+        }]);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then its first line carries the pin, in orange.
+        let pin = (0..32)
+            .filter_map(|x| glyph(&buf, x, 3))
+            .find(|(symbol, _)| symbol == PIN);
+        assert_eq!(pin, Some((PIN.to_owned(), ORANGE)), "the pin");
+    }
+
+    #[rstest::rstest]
+    fn node_second_line_shows_the_project() {
+        // Given an idle thread in orb.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+
+        // When rendering the sidebar.
+        let place = line(&draw(&sessions, at(1000), 8), 4);
+
+        // Then its second line is a guide, orb's folder and name, and no
+        // status word.
+        assert_eq!(
+            place.trim_end(),
+            format!(" ├╴{FOLDER} orb"),
+            "the node's second line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn project_folder_takes_the_badge_colour() {
+        // Given a thread in orb, whose badge is rose-400.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then the folder on its second line is rose.
+        assert_eq!(
+            glyph(&buf, 3, 4),
+            Some((FOLDER.to_owned(), Color::Rgb(0xfb, 0x71, 0x85))),
+            "orb's folder"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(ThreadStatus::NeedsApproval, false, "approval")]
+    #[case(ThreadStatus::NeedsInput, false, "input")]
+    #[case(ThreadStatus::Working, false, "working")]
+    #[case(ThreadStatus::Failed, false, "failed")]
+    #[case(ThreadStatus::Gone, false, "gone")]
+    #[case(ThreadStatus::Idle, true, "done")]
+    #[case(ThreadStatus::Stopped, false, "stopped")]
+    fn node_second_line_ends_with_the_status_word(
+        #[case] status: ThreadStatus,
+        #[case] unseen: bool,
+        #[case] word: &str,
+    ) {
+        // Given a thread in `status`.
+        let sessions = sessions(vec![Thread {
+            unseen,
+            ..thread(1, status)
+        }]);
+
+        // When rendering the sidebar.
+        let place = line(&draw(&sessions, at(1000), 8), 4);
+
+        // Then its second line ends with the status's word.
+        assert!(
+            place.trim_end().ends_with(&format!(" {word}")),
+            "line was '{place}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn node_third_line_shows_the_branch() {
+        // Given a thread on `main`.
+        let sessions = sessions(vec![Thread {
+            branch: Some("main".to_owned()),
+            ..thread(1, ThreadStatus::Idle)
+        }]);
+
+        // When rendering the sidebar.
+        let footer = line(&draw(&sessions, at(1000), 8), 5);
+
+        // Then its third line is the last guide and the branch.
+        assert!(
+            footer.starts_with(&format!(" └╴{BRANCH} main ")),
+            "line was '{footer}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn node_third_line_ends_with_the_claude_logo() {
+        // Given a thread.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then its third line ends with ✳ in Claude orange, before the blank
+        // column.
+        assert_eq!(
+            glyph(&buf, 30, 5),
+            Some((CLAUDE_LOGO.to_owned(), CLAUDE)),
+            "line was '{}'",
+            line(&buf, 5)
+        );
+    }
+
+    #[rstest::rstest]
+    fn draft_first_line_is_new_thread_marked_draft() {
+        // Given a draft in orb.
+        let sessions = draft(DraftWorkspace::Local, Some("dev"));
+
+        // When rendering the sidebar.
+        let heading = line(&draw(&sessions, at(1000), 8), 3);
+
+        // Then its first line is the pencil and `New thread`, marked `draft`.
+        assert!(
+            heading.starts_with(&format!(" {PENCIL} New thread "))
+                && heading.trim_end().ends_with(" draft"),
+            "line was '{heading}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn draft_pencil_is_yellow() {
+        // Given a draft in orb.
+        let sessions = draft(DraftWorkspace::Local, Some("dev"));
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then the pencil is yellow.
+        assert_eq!(
+            glyph(&buf, 1, 3),
+            Some((PENCIL.to_owned(), YELLOW)),
+            "the draft's pencil"
+        );
+    }
+
+    #[rstest::rstest]
+    fn draft_second_line_shows_the_project() {
+        // Given a draft in orb.
+        let sessions = draft(DraftWorkspace::Local, Some("dev"));
+
+        // When rendering the sidebar.
+        let place = line(&draw(&sessions, at(1000), 8), 4);
+
+        // Then its second line is a guide and orb's folder and name.
+        assert_eq!(
+            place.trim_end(),
+            format!(" ├╴{FOLDER} orb"),
+            "the draft's second line"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(DraftWorkspace::Local, Some("dev"), "local · dev")]
+    #[case(DraftWorkspace::NewWorktree, None, "new worktree")]
+    #[case(
+        DraftWorkspace::Existing("/Users/me/.orb/worktrees/orb/orb-1a2b".into()),
+        Some("dev"),
+        "worktree · dev"
+    )]
+    fn draft_third_line_shows_its_workspace(
+        #[case] workspace: DraftWorkspace,
+        #[case] branch: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        // Given a draft in `workspace` on `branch`.
+        let sessions = draft(workspace, branch);
+
+        // When rendering the sidebar.
+        let footer = line(&draw(&sessions, at(1000), 8), 5);
+
+        // Then its third line is the last guide, the branch glyph and where
+        // it will start.
+        assert_eq!(
+            footer.trim_end(),
+            format!(" └╴{BRANCH} {expected}"),
+            "the draft's third line"
+        );
+    }
+
+    /// The line naming the Settled shelf.
+    fn shelf_line(buf: &Buffer) -> String {
+        lines(buf)
+            .into_iter()
+            .find(|line| line.contains(" Settled"))
+            .unwrap_or_default()
+    }
+
+    #[rstest::rstest]
+    #[case::closed(false, FOLDER)]
+    #[case::open(true, FOLDER_OPEN)]
+    fn shelf_header_is_a_folder_open_while_the_shelf_is(
+        #[case] shelf_open: bool,
+        #[case] folder: &str,
+    ) {
+        // Given a settled thread, with the shelf open or closed.
+        let sessions = Sessions {
+            shelf_open,
+            ..sessions(vec![settled(1, 10)])
+        };
+
+        // When rendering the sidebar.
+        let header = shelf_line(&draw(&sessions, at(1000), 8));
+
+        // Then the header is the folder and `Settled`.
+        assert!(
+            header.starts_with(&format!(" {folder} Settled ")),
+            "line was '{header}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn shelf_header_counts_settled_threads() {
+        // Given one active and two settled threads, with the shelf closed.
+        let sessions = sessions(vec![
+            thread(1, ThreadStatus::Idle),
+            settled(2, 10),
+            settled(3, 20),
+        ]);
+
+        // When rendering the sidebar.
+        let header = shelf_line(&draw(&sessions, at(1000), 10));
+
+        // Then the header counts both settled threads.
+        assert!(header.trim_end().ends_with(" 2"), "line was '{header}'");
+    }
+
+    #[rstest::rstest]
+    fn short_list_keeps_the_shelf_header_on_the_bottom_line() {
+        // Given one active and one settled thread on a 10-line sidebar.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Idle), settled(2, 10)]);
+
+        // When rendering the sidebar.
+        let bottom = line(&draw(&sessions, at(1000), 10), 9);
+
+        // Then the shelf header is on the last line.
+        assert!(bottom.contains(" Settled "), "line was '{bottom}'");
+    }
+
+    /// orb's two settled threads, 2 settled at 10 s and 3 at 20 s, with the
+    /// shelf open.
+    fn open_shelf() -> Sessions {
+        Sessions {
+            shelf_open: true,
+            ..sessions(vec![settled(2, 10), settled(3, 20)])
+        }
+    }
+
+    /// The lines after the shelf header.
+    fn settled_lines(buf: &Buffer) -> Vec<String> {
+        lines(buf)
+            .into_iter()
+            .skip_while(|line| !line.contains(" Settled "))
+            .skip(1)
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn open_shelf_lists_settled_threads_newest_first() {
+        // Given two settled threads, with the shelf open.
+        let sessions = open_shelf();
+
+        // When rendering the sidebar.
+        let settled = settled_lines(&draw(&sessions, at(1000), 6));
+
+        // Then the header is followed by one line per settled thread, newest
+        // settle first.
+        assert!(
+            matches!(
+                settled.as_slice(),
+                [first, second] if first.contains("Thread 3") && second.contains("Thread 2")
+            ),
+            "lines were {settled:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settled_rows_hang_off_the_shelf_on_tree_guides() {
+        // Given two settled threads, with the shelf open.
+        let sessions = open_shelf();
+
+        // When rendering the sidebar.
+        let settled = settled_lines(&draw(&sessions, at(1000), 6));
+
+        // Then the first row's guide branches and the last one's ends.
+        let guides: Vec<_> = settled
+            .iter()
+            .map(|line| {
+                [GUIDE, LAST_GUIDE]
+                    .into_iter()
+                    .find(|guide| line.starts_with(guide))
+            })
+            .collect();
+        assert_eq!(
+            guides,
+            [Some(GUIDE), Some(LAST_GUIDE)],
+            "lines were {settled:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settled_row_ends_with_the_time_since_it_settled() {
+        // Given a thread settled 5 minutes before now, with the shelf open.
+        let sessions = Sessions {
+            shelf_open: true,
+            ..sessions(vec![settled(2, 700)])
+        };
+
+        // When rendering the sidebar.
+        let settled = settled_lines(&draw(&sessions, at(1000), 5));
+
+        // Then its row ends with the time since.
+        assert!(
+            settled
+                .first()
+                .is_some_and(|row| row.trim_end().ends_with(" 5m")),
+            "lines were {settled:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::failed(ThreadStatus::Failed, FAILED_ICON, RED)]
+    #[case::gone(ThreadStatus::Gone, GONE_ICON, RED)]
+    #[case::stopped(ThreadStatus::Stopped, COMPLETED_ICON, DARK3)]
+    #[case::idle(ThreadStatus::Idle, COMPLETED_ICON, DARK3)]
+    fn settled_row_icon_marks_only_failures(
+        #[case] status: ThreadStatus,
+        #[case] icon: &str,
+        #[case] colour: Color,
+    ) {
+        // Given a thread settled in `status`, with the shelf open.
+        let sessions = Sessions {
+            shelf_open: true,
+            ..sessions(vec![Thread {
+                settled_at: Some(at(10)),
+                ..thread(1, status)
+            }])
+        };
+
+        // When rendering a 5-line sidebar, its row on the last line.
         let buf = draw(&sessions, at(1000), 5);
 
-        // Then the lines around its card are blank.
-        let around = [line(&buf, 0), line(&buf, 4)];
-        assert!(
-            around
-                .iter()
-                .all(|line| line.trim_end_matches('│').trim().is_empty()),
-            "lines were {:#?}",
-            lines(&buf)
+        // Then its icon follows the guide.
+        assert_eq!(
+            glyph(&buf, 3, 4),
+            Some((icon.to_owned(), colour)),
+            "the settled icon for {status:?}"
         );
+    }
+
+    #[rstest::rstest]
+    fn selected_node_first_line_has_the_cursorline() {
+        // Given a selected thread.
+        let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then its first line has the selection background across the list.
+        let backgrounds: Vec<_> = (0..31)
+            .map(|x| buf.cell((x, 3)).map(|cell| cell.bg))
+            .collect();
+        assert_eq!(backgrounds, vec![Some(VISUAL); 31], "the node's first line");
+    }
+
+    #[rstest::rstest]
+    fn selected_node_other_lines_keep_the_sidebar_background() {
+        // Given a selected thread.
+        let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then its second and third lines keep the dark background.
+        let backgrounds: Vec<_> = [4, 5]
+            .into_iter()
+            .map(|y| buf.cell((0, y)).map(|cell| cell.bg))
+            .collect();
+        assert_eq!(
+            backgrounds,
+            vec![Some(BG_DARK); 2],
+            "the node's other lines"
+        );
+    }
+
+    #[rstest::rstest]
+    fn render_returns_the_selected_nodes_first_line() {
+        // Given a selected thread.
+        let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+
+        // When rendering a 10-line sidebar.
+        let (_, selected_y, _) = render_sized(&sessions, at(1000), 32, 10);
+
+        // Then it reports the line under the input box.
+        assert_eq!(selected_y, Some(3), "the selected node's first line");
     }
 
     #[rstest::rstest]
     fn render_reports_the_list_height_and_each_rows_height() {
-        // Given two cards and a collapsed shelf.
+        // Given two threads and a collapsed shelf.
         let sessions = sessions(vec![
             thread(1, ThreadStatus::Idle),
             thread(2, ThreadStatus::Idle),
@@ -856,172 +1480,75 @@ mod tests {
         ]);
 
         // When rendering a 10-line sidebar.
-        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
-        let (_, layout) = render(
-            &sessions,
-            at(1000),
-            buf.area,
-            &mut buf,
-            &mut SidebarScroll::default(),
-        );
+        let (_, _, layout) = render_sized(&sessions, at(1000), 32, 10);
 
-        // Then it reports the 10 lines and each row's height.
+        // Then it reports the 7 lines under the input box and each row's
+        // height.
         assert_eq!(
             layout,
             SidebarLayout {
-                rows: 10,
-                heights: vec![4, 4, 1],
+                rows: 7,
+                heights: vec![3, 3, 1],
             },
             "the layout should be the list height and one height per row"
         );
     }
 
     #[rstest::rstest]
-    fn sidebar_scrolls_to_show_the_selected_card() {
-        // Given three cards on a five-line sidebar, with the last one selected.
-        let sessions = Sessions {
-            cursor: Some(SidebarItem::Thread(ThreadId(1))),
-            ..sessions(vec![
+    fn sidebar_scrolls_to_show_the_whole_selected_node() {
+        // Given three threads on an 8-line sidebar, with the last one (thread
+        // 1) selected.
+        let sessions = select(
+            sessions(vec![
                 thread(1, ThreadStatus::Idle),
                 thread(2, ThreadStatus::Idle),
                 thread(3, ThreadStatus::Idle),
-            ])
+            ]),
+            1,
+        );
+
+        // When rendering the sidebar.
+        let (_, selected_y, _) = render_sized(&sessions, at(1000), 32, 8);
+
+        // Then its node fills the last three lines.
+        assert_eq!(selected_y, Some(5), "the selected node's first line");
+    }
+
+    #[rstest::rstest]
+    #[case(24, 2)]
+    #[case(2, 8)]
+    #[case(80, 3)]
+    #[case(0, 0)]
+    fn sidebar_draws_at_any_size(#[case] width: u16, #[case] height: u16) {
+        // Given a draft, a pinned thread, an active one and an open shelf,
+        // filtered to orb, with the settled thread selected.
+        let sessions = {
+            let mut sessions = draft(DraftWorkspace::NewWorktree, Some("main"));
+            if let Some(project) = sessions.projects.first_mut() {
+                project.threads = vec![
+                    Thread {
+                        pinned_at: Some(at(5)),
+                        ..thread(1, ThreadStatus::Working)
+                    },
+                    thread(2, ThreadStatus::NeedsApproval),
+                    settled(3, 10),
+                ];
+            }
+            Sessions {
+                shelf_open: true,
+                filter: Some(ProjectId(1)),
+                ..select(sessions, 3)
+            }
         };
 
-        // When rendering the sidebar.
-        let lines = lines(&draw(&sessions, at(1000), 5));
+        // When rendering it at `width`x`height`.
+        let (_, _, layout) = render_sized(&sessions, at(1000), width, height);
 
-        // Then the selected card's title is on screen.
-        assert!(
-            lines.iter().any(|line| line.contains("Thread 1")),
-            "lines were {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn draft_card_heading_shows_the_pencil_and_project() {
-        // Given a draft in orb.
-        let sessions = draft(DraftWorkspace::Local, Some("dev"));
-
-        // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(1000), 5), 1);
-
-        // Then its first line is the pencil, the badge and the project.
-        assert!(heading.starts_with("  ✎ OB orb"), "line was '{heading}'");
-    }
-
-    #[rstest::rstest]
-    fn draft_card_pencil_is_yellow() {
-        // Given a draft in orb.
-        let sessions = draft(DraftWorkspace::Local, Some("dev"));
-
-        // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 5);
-
-        // Then the pencil is drawn in the draft colour.
+        // Then the list takes what the input box leaves.
         assert_eq!(
-            buf.cell((2, 1))
-                .map(|cell| (cell.symbol().to_owned(), cell.fg)),
-            Some(("✎".to_owned(), DRAFT)),
-            "the card's first cell"
+            layout.rows,
+            height.saturating_sub(3),
+            "the list's height at {width}x{height}"
         );
-    }
-
-    #[rstest::rstest]
-    fn draft_card_title_is_new_thread() {
-        // Given a draft in orb.
-        let sessions = draft(DraftWorkspace::Local, Some("dev"));
-
-        // When rendering the sidebar.
-        let title = line(&draw(&sessions, at(1000), 5), 2);
-
-        // Then its second line says "New thread".
-        assert!(title.starts_with("  New thread"), "line was '{title}'");
-    }
-
-    #[rstest::rstest]
-    #[case(DraftWorkspace::Local)]
-    #[case(DraftWorkspace::NewWorktree)]
-    #[case(DraftWorkspace::Existing("/Users/me/.orb/worktrees/orb/orb-1a2b".into()))]
-    fn draft_card_third_line_is_empty(#[case] workspace: DraftWorkspace) {
-        // Given a draft in `workspace` on a known branch.
-        let sessions = draft(workspace, Some("dev"));
-
-        // When rendering the sidebar.
-        let footer = line(&draw(&sessions, at(1000), 5), 3);
-
-        // Then its third line shows neither the workspace nor the branch.
-        assert_eq!(
-            footer.trim_end_matches('│').trim(),
-            "",
-            "the draft card's third line"
-        );
-    }
-
-    /// orb holding `threads`, filtered to orb, with thread 1 selected.
-    fn filtered(threads: Vec<Thread>) -> Sessions {
-        Sessions {
-            filter: Some(ProjectId(1)),
-            cursor: Some(SidebarItem::Thread(ThreadId(1))),
-            ..sessions(threads)
-        }
-    }
-
-    #[rstest::rstest]
-    fn filtered_sidebar_names_the_project_on_its_top_line() {
-        // Given the sidebar filtered to orb.
-        let sessions = filtered(vec![thread(1, ThreadStatus::Idle)]);
-
-        // When rendering it.
-        let buf = draw(&sessions, at(1000), 10);
-
-        // Then the top line is orb's badge and name.
-        assert_eq!(
-            line(&buf, 0).trim_end_matches('│').trim(),
-            "OB orb",
-            "the header should name the filtered project"
-        );
-    }
-
-    #[rstest::rstest]
-    fn filtered_sidebar_selects_below_the_header() {
-        // Given the sidebar filtered to orb, with its one card selected.
-        let sessions = filtered(vec![thread(1, ThreadStatus::Idle)]);
-
-        // When rendering a 10-line sidebar.
-        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
-        let (selected_y, _) = render(
-            &sessions,
-            at(1000),
-            buf.area,
-            &mut buf,
-            &mut SidebarScroll::default(),
-        );
-
-        // Then the card's outline starts on the line under the header.
-        assert_eq!(
-            selected_y,
-            Some(1),
-            "the list should start below the header"
-        );
-    }
-
-    #[rstest::rstest]
-    fn filtered_sidebar_reports_the_list_height_without_the_header() {
-        // Given the sidebar filtered to orb.
-        let sessions = filtered(vec![thread(1, ThreadStatus::Idle)]);
-
-        // When rendering a 10-line sidebar.
-        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
-        let (_, layout) = render(
-            &sessions,
-            at(1000),
-            buf.area,
-            &mut buf,
-            &mut SidebarScroll::default(),
-        );
-
-        // Then the list is 9 lines tall.
-        assert_eq!(layout.rows, 9, "the header's line isn't the list's");
     }
 }
