@@ -549,51 +549,57 @@ const BADGE: [(u8, u8, u8); 18] = [
     (0xf4, 0x72, 0xb6),
     (0xfb, 0x71, 0x85),
 ];
-/// Neutral-400: labels in the draft form and the pickers.
+/// Neutral-400: labels in the draft form.
 pub(crate) const GRAY: Color = Color::Rgb(0xa3, 0xa3, 0xa3);
-/// Neutral-500: dim text in the pickers.
-pub(crate) const DARK_GRAY: Color = Color::Rgb(0x73, 0x73, 0x73);
-/// Behind a picker's selected row (tokyonight's highlight, lighter than the
-/// navy background).
-pub(crate) const SELECTED: Color = Color::Rgb(0x2f, 0x33, 0x4d);
-/// A picker's outline (neutral-600).
-pub(crate) const OUTLINE: Color = Color::Rgb(0x52, 0x52, 0x52);
 
-/// Behind the whole sidebar (tokyonight-moon's `bg_dark`), darker than the
-/// right side, so it needs no border.
-const BG_DARK: Color = Color::Rgb(0x1e, 0x20, 0x30);
-/// Behind the selected row's first line (`bg_visual`, the explorer's
-/// cursorline).
-const VISUAL: Color = Color::Rgb(0x2d, 0x3f, 0x76);
+/// Behind the whole sidebar and the picker (tokyonight-moon's `bg_dark`),
+/// darker than the right side, so the sidebar needs no border.
+pub(crate) const BG_DARK: Color = Color::Rgb(0x1e, 0x20, 0x30);
+/// Behind the selected row's first line, and the picker's selected row
+/// (`bg_visual`, the explorer's cursorline).
+pub(crate) const VISUAL: Color = Color::Rgb(0x2d, 0x3f, 0x76);
 /// The tree guides, and behind the lit shelf badge (`fg_gutter`).
 const GUTTER: Color = Color::Rgb(0x3b, 0x42, 0x61);
-/// Titles, the filtered project's name, and the rename box's text (`fg`).
+/// Titles, the filtered project's name, the picker's input and rows, and
+/// the rename box's text (`fg`).
 pub(crate) const FG: Color = Color::Rgb(0xc8, 0xd3, 0xf5);
-/// Project names (`fg_dark`).
-const FG_DARK: Color = Color::Rgb(0x82, 0x8b, 0xb8);
-/// Times, branches, the count, settled titles and the stopped icon
-/// (`comment`).
-const COMMENT: Color = Color::Rgb(0x63, 0x6d, 0xa6);
-/// The idle icon, `draft`, the unlit shelf badge and settled marks (`dark3`).
-const DARK3: Color = Color::Rgb(0x54, 0x5c, 0x7e);
-/// Working, the Settled shelf and the lit shelf badge (`blue`).
-const BLUE: Color = Color::Rgb(0x82, 0xaa, 0xff);
-/// The `>` prompt (`cyan`).
-const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
-/// A completed turn (`green`).
-const GREEN: Color = Color::Rgb(0xc3, 0xe8, 0x8d);
-/// Needing approval, a draft's pencil, and the rename box (`yellow`).
+/// Project names, and the keys in the picker's hints (`fg_dark`).
+pub(crate) const FG_DARK: Color = Color::Rgb(0x82, 0x8b, 0xb8);
+/// Times, branches, the count, settled titles and the stopped icon; the
+/// picker's hint labels, headings and empty-list text (`comment`).
+pub(crate) const COMMENT: Color = Color::Rgb(0x63, 0x6d, 0xa6);
+/// The idle icon, `draft`, the unlit shelf badge and settled marks; the
+/// picker's disabled branches and hint separators (`dark3`).
+pub(crate) const DARK3: Color = Color::Rgb(0x54, 0x5c, 0x7e);
+/// Working, the Settled shelf and the lit shelf badge; the picker's title and
+/// folders (`blue`).
+pub(crate) const BLUE: Color = Color::Rgb(0x82, 0xaa, 0xff);
+/// The `>` prompt, here and in the picker, and the picker's `default`
+/// branch badge (`cyan`).
+pub(crate) const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
+/// A completed turn; the picker's current branch and new worktree
+/// (`green`).
+pub(crate) const GREEN: Color = Color::Rgb(0xc3, 0xe8, 0x8d);
+/// Needing approval, and a draft's pencil; the picker's permission shield
+/// and `worktree` branch badge; the rename box (`yellow`).
 pub(crate) const YELLOW: Color = Color::Rgb(0xff, 0xc7, 0x77);
-/// The input box and the pin (`orange`).
-const ORANGE: Color = Color::Rgb(0xff, 0x96, 0x6c);
+/// The input box and the pin; the rule under the picker's input and its
+/// git icon (`orange`).
+pub(crate) const ORANGE: Color = Color::Rgb(0xff, 0x96, 0x6c);
 /// Failed and gone (`red`).
 const RED: Color = Color::Rgb(0xff, 0x75, 0x7f);
-/// Needing input (`magenta`).
-const MAGENTA: Color = Color::Rgb(0xc0, 0x99, 0xff);
-/// The ✳ logo (Claude orange).
-const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
-/// The rename box's edit icon (`blue1`, snacks' `SnacksInputIcon`).
+/// Needing input; the picker's remote branches and previous worktree
+/// (`magenta`).
+pub(crate) const MAGENTA: Color = Color::Rgb(0xc0, 0x99, 0xff);
+/// The picker's row numbers and dimmed path parents (`dark5`).
+pub(crate) const DARK5: Color = Color::Rgb(0x73, 0x7a, 0xa2);
+/// The picker's matched characters, and the rename box's edit icon (`blue1`,
+/// snacks' `SnacksInputIcon`).
 pub(crate) const BLUE1: Color = Color::Rgb(0x65, 0xbc, 0xff);
+/// The picker's border (`border_highlight`).
+pub(crate) const BORDER: Color = Color::Rgb(0x58, 0x9e, 0xd7);
+/// The ✳ logo, here and before the picker's models (Claude orange).
+pub(crate) const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
 
 /// Needing approval (Nerd Font `nf-fa-warning`).
 const APPROVAL_ICON: &str = "\u{f071}";
@@ -617,16 +623,19 @@ pub(crate) const SPINNER_FRAME: Duration = Duration::from_millis(100);
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// A pinned thread (`nf-fa-thumb_tack`).
 const PIN: &str = "\u{f08d}";
-/// Before a branch (`nf-pl-branch`).
-const BRANCH: &str = "\u{e0a0}";
-/// A project, and the closed Settled shelf (`nf-fa-folder`).
-const FOLDER: &str = "\u{f07b}";
-/// The open Settled shelf (`nf-fa-folder_open`).
-const FOLDER_OPEN: &str = "\u{f07c}";
+/// Before a branch, here and in the picker (`nf-pl-branch`).
+pub(crate) const BRANCH: &str = "\u{e0a0}";
+/// A project, the closed Settled shelf, and the picker's folders
+/// (`nf-fa-folder`).
+pub(crate) const FOLDER: &str = "\u{f07b}";
+/// The open Settled shelf, and the picker's `All projects` row
+/// (`nf-fa-folder_open`).
+pub(crate) const FOLDER_OPEN: &str = "\u{f07c}";
 /// A draft (`nf-fa-pencil`).
 const PENCIL: &str = "\u{f040}";
-/// Claude's logo, at the end of a thread's node.
-const CLAUDE_LOGO: &str = "✳";
+/// Claude's logo, at the end of a thread's node and before the picker's
+/// models.
+pub(crate) const CLAUDE_LOGO: &str = "✳";
 /// The tree guide before a node's middle line and a settled row.
 const GUIDE: &str = " ├╴";
 /// The tree guide before a node's last line and the last settled row.

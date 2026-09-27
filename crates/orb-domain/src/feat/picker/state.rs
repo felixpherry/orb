@@ -451,6 +451,11 @@ impl PickerState {
         self.list.shown()
     }
 
+    /// How many items the picker has, shown or hidden by the filter.
+    pub fn total(&self) -> usize {
+        self.list.total()
+    }
+
     /// After an edit: re-filter, or start browsing the new directory.
     fn edited(&mut self) -> Option<PathBuf> {
         let input = self.list.input().to_owned();
@@ -543,6 +548,28 @@ mod tests {
     ) {
         // Given / When / Then.
         assert_eq!(split_path(input), expected, "split_path({input:?})");
+    }
+
+    #[rstest::rstest]
+    fn total_counts_items_the_filter_hides() {
+        // Given a project picker over two projects, filtered to neither.
+        let picker = {
+            let project = |id, title: &str| PickerItem::Project {
+                id: ProjectId(id),
+                title: title.to_owned(),
+                root: PathBuf::from("/tmp").join(title),
+            };
+            let mut picker =
+                PickerState::projects(vec![project(1, "orb"), project(2, "jinn")], Focus::Sidebar);
+            picker.insert('z');
+            picker
+        };
+
+        // When counting its items.
+        let total = picker.total();
+
+        // Then both projects count.
+        assert_eq!(total, 2, "total should count the hidden items");
     }
 
     #[rstest::rstest]

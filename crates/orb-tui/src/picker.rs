@@ -1,52 +1,53 @@
-//! The picker popup, in T3 Code's command-palette look: a rounded box over
-//! the screen holding the filter input, a section label, the rows, and a
-//! footer of keys. The box is only as tall as its rows need, and its top
-//! stays put while the filter narrows them.
+//! The picker popup, drawn like LazyVim's `vim.ui.select` in tokyonight-moon:
+//! a small rounded float with the picker's name centred in its top border, a
+//! `>` prompt over an orange rule, numbered one-line rows with the selected
+//! one filled, and the picker's keys dim in its bottom border. The float is
+//! only as tall as its rows need, and its top stays put while the filter
+//! narrows them.
 //!
-//! The project picker shows each project's badge and name over its path, and
-//! so does the project filter, under an `All projects` row; confirming a
-//! project's removal offers `No` and `Yes`. The directory picker shows one
-//! folder per row; the workspace picker shows where a thread's session could
-//! run, each with its glyph; the branch picker shows each branch with its
-//! badge, dimming the ones checked out where the thread can't follow and
-//! saying where; the model picker shows each model's name, with its legacy
-//! models under their own label; a draft whose project isn't a git repository
-//! gets one row, `Initialize Git`. Where the filter matched is bold and
-//! underlined, and the rows scroll to keep the selection in view.
+//! The project picker shows each project as a folder in its badge colour and
+//! its path, the parent dimmed and the name bright, with the name on the
+//! right when the folder is named differently; so does the project filter,
+//! under an `All projects` row. Confirming a project's removal offers `No`
+//! and `Yes`. The directory picker shows one folder per row; the workspace
+//! picker shows where a thread's session could run, each with its glyph; the
+//! branch picker shows each branch with its badge on the right, dimming the
+//! ones checked out where the thread can't follow and saying where; the model
+//! picker shows each model's name after Claude's mark, with its legacy models
+//! under their own heading, and the permission picker each mode after a
+//! shield; a draft whose project isn't a git repository gets one row,
+//! `Initialize Git`. Where the filter matched is blue and bold, and the rows
+//! scroll to keep the selection in view.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use orb_domain::feat::git::git_service::GitRef;
 use orb_domain::feat::picker::list::{
-    ALL_PROJECTS, BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
-    setting_label,
+    ALL_PROJECTS, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label, setting_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
 use orb_domain::tilde;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::sidebar::{DARK_GRAY, GRAY, OUTLINE, SELECTED, badge};
+use crate::sidebar::{
+    BG_DARK, BLUE, BLUE1, BORDER, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, CYAN, DARK3, DARK5, FG,
+    FG_DARK, FOLDER, FOLDER_OPEN, GREEN, MAGENTA, ORANGE, VISUAL, YELLOW, badge, render_split,
+};
 
-/// Nerd Font's search glyph, before every picker's input but the directory
-/// picker's.
-const SEARCH: &str = "\u{f002}";
-/// Nerd Font's folder glyph, before the directory picker's input and rows, and
-/// the current checkout's workspace row.
-const FOLDER: &str = "\u{f07b}";
 /// Nerd Font's code-fork glyph, before the worktree workspace rows.
 const WORKTREE: &str = "\u{f126}";
 /// Nerd Font's history glyph, before the previous worktree's workspace row.
 const HISTORY: &str = "\u{f1da}";
-/// The widest the popup gets, in columns.
-const MAX_WIDTH: u16 = 90;
-/// The popup's lines besides its rows: the borders, a blank line inside each,
-/// the input, the gap and label above the rows, and the gap and footer below.
-const CHROME: u16 = 9;
+/// Before a permission mode (`nf-fa-shield`).
+const SHIELD: &str = "\u{f132}";
+/// Before Initialize Git (`nf-fa-git`).
+const GIT: &str = "\u{f1d3}";
 
 /// How far the picker's rows are scrolled, kept between frames.
 #[derive(Debug, Default)]
@@ -64,123 +65,114 @@ pub(crate) fn render(
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
 ) -> (usize, Position) {
-    let directories = matches!(picker.kind(), PickerKind::Directories { .. });
-    let row_height: u16 = match picker.kind() {
-        PickerKind::Projects | PickerKind::ProjectFilter => 2,
-        _ => 1,
-    };
     let popup = {
-        let rows = u16::try_from(picker.shown().count())
-            .unwrap_or(u16::MAX)
-            .saturating_mul(row_height)
-            .max(1);
-        popup_rect(area, rows)
+        let lines = |count: usize| u16::try_from(count).unwrap_or(u16::MAX);
+        popup_rect(area, lines(picker.shown().count()), lines(picker.total()))
     };
     Clear.render(popup, buf);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(OUTLINE));
-    let inner = block.inner(popup).inner(Margin::new(2, 1));
+        .border_style(Style::new().fg(BORDER).bg(BG_DARK))
+        .style(Style::new().bg(BG_DARK))
+        .title(Line::from(span(format!(" {} ", title(picker.kind())), BLUE)).centered())
+        .title_bottom(hints(picker.kind()));
+    let inner = block.inner(popup);
     block.render(popup, buf);
-    let [input, _, label, rows, _, footer] = Layout::vertical([
-        Constraint::Length(1),
+    let [input, rule, rows] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
     ])
     .areas(inner);
-    let cursor = render_input(picker, directories, pad(input), buf);
-    Line::styled(section_label(picker.kind()), Style::new().fg(GRAY)).render(pad(label), buf);
-    let page = render_rows(picker, home, row_height, rows, buf, scroll);
-    render_footer(directories, pad(footer), buf);
+    let cursor = render_input(picker, input, buf);
+    Line::from(span("─".repeat(usize::from(rule.width)), ORANGE)).render(rule, buf);
+    let page = render_rows(picker, home, rows, buf, scroll);
     (page, cursor)
 }
 
-/// The label above the rows.
-fn section_label(kind: &PickerKind) -> &'static str {
+/// The popup: half the width, kept to 44–72 columns, and as tall as `shown`
+/// rows plus its border, input and rule, at most 60% of the height. It's
+/// centred across, and its top stays where the popup for all `total` rows
+/// would be centred, so filtering doesn't move the input.
+fn popup_rect(area: Rect, shown: u16, total: u16) -> Rect {
+    let width = (area.width / 2).clamp(44, 72).min(area.width);
+    let tallest = (area.height.saturating_mul(3) / 5).max(8).min(area.height);
+    let full = total.max(1).saturating_add(4).min(tallest);
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - full) / 2,
+        width,
+        shown.max(1).saturating_add(4).min(tallest),
+    )
+}
+
+/// The picker's name, centred in its top border.
+fn title(kind: &PickerKind) -> &'static str {
     match kind {
-        PickerKind::Projects | PickerKind::ProjectFilter => "Projects",
-        PickerKind::Directories { .. } => "Directories",
+        PickerKind::Projects => "Projects",
+        PickerKind::ProjectFilter => "Filter projects",
+        PickerKind::Directories { .. } => "Add project",
         PickerKind::Workspace { .. } => "Workspace",
         PickerKind::Branches { .. } => "Branches",
-        PickerKind::Model { .. } => "Models",
-        PickerKind::Permission { .. } => "Permission modes",
+        PickerKind::Model { .. } => "Model",
+        PickerKind::Permission { .. } => "Permission mode",
         PickerKind::InitGit { .. } => "Not a git repository",
         PickerKind::RemoveProject { .. } => "Remove project?",
     }
 }
 
-/// jinn's popup, 80% of the width (at least 30 columns) and 75% of the
-/// height plus 4 rows, narrowed to `MAX_WIDTH` and shortened to fit `rows`
-/// lines of results. It's centred across, and its top stays where the
-/// full-height popup's would be, a third of the way down, so filtering
-/// doesn't move the input.
-fn popup_rect(area: Rect, rows: u16) -> Rect {
-    let width = (area.width - area.width / 5)
-        .clamp(30, MAX_WIDTH)
-        .min(area.width);
-    let full = (area.height - area.height.div_ceil(4))
-        .saturating_add(4)
-        .min(area.height);
-    Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - full) / 3,
-        width,
-        rows.saturating_add(CHROME).min(full),
-    )
-}
-
-/// A row's text area: two cells in from each side of the selection fill.
-fn pad(area: Rect) -> Rect {
-    area.inner(Margin::new(2, 0))
-}
-
-/// The glyph and the typed text, or the project picker's placeholder.
-/// Returns the cursor's position.
-fn render_input(picker: &PickerState, directories: bool, area: Rect, buf: &mut Buffer) -> Position {
-    let glyph = Span::styled(
-        format!("{} ", if directories { FOLDER } else { SEARCH }),
-        Style::new().fg(DARK_GRAY),
-    );
-    let text = match picker.input() {
-        "" if matches!(
-            picker.kind(),
-            PickerKind::Projects | PickerKind::ProjectFilter
-        ) =>
-        {
-            Span::styled("Search projects...", Style::new().fg(DARK_GRAY))
+/// The picker's keys, dim and right-aligned in its bottom border: each key,
+/// then what it does.
+fn hints(kind: &PickerKind) -> Line<'static> {
+    let keys: &[(&str, &str)] = match kind {
+        PickerKind::Directories { .. } => &[("⏎", "add"), ("Tab", "open"), ("Esc", "close")],
+        PickerKind::ProjectFilter => &[("⏎", "filter"), ("<C-x>", "remove"), ("Esc", "close")],
+        PickerKind::RemoveProject { .. } | PickerKind::InitGit { .. } => {
+            &[("⏎", "confirm"), ("Esc", "cancel")]
         }
-        input => Span::raw(input),
+        _ => &[("⏎", "select"), ("Esc", "close")],
     };
+    let mut spans = vec![Span::raw(" ")];
+    for (index, (key, label)) in keys.iter().enumerate() {
+        if index > 0 {
+            spans.push(span(" · ", DARK3));
+        }
+        spans.push(span(*key, FG_DARK));
+        spans.push(span(format!(" {label}"), COMMENT));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans).right_aligned()
+}
+
+/// The ` > ` prompt and the typed text. Returns the cursor's position.
+fn render_input(picker: &PickerState, area: Rect, buf: &mut Buffer) -> Position {
+    let prompt = span(" > ", CYAN);
     let before: String = picker
         .input()
         .graphemes(true)
         .take(picker.cursor())
         .collect();
-    let column = glyph.width() + Line::raw(before).width();
-    Line::from(vec![glyph, text]).render(area, buf);
+    let column = prompt.width() + Line::raw(before).width();
+    Line::from(vec![prompt, span(picker.input(), FG)]).render(area, buf);
     let x = u16::try_from(column)
         .unwrap_or(u16::MAX)
         .min(area.width.saturating_sub(1));
     Position::new(area.x + x, area.y)
 }
 
-/// The rows from the scroll offset down, or a hint when there are none.
-/// Returns how many rows fit.
+/// The numbered rows from the scroll offset down, the selected one filled, or
+/// a hint when there are none. Returns how many rows fit.
 fn render_rows(
     picker: &PickerState,
     home: &Path,
-    row_height: u16,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
 ) -> usize {
-    let page = usize::from(area.height / row_height).max(1);
+    let page = usize::from(area.height).max(1);
     let shown: Vec<(&PickerItem, &Matches)> = picker.shown().collect();
     if shown.is_empty() {
-        Line::styled(empty_hint(picker), Style::new().fg(DARK_GRAY)).render(pad(area), buf);
+        Line::from(span(format!("  {}", empty_hint(picker)), COMMENT)).render(area, buf);
         return page;
     }
     let selection = picker.selection();
@@ -189,143 +181,190 @@ fn render_rows(
         .min(selection)
         .max((selection + 1).saturating_sub(page))
         .min(shown.len().saturating_sub(page));
-    let tops = (area.top()..area.bottom()).step_by(usize::from(row_height));
-    for ((index, (item, matches)), top) in
-        shown.into_iter().enumerate().skip(scroll.offset).zip(tops)
+    let mut number = shown
+        .iter()
+        .take(scroll.offset)
+        .filter(|(item, _)| !matches!(item, PickerItem::Heading(_)))
+        .count();
+    for ((index, (item, matches)), y) in shown
+        .into_iter()
+        .enumerate()
+        .skip(scroll.offset)
+        .zip(area.top()..area.bottom())
     {
-        let row = Rect::new(area.x, top, area.width, row_height).intersection(area);
+        let row = Rect::new(area.x, y, area.width, 1);
         if index == selection && picker.selected().is_some() {
-            buf.set_style(row, Style::new().bg(SELECTED));
+            buf.set_style(row, Style::new().bg(VISUAL));
         }
-        render_item(item, matches, picker.kind(), home, pad(row), buf);
+        let label = match item {
+            PickerItem::Heading(_) => Span::raw("    "),
+            _ => {
+                number += 1;
+                span(format!("{number:>2}. "), DARK5)
+            }
+        };
+        let (content, right) = row_content(item, matches, picker.kind(), home);
+        let left = Line::from_iter([Span::raw(" "), label].into_iter().chain(content));
+        // The row's own text wins; the right column is cut from its left.
+        let room = usize::from(row.width).saturating_sub(left.width() + 3);
+        let right = right.map_or_else(Line::default, |right| right.cut(room));
+        render_split(
+            left,
+            right,
+            Rect {
+                width: row.width.saturating_sub(1),
+                ..row
+            },
+            buf,
+        );
     }
     page
 }
 
-/// A project's badge and name over its path, a directory's folder and name,
-/// or a workspace's glyph and label.
-fn render_item(
+/// What a row shows against its right edge: `prefix`, then `text`, cut from
+/// its left to fit.
+struct RightColumn {
+    prefix: &'static str,
+    text: String,
+    fg: Color,
+}
+
+impl RightColumn {
+    /// `text` in `fg`, with no prefix.
+    fn new(text: String, fg: Color) -> Self {
+        Self {
+            prefix: "",
+            text,
+            fg,
+        }
+    }
+
+    /// The column in at most `room` cells, keeping the prefix whole.
+    fn cut(self, room: usize) -> Line<'static> {
+        let text = cut_left(&self.text, room.saturating_sub(self.prefix.len()));
+        Line::from(span(format!("{}{text}", self.prefix), self.fg))
+    }
+}
+
+/// A row's icon and text, and what goes against its right edge.
+fn row_content(
     item: &PickerItem,
     matches: &Matches,
     kind: &PickerKind,
     home: &Path,
-    area: Rect,
-    buf: &mut Buffer,
-) {
+) -> (Vec<Span<'static>>, Option<RightColumn>) {
     match item {
         PickerItem::Project { title, root, .. } => {
-            let [name_area, path_area] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
-            let name = [badge(title, true), Span::raw(" ")]
-                .into_iter()
-                .chain(highlight(
-                    title,
-                    &matches.name,
-                    Style::new().fg(Color::White),
-                ));
-            Line::from_iter(name).render(name_area, buf);
-            let path = std::iter::once(Span::raw("   ")).chain(highlight(
-                &root.display().to_string(),
-                &matches.path,
-                Style::new().fg(DARK_GRAY),
-            ));
-            Line::from_iter(path).render(path_area, buf);
+            let shown = tilde(root, home);
+            let named = shown.ends_with(title.as_str());
+            let offsets: Vec<usize> = {
+                let shift = root.display().to_string().len().saturating_sub(shown.len());
+                let base = shown.len().saturating_sub(title.len());
+                matches
+                    .path
+                    .iter()
+                    .filter_map(|offset| offset.checked_sub(shift))
+                    .chain(
+                        matches
+                            .name
+                            .iter()
+                            .filter(|_| named)
+                            .map(|offset| base + offset),
+                    )
+                    .collect()
+            };
+            let split = shown.rfind('/').map_or(0, |at| at + 1);
+            let folder = icon(FOLDER, badge(title, true).style.fg.unwrap_or(BLUE));
+            let left = std::iter::once(folder)
+                .chain(highlight(&shown, &offsets, |at| {
+                    if at < split { DARK5 } else { FG }
+                }))
+                .collect();
+            let right = (!named).then(|| RightColumn::new(title.clone(), DARK5));
+            (left, right)
         }
         PickerItem::Directory { name } => {
-            let row = [Span::styled(FOLDER, Style::new().fg(GRAY)), Span::raw(" ")]
-                .into_iter()
-                .chain(highlight(name, &matches.name, Style::new()));
-            Line::from_iter(row).render(area, buf);
+            let mut left = labelled(icon(FOLDER, BLUE), name, &matches.name);
+            left.push(span("/", DARK5));
+            (left, None)
         }
         PickerItem::Workspace(choice) => {
-            let row = [
-                Span::styled(workspace_glyph(choice), Style::new().fg(GRAY)),
-                Span::raw(" "),
-            ]
-            .into_iter()
-            .chain(highlight(&choice.label(), &matches.name, Style::new()));
-            Line::from_iter(row).render(area, buf);
+            let (glyph, fg) = match choice {
+                WorkspaceChoice::Current { worktree: false } => (FOLDER, BLUE),
+                WorkspaceChoice::Current { worktree: true } => (WORKTREE, BLUE),
+                WorkspaceChoice::NewWorktree => (WORKTREE, GREEN),
+                WorkspaceChoice::Previous { .. } => (HISTORY, MAGENTA),
+            };
+            (
+                labelled(icon(glyph, fg), &choice.label(), &matches.name),
+                None,
+            )
         }
         PickerItem::Branch(row) => {
             let cwd = match kind {
                 PickerKind::Branches { cwd, .. } => cwd.as_path(),
                 _ => Path::new(""),
             };
-            render_branch(row, matches, cwd, home, area, buf);
+            let git_ref = &row.git_ref;
+            let (icon_fg, name_fg) = match (row.disabled, git_ref) {
+                (true, _) => (DARK3, DARK3),
+                (_, GitRef { current: true, .. }) => (GREEN, FG),
+                (_, GitRef { remote: true, .. }) => (MAGENTA, FG),
+                _ => (BLUE, FG),
+            };
+            let left = std::iter::once(icon(BRANCH, icon_fg))
+                .chain(highlight(&git_ref.name, &matches.name, |_| name_fg))
+                .collect();
+            let right = match (row.disabled, &git_ref.worktree) {
+                (true, Some(path)) => Some(RightColumn {
+                    prefix: "in ",
+                    text: tilde(path, home),
+                    fg: DARK3,
+                }),
+                _ => branch_badge(git_ref, cwd)
+                    .map(|(badge, fg)| RightColumn::new(badge.to_owned(), fg)),
+            };
+            (left, right)
         }
         PickerItem::Setting(value) => {
-            Line::from_iter(highlight(
-                setting_label(*value),
-                &matches.name,
-                Style::new(),
-            ))
-            .render(area, buf);
+            let mark = match kind {
+                PickerKind::Permission { .. } => icon(SHIELD, YELLOW),
+                _ => icon(CLAUDE_LOGO, CLAUDE),
+            };
+            (labelled(mark, setting_label(*value), &matches.name), None)
         }
-        PickerItem::Heading(text) => {
-            Line::styled(*text, Style::new().fg(GRAY)).render(area, buf);
-        }
-        PickerItem::InitGit => {
-            Line::from_iter(highlight(INIT_GIT, &matches.name, Style::new())).render(area, buf);
-        }
-        PickerItem::AllProjects => {
-            Line::from_iter(highlight(ALL_PROJECTS, &matches.name, Style::new())).render(area, buf);
-        }
-        PickerItem::Confirm(yes) => {
-            Line::from_iter(highlight(confirm_label(*yes), &matches.name, Style::new()))
-                .render(area, buf);
-        }
+        PickerItem::Heading(text) => (vec![span(format!("── {text} ──"), COMMENT)], None),
+        PickerItem::InitGit => (labelled(icon(GIT, ORANGE), INIT_GIT, &matches.name), None),
+        PickerItem::AllProjects => (
+            labelled(icon(FOLDER_OPEN, BLUE), ALL_PROJECTS, &matches.name),
+            None,
+        ),
+        PickerItem::Confirm(yes) => (highlight(confirm_label(*yes), &matches.name, |_| FG), None),
     }
 }
 
-/// A branch's name, and on the right its badge, or where it's checked out
-/// when the row is disabled, the whole row dimmed.
-fn render_branch(
-    row: &BranchRow,
-    matches: &Matches,
-    cwd: &Path,
-    home: &Path,
-    area: Rect,
-    buf: &mut Buffer,
-) {
-    let git_ref = &row.git_ref;
-    let (name_colour, prefix, right) = match (row.disabled, &git_ref.worktree) {
-        (true, Some(path)) => (DARK_GRAY, "in ", tilde(path, home)),
-        _ => (
-            Color::White,
-            "",
-            branch_badge(git_ref, cwd).unwrap_or_default().to_owned(),
-        ),
-    };
-    let name = Line::from_iter(highlight(
-        &git_ref.name,
-        &matches.name,
-        Style::new().fg(name_colour),
-    ));
-    let room = usize::from(area.width).saturating_sub(name.width() + 2 + prefix.len());
-    let right = Line::styled(
-        format!("{prefix}{}", cut_left(&right, room)),
-        Style::new().fg(DARK_GRAY),
-    );
-    let right_width = u16::try_from(right.width()).unwrap_or(u16::MAX);
-    name.render(area, buf);
-    right.render(
-        Rect {
-            x: area.right().saturating_sub(right_width),
-            width: right_width.min(area.width),
-            ..area
-        },
-        buf,
-    );
+/// `glyph` and a space, in `fg`: the icon before a row's text.
+fn icon(glyph: &str, fg: Color) -> Span<'static> {
+    span(format!("{glyph} "), fg)
 }
 
-/// The badge on a branch row, by T3's priority: the branch this directory is
-/// on, one checked out in another worktree, a remote ref, the default branch.
-fn branch_badge(git_ref: &GitRef, cwd: &Path) -> Option<&'static str> {
+/// `icon`, then `text` highlighted where the filter matched.
+fn labelled(icon: Span<'static>, text: &str, offsets: &[usize]) -> Vec<Span<'static>> {
+    std::iter::once(icon)
+        .chain(highlight(text, offsets, |_| FG))
+        .collect()
+}
+
+/// The badge on a branch row and its colour, by T3's priority: the branch
+/// this directory is on, one checked out in another worktree, a remote ref,
+/// the default branch.
+fn branch_badge(git_ref: &GitRef, cwd: &Path) -> Option<(&'static str, Color)> {
     let elsewhere = git_ref.worktree.as_deref().is_some_and(|path| path != cwd);
     match git_ref {
-        GitRef { current: true, .. } => Some("current"),
-        _ if elsewhere => Some("worktree"),
-        GitRef { remote: true, .. } => Some("remote"),
-        GitRef { default: true, .. } => Some("default"),
+        GitRef { current: true, .. } => Some(("current", GREEN)),
+        _ if elsewhere => Some(("worktree", YELLOW)),
+        GitRef { remote: true, .. } => Some(("remote", MAGENTA)),
+        GitRef { default: true, .. } => Some(("default", CYAN)),
         _ => None,
     }
 }
@@ -348,27 +387,19 @@ pub(crate) fn cut_left(text: &str, width: usize) -> String {
     std::iter::once("…").chain(tail.into_iter().rev()).collect()
 }
 
-/// The glyph before a workspace row: a folder for the root checkout, a fork
-/// for a worktree, history for the previous worktree.
-fn workspace_glyph(choice: &WorkspaceChoice) -> &'static str {
-    match choice {
-        WorkspaceChoice::Current { worktree: false } => FOLDER,
-        WorkspaceChoice::Current { worktree: true } | WorkspaceChoice::NewWorktree => WORKTREE,
-        WorkspaceChoice::Previous { .. } => HISTORY,
-    }
-}
-
-/// `text` in `style`, with each grapheme holding one of `offsets` (byte
-/// offsets into `text`) bold and underlined.
-fn highlight(text: &str, offsets: &[usize], style: Style) -> Vec<Span<'static>> {
-    let matched = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+/// `text` with each grapheme holding one of `offsets` (byte offsets into
+/// `text`) blue and bold, and the rest in `fg` of the grapheme's offset.
+fn highlight<F>(text: &str, offsets: &[usize], fg: F) -> Vec<Span<'static>>
+where
+    F: Fn(usize) -> Color,
+{
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (start, grapheme) in text.grapheme_indices(true) {
         let bytes = start..start + grapheme.len();
         let style = if offsets.iter().any(|offset| bytes.contains(offset)) {
-            matched
+            Style::new().fg(BLUE1).add_modifier(Modifier::BOLD)
         } else {
-            style
+            Style::new().fg(fg(start))
         };
         match spans.last_mut() {
             Some(last) if last.style == style => last.content.to_mut().push_str(grapheme),
@@ -378,42 +409,23 @@ fn highlight(text: &str, offsets: &[usize], style: Style) -> Vec<Span<'static>> 
     spans
 }
 
-/// Why no rows are shown.
-fn empty_hint(picker: &PickerState) -> &'static str {
-    match (picker.kind(), split_path(picker.input())) {
-        (PickerKind::Projects, _) if picker.input().trim().is_empty() => {
-            "No projects — ␣p adds one"
-        }
-        (PickerKind::Directories { .. }, None) => "Type a path starting with / or ~/",
-        (PickerKind::Directories { .. }, Some((_, ""))) => "No directories",
-        (PickerKind::Branches { .. }, _) if picker.input().is_empty() => "Loading branches…",
-        (PickerKind::Branches { .. }, _) => "No matching branches",
-        _ => "No matches",
-    }
+/// `text` in `fg`.
+fn span<'a, T>(text: T, fg: Color) -> Span<'a>
+where
+    T: Into<Cow<'a, str>>,
+{
+    Span::styled(text, Style::new().fg(fg))
 }
 
-/// The picker's keys as chips: the key on a filled tile, then what it does.
-fn render_footer(directories: bool, area: Rect, buf: &mut Buffer) {
-    let keys: &[(&str, &str)] = if directories {
-        &[
-            ("↑ ↓", "Navigate"),
-            ("Tab", "Open"),
-            ("Enter", "Add"),
-            ("Esc", "Close"),
-        ]
-    } else {
-        &[("↑ ↓", "Navigate"), ("Enter", "Select"), ("Esc", "Close")]
-    };
-    let chips = keys.iter().flat_map(|(key, label)| {
-        [
-            Span::styled(
-                format!(" {key} "),
-                Style::new().fg(Color::White).bg(SELECTED),
-            ),
-            Span::styled(format!(" {label}   "), Style::new().fg(GRAY)),
-        ]
-    });
-    Line::from_iter(chips).render(area, buf);
+/// Why no rows are shown.
+fn empty_hint(picker: &PickerState) -> &'static str {
+    match picker.kind() {
+        PickerKind::Branches { .. } if picker.input().is_empty() => "Loading branches…",
+        PickerKind::Directories { .. } if split_path(picker.input()).is_none() => {
+            "Type a path starting with / or ~/"
+        }
+        _ => "No results",
+    }
 }
 
 #[cfg(test)]
@@ -430,7 +442,8 @@ mod tests {
     use ratatui::style::Modifier;
     use unicode_segmentation::UnicodeSegmentation;
 
-    use super::{DARK_GRAY, FOLDER, HISTORY, PickerScroll, SELECTED, render};
+    use super::{FOLDER, GIT, HISTORY, PickerScroll, SHIELD, render};
+    use crate::sidebar::{BLUE1, CLAUDE_LOGO, DARK3, DARK5, FG, ORANGE, VISUAL, badge};
 
     /// The home directory the pickers are drawn with.
     const HOME: &str = "/Users/me";
@@ -483,6 +496,33 @@ mod tests {
         })
     }
 
+    /// The rows of the popup's top and bottom borders.
+    fn border_rows(buf: &Buffer) -> Option<(u16, u16)> {
+        find(buf, "╭")
+            .zip(find(buf, "╰"))
+            .map(|((_, top), (_, bottom))| (top, bottom))
+    }
+
+    /// The columns of the popup's left and right borders.
+    fn border_columns(buf: &Buffer) -> Option<(u16, u16)> {
+        find(buf, "╭")
+            .zip(find(buf, "╮"))
+            .map(|((left, _), (right, _))| (left, right))
+    }
+
+    /// The text inside the borders on the popup's `n`th line, trimmed.
+    fn inner_line(buf: &Buffer, n: u16) -> Option<String> {
+        let (top, _) = border_rows(buf)?;
+        lines(buf)
+            .get(usize::from(top + n))
+            .map(|line| line.trim_matches(['│', ' ']).to_owned())
+    }
+
+    /// The line holding `text`.
+    fn line_with(buf: &Buffer, text: &str) -> Option<String> {
+        lines(buf).into_iter().find(|line| line.contains(text))
+    }
+
     fn orb() -> PickerState {
         PickerState::projects(
             vec![
@@ -493,65 +533,270 @@ mod tests {
         )
     }
 
-    #[rstest::rstest]
-    fn project_row_shows_the_badge_and_name() {
-        // Given a project picker listing orb.
-        let picker = orb();
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 16);
-
-        // Then orb's first line is its badge and name.
-        let lines = lines(&buf);
-        assert!(
-            lines.iter().any(|line| line.contains("OB orb")),
-            "screen was {lines:#?}"
-        );
+    /// Ten projects, none named like its folder.
+    fn ten_projects() -> Vec<PickerItem> {
+        (0..10)
+            .map(|i| project(i, &format!("proj{i}"), &format!("/tmp/{i}")))
+            .collect()
     }
 
     #[rstest::rstest]
-    fn project_row_shows_the_path_dimmed_below_the_name() {
-        // Given a project picker listing orb.
+    fn popup_is_as_tall_as_its_rows_plus_four() {
+        // Given a project picker with two projects on a tall screen.
         let picker = orb();
 
         // When drawing it.
-        let buf = draw(&picker, 60, 16);
+        let buf = draw(&picker, 100, 40);
 
-        // Then the line below the name is the path, in dark gray.
-        let name = find(&buf, "OB orb");
-        let path = find(&buf, "/Users/me/dev/orb");
-        let fg = path.and_then(|at| buf.cell(at)).map(|cell| cell.fg);
+        // Then the popup is 6 lines: its two rows and 4 of chrome.
+        let height = border_rows(&buf).map(|(top, bottom)| bottom - top + 1);
+        assert_eq!(height, Some(6), "the popup's height");
+    }
+
+    #[rstest::rstest]
+    fn popup_is_at_most_60_percent_of_the_screen() {
+        // Given a project picker with fifty projects.
+        let picker = {
+            let items = (0..50)
+                .map(|i| project(i, &format!("proj{i}"), &format!("/tmp/{i}")))
+                .collect();
+            PickerState::projects(items, Focus::Sidebar)
+        };
+
+        // When drawing it on a 40-line screen.
+        let buf = draw(&picker, 100, 40);
+
+        // Then the popup is 24 lines tall.
+        let height = border_rows(&buf).map(|(top, bottom)| bottom - top + 1);
+        assert_eq!(height, Some(24), "the popup's height");
+    }
+
+    #[rstest::rstest]
+    #[case(60, 44)]
+    #[case(200, 72)]
+    fn popup_width(#[case] screen: u16, #[case] expected: u16) {
+        // Given a project picker.
+        let picker = orb();
+
+        // When drawing it on a `screen`-column screen.
+        let buf = draw(&picker, screen, 40);
+
+        // Then the popup's top border spans `expected` columns.
+        let width = border_columns(&buf).map(|(left, right)| right - left + 1);
         assert_eq!(
-            (path.map(|(_, y)| y), fg),
-            (name.map(|(_, y)| y + 1), Some(DARK_GRAY)),
-            "the path's row and colour"
+            width,
+            Some(expected),
+            "the popup's width on {screen} columns"
         );
     }
 
     #[rstest::rstest]
-    fn selected_project_is_filled_on_both_lines() {
+    fn popup_top_stays_when_the_filter_hides_rows() {
+        // Given ten projects, unfiltered and filtered down to none.
+        let unfiltered = PickerState::projects(ten_projects(), Focus::Sidebar);
+        let filtered = {
+            let mut picker = PickerState::projects(ten_projects(), Focus::Sidebar);
+            picker.insert('z');
+            picker
+        };
+
+        // When drawing each.
+        let tops = [unfiltered, filtered]
+            .map(|picker| border_rows(&draw(&picker, 100, 40)).map(|(top, _)| top));
+
+        // Then both popups start on the same row.
+        assert_eq!(tops[0], tops[1], "the popup's top row");
+    }
+
+    #[rstest::rstest]
+    fn title_is_centred_in_the_top_border() {
+        // Given a project picker.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then " Projects " sits on the top border with as much border on
+        // each side, give or take a cell.
+        let title = " Projects ";
+        let gaps = find(&buf, title)
+            .zip(border_columns(&buf))
+            .zip(border_rows(&buf))
+            .filter(|(((_, y), _), (top, _))| y == top)
+            .map(|(((x, _), (left, right)), _)| (x - left, right - (x + title.len() as u16 - 1)));
+        assert!(
+            gaps.is_some_and(|(left, right)| left.abs_diff(right) <= 1),
+            "the gaps beside the title were {gaps:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(
+        PickerState::directories(PathBuf::from(HOME), Focus::Sidebar).0,
+        "Add project"
+    )]
+    #[case(PickerState::project_filter(vec![PickerItem::AllProjects], None, Focus::Sidebar), "Filter projects")]
+    #[case(workspace(), "Workspace")]
+    #[case(branches(vec![branch("main", None)]), "Branches")]
+    #[case(PickerState::models(ProjectId(1), None, Focus::Preview), "Model")]
+    #[case(
+        PickerState::permissions(ProjectId(1), None, Focus::Preview),
+        "Permission mode"
+    )]
+    #[case(
+        PickerState::init_git(ProjectId(1), Focus::Preview),
+        "Not a git repository"
+    )]
+    #[case(
+        PickerState::remove_project(ProjectId(1), Focus::Sidebar),
+        "Remove project?"
+    )]
+    fn picker_is_titled_by_its_kind(#[case] picker: PickerState, #[case] title: &str) {
+        // Given a picker of some kind.
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 40);
+
+        // Then its top border holds its title.
+        let top = border_rows(&buf).map(|(top, _)| top);
+        let at = find(&buf, &format!(" {title} ")).map(|(_, y)| y);
+        assert_eq!(at, top, "the row of the title {title:?}");
+    }
+
+    #[rstest::rstest]
+    fn input_starts_with_a_prompt() {
+        // Given a project picker.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the line under the top border starts with ` > `.
+        let input = border_rows(&buf)
+            .zip(border_columns(&buf))
+            .map(|((top, _), (left, _))| {
+                (1..4)
+                    .filter_map(|dx| buf.cell((left + dx, top + 1)).map(Cell::symbol))
+                    .collect::<String>()
+            });
+        assert_eq!(input.as_deref(), Some(" > "), "the input's first cells");
+    }
+
+    #[rstest::rstest]
+    fn rule_sits_under_the_input() {
+        // Given a project picker.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the line under the input is an orange `─`.
+        let cell = border_rows(&buf)
+            .zip(border_columns(&buf))
+            .and_then(|((top, _), (left, _))| buf.cell((left + 1, top + 2)));
+        assert_eq!(
+            cell.map(|cell| (cell.symbol(), cell.fg)),
+            Some(("─", ORANGE)),
+            "the rule's first cell"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rows_are_numbered() {
+        // Given a project picker with two projects.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then its first two rows start with 1. and 2.
+        let rows = [3, 4].map(|n| inner_line(&buf, n).unwrap_or_default());
+        assert!(
+            rows[0].starts_with("1. ") && rows[1].starts_with("2. "),
+            "the first two rows were {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn heading_is_not_numbered() {
+        // Given a model picker, whose five current models come before the
+        // Legacy models heading.
+        let picker = PickerState::models(ProjectId(1), None, Focus::Preview);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 40);
+
+        // Then the first legacy model is number 6.
+        let lines = lines(&buf);
+        let legacy = lines
+            .iter()
+            .skip_while(|line| !line.contains("Legacy models"))
+            .nth(1)
+            .map(|line| line.trim_matches(['│', ' ']));
+        assert!(
+            legacy.is_some_and(|line| line.starts_with("6. ")),
+            "the first legacy model's row was {legacy:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selection_fill_spans_the_inner_width() {
         // Given a project picker with orb, the first project, selected.
         let picker = orb();
 
         // When drawing it.
         let buf = draw(&picker, 60, 16);
 
-        // Then the cell left of the text is filled on the name and path lines.
-        let fills = find(&buf, "OB orb")
-            .map(|(x, y)| [y, y + 1].map(|y| buf.cell((x - 1, y)).map(|cell| cell.bg)));
+        // Then every cell between the borders on orb's row is filled.
+        let filled =
+            border_rows(&buf)
+                .zip(border_columns(&buf))
+                .map(|((top, _), (left, right))| {
+                    (left + 1..right)
+                        .all(|x| buf.cell((x, top + 3)).is_some_and(|cell| cell.bg == VISUAL))
+                });
+        assert_eq!(filled, Some(true), "the selected row's fill");
+    }
+
+    #[rstest::rstest]
+    fn project_row_dims_the_parent_and_brightens_the_name() {
+        // Given a project picker listing orb at ~/dev/orb.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then `~/dev/` is dim and `orb` is bright.
+        let colours = find(&buf, "~/dev/orb")
+            .map(|(x, y)| [x, x + 6].map(|x| buf.cell((x, y)).map(|cell| cell.fg)));
         assert_eq!(
-            fills,
-            Some([Some(SELECTED); 2]),
-            "the selected row's background"
+            colours,
+            Some([Some(DARK5), Some(FG)]),
+            "the parent's and the name's colours"
         );
     }
 
     #[rstest::rstest]
-    fn matched_graphemes_are_bold_and_underlined() {
+    fn project_folder_takes_the_badge_colour() {
+        // Given a project picker listing orb.
+        let picker = orb();
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the folder before orb's path is in orb's badge colour.
+        let fg = find(&buf, &format!("{FOLDER} ~/dev/orb"))
+            .and_then(|at| buf.cell(at))
+            .map(|cell| cell.fg);
+        assert_eq!(fg, badge("orb", true).style.fg, "the folder's colour");
+    }
+
+    #[rstest::rstest]
+    fn matched_graphemes_are_blue_and_bold() {
         // Given a project picker filtered by "rb".
         let picker = {
             let mut picker =
-                PickerState::projects(vec![project(1, "orb", "/tmp/x")], Focus::Sidebar);
+                PickerState::projects(vec![project(1, "orb", "/Users/me/dev/orb")], Focus::Sidebar);
             picker.insert('r');
             picker.insert('b');
             picker
@@ -560,28 +805,117 @@ mod tests {
         // When drawing it.
         let buf = draw(&picker, 60, 16);
 
-        // Then the title's `r` is bold and underlined.
-        let r = find(&buf, "orb").and_then(|(x, y)| buf.cell((x + 1, y)));
+        // Then the name's `r` is blue1 and bold.
+        let r = find(&buf, "~/dev/orb").and_then(|(x, y)| buf.cell((x + 7, y)));
         assert!(
-            r.is_some_and(|cell| cell
-                .modifier
-                .contains(Modifier::BOLD | Modifier::UNDERLINED)),
+            r.is_some_and(|cell| cell.fg == BLUE1 && cell.modifier.contains(Modifier::BOLD)),
             "the matched r was {r:?}"
         );
     }
 
     #[rstest::rstest]
-    fn directory_picker_is_labelled_directories() {
-        // Given a directory picker at `~/`.
-        let (picker, _) = PickerState::directories(PathBuf::from("/Users/me"), Focus::Sidebar);
+    #[case(
+        PickerState::directories(PathBuf::from(HOME), Focus::Sidebar).0,
+        "⏎ add · Tab open · Esc close"
+    )]
+    #[case(
+        PickerState::project_filter(vec![PickerItem::AllProjects], None, Focus::Sidebar),
+        "⏎ filter · <C-x> remove · Esc close"
+    )]
+    #[case(
+        PickerState::remove_project(ProjectId(1), Focus::Sidebar),
+        "⏎ confirm · Esc cancel"
+    )]
+    #[case(
+        PickerState::init_git(ProjectId(1), Focus::Preview),
+        "⏎ confirm · Esc cancel"
+    )]
+    #[case(workspace(), "⏎ select · Esc close")]
+    fn hints(#[case] picker: PickerState, #[case] expected: &str) {
+        // Given a picker of some kind.
+
+        // When drawing it on a narrow screen.
+        let buf = draw(&picker, 60, 16);
+
+        // Then its bottom border holds its keys.
+        let bottom = border_rows(&buf).map(|(_, bottom)| bottom);
+        let at = find(&buf, expected).map(|(_, y)| y);
+        assert_eq!(at, bottom, "the row of the hints {expected:?}");
+    }
+
+    #[rstest::rstest]
+    fn empty_picker_says_no_results() {
+        // Given a project picker filtered down to nothing.
+        let picker = {
+            let mut picker = orb();
+            picker.insert('z');
+            picker
+        };
 
         // When drawing it.
         let buf = draw(&picker, 60, 16);
 
-        // Then its section label says Directories.
+        // Then the rows say there are no results.
+        assert_eq!(
+            inner_line(&buf, 3).as_deref(),
+            Some("No results"),
+            "the empty list's row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn empty_directory_picker_asks_for_a_path() {
+        // Given a directory picker with its `~/` erased.
+        let picker = {
+            let (mut picker, _) = PickerState::directories(PathBuf::from(HOME), Focus::Sidebar);
+            let _ = picker.backspace();
+            let _ = picker.backspace();
+            picker
+        };
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then the rows say to type a path.
+        assert_eq!(
+            inner_line(&buf, 3).as_deref(),
+            Some("Type a path starting with / or ~/"),
+            "the empty list's row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn model_row_starts_with_the_claude_mark() {
+        // Given a model picker.
+        let picker = PickerState::models(ProjectId(1), None, Focus::Preview);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 40);
+
+        // Then Default follows the ✳ mark.
         let lines = lines(&buf);
         assert!(
-            lines.iter().any(|line| line.contains("Directories")),
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("{CLAUDE_LOGO} Default"))),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn permission_row_starts_with_a_shield() {
+        // Given a permission picker.
+        let picker = PickerState::permissions(ProjectId(1), None, Focus::Preview);
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 40);
+
+        // Then Default follows the shield.
+        let lines = lines(&buf);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("{SHIELD} Default"))),
             "screen was {lines:#?}"
         );
     }
@@ -590,7 +924,7 @@ mod tests {
     fn directory_row_shows_a_folder_and_the_name() {
         // Given a directory picker listing `~/dev`.
         let picker = {
-            let home = PathBuf::from("/Users/me");
+            let home = PathBuf::from(HOME);
             let (mut picker, _) = PickerState::directories(home.clone(), Focus::Sidebar);
             picker.show_directories(&home, vec!["dev".to_owned()]);
             picker
@@ -610,47 +944,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn empty_project_picker_shows_the_search_placeholder() {
-        // Given a project picker with no projects.
-        let picker = PickerState::projects(vec![], Focus::Sidebar);
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 16);
-
-        // Then the input shows the placeholder.
-        let lines = lines(&buf);
-        assert!(
-            lines.iter().any(|line| line.contains("Search projects...")),
-            "screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn empty_project_picker_says_how_to_add_one() {
-        // Given a project picker with no projects.
-        let picker = PickerState::projects(vec![], Focus::Sidebar);
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 16);
-
-        // Then the rows say how to add a project.
-        let lines = lines(&buf);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("No projects — ␣p adds one")),
-            "screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
     fn selection_below_the_fold_scrolls_into_view() {
-        // Given ten projects on a screen that fits one, the sixth selected.
+        // Given ten projects on a screen that fits four, the sixth selected.
         let picker = {
-            let items = (0..10)
-                .map(|i| project(i, &format!("proj{i}"), &format!("/tmp/{i}")))
-                .collect();
-            let mut picker = PickerState::projects(items, Focus::Sidebar);
+            let mut picker = PickerState::projects(ten_projects(), Focus::Sidebar);
             for _ in 0..5 {
                 picker.next();
             }
@@ -663,85 +960,8 @@ mod tests {
         // Then the sixth project is on screen.
         let lines = lines(&buf);
         assert!(
-            lines.iter().any(|line| line.contains("P5 proj5")),
+            lines.iter().any(|line| line.contains("/tmp/5")),
             "screen was {lines:#?}"
-        );
-    }
-
-    /// The rows of the popup's top and bottom borders.
-    fn border_rows(buf: &Buffer) -> Option<(u16, u16)> {
-        find(buf, "╭")
-            .zip(find(buf, "╰"))
-            .map(|((_, top), (_, bottom))| (top, bottom))
-    }
-
-    #[rstest::rstest]
-    fn popup_is_as_tall_as_its_rows() {
-        // Given a project picker with two projects on a tall screen.
-        let picker = orb();
-
-        // When drawing it.
-        let buf = draw(&picker, 100, 40);
-
-        // Then the popup is 13 lines: its two 2-line rows and 9 of chrome.
-        let height = border_rows(&buf).map(|(top, bottom)| bottom - top + 1);
-        assert_eq!(height, Some(13), "the popup's height");
-    }
-
-    #[rstest::rstest]
-    fn popup_is_at_most_90_columns_wide() {
-        // Given a project picker.
-        let picker = orb();
-
-        // When drawing it on a 200-column screen.
-        let buf = draw(&picker, 200, 40);
-
-        // Then the popup's top border spans 90 columns.
-        let width = find(&buf, "╭")
-            .zip(find(&buf, "╮"))
-            .map(|((left, _), (right, _))| right - left + 1);
-        assert_eq!(width, Some(90), "the popup's width");
-    }
-
-    #[rstest::rstest]
-    fn popup_top_stays_when_the_filter_hides_rows() {
-        // Given ten projects, unfiltered and filtered down to none.
-        let items: Vec<PickerItem> = (0..10)
-            .map(|i| project(i, &format!("proj{i}"), &format!("/tmp/{i}")))
-            .collect();
-        let unfiltered = PickerState::projects(items.clone(), Focus::Sidebar);
-        let filtered = {
-            let mut picker = PickerState::projects(items, Focus::Sidebar);
-            picker.insert('z');
-            picker
-        };
-
-        // When drawing each.
-        let tops = [unfiltered, filtered]
-            .map(|picker| border_rows(&draw(&picker, 100, 40)).map(|(top, _)| top));
-
-        // Then both popups start on the same row.
-        assert_eq!(tops[0], tops[1], "the popup's top row");
-    }
-
-    #[rstest::rstest]
-    fn selection_fill_stops_short_of_the_border() {
-        // Given a project picker with orb selected.
-        let picker = orb();
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 16);
-
-        // Then the two cells inside the left border beside orb's row are
-        // unfilled, and the third is filled.
-        let border = find(&buf, "╭").map(|(x, _)| x);
-        let fills = border.zip(find(&buf, "OB orb")).map(|(x, (_, y))| {
-            [1, 2, 3].map(|dx| buf.cell((x + dx, y)).map(|cell| cell.bg == SELECTED))
-        });
-        assert_eq!(
-            fills,
-            Some([Some(false), Some(false), Some(true)]),
-            "the fill beside the left border"
         );
     }
 
@@ -761,22 +981,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn workspace_picker_is_labelled_workspace() {
-        // Given a workspace picker.
-        let picker = workspace();
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 16);
-
-        // Then its section label says Workspace.
-        let lines = lines(&buf);
-        assert!(
-            lines.iter().any(|line| line.contains("Workspace")),
-            "screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
     fn previous_worktree_row_shows_its_branch() {
         // Given a workspace picker offering the previous worktree.
         let picker = workspace();
@@ -790,24 +994,6 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.contains(&format!("{HISTORY} Previous worktree (orb/fix-login)"))),
-            "screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn workspace_picker_shows_the_select_footer() {
-        // Given a workspace picker.
-        let picker = workspace();
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 16);
-
-        // Then the footer offers Enter to select, not Tab to open.
-        let lines = lines(&buf);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains(" Enter  Select") && !line.contains("Tab")),
             "screen was {lines:#?}"
         );
     }
@@ -860,11 +1046,6 @@ mod tests {
         picker
     }
 
-    /// The line holding `text`.
-    fn line_with(buf: &Buffer, text: &str) -> Option<String> {
-        lines(buf).into_iter().find(|line| line.contains(text))
-    }
-
     #[rstest::rstest]
     fn branch_row_shows_its_badge() {
         // Given a branch picker listing the default branch.
@@ -908,11 +1089,11 @@ mod tests {
         // When drawing it.
         let buf = draw(&picker, 80, 16);
 
-        // Then feature's name is dark gray.
+        // Then feature's name is dark3.
         let fg = find(&buf, "feature")
             .and_then(|at| buf.cell(at))
             .map(|cell| cell.fg);
-        assert_eq!(fg, Some(DARK_GRAY), "the disabled name's colour");
+        assert_eq!(fg, Some(DARK3), "the disabled name's colour");
     }
 
     #[rstest::rstest]
@@ -920,8 +1101,8 @@ mod tests {
         // Given a branch picker with feature disabled.
         let picker = with_disabled();
 
-        // When drawing it.
-        let buf = draw(&picker, 80, 16);
+        // When drawing it on a screen wide enough for the whole path.
+        let buf = draw(&picker, 160, 16);
 
         // Then feature's row says where it's checked out, under `~`.
         let line = line_with(&buf, "feature");
@@ -980,29 +1161,7 @@ mod tests {
         let bg = find(&buf, "feature")
             .and_then(|(x, y)| buf.cell((x - 1, y)))
             .map(|cell| cell.bg);
-        assert_ne!(bg, Some(SELECTED), "the disabled row's background");
-    }
-
-    #[rstest::rstest]
-    #[case(PickerState::models(ProjectId(1), None, Focus::Preview), "Models")]
-    #[case(
-        PickerState::permissions(ProjectId(1), None, Focus::Preview),
-        "Permission modes"
-    )]
-    fn setting_picker_is_labelled_by_its_setting(#[case] picker: PickerState, #[case] label: &str) {
-        // Given a model or permission picker.
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 20);
-
-        // Then its section label names the setting.
-        let lines = lines(&buf);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains(&format!("  {label} "))),
-            "screen was {lines:#?}"
-        );
+        assert_ne!(bg, Some(VISUAL), "the disabled row's background");
     }
 
     #[rstest::rstest]
@@ -1011,17 +1170,13 @@ mod tests {
         let picker = PickerState::models(ProjectId(1), Some("sonnet"), Focus::Preview);
 
         // When drawing it.
-        let buf = draw(&picker, 60, 20);
+        let buf = draw(&picker, 60, 40);
 
-        // Then the row under the label is Default.
-        let lines = lines(&buf);
-        let first = lines
-            .iter()
-            .skip_while(|line| !line.contains("Models"))
-            .nth(1);
-        assert!(
-            first.is_some_and(|line| line.trim_matches(['│', ' ']) == "Default"),
-            "screen was {lines:#?}"
+        // Then the first row, under the rule, is Default.
+        assert_eq!(
+            inner_line(&buf, 3),
+            Some(format!("1. {CLAUDE_LOGO} Default")),
+            "the first row"
         );
     }
 
@@ -1034,14 +1189,10 @@ mod tests {
         let buf = draw(&picker, 60, 40);
 
         // Then the row after Default is Claude Opus 5.5, not its ID.
-        let lines = lines(&buf);
-        let second = lines
-            .iter()
-            .skip_while(|line| !line.contains("Models"))
-            .nth(2);
-        assert!(
-            second.is_some_and(|line| line.trim_matches(['│', ' ']) == "Claude Opus 5.5"),
-            "screen was {lines:#?}"
+        assert_eq!(
+            inner_line(&buf, 4),
+            Some(format!("2. {CLAUDE_LOGO} Claude Opus 5.5")),
+            "the second row"
         );
     }
 
@@ -1053,14 +1204,14 @@ mod tests {
         // When drawing it.
         let buf = draw(&picker, 60, 40);
 
-        // Then a Legacy models label follows Claude Sonnet 5.
+        // Then a Legacy models heading follows Claude Sonnet 5.
         let lines = lines(&buf);
         let after = lines
             .iter()
             .skip_while(|line| !line.contains("Claude Sonnet 5"))
             .nth(1);
         assert!(
-            after.is_some_and(|line| line.trim_matches(['│', ' ']) == "Legacy models"),
+            after.is_some_and(|line| line.trim_matches(['│', ' ']) == "── Legacy models ──"),
             "screen was {lines:#?}"
         );
     }
@@ -1073,15 +1224,11 @@ mod tests {
         // When drawing it.
         let buf = draw(&picker, 60, 20);
 
-        // Then its one row, under the label, is Initialize Git.
-        let lines = lines(&buf);
-        let first = lines
-            .iter()
-            .skip_while(|line| !line.contains("Not a git repository"))
-            .nth(1);
-        assert!(
-            first.is_some_and(|line| line.trim_matches(['│', ' ']) == "Initialize Git"),
-            "screen was {lines:#?}"
+        // Then its one row is Initialize Git.
+        assert_eq!(
+            inner_line(&buf, 3),
+            Some(format!("1. {GIT} Initialize Git")),
+            "the only row"
         );
     }
 
@@ -1101,7 +1248,7 @@ mod tests {
         let buf = draw(&picker, 60, 16);
 
         // Then All projects is drawn above orb.
-        let rows = (find(&buf, "All projects"), find(&buf, "OB orb"));
+        let rows = (find(&buf, "All projects"), find(&buf, "~/dev/orb"));
         assert!(
             matches!(rows, (Some((_, all)), Some((_, orb))) if all < orb),
             "rows were at {rows:?}"
@@ -1116,7 +1263,7 @@ mod tests {
         // When drawing it.
         let buf = draw(&picker, 60, 16);
 
-        // Then its section label asks.
+        // Then its title asks.
         let lines = lines(&buf);
         assert!(
             lines.iter().any(|line| line.contains("Remove project?")),
