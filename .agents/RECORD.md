@@ -34,7 +34,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) Plain `q` in the sidebar quits orb.
 - (keybinds) orb has no `:` command line.
 - (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
-- (pane) orb redraws when input, PTY output, child exit, or an actor's state change wakes the loop, and once a second while a thread is working; there is no other tick or frame throttle.
+- (pane) orb redraws when input, PTY output, child exit, or an actor's state change wakes the loop, and every 100 ms while a thread is working (the spinner's frame); there is no other tick or frame throttle.
 - (pane) While attached, keys, paste, mouse, and focus events are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb captures the mouse only while attached and forwards the child's OSC 52 clipboard writes to its outer terminal.
@@ -46,7 +46,8 @@ Entries are added or amended **only with human approval**.
 - (sessions) Session status is read by polling `claude agents --json --all` every second while a thread is busy or waiting or orb is attached, and every 5 seconds otherwise.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
 - (sessions) A thread's title is its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
-- (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread is a card showing its project, status, title, and branch.
+- (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread is a three-line tree node showing its status icon, title, and time, then its project and status word, then its branch.
+- (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an s badge lit while the Settled shelf is open and a shown/total count of drafts and threads, and the selected row's first line highlighted.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
 - (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the preview, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
@@ -58,7 +59,7 @@ Entries are added or amended **only with human approval**.
 - (preview) Yanked text goes to the outer terminal's clipboard via OSC 52.
 - (pane) orb draws the Claude pane while attached and after `<C-h>` leaves it for the sidebar, until `<C-\>` is pressed, another thread is selected, or Claude exits; otherwise the right-hand area shows the selected thread's preview.
 - (sidebar) Pinned threads come first, then Active threads, then a collapsible Settled shelf at the bottom of the sidebar.
-- (sidebar) A thread shows ✓ Completed when its latest turn ended after the user last selected it.
+- (sidebar) A thread shows a green check and "done" when its latest turn ended after the user last selected it.
 - (settle) Any new turn, approval request, or input request un-settles a thread.
 - (settle) An unpinned thread auto-settles after 3 days without turn activity, unless the user un-settled it since that activity or orb is attached to it.
 - (settle) Settling a thread stops its Claude session (`claude stop`); attaching resumes it.
@@ -107,7 +108,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In the sidebar or preview, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
 - (sidebar) The sidebar's width and project filter persist across restarts.
 - (keybinds) `␣f` in the sidebar opens the project filter: `All projects`, then the projects in `␣n` order.
-- (sidebar) While a project filter is set, the sidebar lists only that project's drafts and threads, under a header naming it.
+- (sidebar) While a project filter is set, the sidebar lists only that project's drafts and threads, and its input box shows the project after the > prompt.
 - (sidebar) Picking a project in `␣n` outside the project filter clears the filter.
 - (keybinds) `<C-x>` in the project filter removes the highlighted project after a `No`/`Yes` confirm.
 - (projects) A removed project is hidden from `␣n` and the project filter and loses its draft; its threads stay, and adding it again with `␣p` restores it.

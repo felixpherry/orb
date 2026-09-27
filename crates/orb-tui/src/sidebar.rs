@@ -367,15 +367,15 @@ fn status(thread: &Thread, now: SystemTime) -> (&'static str, Option<&'static st
     }
 }
 
-/// The working spinner's frame: one a second since the turn started, so it
-/// moves with the once-a-second redraw while a thread works.
+/// The working spinner's frame: one per [`SPINNER_FRAME`] since the turn
+/// started, so it moves with the loop's redraw while a thread works.
 fn spinner(thread: &Thread, now: SystemTime) -> &'static str {
-    let secs = thread
+    let frames = thread
         .turn_started_at
-        .map(|at| since(now, at).as_secs())
+        .map(|at| since(now, at).as_millis() / SPINNER_FRAME.as_millis())
         .unwrap_or_default();
     SPINNER
-        .get(secs as usize % SPINNER.len())
+        .get(frames as usize % SPINNER.len())
         .copied()
         .unwrap_or_default()
 }
@@ -608,6 +608,9 @@ const COMPLETED_ICON: &str = "\u{f058}";
 const STOPPED_ICON: &str = "\u{f04d}";
 /// Idle, or a status orb doesn't know (`nf-fa-circle_o`).
 const IDLE_ICON: &str = "\u{f10c}";
+/// How long each spinner frame shows; the loop redraws this often while a
+/// thread works.
+pub(crate) const SPINNER_FRAME: Duration = Duration::from_millis(100);
 /// The working spinner's frames.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// A pinned thread (`nf-fa-thumb_tack`).
@@ -1007,18 +1010,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn working_icon_is_the_spinner_frame_for_its_elapsed_seconds() {
-        // Given a Working thread whose turn started 134 s before now.
+    fn working_icon_is_the_spinner_frame_for_its_elapsed_tenths() {
+        // Given a Working thread whose turn started 134.3 s before now.
         let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
 
         // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 8);
+        let buf = draw(&sessions, at(1000) + Duration::from_millis(300), 8);
 
-        // Then its icon is the spinner's fifth frame, in blue.
+        // Then its icon is the spinner's fourth frame (1343 tenths), in blue.
         assert_eq!(
             glyph(&buf, 1, 3),
-            Some(("⠼".to_owned(), BLUE)),
-            "the spinner 134 s in"
+            Some(("⠸".to_owned(), BLUE)),
+            "the spinner 134.3 s in"
         );
     }
 

@@ -3,8 +3,9 @@
 //! Terminal input, the pane's background threads, and the actors' state
 //! changes all feed one channel. The loop sleeps until something arrives,
 //! handles everything pending, and then draws a single frame, so bursts of
-//! output cost one redraw. The only tick is once a second while a thread is
-//! working, so its elapsed time counts up.
+//! output cost one redraw. The only tick is every spinner frame (100 ms)
+//! while a thread is working, so its spinner turns and its elapsed time
+//! counts up.
 //!
 //! Each thread gets its own `claude attach` pane; selecting another thread
 //! drops it (the session keeps running). While attached, input goes straight
@@ -38,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
 use kameo::prelude::ActorRef;
@@ -61,7 +62,7 @@ use wherror::Error;
 use crate::keymap::{self, Keys, Route, Scope, Selection};
 use crate::picker::PickerScroll;
 use crate::preview::PreviewCache;
-use crate::sidebar::SidebarScroll;
+use crate::sidebar::{SPINNER_FRAME, SidebarScroll};
 use crate::{outer_terminal, render};
 
 /// The frontend loop failed to draw a frame or read a terminal event.
@@ -353,11 +354,11 @@ impl App {
     }
 
     /// When the loop must wake without an event: the pane's synchronized
-    /// update times out, or a second passes while a thread is working so its
-    /// elapsed time ticks.
+    /// update times out, or a spinner frame passes while a thread is working
+    /// so its spinner and elapsed time tick.
     fn deadline(&self) -> Option<Instant> {
         let tick = (self.state.read().sessions.working_count() > 0)
-            .then(|| Instant::now() + Duration::from_secs(1));
+            .then(|| Instant::now() + SPINNER_FRAME);
         let sync = self
             .pane
             .as_ref()
