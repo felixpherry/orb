@@ -380,7 +380,9 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Resolved in M9's research and walk (research §14): zellij 0.45 drops OSC 99, OSC 9 and OSC 777, and sends no focus-out to the tab the user leaves, so orb asks `zellij action list-clients` before dropping a notice while it seems focused. An `osascript` notification opens Script Editor on click, so orb posts through `terminal-notifier` when it's installed, with an `-execute` line back to orb's kitty window, zellij tab and pane, and through `osascript` when it isn't or when it fails. The user's kitty → zellij walk passed AC1–AC9. Three pre-check UI points were kept as they are: the `Remove project?` confirm doesn't name the project (UI pass); `<C-h>` in a trust pane left untrusted retries once and shows `Workspace not trusted`; `Yes` on the filtered project, with its draft selected, moves the cursor within the full list.
 
 ### Backlog
-**Deferred** (the user doesn't need them for now, M9): subagent transcript expansion · PR status via `gh` + settle on merge · snooze · undo.
+**To plan** (scope decided in the planning session): worktree pruning, automatic or manual · `␣sg` global search.
+
+**UI polish:** the Settled header sticks to the bottom of the sidebar while the list scrolls · while a search lists settled matches, the Settled header keeps its closed-folder icon · a search text longer than the input box scrolls instead of being cut off by the count.
 
 **Dropped in M9:**
 - Codex behind `SessionHost` — orb supports Claude Code as its only provider (RECORD `(identity)`), and another provider is a milestone of its own.
@@ -391,7 +393,14 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Quick-reply box — `claude` has no send command, so it would be a hidden `claude attach` plus a timed paste that Claude's vim mode could eat.
 - Drag reorder of pinned/active threads — orb captures the mouse only while attached, and a keyboard reorder would reopen "Sidebar ordering".
 
-**UI pass** (after the last milestone): project favicons (`ratatui-image`; zellij 0.45 supports kitty graphics) · the Settled header sticks to the bottom of the sidebar while the list scrolls · the `Remove project?` confirm names the project · a `<C-x>` chip in the project filter's footer · while a search lists settled matches, the Settled header keeps its closed-folder icon · a search text longer than the input box is cut off by the count instead of scrolling.
+**Dropped 2026-09-27:**
+- Subagent transcript expansion — it would expand inside the preview, which the dashboard replaced.
+- PR status via `gh` + settle on merge — the user doesn't track PRs that way.
+- Snooze — settle already covers it.
+- Undo — settle, delete and discard ask a `No`/`Yes` confirm first.
+- Project favicons — projects are told apart by name; it would add `ratatui-image` and kitty-graphics plumbing.
+- The `Remove project?` confirm names the project — the confirm acts on the highlighted row.
+- A `<C-x>` chip in the project filter's footer — built (RECORD `(picker)`).
 
 ## Risks
 
