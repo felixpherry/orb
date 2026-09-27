@@ -659,7 +659,8 @@ pub(crate) const YELLOW: Color = Color::Rgb(0xff, 0xc7, 0x77);
 /// The input box and the pin; the rule under the picker's input and its
 /// git icon (`orange`).
 pub(crate) const ORANGE: Color = Color::Rgb(0xff, 0x96, 0x6c);
-/// Failed and gone, and the mode line's error (`red`).
+/// Failed and gone, the mode line's error, and the which-key popup's lazygit
+/// icon (`red`).
 pub(crate) const RED: Color = Color::Rgb(0xff, 0x75, 0x7f);
 /// Needing input; the picker's remote branches and previous worktree
 /// (`magenta`).
