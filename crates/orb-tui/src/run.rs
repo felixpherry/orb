@@ -4,8 +4,8 @@
 //! changes all feed one channel. The loop sleeps until something arrives,
 //! handles everything pending, and then draws a single frame, so bursts of
 //! output cost one redraw. The only tick is every spinner frame (100 ms)
-//! while a thread is working, so its spinner turns and its elapsed time
-//! counts up.
+//! while a thread is working or a session is starting, so the spinners turn
+//! and a working thread's elapsed time counts up.
 //!
 //! Each thread gets its own `claude attach` pane; selecting another thread
 //! drops it (the session keeps running). While attached, input goes straight
@@ -47,6 +47,7 @@ use std::thread;
 use std::time::{Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
+use jiff::tz::TimeZone;
 use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::notify::notifier::NotifierService;
@@ -77,16 +78,17 @@ pub struct TuiRunError;
 pub struct Frontend {
     tx: Sender<LoopEvent>,
     rx: Receiver<LoopEvent>,
-}
-
-impl Default for Frontend {
-    fn default() -> Self {
-        let (tx, rx) = mpsc::channel();
-        Self { tx, rx }
-    }
+    /// The zone the mode line's clock shows.
+    tz: TimeZone,
 }
 
 impl Frontend {
+    /// A frontend whose mode line shows the time in `tz`.
+    pub fn new(tz: TimeZone) -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self { tx, rx, tz }
+    }
+
     /// Wakes the loop to redraw after an actor changed the state.
     pub fn waker(&self) -> Wake {
         let tx = self.tx.clone();
@@ -115,12 +117,12 @@ impl Frontend {
         zellij: Option<ZellijService>,
         notifier: NotifierService,
     ) -> Result<(), Report<TuiRunError>> {
-        let Self { tx, rx } = self;
+        let Self { tx, rx, tz } = self;
         ratatui::run(|terminal| -> io::Result<()> {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook();
-            let result =
-                App::new(state, sessions, git, claude_env, zellij, notifier, tx).run(terminal, &rx);
+            let result = App::new(state, sessions, git, claude_env, zellij, notifier, tx, tz)
+                .run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
             result.and(restored)
         })
@@ -238,6 +240,8 @@ struct App {
     zellij: Option<ZellijService>,
     /// Announces the sessions actor's notices.
     notifier: NotifierService,
+    /// The zone the mode line's clock shows.
+    tz: TimeZone,
     tx: Sender<LoopEvent>,
     pane_area: Rect,
     /// The cursor style last sent to the outer terminal.
@@ -258,6 +262,7 @@ impl App {
         zellij: Option<ZellijService>,
         notifier: NotifierService,
         tx: Sender<LoopEvent>,
+        tz: TimeZone,
     ) -> Self {
         let scope = {
             let state = state.read();
@@ -274,6 +279,7 @@ impl App {
             claude_env,
             zellij,
             notifier,
+            tz,
             tx,
             pane_area: Rect::default(),
             cursor_style: SetCursorStyle::DefaultUserShape,
@@ -311,6 +317,7 @@ impl App {
                     self.pane_error.as_deref(),
                     &self.keys,
                     now,
+                    &self.tz,
                     &mut self.sidebar_scroll,
                     &mut self.picker_scroll,
                 );
@@ -365,9 +372,13 @@ impl App {
 
     /// When the loop must wake without an event: the pane's synchronized
     /// update times out, or a spinner frame passes while a thread is working
-    /// so its spinner and elapsed time tick.
+    /// or a session is starting, so the spinners and elapsed time tick.
     fn deadline(&self) -> Option<Instant> {
-        let tick = (self.state.read().sessions.working_count() > 0)
+        let tick = self
+            .state
+            .read()
+            .sessions
+            .spinning()
             .then(|| Instant::now() + SPINNER_FRAME);
         let sync = self
             .pane

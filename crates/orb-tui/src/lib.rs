@@ -3,11 +3,13 @@
 
 mod dashboard;
 mod keymap;
+mod mode_line;
 mod outer_terminal;
 mod picker;
 mod rename;
 mod render;
 mod run;
 mod sidebar;
+mod which_key;
 
 pub use run::{Frontend, TuiRunError};

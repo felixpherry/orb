@@ -577,12 +577,23 @@ impl Sessions {
         self.cursor = Some(SidebarItem::SettledShelf);
     }
 
+    /// How many threads have `status`, not counting threads being deleted.
+    pub fn status_count(&self, status: ThreadStatus) -> usize {
+        self.shown_threads()
+            .filter(|thread| thread.status == status)
+            .count()
+    }
+
     /// How many threads are running a turn right now, not counting threads
     /// being deleted.
     pub fn working_count(&self) -> usize {
-        self.shown_threads()
-            .filter(|thread| thread.status == ThreadStatus::Working)
-            .count()
+        self.status_count(ThreadStatus::Working)
+    }
+
+    /// Whether something shows a spinner: a session is being started or a
+    /// thread is working.
+    pub fn spinning(&self) -> bool {
+        self.starting || self.working_count() > 0
     }
 
     /// Whether any thread not being deleted has a turn underway.
@@ -1380,6 +1391,73 @@ mod tests {
             count, 1,
             "a thread being deleted shouldn't count as running"
         );
+    }
+
+    #[rstest::rstest]
+    fn status_count_skips_threads_being_deleted() {
+        // Given two threads needing approval, one being deleted.
+        let needs_approval = |id| Thread {
+            status: ThreadStatus::NeedsApproval,
+            ..thread(id)
+        };
+        let sessions = Sessions {
+            deleting: [ThreadId(1)].into(),
+            ..sessions(vec![needs_approval(1), needs_approval(2)], None)
+        };
+
+        // When counting the threads needing approval.
+        let count = sessions.status_count(ThreadStatus::NeedsApproval);
+
+        // Then only the other one counts.
+        assert_eq!(
+            count, 1,
+            "a thread being deleted shouldn't count toward its status"
+        );
+    }
+
+    #[rstest::rstest]
+    fn spinning_while_a_session_starts() {
+        // Given idle threads and a session being started.
+        let sessions = Sessions {
+            starting: true,
+            ..sessions(vec![thread(1)], None)
+        };
+
+        // When asking whether anything spins.
+        let spinning = sessions.spinning();
+
+        // Then it spins.
+        assert!(spinning, "a starting session should spin");
+    }
+
+    #[rstest::rstest]
+    fn spinning_while_a_thread_works() {
+        // Given a working thread and no session starting.
+        let sessions = sessions(
+            vec![Thread {
+                status: ThreadStatus::Working,
+                ..thread(1)
+            }],
+            None,
+        );
+
+        // When asking whether anything spins.
+        let spinning = sessions.spinning();
+
+        // Then it spins.
+        assert!(spinning, "a working thread should spin");
+    }
+
+    #[rstest::rstest]
+    fn not_spinning_when_idle() {
+        // Given only idle threads and no session starting.
+        let sessions = sessions(vec![thread(1), thread(2)], None);
+
+        // When asking whether anything spins.
+        let spinning = sessions.spinning();
+
+        // Then nothing spins.
+        assert!(!spinning, "idle threads with no start shouldn't spin");
     }
 
     #[rstest::rstest]

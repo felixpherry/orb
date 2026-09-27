@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use error_stack::{Report, ResultExt};
+use jiff::tz::TimeZone;
 use orb_domain::feat::git::git_cli::GitCli;
 use orb_domain::feat::git::git_service::GitService;
 use orb_domain::feat::notify::notifier::NotifierService;
@@ -32,6 +33,7 @@ fn main() -> Result<(), Report<OrbError>> {
     let claude_dir =
         std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from);
     let claude_env = child_env(std::env::vars_os());
+    let tz = TimeZone::system();
     let session = std::env::var_os("ZELLIJ_SESSION_NAME");
     let pane = std::env::var("ZELLIJ_PANE_ID")
         .ok()
@@ -80,7 +82,7 @@ fn main() -> Result<(), Report<OrbError>> {
         home,
         ..AppState::default()
     });
-    let frontend = Frontend::default();
+    let frontend = Frontend::new(tz);
     let services = Services {
         session_host: SessionHostService::new(Arc::new(ClaudeSupervisor::new(claude_env.clone()))),
         git: GitService::new(Arc::new(GitCli::new(claude_env.clone()))),
