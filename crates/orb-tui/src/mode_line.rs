@@ -188,6 +188,10 @@ where
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "tests propagate parse failures with `?` and assert on the outcome"
+)]
 mod tests {
     use std::time::{Duration, SystemTime};
 
@@ -373,6 +377,21 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case::attached(Focus::Attached, " ATTACHED ")]
+    #[case::picker(Focus::Picker, " PICKER ")]
+    fn mode_line_names_the_focus_mode(#[case] focus: Focus, #[case] block: &str) {
+        // Given a selected thread with that focus.
+        let state = selected(focus);
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the mode block names that mode.
+        let text = text(&buffer);
+        assert!(text.starts_with(block), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
     #[case(Focus::Sidebar)]
     #[case(Focus::Preview)]
     fn mode_line_shows_draft_on_a_draft(#[case] focus: Focus) {
@@ -528,6 +547,30 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn starting_spinner_turns_a_frame_later() {
+        // Given a session being started and no thread working.
+        let state = with_sessions(Sessions {
+            starting: true,
+            ..sessions(vec![])
+        });
+
+        // When drawing the mode line one spinner frame after `NOW`.
+        let buffer = {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 120, 1));
+            let now = SystemTime::UNIX_EPOCH + Duration::from_secs(NOW) + super::SPINNER_FRAME;
+            render(&state, now, &TimeZone::UTC, buf.area, &mut buf);
+            buf
+        };
+
+        // Then the spinner beside it shows its second frame.
+        let text = text(&buffer);
+        assert!(
+            text.contains("⠙ starting session…"),
+            "mode line was '{text}'"
+        );
+    }
+
+    #[rstest::rstest]
     fn no_activity_when_idle() {
         // Given only idle threads.
         let state = with_sessions(sessions(vec![
@@ -640,6 +683,27 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case::before_the_switch("2026-03-08T06:30:00Z", "01:30")]
+    #[case::after_the_switch("2026-03-08T07:30:00Z", "03:30")]
+    fn clock_follows_a_dst_switch(
+        #[case] instant: &str,
+        #[case] expected: &str,
+    ) -> Result<(), jiff::Error> {
+        // Given US Eastern time, which springs forward at 07:00 UTC on 2026-03-08.
+        let zone = TimeZone::posix("EST5EDT,M3.2.0,M11.1.0")?;
+        let now = SystemTime::from(instant.parse::<jiff::Timestamp>()?);
+
+        // When drawing the mode line at that instant in that zone.
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 1));
+        render(&AppState::default(), now, &zone, buffer.area, &mut buffer);
+
+        // Then the clock shows the local time on that side of the switch.
+        let text = text(&buffer);
+        assert!(text.contains(expected), "mode line was '{text}'");
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn narrow_line_keeps_the_right_side_whole() {
         // Given a long claude error.
         let state = with_sessions(Sessions {
@@ -659,5 +723,87 @@ mod tests {
         assert!(text.ends_with(" \u{f017} 22:13 "), "mode line was '{text}'");
         // And the error is cut.
         assert!(!text.contains("retry."), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn narrow_line_cuts_the_error_before_the_mode_block() {
+        // Given a long claude error.
+        let state = with_sessions(Sessions {
+            error: Some(
+                "Workspace not trusted. Run `claude` in /Users/me/dev/a-long-project once \
+                 and accept the trust prompt, then retry."
+                    .to_owned(),
+            ),
+            ..Sessions::default()
+        });
+
+        // When drawing the mode line 60 columns wide.
+        let buffer = draw_in(&state, 60, &TimeZone::UTC);
+
+        // Then the line still starts with the mode block.
+        let text = text(&buffer);
+        assert!(text.starts_with(" NORMAL "), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn line_as_wide_as_the_right_side_shows_only_the_right_side() {
+        // Given nothing selected, so the right side is the 10-column clock block.
+        let state = AppState::default();
+
+        // When drawing the mode line exactly 10 columns wide.
+        let buffer = draw_in(&state, 10, &TimeZone::UTC);
+
+        // Then the line is the whole clock block and nothing of the left.
+        let text = text(&buffer);
+        assert_eq!(text, "\u{e0b2} \u{f017} 22:13 ", "mode line");
+    }
+
+    #[rstest::rstest]
+    fn line_narrower_than_the_right_side_cuts_the_right_side_at_its_end() {
+        // Given nothing selected, so the right side is the 10-column clock block.
+        let state = AppState::default();
+
+        // When drawing the mode line 6 columns wide.
+        let buffer = draw_in(&state, 6, &TimeZone::UTC);
+
+        // Then the clock block shows from its start and is cut at its end.
+        let text = text(&buffer);
+        assert_eq!(text, "\u{e0b2} \u{f017} 22", "mode line");
+    }
+
+    #[rstest::rstest]
+    #[case(0)]
+    #[case(1)]
+    fn tiny_line_draws_without_panicking(#[case] width: u16) {
+        // Given a claude error and a working thread.
+        let state = with_sessions(Sessions {
+            error: Some("Workspace not trusted".to_owned()),
+            ..sessions(vec![thread(1, ThreadStatus::Working)])
+        });
+
+        // When drawing the mode line that narrow.
+        let buffer = draw_in(&state, width, &TimeZone::UTC);
+
+        // Then it fills exactly that many cells.
+        assert_eq!(buffer.content.len(), usize::from(width), "mode line cells");
+    }
+
+    #[rstest::rstest]
+    fn wide_grapheme_at_the_cut_is_dropped_whole() {
+        // Given an error whose wide character would straddle the cut.
+        let state = with_sessions(Sessions {
+            error: Some("a日".to_owned()),
+            ..Sessions::default()
+        });
+
+        // When drawing the mode line so the left side ends mid-character.
+        let buffer = draw_in(&state, 24, &TimeZone::UTC);
+
+        // Then the wide character is left out and the right side stays whole.
+        let text = text(&buffer);
+        assert_eq!(
+            text, " NORMAL \u{e0b0} \u{f057} a \u{e0b2} \u{f017} 22:13 ",
+            "mode line"
+        );
     }
 }
