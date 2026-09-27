@@ -11,8 +11,8 @@
 //! outside which-key, which can't name them. While attached, every key goes
 //! to Claude except `<C-\>` and `<C-h>`. An open picker takes typed
 //! characters as filter text and has its own fixed keys, `<C-x>` among them
-//! for removing a project from the project filter. The rename box (`r`) uses
-//! the picker's keys.
+//! for removing a project from the project filter. The rename box (`r`) and
+//! the sidebar search (`/` or `i`) use the picker's keys.
 
 use std::fmt;
 
@@ -147,6 +147,8 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             .bind("q", Intent::Quit, KeyCategory::General, scope)
             .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
             .bind("h", Intent::CloseShelf, KeyCategory::Navigation, scope)
+            .bind("/", Intent::Search, KeyCategory::Navigation, scope)
+            .bind("i", Intent::Search, KeyCategory::Navigation, scope)
             .bind(
                 "<leader>n",
                 Intent::NewSession,
@@ -635,6 +637,25 @@ mod tests {
             intent.as_ref(),
             Some(&expected),
             "the key for {expected} in the sidebar"
+        );
+    }
+
+    #[rstest::rstest]
+    fn slash_and_i_search_in_every_sidebar_scope(
+        #[values(Scope::Sidebar, Scope::SidebarDraft, Scope::SidebarEmpty)] scope: Scope,
+        #[values('/', 'i')] pressed: char,
+    ) {
+        // Given the keymap in a sidebar scope.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing the key.
+        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
+
+        // Then it starts a search.
+        assert_eq!(
+            intent,
+            Some(Intent::Search),
+            "`{pressed}` should search in {scope:?}"
         );
     }
 

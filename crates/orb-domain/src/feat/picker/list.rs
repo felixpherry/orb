@@ -432,6 +432,26 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
     }
 }
 
+/// The summed score of every term in `label`, and the sorted byte offsets of
+/// the characters they matched; `None` when a term doesn't match.
+pub fn fuzzy_match(
+    matcher: &SkimMatcherV2,
+    label: &str,
+    terms: &[&str],
+) -> Option<(i64, Vec<usize>)> {
+    let bytes: Vec<usize> = label.char_indices().map(|(at, _)| at).collect();
+    let mut total = 0;
+    let mut offsets = Vec::new();
+    for term in terms {
+        let (score, chars) = matcher.fuzzy_indices(label, term)?;
+        total += score;
+        offsets.extend(chars.iter().filter_map(|&index| bytes.get(index).copied()));
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    Some((total, offsets))
+}
+
 /// The summed score and match offsets of `item` when every term matches.
 fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(i64, Matches)> {
     // A project is matched on "title\nroot". Typed text never holds a line
@@ -449,16 +469,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::AllProjects => (ALL_PROJECTS.to_owned(), None),
         PickerItem::Confirm(yes) => (confirm_label(*yes).to_owned(), None),
     };
-    let bytes: Vec<usize> = label.char_indices().map(|(at, _)| at).collect();
-    let mut total = 0;
-    let mut offsets = Vec::new();
-    for term in terms {
-        let (score, chars) = matcher.fuzzy_indices(&label, term)?;
-        total += score;
-        offsets.extend(chars.iter().filter_map(|&index| bytes.get(index).copied()));
-    }
-    offsets.sort_unstable();
-    offsets.dedup();
+    let (total, offsets) = fuzzy_match(matcher, &label, terms)?;
     let found = match title_len {
         Some(title_len) => {
             let (name, path): (Vec<usize>, Vec<usize>) =

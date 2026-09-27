@@ -389,7 +389,7 @@ pub(crate) fn cut_left(text: &str, width: usize) -> String {
 
 /// `text` with each grapheme holding one of `offsets` (byte offsets into
 /// `text`) blue and bold, and the rest in `fg` of the grapheme's offset.
-fn highlight<F>(text: &str, offsets: &[usize], fg: F) -> Vec<Span<'static>>
+pub(crate) fn highlight<F>(text: &str, offsets: &[usize], fg: F) -> Vec<Span<'static>>
 where
     F: Fn(usize) -> Color,
 {

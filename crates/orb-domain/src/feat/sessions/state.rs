@@ -7,7 +7,14 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use fuzzy_matcher::skim::SkimMatcherV2;
+
+use crate::TextInput;
+use crate::feat::picker::list::fuzzy_match;
 use crate::feat::sidebar::state::SidebarLayout;
+
+/// What a draft is called, and a thread before its transcript names it.
+pub const NEW_THREAD: &str = "New thread";
 
 /// Identifies a thread across launches (its row in orb's store).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -205,6 +212,14 @@ impl SidebarRow<'_> {
     }
 }
 
+/// The sidebar search: the typed text, and where the cursor was before it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Search {
+    pub input: TextInput,
+    /// Where `Esc` puts the cursor back.
+    pub return_to: Option<SidebarItem>,
+}
+
 /// orb's projects, threads and drafts, and where the sidebar's cursor is.
 ///
 /// Written by the sessions actor (projects and their drafts, `error`,
@@ -240,6 +255,10 @@ pub struct Sessions {
     /// Status changes for the frontend to announce; the sessions actor
     /// pushes, the frontend takes.
     pub notices: Vec<Notice>,
+    /// The sidebar search while the user types one. Written only by the
+    /// intent handler; the frontend clears it when it gives the keys to a
+    /// pane.
+    pub search: Option<Search>,
 }
 
 impl Sessions {
@@ -276,17 +295,26 @@ impl Sessions {
     /// anything is settled, the shelf header and the settled rows (newest
     /// settle first). A collapsed shelf still lists the cursor's settled
     /// thread. Ties go to the higher id. Threads being deleted aren't listed.
-    /// While a project filter is set, only that project's rows are.
+    /// While a project filter is set, only that project's rows are. While a
+    /// search has text, only the drafts and threads whose title matches it
+    /// are, settled ones even while the shelf is closed, and the shelf header
+    /// only when a settled thread matches.
     pub fn sidebar(&self) -> Vec<SidebarRow<'_>> {
+        let searching = self.searching();
         let mut drafts: Vec<_> = self
             .listed_projects()
             .filter_map(|project| project.draft.as_ref().map(|draft| (project, draft)))
+            .filter(|_| self.title_matches(NEW_THREAD).is_some())
             .collect();
         drafts.sort_by_key(|(project, draft)| Reverse((draft.created_at, project.id.0)));
         let (mut settled, live): (Vec<_>, Vec<_>) = self
             .listed_projects()
             .flat_map(|project| project.threads.iter().map(move |thread| (project, thread)))
             .filter(|(_, thread)| !self.deleting.contains(&thread.id))
+            .filter(|(_, thread)| {
+                self.title_matches(thread.title.as_deref().unwrap_or(NEW_THREAD))
+                    .is_some()
+            })
             .partition(|(_, thread)| thread.settled_at.is_some());
         let (mut pinned, mut active): (Vec<_>, Vec<_>) = live
             .into_iter()
@@ -313,12 +341,80 @@ impl Sessions {
                 settled
                     .into_iter()
                     .filter(|(_, thread)| {
-                        self.shelf_open || self.cursor == Some(SidebarItem::Thread(thread.id))
+                        searching
+                            || self.shelf_open
+                            || self.cursor == Some(SidebarItem::Thread(thread.id))
                     })
                     .map(|(project, thread)| SidebarRow::Settled { project, thread }),
             );
         }
         rows
+    }
+
+    /// Where the search's terms matched `title`, as sorted byte offsets:
+    /// empty without a search or with blank text, `None` when a term
+    /// doesn't match.
+    pub fn title_matches(&self, title: &str) -> Option<Vec<usize>> {
+        let terms: Vec<&str> = self
+            .search
+            .as_ref()
+            .map(|search| search.input.text().split_whitespace().collect())
+            .unwrap_or_default();
+        match terms.as_slice() {
+            [] => Some(Vec::new()),
+            terms => {
+                fuzzy_match(&SkimMatcherV2::default(), title, terms).map(|(_, offsets)| offsets)
+            }
+        }
+    }
+
+    /// Move the cursor to the first draft or thread the search lists, or to
+    /// nothing when none matches. Blank text leaves the cursor where it is.
+    pub fn select_first_match(&mut self) {
+        if self.searching() {
+            self.cursor = self.matches().first().copied();
+        }
+    }
+
+    /// Move the cursor to the next draft or thread the search lists, past
+    /// the shelf header; stays put on the last one. Without a cursor, or with
+    /// one on a row that's gone, selects the first.
+    pub fn select_next_match(&mut self) {
+        let matches = self.matches();
+        let next = match self.position(&matches) {
+            None => matches.first(),
+            Some(at) => matches.get(at + 1),
+        };
+        if let Some(&next) = next {
+            self.cursor = Some(next);
+        }
+    }
+
+    /// Move the cursor to the previous draft or thread the search lists,
+    /// past the shelf header; stays put on the first one. Without a cursor,
+    /// or with one on a row that's gone, selects the first.
+    pub fn select_prev_match(&mut self) {
+        let matches = self.matches();
+        let prev = match self.position(&matches) {
+            None => matches.first(),
+            Some(at) => at.checked_sub(1).and_then(|at| matches.get(at)),
+        };
+        if let Some(&prev) = prev {
+            self.cursor = Some(prev);
+        }
+    }
+
+    /// End the search and put the cursor back where it was before it, or on
+    /// the first row when that row is no longer listed.
+    pub fn cancel_search(&mut self) {
+        let Some(search) = self.search.take() else {
+            return;
+        };
+        self.cursor = search.return_to;
+        let items = self.items();
+        if self.position(&items).is_none() {
+            self.cursor = items.first().copied();
+        }
     }
 
     /// The thread under the cursor, if it still exists.
@@ -506,6 +602,22 @@ impl Sessions {
             .filter(|thread| !self.deleting.contains(&thread.id))
     }
 
+    /// Whether a search with text is filtering the sidebar.
+    fn searching(&self) -> bool {
+        self.search
+            .as_ref()
+            .is_some_and(|search| !search.input.text().trim().is_empty())
+    }
+
+    /// The drafts and threads listed, in display order: every row but the
+    /// shelf header.
+    fn matches(&self) -> Vec<SidebarItem> {
+        self.items()
+            .into_iter()
+            .filter(|&item| item != SidebarItem::SettledShelf)
+            .collect()
+    }
+
     /// What each sidebar row's cursor rests on, in display order.
     fn items(&self) -> Vec<SidebarItem> {
         self.sidebar().iter().map(SidebarRow::item).collect()
@@ -572,9 +684,10 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, SidebarRow, Thread,
-        ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem, SidebarRow,
+        Thread, ThreadId, ThreadStatus,
     };
+    use crate::TextInput;
     use crate::feat::sidebar::state::SidebarLayout;
 
     fn at(secs: u64) -> SystemTime {
@@ -1482,5 +1595,274 @@ mod tests {
             next, None,
             "another project's settled thread shouldn't offer a hidden shelf"
         );
+    }
+
+    /// `thread`, titled `title`.
+    fn titled(thread: Thread, title: &str) -> Thread {
+        Thread {
+            title: Some(title.to_owned()),
+            ..thread
+        }
+    }
+
+    /// `sessions` searching for `text`, from the cursor it has.
+    fn searching(sessions: Sessions, text: &str) -> Sessions {
+        Sessions {
+            search: Some(Search {
+                input: TextInput::new(text),
+                return_to: sessions.cursor,
+            }),
+            ..sessions
+        }
+    }
+
+    /// Active "fix login bug" (1), "add dark mode" (2) and "fix logout" (3),
+    /// listed 3, 2, 1, and "fix lint" (4) settled, with the shelf closed.
+    fn four_titles() -> Sessions {
+        sessions(
+            vec![
+                titled(active(1, 10), "fix login bug"),
+                titled(active(2, 20), "add dark mode"),
+                titled(active(3, 30), "fix logout"),
+                titled(settled(4, 40), "fix lint"),
+            ],
+            None,
+        )
+    }
+
+    #[rstest::rstest]
+    fn search_keeps_only_matching_titles_in_sidebar_order() {
+        // Given three active threads, two titled "fix log…", and the shelf
+        // empty of matches.
+        let sessions = searching(
+            sessions(
+                vec![
+                    titled(active(1, 10), "fix login bug"),
+                    titled(active(2, 20), "add dark mode"),
+                    titled(active(3, 30), "fix logout"),
+                ],
+                None,
+            ),
+            "fix log",
+        );
+
+        // When listing the sidebar.
+        let rows = items(&sessions);
+
+        // Then only the two matches show, newest first as usual.
+        assert_eq!(
+            rows,
+            vec![on(3), on(1)],
+            "the search should keep only matches, in sidebar order"
+        );
+    }
+
+    #[rstest::rstest]
+    fn search_lists_settled_matches_while_the_shelf_is_closed() {
+        // Given a settled "fix lint" with the shelf closed.
+        let sessions = searching(four_titles(), "lint");
+
+        // When listing the sidebar.
+        let rows = items(&sessions);
+
+        // Then the shelf header and the settled match show.
+        assert_eq!(
+            rows,
+            vec![SidebarItem::SettledShelf, on(4)],
+            "a settled match should show with the shelf closed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn search_counts_only_matching_settled_threads_on_the_shelf() {
+        // Given two settled threads, one matching.
+        let sessions = searching(
+            sessions(
+                vec![
+                    titled(settled(1, 10), "fix lint"),
+                    titled(settled(2, 20), "add dark mode"),
+                ],
+                None,
+            ),
+            "lint",
+        );
+
+        // When listing the sidebar.
+        let count = sessions.sidebar().iter().find_map(|row| match row {
+            SidebarRow::ShelfHeader { count, .. } => Some(*count),
+            _ => None,
+        });
+
+        // Then the header counts only the match.
+        assert_eq!(count, Some(1), "the header should count the matches");
+    }
+
+    #[rstest::rstest]
+    fn search_without_a_settled_match_has_no_shelf_header() {
+        // Given a settled "fix lint" and a search only an active thread
+        // matches.
+        let sessions = searching(four_titles(), "dark");
+
+        // When listing the sidebar.
+        let rows = items(&sessions);
+
+        // Then only the active match shows.
+        assert_eq!(rows, vec![on(2)], "no settled match, no header");
+    }
+
+    #[rstest::rstest]
+    fn search_stays_inside_the_project_filter() {
+        // Given two projects each with an untitled card, filtered to project
+        // 2.
+        let sessions = searching(two_projects(Some(2)), "new");
+
+        // When listing the sidebar.
+        let rows = items(&sessions);
+
+        // Then only project 2's matching rows show.
+        assert_eq!(
+            rows,
+            vec![on_draft(2), on(3), SidebarItem::SettledShelf, on(4)],
+            "the search should stay inside the filter"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case("")]
+    #[case("  ")]
+    fn blank_search_filters_nothing(#[case] text: &str) {
+        // Given a search with blank text.
+        let sessions = searching(four_titles(), text);
+
+        // When listing the sidebar.
+        let rows = items(&sessions);
+
+        // Then every row shows as without a search.
+        assert_eq!(rows, items(&four_titles()), "blank text shouldn't filter");
+    }
+
+    #[rstest::rstest]
+    fn title_matches_returns_the_matched_byte_offsets() {
+        // Given a search for "fl".
+        let sessions = searching(Sessions::default(), "fl");
+
+        // When matching "fix lint".
+        let offsets = sessions.title_matches("fix lint");
+
+        // Then the `f` and the `l` match.
+        assert_eq!(offsets, Some(vec![0, 4]), "offsets of 'fl' in 'fix lint'");
+    }
+
+    #[rstest::rstest]
+    fn select_first_match_without_a_match_clears_the_cursor() {
+        // Given the cursor on thread 1 and a search nothing matches.
+        let mut sessions = searching(
+            Sessions {
+                cursor: Some(on(1)),
+                ..four_titles()
+            },
+            "zzz",
+        );
+
+        // When selecting the first match.
+        sessions.select_first_match();
+
+        // Then nothing is selected.
+        assert_eq!(sessions.cursor, None, "no match, no cursor");
+    }
+
+    #[rstest::rstest]
+    fn select_first_match_with_blank_text_keeps_the_cursor() {
+        // Given the cursor on thread 1 and a blank search.
+        let mut sessions = searching(
+            Sessions {
+                cursor: Some(on(1)),
+                ..four_titles()
+            },
+            "",
+        );
+
+        // When selecting the first match.
+        sessions.select_first_match();
+
+        // Then the cursor stays.
+        assert_eq!(sessions.cursor, Some(on(1)), "blank text shouldn't move it");
+    }
+
+    #[rstest::rstest]
+    fn select_next_match_skips_the_shelf_header() {
+        // Given "fix" matching cards 3 and 1 and settled 4, with the cursor on
+        // card 1.
+        let mut sessions = searching(
+            Sessions {
+                cursor: Some(on(1)),
+                ..four_titles()
+            },
+            "fix",
+        );
+
+        // When selecting the next match.
+        sessions.select_next_match();
+
+        // Then it lands on the settled match, past the header.
+        assert_eq!(sessions.cursor, Some(on(4)), "the header is skipped");
+    }
+
+    #[rstest::rstest]
+    fn select_prev_match_skips_the_shelf_header() {
+        // Given "fix" matching cards 3 and 1 and settled 4, with the cursor on
+        // settled 4.
+        let mut sessions = searching(
+            Sessions {
+                cursor: Some(on(4)),
+                ..four_titles()
+            },
+            "fix",
+        );
+
+        // When selecting the previous match.
+        sessions.select_prev_match();
+
+        // Then it lands on card 1, past the header.
+        assert_eq!(sessions.cursor, Some(on(1)), "the header is skipped");
+    }
+
+    #[rstest::rstest]
+    fn cancel_search_restores_the_cursor_from_before() {
+        // Given a search begun on thread 2 that moved the cursor to thread 3.
+        let mut sessions = Sessions {
+            cursor: Some(on(3)),
+            ..searching(
+                Sessions {
+                    cursor: Some(on(2)),
+                    ..four_titles()
+                },
+                "logout",
+            )
+        };
+
+        // When cancelling the search.
+        sessions.cancel_search();
+
+        // Then the cursor is back on thread 2.
+        assert_eq!(sessions.cursor, Some(on(2)), "Esc restores the cursor");
+    }
+
+    #[rstest::rstest]
+    fn cancel_search_falls_back_to_the_first_row_when_the_old_one_is_gone() {
+        // Given a search begun on thread 9, which no longer exists.
+        let mut sessions = searching(
+            Sessions {
+                cursor: Some(on(9)),
+                ..four_titles()
+            },
+            "logout",
+        );
+
+        // When cancelling the search.
+        sessions.cancel_search();
+
+        // Then the cursor is on the first row.
+        assert_eq!(sessions.cursor, Some(on(3)), "the first row");
     }
 }

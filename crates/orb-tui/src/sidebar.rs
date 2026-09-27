@@ -15,15 +15,17 @@ use std::borrow::Cow;
 use std::time::{Duration, SystemTime};
 
 use orb_domain::feat::sessions::state::{
-    Draft, DraftWorkspace, Project, Sessions, SidebarRow, Thread, ThreadStatus,
+    Draft, DraftWorkspace, NEW_THREAD, Project, Sessions, SidebarRow, Thread, ThreadStatus,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::picker::highlight;
 
 /// How far the sidebar is scrolled, kept between frames.
 #[derive(Debug, Default)]
@@ -34,15 +36,15 @@ pub(crate) struct SidebarScroll {
 
 /// Draws the sidebar into `area`, a blank column short of its right edge: the
 /// input box, then the list, scrolled so the cursor's row is in view. Returns
-/// the y of the selected row's first line when it's on screen, and the list's
-/// layout.
+/// the y of the selected row's first line when it's on screen, the list's
+/// layout, and the search text's cursor while there is a search.
 pub(crate) fn render(
     sessions: &Sessions,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut SidebarScroll,
-) -> (Option<u16>, SidebarLayout) {
+) -> (Option<u16>, SidebarLayout, Option<Position>) {
     buf.set_style(area, Style::new().bg(BG_DARK).fg(FG));
     let area = Rect {
         width: area.width.saturating_sub(1),
@@ -50,18 +52,24 @@ pub(crate) fn render(
     };
     let [input, list] = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
     let rows = sessions.sidebar();
-    render_input(sessions, &rows, input, buf);
+    let search_cursor = render_input(sessions, &rows, input, buf);
     let layout = SidebarLayout {
         rows: list.height,
         heights: rows.iter().map(height).collect(),
     };
     let selected_y = render_list(sessions, rows, now, list, buf, scroll);
-    (selected_y, layout)
+    (selected_y, layout, search_cursor)
 }
 
 /// The rounded box at the top: its title and shelf badge, the prompt, and the
-/// count against its right edge.
-fn render_input(sessions: &Sessions, rows: &[SidebarRow<'_>], area: Rect, buf: &mut Buffer) {
+/// count against its right edge. Returns the search text's cursor while
+/// there is a search.
+fn render_input(
+    sessions: &Sessions,
+    rows: &[SidebarRow<'_>],
+    area: Rect,
+    buf: &mut Buffer,
+) -> Option<Position> {
     let badge = if sessions.shelf_open {
         Style::new().fg(BLUE).bg(GUTTER)
     } else {
@@ -77,28 +85,59 @@ fn render_input(sessions: &Sessions, rows: &[SidebarRow<'_>], area: Rect, buf: &
         ]));
     let inner = block.inner(area);
     block.render(area, buf);
+    let (prompt, cursor) = prompt(sessions);
     render_split(
-        prompt(sessions),
+        prompt,
         Line::from(span(count(sessions, rows), COMMENT)),
         inner,
         buf,
     );
+    cursor.map(|column| {
+        Position::new(
+            inner
+                .x
+                .saturating_add(column)
+                .min(inner.right().saturating_sub(1)),
+            inner.y,
+        )
+    })
 }
 
 /// `>`, followed by the filtered project's folder and name while there is
-/// one, where snacks shows the query.
-fn prompt(sessions: &Sessions) -> Line<'_> {
+/// one, then the search text while there is a search, where snacks shows the
+/// query. Also returns the column of the search text's cursor.
+fn prompt(sessions: &Sessions) -> (Line<'_>, Option<u16>) {
     let filtered = sessions
         .filter
         .and_then(|id| sessions.projects.iter().find(|project| project.id == id));
-    match filtered {
-        Some(project) => Line::from(vec![
+    let mut spans = match filtered {
+        Some(project) => vec![
             span("> ", CYAN),
             span(format!("{FOLDER} "), project_colour(&project.title)),
             span(project.title.as_str(), FG),
-        ]),
-        None => Line::from(span(">", CYAN)),
-    }
+        ],
+        None => vec![span(">", CYAN)],
+    };
+    let Some(search) = &sessions.search else {
+        return (Line::from(spans), None);
+    };
+    spans.push(Span::raw(" "));
+    let typed: String = search
+        .input
+        .text()
+        .graphemes(true)
+        .take(search.input.cursor())
+        .collect();
+    let column = spans
+        .iter()
+        .map(Span::width)
+        .sum::<usize>()
+        .saturating_add(Span::raw(typed).width());
+    spans.push(span(search.input.text(), FG));
+    (
+        Line::from(spans),
+        Some(u16::try_from(column).unwrap_or(u16::MAX)),
+    )
 }
 
 /// `shown/total`, like snacks' match count: the drafts and threads listed,
@@ -159,7 +198,7 @@ fn render_list(
             }
             let ends_shelf =
                 !matches!(placed.get(index + 1), Some((SidebarRow::Settled { .. }, _)));
-            render_row(row, ends_shelf, now, row_area, &mut list);
+            render_row(sessions, row, ends_shelf, now, row_area, &mut list);
         }
         list
     };
@@ -205,33 +244,52 @@ fn height(row: &SidebarRow<'_>) -> u16 {
     }
 }
 
-/// One row; `ends_shelf` says no settled row follows it.
+/// One row; `ends_shelf` says no settled row follows it. Titles show where
+/// the search matched them.
 fn render_row(
+    sessions: &Sessions,
     row: &SidebarRow<'_>,
     ends_shelf: bool,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
 ) {
+    let matched = |title: &str| sessions.title_matches(title).unwrap_or_default();
     match row {
-        SidebarRow::Draft { project, draft } => render_draft(project, draft, area, buf),
-        SidebarRow::Card { project, thread } => render_card(project, thread, now, area, buf),
+        SidebarRow::Draft { project, draft } => {
+            render_draft(project, draft, &matched(NEW_THREAD), area, buf);
+        }
+        SidebarRow::Card { project, thread } => {
+            render_card(project, thread, &matched(title(thread)), now, area, buf);
+        }
         SidebarRow::ShelfHeader { count, open } => render_shelf_header(*count, *open, area, buf),
-        SidebarRow::Settled { thread, .. } => render_settled(thread, ends_shelf, now, area, buf),
+        SidebarRow::Settled { thread, .. } => {
+            let matched = matched(title(thread));
+            render_settled(thread, &matched, ends_shelf, now, area, buf);
+        }
     }
 }
 
-/// A thread's node: its status icon, title, pin and time; the project and
-/// status word; the branch and ✳.
-fn render_card(project: &Project, thread: &Thread, now: SystemTime, area: Rect, buf: &mut Buffer) {
+/// A thread's node: its status icon, title (`matched` at those byte
+/// offsets), pin and time; the project and status word; the branch and ✳.
+fn render_card(
+    project: &Project,
+    thread: &Thread,
+    matched: &[usize],
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     let [heading, place, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
     let (glyph, word, colour) = status(thread, now);
     let pin = if thread.pinned_at.is_some() { PIN } else { "" };
     render_split(
-        Line::from(vec![
-            span(format!(" {glyph} "), colour),
-            span(title(thread), FG),
-        ]),
+        Line::from(
+            [span(format!(" {glyph} "), colour)]
+                .into_iter()
+                .chain(highlight(title(thread), matched, |_| FG))
+                .collect::<Vec<_>>(),
+        ),
         Line::from(vec![
             span(format!("{pin} "), ORANGE),
             span(when(thread, now), COMMENT),
@@ -260,15 +318,17 @@ fn render_card(project: &Project, thread: &Thread, now: SystemTime, area: Rect, 
     );
 }
 
-/// A draft's node: the pencil and `New thread`; the project; the workspace
-/// and branch it will start on.
-fn render_draft(project: &Project, draft: &Draft, area: Rect, buf: &mut Buffer) {
+/// A draft's node: the pencil and `New thread` (`matched` at those byte
+/// offsets); the project; the workspace and branch it will start on.
+fn render_draft(project: &Project, draft: &Draft, matched: &[usize], area: Rect, buf: &mut Buffer) {
     let [heading, place, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
     render_split(
-        Line::from(vec![
-            span(format!(" {PENCIL} "), YELLOW),
-            span("New thread", FG),
-        ]),
+        Line::from(
+            [span(format!(" {PENCIL} "), YELLOW)]
+                .into_iter()
+                .chain(highlight(NEW_THREAD, matched, |_| FG))
+                .collect::<Vec<_>>(),
+        ),
         Line::from(span("draft", DARK3)),
         heading,
         buf,
@@ -324,9 +384,11 @@ fn render_shelf_header(count: usize, open: bool, area: Rect, buf: &mut Buffer) {
 }
 
 /// A settled thread's row under the shelf's folder: its icon (a dim check
-/// unless it failed or is gone), title, and the time since it settled.
+/// unless it failed or is gone), title (`matched` at those byte offsets), and
+/// the time since it settled.
 fn render_settled(
     thread: &Thread,
+    matched: &[usize],
     ends_shelf: bool,
     now: SystemTime,
     area: Rect,
@@ -341,11 +403,12 @@ fn render_settled(
         _ => (COMPLETED_ICON, DARK3),
     };
     render_split(
-        Line::from(vec![
-            span(guide, GUTTER),
-            span(format!("{glyph} "), colour),
-            span(title(thread), COMMENT),
-        ]),
+        Line::from(
+            [span(guide, GUTTER), span(format!("{glyph} "), colour)]
+                .into_iter()
+                .chain(highlight(title(thread), matched, |_| COMMENT))
+                .collect::<Vec<_>>(),
+        ),
         Line::from(span(when(thread, now), DARK3)),
         area,
         buf,
@@ -393,7 +456,7 @@ fn when(thread: &Thread, now: SystemTime) -> String {
 }
 
 fn title(thread: &Thread) -> &str {
-    thread.title.as_deref().unwrap_or("New thread")
+    thread.title.as_deref().unwrap_or(NEW_THREAD)
 }
 
 fn span<'a, T>(text: T, fg: Color) -> Span<'a>
@@ -645,18 +708,19 @@ const LAST_GUIDE: &str = " └╴";
 mod tests {
     use std::time::{Duration, SystemTime};
 
+    use orb_domain::TextInput;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
+        Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem, Thread, ThreadId,
         ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::SidebarLayout;
     use ratatui::buffer::{Buffer, Cell};
-    use ratatui::layout::Rect;
-    use ratatui::style::Color;
+    use ratatui::layout::{Position, Rect};
+    use ratatui::style::{Color, Modifier};
 
     use super::{
-        APPROVAL_ICON, BG_DARK, BLUE, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, COMPLETED_ICON, CYAN,
-        DARK3, FAILED_ICON, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GUIDE, GUTTER, IDLE_ICON,
+        APPROVAL_ICON, BG_DARK, BLUE, BLUE1, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, COMPLETED_ICON,
+        CYAN, DARK3, FAILED_ICON, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GUIDE, GUTTER, IDLE_ICON,
         INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PENCIL, PIN, RED, STOPPED_ICON, SidebarScroll,
         VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
     };
@@ -756,7 +820,7 @@ mod tests {
         height: u16,
     ) -> (Buffer, Option<u16>, SidebarLayout) {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
-        let (selected_y, layout) = render(
+        let (selected_y, layout, _) = render(
             sessions,
             now,
             buf.area,
@@ -971,6 +1035,99 @@ mod tests {
 
         // Then the count is orb's thread out of both.
         assert!(prompt.trim_end().ends_with("1/2│"), "line was '{prompt}'");
+    }
+
+    /// `sessions` searching for `text`.
+    fn searching(sessions: Sessions, text: &str) -> Sessions {
+        Sessions {
+            search: Some(Search {
+                input: TextInput::new(text),
+                return_to: None,
+            }),
+            ..sessions
+        }
+    }
+
+    #[rstest::rstest]
+    fn search_text_follows_the_filtered_project() {
+        // Given the sidebar filtered to orb, searching for "thr".
+        let sessions = searching(filtered(), "thr");
+
+        // When rendering the sidebar.
+        let prompt = line(&draw(&sessions, at(1000), 10), 1);
+
+        // Then the search text follows orb's name.
+        assert!(
+            prompt.starts_with(&format!("│> {FOLDER} orb thr ")),
+            "line was '{prompt}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn search_text_follows_the_chevron() {
+        // Given no filter, searching for "thr".
+        let sessions = searching(sessions(vec![thread(1, ThreadStatus::Idle)]), "thr");
+
+        // When rendering the sidebar.
+        let prompt = line(&draw(&sessions, at(1000), 10), 1);
+
+        // Then the search text follows the `>`.
+        assert!(prompt.starts_with("│> thr "), "line was '{prompt}'");
+    }
+
+    #[rstest::rstest]
+    fn search_cursor_is_after_the_typed_text() {
+        // Given a filtered sidebar searching for "thr".
+        let sessions = searching(filtered(), "thr");
+
+        // When rendering the sidebar.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
+        let (_, _, cursor) = render(
+            &sessions,
+            at(1000),
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+        );
+
+        // Then the cursor is after `> `, the folder and space, `orb`, a space
+        // and `thr`: 11 columns into the box.
+        assert_eq!(cursor, Some(Position::new(12, 1)), "the search cursor");
+    }
+
+    #[rstest::rstest]
+    fn search_count_reads_matches_out_of_every_thread() {
+        // Given three threads, searching for "2".
+        let sessions = searching(
+            sessions(vec![
+                thread(1, ThreadStatus::Idle),
+                thread(2, ThreadStatus::Idle),
+                thread(3, ThreadStatus::Idle),
+            ]),
+            "2",
+        );
+
+        // When rendering the sidebar.
+        let prompt = line(&draw(&sessions, at(1000), 10), 1);
+
+        // Then the count is the one match out of three.
+        assert!(prompt.trim_end().ends_with("1/3│"), "line was '{prompt}'");
+    }
+
+    #[rstest::rstest]
+    fn search_highlights_the_matched_title_characters() {
+        // Given "Thread 7", searching for "7".
+        let sessions = searching(sessions(vec![thread(7, ThreadStatus::Idle)]), "7");
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 8);
+
+        // Then the title's `7` is blue and bold.
+        let seven = (0..buf.area.width)
+            .filter_map(|x| buf.cell((x, 3)))
+            .find(|cell| cell.symbol() == "7")
+            .map(|cell| (cell.fg, cell.modifier.contains(Modifier::BOLD)));
+        assert_eq!(seven, Some((BLUE1, true)), "the matched `7`");
     }
 
     #[rstest::rstest]

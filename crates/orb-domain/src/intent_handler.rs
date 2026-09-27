@@ -16,7 +16,7 @@ use crate::feat::picker::validator::{
 };
 use crate::feat::preview::validator::{validate_toggle_fold, validate_yank};
 use crate::feat::sessions::state::{
-    AttachTarget, Draft, DraftWorkspace, Project, ProjectId, SidebarItem, ThreadId,
+    AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Search, SidebarItem, ThreadId,
 };
 use crate::feat::sessions::validator::{
     validate_close_shelf, validate_delete, validate_open_shelf, validate_pick_setting,
@@ -225,6 +225,23 @@ impl IntentHandler {
                 if state.focus == Focus::Rename =>
             {
                 rename_key(intent, state)
+            }
+            Intent::PickerInput(_)
+            | Intent::PickerBackspace
+            | Intent::PickerDeleteWord
+            | Intent::PickerCursorLeft
+            | Intent::PickerCursorRight
+            | Intent::PickerNext
+            | Intent::PickerPrev
+            | Intent::PickerHalfPageDown
+            | Intent::PickerHalfPageUp
+            | Intent::PickerConfirm
+            | Intent::PickerOpen
+            | Intent::PickerCancel
+            | Intent::PickerRemove
+                if state.focus == Focus::Search =>
+            {
+                search_key(intent, state)
             }
             Intent::PickerInput(ch) => list(state.picker.as_mut().and_then(|p| p.insert(*ch))),
             Intent::PickerBackspace => list(state.picker.as_mut().and_then(PickerState::backspace)),
@@ -529,6 +546,14 @@ impl IntentHandler {
                 }
                 _ => vec![],
             },
+            Intent::Search => {
+                state.sessions.search = Some(Search {
+                    input: TextInput::default(),
+                    return_to: state.sessions.cursor,
+                });
+                state.focus = Focus::Search;
+                vec![]
+            }
             Intent::ToggleSettle => {
                 match (
                     validate_toggle_settle(state),
@@ -900,6 +925,49 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
     vec![]
 }
 
+/// What a picker key does in the sidebar search: edit the text, putting the
+/// cursor on the first match; move between matches; or end the search,
+/// giving the sidebar back the keys. `⏎` keeps the cursor on its match (with
+/// no match it acts as `Esc`); `Esc` puts it back where it was. The picker's
+/// other keys do nothing.
+fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
+    let sessions = &mut state.sessions;
+    match (intent, &mut sessions.search) {
+        (Intent::PickerInput(ch), Some(search)) => {
+            search.input.insert(*ch);
+            sessions.select_first_match();
+        }
+        (Intent::PickerBackspace, Some(search)) => {
+            search.input.backspace();
+            sessions.select_first_match();
+        }
+        (Intent::PickerDeleteWord, Some(search)) => {
+            search.input.delete_word();
+            sessions.select_first_match();
+        }
+        (Intent::PickerCursorLeft, Some(search)) => {
+            search.input.cursor_left();
+            return vec![];
+        }
+        (Intent::PickerCursorRight, Some(search)) => {
+            search.input.cursor_right();
+            return vec![];
+        }
+        (Intent::PickerNext, _) => sessions.select_next_match(),
+        (Intent::PickerPrev, _) => sessions.select_prev_match(),
+        (Intent::PickerConfirm, _) if sessions.cursor.is_some() => {
+            sessions.search = None;
+            state.focus = Focus::Sidebar;
+        }
+        (Intent::PickerConfirm | Intent::PickerCancel, _) => {
+            sessions.cancel_search();
+            state.focus = Focus::Sidebar;
+        }
+        _ => return vec![],
+    }
+    with_visit(state, vec![Command::ShowPreview])
+}
+
 /// `commands`, then a visit to the thread under the cursor, if any.
 fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
     commands.extend(state.sessions.selected_id().map(Command::Visit));
@@ -918,8 +986,8 @@ mod tests {
     use crate::feat::preview::block::{Block, BlockId, BlockKind, ToolCall, ToolStatus};
     use crate::feat::preview::state::{Preview, PreviewLayout};
     use crate::feat::sessions::state::{
-        AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, SidebarRow,
-        Thread, ThreadId, ThreadStatus,
+        AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem,
+        SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sidebar::state::{Rename, SidebarView};
     use crate::feat::zellij::zellij_service::Tool;
@@ -4129,6 +4197,161 @@ mod tests {
             (state.focus, state.rename.is_none()),
             (Focus::Sidebar, true),
             "Esc should close the rename box"
+        );
+    }
+
+    /// "fix login bug" (1), "add dark mode" (2) and "fix logout" (3), listed
+    /// 3, 2, 1, with the cursor on thread 2.
+    fn three_titles() -> AppState {
+        let threads = [
+            (1, "fix login bug"),
+            (2, "add dark mode"),
+            (3, "fix logout"),
+        ]
+        .map(|(id, title)| Thread {
+            title: Some(title.to_owned()),
+            ..thread(id, ThreadStatus::Idle)
+        })
+        .into();
+        state_with(threads, 2)
+    }
+
+    /// `three_titles`, searching for `text` from thread 2, with the cursor
+    /// on `cursor`.
+    fn searching(text: &str, cursor: Option<i64>) -> AppState {
+        let mut state = three_titles();
+        state.focus = Focus::Search;
+        state.sessions.search = Some(Search {
+            input: TextInput::new(text),
+            return_to: Some(SidebarItem::Thread(ThreadId(2))),
+        });
+        state.sessions.cursor = cursor.map(|id| SidebarItem::Thread(ThreadId(id)));
+        state
+    }
+
+    #[rstest::rstest]
+    fn search_moves_the_keys_to_the_input_box() {
+        // Given the sidebar focused on thread 2.
+        let mut state = three_titles();
+
+        // When handling Search.
+        IntentHandler::handle(&Intent::Search, &mut state);
+
+        // Then the keys go to an empty search.
+        assert_eq!(
+            (
+                state.focus,
+                state.sessions.search.as_ref().map(|s| s.input.text())
+            ),
+            (Focus::Search, Some("")),
+            "Search should focus an empty search"
+        );
+    }
+
+    #[rstest::rstest]
+    fn typing_in_the_search_selects_the_first_match() {
+        // Given an empty search begun on thread 2.
+        let mut state = searching("", Some(2));
+
+        // When typing `l`, which "fix logout" (3) and "fix login bug" (1)
+        // match.
+        IntentHandler::handle(&Intent::PickerInput('l'), &mut state);
+
+        // Then the cursor is on the first match.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Thread(ThreadId(3))),
+            "typing should select the first match"
+        );
+    }
+
+    #[rstest::rstest]
+    fn typing_in_the_search_previews_and_visits_the_first_match() {
+        // Given an empty search begun on thread 2.
+        let mut state = searching("", Some(2));
+
+        // When typing `l`.
+        let commands = IntentHandler::handle(&Intent::PickerInput('l'), &mut state);
+
+        // Then the preview follows and the match is visited.
+        assert_eq!(
+            commands,
+            vec![Command::ShowPreview, Command::Visit(ThreadId(3))],
+            "typing should preview and visit the first match"
+        );
+    }
+
+    #[rstest::rstest]
+    fn search_next_moves_to_the_next_match() {
+        // Given "fix" matching threads 3 and 1, with the cursor on 3.
+        let mut state = searching("fix", Some(3));
+
+        // When handling PickerNext (`<C-j>`).
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // Then the cursor is on thread 1, past the unmatched thread 2.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Thread(ThreadId(1))),
+            "<C-j> should move to the next match"
+        );
+    }
+
+    #[rstest::rstest]
+    fn search_confirm_clears_the_search_and_keeps_the_selection() {
+        // Given "logout" matching thread 3, with the cursor on it.
+        let mut state = searching("logout", Some(3));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the search is gone, the sidebar has the keys and the cursor
+        // stays on the match.
+        assert_eq!(
+            (
+                state.sessions.search.is_none(),
+                state.focus,
+                state.sessions.cursor
+            ),
+            (true, Focus::Sidebar, Some(SidebarItem::Thread(ThreadId(3)))),
+            "⏎ should end the search on the match"
+        );
+    }
+
+    #[rstest::rstest]
+    fn search_confirm_without_a_match_restores_the_old_selection() {
+        // Given a search begun on thread 2 that matches nothing.
+        let mut state = searching("zzz", None);
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then it acts as Esc: the cursor is back on thread 2.
+        assert_eq!(
+            (state.sessions.search.is_none(), state.sessions.cursor),
+            (true, Some(SidebarItem::Thread(ThreadId(2)))),
+            "⏎ with no match should act as Esc"
+        );
+    }
+
+    #[rstest::rstest]
+    fn search_cancel_clears_the_search_and_restores_the_old_selection() {
+        // Given a search begun on thread 2 that moved the cursor to thread 3.
+        let mut state = searching("logout", Some(3));
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the search is gone, the sidebar has the keys and the cursor is
+        // back on thread 2.
+        assert_eq!(
+            (
+                state.sessions.search.is_none(),
+                state.focus,
+                state.sessions.cursor
+            ),
+            (true, Focus::Sidebar, Some(SidebarItem::Thread(ThreadId(2)))),
+            "Esc should end the search where it began"
         );
     }
 }
