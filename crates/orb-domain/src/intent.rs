@@ -114,7 +114,7 @@ pub enum Intent {
     /// Pick the selected item: open the project's draft, add the directory,
     /// or apply the workspace, branch, model or permission mode. In the
     /// rename box, save the name. In the sidebar search, end it and keep the
-    /// cursor on the match.
+    /// cursor on the match, or with no match, cancel it.
     PickerConfirm,
     /// Browse into the directory picker's selected directory.
     PickerOpen,

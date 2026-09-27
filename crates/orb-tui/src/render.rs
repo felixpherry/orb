@@ -6,6 +6,9 @@
 //! what the repeat will do instead of the popup. An open picker is drawn over
 //! everything but the mode line, with neither the popup nor the banner, and so
 //! is the rename box while it has the keys.
+//! The terminal's cursor is shown only where the keys are: on the sidebar's
+//! selected row, at the text cursor of the picker, the rename box or the
+//! sidebar search, or in the attached pane. The preview shows none.
 //! Whatever is left on the terminal's default background gets orb's navy, so
 //! a transparent terminal doesn't show through.
 
