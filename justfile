@@ -14,15 +14,6 @@ commit MSG:
     git diff --cached --check
     git commit -m {{quote(MSG)}}
 
-# PROTOTYPE: the real orb with a LazyVim-style which-key popup
-# (helix|classic|modern|current; ←/→ while a popup is open flips variants).
-which-key VARIANT="helix":
-    ORB_WHICHKEY_VARIANT={{VARIANT}} cargo run
-
-# PROTOTYPE: print every which-key variant for ␣, g and z, in colour.
-which-key-dump WIDTH="140" HEIGHT="36":
-    cargo run -q -p orb-tui --example which_key_prototype -- {{WIDTH}} {{HEIGHT}}
-
 test:
     cargo test --workspace
 

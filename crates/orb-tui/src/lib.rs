@@ -10,6 +10,6 @@ mod rename;
 mod render;
 mod run;
 mod sidebar;
-pub mod which_key_prototype;
+mod which_key;
 
 pub use run::{Frontend, TuiRunError};
