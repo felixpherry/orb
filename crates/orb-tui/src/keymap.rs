@@ -4,7 +4,7 @@
 //! In the sidebar and the dashboard, keys go through a which-key keymap whose
 //! scope is the focus and what the sidebar cursor is on; `<Space>` is the
 //! leader and shows a popup. A key that does nothing for the selection isn't
-//! bound there (`␣m`/`␣a` on a thread, `p`/`ss`/`r` off a thread, `␣w`/`␣b`
+//! bound there (`␣m`/`␣a` on a thread, `p`/`s`/`r` off a thread, `␣w`/`␣b`
 //! and the tool keys `␣t`/`␣g`/`␣v` with nothing selected, and the
 //! dashboard's `m`/`a` off a draft and `o`/`w`/`b`/`t`/`g`/`v` with nothing
 //! selected), so the popups don't offer it. On the dashboard each menu item's
@@ -171,13 +171,13 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         .bind("p", Intent::TogglePin, KeyCategory::Threads, Scope::Sidebar)
         .bind("r", Intent::Rename, KeyCategory::Threads, Scope::Sidebar)
         .bind(
-            "ss",
+            "s",
             Intent::ToggleSettle,
             KeyCategory::Threads,
             Scope::Sidebar,
         );
     for scope in [Scope::Sidebar, Scope::SidebarDraft] {
-        keymap.bind("xx", Intent::DeleteThread, KeyCategory::Threads, scope);
+        keymap.bind("d", Intent::DeleteThread, KeyCategory::Threads, scope);
     }
     for scope in [
         Scope::Dashboard,
@@ -328,24 +328,6 @@ pub(crate) fn press(keys: &mut Keys, key: KeyEvent) -> Option<Intent> {
     keys.handle_key(KeyEvent::new(key.code, modifiers))
 }
 
-/// The sidebar key waiting for its repeat: the `s` of `ss` or the `x` of
-/// `xx`.
-pub(crate) fn pending_confirm(keys: &Keys) -> Option<char> {
-    match (keys.scope(), keys.current_sequence.as_slice()) {
-        (
-            Scope::Sidebar | Scope::SidebarDraft,
-            [
-                KeyEvent {
-                    code: KeyCode::Char(c @ ('s' | 'x')),
-                    modifiers,
-                    ..
-                },
-            ],
-        ) if modifiers.is_empty() => Some(*c),
-        _ => None,
-    }
-}
-
 /// Where a key goes while attached.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Route {
@@ -424,8 +406,8 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     use super::{
-        Keys, Route, Scope, Selection, attached_route, keymap, layout_route, pending_confirm,
-        picker_route, press, sidebar_route,
+        Keys, Route, Scope, Selection, attached_route, keymap, layout_route, picker_route, press,
+        sidebar_route,
     };
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1031,13 +1013,13 @@ mod tests {
 
     #[rstest::rstest]
     #[case(vec![key(KeyCode::Char('p'))])]
-    #[case(vec![key(KeyCode::Char('s')), key(KeyCode::Char('s'))])]
+    #[case(vec![key(KeyCode::Char('s'))])]
     #[case(vec![key(KeyCode::Char('r'))])]
     fn thread_keys_are_unbound_on_a_draft_in_the_sidebar(#[case] pressed: Vec<KeyEvent>) {
         // Given the keymap in the sidebar on a draft.
         let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
 
-        // When pressing `p`, `ss` or `r`.
+        // When pressing `p`, `s` or `r`.
         let intents: Vec<Option<Intent>> = pressed
             .into_iter()
             .map(|pressed| press(&mut keys, pressed))
@@ -1079,22 +1061,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn x_waits_for_its_repeat_on_a_draft_in_the_sidebar() {
-        // Given the keymap in the sidebar on a draft.
-        let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
-
-        // When pressing `x` once.
-        press(&mut keys, key(KeyCode::Char('x')));
-
-        // Then the discard waits for the second `x`.
-        assert_eq!(
-            pending_confirm(&keys),
-            Some('x'),
-            "x on a draft should wait for xx"
-        );
-    }
-
-    #[rstest::rstest]
     #[case(vec![ctrl('h')], Intent::FocusSidebar)]
     #[case(vec![key(KeyCode::Enter)], Intent::DashboardRun)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('n'))], Intent::NewSession)]
@@ -1126,42 +1092,33 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn s_then_s_toggles_settle() {
-        // Given `s` already pressed in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
-        press(&mut keys, key(KeyCode::Char('s')));
-
-        // When pressing `s` again.
-        let intent = press(&mut keys, key(KeyCode::Char('s')));
-
-        // Then it settles or un-settles the thread.
-        assert_eq!(intent, Some(Intent::ToggleSettle), "ss should settle");
-    }
-
-    #[rstest::rstest]
-    fn x_then_x_deletes() {
-        // Given `x` already pressed in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
-        press(&mut keys, key(KeyCode::Char('x')));
-
-        // When pressing `x` again.
-        let intent = press(&mut keys, key(KeyCode::Char('x')));
-
-        // Then it deletes the thread.
-        assert_eq!(intent, Some(Intent::DeleteThread), "xx should delete");
-    }
-
-    #[rstest::rstest]
-    fn s_then_j_does_nothing() {
+    #[case('s', Intent::ToggleSettle)]
+    #[case('d', Intent::DeleteThread)]
+    fn sidebar_thread_key_yields_its_intent(#[case] c: char, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
         let mut keys = Keys::new(keymap(), Scope::Sidebar);
 
-        // When pressing `s` then `j`.
-        let intents =
-            [KeyCode::Char('s'), KeyCode::Char('j')].map(|code| press(&mut keys, key(code)));
+        // When pressing the key once.
+        let intent = press(&mut keys, key(KeyCode::Char(c)));
 
-        // Then neither key yields an intent.
-        assert_eq!(intents, [None, None], "j should cancel the pending s");
+        // Then it yields its intent.
+        assert_eq!(intent, Some(expected), "{c} in the sidebar");
+    }
+
+    #[rstest::rstest]
+    fn d_on_a_draft_in_the_sidebar_deletes() {
+        // Given the keymap in the sidebar on a draft.
+        let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
+
+        // When pressing `d`.
+        let intent = press(&mut keys, key(KeyCode::Char('d')));
+
+        // Then it asks to discard the draft.
+        assert_eq!(
+            intent,
+            Some(Intent::DeleteThread),
+            "d on a draft should ask to discard it"
+        );
     }
 
     #[rstest::rstest]

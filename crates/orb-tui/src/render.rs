@@ -2,10 +2,8 @@
 //! dashboard on the right, the mode line at the bottom, and the which-key
 //! popup on top while a key sequence is pending.
 //! While the sidebar is hidden, the right side takes the full width.
-//! While `s` or `x` waits for its repeat, a banner above the selected row says
-//! what the repeat will do instead of the popup. An open picker is drawn over
-//! everything but the mode line, with neither the popup nor the banner, and so
-//! is the rename box while it has the keys.
+//! An open picker is drawn over everything but the mode line, without the
+//! popup, and so is the rename box while it has the keys.
 //! The terminal's cursor is shown only where the keys are: on the sidebar's
 //! selected row, at the text cursor of the picker, the rename box or the
 //! sidebar search, on the dashboard's highlighted item, or in the attached
@@ -16,19 +14,15 @@
 use std::time::SystemTime;
 
 use jiff::tz::TimeZone;
-use orb_domain::feat::sessions::validator::{ToggleSettleError, validate_toggle_settle};
 use orb_domain::feat::sidebar::state::{SidebarLayout, SidebarView};
 use orb_domain::{AppState, Focus};
 use orb_term::Pane;
 use ratatui::Frame;
-use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
-use ratatui::text::Line;
-use ratatui::widgets::Widget;
+use ratatui::style::Color;
 
 use crate::dashboard;
-use crate::keymap::{self, Keys};
+use crate::keymap::Keys;
 use crate::mode_line;
 use crate::picker::{self, PickerScroll};
 use crate::rename;
@@ -106,8 +100,8 @@ pub(crate) fn render(
         .rename
         .as_ref()
         .filter(|_| state.focus == Focus::Rename);
-    let picker_page = match (&state.picker, renaming, keymap::pending_confirm(keys)) {
-        (Some(picker), _, _) => {
+    let picker_page = match (&state.picker, renaming) {
+        (Some(picker), _) => {
             let (rows, cursor) = picker::render(
                 picker,
                 &state.home,
@@ -118,18 +112,12 @@ pub(crate) fn render(
             frame.set_cursor_position(cursor);
             Some(rows)
         }
-        (None, Some(rename), _) => {
+        (None, Some(rename)) => {
             let cursor = rename::render(rename, sidebar_area.union(right), frame.buffer_mut());
             frame.set_cursor_position(cursor);
             None
         }
-        (None, None, Some(confirm)) => {
-            if let Some(y) = selected_y {
-                render_banner(state, confirm, y, frame.buffer_mut());
-            }
-            None
-        }
-        (None, None, None) => {
+        (None, None) => {
             which_key::render(keys, sidebar_area.union(right), frame.buffer_mut());
             None
         }
@@ -145,41 +133,6 @@ pub(crate) fn render(
         }
     }
     (sidebar_layout, picker_page)
-}
-
-/// jinn's confirm banner, on the line above the selected row (the row itself
-/// at the top), against the frame's right edge: yellow when repeating
-/// `confirm` will act, red when it would be refused. On a draft only `x`
-/// has one.
-fn render_banner(state: &AppState, confirm: char, selected_y: u16, buf: &mut Buffer) {
-    let sessions = &state.sessions;
-    let (text, colour) = match (
-        confirm,
-        validate_toggle_settle(state),
-        sessions.selected_thread(),
-    ) {
-        ('x', _, None) if sessions.selected_draft().is_some() => {
-            (" Press x again to discard ", Color::Yellow)
-        }
-        (_, _, None) | (_, Err(ToggleSettleError::NoThread), _) => return,
-        ('x', _, Some(_)) => (" Press x again to delete ", Color::Yellow),
-        (_, Ok(()), Some(thread)) if thread.settled_at.is_some() => {
-            (" Press s again to un-settle ", Color::Yellow)
-        }
-        (_, Ok(()), Some(_)) => (" Press s again to settle ", Color::Yellow),
-        (_, Err(ToggleSettleError::InProgress), Some(_)) => {
-            (" Can't settle while Claude is working ", Color::Red)
-        }
-    };
-    let banner = Line::styled(text, Style::new().fg(Color::Black).bg(colour));
-    let area = buf.area;
-    let width = u16::try_from(banner.width())
-        .unwrap_or(u16::MAX)
-        .min(area.width);
-    banner.render(
-        Rect::new(area.right() - width, selected_y.saturating_sub(1), width, 1),
-        buf,
-    );
 }
 
 #[cfg(test)]
@@ -398,16 +351,6 @@ mod tests {
             .join("\n")
     }
 
-    /// The keymap in Sidebar focus with `c` pressed once.
-    fn pending(c: char) -> Keys {
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
-        press(
-            &mut keys,
-            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-        );
-        keys
-    }
-
     fn mode_line(buffer: &Buffer) -> String {
         let [_, _, mode_line] = layout(buffer.area, &SidebarView::default());
         text(buffer, mode_line)
@@ -590,74 +533,6 @@ mod tests {
         // line.
         let corner = terminal.backend().buffer().cell((78, 18)).map(Cell::symbol);
         assert_eq!(corner, Some("╯"), "the popup's bottom-right corner");
-    }
-
-    #[rstest::rstest]
-    fn pending_s_shows_the_settle_banner() {
-        // Given an idle selected thread and `s` pressed once.
-        let state = selected(Focus::Sidebar);
-
-        // When drawing a frame.
-        let buffer = draw_with(&state, &pending('s'));
-
-        // Then the banner asks for the second `s`.
-        let screen = text(&buffer, buffer.area);
-        assert!(
-            screen.contains(" Press s again to settle "),
-            "screen was '{screen}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn settle_banner_sits_on_the_line_above_the_selected_node() {
-        // Given an idle selected thread, its node's first line on row 3, and
-        // `s` pressed once.
-        let state = selected(Focus::Sidebar);
-
-        // When drawing a frame.
-        let buffer = draw_with(&state, &pending('s'));
-
-        // Then the banner is on row 2.
-        let row = text(&buffer, Rect::new(0, 2, 80, 1));
-        assert!(
-            row.ends_with(" Press s again to settle "),
-            "row was '{row}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn pending_s_on_a_working_thread_shows_the_refusal() {
-        // Given a Working selected thread and `s` pressed once.
-        let state = AppState {
-            sessions: Sessions {
-                cursor: Some(SidebarItem::Thread(ThreadId(1))),
-                ..sessions(vec![thread(1, ThreadStatus::Working)])
-            },
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let buffer = draw_with(&state, &pending('s'));
-
-        // Then the banner says the settle would be refused.
-        let screen = text(&buffer, buffer.area);
-        assert!(
-            screen.contains(" Can't settle while Claude is working "),
-            "screen was '{screen}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn pending_s_hides_the_which_key_popup() {
-        // Given an idle selected thread and `s` pressed once.
-        let state = selected(Focus::Sidebar);
-
-        // When drawing a frame.
-        let buffer = draw_with(&state, &pending('s'));
-
-        // Then no popup is drawn.
-        let screen = text(&buffer, buffer.area);
-        assert!(!screen.contains("esc close"), "screen was '{screen}'");
     }
 
     #[rstest::rstest]
@@ -890,22 +765,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn pending_x_on_a_draft_shows_the_discard_banner() {
-        // Given orb's draft selected and `x` pressed once.
-        let state = drafted(Focus::Sidebar);
-
-        // When drawing a frame.
-        let buffer = draw_with(&state, &pending('x'));
-
-        // Then the banner asks for the second `x` to discard it.
-        let screen = text(&buffer, buffer.area);
-        assert!(
-            screen.contains(" Press x again to discard "),
-            "screen was '{screen}'"
-        );
-    }
-
-    #[rstest::rstest]
     fn hidden_sidebar_gives_the_right_side_the_whole_body() {
         // Given a hidden sidebar on an 80x8 screen.
         let sidebar = SidebarView {
@@ -1004,18 +863,5 @@ mod tests {
 
         // Then there's no sidebar layout to replace the last drawn one.
         assert_eq!(sidebar_layout, None, "a hidden sidebar isn't laid out");
-    }
-
-    #[rstest::rstest]
-    fn pending_s_on_a_draft_shows_no_banner() {
-        // Given orb's draft selected and `s` pressed once.
-        let state = drafted(Focus::Sidebar);
-
-        // When drawing a frame.
-        let buffer = draw_with(&state, &pending('s'));
-
-        // Then no banner is drawn.
-        let screen = text(&buffer, buffer.area);
-        assert!(!screen.contains("Press s again"), "screen was '{screen}'");
     }
 }
