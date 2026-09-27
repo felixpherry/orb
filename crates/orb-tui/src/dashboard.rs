@@ -15,7 +15,7 @@ use std::path::Path;
 use orb_domain::feat::dashboard::{DashboardItem, items};
 use orb_domain::feat::picker::list::setting_label;
 use orb_domain::feat::sessions::state::{
-    Draft, DraftWorkspace, NEW_THREAD, SidebarItem, SidebarRow,
+    Draft, DraftWorkspace, GroupKind, NEW_THREAD, SidebarItem, SidebarRow,
 };
 use orb_domain::{AppState, tilde};
 use ratatui::buffer::Buffer;
@@ -154,18 +154,42 @@ fn banner(x: u16, top: u16, area: Rect, buf: &mut Buffer) {
 }
 
 /// What the selection is: the thread's project, title and branch, a draft's
-/// project and branch, the shelf hint on the Settled header, or that nothing
-/// is selected. A long title is cut to fit `max` columns.
+/// project and branch, a group's kind, `<project>/<slug>` and branch (the
+/// title is the kind's name on the card, `New thread` on its draft), the
+/// shelf hint on the Settled header, or that nothing is selected. A long
+/// title is cut to fit `max` columns.
 fn context(state: &AppState, max: usize) -> Line<'static> {
     let sessions = &state.sessions;
-    let (project, title, branch) = match (sessions.selected_thread(), sessions.selected_draft()) {
-        (Some(thread), _) => (
-            sessions.selected_project(),
+    let (project, title, branch) = match (
+        sessions.selected_thread(),
+        sessions.selected_draft(),
+        sessions.selected_group(),
+    ) {
+        (Some(thread), _, _) => (
+            sessions
+                .selected_project()
+                .map(|project| (FOLDER, BLUE, project.title.clone())),
             thread.title.as_deref().unwrap_or(NEW_THREAD),
             thread.branch.as_deref(),
         ),
-        (None, Some((project, draft))) => (Some(project), NEW_THREAD, draft.branch.as_deref()),
-        (None, None) => {
+        (None, Some((project, draft)), _) => (
+            Some((FOLDER, BLUE, project.title.clone())),
+            NEW_THREAD,
+            draft.branch.as_deref(),
+        ),
+        (None, None, Some((project, group))) => {
+            let (icon, colour) = sidebar::kind_look(group.kind);
+            let title = match sessions.cursor {
+                Some(SidebarItem::GroupDraft(_)) => NEW_THREAD,
+                _ => kind_title(group.kind),
+            };
+            (
+                Some((icon, colour, format!("{}/{}", project.title, group.name))),
+                title,
+                group.branch.as_deref(),
+            )
+        }
+        (None, None, None) => {
             return match sessions.cursor {
                 Some(SidebarItem::SettledShelf) => Line::from(span(shelf_hint(state), FG_DARK)),
                 _ => Line::from(span("no session selected", COMMENT)),
@@ -173,10 +197,10 @@ fn context(state: &AppState, max: usize) -> Line<'static> {
         }
     };
     let mut spans = Vec::new();
-    if let Some(project) = project {
+    if let Some((icon, colour, text)) = project {
         spans.extend([
-            span(format!("{FOLDER} "), BLUE),
-            span(project.title.clone(), FG_DARK),
+            span(format!("{icon} "), colour),
+            span(text, FG_DARK),
             span("  ·  ", DARK3),
         ]);
     }
@@ -189,6 +213,15 @@ fn context(state: &AppState, max: usize) -> Line<'static> {
         ]);
     }
     Line::from(spans)
+}
+
+/// A group kind's name, as the dashboard titles its card.
+fn kind_title(kind: GroupKind) -> &'static str {
+    match kind {
+        GroupKind::Feature => "Feature group",
+        GroupKind::Research => "Research group",
+        GroupKind::Learn => "Learn group",
+    }
 }
 
 /// What `⏎` does on the Settled header: `▸ Settled (N) · ⏎ open`, or
@@ -259,8 +292,9 @@ fn look(item: DashboardItem) -> (&'static str, &'static str) {
     }
 }
 
-/// An item's current value: the selected thread's directory and branch, or
-/// the selected draft's workspace, branch, model and permission.
+/// An item's current value: the selected thread's directory and branch, the
+/// selected draft's workspace, branch, model and permission, or a group
+/// draft's model and permission.
 fn value(state: &AppState, item: DashboardItem) -> Option<String> {
     let sessions = &state.sessions;
     let home = &state.home;
@@ -277,6 +311,12 @@ fn value(state: &AppState, item: DashboardItem) -> Option<String> {
         (DashboardItem::Permission, Some((_, draft)), _) => {
             Some(setting_label(draft.permission.as_deref()).to_owned())
         }
+        (DashboardItem::Model, None, None) => sessions
+            .selected_group_draft()
+            .map(|(_, _, draft)| setting_label(draft.model.as_deref()).to_owned()),
+        (DashboardItem::Permission, None, None) => sessions
+            .selected_group_draft()
+            .map(|(_, _, draft)| setting_label(draft.permission.as_deref()).to_owned()),
         _ => None,
     }
 }
@@ -381,8 +421,8 @@ mod tests {
 
     use orb_domain::AppState;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, NEW_THREAD, Project,
+        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
@@ -603,6 +643,69 @@ mod tests {
             rows,
             (first..first + 10).collect::<Vec<_>>(),
             "the items' rows"
+        );
+    }
+
+    /// orb's thread 1 in Feature group 9 `GT-514-login`, which has a draft;
+    /// the cursor on `cursor`.
+    fn in_group(cursor: SidebarItem) -> AppState {
+        let group = Group {
+            id: GroupId(9),
+            kind: GroupKind::Feature,
+            name: "GT-514-login".to_owned(),
+            dir: None,
+            branch: Some("GT-514-login".to_owned()),
+            created_at: SystemTime::UNIX_EPOCH,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            draft: Some(GroupDraft {
+                model: None,
+                permission: None,
+            }),
+        };
+        let child = Thread {
+            group: Some(GroupId(9)),
+            ..thread(1)
+        };
+        state(
+            vec![Project {
+                groups: vec![group],
+                ..project(1, "orb", vec![child], None)
+            }],
+            Some(cursor),
+        )
+    }
+
+    #[rstest::rstest]
+    fn group_card_context_shows_the_group_path_and_kind() {
+        // Given Feature group GT-514-login's card selected.
+        let state = in_group(SidebarItem::Group(GroupId(9)));
+
+        // When drawing the dashboard 80×40.
+        let (buf, _) = draw(&state, None, 80, 40);
+
+        // Then the context line names orb/GT-514-login and Feature group.
+        let context = line_with(&buf, "orb/GT-514-login");
+        assert!(
+            context.contains("orb/GT-514-login  ·  Feature group"),
+            "context line was '{context}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_draft_context_shows_new_thread_in_the_group() {
+        // Given Feature group GT-514-login's draft selected.
+        let state = in_group(SidebarItem::GroupDraft(GroupId(9)));
+
+        // When drawing the dashboard 80×40.
+        let (buf, _) = draw(&state, None, 80, 40);
+
+        // Then the context line names orb/GT-514-login and a new thread.
+        let context = line_with(&buf, "orb/GT-514-login");
+        assert!(
+            context.contains(&format!("orb/GT-514-login  ·  {NEW_THREAD}")),
+            "context line was '{context}'"
         );
     }
 

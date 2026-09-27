@@ -39,7 +39,8 @@ pub enum Intent {
     WidenFocused,
     /// Narrow the focused side: the sidebar, or the right side.
     NarrowFocused,
-    /// Attach to the selected thread's session, or start the selected draft.
+    /// Attach to the selected thread's session, or start the selected draft,
+    /// or open or close the selected group.
     Attach,
     /// Return from the attached session to the dashboard.
     Detach,
@@ -67,6 +68,11 @@ pub enum Intent {
     OpenShelf,
     /// Hide the Settled shelf's threads.
     CloseShelf,
+    /// Show the selected group's children.
+    OpenGroup,
+    /// Hide the selected group's children and select its card; on a settled
+    /// group already closed, close the Settled shelf.
+    CloseGroup,
     /// Open the directory picker to add a project.
     AddProject,
     /// Open the workspace picker for the selected draft, or the selected
@@ -149,6 +155,8 @@ impl fmt::Display for Intent {
             Self::DeleteThread | Self::PickerBackspace => "delete",
             Self::OpenShelf => "open settled",
             Self::CloseShelf => "close settled",
+            Self::OpenGroup => "open group",
+            Self::CloseGroup => "close group",
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",

@@ -3,9 +3,11 @@
 //! Its menu lists what the sidebar's selection can do: open a thread or start
 //! a draft, change its workspace, branch and (for a draft) model and
 //! permission, open a tool in its directory, and the always-available new
-//! session, add project, filter projects and quit. Each item has a single key
-//! that runs it; a cursor moves over the items and `⏎` runs the highlighted
-//! one. The cursor goes back to the first item whenever the selection changes.
+//! session, add project, filter projects and quit. On a group's rows, the
+//! menu has no workspace or branch: the group owns its directory. Each item
+//! has a single key that runs it; a cursor moves over the items and `⏎` runs
+//! the highlighted one. The cursor goes back to the first item whenever the
+//! selection changes.
 
 pub mod state;
 
@@ -78,15 +80,27 @@ pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
         AddProject, Branch, FilterProjects, Lazygit, Model, Neovim, NewSession, Open, Permission,
         Quit, Shell, Start, Workspace,
     };
-    let own: &[DashboardItem] = match (sessions.selected_draft(), sessions.selected_thread()) {
-        (Some((_, draft)), _) if draft.repo => &[Start, Workspace, Branch, Model, Permission],
-        (Some(_), _) => &[Start, Model, Permission],
-        (None, Some(_)) => &[Open, Workspace, Branch],
-        (None, None) => &[],
+    let (own, tools): (&[DashboardItem], bool) = match (
+        sessions.selected_draft(),
+        sessions.selected_thread(),
+        sessions.selected_group(),
+    ) {
+        (Some((_, draft)), _, _) if draft.repo => {
+            (&[Start, Workspace, Branch, Model, Permission], true)
+        }
+        (Some(_), _, _) => (&[Start, Model, Permission], true),
+        (None, Some(_), Some(_)) => (&[Open], true),
+        (None, Some(_), None) => (&[Open, Workspace, Branch], true),
+        (None, None, Some(_)) if sessions.selected_group_draft().is_some() => {
+            (&[Start, Model, Permission], true)
+        }
+        (None, None, Some(_)) => (&[], true),
+        (None, None, None) => (&[], false),
     };
-    let tools: &[DashboardItem] = match own {
-        [] => &[],
-        _ => &[Shell, Lazygit, Neovim],
+    let tools: &[DashboardItem] = if tools {
+        &[Shell, Lazygit, Neovim]
+    } else {
+        &[]
     };
     own.iter()
         .chain(&[NewSession, AddProject, FilterProjects])
@@ -106,8 +120,8 @@ pub(crate) mod tests {
     };
     use super::items;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
     /// Project 1 holding thread 1 and, when `repo` is given, a local draft in
@@ -155,6 +169,110 @@ pub(crate) mod tests {
             cursor,
             ..Sessions::default()
         }
+    }
+
+    /// `sessions()` with thread 1 in Feature group 9, which has a draft when
+    /// `draft`; the cursor on `cursor`.
+    fn grouped(cursor: SidebarItem, draft: bool) -> Sessions {
+        let mut sessions = sessions(None, Some(cursor));
+        if let Some(project) = sessions.projects.first_mut() {
+            project
+                .threads
+                .iter_mut()
+                .for_each(|thread| thread.group = Some(GroupId(9)));
+            project.groups = vec![Group {
+                id: GroupId(9),
+                kind: GroupKind::Feature,
+                name: "GT-514-login".to_owned(),
+                dir: None,
+                branch: Some("GT-514-login".to_owned()),
+                created_at: SystemTime::UNIX_EPOCH,
+                pinned_at: None,
+                settled_at: None,
+                active_since: SystemTime::UNIX_EPOCH,
+                draft: draft.then_some(GroupDraft {
+                    model: None,
+                    permission: None,
+                }),
+            }];
+        }
+        sessions
+    }
+
+    #[rstest::rstest]
+    fn grouped_thread_lists_open_without_workspace_or_branch() {
+        // Given a selected thread in a group.
+        let sessions = grouped(SidebarItem::Thread(ThreadId(1)), false);
+
+        // When listing the dashboard's items.
+        let items = items(&sessions);
+
+        // Then Open leads, with no Workspace or Branch.
+        assert_eq!(
+            items,
+            [
+                Open,
+                NewSession,
+                AddProject,
+                FilterProjects,
+                Shell,
+                Lazygit,
+                Neovim,
+                Quit
+            ],
+            "a grouped thread's dashboard items"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_draft_lists_start_model_and_permission() {
+        // Given a selected group draft.
+        let sessions = grouped(SidebarItem::GroupDraft(GroupId(9)), true);
+
+        // When listing the dashboard's items.
+        let items = items(&sessions);
+
+        // Then Start, Model and Permission lead.
+        assert_eq!(
+            items,
+            [
+                Start,
+                Model,
+                Permission,
+                NewSession,
+                AddProject,
+                FilterProjects,
+                Shell,
+                Lazygit,
+                Neovim,
+                Quit
+            ],
+            "a group draft's dashboard items"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_card_lists_the_general_items_and_tools() {
+        // Given a selected group card.
+        let sessions = grouped(SidebarItem::Group(GroupId(9)), false);
+
+        // When listing the dashboard's items.
+        let items = items(&sessions);
+
+        // Then the general items, the tools and Quit are listed.
+        assert_eq!(
+            items,
+            [
+                NewSession,
+                AddProject,
+                FilterProjects,
+                Shell,
+                Lazygit,
+                Neovim,
+                Quit
+            ],
+            "a group card's dashboard items"
+        );
     }
 
     #[rstest::rstest]

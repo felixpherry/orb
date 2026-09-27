@@ -1,7 +1,7 @@
 //! Checks whether the user's sidebar actions can proceed: starting the
 //! selected draft or picking its model or permission mode, pinning, settling
 //! or deleting the selected thread, discarding the selected draft, and opening
-//! or closing the Settled shelf.
+//! or closing the Settled shelf or a group.
 
 use wherror::Error;
 
@@ -184,12 +184,55 @@ pub fn validate_close_shelf(state: &AppState) -> Result<(), CloseShelfError> {
     }
 }
 
+/// Why opening a group can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum OpenGroupError {
+    /// The cursor isn't on a group's card, draft or thread.
+    NoGroup,
+}
+
+/// Allow opening the selected group.
+///
+/// # Errors
+///
+/// Returns [`OpenGroupError::NoGroup`] when the cursor isn't on a group's
+/// rows.
+pub fn validate_open_group(state: &AppState) -> Result<(), OpenGroupError> {
+    match state.sessions.selected_group() {
+        Some(_) => Ok(()),
+        None => Err(OpenGroupError::NoGroup),
+    }
+}
+
+/// Why closing a group can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum CloseGroupError {
+    /// The cursor isn't on a group's card, draft or thread.
+    NoGroup,
+}
+
+/// Allow closing the selected group.
+///
+/// # Errors
+///
+/// Returns [`CloseGroupError::NoGroup`] when the cursor isn't on a group's
+/// rows.
+pub fn validate_close_group(state: &AppState) -> Result<(), CloseGroupError> {
+    match state.sessions.selected_group() {
+        Some(_) => Ok(()),
+        None => Err(CloseGroupError::NoGroup),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::SystemTime;
 
     use super::{
-        DeleteError, PickSettingError, StartDraftError, ToggleSettleError, validate_delete,
+        CloseGroupError, DeleteError, OpenGroupError, PickSettingError, StartDraftError,
+        ToggleSettleError, validate_close_group, validate_delete, validate_open_group,
         validate_pick_setting, validate_start_draft, validate_toggle_settle,
     };
     use crate::AppState;
@@ -381,6 +424,77 @@ mod tests {
             result,
             Err(ToggleSettleError::InProgress),
             "a working thread can't be settled"
+        );
+    }
+
+    /// One project holding ungrouped thread 1, with the cursor on it.
+    fn lone_thread() -> AppState {
+        AppState {
+            sessions: Sessions {
+                projects: vec![Project {
+                    id: ProjectId(1),
+                    title: "work".into(),
+                    root: "/work".into(),
+                    created_at: SystemTime::UNIX_EPOCH,
+                    removed: false,
+                    draft: None,
+                    threads: vec![Thread {
+                        id: ThreadId(1),
+                        title: None,
+                        cwd: "/work".into(),
+                        transcript: None,
+                        status: ThreadStatus::Idle,
+                        turn_started_at: None,
+                        attach_argv: vec![],
+                        branch: None,
+                        pinned_at: None,
+                        settled_at: None,
+                        active_since: SystemTime::UNIX_EPOCH,
+                        last_activity_at: SystemTime::UNIX_EPOCH,
+                        unseen: false,
+                        group: None,
+                        model: None,
+                        permission: None,
+                    }],
+                    groups: vec![],
+                    kind: ProjectKind::Normal,
+                }],
+                cursor: Some(SidebarItem::Thread(ThreadId(1))),
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        }
+    }
+
+    #[rstest::rstest]
+    fn open_group_rejected_off_a_group() {
+        // Given the cursor on a thread in no group.
+        let state = lone_thread();
+
+        // When validating a group open.
+        let result = validate_open_group(&state);
+
+        // Then validation fails with NoGroup.
+        assert_eq!(
+            result,
+            Err(OpenGroupError::NoGroup),
+            "only a group's rows can open a group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_group_rejected_off_a_group() {
+        // Given the cursor on a thread in no group.
+        let state = lone_thread();
+
+        // When validating a group close.
+        let result = validate_close_group(&state);
+
+        // Then validation fails with NoGroup.
+        assert_eq!(
+            result,
+            Err(CloseGroupError::NoGroup),
+            "only a group's rows can close a group"
         );
     }
 }

@@ -736,6 +736,55 @@ impl Sessions {
         self.cursor = Some(SidebarItem::SettledShelf);
     }
 
+    /// Show group `id`'s children: un-fold an active group; open a settled
+    /// one, and the Settled shelf with it.
+    pub fn open_group(&mut self, id: GroupId) {
+        match self.group(id).map(|(_, group)| group.settled_at.is_some()) {
+            Some(true) => {
+                self.opened.insert(id);
+                self.shelf_open = true;
+            }
+            Some(false) => {
+                self.folded.remove(&id);
+            }
+            None => {}
+        }
+    }
+
+    /// Hide group `id`'s children and put the cursor on its card. A settled
+    /// group that's already closed closes the Settled shelf instead.
+    pub fn close_group(&mut self, id: GroupId) {
+        let settled = match self.group(id) {
+            Some((_, group)) => group.settled_at.is_some(),
+            None => return,
+        };
+        match (settled, self.opened.contains(&id)) {
+            (true, false) => self.close_shelf(),
+            (true, true) => {
+                self.opened.remove(&id);
+                self.cursor = Some(SidebarItem::Group(id));
+            }
+            (false, _) => {
+                self.folded.insert(id);
+                self.cursor = Some(SidebarItem::Group(id));
+            }
+        }
+    }
+
+    /// Close group `id` if the sidebar lists it open, else open it.
+    pub fn toggle_group(&mut self, id: GroupId) {
+        let open = self.sidebar().iter().any(|row| match row {
+            SidebarRow::GroupCard { group, open, .. }
+            | SidebarRow::SettledGroup { group, open, .. } => group.id == id && *open,
+            _ => false,
+        });
+        if open {
+            self.close_group(id);
+        } else {
+            self.open_group(id);
+        }
+    }
+
     /// How many threads have `status`, not counting threads being deleted.
     pub fn status_count(&self, status: ThreadStatus) -> usize {
         self.shown_threads()
