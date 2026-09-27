@@ -763,6 +763,7 @@ impl App {
                 {
                     let mut app = self.state.write();
                     app.rename = None;
+                    app.sessions.search = None;
                     app.focus = Focus::Attached;
                 }
                 outer_terminal::set_mouse_capture(out, true)

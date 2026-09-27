@@ -64,6 +64,8 @@ pub enum Intent {
     TogglePin,
     /// Open the rename box for the selected thread, filled in with its title.
     Rename,
+    /// Move the keys to the sidebar's input box to search thread titles.
+    Search,
     /// Settle or un-settle the selected thread.
     ToggleSettle,
     /// Delete the selected thread and its Claude session.
@@ -85,19 +87,25 @@ pub enum Intent {
     PickModel,
     /// Open the permission-mode picker for the selected draft.
     PickPermission,
-    /// Type a character into the picker's filter, or the rename box.
+    /// Type a character into the picker's filter, the rename box, or the
+    /// sidebar search.
     PickerInput(char),
-    /// Delete the grapheme before the picker's or the rename box's cursor.
+    /// Delete the grapheme before the cursor of the picker, the rename box, or
+    /// the sidebar search.
     PickerBackspace,
-    /// Delete the word before the picker's or the rename box's cursor.
+    /// Delete the word before the cursor of the picker, the rename box, or
+    /// the sidebar search.
     PickerDeleteWord,
-    /// Move the picker's or the rename box's cursor one grapheme left.
+    /// Move the cursor of the picker, the rename box, or the sidebar search
+    /// one grapheme left.
     PickerCursorLeft,
-    /// Move the picker's or the rename box's cursor one grapheme right.
+    /// Move the cursor of the picker, the rename box, or the sidebar search
+    /// one grapheme right.
     PickerCursorRight,
-    /// Select the picker's next item.
+    /// Select the picker's next item, or the sidebar search's next match.
     PickerNext,
-    /// Select the picker's previous item.
+    /// Select the picker's previous item, or the sidebar search's previous
+    /// match.
     PickerPrev,
     /// Move the picker's selection half a page down.
     PickerHalfPageDown,
@@ -105,11 +113,13 @@ pub enum Intent {
     PickerHalfPageUp,
     /// Pick the selected item: open the project's draft, add the directory,
     /// or apply the workspace, branch, model or permission mode. In the
-    /// rename box, save the name.
+    /// rename box, save the name. In the sidebar search, end it and keep the
+    /// cursor on the match.
     PickerConfirm,
     /// Browse into the directory picker's selected directory.
     PickerOpen,
     /// Close the picker without picking, or the rename box without renaming.
+    /// In the sidebar search, end it and put the cursor back.
     PickerCancel,
     /// Ask to remove the project highlighted in the project filter.
     PickerRemove,
@@ -143,6 +153,7 @@ impl fmt::Display for Intent {
             Self::Yank => "yank",
             Self::TogglePin => "pin",
             Self::Rename => "rename",
+            Self::Search => "search",
             Self::ToggleSettle => "settle",
             Self::DeleteThread | Self::PickerBackspace => "delete",
             Self::OpenShelf => "open settled",

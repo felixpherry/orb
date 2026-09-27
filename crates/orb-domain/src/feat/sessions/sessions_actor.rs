@@ -65,8 +65,8 @@ use super::session_host::{
     SessionHostError, SessionHostService, SessionOptions, SessionRecord, WorkspaceUntrusted,
 };
 use super::state::{
-    Draft, DraftWorkspace, Notice, NoticeKind, Project, ProjectId, Sessions, SidebarItem, Thread,
-    ThreadId, ThreadStatus,
+    Draft, DraftWorkspace, NEW_THREAD, Notice, NoticeKind, Project, ProjectId, Sessions,
+    SidebarItem, Thread, ThreadId, ThreadStatus,
 };
 use super::store::{
     DraftRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, ThreadRow, Ui,
@@ -94,8 +94,6 @@ const SAVE_FAILED: &str = "couldn't save orb's state";
 const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
 /// How many random worktree names to try before giving up.
 const WORKTREE_NAME_ATTEMPTS: u32 = 8;
-/// What a notice calls a thread Claude hasn't titled yet.
-const NEW_THREAD: &str = "New thread";
 
 /// What the sessions actor needs to start.
 pub struct SessionsActorDeps {

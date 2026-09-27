@@ -71,17 +71,17 @@ pub(crate) fn render(
     picker_scroll: &mut PickerScroll,
 ) -> (Option<PreviewLayout>, Option<SidebarLayout>, Option<usize>) {
     let [sidebar_area, right, mode_line] = layout(frame.area(), &state.sidebar);
-    let (selected_y, sidebar_layout) = if state.sidebar.hidden {
-        (None, None)
+    let (selected_y, sidebar_layout, search_cursor) = if state.sidebar.hidden {
+        (None, None, None)
     } else {
-        let (selected_y, sidebar_layout) = sidebar::render(
+        let (selected_y, sidebar_layout, search_cursor) = sidebar::render(
             &state.sessions,
             now,
             sidebar_area,
             frame.buffer_mut(),
             scroll,
         );
-        (selected_y, Some(sidebar_layout))
+        (selected_y, Some(sidebar_layout), search_cursor)
     };
     let attached = state.focus == Focus::Attached;
     let pane_shown = attached
@@ -156,10 +156,10 @@ pub(crate) fn render(
         }
         (None, None, None) => None,
     };
-    if state.focus == Focus::Sidebar
-        && let Some(y) = selected_y
-    {
-        frame.set_cursor_position((sidebar_area.x, y));
+    match (state.focus, selected_y, search_cursor) {
+        (Focus::Sidebar, Some(y), _) => frame.set_cursor_position((sidebar_area.x, y)),
+        (Focus::Search, _, Some(cursor)) => frame.set_cursor_position(cursor),
+        _ => {}
     }
     for cell in &mut frame.buffer_mut().content {
         if cell.bg == Color::Reset {
@@ -263,7 +263,7 @@ mod tests {
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::preview::state::Preview;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
+        Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem, Thread, ThreadId,
         ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::{Rename, SidebarView};
@@ -978,6 +978,22 @@ mod tests {
             .cursor_visible()
             .then(|| terminal.get_cursor_position().ok())
             .flatten()
+    }
+
+    #[rstest::rstest]
+    fn search_focus_puts_the_cursor_after_the_search_text() {
+        // Given a search holding "ab" with the keys.
+        let mut state = selected(Focus::Search);
+        state.sessions.search = Some(Search {
+            input: TextInput::new("ab"),
+            return_to: None,
+        });
+
+        // When drawing a frame.
+        let cursor = cursor_of(&state, None);
+
+        // Then the cursor is after "> ab" in the input box.
+        assert_eq!(cursor, Some(Position::new(5, 1)), "the search cursor");
     }
 
     #[rstest::rstest]
