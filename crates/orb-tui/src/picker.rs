@@ -118,6 +118,9 @@ fn title(kind: &PickerKind) -> &'static str {
         PickerKind::Permission { .. } => "Permission mode",
         PickerKind::InitGit { .. } => "Not a git repository",
         PickerKind::RemoveProject { .. } => "Remove project?",
+        PickerKind::SettleThread { .. } => "Settle thread?",
+        PickerKind::DeleteThread { .. } => "Delete thread?",
+        PickerKind::DiscardDraft { .. } => "Discard draft?",
     }
 }
 
@@ -127,9 +130,11 @@ fn hints(kind: &PickerKind) -> Line<'static> {
     let keys: &[(&str, &str)] = match kind {
         PickerKind::Directories { .. } => &[("⏎", "add"), ("Tab", "open"), ("Esc", "close")],
         PickerKind::ProjectFilter => &[("⏎", "filter"), ("<C-x>", "remove"), ("Esc", "close")],
-        PickerKind::RemoveProject { .. } | PickerKind::InitGit { .. } => {
-            &[("⏎", "confirm"), ("Esc", "cancel")]
-        }
+        PickerKind::RemoveProject { .. }
+        | PickerKind::SettleThread { .. }
+        | PickerKind::DeleteThread { .. }
+        | PickerKind::DiscardDraft { .. }
+        | PickerKind::InitGit { .. } => &[("⏎", "confirm"), ("Esc", "cancel")],
         _ => &[("⏎", "select"), ("Esc", "close")],
     };
     let mut spans = vec![Span::raw(" ")];
@@ -651,6 +656,18 @@ mod tests {
         PickerState::remove_project(ProjectId(1), Focus::Sidebar),
         "Remove project?"
     )]
+    #[case(
+        PickerState::settle_thread(ThreadId(1), Focus::Sidebar),
+        "Settle thread?"
+    )]
+    #[case(
+        PickerState::delete_thread(ThreadId(1), Focus::Sidebar),
+        "Delete thread?"
+    )]
+    #[case(
+        PickerState::discard_draft(ProjectId(1), Focus::Sidebar),
+        "Discard draft?"
+    )]
     fn picker_is_titled_by_its_kind(#[case] picker: PickerState, #[case] title: &str) {
         // Given a picker of some kind.
 
@@ -828,6 +845,18 @@ mod tests {
     )]
     #[case(
         PickerState::init_git(ProjectId(1), Focus::Dashboard),
+        "⏎ confirm · Esc cancel"
+    )]
+    #[case(
+        PickerState::settle_thread(ThreadId(1), Focus::Sidebar),
+        "⏎ confirm · Esc cancel"
+    )]
+    #[case(
+        PickerState::delete_thread(ThreadId(1), Focus::Sidebar),
+        "⏎ confirm · Esc cancel"
+    )]
+    #[case(
+        PickerState::discard_draft(ProjectId(1), Focus::Sidebar),
         "⏎ confirm · Esc cancel"
     )]
     #[case(workspace(), "⏎ select · Esc close")]

@@ -19,8 +19,9 @@ use crate::feat::sessions::state::{
     AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Search, SidebarItem, ThreadId,
 };
 use crate::feat::sessions::validator::{
-    validate_close_shelf, validate_delete, validate_open_shelf, validate_pick_setting,
-    validate_start_draft, validate_toggle_pin, validate_toggle_settle,
+    SETTLE_IN_PROGRESS, ToggleSettleError, validate_close_shelf, validate_delete,
+    validate_open_shelf, validate_pick_setting, validate_start_draft, validate_toggle_pin,
+    validate_toggle_settle,
 };
 use crate::feat::sidebar::state::Rename;
 use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
@@ -453,6 +454,32 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
+                Some(&PickerKind::SettleThread { thread }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Confirm(true)) => settle(state, thread),
+                        _ => vec![],
+                    }
+                }
+                Some(&PickerKind::DeleteThread { thread }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Confirm(true))
+                            if still_deletable(state, SidebarItem::Thread(thread)) =>
+                        {
+                            delete_thread(state, thread)
+                        }
+                        _ => vec![],
+                    }
+                }
+                Some(&PickerKind::DiscardDraft { project }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Confirm(true))
+                            if still_deletable(state, SidebarItem::Draft(project)) =>
+                        {
+                            discard_draft(state, project)
+                        }
+                        _ => vec![],
+                    }
+                }
                 Some(PickerKind::ProjectFilter) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::AllProjects) => filter_to(state, None),
@@ -557,25 +584,25 @@ impl IntentHandler {
                         vec![Command::Unsettle(thread.id)]
                     }
                     (Ok(()), Some(thread)) => {
-                        let id = thread.id;
-                        state.attached.remove(&id);
-                        state.sessions.cursor = state.sessions.card_neighbour(id);
-                        with_visit(state, vec![Command::Settle(id)])
+                        let picker = PickerState::settle_thread(thread.id, state.focus);
+                        open_picker(state, picker);
+                        vec![]
+                    }
+                    (Err(ToggleSettleError::InProgress), _) => {
+                        state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
+                        vec![]
                     }
                     _ => vec![],
                 }
             }
             Intent::DeleteThread => match (validate_delete(state), state.sessions.cursor) {
-                (Ok(()), Some(item @ SidebarItem::Draft(project))) => {
-                    state.sessions.cursor = state.sessions.row_neighbour(item);
-                    with_visit(state, vec![Command::DiscardDraft(project)])
+                (Ok(()), Some(SidebarItem::Draft(project))) => {
+                    open_picker(state, PickerState::discard_draft(project, state.focus));
+                    vec![]
                 }
-                (Ok(()), Some(item @ SidebarItem::Thread(id))) => {
-                    let neighbour = state.sessions.row_neighbour(item);
-                    state.sessions.deleting.insert(id);
-                    state.attached.remove(&id);
-                    state.sessions.cursor = neighbour;
-                    with_visit(state, vec![Command::Delete(id)])
+                (Ok(()), Some(SidebarItem::Thread(id))) => {
+                    open_picker(state, PickerState::delete_thread(id, state.focus));
+                    vec![]
                 }
                 _ => vec![],
             },
@@ -793,6 +820,51 @@ fn remove_project(state: &mut AppState, project: ProjectId) -> Vec<Command> {
     )
 }
 
+/// Settles `thread`, answered `Yes` in its confirm, if the cursor is still on
+/// it and it is still unsettled and between turns. Settling detaches it and
+/// moves the cursor to the neighbouring card; a turn that started meanwhile
+/// shows the refusal on the mode line.
+fn settle(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
+    match (
+        validate_toggle_settle(state),
+        state.sessions.selected_thread(),
+    ) {
+        (Ok(()), Some(selected)) if selected.id == thread && selected.settled_at.is_none() => {
+            state.attached.remove(&thread);
+            state.sessions.cursor = state.sessions.card_neighbour(thread);
+            with_visit(state, vec![Command::Settle(thread)])
+        }
+        (Err(ToggleSettleError::InProgress), Some(selected)) if selected.id == thread => {
+            state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
+            vec![]
+        }
+        _ => vec![],
+    }
+}
+
+/// Whether `item`, answered `Yes` in its delete or discard confirm, is still
+/// under the cursor and can still be deleted.
+fn still_deletable(state: &AppState, item: SidebarItem) -> bool {
+    state.sessions.cursor == Some(item) && validate_delete(state).is_ok()
+}
+
+/// Asks for `thread` to be deleted, hiding it at once, detaching it and moving
+/// the cursor to the neighbouring row.
+fn delete_thread(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
+    let neighbour = state.sessions.row_neighbour(SidebarItem::Thread(thread));
+    state.sessions.deleting.insert(thread);
+    state.attached.remove(&thread);
+    state.sessions.cursor = neighbour;
+    with_visit(state, vec![Command::Delete(thread)])
+}
+
+/// Asks for `project`'s draft to be discarded, moving the cursor to the
+/// neighbouring row.
+fn discard_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
+    state.sessions.cursor = state.sessions.row_neighbour(SidebarItem::Draft(project));
+    with_visit(state, vec![Command::DiscardDraft(project)])
+}
+
 /// Selects `project`'s draft and gives the keys to its form, asking the
 /// sessions actor to create the draft when the project has none. A filter to
 /// another project goes back to all projects.
@@ -976,6 +1048,7 @@ mod tests {
         AttachTarget, Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem,
         SidebarRow, Thread, ThreadId, ThreadStatus,
     };
+    use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::feat::sidebar::state::{Rename, SidebarView};
     use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
@@ -1759,11 +1832,13 @@ mod tests {
 
     #[rstest::rstest]
     fn settle_removes_the_thread_from_attached() {
-        // Given attached thread 1 selected in the sidebar.
+        // Given attached thread 1 selected in the sidebar, and Yes highlighted in its settle
+        // confirm.
         let mut state = left_pane(&[1], 1);
+        answer_yes(&Intent::ToggleSettle, &mut state);
 
-        // When handling ToggleSettle.
-        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then thread 1 is no longer attached.
         assert!(
@@ -1774,11 +1849,13 @@ mod tests {
 
     #[rstest::rstest]
     fn delete_removes_the_thread_from_attached() {
-        // Given attached thread 1 selected in the sidebar.
+        // Given attached thread 1 selected in the sidebar, and Yes highlighted in its delete
+        // confirm.
         let mut state = left_pane(&[1], 1);
+        answer_yes(&Intent::DeleteThread, &mut state);
 
-        // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then thread 1 is no longer attached.
         assert!(
@@ -2432,25 +2509,28 @@ mod tests {
 
     #[rstest::rstest]
     fn settle_returns_the_settle_command() {
-        // Given threads 2 and 1 in sidebar order, with thread 2 selected.
+        // Given threads 2 and 1 in sidebar order, with thread 2 selected, and Yes highlighted in
+        // its settle confirm.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
             2,
         );
+        answer_yes(&Intent::ToggleSettle, &mut state);
 
-        // When handling ToggleSettle.
-        let commands = IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then the sessions actor is asked to settle thread 2.
         assert!(
             commands.contains(&Command::Settle(ThreadId(2))),
-            "ToggleSettle should return Settle"
+            "Yes on the settle confirm should return Settle"
         );
     }
 
     #[rstest::rstest]
     fn settle_selects_the_next_card_below() {
-        // Given threads 3, 2 and 1 in sidebar order, with thread 2 selected.
+        // Given threads 3, 2 and 1 in sidebar order, with thread 2 selected, and Yes highlighted in
+        // its settle confirm.
         let mut state = state_with(
             vec![
                 thread(1, ThreadStatus::Idle),
@@ -2459,9 +2539,10 @@ mod tests {
             ],
             2,
         );
+        answer_yes(&Intent::ToggleSettle, &mut state);
 
-        // When handling ToggleSettle.
-        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then the card below is selected.
         assert_eq!(
@@ -2473,14 +2554,16 @@ mod tests {
 
     #[rstest::rstest]
     fn settling_the_last_card_selects_the_card_above() {
-        // Given threads 2 and 1 in sidebar order, with thread 1 selected.
+        // Given threads 2 and 1 in sidebar order, with thread 1 selected, and Yes highlighted in
+        // its settle confirm.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
             1,
         );
+        answer_yes(&Intent::ToggleSettle, &mut state);
 
-        // When handling ToggleSettle.
-        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then the card above is selected.
         assert_eq!(
@@ -2492,11 +2575,12 @@ mod tests {
 
     #[rstest::rstest]
     fn settling_the_only_card_selects_the_shelf() {
-        // Given one thread, selected.
+        // Given one thread, selected, and Yes highlighted in its settle confirm.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        answer_yes(&Intent::ToggleSettle, &mut state);
 
-        // When handling ToggleSettle.
-        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then the shelf header the settle creates is selected.
         assert_eq!(
@@ -2562,23 +2646,24 @@ mod tests {
 
     #[rstest::rstest]
     fn delete_returns_the_delete_command() {
-        // Given one thread, selected.
+        // Given one thread, selected, and Yes highlighted in its delete confirm.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        answer_yes(&Intent::DeleteThread, &mut state);
 
-        // When handling DeleteThread.
-        let commands = IntentHandler::handle(&Intent::DeleteThread, &mut state);
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then the sessions actor is asked to delete it.
         assert!(
             commands.contains(&Command::Delete(ThreadId(1))),
-            "DeleteThread should return Delete"
+            "Yes on the delete confirm should return Delete"
         );
     }
 
     #[rstest::rstest]
     fn delete_selects_the_next_row_below() {
-        // Given cards 2 and 1, then the open shelf holding thread 3, with card
-        // 1 selected.
+        // Given cards 2 and 1, then the open shelf holding thread 3, with card 1 selected, and Yes
+        // highlighted in its delete confirm.
         let mut state = state_with(
             vec![
                 thread(1, ThreadStatus::Idle),
@@ -2588,9 +2673,10 @@ mod tests {
             1,
         );
         state.sessions.shelf_open = true;
+        answer_yes(&Intent::DeleteThread, &mut state);
 
-        // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then the settled thread below, past the header, is selected.
         assert_eq!(
@@ -2632,14 +2718,15 @@ mod tests {
 
     #[rstest::rstest]
     fn delete_hides_the_thread_from_the_sidebar() {
-        // Given threads 2 and 1, with thread 1 selected.
+        // Given threads 2 and 1, with thread 1 selected, and Yes highlighted in its delete confirm.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
             1,
         );
+        answer_yes(&Intent::DeleteThread, &mut state);
 
-        // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then only thread 2 is listed, while its session is removed.
         let listed: Vec<SidebarItem> = state
@@ -3456,35 +3543,245 @@ mod tests {
 
     #[rstest::rstest]
     fn delete_on_a_draft_returns_discard_draft() {
-        // Given a selected draft.
+        // Given a selected draft, and Yes highlighted in its discard confirm.
         let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+        answer_yes(&Intent::DeleteThread, &mut state);
 
-        // When handling DeleteThread.
-        let commands = IntentHandler::handle(&Intent::DeleteThread, &mut state);
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then the sessions actor is asked to discard it.
         assert!(
             commands.contains(&Command::DiscardDraft(ProjectId(1))),
-            "xx on a draft should discard it"
+            "Yes on a draft's discard confirm should discard it"
         );
     }
 
     #[rstest::rstest]
     fn delete_on_a_draft_selects_the_next_row() {
-        // Given a selected draft above thread 1's card.
+        // Given a selected draft above thread 1's card, and Yes highlighted in its discard confirm.
         let mut state = drafting(
             draft(DraftWorkspace::Local),
             vec![thread(1, ThreadStatus::Idle)],
         );
+        answer_yes(&Intent::DeleteThread, &mut state);
 
-        // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then the card below is selected.
         assert_eq!(
             state.sessions.cursor,
             Some(SidebarItem::Thread(ThreadId(1))),
             "discarding a draft should select the row below"
+        );
+    }
+
+    /// The open picker's kind and selected item.
+    fn open_confirm(state: &AppState) -> Option<(&PickerKind, Option<&PickerItem>)> {
+        state
+            .picker
+            .as_ref()
+            .map(|picker| (picker.kind(), picker.selected()))
+    }
+
+    #[rstest::rstest]
+    fn settle_opens_the_settle_confirm_with_no_selected() {
+        // Given a selected idle thread.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then its settle confirm is open with No selected.
+        assert_eq!(
+            open_confirm(&state),
+            Some((
+                &PickerKind::SettleThread {
+                    thread: ThreadId(1)
+                },
+                Some(&PickerItem::Confirm(false))
+            )),
+            "s should ask to settle the thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_on_a_settled_thread_opens_no_confirm() {
+        // Given a selected settled thread.
+        let mut state = state_with(vec![settled(1)], 1);
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then no confirm opens.
+        assert!(state.picker.is_none(), "un-settling needs no confirm");
+    }
+
+    #[rstest::rstest]
+    fn settle_on_a_working_thread_shows_the_refusal() {
+        // Given a selected thread Claude is working in.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Working)], 1);
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the mode line says it can't settle.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some(SETTLE_IN_PROGRESS),
+            "s on a working thread should say why it can't settle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_on_a_working_thread_opens_no_confirm() {
+        // Given a selected thread Claude is working in.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Working)], 1);
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then no confirm opens.
+        assert!(
+            state.picker.is_none(),
+            "a thread that can't be settled should not ask to settle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_settle_confirm_after_a_turn_started_does_not_settle() {
+        // Given Yes highlighted in thread 1's settle confirm, and then Claude
+        // starts a turn in it.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        answer_yes(&Intent::ToggleSettle, &mut state);
+        state.sessions.projects[0].threads = vec![thread(1, ThreadStatus::Working)];
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing is asked of the sessions actor.
+        assert!(
+            commands.is_empty(),
+            "a thread that started working should not be settled"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_settle_confirm_after_a_turn_started_shows_the_refusal() {
+        // Given Yes highlighted in thread 1's settle confirm, and then Claude
+        // starts a turn in it.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        answer_yes(&Intent::ToggleSettle, &mut state);
+        state.sessions.projects[0].threads = vec![thread(1, ThreadStatus::Working)];
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the mode line says it can't settle.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some(SETTLE_IN_PROGRESS),
+            "Yes on a thread that started working should say why it can't settle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_settle_confirm_after_it_was_settled_returns_no_commands() {
+        // Given Yes highlighted in thread 1's settle confirm, and then thread 1
+        // is settled.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        answer_yes(&Intent::ToggleSettle, &mut state);
+        state.sessions.projects[0].threads = vec![settled(1)];
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then it is not toggled back.
+        assert!(
+            commands.is_empty(),
+            "Yes on an already settled thread should not un-settle it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_opens_the_delete_confirm_with_no_selected() {
+        // Given a selected thread.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then its delete confirm is open with No selected.
+        assert_eq!(
+            open_confirm(&state),
+            Some((
+                &PickerKind::DeleteThread {
+                    thread: ThreadId(1)
+                },
+                Some(&PickerItem::Confirm(false))
+            )),
+            "d should ask to delete the thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_on_a_draft_opens_the_discard_confirm_with_no_selected() {
+        // Given a selected draft.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then its discard confirm is open with No selected.
+        assert_eq!(
+            open_confirm(&state),
+            Some((
+                &PickerKind::DiscardDraft {
+                    project: ProjectId(1)
+                },
+                Some(&PickerItem::Confirm(false))
+            )),
+            "d on a draft should ask to discard it"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::ToggleSettle, state_with(vec![thread(1, ThreadStatus::Idle)], 1))]
+    #[case(Intent::DeleteThread, state_with(vec![thread(1, ThreadStatus::Idle)], 1))]
+    #[case(Intent::DeleteThread, drafting(draft(DraftWorkspace::Local), vec![]))]
+    fn no_on_a_sidebar_confirm_returns_no_commands(
+        #[case] intent: Intent,
+        #[case] mut state: AppState,
+    ) {
+        // Given the confirm `intent` opened, with No selected.
+        IntentHandler::handle(&intent, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing is asked of the sessions actor.
+        assert!(
+            commands.is_empty(),
+            "No on {intent:?}'s confirm should do nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_delete_confirm_after_the_thread_left_returns_no_commands() {
+        // Given Yes highlighted in thread 1's delete confirm, and then thread 1
+        // leaves the sidebar.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        answer_yes(&Intent::DeleteThread, &mut state);
+        state.sessions.projects[0].threads.clear();
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing is asked of the sessions actor.
+        assert!(
+            commands.is_empty(),
+            "Yes on a thread that is gone should do nothing"
         );
     }
 
@@ -3606,6 +3903,12 @@ mod tests {
         if let Some(picker) = &mut state.picker {
             picker.select(item);
         }
+    }
+
+    /// Handles `intent` to open its `No`/`Yes` confirm, then highlights `Yes`.
+    fn answer_yes(intent: &Intent, state: &mut AppState) {
+        IntentHandler::handle(intent, state);
+        highlight(state, &PickerItem::Confirm(true));
     }
 
     /// [`filtering`], then `<C-x>` on alpha.

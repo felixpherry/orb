@@ -52,6 +52,12 @@ pub enum PickerKind {
     ProjectFilter,
     /// `<C-x>` in the project filter: confirm removing `project`.
     RemoveProject { project: ProjectId },
+    /// `s` on a thread: confirm settling it.
+    SettleThread { thread: ThreadId },
+    /// `d` on a thread: confirm deleting it.
+    DeleteThread { thread: ThreadId },
+    /// `d` on a draft: confirm discarding it.
+    DiscardDraft { project: ProjectId },
 }
 
 /// The open picker.
@@ -112,8 +118,29 @@ impl PickerState {
 
     /// The `No`/`Yes` confirm for removing `project`, with `No` selected.
     pub fn remove_project(project: ProjectId, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::RemoveProject { project }, return_to)
+    }
+
+    /// The `No`/`Yes` confirm for settling `thread`, with `No` selected.
+    pub fn settle_thread(thread: ThreadId, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::SettleThread { thread }, return_to)
+    }
+
+    /// The `No`/`Yes` confirm for deleting `thread`, with `No` selected.
+    pub fn delete_thread(thread: ThreadId, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::DeleteThread { thread }, return_to)
+    }
+
+    /// The `No`/`Yes` confirm for discarding `project`'s draft, with `No`
+    /// selected.
+    pub fn discard_draft(project: ProjectId, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::DiscardDraft { project }, return_to)
+    }
+
+    /// A `No`/`Yes` confirm of `kind`, with `No` selected.
+    fn confirm(kind: PickerKind, return_to: Focus) -> Self {
         Self {
-            kind: PickerKind::RemoveProject { project },
+            kind,
             list: PickerList::new(vec![PickerItem::Confirm(false), PickerItem::Confirm(true)]),
             return_to,
             home: PathBuf::new(),
