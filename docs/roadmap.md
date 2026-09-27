@@ -607,7 +607,7 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 - ``(notify) Notifications are delivered through `terminal-notifier` when it's on `PATH` at startup, and through `osascript` otherwise, or when terminal-notifier fails.``
 - ``(notify) Clicking a `terminal-notifier` notification focuses orb's zellij tab and pane, and brings orb's kitty window forward if kitty's remote control is on (`KITTY_LISTEN_ON`).``
 
-### Dashboard
+### Dashboard (written)
 
 Written in the dashboard's Verification step (not a milestone; it replaced M3's preview).
 
@@ -625,7 +625,7 @@ Written in the dashboard's Verification step (not a milestone; it replaced M3's 
 - ``(pane) orb draws the Claude pane while attached and after `<C-h>` leaves it for the sidebar, until `<C-\>` is pressed, another thread is selected, or Claude exits; otherwise the right-hand area shows the selected thread's preview.`` → ``(pane) orb draws the Claude pane while attached and after `<C-h>` leaves it for the sidebar, until `<C-\>` is pressed, another thread is selected, or Claude exits; otherwise the right-hand area shows the dashboard.``
 - ``(keybinds) Plain `q` in the sidebar quits orb.`` → ``(keybinds) Plain `q` in the sidebar or the dashboard quits orb.``
 - ``(drafts) A new-worktree draft creates its worktree only when started; its form shows the ref it will start from as `From <ref>`.`` → ``(drafts) A new-worktree draft creates its worktree only when started; the dashboard's Branch item shows the ref it will start from as `From <ref>`.``
-- ``(keybinds) On a draft, in the sidebar or its form, `⏎` starts it and `␣w`/`␣b`/`␣m`/`␣a` pick its workspace, base branch, model, and permission.`` → ``(keybinds) On a draft, in the sidebar or the dashboard, `⏎` starts it and `␣w`/`␣b`/`␣m`/`␣a` pick its workspace, base branch, model, and permission.``
+- ``(keybinds) On a draft, in the sidebar or its form, `⏎` starts it and `␣w`/`␣b`/`␣m`/`␣a` pick its workspace, base branch, model, and permission.`` → ``(keybinds) On a draft, in the sidebar or the dashboard, `⏎` starts it and `␣w`/`␣b`/`␣m`/`␣a` pick its workspace, base branch, model, and permission.`` *(not written: on the dashboard `⏎` runs the highlighted item, so it starts the draft only while Start is highlighted; wording pending)*
 - ``(keybinds) `␣w` in the sidebar or preview opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.`` → ``(keybinds) `␣w` in the sidebar or dashboard opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.``
 - ``(keybinds) `␣b` in the sidebar or preview opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.`` → ``(keybinds) `␣b` in the sidebar or dashboard opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.``
 - ``(keybinds) `␣t` opens a shell, `␣g` lazygit, and `␣v` `nvim .` in the selected thread's or draft's directory, in the sidebar or preview.`` → ``(keybinds) `␣t` opens a shell, `␣g` lazygit, and `␣v` `nvim .` in the selected thread's or draft's directory, in the sidebar or dashboard.``
@@ -634,9 +634,9 @@ Written in the dashboard's Verification step (not a milestone; it replaced M3's 
 
 **Add**
 - `(dashboard) While no Claude pane is shown, the right-hand area shows a LazyVim-style dashboard: a gradient ORB banner, a context line, a menu of the selection's actions, and a footer counting working threads, threads and projects.`
-- ``(dashboard) The dashboard's menu lists `o` Open session, `w` Workspace and `b` Branch on a thread; `o` Start session, `w`, `b`, `m` Model and `a` Permission with their current values on a draft; `t` Shell, `g` Lazygit and `v` Neovim on either; and `n` New session, `p` Add project, `f` Filter projects and `q` Quit always.``
+- ``(dashboard) The dashboard's menu lists `o` Open session, `w` Workspace and `b` Branch on a thread; `o` Start session, `w` and `b` (only in a git repository), `m` Model and `a` Permission with their current values on a draft; `t` Shell, `g` Lazygit and `v` Neovim on either; and `n` New session, `p` Add project, `f` Filter projects and `q` Quit always.``
 - ``(keybinds) On the dashboard, `j`/`k` or `↓`/`↑` move the menu cursor, wrapping from the last item to the first and back, `⏎` runs the highlighted item, and an item's letter runs it directly.``
-- `(dashboard) The menu cursor starts on Open/Start session and goes back there whenever the selection changes.`
+- `(dashboard) The menu cursor starts on the first item (Open/Start session, or New session with nothing selected) and goes back there whenever the selection changes.`
 - `(dashboard) While the Settled shelf's header is selected, the dashboard's context line shows the shelf hint.`
-- `(dashboard) The dashboard shows why a session couldn't start under its footer.`
+- ``(dashboard) When the Claude pane fails to start, the reason shows in red under the dashboard's footer; other errors, such as a failed `claude --bg` or `claude agents`, show on the mode line.``
 - `(dashboard) While the dashboard has the keys, a steady block cursor sits on the first cell of the highlighted item's label.`

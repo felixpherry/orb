@@ -31,14 +31,14 @@ Entries are added or amended **only with human approval**.
 
 ---
 
-- (keybinds) Plain `q` in the sidebar quits orb.
+- (keybinds) Plain `q` in the sidebar or the dashboard quits orb.
 - (keybinds) orb has no `:` command line.
 - (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
 - (pane) orb redraws when input, PTY output, child exit, or an actor's state change wakes the loop, and every 100 ms while a thread is working (the spinner's frame); there is no other tick or frame throttle.
 - (pane) While attached, keys, paste, mouse, and focus events are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb captures the mouse only while attached and forwards the child's OSC 52 clipboard writes to its outer terminal.
-- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview, and `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden.
+- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the dashboard, and `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden.
 - (identity) orb supports Claude Code as its only provider.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
@@ -49,15 +49,10 @@ Entries are added or amended **only with human approval**.
 - (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread is a three-line tree node showing its status icon, title, and time, then its project and status word, then its branch.
 - (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the Settled shelf is open and a shown/total count of drafts and threads, and the selected row's first line highlighted.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
-- (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the preview, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
+- (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the dashboard, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
-- (preview) The preview renders the selected thread from its Claude transcript JSONL as navigable blocks, without spawning a process.
-- (preview) The preview shows only the transcript's newest branch and continues across compaction boundaries.
-- (preview) The preview reads new transcript lines within half a second and follows the tail while scrolled to the bottom.
-- (keybinds) In the preview, `j`/`k` move between blocks, `<C-d>`/`<C-u>` move half a page, `gg`/`G` jump to the top/bottom, `za`/`<Tab>` fold or unfold a block, and `y` yanks its raw text.
-- (preview) Yanked text goes to the outer terminal's clipboard via OSC 52.
-- (pane) orb draws the Claude pane while attached and after `<C-h>` leaves it for the sidebar, until `<C-\>` is pressed, another thread is selected, or Claude exits; otherwise the right-hand area shows the selected thread's preview.
+- (pane) orb draws the Claude pane while attached and after `<C-h>` leaves it for the sidebar, until `<C-\>` is pressed, another thread is selected, or Claude exits; otherwise the right-hand area shows the dashboard.
 - (sidebar) Pinned threads come first, then Active threads, then a collapsible Settled shelf at the bottom of the sidebar.
 - (sidebar) A thread shows a green check and "done" when its latest turn ended after the user last selected it.
 - (settle) Any new turn, approval request, or input request un-settles a thread.
@@ -84,22 +79,21 @@ Entries are added or amended **only with human approval**.
 - (worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from the thread's title; the directory keeps its name.
 - (worktrees) Deleting a thread leaves its worktree on disk.
 - (worktrees) A thread's workspace can change only before its first prompt; orb then starts a new session in the new workspace, with the same model and permission, and removes the old one.
-- (keybinds) `␣w` in the sidebar or preview opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.
-- (keybinds) `␣b` in the sidebar or preview opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.
+- (keybinds) `␣w` in the sidebar or dashboard opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.
+- (keybinds) `␣b` in the sidebar or dashboard opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.
 - (branches) After a thread's first prompt, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any thread in the same directory is working or waiting.
 - (trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>` or `<C-h>`.
 - (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session with those settings and attaches while the draft is still selected and no picker, rename box or search has the keys.
 - (drafts) Each project has at most one draft; drafts persist to orb's store and sit above pinned threads in the sidebar.
 - (drafts) Draft settings default to the project's last-used workspace, model and permission, falling back to the last-used model and permission from any project and a local checkout; a new worktree's base branch defaults to the project's default branch.
-- (drafts) A new-worktree draft creates its worktree only when started; its form shows the ref it will start from as `From <ref>`.
+- (drafts) A new-worktree draft creates its worktree only when started; the dashboard's Branch item shows the ref it will start from as `From <ref>`.
 - (drafts) In a draft on the project's root or in an existing worktree, picking a branch checks it out there right away; a branch checked out in the root or another worktree moves the draft there instead, and in a worktree the default branch takes the draft back to the root.
 - (drafts) A draft of a project that isn't a git repository has no workspace or base branch, starts in the project's directory, and `␣w`/`␣b` offer to initialize git.
 - (drafts) The model picker lists `Default`, then T3 Code's current Claude models by name, then its legacy models under a `Legacy models` heading; orb passes the picked model's full ID to `--model`.
 - (keybinds) On a draft, in the sidebar or its form, `⏎` starts it and `␣w`/`␣b`/`␣m`/`␣a` pick its workspace, base branch, model, and permission.
-- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` only on a thread or draft, and `p`/`ss`/`r` only on a thread.
-- (preview) The preview header names the thread's model as the model picker does (e.g. Claude Opus 5.5), else shows its ID without `claude-`.
-- (keybinds) `␣t` opens a shell, `␣g` lazygit, and `␣v` `nvim .` in the selected thread's or draft's directory, in the sidebar or preview.
+- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` and the dashboard's `m`/`a` only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` and the dashboard's `o`/`w`/`b`/`t`/`g`/`v` only on a thread or draft, and `p`/`ss`/`r` in the sidebar only on a thread.
+- (keybinds) `␣t` opens a shell, `␣g` lazygit, and `␣v` `nvim .` in the selected thread's or draft's directory, in the sidebar or dashboard.
 - (zellij) Tool handoff opens each tool as a full-screen floating zellij pane named `orb:<directory>:<tool>`, which closes when the tool exits.
 - (zellij) Tool handoff focuses an existing pane of the same name, switching to its tab, instead of opening a second one.
 - (zellij) A draft's tools open in its worktree, or in the project root for a local or new-worktree draft.
@@ -108,7 +102,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
 - (keybinds) `␣e` hides or shows the sidebar; while it's hidden the right-hand area takes the full width, and `<C-h>` and resizing do nothing.
-- (keybinds) In the sidebar or preview, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
+- (keybinds) In the sidebar or dashboard, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
 - (sidebar) The sidebar's width and project filter persist across restarts.
 - (keybinds) `␣f` in the sidebar opens the project filter: `All projects`, then the projects in `␣n` order.
 - (sidebar) While a project filter is set, the sidebar lists only that project's drafts and threads, and its input box shows the project after the > prompt.
@@ -130,3 +124,10 @@ Entries are added or amended **only with human approval**.
 - (tui) The rename box, the sidebar search and the pickers show a steady bar cursor.
 - (tui) The mode line shows `INSERT` while typing in the rename box or the sidebar search.
 - (keybinds) The which-key popup is drawn like LazyVim's default which-key (helix) in tokyonight-moon: a rounded box in the bottom-right corner on the mode line, the pending keys in its top border (`␣` for Space), one `key ➜ icon desc` row per next key with groups as `+name`, in which-key's order (letters and digits before symbols, lowercase before its capital), and `esc close  ⌫ back` on its last row; rows that don't fit are cut off.
+- (dashboard) While no Claude pane is shown, the right-hand area shows a LazyVim-style dashboard: a gradient ORB banner, a context line, a menu of the selection's actions, and a footer counting working threads, threads and projects.
+- (dashboard) The dashboard's menu lists `o` Open session, `w` Workspace and `b` Branch on a thread; `o` Start session, `w` and `b` (only in a git repository), `m` Model and `a` Permission with their current values on a draft; `t` Shell, `g` Lazygit and `v` Neovim on either; and `n` New session, `p` Add project, `f` Filter projects and `q` Quit always.
+- (keybinds) On the dashboard, `j`/`k` or `↓`/`↑` move the menu cursor, wrapping from the last item to the first and back, `⏎` runs the highlighted item, and an item's letter runs it directly.
+- (dashboard) The menu cursor starts on the first item (Open/Start session, or New session with nothing selected) and goes back there whenever the selection changes.
+- (dashboard) While the Settled shelf's header is selected, the dashboard's context line shows the shelf hint.
+- (dashboard) When the Claude pane fails to start, the reason shows in red under the dashboard's footer; other errors, such as a failed `claude --bg` or `claude agents`, show on the mode line.
+- (dashboard) While the dashboard has the keys, a steady block cursor sits on the first cell of the highlighted item's label.
