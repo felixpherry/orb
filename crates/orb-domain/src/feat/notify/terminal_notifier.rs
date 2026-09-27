@@ -16,13 +16,16 @@
 //! backslash from every value to allow for that, so orb prefixes every value
 //! with one. A later notification about the same thread replaces the earlier
 //! one. Like `osascript`, each one runs with no stdin, stdout or stderr, and a
-//! thread of its own waits for it to exit.
+//! thread of its own waits for it to exit. If it fails, for example because
+//! it isn't allowed to notify, that thread sends the same notification through
+//! a fallback notifier instead.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use error_stack::Report;
 
@@ -60,16 +63,22 @@ pub struct ZellijTarget {
     pub pane: u32,
 }
 
-/// Shows notifications with `terminal-notifier`, whose click runs a command.
-#[derive(Debug, Clone)]
+/// Shows notifications with `terminal-notifier`, whose click runs a command,
+/// and through `fallback` when terminal-notifier exits unsuccessfully.
+#[derive(Clone)]
 pub struct TerminalNotifierNotifier {
     program: PathBuf,
     click: ClickTarget,
+    fallback: Arc<dyn Notifier>,
 }
 
 impl TerminalNotifierNotifier {
-    pub fn new(program: PathBuf, click: ClickTarget) -> Self {
-        Self { program, click }
+    pub fn new(program: PathBuf, click: ClickTarget, fallback: Arc<dyn Notifier>) -> Self {
+        Self {
+            program,
+            click,
+            fallback,
+        }
     }
 
     /// terminal-notifier's arguments to show `title` and `body` about
@@ -158,7 +167,14 @@ impl Notifier for TerminalNotifierNotifier {
         thread: ThreadId,
         tab: Option<u64>,
     ) -> Result<(), Report<NotifyError>> {
-        spawn_detached(&self.program, self.args(title, body, thread, tab))
+        let resend = {
+            let fallback = Arc::clone(&self.fallback);
+            let (title, body) = (title.to_owned(), body.to_owned());
+            move || {
+                let _ = fallback.notify(&title, &body, thread, tab);
+            }
+        };
+        spawn_detached(&self.program, self.args(title, body, thread, tab), resend)
     }
 }
 
@@ -212,11 +228,57 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::time::Duration;
 
+    use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
 
     use super::{ClickTarget, Kitty, TerminalNotifierNotifier, ZellijTarget, window_title_match};
+    use crate::feat::notify::notifier::{Notifier, NotifyError};
     use crate::feat::sessions::state::ThreadId;
+
+    /// What a fallback notifier was asked to show: title, body, thread and tab.
+    type Resent = (String, String, ThreadId, Option<u64>);
+
+    /// A fallback notifier that sends each notification it's asked to show
+    /// down a channel.
+    struct Fallback(Sender<Resent>);
+
+    impl Notifier for Fallback {
+        fn name(&self) -> &'static str {
+            "fallback"
+        }
+
+        fn notify(
+            &self,
+            title: &str,
+            body: &str,
+            thread: ThreadId,
+            tab: Option<u64>,
+        ) -> Result<(), Report<NotifyError>> {
+            let _ = self
+                .0
+                .send((title.to_owned(), body.to_owned(), thread, tab));
+            Ok(())
+        }
+    }
+
+    /// A fallback notifier, and what it gets asked to show.
+    fn fallback() -> (Arc<Fallback>, Receiver<Resent>) {
+        let (sender, resent) = mpsc::channel();
+        (Arc::new(Fallback(sender)), resent)
+    }
+
+    /// Writes a `terminal-notifier` into `dir` that shows nothing and exits `code`.
+    fn exiting(dir: &Path, code: i32) -> Result<PathBuf, Report<NotifyError>> {
+        let path = dir.join("terminal-notifier");
+        fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).change_context(NotifyError)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .change_context(NotifyError)?;
+        Ok(path)
+    }
 
     fn kitty(window: Option<u64>) -> Kitty {
         Kitty {
@@ -235,7 +297,7 @@ mod tests {
     }
 
     fn notifier(click: ClickTarget) -> TerminalNotifierNotifier {
-        TerminalNotifierNotifier::new(PathBuf::from("/t/terminal-notifier"), click)
+        TerminalNotifierNotifier::new(PathBuf::from("/t/terminal-notifier"), click, fallback().0)
     }
 
     /// The `-execute` value in `args`, without its leading backslash.
@@ -446,6 +508,61 @@ mod tests {
             (recorded, pwned),
             (expected, false),
             "what the programs got for {session:?}, and whether anything else ran"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::not_allowed_to_notify(3)]
+    #[case::refused_by_the_notification_service(5)]
+    fn failing_terminal_notifier_resends_the_notice_through_the_fallback(
+        #[case] code: i32,
+    ) -> Result<(), Report<NotifyError>> {
+        // Given a terminal-notifier that exits `code`, and a fallback notifier.
+        let dir = TempDir::new().change_context(NotifyError)?;
+        let (fallback, resent) = fallback();
+        let notifier = TerminalNotifierNotifier::new(
+            exiting(dir.path(), code)?,
+            ClickTarget::default(),
+            fallback,
+        );
+
+        // When notifying that thread 7 finished, with orb on tab 3.
+        notifier.notify("orb · x", "Finished", ThreadId(7), Some(3))?;
+
+        // Then the fallback is asked to show the same notification.
+        assert_eq!(
+            resent.recv_timeout(Duration::from_secs(5)).ok(),
+            Some((
+                "orb · x".to_owned(),
+                "Finished".to_owned(),
+                ThreadId(7),
+                Some(3)
+            )),
+            "what the fallback showed after terminal-notifier exited {code}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn succeeding_terminal_notifier_sends_nothing_through_the_fallback()
+    -> Result<(), Report<NotifyError>> {
+        // Given a terminal-notifier that exits 0, and a fallback notifier.
+        let dir = TempDir::new().change_context(NotifyError)?;
+        let (fallback, resent) = fallback();
+        let notifier = TerminalNotifierNotifier::new(
+            exiting(dir.path(), 0)?,
+            ClickTarget::default(),
+            fallback,
+        );
+
+        // When notifying that thread 7 finished.
+        notifier.notify("orb · x", "Finished", ThreadId(7), None)?;
+
+        // Then the fallback is asked to show nothing.
+        assert!(
+            resent.recv_timeout(Duration::from_secs(1)).is_err(),
+            "the fallback should stay quiet when terminal-notifier succeeds"
         );
         Ok(())
     }
