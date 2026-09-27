@@ -558,11 +558,13 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 ### M9
 
 **Amend**
-- ``(keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview.`` → ``(keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview, and `<C-h>`, which focuses the sidebar and leaves the Claude pane shown.``
+- ``(keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview.`` → ``(keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the thread's preview, and `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden.``
 - ``(pane) orb draws the Claude pane only while attached; otherwise the right-hand area shows the selected thread's preview.`` → ``(pane) orb draws the Claude pane while attached and after `<C-h>` leaves it for the sidebar, until `<C-\>` is pressed, another thread is selected, or Claude exits; otherwise the right-hand area shows the selected thread's preview.``
 - ``(pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area with the sidebar visible.`` → ``(pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.``
 - ``(keybinds) `<C-h>`/`<C-l>` move focus between sidebar and preview, `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.`` → ``(keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the preview, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.``
 - `(tui) The mode line cuts a long status message at its end, so the mode's key hints and a 2-cell gap stay visible.` → `(tui) The mode line shows only the mode's name on its left and cuts a long status message at its end, so the name and a 2-cell gap stay visible.`
+- ``(trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>`.`` → ``(trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>` or `<C-h>`.``
+- ``(zellij) A zellij call that runs longer than 2 s is killed, and the mode line shows `zellij timed out (session renamed? restart orb)`.`` → ``(zellij) A zellij call that runs longer than 2 s is killed; when it was opening a tool, the mode line then shows `zellij timed out (session renamed? restart orb)`.``
 
 **Add**
 - ``(keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.``
@@ -578,4 +580,4 @@ At the end of milestone N, write the **MN** group into `.agents/RECORD.md` verba
 - `(notify) While orb's pane isn't focused, orb sends a macOS notification when a thread finishes a turn, needs approval, or needs input.`
 - ``(notify) While its last focus event says it's focused, orb still notifies if `zellij action list-clients` shows no client on its pane, because zellij sends no focus-out on a tab switch.``
 - ``(notify) Notifications are delivered through `terminal-notifier` when it's on `PATH` at startup, and through `osascript` otherwise, or when terminal-notifier fails.``
-- ``(notify) Clicking a `terminal-notifier` notification brings orb's kitty window forward and focuses orb's zellij tab and pane.``
+- ``(notify) Clicking a `terminal-notifier` notification focuses orb's zellij tab and pane, and brings orb's kitty window forward if kitty's remote control is on (`KITTY_LISTEN_ON`).``
