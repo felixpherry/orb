@@ -412,23 +412,28 @@ impl App {
                             None
                         }
                     },
-                    Focus::Sidebar | Focus::Dashboard => match keymap::layout_route(key) {
-                        Some(intent) => {
-                            // A resize ends any key sequence in progress.
-                            self.keys.dismiss();
-                            Some(intent)
-                        }
-                        None => {
-                            // Focus and the selection also change outside
-                            // intents (the pane exits, a draft starts).
-                            let scope =
-                                Scope::new(focus, Selection::of(&self.state.read().sessions));
-                            if *self.keys.scope() != scope {
-                                self.keys.set_scope(scope);
+                    Focus::Sidebar | Focus::Dashboard => {
+                        match keymap::layout_route(key).or(match focus {
+                            Focus::Sidebar => keymap::sidebar_route(key),
+                            _ => None,
+                        }) {
+                            Some(intent) => {
+                                // A resize or a detach ends any key sequence in progress.
+                                self.keys.dismiss();
+                                Some(intent)
                             }
-                            keymap::press(&mut self.keys, key)
+                            None => {
+                                // Focus and the selection also change outside
+                                // intents (the pane exits, a draft starts).
+                                let scope =
+                                    Scope::new(focus, Selection::of(&self.state.read().sessions));
+                                if *self.keys.scope() != scope {
+                                    self.keys.set_scope(scope);
+                                }
+                                keymap::press(&mut self.keys, key)
+                            }
                         }
-                    },
+                    }
                     // The rename box and the search take the picker's keys.
                     Focus::Picker | Focus::Rename | Focus::Search => keymap::picker_route(key),
                 };
@@ -474,14 +479,14 @@ impl App {
                     .pane
                     .as_ref()
                     .filter(|attached| attached.pane.has_exited())
-                    .map(|attached| attached.owner.retries_start());
+                    .map(|attached| attached.owner);
                 match exited {
-                    Some(true) => self.leave_trust(out)?,
-                    Some(false) => {
+                    Some(PaneOwner::Trust) => self.leave_trust(out)?,
+                    Some(PaneOwner::Thread(id)) => {
                         {
                             let mut app = self.state.write();
                             app.focus = after_pane(app.focus);
-                            app.pane_shown = None;
+                            app.attached.remove(&id);
                         }
                         outer_terminal::set_mouse_capture(out, false)?;
                     }
@@ -514,7 +519,7 @@ impl App {
                             self.pane_error = Some("couldn't start claude attach".to_owned());
                             let mut app = self.state.write();
                             app.focus = Focus::Dashboard;
-                            app.pane_shown = None;
+                            app.attached.remove(&target.thread);
                             return Ok(());
                         }
                     }
@@ -725,8 +730,13 @@ impl App {
         {
             return Ok(());
         }
-        self.pane = None;
-        self.state.write().pane_shown = None;
+        if let Some(AttachedPane {
+            owner: PaneOwner::Thread(id),
+            ..
+        }) = self.pane.take()
+        {
+            self.state.write().attached.remove(&id);
+        }
         if focus == Focus::Attached {
             self.state.write().focus = Focus::Dashboard;
             outer_terminal::set_mouse_capture(out, false)?;
@@ -806,7 +816,6 @@ impl App {
         {
             let mut app = self.state.write();
             app.focus = after_pane(app.focus);
-            app.pane_shown = None;
         }
         self.retry_start();
         outer_terminal::set_mouse_capture(out, false)

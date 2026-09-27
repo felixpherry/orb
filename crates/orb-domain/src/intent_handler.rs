@@ -9,7 +9,7 @@ use crate::feat::git::validator::{
     validate_switch_branch,
 };
 use crate::feat::git::worktree::previous_worktree;
-use crate::feat::pane::validator::validate_attach;
+use crate::feat::pane::validator::{validate_attach, validate_detach};
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
 use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
 use crate::feat::picker::validator::{
@@ -137,7 +137,12 @@ impl IntentHandler {
             Intent::Attach => attach_thread(state),
             Intent::Detach => {
                 state.focus = Focus::Dashboard;
-                state.pane_shown = None;
+                // The trust pane isn't a thread's: leaving it must not detach the selection.
+                if state.sessions.trust.is_none()
+                    && let Some(id) = state.sessions.selected_id()
+                {
+                    state.attached.remove(&id);
+                }
                 vec![Command::Detach, Command::RefreshSessions]
             }
             Intent::LeavePane => match validate_focus_sidebar(state) {
@@ -147,6 +152,15 @@ impl IntentHandler {
                 }
                 Err(_) => vec![],
             },
+            Intent::DetachSelected => {
+                match (validate_detach(state), state.sessions.selected_id()) {
+                    (Ok(()), Some(id)) => {
+                        state.attached.remove(&id);
+                        vec![Command::RefreshSessions]
+                    }
+                    _ => vec![],
+                }
+            }
             Intent::NewSession => {
                 let items = state
                     .sessions
@@ -544,6 +558,7 @@ impl IntentHandler {
                     }
                     (Ok(()), Some(thread)) => {
                         let id = thread.id;
+                        state.attached.remove(&id);
                         state.sessions.cursor = state.sessions.card_neighbour(id);
                         with_visit(state, vec![Command::Settle(id)])
                     }
@@ -558,6 +573,7 @@ impl IntentHandler {
                 (Ok(()), Some(item @ SidebarItem::Thread(id))) => {
                     let neighbour = state.sessions.row_neighbour(item);
                     state.sessions.deleting.insert(id);
+                    state.attached.remove(&id);
                     state.sessions.cursor = neighbour;
                     with_visit(state, vec![Command::Delete(id)])
                 }
@@ -830,8 +846,8 @@ fn close_picker(state: &mut AppState) -> Option<PickerState> {
     Some(picker)
 }
 
-/// Attaches to the selected thread's session and shows its pane, unless the
-/// thread can't be attached to.
+/// Attaches to the selected thread's session, adding it to the attached
+/// threads and showing its pane, unless the thread can't be attached to.
 fn attach_thread(state: &mut AppState) -> Vec<Command> {
     match (validate_attach(state), state.sessions.selected_thread()) {
         (Ok(()), Some(thread)) => {
@@ -841,19 +857,19 @@ fn attach_thread(state: &mut AppState) -> Vec<Command> {
                 cwd: thread.cwd.clone(),
             };
             state.focus = Focus::Attached;
-            state.pane_shown = Some(target.thread);
+            state.attached.insert(target.thread);
             vec![Command::Attach(target), Command::RefreshSessions]
         }
         _ => vec![],
     }
 }
 
-/// Moves the keys to the right-hand area: back into the Claude pane while
-/// it's shown for the selected thread and can still be attached to, else to
-/// the dashboard.
+/// Moves the keys to the right-hand area: into the Claude pane while the
+/// selected thread is attached and can still be attached to, else to the
+/// dashboard.
 fn focus_right(state: &mut AppState) -> Vec<Command> {
-    match state.pane_shown {
-        Some(id) if state.sessions.selected_id() == Some(id) && validate_attach(state).is_ok() => {
+    match state.sessions.selected_id() {
+        Some(id) if state.attached.contains(&id) && validate_attach(state).is_ok() => {
             attach_thread(state)
         }
         _ => {
@@ -948,6 +964,7 @@ fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
@@ -1433,13 +1450,77 @@ mod tests {
         );
     }
 
+    /// Keys going to thread 1's attached session.
+    fn attached() -> AppState {
+        AppState {
+            focus: Focus::Attached,
+            attached: HashSet::from([ThreadId(1)]),
+            ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
+        }
+    }
+
+    /// Threads 1 and 2 in the sidebar with those in `attached` attached and
+    /// thread `selected` selected.
+    fn left_pane(attached: &[i64], selected: i64) -> AppState {
+        AppState {
+            focus: Focus::Sidebar,
+            attached: attached.iter().copied().map(ThreadId).collect(),
+            ..state_with(
+                vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+                selected,
+            )
+        }
+    }
+
+    #[rstest::rstest]
+    fn attach_adds_the_thread_to_attached() {
+        // Given a selected idle thread.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the thread is attached.
+        assert!(
+            state.attached.contains(&ThreadId(1)),
+            "Attach should add the thread to attached"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selecting_another_thread_keeps_it_attached() {
+        // Given thread 1 attached and selected in the sidebar.
+        let mut state = left_pane(&[1], 1);
+
+        // When handling SelectNext onto another thread.
+        IntentHandler::handle(&Intent::SelectNext, &mut state);
+
+        // Then thread 1 is still attached.
+        assert!(
+            state.attached.contains(&ThreadId(1)),
+            "selecting another thread should keep thread 1 attached"
+        );
+    }
+
+    #[rstest::rstest]
+    fn detach_removes_the_selected_thread_from_attached() {
+        // Given keys going to thread 1's attached session.
+        let mut state = attached();
+
+        // When handling Detach.
+        IntentHandler::handle(&Intent::Detach, &mut state);
+
+        // Then thread 1 is no longer attached.
+        assert!(
+            !state.attached.contains(&ThreadId(1)),
+            "Detach should remove the selected thread from attached"
+        );
+    }
+
     #[rstest::rstest]
     fn detach_sets_focus_dashboard() {
-        // Given keys going to an attached session.
-        let mut state = AppState {
-            focus: Focus::Attached,
-            ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
-        };
+        // Given keys going to thread 1's attached session.
+        let mut state = attached();
 
         // When handling Detach.
         IntentHandler::handle(&Intent::Detach, &mut state);
@@ -1454,11 +1535,8 @@ mod tests {
 
     #[rstest::rstest]
     fn detach_returns_detach_and_refresh() {
-        // Given keys going to an attached session.
-        let mut state = AppState {
-            focus: Focus::Attached,
-            ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
-        };
+        // Given keys going to thread 1's attached session.
+        let mut state = attached();
 
         // When handling Detach.
         let commands = IntentHandler::handle(&Intent::Detach, &mut state);
@@ -1472,58 +1550,67 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn detach_stops_showing_the_pane() {
-        // Given keys going to thread 1's attached session.
-        let mut state = AppState {
-            focus: Focus::Attached,
-            pane_shown: Some(ThreadId(1)),
-            ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
-        };
+    fn detach_from_the_trust_pane_keeps_the_selection_attached() {
+        // Given keys going to the trust pane while thread 1 is attached and
+        // selected.
+        let mut state = attached();
+        state.sessions.trust = Some("/work".into());
 
         // When handling Detach.
         IntentHandler::handle(&Intent::Detach, &mut state);
 
-        // Then the right side goes back to the dashboard.
-        assert_eq!(
-            state.pane_shown, None,
-            "Detach should stop showing the pane"
+        // Then thread 1 is still attached.
+        assert!(
+            state.attached.contains(&ThreadId(1)),
+            "Detach from the trust pane should keep the selected thread attached"
         );
     }
 
     #[rstest::rstest]
-    fn attach_shows_the_threads_pane() {
-        // Given a selected idle thread.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+    fn detach_selected_removes_the_thread_from_attached() {
+        // Given the sidebar on attached thread 1.
+        let mut state = left_pane(&[1], 1);
 
-        // When handling Attach.
-        IntentHandler::handle(&Intent::Attach, &mut state);
+        // When handling DetachSelected.
+        IntentHandler::handle(&Intent::DetachSelected, &mut state);
 
-        // Then its pane is the one shown.
-        assert_eq!(
-            state.pane_shown,
-            Some(ThreadId(1)),
-            "Attach should show the thread's pane"
+        // Then thread 1 is no longer attached.
+        assert!(
+            !state.attached.contains(&ThreadId(1)),
+            "DetachSelected should remove the selected thread from attached"
         );
     }
 
-    /// Keys going to thread 1's attached session.
-    fn attached() -> AppState {
-        AppState {
-            focus: Focus::Attached,
-            pane_shown: Some(ThreadId(1)),
-            ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
-        }
+    #[rstest::rstest]
+    fn detach_selected_keeps_focus_in_the_sidebar() {
+        // Given the sidebar on attached thread 1.
+        let mut state = left_pane(&[1], 1);
+
+        // When handling DetachSelected.
+        IntentHandler::handle(&Intent::DetachSelected, &mut state);
+
+        // Then keys still drive the sidebar.
+        assert_eq!(
+            state.focus,
+            Focus::Sidebar,
+            "DetachSelected should keep focus in the sidebar"
+        );
     }
 
-    /// Thread 1's pane left shown for the sidebar, with `selected` selected.
-    fn left_pane(selected: i64) -> AppState {
-        AppState {
-            pane_shown: Some(ThreadId(1)),
-            ..state_with(
-                vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
-                selected,
-            )
-        }
+    #[rstest::rstest]
+    fn detach_selected_on_an_unattached_thread_returns_no_commands() {
+        // Given the sidebar on thread 1, which isn't attached.
+        let mut state = left_pane(&[], 1);
+
+        // When handling DetachSelected.
+        let commands = IntentHandler::handle(&Intent::DetachSelected, &mut state);
+
+        // Then nothing happens.
+        assert_eq!(
+            commands,
+            vec![],
+            "DetachSelected on an unattached thread should return no commands"
+        );
     }
 
     #[rstest::rstest]
@@ -1543,18 +1630,17 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leave_pane_keeps_the_pane_shown() {
+    fn leave_pane_keeps_the_thread_attached() {
         // Given keys going to thread 1's attached session.
         let mut state = attached();
 
         // When handling LeavePane.
         IntentHandler::handle(&Intent::LeavePane, &mut state);
 
-        // Then thread 1's pane stays on the right.
-        assert_eq!(
-            state.pane_shown,
-            Some(ThreadId(1)),
-            "LeavePane should keep the pane shown"
+        // Then thread 1 is still attached.
+        assert!(
+            state.attached.contains(&ThreadId(1)),
+            "LeavePane should keep the thread attached"
         );
     }
 
@@ -1598,56 +1684,51 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn focus_right_with_the_pane_shown_attaches() {
-        // Given thread 1's pane shown and thread 1 selected in the sidebar.
-        let mut state = left_pane(1);
+    fn focus_right_on_an_attached_thread_attaches() {
+        // Given the sidebar on attached thread 2.
+        let mut state = left_pane(&[2], 2);
 
         // When handling FocusRight.
         IntentHandler::handle(&Intent::FocusRight, &mut state);
 
-        // Then keys go back to the session.
+        // Then keys go into thread 2's pane.
         assert_eq!(
             state.focus,
             Focus::Attached,
-            "FocusRight should go back into the shown pane"
+            "FocusRight should go into the selected thread's pane"
         );
     }
 
     #[rstest::rstest]
-    fn focus_right_with_the_pane_shown_returns_attach_and_refresh() {
-        // Given thread 1's pane shown and thread 1 selected in the sidebar.
-        let mut state = left_pane(1);
+    fn focus_right_on_an_attached_thread_returns_attach_and_refresh() {
+        // Given the sidebar on attached thread 2.
+        let mut state = left_pane(&[2], 2);
 
         // When handling FocusRight.
         let commands = IntentHandler::handle(&Intent::FocusRight, &mut state);
 
-        // Then the loop attaches to thread 1 again and the statuses are
-        // refreshed.
+        // Then the loop attaches to thread 2 and the statuses are refreshed.
         assert_eq!(
             commands,
             vec![
                 Command::Attach(AttachTarget {
-                    thread: ThreadId(1),
-                    argv: vec!["claude".into(), "attach".into(), "t1".into()],
-                    cwd: "/work/1".into(),
+                    thread: ThreadId(2),
+                    argv: vec!["claude".into(), "attach".into(), "t2".into()],
+                    cwd: "/work/2".into(),
                 }),
                 Command::RefreshSessions,
             ],
-            "FocusRight should attach to the shown pane's thread, then refresh"
+            "FocusRight should attach to the selected thread, then refresh"
         );
     }
 
     #[rstest::rstest]
-    #[case(None)]
-    #[case(Some(ThreadId(1)))]
-    fn focus_right_without_the_selected_threads_pane_focuses_the_dashboard(
-        #[case] pane_shown: Option<ThreadId>,
-    ) {
-        // Given thread 2 selected, with no pane shown or thread 1's.
-        let mut state = AppState {
-            pane_shown,
-            ..left_pane(2)
-        };
+    #[case(&[])]
+    #[case(&[1])]
+    fn focus_right_on_an_unattached_thread_focuses_the_dashboard(#[case] attached: &[i64]) {
+        // Given thread 2 selected and unattached, with no thread or thread 1
+        // attached.
+        let mut state = left_pane(attached, 2);
 
         // When handling FocusRight.
         IntentHandler::handle(&Intent::FocusRight, &mut state);
@@ -1656,14 +1737,14 @@ mod tests {
         assert_eq!(
             state.focus,
             Focus::Dashboard,
-            "FocusRight with {pane_shown:?} shown should focus the dashboard"
+            "FocusRight with {attached:?} attached should focus the dashboard"
         );
     }
 
     #[rstest::rstest]
-    fn hiding_the_sidebar_with_the_pane_shown_focuses_the_pane() {
-        // Given thread 1's pane shown and thread 1 selected in the sidebar.
-        let mut state = left_pane(1);
+    fn hiding_the_sidebar_with_the_selected_thread_attached_focuses_the_pane() {
+        // Given thread 1 attached and selected in the sidebar.
+        let mut state = left_pane(&[1], 1);
 
         // When handling ToggleSidebar.
         IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
@@ -1672,7 +1753,37 @@ mod tests {
         assert_eq!(
             state.focus,
             Focus::Attached,
-            "hiding the sidebar should focus the shown pane"
+            "hiding the sidebar should focus the selected thread's pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_removes_the_thread_from_attached() {
+        // Given attached thread 1 selected in the sidebar.
+        let mut state = left_pane(&[1], 1);
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then thread 1 is no longer attached.
+        assert!(
+            !state.attached.contains(&ThreadId(1)),
+            "settling should remove the thread from attached"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_removes_the_thread_from_attached() {
+        // Given attached thread 1 selected in the sidebar.
+        let mut state = left_pane(&[1], 1);
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then thread 1 is no longer attached.
+        assert!(
+            !state.attached.contains(&ThreadId(1)),
+            "deleting should remove the thread from attached"
         );
     }
 

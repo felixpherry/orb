@@ -45,6 +45,8 @@ pub enum Intent {
     Detach,
     /// Leave the attached session for the sidebar, keeping its pane shown.
     LeavePane,
+    /// Detach the selected thread from its pane, keeping the keys where they are.
+    DetachSelected,
     /// Open the project picker to open that project's draft.
     NewSession,
     /// Open the project filter picker to filter the sidebar to one project,
@@ -132,6 +134,7 @@ impl fmt::Display for Intent {
             Self::NarrowFocused => "narrow",
             Self::Attach => "attach",
             Self::Detach => "back to orb",
+            Self::DetachSelected => "detach",
             Self::NewSession => "new session",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",
@@ -177,6 +180,16 @@ mod tests {
         assert_eq!(
             Intent::OpenTool(tool).to_string(),
             expected,
+            "which-key label"
+        );
+    }
+
+    #[rstest::rstest]
+    fn detach_selected_displays_as_detach() {
+        // Given / When / Then: which-key labels DetachSelected "detach".
+        assert_eq!(
+            Intent::DetachSelected.to_string(),
+            "detach",
             "which-key label"
         );
     }

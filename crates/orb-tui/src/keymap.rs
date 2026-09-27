@@ -10,11 +10,12 @@
 //! selected), so the popups don't offer it. On the dashboard each menu item's
 //! letter runs it, `j`/`k` or `↓`/`↑` move the menu cursor, and `⏎` runs the
 //! highlighted item. `<C-Right>`/`<C-Left>` resize the focused side
-//! outside which-key, which can't name them. While attached, every key goes
-//! to Claude except `<C-\>` and `<C-h>`. An open picker takes typed
-//! characters as filter text and has its own fixed keys, `<C-x>` among them
-//! for removing a project from the project filter. The rename box (`r`) and
-//! the sidebar search (`/` or `i`) use the picker's keys.
+//! outside which-key, which can't name them. In the sidebar, `<C-\>` detaches
+//! the selected attached thread, also outside which-key. While attached,
+//! every key goes to Claude except `<C-\>` and `<C-h>`. An open picker takes
+//! typed characters as filter text and has its own fixed keys, `<C-x>` among
+//! them for removing a project from the project filter. The rename box (`r`)
+//! and the sidebar search (`/` or `i`) use the picker's keys.
 
 use std::fmt;
 
@@ -376,6 +377,16 @@ pub(crate) fn layout_route(key: KeyEvent) -> Option<Intent> {
     }
 }
 
+/// What `key` does in the sidebar outside which-key: `<C-\>` (the kitty
+/// `Char('\\')` and the legacy `Char('4')` forms) detaches the selected
+/// thread. `None` for any other key.
+pub(crate) fn sidebar_route(key: KeyEvent) -> Option<Intent> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Some(Intent::DetachSelected),
+        _ => None,
+    }
+}
+
 /// What `key` does in an open picker; `None` when it does nothing.
 pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
@@ -414,7 +425,7 @@ mod tests {
 
     use super::{
         Keys, Route, Scope, Selection, attached_route, keymap, layout_route, pending_confirm,
-        picker_route, press,
+        picker_route, press, sidebar_route,
     };
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -833,6 +844,38 @@ mod tests {
 
         // Then it's left to the keymap.
         assert_eq!(intent, None, "{pressed:?} shouldn't resize");
+    }
+
+    #[rstest::rstest]
+    #[case('\\')]
+    #[case('4')]
+    fn ctrl_backslash_detaches_the_selected_thread_in_the_sidebar(#[case] c: char) {
+        // Given `<C-\>` in one of its two forms.
+        let pressed = ctrl(c);
+
+        // When routing it in the sidebar.
+        let intent = sidebar_route(pressed);
+
+        // Then it detaches the selected thread.
+        assert_eq!(
+            intent,
+            Some(Intent::DetachSelected),
+            "{pressed:?} should detach the selected thread"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(ctrl('h'))]
+    #[case(key(KeyCode::Char('\\')))]
+    #[case(key(KeyCode::Char('4')))]
+    fn other_keys_do_not_detach_in_the_sidebar(#[case] pressed: KeyEvent) {
+        // Given a key other than `<C-\>`.
+
+        // When routing it in the sidebar.
+        let intent = sidebar_route(pressed);
+
+        // Then it's left to the keymap.
+        assert_eq!(intent, None, "{pressed:?} shouldn't detach");
     }
 
     #[rstest::rstest]

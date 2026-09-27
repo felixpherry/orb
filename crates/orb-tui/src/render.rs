@@ -88,11 +88,12 @@ pub(crate) fn render(
         (selected_y, Some(sidebar_layout), search_cursor)
     };
     let attached = state.focus == Focus::Attached;
-    let pane_shown = attached
+    let shows_pane = attached
         || state
-            .pane_shown
-            .is_some_and(|id| state.sessions.selected_id() == Some(id));
-    match pane.filter(|_| pane_shown) {
+            .sessions
+            .selected_id()
+            .is_some_and(|id| state.attached.contains(&id));
+    match pane.filter(|_| shows_pane) {
         Some(pane) => {
             if let Some(cursor) = pane.render(right, frame.buffer_mut()).filter(|_| attached) {
                 frame.set_cursor_position(cursor);
@@ -188,6 +189,7 @@ fn render_banner(state: &AppState, confirm: char, selected_y: u16, buf: &mut Buf
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::thread;
     use std::time::{Duration, Instant, SystemTime};
 
@@ -702,7 +704,7 @@ mod tests {
     /// Thread 1, selected in the sidebar, with its pane left shown by `<C-h>`.
     fn left_pane() -> AppState {
         AppState {
-            pane_shown: Some(ThreadId(1)),
+            attached: HashSet::from([ThreadId(1)]),
             ..selected(Focus::Sidebar)
         }
     }

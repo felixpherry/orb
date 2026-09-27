@@ -1,3 +1,3 @@
-//! Terminal pane — attaching to and detaching from the child the pane runs.
+//! Terminal panes — attaching to threads' panes (one per attached thread) and detaching from them.
 
 pub mod validator;
