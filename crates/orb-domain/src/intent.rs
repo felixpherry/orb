@@ -58,9 +58,10 @@ pub enum Intent {
     Rename,
     /// Move the keys to the sidebar's input box to search thread titles.
     Search,
-    /// Settle or un-settle the selected thread.
+    /// Un-settle the selected thread, or ask to settle it.
     ToggleSettle,
-    /// Delete the selected thread and its Claude session.
+    /// Ask to delete the selected thread and its Claude session, or to discard
+    /// the selected draft.
     DeleteThread,
     /// Show the Settled shelf's threads.
     OpenShelf,

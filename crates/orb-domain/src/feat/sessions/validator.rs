@@ -18,6 +18,9 @@ pub enum ToggleSettleError {
     InProgress,
 }
 
+/// What the mode line says when settling is refused because Claude is working.
+pub const SETTLE_IN_PROGRESS: &str = "Can't settle while Claude is working";
+
 /// Allow settling a thread only between turns; un-settling is always allowed.
 ///
 /// # Errors
