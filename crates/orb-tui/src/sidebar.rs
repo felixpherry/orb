@@ -2,7 +2,7 @@
 //! like LazyVim's file explorer (snacks.nvim) in tokyonight-moon.
 //!
 //! An input box heads it: `Sessions`, with an `i` badge lit while the
-//! Settled shelf is open, the filtered project after the `>` prompt, and how
+//! search has the keys, the filtered project after the `>` prompt, and how
 //! many drafts and threads are listed out of all of them. Below it, drafts
 //! come first, then pinned threads, then active ones, each a three-line tree
 //! node: the status icon and title, then the project and status, then the
@@ -28,10 +28,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Widget};
+use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::picker::highlight;
+use crate::picker::{highlight, visible};
 
 /// How far the sidebar is scrolled, kept between frames.
 #[derive(Debug, Default)]
@@ -69,7 +69,7 @@ pub(crate) fn render(
     (selected_y, layout, search_cursor)
 }
 
-/// The rounded box at the top: its title and shelf badge, the prompt, and the
+/// The rounded box at the top: its title and search badge, the prompt, and the
 /// count against its right edge. Returns the search text's cursor while
 /// there is a search.
 fn render_input(
@@ -78,7 +78,7 @@ fn render_input(
     area: Rect,
     buf: &mut Buffer,
 ) -> Option<Position> {
-    let badge = if sessions.shelf_open {
+    let badge = if sessions.search.is_some() {
         Style::new().fg(BLUE).bg(GUTTER)
     } else {
         Style::new().fg(DARK3)
@@ -93,13 +93,12 @@ fn render_input(
         ]));
     let inner = block.inner(area);
     block.render(area, buf);
-    let (prompt, cursor) = prompt(sessions);
-    render_split(
-        prompt,
-        Line::from(span(count(sessions, rows), COMMENT)),
-        inner,
-        buf,
+    let count = Line::from(span(count(sessions, rows), COMMENT));
+    let (prompt, cursor) = prompt(
+        sessions,
+        usize::from(inner.width).saturating_sub(usize::from(width(&count)) + 1),
     );
+    render_split(prompt, count, inner, buf);
     cursor.map(|column| {
         Position::new(
             inner
@@ -113,8 +112,9 @@ fn render_input(
 
 /// `>`, followed by the filtered project's folder and name while there is
 /// one, then the search text while there is a search, where snacks shows the
-/// query. Also returns the column of the search text's cursor.
-fn prompt(sessions: &Sessions) -> (Line<'_>, Option<u16>) {
+/// query. A search text too long for the `room` columns shows its end. Also
+/// returns the column of the search text's cursor.
+fn prompt(sessions: &Sessions, room: usize) -> (Line<'_>, Option<u16>) {
     let filtered = sessions
         .filter
         .and_then(|id| sessions.projects.iter().find(|project| project.id == id));
@@ -130,21 +130,16 @@ fn prompt(sessions: &Sessions) -> (Line<'_>, Option<u16>) {
         return (Line::from(spans), None);
     };
     spans.push(Span::raw(" "));
-    let typed: String = search
-        .input
-        .text()
-        .graphemes(true)
-        .take(search.input.cursor())
-        .collect();
-    let column = spans
-        .iter()
-        .map(Span::width)
-        .sum::<usize>()
-        .saturating_add(Span::raw(typed).width());
-    spans.push(span(search.input.text(), FG));
+    let prefix_width: usize = spans.iter().map(Span::width).sum();
+    let (shown, before) = visible(
+        search.input.text(),
+        search.input.cursor(),
+        room.saturating_sub(prefix_width + 1),
+    );
+    spans.push(span(shown, FG));
     (
         Line::from(spans),
-        Some(u16::try_from(column).unwrap_or(u16::MAX)),
+        Some(u16::try_from(prefix_width + before).unwrap_or(u16::MAX)),
     )
 }
 
@@ -168,7 +163,9 @@ fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
 }
 
 /// Draws the rows into `area`, scrolled so the selected one is whole on
-/// screen, and returns the y of its first line when it's there.
+/// screen, with the shelf header held on the bottom row while its real line
+/// is below the view. Returns the y of the selected row's first line when
+/// it's there.
 fn render_list(
     sessions: &Sessions,
     attached: &HashSet<ThreadId>,
@@ -190,6 +187,24 @@ fn render_list(
             .max(top.saturating_add(rows).saturating_sub(area.height));
     }
     scroll.offset = scroll.offset.min(total.saturating_sub(area.height));
+    // The shelf header while its real line is below the view: it then takes
+    // the bottom row, which the selected row must stay clear of.
+    let below = |offset: u16| {
+        placed.iter().find_map(|(row, top)| match row {
+            SidebarRow::ShelfHeader { count, open }
+                if area.height >= 2 && *top >= offset.saturating_add(area.height) =>
+            {
+                Some((*count, *open))
+            }
+            _ => None,
+        })
+    };
+    if let (Some(_), Some((top, rows))) = (below(scroll.offset), selected) {
+        scroll.offset = scroll
+            .offset
+            .max(top.saturating_add(rows).saturating_sub(area.height - 1));
+    }
+    let sticky = below(scroll.offset);
     // The whole list, then the lines in view.
     let list = {
         let mut list = Buffer::empty(Rect::new(area.x, 0, area.width, total));
@@ -219,6 +234,16 @@ fn render_list(
                 *shown = cell.clone();
             }
         }
+    }
+    if let Some((count, open)) = sticky {
+        let row = Rect {
+            y: area.bottom() - 1,
+            height: 1,
+            ..area
+        };
+        Clear.render(row, buf);
+        buf.set_style(row, Style::new().bg(BG_DARK).fg(FG));
+        render_shelf_header(count, open, row, buf);
     }
     selected
         .map(|(top, _)| top)
@@ -990,7 +1015,7 @@ mod tests {
         // When rendering the sidebar.
         let top = line(&draw(&sessions, at(1000), 5), 0);
 
-        // Then the box's top border carries the title and the shelf badge.
+        // Then the box's top border carries the title and the search badge.
         assert!(top.starts_with("╭ Sessions  i  ─"), "line was '{top}'");
     }
 
@@ -1011,29 +1036,24 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::closed(false, (DARK3, BG_DARK))]
-    #[case::open(true, (BLUE, GUTTER))]
-    fn shelf_badge_lights_up_while_the_shelf_is_open(
-        #[case] shelf_open: bool,
+    #[case::shelf_open(Sessions { shelf_open: true, ..sessions(vec![settled(1, 10)]) }, (DARK3, BG_DARK))]
+    #[case::searching(searching(sessions(vec![settled(1, 10)]), ""), (BLUE, GUTTER))]
+    fn badge_lights_up_while_searching(
+        #[case] sessions: Sessions,
         #[case] expected: (Color, Color),
     ) {
-        // Given the Settled shelf open or closed.
-        let sessions = Sessions {
-            shelf_open,
-            ..sessions(vec![settled(1, 10)])
-        };
-
+        // Given the Settled shelf open without a search, or a search.
         // When rendering the sidebar.
         let buf = draw(&sessions, at(1000), 8);
 
-        // Then the badge's `i` has the shelf's colours.
+        // Then the badge's `i` is lit only while searching.
         let badge = buf
             .cell((12, 0))
             .map(|cell| (cell.symbol().to_owned(), (cell.fg, cell.bg)));
         assert_eq!(
             badge,
             Some(("i".to_owned(), expected)),
-            "the badge with the shelf open: {shelf_open}"
+            "the badge's colours"
         );
     }
 
@@ -1153,6 +1173,74 @@ mod tests {
         // Then the cursor is after `> `, the folder and space, `orb`, a space
         // and `thr`: 11 columns into the box.
         assert_eq!(cursor, Some(Position::new(12, 1)), "the search cursor");
+    }
+
+    /// The search text wider than a 32-column sidebar's input box: 40 `x`s
+    /// then `end`.
+    fn long_search() -> String {
+        format!("{}end", "x".repeat(40))
+    }
+
+    #[rstest::rstest]
+    fn long_search_text_shows_its_end_before_the_whole_count() {
+        // Given one thread, searching for a text wider than the box.
+        let sessions = searching(
+            sessions(vec![thread(1, ThreadStatus::Idle)]),
+            &long_search(),
+        );
+
+        // When rendering the sidebar.
+        let prompt = line(&draw(&sessions, at(1000), 10), 1);
+
+        // Then the line shows the text's end, then the count whole.
+        assert!(
+            prompt.starts_with("│> x") && prompt.trim_end().ends_with("end  0/1│"),
+            "line was '{prompt}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn long_search_text_keeps_the_filtered_project_whole() {
+        // Given the sidebar filtered to orb, searching for a text wider than
+        // the box.
+        let sessions = searching(filtered(), &long_search());
+
+        // When rendering the sidebar.
+        let prompt = line(&draw(&sessions, at(1000), 10), 1);
+
+        // Then orb's folder and name start the line, and the text shows its end.
+        assert!(
+            prompt.starts_with(&format!("│> {FOLDER} orb x")) && prompt.contains("end "),
+            "line was '{prompt}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn long_search_cursor_is_after_the_texts_end() {
+        // Given one thread, searching for a text wider than the box.
+        let sessions = searching(
+            sessions(vec![thread(1, ThreadStatus::Idle)]),
+            &long_search(),
+        );
+
+        // When rendering the sidebar.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
+        let (_, _, cursor) = render(
+            &sessions,
+            &HashSet::new(),
+            at(1000),
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+        );
+
+        // Then the cursor is right after the shown `end`, clear of the count.
+        let before = cursor.and_then(|at| buf.cell((at.x - 1, at.y)).map(Cell::symbol));
+        assert_eq!(
+            (cursor, before),
+            (Some(Position::new(25, 1)), Some("d")),
+            "the search cursor"
+        );
     }
 
     #[rstest::rstest]
@@ -1813,6 +1901,67 @@ mod tests {
 
         // Then its node fills the last three lines.
         assert_eq!(selected_y, Some(5), "the selected node's first line");
+    }
+
+    /// `active` idle threads, 1 to `active`, and the threads `settled_ids`
+    /// settled at 10 s, with `selected`'s thread selected.
+    fn overflowing(active: i64, settled_ids: &[i64], selected: i64) -> Sessions {
+        let threads = (1..=active)
+            .map(|id| thread(id, ThreadStatus::Idle))
+            .chain(settled_ids.iter().map(|&id| settled(id, 10)))
+            .collect();
+        select(sessions(threads), selected)
+    }
+
+    #[rstest::rstest]
+    fn overflowing_list_holds_the_shelf_header_on_the_bottom_line() {
+        // Given four threads and a settled one on a 10-line sidebar, with the
+        // first node (thread 4) selected.
+        let sessions = overflowing(4, &[5], 4);
+
+        // When rendering the sidebar.
+        let bottom = line(&draw(&sessions, at(1000), 10), 9);
+
+        // Then the shelf header is on the last line.
+        assert!(bottom.contains(" Settled "), "line was '{bottom}'");
+    }
+
+    #[rstest::rstest]
+    #[case::next_to_the_header(1)]
+    #[case::far_from_the_header(2)]
+    fn selected_node_stays_whole_above_the_held_shelf_header(#[case] selected: i64) {
+        // Given five threads and a settled one on a 10-line sidebar, with a
+        // node near the list's end selected.
+        let sessions = overflowing(5, &[6], selected);
+
+        // When rendering the sidebar.
+        let (buf, selected_y, _) = render_sized(&sessions, at(1000), 32, 10);
+
+        // Then the node fills lines 6 to 8, right above the header's line.
+        assert_eq!(
+            (selected_y, line(&buf, 9).contains(" Settled ")),
+            (Some(6), true),
+            "thread {selected}'s first line, and the header on the last"
+        );
+    }
+
+    #[rstest::rstest]
+    fn shelf_header_in_view_scrolls_with_the_list() {
+        // Given four threads and an open shelf of two on a 10-line sidebar,
+        // with the last settled thread selected.
+        let sessions = Sessions {
+            shelf_open: true,
+            ..overflowing(4, &[5, 6], 5)
+        };
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 10);
+
+        // Then the header is on its own line, the settled threads below it.
+        let header = lines(&buf)
+            .iter()
+            .position(|line| line.contains(" Settled "));
+        assert_eq!(header, Some(7), "the header's line");
     }
 
     #[rstest::rstest]

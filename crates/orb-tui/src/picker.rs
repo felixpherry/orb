@@ -149,17 +149,18 @@ fn hints(kind: &PickerKind) -> Line<'static> {
     Line::from(spans).right_aligned()
 }
 
-/// The ` > ` prompt and the typed text. Returns the cursor's position.
+/// The ` > ` prompt and the typed text, its end while it is too long to fit.
+/// Returns the cursor's position.
 fn render_input(picker: &PickerState, area: Rect, buf: &mut Buffer) -> Position {
     let prompt = span(" > ", CYAN);
-    let before: String = picker
-        .input()
-        .graphemes(true)
-        .take(picker.cursor())
-        .collect();
-    let column = prompt.width() + Line::raw(before).width();
-    Line::from(vec![prompt, span(picker.input(), FG)]).render(area, buf);
-    let x = u16::try_from(column)
+    let prompt_width = prompt.width();
+    let (shown, before) = visible(
+        picker.input(),
+        picker.cursor(),
+        usize::from(area.width).saturating_sub(prompt_width + 1),
+    );
+    Line::from(vec![prompt, span(shown, FG)]).render(area, buf);
+    let x = u16::try_from(prompt_width + before)
         .unwrap_or(u16::MAX)
         .min(area.width.saturating_sub(1));
     Position::new(area.x + x, area.y)
@@ -390,6 +391,24 @@ pub(crate) fn cut_left(text: &str, width: usize) -> String {
         })
         .collect();
     std::iter::once("…").chain(tail.into_iter().rev()).collect()
+}
+
+/// The part of `text` to show when `room` columns fit before the cursor
+/// (at grapheme `cursor`): everything, or a tail that keeps the cursor in
+/// view. Returns it and its width before the cursor.
+pub(crate) fn visible(text: &str, cursor: usize, room: usize) -> (String, usize) {
+    let graphemes: Vec<&str> = text.graphemes(true).collect();
+    let widths: Vec<usize> = graphemes
+        .iter()
+        .map(|grapheme| Span::raw(*grapheme).width())
+        .collect();
+    let mut before: usize = widths.iter().take(cursor).sum();
+    let mut start = 0;
+    while before > room && start < cursor {
+        before -= widths.get(start).copied().unwrap_or_default();
+        start += 1;
+    }
+    (graphemes.iter().skip(start).copied().collect(), before)
 }
 
 /// `text` with each grapheme holding one of `offsets` (byte offsets into
@@ -1313,6 +1332,40 @@ mod tests {
         assert!(
             matches!(rows, (Some((_, no)), Some((_, yes))) if no + 1 == yes),
             "rows were at {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn long_filter_shows_its_end_before_the_cursor() {
+        // Given a filter wider than the popup, ending in `q`.
+        let picker = {
+            let mut picker = orb();
+            for _ in 0..50 {
+                picker.insert('z');
+            }
+            picker.insert('q');
+            picker
+        };
+
+        // When drawing the picker on an 80-column screen.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 20));
+        let (_, cursor) = render(
+            &picker,
+            Path::new(HOME),
+            buf.area,
+            &mut buf,
+            &mut PickerScroll::default(),
+        );
+
+        // Then the cell before the cursor holds the `q`, inside the right border.
+        let before = buf.cell((cursor.x - 1, cursor.y)).map(Cell::symbol);
+        assert_eq!(
+            (
+                before,
+                border_columns(&buf).map(|(_, right)| cursor.x < right)
+            ),
+            (Some("q"), Some(true)),
+            "the filter's end before the cursor at {cursor:?}"
         );
     }
 }
