@@ -36,8 +36,11 @@ fn main() -> Result<(), Report<OrbError>> {
     let zellij = {
         let shell = std::env::var_os("SHELL").unwrap_or_else(|| "sh".into());
         let cli = ZellijCli::new(std::env::var_os("NO_COLOR"));
+        let pane = std::env::var("ZELLIJ_PANE_ID")
+            .ok()
+            .and_then(|id| id.parse().ok());
         std::env::var_os("ZELLIJ_SESSION_NAME")
-            .map(|_| ZellijService::new(Arc::new(cli), shell, home.clone()))
+            .map(|_| ZellijService::new(Arc::new(cli), shell, home.clone(), pane))
     };
     let store = Store::open(&home.join(".orb/userdata/state.sqlite")).change_context(OrbError)?;
     let worktrees_root = home.join(".orb/worktrees");

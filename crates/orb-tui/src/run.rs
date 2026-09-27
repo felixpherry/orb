@@ -18,7 +18,10 @@
 //!
 //! When a thread finishes a turn or starts needing an approval or an answer
 //! while orb's pane isn't focused, the loop announces it as a desktop
-//! notification; notices that arrive while it is focused are dropped.
+//! notification; notices that arrive while it is focused are dropped. zellij
+//! sends no focus-out to the tab the user leaves, so while orb seems focused
+//! a thread of its own asks zellij whether any client is on orb's pane, and
+//! announces the notices only if none is.
 //!
 //! When a session start waits for the user to trust a directory, the pane
 //! runs an interactive `claude` there instead. Leaving it, by its exit,
@@ -42,8 +45,10 @@ use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::preview::preview_actor::{self, PreviewActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
-use orb_domain::feat::sessions::state::{Notice, ThreadId};
-use orb_domain::feat::zellij::zellij_service::{NOT_IN_ZELLIJ, ZellijService, zellij_reason};
+use orb_domain::feat::sessions::state::ThreadId;
+use orb_domain::feat::zellij::zellij_service::{
+    NOT_IN_ZELLIJ, ZellijError, ZellijService, zellij_reason,
+};
 use orb_domain::{Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
@@ -89,8 +94,8 @@ impl Frontend {
     /// `sessions` and preview commands to `preview`; the branch picker's refs
     /// come from `git`; attached sessions run with `claude_env`; tools open
     /// through `zellij`, `None` outside zellij; notices are announced through
-    /// `notifier` while orb's pane isn't focused. The terminal is restored on
-    /// exit and on panic.
+    /// `notifier` while orb's pane isn't focused, or while zellij says no
+    /// client is on it. The terminal is restored on exit and on panic.
     ///
     /// # Errors
     ///
@@ -176,10 +181,16 @@ fn after_pane(focus: Focus) -> Focus {
     }
 }
 
-/// The notices to announce: none while orb's pane is focused, where the
-/// sidebar already shows each status, else all of them.
-fn to_announce(notices: Vec<Notice>, focused: bool) -> Vec<Notice> {
-    if focused { Vec::new() } else { notices }
+/// Whether to announce notices: always while orb's pane isn't focused.
+/// While it seems focused, where the sidebar already shows each status, only
+/// if `watched`, asked only then, says no zellij client has orb's pane
+/// focused, since a zellij tab switch sends orb no focus-out. If zellij can't
+/// say, they're dropped.
+fn announces<F>(focused: bool, watched: F) -> bool
+where
+    F: FnOnce() -> Result<bool, Report<ZellijError>>,
+{
+    !focused || matches!(watched(), Ok(false))
 }
 
 /// A running pane and what it is for.
@@ -766,13 +777,35 @@ impl App {
         self.leave_pane(out)
     }
 
-    /// Takes the sessions actor's notices and announces them if orb's pane
-    /// isn't focused; while it is, they're dropped. A notice that can't be
-    /// sent is dropped too.
+    /// Takes the sessions actor's notices and announces them as
+    /// [`announces`] decides. Asking zellij can take up to its timeout, so
+    /// it happens on a thread of its own. A notice that can't be sent is
+    /// dropped.
     fn announce(&self) {
         let notices = mem::take(&mut self.state.write().sessions.notices);
-        for notice in to_announce(notices, self.focused) {
-            let _ = self.notifier.announce(&notice);
+        if notices.is_empty() {
+            return;
+        }
+        let focused = self.focused;
+        let zellij = self.zellij.clone();
+        let notifier = self.notifier.clone();
+        let deliver = move || {
+            let watched = || match &zellij {
+                Some(zellij) => zellij.pane_focused(),
+                None => Err(Report::new(ZellijError).attach(NOT_IN_ZELLIJ.to_owned())),
+            };
+            if announces(focused, watched) {
+                for notice in &notices {
+                    let _ = notifier.announce(notice);
+                }
+            }
+        };
+        if focused && self.zellij.is_some() {
+            let _ = thread::Builder::new()
+                .name("orb-notice".into())
+                .spawn(deliver);
+        } else {
+            deliver();
         }
     }
 
@@ -862,54 +895,56 @@ fn spawn_input_thread(tx: Sender<LoopEvent>) -> io::Result<()> {
     reason = "tests propagate file failures with `?` and assert on the outcome"
 )]
 mod tests {
+    use std::cell::Cell;
     use std::fs;
     use std::io;
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
 
+    use error_stack::Report;
     use orb_domain::Focus;
-    use orb_domain::feat::sessions::state::{Notice, NoticeKind, ThreadId};
+    use orb_domain::feat::sessions::state::ThreadId;
+    use orb_domain::feat::zellij::zellij_service::ZellijError;
 
-    use super::{PaneOwner, after_pane, attaches, list_directories, to_announce, trust_to_open};
+    use super::{PaneOwner, after_pane, announces, attaches, list_directories, trust_to_open};
 
-    fn finished(thread: i64) -> Notice {
-        Notice {
-            thread: ThreadId(thread),
-            kind: NoticeKind::Finished,
-            project: "orb".to_owned(),
-            title: "Parser fix".to_owned(),
-        }
+    #[rstest::rstest]
+    #[case::no_client_is_on_orbs_pane(Ok(false), true)]
+    #[case::a_client_is_on_orbs_pane(Ok(true), false)]
+    #[case::zellij_cant_say(Err(Report::new(ZellijError)), false)]
+    fn a_focused_orb_announces_only_when_zellij_says_no_client_is_on_its_pane(
+        #[case] watched: Result<bool, Report<ZellijError>>,
+        #[case] expected: bool,
+    ) {
+        // Given / When deciding while orb's pane seems focused and zellij answers `watched`.
+        let announced = announces(true, || watched);
+
+        // Then the notices are announced only if no client is on orb's pane.
+        assert_eq!(announced, expected, "whether a focused orb announces");
     }
 
     #[rstest::rstest]
-    fn notices_are_not_announced_while_orb_is_focused() {
-        // Given two threads that finished.
-        let notices = vec![finished(1), finished(2)];
+    fn an_unfocused_orb_announces() {
+        // Given / When deciding while orb's pane isn't focused, with zellij saying it is.
+        let announced = announces(false, || Ok(true));
 
-        // When deciding what to announce while orb's pane is focused.
-        let announced = to_announce(notices, true);
-
-        // Then nothing is announced.
-        assert!(
-            announced.is_empty(),
-            "a focused orb shows statuses in the sidebar"
-        );
+        // Then the notices are announced.
+        assert!(announced, "an unfocused orb announces every notice");
     }
 
     #[rstest::rstest]
-    fn every_notice_is_announced_while_orb_isnt_focused() {
-        // Given two threads that finished.
-        let notices = vec![finished(1), finished(2)];
+    fn an_unfocused_orb_doesnt_ask_zellij() {
+        // Given a zellij that counts how often it's asked.
+        let asked = Cell::new(0);
 
-        // When deciding what to announce while orb's pane isn't focused.
-        let announced = to_announce(notices, false);
+        // When deciding while orb's pane isn't focused.
+        let _announced = announces(false, || {
+            asked.set(asked.get() + 1);
+            Ok(false)
+        });
 
-        // Then both are announced, in order.
-        assert_eq!(
-            announced,
-            [finished(1), finished(2)],
-            "an unfocused orb announces every notice"
-        );
+        // Then zellij was never asked.
+        assert_eq!(asked.get(), 0, "focus-out alone decides");
     }
 
     #[rstest::rstest]

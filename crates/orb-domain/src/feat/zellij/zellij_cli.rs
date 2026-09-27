@@ -68,6 +68,13 @@ impl Zellij for ZellijCli {
         run(new_pane_args(name, cwd, self.no_color.as_deref(), argv))?;
         Ok(())
     }
+
+    fn focused_panes(&self) -> Result<Vec<u32>, Report<ZellijError>> {
+        let listed = run(["list-clients"])?;
+        parse_clients(&listed).ok_or_else(|| {
+            Report::new(ZellijError).attach("couldn't read zellij's clients".to_owned())
+        })
+    }
 }
 
 /// Runs `zellij action <args>`; returns its stdout.
@@ -169,6 +176,31 @@ pub fn parse_panes(json: &str) -> Result<Vec<ZellijPane>, serde_json::Error> {
         .collect())
 }
 
+/// The terminal pane each client has focused, from `list-clients`' table:
+/// a `CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND` header, then a row per
+/// client whose first two columns are its id and its focused pane. A client
+/// on any pane but a `terminal_<id>`, such as a plugin, is left out. `None`
+/// if `table` isn't that table.
+pub fn parse_clients(table: &str) -> Option<Vec<u32>> {
+    let mut lines = table.lines().filter(|line| !line.trim().is_empty());
+    let header: Vec<&str> = lines.next()?.split_whitespace().collect();
+    if header != ["CLIENT_ID", "ZELLIJ_PANE_ID", "RUNNING_COMMAND"] {
+        return None;
+    }
+    let panes = lines
+        .map(|line| {
+            let mut columns = line.split_whitespace();
+            let _client: u16 = columns.next()?.parse().ok()?;
+            let pane = columns.next()?;
+            match pane.strip_prefix("terminal_") {
+                Some(id) => id.parse().ok().map(Some),
+                None => Some(None),
+            }
+        })
+        .collect::<Option<Vec<Option<u32>>>>()?;
+    Some(panes.into_iter().flatten().collect())
+}
+
 /// The `zellij action` arguments that open a floating pane named `name` in
 /// `cwd` running `argv`, filling the tab and closing when `argv` exits.
 /// `argv` runs with `NO_COLOR` set to `no_color`, or unset without one.
@@ -213,7 +245,7 @@ mod tests {
     use error_stack::Report;
     use tempfile::TempDir;
 
-    use super::{new_pane_args, parse_panes, run_within};
+    use super::{new_pane_args, parse_clients, parse_panes, run_within};
     use crate::feat::zellij::zellij_service::{ZellijError, ZellijPane, zellij_reason};
 
     fn pane(id: u32, name: &str, tab: u64) -> ZellijPane {
@@ -253,6 +285,63 @@ mod tests {
 
         // Then parsing fails.
         assert!(parsed.is_err(), "non-JSON output should not parse");
+    }
+
+    /// `list-clients`' table, as zellij 0.45.0 prints it, with `rows`.
+    fn clients_table(rows: &[&str]) -> String {
+        ["CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"]
+            .iter()
+            .chain(rows)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[rstest::rstest]
+    #[case::one_client_on_a_command_pane(
+        &["1         terminal_4     /bin/sh /tmp/orbfocus/inside.sh"],
+        Some(vec![4])
+    )]
+    #[case::one_client_on_a_padded_row(&["1         terminal_2     sleep 3600     "], Some(vec![2]))]
+    #[case::two_clients(
+        &[
+            "1         terminal_2     sleep 3600     ",
+            "2         terminal_5     sleep 3600     ",
+        ],
+        Some(vec![2, 5])
+    )]
+    #[case::a_client_on_a_plugin(
+        &[
+            "1         plugin_3       zellij:session-manager",
+            "2         terminal_5     sleep 3600     ",
+        ],
+        Some(vec![5])
+    )]
+    #[case::no_clients(&[], Some(Vec::new()))]
+    #[case::a_row_without_a_pane(&["1"], None)]
+    #[case::a_row_with_a_bad_terminal(&["1         terminal_x     sleep 3600     "], None)]
+    #[case::a_row_with_a_bad_client(&["x         terminal_4     sleep 3600     "], None)]
+    fn parse_clients_reads_each_clients_focused_terminal(
+        #[case] rows: &[&str],
+        #[case] expected: Option<Vec<u32>>,
+    ) {
+        // Given / When parsing a list-clients table with `rows`.
+        let panes = parse_clients(&clients_table(rows));
+
+        // Then each client's focused terminal pane comes back, or nothing for a bad row.
+        assert_eq!(panes, expected, "focused panes of {rows:?}");
+    }
+
+    #[rstest::rstest]
+    #[case::empty("")]
+    #[case::not_a_table("There is no active session!")]
+    #[case::another_table("CLIENT_ID PANE\n1 terminal_4")]
+    fn parse_clients_rejects_output_that_isnt_the_clients_table(#[case] output: &str) {
+        // Given / When parsing something that isn't list-clients' table.
+        let panes = parse_clients(output);
+
+        // Then parsing fails.
+        assert_eq!(panes, None, "{output:?} should not parse");
     }
 
     /// The `new-pane` arguments for lazygit in ~/dev/orb, split at `--` into
