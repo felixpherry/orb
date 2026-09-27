@@ -15,6 +15,6 @@ mod intent_handler;
 
 pub use app_state::{AppState, Focus};
 pub use command::Command;
-pub use common::{Services, State, Wake, tilde};
+pub use common::{Services, State, TextInput, Wake, tilde};
 pub use intent::Intent;
 pub use intent_handler::IntentHandler;

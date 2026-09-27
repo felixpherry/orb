@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use fuzzy_matcher::FuzzyMatcher as _;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use unicode_segmentation::UnicodeSegmentation;
 
+use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::sessions::state::ProjectId;
 
@@ -225,10 +225,8 @@ pub struct Matches {
 /// The filter text with its cursor, the items, and which of them are shown.
 #[derive(Debug, Default)]
 pub struct PickerList {
-    /// The typed filter text.
-    input: String,
-    /// A grapheme index into `input`.
-    cursor: usize,
+    /// The typed filter text and its cursor.
+    input: TextInput,
     /// An index into `shown`.
     selection: usize,
     items: Vec<PickerItem>,
@@ -280,59 +278,33 @@ impl PickerList {
 
     /// Replaces the filter text, leaving the cursor at its end.
     pub fn replace_input(&mut self, text: &str) {
-        text.clone_into(&mut self.input);
-        self.cursor = self.input.graphemes(true).count();
+        self.input = TextInput::new(text);
     }
 
     /// Types `ch` at the cursor. Line breaks are dropped.
     pub fn insert(&mut self, ch: char) {
-        if matches!(ch, '\n' | '\r') {
-            return;
-        }
-        let at = self.byte_at(self.cursor);
-        self.input.insert(at, ch);
-        self.cursor = self
-            .input
-            .get(..at + ch.len_utf8())
-            .map_or(0, |typed| typed.graphemes(true).count());
+        self.input.insert(ch);
     }
 
     /// Deletes the grapheme before the cursor.
     pub fn backspace(&mut self) {
-        let Some(before) = self.cursor.checked_sub(1) else {
-            return;
-        };
-        let start = self.byte_at(before);
-        self.input
-            .replace_range(start..self.byte_at(self.cursor), "");
-        self.cursor = before;
+        self.input.backspace();
     }
 
     /// Deletes back from the cursor to the previous `/` or space. A `/` or
     /// space right before the cursor goes with it: `~/dev/` becomes `~/`.
     pub fn delete_word(&mut self) {
-        let before: Vec<&str> = self.input.graphemes(true).take(self.cursor).collect();
-        let separator = |g: &&str| *g == "/" || g.chars().all(char::is_whitespace);
-        let mut from = before.len();
-        if before.last().is_some_and(separator) {
-            from -= 1;
-        }
-        from -= before.get(..from).map_or(0, |word| {
-            word.iter().rev().take_while(|&g| !separator(g)).count()
-        });
-        let (start, end) = (self.byte_at(from), self.byte_at(self.cursor));
-        self.input.replace_range(start..end, "");
-        self.cursor = from;
+        self.input.delete_word();
     }
 
     /// Moves the cursor one grapheme left.
     pub fn cursor_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+        self.input.cursor_left();
     }
 
     /// Moves the cursor one grapheme right.
     pub fn cursor_right(&mut self) {
-        self.cursor = (self.cursor + 1).min(self.input.graphemes(true).count());
+        self.input.cursor_right();
     }
 
     /// Selects the next shown item, stopping at the last. Disabled items are
@@ -358,12 +330,12 @@ impl PickerList {
 
     /// The typed filter text.
     pub fn input(&self) -> &str {
-        &self.input
+        self.input.text()
     }
 
     /// The cursor, as a grapheme index into [`input`](Self::input).
     pub fn cursor(&self) -> usize {
-        self.cursor
+        self.input.cursor()
     }
 
     /// The selected row, as an index into [`shown`](Self::shown).
@@ -438,14 +410,6 @@ impl PickerList {
     fn item_at(&self, index: usize) -> Option<&PickerItem> {
         let (item, _) = self.shown.get(index)?;
         self.items.get(*item)
-    }
-
-    /// The byte offset of grapheme `index` in the input, or its end.
-    fn byte_at(&self, index: usize) -> usize {
-        self.input
-            .grapheme_indices(true)
-            .nth(index)
-            .map_or(self.input.len(), |(at, _)| at)
     }
 }
 
@@ -578,14 +542,6 @@ mod tests {
         }
     }
 
-    fn typed(text: &str) -> PickerList {
-        let mut list = PickerList::default();
-        for ch in text.chars() {
-            list.insert(ch);
-        }
-        list
-    }
-
     #[rstest::rstest]
     fn empty_pattern_shows_every_item_in_list_order() {
         // Given a list of directories.
@@ -702,53 +658,6 @@ mod tests {
             }],
             "a path match should be offset into the path"
         );
-    }
-
-    #[rstest::rstest]
-    fn insert_types_at_the_cursor() {
-        // Given "ab" typed, with the cursor between the two.
-        let mut list = typed("ab");
-        list.cursor_left();
-
-        // When typing "x".
-        list.insert('x');
-
-        // Then it lands at the cursor.
-        assert_eq!(list.input(), "axb", "insert should type at the cursor");
-    }
-
-    #[rstest::rstest]
-    fn backspace_deletes_the_grapheme_before_the_cursor() {
-        // Given "abc" typed, with the cursor before "c".
-        let mut list = typed("abc");
-        list.cursor_left();
-
-        // When deleting.
-        list.backspace();
-
-        // Then "b" is gone.
-        assert_eq!(
-            list.input(),
-            "ac",
-            "backspace should delete before the cursor"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case("~/dev/orb", "~/dev/")]
-    #[case("~/dev/", "~/")]
-    #[case("~/", "")]
-    #[case("foo bar", "foo ")]
-    #[case("foo ", "")]
-    fn delete_word_deletes_back_to_a_separator(#[case] text: &str, #[case] expected: &str) {
-        // Given text typed with the cursor at its end.
-        let mut list = typed(text);
-
-        // When deleting a word.
-        list.delete_word();
-
-        // Then the text up to the previous separator remains.
-        assert_eq!(list.input(), expected, "delete_word on {text:?}");
     }
 
     #[rstest::rstest]

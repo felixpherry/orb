@@ -21,6 +21,10 @@ pub enum Focus {
     Attached,
     /// Keys edit the open picker's filter and move its selection.
     Picker,
+    /// Keys edit the name in the rename box.
+    Rename,
+    /// Keys edit the sidebar's search and move between its matches.
+    Search,
 }
 
 /// Everything the frontend needs to draw a frame and decide whether to exit.
