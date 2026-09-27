@@ -3,6 +3,7 @@
 
 mod draft;
 mod keymap;
+mod mode_line;
 mod outer_terminal;
 mod picker;
 mod preview;

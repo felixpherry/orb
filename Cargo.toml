@@ -16,6 +16,7 @@ publish = false
 orb-domain = { workspace = true }
 orb-tui = { workspace = true }
 error-stack = { workspace = true }
+jiff = { workspace = true }
 tokio = { workspace = true }
 wherror = { workspace = true }
 
@@ -43,6 +44,7 @@ ratatui-which-key = "0.14"
 unicode-segmentation = "1.13"
 fuzzy-matcher = "0.3"
 tempfile = "3.27"
+jiff = "0.2.37"
 
 [lints]
 workspace = true
