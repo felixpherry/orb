@@ -183,6 +183,19 @@ fn after_pane(focus: Focus) -> Focus {
     }
 }
 
+/// The outer terminal's cursor shape with the keys in `focus`: a steady
+/// block on the sidebar's selected row, a steady bar in a picker's input, the
+/// child's own shape (`pane`) while attached, and the user's default
+/// elsewhere, where no cursor is drawn.
+fn cursor_style(focus: Focus, pane: Option<SetCursorStyle>) -> SetCursorStyle {
+    match (focus, pane) {
+        (Focus::Sidebar, _) => SetCursorStyle::SteadyBlock,
+        (Focus::Picker, _) => SetCursorStyle::SteadyBar,
+        (Focus::Attached, Some(style)) => style,
+        (Focus::Attached, None) | (Focus::Preview, _) => SetCursorStyle::DefaultUserShape,
+    }
+}
+
 /// Whether to announce notices: always while orb's pane isn't focused.
 /// While it seems focused, where the sidebar already shows each status, only
 /// if `watched`, asked only then, says no zellij client has orb's pane
@@ -323,7 +336,7 @@ impl App {
             {
                 picker.resize(page);
             }
-            self.mirror_cursor_style(terminal.backend_mut())?;
+            self.sync_cursor_style(terminal.backend_mut())?;
             if self.state.read().should_quit {
                 return Ok(());
             }
@@ -461,7 +474,7 @@ impl App {
                             app.focus = after_pane(app.focus);
                             app.pane_shown = None;
                         }
-                        self.leave_pane(out)?;
+                        outer_terminal::set_mouse_capture(out, false)?;
                     }
                     None => {}
                 }
@@ -509,7 +522,7 @@ impl App {
                     }
                     attached.pane.focus(false);
                 }
-                self.leave_pane(out)
+                outer_terminal::set_mouse_capture(out, false)
             }
             Command::CreateDraft(project) => {
                 let _ = self
@@ -702,7 +715,7 @@ impl App {
         self.state.write().pane_shown = None;
         if focus == Focus::Attached {
             self.state.write().focus = Focus::Preview;
-            self.leave_pane(out)?;
+            outer_terminal::set_mouse_capture(out, false)?;
         }
         Ok(())
     }
@@ -776,7 +789,7 @@ impl App {
             app.pane_shown = None;
         }
         self.retry_start();
-        self.leave_pane(out)
+        outer_terminal::set_mouse_capture(out, false)
     }
 
     /// Takes the sessions actor's notices and announces them as
@@ -828,23 +841,14 @@ impl App {
         .ok()
     }
 
-    /// Gives the mouse and the cursor shape back to orb.
-    fn leave_pane<W>(&mut self, out: &mut W) -> io::Result<()>
+    /// Shows the cursor shape for where the keys are in the outer terminal.
+    fn sync_cursor_style<W>(&mut self, out: &mut W) -> io::Result<()>
     where
         W: Write,
     {
-        outer_terminal::set_mouse_capture(out, false)?;
-        self.cursor_style = SetCursorStyle::DefaultUserShape;
-        outer_terminal::set_cursor_style(out, self.cursor_style)
-    }
-
-    /// Shows the child's cursor shape in the outer terminal while attached.
-    fn mirror_cursor_style<W>(&mut self, out: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
-        let Some(style) = self.attached_pane().map(Pane::cursor_style) else {
-            return Ok(());
+        let style = {
+            let focus = self.state.read().focus;
+            cursor_style(focus, self.attached_pane().map(Pane::cursor_style))
         };
         if style == self.cursor_style {
             return Ok(());
@@ -905,8 +909,32 @@ mod tests {
     use orb_domain::Focus;
     use orb_domain::feat::sessions::state::ThreadId;
     use orb_domain::feat::zellij::zellij_service::ZellijError;
+    use ratatui::crossterm::cursor::SetCursorStyle;
 
-    use super::{PaneOwner, after_pane, announces, attaches, list_directories, trust_to_open};
+    use super::{
+        PaneOwner, after_pane, announces, attaches, cursor_style, list_directories, trust_to_open,
+    };
+
+    #[rstest::rstest]
+    #[case::sidebar_block(Focus::Sidebar, None, SetCursorStyle::SteadyBlock)]
+    #[case::picker_bar(Focus::Picker, None, SetCursorStyle::SteadyBar)]
+    #[case::attached_follows_the_pane(
+        Focus::Attached,
+        Some(SetCursorStyle::BlinkingUnderScore),
+        SetCursorStyle::BlinkingUnderScore
+    )]
+    #[case::preview_default(Focus::Preview, None, SetCursorStyle::DefaultUserShape)]
+    fn cursor_shape_follows_where_the_keys_are(
+        #[case] focus: Focus,
+        #[case] pane: Option<SetCursorStyle>,
+        #[case] expected: SetCursorStyle,
+    ) {
+        // Given / When choosing the cursor shape in `focus` with the pane's `pane` shape.
+        let style = cursor_style(focus, pane);
+
+        // Then it is the shape for that focus.
+        assert_eq!(style, expected, "cursor shape in {focus:?}");
+    }
 
     #[rstest::rstest]
     #[case::no_client_is_on_orbs_pane(Ok(false), true)]
