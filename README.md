@@ -50,8 +50,8 @@ The demo shows, in order: the sidebar and dashboard, the which-key popup, approv
 | `/` or `i` | Search thread titles |
 | `r` | Rename the thread |
 | `p` | Pin or unpin |
-| `ss` | Settle or un-settle |
-| `xx` | Delete the thread |
+| `s` | Settle (after a `No`/`Yes` confirm) or un-settle |
+| `d` | Delete the thread or discard the draft (after a `No`/`Yes` confirm) |
 | `␣n` | New session (project picker) |
 | `␣p` | Add a project |
 | `␣f` | Filter by project (`<C-x>` removes one) |
