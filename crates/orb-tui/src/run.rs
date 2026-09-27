@@ -175,22 +175,24 @@ fn attaches(started: Option<ThreadId>, selected: Option<ThreadId>, focus: Focus)
 }
 
 /// Where the keys go once the pane is gone: from the pane to the preview;
-/// anywhere else (the sidebar after `<C-h>`, the preview, a picker) they stay.
+/// anywhere else (the sidebar after `<C-h>`, the preview, a text input) they
+/// stay.
 fn after_pane(focus: Focus) -> Focus {
     match focus {
         Focus::Attached => Focus::Preview,
-        Focus::Sidebar | Focus::Preview | Focus::Picker => focus,
+        Focus::Sidebar | Focus::Preview | Focus::Picker | Focus::Rename | Focus::Search => focus,
     }
 }
 
 /// The outer terminal's cursor shape with the keys in `focus`: a steady
-/// block on the sidebar's selected row, a steady bar in a picker's input, the
+/// block on the sidebar's selected row, a steady bar in a text input (a
+/// picker's filter, the rename box, the sidebar search), the
 /// child's own shape (`pane`) while attached, and the user's default
 /// elsewhere, where no cursor is drawn.
 fn cursor_style(focus: Focus, pane: Option<SetCursorStyle>) -> SetCursorStyle {
     match (focus, pane) {
         (Focus::Sidebar, _) => SetCursorStyle::SteadyBlock,
-        (Focus::Picker, _) => SetCursorStyle::SteadyBar,
+        (Focus::Picker | Focus::Rename | Focus::Search, _) => SetCursorStyle::SteadyBar,
         (Focus::Attached, Some(style)) => style,
         (Focus::Attached, None) | (Focus::Preview, _) => SetCursorStyle::DefaultUserShape,
     }
@@ -421,7 +423,8 @@ impl App {
                             keymap::press(&mut self.keys, key)
                         }
                     },
-                    Focus::Picker => keymap::picker_route(key),
+                    // The rename box and the search take the picker's keys.
+                    Focus::Picker | Focus::Rename | Focus::Search => keymap::picker_route(key),
                 };
                 if let Some(intent) = intent {
                     let commands = IntentHandler::handle(&intent, &mut self.state.write());
@@ -918,6 +921,8 @@ mod tests {
     #[rstest::rstest]
     #[case::sidebar_block(Focus::Sidebar, None, SetCursorStyle::SteadyBlock)]
     #[case::picker_bar(Focus::Picker, None, SetCursorStyle::SteadyBar)]
+    #[case::rename_bar(Focus::Rename, None, SetCursorStyle::SteadyBar)]
+    #[case::search_bar(Focus::Search, None, SetCursorStyle::SteadyBar)]
     #[case::attached_follows_the_pane(
         Focus::Attached,
         Some(SetCursorStyle::BlinkingUnderScore),

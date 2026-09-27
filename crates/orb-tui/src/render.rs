@@ -222,6 +222,7 @@ fn render_mode_line(state: &AppState, area: Rect, buf: &mut Buffer) {
         (Focus::Sidebar | Focus::Preview, Some(_)) => "DRAFT",
         (Focus::Sidebar | Focus::Preview, None) => "NORMAL",
         (Focus::Picker, _) => "PICKER",
+        (Focus::Rename | Focus::Search, _) => "INSERT",
     };
     let sessions = &state.sessions;
     let status = Line::raw(
@@ -630,6 +631,24 @@ mod tests {
         // Then the mode line shows only the mode's name.
         let mode_line = mode_line(&buffer);
         assert_eq!(mode_line.trim_end(), "PICKER", "the mode line");
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Rename)]
+    #[case(Focus::Search)]
+    fn mode_line_shows_insert_while_typing(#[case] focus: Focus) {
+        // Given the keys in the rename box or the sidebar search.
+        let state = AppState {
+            focus,
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the mode line shows only the mode's name.
+        let mode_line = mode_line(&buffer);
+        assert_eq!(mode_line.trim_end(), "INSERT", "the mode line in {focus:?}");
     }
 
     #[rstest::rstest]

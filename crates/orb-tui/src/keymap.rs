@@ -90,13 +90,18 @@ impl Scope {
             (Focus::Preview, Selection::Thread) => Self::Preview,
             (Focus::Preview, Selection::Draft) => Self::DraftForm,
             (Focus::Preview, Selection::Nothing) => Self::PreviewEmpty,
-            (Focus::Sidebar | Focus::Attached | Focus::Picker, Selection::Thread) => Self::Sidebar,
-            (Focus::Sidebar | Focus::Attached | Focus::Picker, Selection::Draft) => {
-                Self::SidebarDraft
-            }
-            (Focus::Sidebar | Focus::Attached | Focus::Picker, Selection::Nothing) => {
-                Self::SidebarEmpty
-            }
+            (
+                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Selection::Thread,
+            ) => Self::Sidebar,
+            (
+                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Selection::Draft,
+            ) => Self::SidebarDraft,
+            (
+                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Selection::Nothing,
+            ) => Self::SidebarEmpty,
         }
     }
 }
