@@ -113,7 +113,7 @@ Source: https://github.com/pingdotgg/t3code (commit f5ef0dd). Local data: `~/.t3
 | Picker | `crates/jinn-selection-widget` (`PickerItem`, `SelectionState<T>`, SkimMatcherV2) |
 | Sidebar | `crates/jinn-domain/src/feat/ui/sidebar/` (`section_trait.rs`, `sessions/render/entry_line.rs`) |
 | Chat log blocks | `crates/jinn-domain/src/feat/ui/chat_log/` (`visual_item.rs`, `line_count_cache.rs`, `markdown.rs`, `tool_call.rs`, `tool_result.rs`, `thinking.rs`, `user.rs`, `assistant.rs`) |
-| Markdown | `ratatui-markdown` (crates.io, MIT/Apache; jinn vendors a patched copy in `vendor/`). orb uses `tui-markdown` 0.3.9 instead (§8). |
+| Markdown | `ratatui-markdown` (crates.io, MIT/Apache; jinn vendors a patched copy in `vendor/`). orb used `tui-markdown` 0.3.9 instead for its transcript preview (§8); it went with the preview when the dashboard replaced it, and orb has no markdown renderer now. |
 | PTY / emulator | `crates/jinn-domain/src/feat/interactive_term/` (`pty_session.rs`, `screen_task.rs`, `emulator.rs`, `query_responder.rs`, `settle.rs::encode_key_event`), `crates/jinn-tui/src/render/terminal_tab.rs` — **known gaps**: legacy-only key encoding (Shift+Enter lost), no BackTab, paste/mouse not forwarded, ~150 ms output latency |
 | External editor suspend | `crates/jinn-tui/src/suspend.rs` |
 | SQLite migrations / DAO | `crates/jinn-session-schema` (`migrate.rs`), `crates/jinn-domain/build.rs` (daow compile-time SQL check), `feat/session/session_store/sqlite.rs` |
@@ -219,6 +219,8 @@ Tags as in §6; **source** for libraries = read from the crate source in `~/.car
 
 ## 8. Transcript preview (verified 2026-09-25, Claude Code 2.1.282)
 
+> The preview this section served was removed (2026-09-27): the dashboard took its place, and `tui-markdown` left orb's dependencies. The transcript facts still hold for the title and branch scan (`feat/sessions/transcript.rs`); the block-rebuild and library notes are kept as history.
+
 Sample: 207 main transcripts and 67 subagent files under `~/.claude/projects` on this machine. Tags as in §6.
 
 ### Transcript lines
@@ -255,7 +257,7 @@ Sample: 207 main transcripts and 67 subagent files under `~/.claude/projects` on
 
 ### Libraries
 - **`ratatui-markdown`** requires ratatui `^0.29` in every release (checked through 0.3.6), so it can't share types with orb's ratatui 0.30.2. **[verified: source]**
-- **`tui-markdown` 0.3.9** (joshka) **[verified: source + scratch build]**:
+- **`tui-markdown` 0.3.9** (joshka; orb no longer depends on it) **[verified: source + scratch build]**:
   - Builds on `ratatui-core` 0.1 (default features off), which is ratatui 0.30's core; with ratatui 0.30.2, `cargo tree -i ratatui-core` shows one version (0.1.2).
   - Pulls `syntect` 5.3 with default features (builds the oniguruma C library), `pulldown-cmark` 0.13, and `ansi-to-tui` 8.
   - `tui_markdown::from_str(&'a str) -> ratatui_core::text::Text<'a>` borrows its input; caching needs an owned copy (`Span` content `.into_owned()`).
@@ -323,7 +325,7 @@ T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913
   - Backspace pops one pending key.
 
 ### Transcript `gitBranch` **[verified]**
-- Present on `user` and `assistant` lines. An empty string means "no branch". The preview already takes the latest non-empty value (`Conversation::branch`).
+- Present on `user` and `assistant` lines. An empty string means "no branch". The title scan takes the latest non-empty value (`feat/sessions/transcript.rs`) and stores it in `threads.branch`.
 
 ## 10. Projects & picker (verified 2026-09-26; T3 f5ef0dd)
 
