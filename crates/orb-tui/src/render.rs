@@ -152,6 +152,10 @@ pub(crate) fn render(
             }
             None
         }
+        (None, None, None) if crate::which_key_prototype::active() => {
+            crate::which_key_prototype::render(keys, sidebar_area.union(right), frame.buffer_mut());
+            None
+        }
         // ratatui-which-key divides by the height inside the popup's borders.
         (None, None, None) if frame.area().height > 2 => {
             WhichKey::new().render(frame.buffer_mut(), keys);

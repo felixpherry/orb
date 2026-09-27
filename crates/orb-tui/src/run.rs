@@ -417,6 +417,11 @@ impl App {
                             None
                         }
                     },
+                    Focus::Sidebar | Focus::Preview
+                        if crate::which_key_prototype::flip(&self.keys, key) =>
+                    {
+                        None
+                    }
                     Focus::Sidebar | Focus::Preview => match keymap::layout_route(key) {
                         Some(intent) => {
                             // A resize ends any key sequence in progress.
