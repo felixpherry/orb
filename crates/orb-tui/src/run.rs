@@ -21,7 +21,8 @@
 //! notification; notices that arrive while it is focused are dropped. zellij
 //! sends no focus-out to the tab the user leaves, so while orb seems focused
 //! a thread of its own asks zellij whether any client is on orb's pane, and
-//! announces the notices only if none is.
+//! announces the notices only if none is. That thread also asks zellij which
+//! tab orb's pane is on, where a click on the notification goes back to.
 //!
 //! When a session start waits for the user to trust a directory, the pane
 //! runs an interactive `claude` there instead. Leaving it, by its exit,
@@ -778,9 +779,11 @@ impl App {
     }
 
     /// Takes the sessions actor's notices and announces them as
-    /// [`announces`] decides. Asking zellij can take up to its timeout, so
-    /// it happens on a thread of its own. A notice that can't be sent is
-    /// dropped.
+    /// [`announces`] decides, telling the notifier which zellij tab orb's
+    /// pane is on so a click can go back there. Each zellij call can take up
+    /// to its timeout, so this happens on a thread of its own. A notice that
+    /// can't be sent is dropped, and one whose tab zellij can't give is sent
+    /// without it.
     fn announce(&self) {
         let notices = mem::take(&mut self.state.write().sessions.notices);
         if notices.is_empty() {
@@ -789,24 +792,20 @@ impl App {
         let focused = self.focused;
         let zellij = self.zellij.clone();
         let notifier = self.notifier.clone();
-        let deliver = move || {
-            let watched = || match &zellij {
-                Some(zellij) => zellij.pane_focused(),
-                None => Err(Report::new(ZellijError).attach(NOT_IN_ZELLIJ.to_owned())),
-            };
-            if announces(focused, watched) {
-                for notice in &notices {
-                    let _ = notifier.announce(notice);
+        let _ = thread::Builder::new()
+            .name("orb-notice".into())
+            .spawn(move || {
+                let watched = || match &zellij {
+                    Some(zellij) => zellij.pane_focused(),
+                    None => Err(Report::new(ZellijError).attach(NOT_IN_ZELLIJ.to_owned())),
+                };
+                if announces(focused, watched) {
+                    let tab = zellij.as_ref().and_then(|zellij| zellij.pane_tab().ok());
+                    for notice in &notices {
+                        let _ = notifier.announce(notice, tab);
+                    }
                 }
-            }
-        };
-        if focused && self.zellij.is_some() {
-            let _ = thread::Builder::new()
-                .name("orb-notice".into())
-                .spawn(deliver);
-        } else {
-            deliver();
-        }
+            });
     }
 
     fn retry_start(&self) {
