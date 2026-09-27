@@ -11,5 +11,6 @@ mod rename;
 mod render;
 mod run;
 mod sidebar;
+mod which_key;
 
 pub use run::{Frontend, TuiRunError};

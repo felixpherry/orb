@@ -27,7 +27,6 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
-use ratatui_which_key::WhichKey;
 
 use crate::draft;
 use crate::keymap::{self, Keys};
@@ -36,6 +35,7 @@ use crate::picker::{self, PickerScroll};
 use crate::preview::{self, PreviewCache};
 use crate::rename;
 use crate::sidebar::{self, SidebarScroll};
+use crate::which_key;
 
 /// Behind everything that doesn't set its own background (tokyonight-moon's
 /// `bg`).
@@ -156,12 +156,10 @@ pub(crate) fn render(
             }
             None
         }
-        // ratatui-which-key divides by the height inside the popup's borders.
-        (None, None, None) if frame.area().height > 2 => {
-            WhichKey::new().render(frame.buffer_mut(), keys);
+        (None, None, None) => {
+            which_key::render(keys, sidebar_area.union(right), frame.buffer_mut());
             None
         }
-        (None, None, None) => None,
     };
     match (state.focus, selected_y, search_cursor) {
         (Focus::Sidebar, Some(y), _) => frame.set_cursor_position((sidebar_area.x, y)),
@@ -586,6 +584,39 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn leader_popup_sits_above_the_mode_line() {
+        // Given Space pressed on a 20-row screen.
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        press(
+            &mut keys,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+
+        // When drawing a frame.
+        let state = AppState::default();
+        let Ok(_) = terminal.draw(|frame| {
+            render(
+                frame,
+                &state,
+                None,
+                None,
+                &keys,
+                SystemTime::UNIX_EPOCH,
+                &TimeZone::UTC,
+                &mut PreviewCache::default(),
+                &mut SidebarScroll::default(),
+                &mut PickerScroll::default(),
+            );
+        });
+
+        // Then the popup's bottom-right corner is on the row above the mode
+        // line.
+        let corner = terminal.backend().buffer().cell((78, 18)).map(Cell::symbol);
+        assert_eq!(corner, Some("╯"), "the popup's bottom-right corner");
+    }
+
+    #[rstest::rstest]
     fn pending_s_shows_the_settle_banner() {
         // Given an idle selected thread and `s` pressed once.
         let state = selected(Focus::Sidebar);
@@ -648,9 +679,9 @@ mod tests {
         // When drawing a frame.
         let buffer = draw_with(&state, &pending('s'));
 
-        // Then no popup border is drawn.
+        // Then no popup is drawn.
         let screen = text(&buffer, buffer.area);
-        assert!(!screen.contains('┌'), "screen was '{screen}'");
+        assert!(!screen.contains("esc close"), "screen was '{screen}'");
     }
 
     #[rstest::rstest]
