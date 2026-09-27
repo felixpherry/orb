@@ -939,8 +939,8 @@ mod tests {
     #[rstest::rstest]
     fn moving_down_from_the_last_model_wraps_to_default() {
         // Given a model picker on the last legacy model.
-        let last = LEGACY_MODELS[LEGACY_MODELS.len() - 1].id;
-        let mut picker = PickerState::models(ProjectId(1), Some(last), Focus::Preview);
+        let last = LEGACY_MODELS.last().map(|model| model.id);
+        let mut picker = PickerState::models(ProjectId(1), last, Focus::Preview);
 
         // When moving down.
         picker.next();
