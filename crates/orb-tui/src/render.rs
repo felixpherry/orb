@@ -1012,6 +1012,49 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn sidebar_cursor_follows_the_selection_to_a_later_row() {
+        // Given thread 1 and a settled thread, with the sidebar focused on
+        // the Settled header below thread 1's three-line node.
+        let state = AppState {
+            focus: Focus::Sidebar,
+            sessions: Sessions {
+                cursor: Some(SidebarItem::SettledShelf),
+                ..sessions(vec![
+                    thread(1, ThreadStatus::Idle),
+                    Thread {
+                        settled_at: Some(SystemTime::UNIX_EPOCH),
+                        ..thread(2, ThreadStatus::Stopped)
+                    },
+                ])
+            },
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let cursor = cursor_of(&state, None);
+
+        // Then the cursor is on the first cell of the header's row.
+        assert_eq!(cursor, Some(Position::new(0, 6)), "the sidebar cursor");
+    }
+
+    #[rstest::rstest]
+    fn attached_focus_puts_the_cursor_in_the_pane_not_the_sidebar() {
+        // Given a live pane for the selected thread, attached.
+        let pane = pane_with_text();
+        let state = selected(Focus::Attached);
+
+        // When drawing a frame.
+        let cursor = pane.as_ref().and_then(|pane| cursor_of(&state, Some(pane)));
+
+        // Then the cursor is on the right side, in the pane.
+        let [_, right, _] = layout(Rect::new(0, 0, 80, 8), &state.sidebar);
+        assert!(
+            cursor.is_some_and(|cursor| right.contains(cursor)),
+            "the attached cursor was {cursor:?}, outside {right:?}"
+        );
+    }
+
+    #[rstest::rstest]
     fn preview_focus_shows_no_cursor() {
         // Given thread 1 selected with the preview focused.
         let state = selected(Focus::Preview);

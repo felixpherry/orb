@@ -4298,6 +4298,22 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn search_prev_moves_to_the_previous_match() {
+        // Given "fix" matching threads 3 and 1, with the cursor on 1.
+        let mut state = searching("fix", Some(1));
+
+        // When handling PickerPrev (`<C-k>`).
+        IntentHandler::handle(&Intent::PickerPrev, &mut state);
+
+        // Then the cursor is on thread 3, past the unmatched thread 2.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Thread(ThreadId(3))),
+            "<C-k> should move to the previous match"
+        );
+    }
+
+    #[rstest::rstest]
     fn search_confirm_clears_the_search_and_keeps_the_selection() {
         // Given "logout" matching thread 3, with the cursor on it.
         let mut state = searching("logout", Some(3));
