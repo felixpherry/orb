@@ -34,8 +34,8 @@ mod tests {
     use super::{OpenToolError, validate_open_tool};
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
-        ThreadStatus,
+        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus,
     };
 
     /// One project at `/work` with a thread and a draft, the cursor on
@@ -72,7 +72,12 @@ mod tests {
                         active_since: SystemTime::UNIX_EPOCH,
                         last_activity_at: SystemTime::UNIX_EPOCH,
                         unseen: false,
+                        group: None,
+                        model: None,
+                        permission: None,
                     }],
+                    groups: vec![],
+                    kind: ProjectKind::Normal,
                 }],
                 cursor,
                 ..Sessions::default()

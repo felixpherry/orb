@@ -89,7 +89,9 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{hex_branch, previous_worktree, slug};
-    use crate::feat::sessions::state::{Project, ProjectId, Thread, ThreadId, ThreadStatus};
+    use crate::feat::sessions::state::{
+        Project, ProjectId, ProjectKind, Thread, ThreadId, ThreadStatus,
+    };
 
     const ROOT: &str = "/tmp/orb";
 
@@ -109,6 +111,9 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH + Duration::from_secs(activity),
             unseen: false,
+            group: None,
+            model: None,
+            permission: None,
         }
     }
 
@@ -121,6 +126,8 @@ mod tests {
             removed: false,
             threads,
             draft: None,
+            groups: vec![],
+            kind: ProjectKind::Normal,
         }
     }
 

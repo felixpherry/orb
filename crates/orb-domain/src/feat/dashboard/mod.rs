@@ -106,8 +106,8 @@ pub(crate) mod tests {
     };
     use super::items;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, Sessions, SidebarItem, Thread, ThreadId,
-        ThreadStatus,
+        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus,
     };
 
     /// Project 1 holding thread 1 and, when `repo` is given, a local draft in
@@ -127,6 +127,9 @@ pub(crate) mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
+            group: None,
+            model: None,
+            permission: None,
         };
         let draft = repo.map(|repo| Draft {
             workspace: DraftWorkspace::Local,
@@ -146,6 +149,8 @@ pub(crate) mod tests {
                 removed: false,
                 draft,
                 threads: vec![thread],
+                groups: vec![],
+                kind: ProjectKind::Normal,
             }],
             cursor,
             ..Sessions::default()

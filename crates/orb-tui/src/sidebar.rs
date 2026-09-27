@@ -272,11 +272,15 @@ fn place(rows: Vec<SidebarRow<'_>>, lines: u16) -> (Vec<(SidebarRow<'_>, u16)>, 
     (placed, top)
 }
 
-/// How many lines a row takes: a draft's or thread's node 3, else 1.
+/// How many lines a row takes: a draft's, thread's or group's node 3, else 1.
 fn height(row: &SidebarRow<'_>) -> u16 {
     match row {
-        SidebarRow::Draft { .. } | SidebarRow::Card { .. } => 3,
-        SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } => 1,
+        SidebarRow::Draft { .. } | SidebarRow::Card { .. } | SidebarRow::GroupCard { .. } => 3,
+        SidebarRow::ShelfHeader { .. }
+        | SidebarRow::Settled { .. }
+        | SidebarRow::GroupThread { .. }
+        | SidebarRow::GroupDraftRow { .. }
+        | SidebarRow::SettledGroup { .. } => 1,
     }
 }
 
@@ -312,6 +316,13 @@ fn render_row(
             let matched = matched(title(thread));
             render_settled(thread, &matched, ends_shelf, now, area, buf);
         }
+        SidebarRow::GroupCard { group, .. } | SidebarRow::SettledGroup { group, .. } => {
+            Line::from(span(group.name.as_str(), FG)).render(area, buf);
+        }
+        SidebarRow::GroupThread { thread, .. } => {
+            Line::from(span(title(thread), FG)).render(area, buf);
+        }
+        SidebarRow::GroupDraftRow { .. } => Line::from(span(NEW_THREAD, FG)).render(area, buf),
     }
 }
 
@@ -769,8 +780,8 @@ mod tests {
 
     use orb_domain::TextInput;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, Search, Sessions, SidebarItem, Thread, ThreadId,
-        ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        ProjectKind, Search, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::SidebarLayout;
     use ratatui::buffer::{Buffer, Cell};
@@ -804,6 +815,9 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
+            group: None,
+            model: None,
+            permission: None,
         }
     }
 
@@ -823,6 +837,8 @@ mod tests {
             removed: false,
             draft: None,
             threads,
+            groups: vec![],
+            kind: ProjectKind::Normal,
         }
     }
 
@@ -1999,6 +2015,61 @@ mod tests {
             layout.rows,
             height.saturating_sub(3),
             "the list's height at {width}x{height}"
+        );
+    }
+
+    /// orb holding group "login-flow": with thread 1 unless `draft`, settled
+    /// on an open shelf if `settled`.
+    fn group_sessions(settled: bool, draft: bool) -> Sessions {
+        let group = Group {
+            id: GroupId(9),
+            kind: GroupKind::Feature,
+            name: "login-flow".to_owned(),
+            dir: None,
+            branch: None,
+            created_at: SystemTime::UNIX_EPOCH,
+            pinned_at: None,
+            settled_at: settled.then(|| at(20)),
+            active_since: SystemTime::UNIX_EPOCH,
+            draft: draft.then_some(GroupDraft {
+                model: None,
+                permission: None,
+            }),
+        };
+        let threads = if draft {
+            vec![]
+        } else {
+            vec![Thread {
+                group: Some(GroupId(9)),
+                ..thread(1, ThreadStatus::Idle)
+            }]
+        };
+        Sessions {
+            projects: vec![Project {
+                groups: vec![group],
+                ..project(1, "orb", threads)
+            }],
+            shelf_open: settled,
+            ..Sessions::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::group_card(group_sessions(false, false), "login-flow")]
+    #[case::group_thread(group_sessions(false, false), "Thread 1")]
+    #[case::group_draft_row(group_sessions(false, true), "New thread")]
+    #[case::settled_group(group_sessions(true, false), "login-flow")]
+    fn minimal_group_rows_draw_their_names(#[case] sessions: Sessions, #[case] expected: &str) {
+        // Given a sidebar listing a group row.
+
+        // When drawing the sidebar.
+        let buf = draw(&sessions, at(900), 20);
+
+        // Then the row's text appears.
+        assert!(
+            lines(&buf).iter().any(|line| line.contains(expected)),
+            "the sidebar should show {expected:?}: {:#?}",
+            lines(&buf)
         );
     }
 }
