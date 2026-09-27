@@ -128,3 +128,4 @@ Entries are added or amended **only with human approval**.
 - (sidebar) While the sidebar has the keys, a steady block cursor sits on the first cell of the selected row.
 - (tui) The rename box, the sidebar search and the pickers show a steady bar cursor.
 - (tui) The mode line shows `INSERT` while typing in the rename box or the sidebar search.
+- (keybinds) The which-key popup is drawn like LazyVim's default which-key (helix) in tokyonight-moon: a rounded box in the bottom-right corner on the mode line, the pending keys in its top border (`␣` for Space), one `key ➜ icon desc` row per next key with groups as `+name`, in which-key's order (letters and digits before symbols, lowercase before its capital), and `esc close  ⌫ back` on its last row; rows that don't fit are cut off.
