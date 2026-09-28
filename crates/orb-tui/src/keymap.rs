@@ -14,7 +14,8 @@
 //! highlighted item. `<C-Right>`/`<C-Left>` resize the focused side
 //! outside which-key, which can't name them. In the sidebar, `<C-\>` detaches
 //! the selected attached thread, also outside which-key. While attached,
-//! every key goes to Claude except `<C-\>` and `<C-h>`. An open picker takes
+//! every key goes to Claude except `<C-\>`, `<C-h>` and the resize keys,
+//! which resize the pane as they do the dashboard. An open picker takes
 //! typed characters as filter text and has its own fixed keys, `<C-x>` among
 //! them for removing a project from the project filter. The rename box (`r`)
 //! and the sidebar search (`/` or `i`) use the picker's keys. On a group's
@@ -519,12 +520,13 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
         (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Route::Intent(Intent::Detach),
         // Claude can't bind `<C-h>`: it's Backspace in a legacy terminal.
         (KeyCode::Char('h'), KeyModifiers::CONTROL) => Route::Intent(Intent::LeavePane),
-        _ => Route::Forward,
+        _ => layout_route(key).map_or(Route::Forward, Route::Intent),
     }
 }
 
-/// The resize `key` asks for in the sidebar or dashboard: `<C-Right>` widens
-/// the focused side and `<C-Left>` narrows it. `None` for any other key.
+/// The resize `key` asks for in the sidebar, the dashboard or the attached
+/// pane: `<C-Right>` widens the focused side and `<C-Left>` narrows it.
+/// `None` for any other key.
 pub(crate) fn layout_route(key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
         (KeyCode::Right, KeyModifiers::CONTROL) => Some(Intent::WidenFocused),
@@ -1724,6 +1726,24 @@ mod tests {
             routed,
             Route::Intent(Intent::LeavePane),
             "<C-h> should leave the pane"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(KeyCode::Right, Intent::WidenFocused)]
+    #[case(KeyCode::Left, Intent::NarrowFocused)]
+    fn ctrl_arrows_resize_while_attached(#[case] code: KeyCode, #[case] expected: Intent) {
+        // Given a Ctrl-modified arrow.
+        let key = KeyEvent::new(code, KeyModifiers::CONTROL);
+
+        // When routing it while attached.
+        let routed = attached_route(key);
+
+        // Then it resizes instead of reaching Claude.
+        assert_eq!(
+            routed,
+            Route::Intent(expected),
+            "<C-{code}> should resize while attached"
         );
     }
 

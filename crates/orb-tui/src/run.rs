@@ -10,7 +10,7 @@
 //! Each attached thread keeps its own `claude attach` pane while other
 //! threads are selected; the right side shows the selected thread's pane
 //! when it's attached, else the dashboard. While attached, input goes
-//! straight to Claude; otherwise keys go through the resize keys, then the
+//! straight to Claude, except the resize keys; otherwise keys go through the resize keys, then the
 //! [`keymap`]. The loop itself reads the directory picker's listings and the
 //! branch picker's refs, and hands tools to zellij, since each takes
 //! milliseconds.
