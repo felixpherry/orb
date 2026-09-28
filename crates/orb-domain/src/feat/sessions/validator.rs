@@ -195,9 +195,7 @@ pub fn validate_delete(state: &AppState) -> Result<(), DeleteError> {
     let sessions = &state.sessions;
     match (sessions.cursor, sessions.selected_group()) {
         (Some(SidebarItem::GroupDraft(_)), Some(_)) => Err(DeleteError::LastInGroup),
-        (Some(SidebarItem::Group(_)), Some((_, group)))
-            if group.draft.is_some() && sessions.starting =>
-        {
+        (Some(SidebarItem::Group(_)), Some((_, group))) if group.draft && sessions.starting => {
             Err(DeleteError::Starting)
         }
         (Some(SidebarItem::Group(_)), Some(_)) => Ok(()),
@@ -315,17 +313,20 @@ pub enum PickSettingError {
     Starting,
 }
 
-/// Allow picking the selected draft's or group draft's model or permission
-/// mode between session starts.
+/// Allow picking the selected draft's model or permission mode, or the
+/// group's default one on a group's draft or card, between session starts.
 ///
 /// # Errors
 ///
-/// Returns [`PickSettingError::NoDraft`] without a selected draft or group
-/// draft, and [`PickSettingError::Starting`] while a start is in flight.
+/// Returns [`PickSettingError::NoDraft`] without a selected draft, group
+/// draft or group card, and [`PickSettingError::Starting`] while a start is
+/// in flight.
 pub fn validate_pick_setting(state: &AppState) -> Result<(), PickSettingError> {
     let sessions = &state.sessions;
+    let card = matches!(sessions.cursor, Some(SidebarItem::Group(_)))
+        && sessions.selected_group().is_some();
     match (sessions.selected_draft(), sessions.selected_group_draft()) {
-        (None, None) => Err(PickSettingError::NoDraft),
+        (None, None) if !card => Err(PickSettingError::NoDraft),
         _ if sessions.starting => Err(PickSettingError::Starting),
         _ => Ok(()),
     }
@@ -435,7 +436,7 @@ mod tests {
         validate_start_group_draft, validate_toggle_pin, validate_toggle_settle,
     };
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
         ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
@@ -721,7 +722,8 @@ mod tests {
                     pinned_at: None,
                     settled_at: Some(SystemTime::UNIX_EPOCH),
                     active_since: SystemTime::UNIX_EPOCH,
-                    draft: None,
+                    draft: false,
+                    defaults: GroupDefaults::default(),
                 }],
                 kind: project_kind,
             };
@@ -854,10 +856,11 @@ mod tests {
                         pinned_at: None,
                         settled_at: None,
                         active_since: SystemTime::UNIX_EPOCH,
-                        draft: Some(GroupDraft {
+                        draft: true,
+                        defaults: GroupDefaults {
                             model: None,
                             permission: None,
-                        }),
+                        },
                     }],
                     kind: ProjectKind::Research,
                 }],
@@ -913,6 +916,54 @@ mod tests {
         assert_eq!(result, Ok(()), "a group draft has settings to pick");
     }
 
+    #[rstest::rstest]
+    fn pick_setting_allowed_on_a_group_card() {
+        // Given a started group's card selected.
+        let state = grouped_at(SidebarItem::Group(GroupId(7)), &[ThreadStatus::Idle], false);
+
+        // When validating a setting pick.
+        let result = validate_pick_setting(&state);
+
+        // Then it's allowed.
+        assert_eq!(result, Ok(()), "a card picks the group's defaults");
+    }
+
+    #[rstest::rstest]
+    fn pick_setting_on_a_group_card_is_refused_while_starting() {
+        // Given a started group's card selected while a start is in flight.
+        let state = grouped_at(SidebarItem::Group(GroupId(7)), &[ThreadStatus::Idle], true);
+
+        // When validating a setting pick.
+        let result = validate_pick_setting(&state);
+
+        // Then validation fails with Starting.
+        assert_eq!(
+            result,
+            Err(PickSettingError::Starting),
+            "the defaults can't change while a start may be reading them"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pick_setting_is_refused_on_a_grouped_thread() {
+        // Given a thread of a group selected.
+        let state = grouped_at(
+            SidebarItem::Thread(ThreadId(1)),
+            &[ThreadStatus::Idle],
+            false,
+        );
+
+        // When validating a setting pick.
+        let result = validate_pick_setting(&state);
+
+        // Then validation fails with NoDraft.
+        assert_eq!(
+            result,
+            Err(PickSettingError::NoDraft),
+            "a running thread's settings don't change"
+        );
+    }
+
     /// One project holding Feature group 7, whose threads have `statuses`,
     /// newest first (thread ids count down to 1), with the cursor on `cursor`
     /// and a start in flight if `starting`.
@@ -959,7 +1010,8 @@ mod tests {
                         pinned_at: None,
                         settled_at: None,
                         active_since: SystemTime::UNIX_EPOCH,
-                        draft: None,
+                        draft: false,
+                        defaults: GroupDefaults::default(),
                     }],
                     kind: ProjectKind::Normal,
                 }],

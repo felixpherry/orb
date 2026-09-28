@@ -7,8 +7,9 @@
 //! bound there (`␣m`/`␣a` on a thread, `p`/`s` off a lone thread or a
 //! group's card, `r` off a thread, `␣w`/`␣b`
 //! and the tool keys `␣t`/`␣gg`/`␣v` with nothing selected, and the
-//! dashboard's `m`/`a` off a draft and `o`/`w`/`b`/`t`/`g`/`v` with nothing
-//! selected), so the popups don't offer it. On the dashboard each menu item's
+//! dashboard's `m`/`a` off a draft or a group's card and
+//! `o`/`w`/`b`/`t`/`g`/`v` with nothing selected), so the popups don't offer
+//! it. On the dashboard each menu item's
 //! letter runs it, `j`/`k` or `↓`/`↑` move the menu cursor, and `⏎` runs the
 //! highlighted item. `<C-Right>`/`<C-Left>` resize the focused side
 //! outside which-key, which can't name them. In the sidebar, `<C-\>` detaches
@@ -20,8 +21,9 @@
 //! card, draft or threads, `l`/`h` open and close the group. `␣w` isn't bound
 //! on them, and `␣b` (the dashboard's `b` too) only on the card of a Feature
 //! group whose worktree exists, where it switches that worktree's branch.
-//! `n` on a group's card or thread starts a sibling; `d` on a card deletes
-//! the group.
+//! `␣m`/`␣a` on a card pick the group's default model and permission (its
+//! draft's and each sibling's). `n` on a group's card or thread starts a
+//! sibling; `d` on a card deletes the group.
 //! `␣gf`/`␣gr`/`␣gl` add a Feature, Research or Learn group in every scope.
 
 use std::fmt;
@@ -354,10 +356,13 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             ],
         ),
         (Scope::DashboardEmpty, &[]),
-        (Scope::DashboardGroup, &[Shell, Lazygit, Neovim]),
+        (
+            Scope::DashboardGroup,
+            &[Model, Permission, Shell, Lazygit, Neovim],
+        ),
         (
             Scope::DashboardWorktreeGroup,
-            &[Branch, Shell, Lazygit, Neovim],
+            &[Branch, Model, Permission, Shell, Lazygit, Neovim],
         ),
         (Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim]),
         (
@@ -467,6 +472,10 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         Scope::DashboardDraft,
         Scope::SidebarGroupDraft,
         Scope::DashboardGroupDraft,
+        Scope::SidebarGroup,
+        Scope::SidebarWorktreeGroup,
+        Scope::DashboardGroup,
+        Scope::DashboardWorktreeGroup,
     ] {
         keymap
             .bind("<leader>m", Intent::PickModel, KeyCategory::Sessions, scope)
@@ -569,7 +578,7 @@ mod tests {
     use std::time::SystemTime;
 
     use orb_domain::feat::sessions::state::{
-        Group, GroupDraft, GroupId, GroupKind, Project, ProjectId, ProjectKind, Sessions,
+        Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId, ProjectKind, Sessions,
         SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::zellij::zellij_service::Tool;
@@ -678,6 +687,10 @@ mod tests {
     #[case(Scope::SidebarDraft, 'b', Intent::SwitchBranch)]
     #[case(Scope::SidebarDraft, 'm', Intent::PickModel)]
     #[case(Scope::SidebarDraft, 'a', Intent::PickPermission)]
+    #[case(Scope::SidebarGroup, 'm', Intent::PickModel)]
+    #[case(Scope::SidebarGroup, 'a', Intent::PickPermission)]
+    #[case(Scope::SidebarWorktreeGroup, 'm', Intent::PickModel)]
+    #[case(Scope::SidebarWorktreeGroup, 'a', Intent::PickPermission)]
     fn leader_keys_open_the_session_setup_pickers(
         #[case] scope: Scope,
         #[case] pressed: char,
@@ -823,8 +836,11 @@ mod tests {
         Scope::DashboardDraft,
         &[Start, Workspace, Branch, Model, Permission, Shell, Lazygit, Neovim]
     )]
-    #[case::group(Scope::DashboardGroup, &[Shell, Lazygit, Neovim])]
-    #[case::worktree_group(Scope::DashboardWorktreeGroup, &[Branch, Shell, Lazygit, Neovim])]
+    #[case::group(Scope::DashboardGroup, &[Model, Permission, Shell, Lazygit, Neovim])]
+    #[case::worktree_group(
+        Scope::DashboardWorktreeGroup,
+        &[Branch, Model, Permission, Shell, Lazygit, Neovim]
+    )]
     #[case::group_thread(Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim])]
     #[case::group_draft(
         Scope::DashboardGroupDraft,
@@ -847,7 +863,9 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Scope::DashboardDraft, Some(Intent::PickModel))]
+    #[case(Scope::DashboardGroup, Some(Intent::PickModel))]
     #[case(Scope::Dashboard, None)]
+    #[case(Scope::DashboardGroupThread, None)]
     fn m_picks_the_model_only_on_a_drafts_dashboard(
         #[case] scope: Scope,
         #[case] expected: Option<Intent>,
@@ -1107,10 +1125,11 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            draft: draft.then_some(GroupDraft {
+            draft,
+            defaults: GroupDefaults {
                 model: None,
                 permission: None,
-            }),
+            },
         }
     }
 
@@ -1507,15 +1526,15 @@ mod tests {
     #[case(Scope::Sidebar, "befgnptvw")]
     #[case(Scope::SidebarDraft, "abefgmnptvw")]
     #[case(Scope::SidebarEmpty, "efgnp")]
-    #[case(Scope::SidebarGroup, "efgnptv")]
-    #[case(Scope::SidebarWorktreeGroup, "befgnptv")]
+    #[case(Scope::SidebarGroup, "aefgmnptv")]
+    #[case(Scope::SidebarWorktreeGroup, "abefgmnptv")]
     #[case(Scope::SidebarGroupThread, "efgnptv")]
     #[case(Scope::SidebarGroupDraft, "aefgmnptv")]
     #[case(Scope::Dashboard, "begnptvw")]
     #[case(Scope::DashboardDraft, "abegmnptvw")]
     #[case(Scope::DashboardEmpty, "egnp")]
-    #[case(Scope::DashboardGroup, "egnptv")]
-    #[case(Scope::DashboardWorktreeGroup, "begnptv")]
+    #[case(Scope::DashboardGroup, "aegmnptv")]
+    #[case(Scope::DashboardWorktreeGroup, "abegmnptv")]
     #[case(Scope::DashboardGroupThread, "egnptv")]
     #[case(Scope::DashboardGroupDraft, "aegmnptv")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {

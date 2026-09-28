@@ -143,8 +143,8 @@ mod tests {
     };
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupId, GroupKind, Project, ProjectId, ProjectKind,
-        Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
+        ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
     /// One project at `/work` whose only thread, selected, runs in the root
@@ -489,7 +489,8 @@ mod tests {
                 pinned_at: None,
                 settled_at: None,
                 active_since: SystemTime::UNIX_EPOCH,
-                draft: None,
+                draft: false,
+                defaults: GroupDefaults::default(),
             }];
         }
         state.sessions.cursor = Some(SidebarItem::Group(GroupId(9)));

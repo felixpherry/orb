@@ -4,7 +4,8 @@
 //! a draft, change its workspace, branch and (for a draft) model and
 //! permission, open a tool in its directory, and the always-available new
 //! session, add project, filter projects and quit. On a group's rows, the
-//! menu has no workspace or branch: the group owns its directory. Each item
+//! menu has no workspace or branch: the group owns its directory. A group's
+//! card and draft pick the group's default model and permission. Each item
 //! has a single key that runs it; a cursor moves over the items and `⏎` runs
 //! the highlighted one. The cursor goes back to the first item whenever the
 //! selection changes.
@@ -97,9 +98,9 @@ pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
         (None, None, Some((_, group)))
             if group.kind == GroupKind::Feature && group.dir.is_some() =>
         {
-            (&[Branch], true)
+            (&[Branch, Model, Permission], true)
         }
-        (None, None, Some(_)) => (&[], true),
+        (None, None, Some(_)) => (&[Model, Permission], true),
         (None, None, None) => (&[], false),
     };
     let tools: &[DashboardItem] = if tools {
@@ -125,7 +126,7 @@ pub(crate) mod tests {
     };
     use super::items;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
         ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
@@ -195,10 +196,11 @@ pub(crate) mod tests {
                 pinned_at: None,
                 settled_at: None,
                 active_since: SystemTime::UNIX_EPOCH,
-                draft: draft.then_some(GroupDraft {
+                draft,
+                defaults: GroupDefaults {
                     model: None,
                     permission: None,
-                }),
+                },
             }];
         }
         sessions
@@ -274,11 +276,14 @@ pub(crate) mod tests {
         // When listing the dashboard's items.
         let items = items(&sessions);
 
-        // Then Branch leads the general items and the tools.
+        // Then Branch, Model and Permission lead the general items and the
+        // tools.
         assert_eq!(
             items,
             [
                 Branch,
+                Model,
+                Permission,
                 NewSession,
                 AddProject,
                 FilterProjects,
@@ -292,17 +297,20 @@ pub(crate) mod tests {
     }
 
     #[rstest::rstest]
-    fn group_card_lists_the_general_items_and_tools() {
+    fn group_card_lists_its_defaults_the_general_items_and_tools() {
         // Given a selected card of a group with no worktree yet.
         let sessions = grouped(SidebarItem::Group(GroupId(9)), false);
 
         // When listing the dashboard's items.
         let items = items(&sessions);
 
-        // Then the general items, the tools and Quit are listed.
+        // Then Model and Permission, the general items, the tools and Quit
+        // are listed.
         assert_eq!(
             items,
             [
+                Model,
+                Permission,
                 NewSession,
                 AddProject,
                 FilterProjects,

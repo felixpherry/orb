@@ -31,7 +31,10 @@
 //!
 //! When Claude refuses to start in a directory it hasn't been trusted in, the
 //! start waits: the actor asks the frontend for an interactive `claude` there,
-//! and tries the start once more when asked. A second refusal fails the start.
+//! tries the start again on every poll (each second while it waits), so it
+//! goes ahead as soon as the user trusts the directory, and once more when
+//! asked, when the user leaves that `claude`. A refusal on that last try
+//! fails the start.
 //!
 //! It keeps each thread's place in the sidebar: pinning, settling onto the
 //! Settled shelf (which stops the session), un-settling, and deleting. A turn
@@ -46,16 +49,19 @@
 //! orb's own project for its kind, added when first needed, in a new folder
 //! copied from the user's template for the kind; orb writes that template
 //! from its built-in default when it's missing, and never overwrites a
-//! folder that already exists. A new group's draft takes the project's
-//! last-used model and permission, and is selected, and saves them as the
-//! user edits them. Starting it starts the group's first thread: a Feature
-//! group in a new worktree on the branch named after it, which becomes the
-//! group's directory, and a Research or Learn group in its folder. `n`
-//! starts a sibling at the top of a group, in its directory. A group is
-//! pinned, settled and deleted as a whole: pinning a settled group un-settles
-//! it, settling it stops its idle sessions, and deleting it deletes each
-//! thread, then the group and its directory: a Research or Learn folder, or a
-//! Feature worktree (forced) and its branch unless that isn't merged. A group
+//! folder that already exists. A new group's default model and permission
+//! are the project's last-used ones; the group's draft is selected, and the
+//! defaults are saved as the user edits them on the draft or the card.
+//! Starting the draft starts the group's first thread: a Feature group in a
+//! new worktree on the branch named after it, which becomes the group's
+//! directory, and a Research or Learn group in its folder. `n` starts a
+//! sibling at the top of a group, in its directory, with the group's
+//! defaults. A group is pinned, settled and deleted as a whole: pinning a
+//! settled group un-settles it, settling it stops its idle sessions, and
+//! deleting it deletes each thread, then the group and its directory: a
+//! Research or Learn folder, or a Feature worktree (forced) and its branch.
+//! A Feature group whose branch orb would delete isn't merged is kept whole,
+//! with the reason. A group
 //! auto-settles when no thread has had turn activity for three days, unless
 //! it is pinned, was just un-settled, or orb is attached to one of its
 //! threads; a turn in any of its threads un-settles it.
@@ -88,8 +94,9 @@ use super::session_host::{
     SessionHostError, SessionHostService, SessionOptions, SessionRecord, WorkspaceUntrusted,
 };
 use super::state::{
-    Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, NEW_THREAD, Notice, NoticeKind,
-    Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+    Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, NEW_THREAD, Notice,
+    NoticeKind, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId,
+    ThreadStatus,
 };
 use super::store::{
     DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store,
@@ -300,7 +307,7 @@ pub struct CreateGroup {
 #[derive(Debug)]
 pub struct StartGroupDraft(pub GroupId);
 
-/// Save group `.0`'s draft settings as the app state has them.
+/// Save group `.0`'s default model and permission as the app state has them.
 #[derive(Debug)]
 pub struct SaveGroupDraft(pub GroupId);
 
@@ -704,7 +711,7 @@ impl Message<SaveGroupDraft> for SessionsActor {
         SaveGroupDraft(id): SaveGroupDraft,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.save_group_draft(id);
+        self.save_group_defaults(id);
     }
 }
 
@@ -870,14 +877,19 @@ impl SessionsActor {
         }
     }
 
-    /// Asks the host what every session is doing and shows it. Returns how
-    /// long to wait before the next poll.
+    /// Asks the host what every session is doing and shows it, then tries a
+    /// start waiting for trust again. Returns how long to wait before the
+    /// next poll: a second while a turn is underway, orb is attached, or a
+    /// start waits for trust.
     async fn poll(&mut self) -> Duration {
         if let Err(report) = self.sync().await {
             self.fail(&report);
         }
+        if let Some(pending) = self.pending.take() {
+            self.start(pending, true).await;
+        }
         let app = self.state.read();
-        if app.sessions.any_in_progress() || !app.attached.is_empty() {
+        if app.sessions.any_in_progress() || !app.attached.is_empty() || self.pending.is_some() {
             FAST_POLL
         } else {
             SLOW_POLL
@@ -1105,29 +1117,22 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Saves group `id`'s draft model and permission as the app state has them.
-    fn save_group_draft(&mut self, id: GroupId) {
-        let draft = self
+    /// Saves group `id`'s default model and permission as the app state has
+    /// them, on its kept row, so nothing else of the group changes.
+    fn save_group_defaults(&mut self, id: GroupId) {
+        let defaults = self
             .state
             .read()
             .sessions
-            .projects
-            .iter()
-            .flat_map(|project| &project.groups)
-            .find(|group| group.id == id)
-            .and_then(|group| group.draft.clone());
-        let Some(draft) = draft else {
+            .group(id)
+            .map(|(_, group)| group.defaults.clone());
+        let Some(defaults) = defaults else {
             return;
         };
-        let Some(row) = self.groups.iter_mut().find(|row| row.id == id) else {
-            return;
-        };
-        row.draft_model = draft.model;
-        row.draft_permission_mode = draft.permission;
-        if self.store.save_group(row).is_err() {
-            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
-            (self.wake)();
-        }
+        self.edit_group(id, |row, _now| {
+            row.draft_model = defaults.model;
+            row.draft_permission_mode = defaults.permission;
+        });
     }
 
     /// Checks `git_ref` out in `cwd` for project `id`'s draft. A checkout in
@@ -1266,8 +1271,10 @@ impl SessionsActor {
 
     /// Starts a session for `pending` and finishes what it was for. If Claude
     /// hasn't been trusted in its directory and `allow_trust`, the start waits
-    /// for the user to trust it. If it fails, the reason shows and a worktree
-    /// made for it is removed.
+    /// for the user to trust it (asking the frontend once). Otherwise the
+    /// trust request ends first, so the frontend closes its trust pane before
+    /// the thread shows. If it fails, the reason shows and a worktree made
+    /// for it is removed.
     async fn start(&mut self, pending: PendingStart, allow_trust: bool) {
         let created = self
             .services
@@ -1278,10 +1285,18 @@ impl SessionsActor {
             && allow_trust
             && report.contains::<WorkspaceUntrusted>()
         {
-            self.state.write().sessions.trust = Some(pending.cwd.clone());
+            let asked = {
+                let mut app = self.state.write();
+                app.sessions.trust.replace(pending.cwd.clone()).as_ref() == Some(&pending.cwd)
+            };
             self.pending = Some(pending);
-            return (self.wake)();
+            if !asked {
+                (self.wake)();
+            }
+            return;
         }
+        // The frontend closes its trust pane before the thread shows.
+        self.state.write().sessions.trust = None;
         let PendingStart {
             kind,
             cwd,
@@ -1399,21 +1414,21 @@ impl SessionsActor {
             .iter()
             .find_map(|project| {
                 let group = project.groups.iter().find(|group| group.id == id)?;
-                let draft = group.draft.clone()?;
-                Some((
-                    project.id,
-                    project.root.clone(),
-                    project.title.clone(),
-                    group.clone(),
-                    draft,
-                ))
+                group.draft.then(|| {
+                    (
+                        project.id,
+                        project.root.clone(),
+                        project.title.clone(),
+                        group.clone(),
+                    )
+                })
             });
-        let Some((project, root, title, group, draft)) = found else {
+        let Some((project, root, title, group)) = found else {
             return self.end_start(Err("the draft is gone".to_owned()));
         };
         let options = SessionOptions {
-            model: draft.model,
-            permission_mode: draft.permission,
+            model: group.defaults.model,
+            permission_mode: group.defaults.permission,
         };
         let (cwd, branch, made) = match (group.kind, group.dir) {
             (GroupKind::Feature, _) => {
@@ -1524,7 +1539,7 @@ impl SessionsActor {
                 .ok_or_else(|| NEW_SESSION_UNSAVED.to_owned())?;
             if let Some(group) = project.groups.iter_mut().find(|group| group.id == group_id) {
                 group.dir.get_or_insert_with(|| cwd.to_owned());
-                group.draft = None;
+                group.draft = false;
             }
             let id = thread.id;
             project.threads.insert(0, thread);
@@ -2248,7 +2263,11 @@ impl SessionsActor {
     /// is left, the group. A thread whose session couldn't be removed stays
     /// in the group, shown again with the reason, and so does the group.
     /// Then its directory goes too (see `clear_group_dir`); if that fails,
-    /// the group is still deleted and the reason shows.
+    /// the group is still deleted and the reason shows. A Feature group whose
+    /// slug branch the delete would remove isn't merged is refused first,
+    /// with the reason, and nothing changes. Otherwise its threads are hidden
+    /// and detached at once, and a cursor on the group moves to the
+    /// neighbouring row (a thread there counts as visited).
     async fn delete_group(&mut self, id: GroupId) {
         let threads: Vec<ThreadId> = self
             .rows
@@ -2256,6 +2275,28 @@ impl SessionsActor {
             .filter(|row| row.group_id == Some(id))
             .map(|row| row.id)
             .collect();
+        if let Some(slug) = self.unmerged_slug(id) {
+            self.state.write().sessions.error = Some(unmerged(&slug));
+            return (self.wake)();
+        }
+        let neighbour = {
+            let mut app = self.state.write();
+            let app = &mut *app;
+            let sessions = &mut app.sessions;
+            let on_group = sessions.selected_group().map(|(_, group)| group.id) == Some(id);
+            if on_group {
+                sessions.cursor = sessions.row_neighbour(SidebarItem::Group(id));
+            }
+            for thread in &threads {
+                sessions.deleting.insert(*thread);
+                app.attached.remove(thread);
+            }
+            on_group.then(|| sessions.selected_id()).flatten()
+        };
+        (self.wake)();
+        if let Some(neighbour) = neighbour {
+            self.visit(neighbour);
+        }
         for thread in threads {
             self.delete(thread).await;
         }
@@ -2311,18 +2352,16 @@ impl SessionsActor {
     }
 
     /// Force-removes Feature group `row`'s orb worktree at `dir`, then
-    /// safe-deletes the branch orb made for it, named after the group (an
-    /// unmerged one stays, with git's reason). A branch the group was
+    /// safe-deletes the branch orb made for it, named after the group (one
+    /// git still refuses, which `delete_group` checked for first, stays with
+    /// git's reason). A branch the group was
     /// switched to is the user's and stays. Neither is touched while a
     /// thread outside the group works there.
     fn remove_group_worktree(&self, row: &GroupRow, dir: &Path) -> Result<(), String> {
-        let Some(root) = self
-            .project_root(row.project_id)
-            .filter(|_| is_orb_worktree(&self.worktrees_root, dir))
-        else {
+        let Some(root) = self.worktree_root(row, dir) else {
             return Ok(());
         };
-        if self.rows.iter().any(|thread| thread.cwd == dir) {
+        if self.shares_worktree(row, dir) {
             return Err(WORKTREE_IN_USE.to_owned());
         }
         let git = &self.services.git;
@@ -2334,6 +2373,37 @@ impl SessionsActor {
                 .map_err(|report| git_reason(&report))?;
         }
         Ok(())
+    }
+
+    /// The project root of Feature group `row`'s worktree `dir`, when `dir` is
+    /// an orb worktree of a known project: the only worktree a group delete
+    /// removes.
+    fn worktree_root(&self, row: &GroupRow, dir: &Path) -> Option<PathBuf> {
+        self.project_root(row.project_id)
+            .filter(|_| is_orb_worktree(&self.worktrees_root, dir))
+    }
+
+    /// Whether a thread outside group `row` works in `dir`.
+    fn shares_worktree(&self, row: &GroupRow, dir: &Path) -> bool {
+        self.rows
+            .iter()
+            .any(|thread| thread.cwd == dir && thread.group_id != Some(row.id))
+    }
+
+    /// Group `id`'s slug branch, if deleting the group would delete it (see
+    /// `remove_group_worktree`) and git doesn't call it merged.
+    fn unmerged_slug(&self, id: GroupId) -> Option<String> {
+        let row = self.groups.iter().find(|row| row.id == id)?;
+        let dir = row
+            .dir
+            .as_deref()
+            .filter(|_| row.kind == GroupKind::Feature)?;
+        let root = self.worktree_root(row, dir)?;
+        let git = &self.services.git;
+        let unmerged = !self.shares_worktree(row, dir)
+            && git.branch_exists(&root, &row.name)
+            && !git.is_merged(&root, &row.name);
+        unmerged.then(|| row.name.clone())
     }
 
     /// Saves the sidebar's width and project filter, showing why if it can't.
@@ -2780,12 +2850,11 @@ fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
             .filter(|_| row.settled_override == Some(SettledOverride::Settled))
             .map(from_ms),
         active_since: from_ms(row.created_at.max(row.unsettled_at.unwrap_or(0))),
-        draft: (!threads.iter().any(|thread| thread.group_id == Some(row.id))).then(|| {
-            GroupDraft {
-                model: row.draft_model.clone(),
-                permission: row.draft_permission_mode.clone(),
-            }
-        }),
+        defaults: GroupDefaults {
+            model: row.draft_model.clone(),
+            permission: row.draft_permission_mode.clone(),
+        },
+        draft: !threads.iter().any(|thread| thread.group_id == Some(row.id)),
     }
 }
 
@@ -2945,6 +3014,12 @@ fn project_title(root: &Path) -> String {
     )
 }
 
+/// The error shown when a Feature group isn't deleted because its slug
+/// branch has commits git doesn't call merged.
+fn unmerged(slug: &str) -> String {
+    format!("branch {slug} has unmerged commits")
+}
+
 /// Milliseconds since the Unix epoch, now.
 fn now_ms() -> i64 {
     to_ms(SystemTime::now())
@@ -2982,7 +3057,7 @@ mod tests {
     use crate::Focus;
     use crate::TextInput;
     use crate::command::Workspace;
-    use crate::common::{Services, State};
+    use crate::common::{Services, State, Wake};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService};
     use crate::feat::git::validator::BUSY_DIRECTORY;
     use crate::feat::git::worktree::hex_branch;
@@ -2991,7 +3066,7 @@ mod tests {
         SessionRecord, WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Notice, NoticeKind,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Notice, NoticeKind,
         ProjectId, ProjectKind, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::store::{
@@ -3222,7 +3297,8 @@ mod tests {
         init: Result<(), String>,
         /// The branches origin had at the last fetch.
         remote: Vec<String>,
-        /// Whether `delete_branch` without force finds the branch merged.
+        /// Whether `is_merged` and `delete_branch` without force find the
+        /// branch merged.
         merged: bool,
         calls: Mutex<Vec<GitCall>>,
     }
@@ -3414,6 +3490,10 @@ mod tests {
 
         fn branch_exists(&self, _repo: &Path, branch: &str) -> bool {
             self.existing.as_deref() == Some(branch)
+        }
+
+        fn is_merged(&self, _repo: &Path, _branch: &str) -> bool {
+            self.merged
         }
 
         fn has_remote_branch(&self, _repo: &Path, branch: &str) -> bool {
@@ -6217,19 +6297,27 @@ mod tests {
         );
 
         // Then the group shows a draft with its saved settings.
-        let drafts: Vec<Option<GroupDraft>> = state
+        let drafts: Vec<(bool, GroupDefaults)> = state
             .read()
             .sessions
             .projects
             .iter()
-            .flat_map(|project| project.groups.iter().map(|group| group.draft.clone()))
+            .flat_map(|project| {
+                project
+                    .groups
+                    .iter()
+                    .map(|group| (group.draft, group.defaults.clone()))
+            })
             .collect();
         assert_eq!(
             drafts,
-            vec![Some(GroupDraft {
-                model: Some("opus".to_owned()),
-                permission: None,
-            })],
+            vec![(
+                true,
+                GroupDefaults {
+                    model: Some("opus".to_owned()),
+                    permission: None,
+                }
+            )],
             "a group without threads should be restored with its draft"
         );
         Ok(())
@@ -7500,6 +7588,85 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn poll_starts_a_draft_waiting_for_trust_once_trusted() -> Result<(), Report<StoreError>>
+    {
+        // Given a draft start waiting for its root to be trusted, which the
+        // user has just trusted.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.start_draft(project).await;
+
+        // When the next poll runs, with the trust pane still open.
+        actor.poll().await;
+
+        // Then the new thread shows.
+        assert_eq!(
+            state.read().sessions.threads().count(),
+            1,
+            "a start should go ahead as soon as the directory is trusted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn trusted_start_on_a_poll_ends_the_trust_request() -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust, now trusted.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.start_draft(project).await;
+
+        // When the next poll starts it.
+        actor.poll().await;
+
+        // Then no trust is asked for any more, so the trust pane closes.
+        assert_eq!(trust_of(&state), None, "the trust pane should give way");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn poll_keeps_a_start_waiting_while_still_untrusted() -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust, still untrusted.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::untrusted(2, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.start_draft(project).await;
+
+        // When the next poll runs.
+        actor.poll().await;
+
+        // Then the start still waits on the root, with no error.
+        assert_eq!(
+            (trust_of(&state), error_of(&state)),
+            (Some(PathBuf::from(PROJECT_ROOT)), None),
+            "an untrusted retry should keep waiting quietly"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn poll_waits_one_second_while_a_start_waits_for_trust() -> Result<(), Report<StoreError>>
+    {
+        // Given a draft start waiting for trust, still untrusted.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::untrusted(2, Ok("bb"));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.start_draft(project).await;
+
+        // When polling.
+        let next = actor.poll().await;
+
+        // Then the next poll comes in a second.
+        assert_eq!(next, FAST_POLL, "trust should be noticed within a second");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn retry_refused_again_shows_the_error() -> Result<(), Report<StoreError>> {
         // Given a draft start waiting for trust, and the directory still untrusted.
         let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
@@ -8386,8 +8553,6 @@ mod tests {
     }
 
     const SLUG_BRANCH: &str = "GT-514-login";
-    /// git's reason for refusing to safe-delete [`SLUG_BRANCH`].
-    const UNMERGED: &str = "error: the branch 'GT-514-login' is not fully merged";
 
     /// A store whose orb project has a `kind` group `GT-514-login` with a
     /// draft on opus in auto mode, in `dir` when given, and the actor started
@@ -8506,10 +8671,10 @@ mod tests {
             .threads()
             .map(|thread| thread.group)
             .collect();
-        let draft = shown_group(&state, id).and_then(|group| group.draft);
+        let draft = shown_group(&state, id).map(|group| group.draft);
         assert_eq!(
             (grouped, draft),
-            (vec![Some(id)], None),
+            (vec![Some(id)], Some(false)),
             "the group's first thread should replace its draft"
         );
         Ok(())
@@ -8533,6 +8698,37 @@ mod tests {
             (sessions.cursor, sessions.attach),
             (thread.map(SidebarItem::Thread), thread),
             "the started thread should be selected and attached"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn trusted_group_draft_start_on_a_poll_selects_and_attaches_the_thread()
+    -> Result<(), Report<StoreError>> {
+        // Given a selected Research group draft whose start waits for its
+        // folder to be trusted, which the user has just trusted in the trust
+        // pane.
+        let folder = tempfile::tempdir().change_context(StoreError)?;
+        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
+        let (id, mut actor, state) = group_draft(
+            GroupKind::Research,
+            Some(folder.path().to_owned()),
+            &host,
+            &git,
+        )?;
+        actor.start_group_draft(id).await;
+
+        // When the next poll runs.
+        actor.poll().await;
+
+        // Then its thread is selected and to be attached.
+        let sessions = &state.read().sessions;
+        let thread = sessions.threads().next().map(|thread| thread.id);
+        assert_eq!(
+            (sessions.cursor, sessions.attach),
+            (thread.map(SidebarItem::Thread), thread),
+            "the trusted start's thread should replace the draft and attach"
         );
         Ok(())
     }
@@ -8601,7 +8797,7 @@ mod tests {
         assert_eq!(
             (
                 error_of(&state),
-                shown_group(&state, id).is_some_and(|group| group.draft.is_some())
+                shown_group(&state, id).is_some_and(|group| group.draft)
             ),
             (
                 Some("branch GT-514-login already exists in orb".to_owned()),
@@ -8629,7 +8825,7 @@ mod tests {
         });
         assert_eq!(
             (
-                shown_group(&state, id).is_some_and(|group| group.draft.is_some()),
+                shown_group(&state, id).is_some_and(|group| group.draft),
                 removed
             ),
             (true, true),
@@ -8657,16 +8853,76 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[tokio::test]
+    async fn saving_a_started_groups_defaults_keeps_the_rest_of_its_row()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group, switched to `main`, whose defaults
+        // were changed on its card to sonnet in plan mode.
+        let (group, mut actor, state) = started_feature_group(&FakeGit::local()).await?;
+        actor.check_out_group(group, &git_ref("main", false));
+        if let Some(defaults) = state.write().sessions.group_defaults_mut(group) {
+            defaults.model = Some("sonnet".to_owned());
+            defaults.permission = Some("plan".to_owned());
+        }
+
+        // When saving them.
+        actor.save_group_defaults(group);
+
+        // Then the saved row has the defaults and still its directory and
+        // branch.
+        let row = saved_group(&actor.store, group)?;
+        assert_eq!(
+            (
+                row.draft_model.as_deref(),
+                row.draft_permission_mode.as_deref(),
+                row.dir.as_deref(),
+                row.branch.as_deref()
+            ),
+            (
+                Some("sonnet"),
+                Some("plan"),
+                Some(Path::new(HEX_WORKTREE)),
+                Some("main")
+            ),
+            "the card's defaults should save onto the group's kept row"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn saving_a_started_groups_defaults_leaves_its_threads_alone()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose thread aa runs Claude's default,
+        // and whose defaults were changed to sonnet.
+        let (group, mut actor, state) = started_feature_group(&FakeGit::local()).await?;
+        if let Some(defaults) = state.write().sessions.group_defaults_mut(group) {
+            defaults.model = Some("sonnet".to_owned());
+        }
+
+        // When saving them.
+        actor.save_group_defaults(group);
+
+        // Then thread aa keeps its saved model.
+        assert_eq!(
+            saved(&actor.store, "aa")?.model,
+            None,
+            "a running thread keeps its model"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn saving_a_group_draft_persists_its_model() -> Result<(), Report<StoreError>> {
         // Given a group draft whose model was changed to sonnet.
         let (host, git) = (FakeHost::listing(Vec::new()), FakeGit::local());
         let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-        if let Some(draft) = state.write().sessions.group_draft_mut(id) {
-            draft.model = Some("sonnet".to_owned());
+        if let Some(defaults) = state.write().sessions.group_defaults_mut(id) {
+            defaults.model = Some("sonnet".to_owned());
         }
 
         // When saving it.
-        actor.save_group_draft(id);
+        actor.save_group_defaults(id);
 
         // Then the store has sonnet for the group's draft.
         let saved: Vec<Option<String>> = actor
@@ -9782,41 +10038,282 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_feature_group_with_an_unmerged_branch_shows_why()
     -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose branch isn't merged.
+        // Given a started Feature group whose slug branch isn't merged.
         let git = FakeGit::unmerged(SLUG_BRANCH);
         let (group, mut actor, state) = started_feature_group(&git).await?;
 
         // When deleting it.
         actor.delete_group(group).await;
 
-        // Then git's reason is the error.
+        // Then the mode line says the branch has unmerged commits.
         assert_eq!(
             error_of(&state).as_deref(),
-            Some(UNMERGED),
-            "the mode line should say why the branch stayed"
+            Some("branch GT-514-login has unmerged commits"),
+            "the mode line should say why the group stays"
         );
         Ok(())
     }
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn deleting_a_feature_group_with_an_unmerged_branch_still_forgets_it()
+    async fn deleting_a_feature_group_with_an_unmerged_branch_keeps_it()
     -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose branch isn't merged.
+        // Given a started Feature group whose slug branch isn't merged.
         let git = FakeGit::unmerged(SLUG_BRANCH);
         let (group, mut actor, state) = started_feature_group(&git).await?;
 
         // When deleting it.
         actor.delete_group(group).await;
 
-        // Then it is neither saved nor shown.
+        // Then it is still saved and shown.
         assert_eq!(
             (
                 actor.store.load()?.3.iter().any(|row| row.id == group),
                 shown_group(&state, group).is_some()
             ),
-            (false, false),
-            "an unmerged branch never keeps the group"
+            (true, true),
+            "an unmerged slug branch refuses the whole delete"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_an_unmerged_branch_removes_no_session()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group, holding thread aa, whose slug branch
+        // isn't merged.
+        let git = FakeGit::unmerged(SLUG_BRANCH);
+        let (store, group, _) =
+            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then no session is removed and thread aa is still saved.
+        assert_eq!(
+            (host.removed(), saved(&actor.store, "aa").is_ok()),
+            (Vec::<String>::new(), true),
+            "the refusal comes before any thread is touched"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_an_unmerged_branch_touches_no_git()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose slug branch isn't merged.
+        let git = FakeGit::unmerged(SLUG_BRANCH);
+        let (group, mut actor, _state) = started_feature_group(&git).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then git removes no worktree and deletes no branch.
+        let touched = git.calls().iter().any(|call| {
+            matches!(
+                call,
+                GitCall::RemoveWorktree { .. } | GitCall::DeleteBranch { .. }
+            )
+        });
+        assert!(!touched, "the worktree and branch stay as they are");
+        Ok(())
+    }
+
+    /// [`started_feature_group`] with thread aa attached and the cursor on
+    /// the card, and whether any wake has seen a thread hidden as deleting.
+    async fn watched_feature_group(
+        git: &Arc<FakeGit>,
+    ) -> Result<(GroupId, SessionsActor, State, Arc<Mutex<bool>>), Report<StoreError>> {
+        let (store, group, threads) =
+            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let state = State::default();
+        let hidden = Arc::new(Mutex::new(false));
+        let wake: Wake = {
+            let (state, hidden) = (state.clone(), hidden.clone());
+            Arc::new(move || {
+                if !state.read().sessions.deleting.is_empty() {
+                    *hidden.lock().unwrap_or_else(PoisonError::into_inner) = true;
+                }
+            })
+        };
+        let mut actor = SessionsActor::restore(SessionsActorDeps {
+            services: Services {
+                session_host: SessionHostService::new(host),
+                git: GitService::new(git.clone()),
+            },
+            state: state.clone(),
+            store,
+            claude_dir: PathBuf::from(NO_CLAUDE_DIR),
+            worktrees_root: PathBuf::from(WORKTREES_ROOT),
+            orb_root: PathBuf::from(ORB_ROOT),
+            wake,
+        });
+        actor.poll().await;
+        {
+            let mut app = state.write();
+            app.attached.extend(threads);
+            app.sessions.cursor = Some(SidebarItem::Group(group));
+        }
+        Ok((group, actor, state, hidden))
+    }
+
+    fn seen(hidden: &Mutex<bool>) -> bool {
+        *hidden.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_an_unmerged_branch_never_hides_its_threads()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose slug branch isn't merged.
+        let (group, mut actor, _state, hidden) =
+            watched_feature_group(&FakeGit::unmerged(SLUG_BRANCH)).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then no redraw ever showed its thread hidden.
+        assert!(!seen(&hidden), "a refused delete should never flicker");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_an_unmerged_branch_keeps_it_attached()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose slug branch isn't merged, its
+        // thread attached.
+        let (group, mut actor, state, _hidden) =
+            watched_feature_group(&FakeGit::unmerged(SLUG_BRANCH)).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then its thread is still attached.
+        assert_eq!(
+            state.read().attached.len(),
+            1,
+            "a refused delete should leave the pane alone"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_group_hides_its_threads_while_they_are_removed()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose slug branch is merged.
+        let (group, mut actor, _state, hidden) =
+            watched_feature_group(&FakeGit::having(SLUG_BRANCH)).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then a redraw showed its thread hidden before it was removed.
+        assert!(
+            seen(&hidden),
+            "a delete that goes ahead hides the threads at once"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_group_detaches_its_threads() -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose thread is attached.
+        let (group, mut actor, state, _hidden) =
+            watched_feature_group(&FakeGit::having(SLUG_BRANCH)).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then nothing is attached.
+        assert!(
+            state.read().attached.is_empty(),
+            "a deleted group's threads should be detached"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_group_moves_the_cursor_off_it() -> Result<(), Report<StoreError>> {
+        // Given a started Feature group, the only row, with the cursor on its
+        // card.
+        let (group, mut actor, state, _hidden) =
+            watched_feature_group(&FakeGit::having(SLUG_BRANCH)).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then the cursor is on no row.
+        assert_eq!(
+            state.read().sessions.cursor,
+            None,
+            "the cursor should leave a deleted group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_whose_slug_branch_is_gone_needs_no_merge()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose slug branch is gone, in a repo
+        // where only an unmerged `main` exists.
+        let git = FakeGit::unmerged("main");
+        let (group, mut actor, state) = started_feature_group(&git).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then the group goes: there's no branch to check.
+        assert!(
+            shown_group(&state, group).is_none(),
+            "a missing slug branch needs no merge check"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_whose_worktree_is_shared_needs_no_merge()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group with an unmerged slug branch, in an
+        // orb worktree where lone thread cc also works.
+        let git = FakeGit::unmerged(SLUG_BRANCH);
+        let (store, group, _) =
+            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
+        let project = orb_project(&store)?;
+        store.insert_thread(&NewThread {
+            project_id: project,
+            short_id: "cc".to_owned(),
+            cwd: HEX_WORKTREE.into(),
+            created_at: now_ms() - HOUR_MS,
+            model: None,
+            permission_mode: None,
+            group_id: None,
+        })?;
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("cc", ThreadStatus::Idle),
+        ]);
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then the group goes: the worktree and branch it keeps aren't deleted.
+        assert!(
+            shown_group(&state, group).is_none(),
+            "a kept branch needs no merge check"
         );
         Ok(())
     }

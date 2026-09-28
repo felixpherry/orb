@@ -44,7 +44,8 @@ pub struct AppState {
     /// The threads orb holds a live Claude pane for: added on attach, removed by
     /// `<C-\>`, settling, deleting, the pane's exit and a failed spawn. The
     /// right-hand area shows the selected thread's pane while it's in here.
-    /// Written by the intent handler and the frontend.
+    /// Written by the intent handler, the frontend, and the sessions actor
+    /// (which detaches a group it goes ahead deleting).
     pub attached: HashSet<ThreadId>,
     /// The open picker, if any.
     pub picker: Option<PickerState>,

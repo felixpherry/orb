@@ -16,8 +16,8 @@ use crate::feat::picker::validator::{
     validate_add_directory, validate_open_directory, validate_pick_project, validate_remove_project,
 };
 use crate::feat::sessions::state::{
-    AttachTarget, Draft, DraftWorkspace, GroupId, GroupKind, Project, ProjectId, ProjectKind,
-    Search, SidebarItem, ThreadId, group_slug,
+    AttachTarget, Draft, DraftWorkspace, Group, GroupId, GroupKind, Project, ProjectId,
+    ProjectKind, Search, Sessions, SidebarItem, ThreadId, group_slug,
 };
 use crate::feat::sessions::validator::{
     DeleteError, LAST_IN_GROUP, NewGroupError, NewSiblingError, SETTLE_IN_PROGRESS,
@@ -193,13 +193,6 @@ impl IntentHandler {
             Intent::FilterProjects => {
                 let items = std::iter::once(PickerItem::AllProjects)
                     .chain(
-                        state
-                            .sessions
-                            .projects_by_recency()
-                            .into_iter()
-                            .map(project_item),
-                    )
-                    .chain(
                         [ProjectKind::Research, ProjectKind::Learn]
                             .into_iter()
                             .filter_map(|kind| {
@@ -209,6 +202,13 @@ impl IntentHandler {
                                     .iter()
                                     .find(|project| project.kind == kind && !project.removed)
                             })
+                            .map(project_item),
+                    )
+                    .chain(
+                        state
+                            .sessions
+                            .projects_by_recency()
+                            .into_iter()
                             .map(project_item),
                     )
                     .collect();
@@ -413,43 +413,22 @@ impl IntentHandler {
                 _ => vec![],
             },
             Intent::PickModel => {
-                let sessions = &state.sessions;
-                let picker = match (
-                    validate_pick_setting(state),
-                    sessions.selected_draft(),
-                    sessions.selected_group_draft(),
-                ) {
-                    (Ok(()), Some((project, draft)), _) => {
-                        Some((DraftTarget::Project(project.id), draft.model.as_deref()))
-                    }
-                    (Ok(()), None, Some((_, group, draft))) => {
-                        Some((DraftTarget::Group(group.id), draft.model.as_deref()))
-                    }
-                    _ => None,
-                }
-                .map(|(target, current)| PickerState::models(target, current, state.focus));
+                let picker = validate_pick_setting(state)
+                    .ok()
+                    .and_then(|()| setting_target(&state.sessions))
+                    .map(|(target, model, _)| PickerState::models(target, model, state.focus));
                 if let Some(picker) = picker {
                     open_picker(state, picker);
                 }
                 vec![]
             }
             Intent::PickPermission => {
-                let sessions = &state.sessions;
-                let picker = match (
-                    validate_pick_setting(state),
-                    sessions.selected_draft(),
-                    sessions.selected_group_draft(),
-                ) {
-                    (Ok(()), Some((project, draft)), _) => Some((
-                        DraftTarget::Project(project.id),
-                        draft.permission.as_deref(),
-                    )),
-                    (Ok(()), None, Some((_, group, draft))) => {
-                        Some((DraftTarget::Group(group.id), draft.permission.as_deref()))
-                    }
-                    _ => None,
-                }
-                .map(|(target, current)| PickerState::permissions(target, current, state.focus));
+                let picker = validate_pick_setting(state)
+                    .ok()
+                    .and_then(|()| setting_target(&state.sessions))
+                    .map(|(target, _, permission)| {
+                        PickerState::permissions(target, permission, state.focus)
+                    });
                 if let Some(picker) = picker {
                     open_picker(state, picker);
                 }
@@ -537,7 +516,10 @@ impl IntentHandler {
                         Some(PickerItem::Confirm(true))
                             if still_deletable(state, SidebarItem::Group(group)) =>
                         {
-                            delete_group(state, group)
+                            // Nothing is hidden yet: the sessions actor may
+                            // refuse (an unmerged Feature branch), so it hides,
+                            // detaches and moves the cursor once it goes ahead.
+                            vec![Command::DeleteGroup(group)]
                         }
                         _ => vec![],
                     }
@@ -671,9 +653,13 @@ impl IntentHandler {
                 (Ok(()), Some(group)) => {
                     let (model, permission_mode) = state
                         .sessions
-                        .selected_thread()
-                        .or_else(|| state.sessions.group_threads(group).next())
-                        .map(|thread| (thread.model.clone(), thread.permission.clone()))
+                        .group(group)
+                        .map(|(_, shown)| {
+                            (
+                                shown.defaults.model.clone(),
+                                shown.defaults.permission.clone(),
+                            )
+                        })
                         .unwrap_or_default();
                     let from = state.sessions.cursor;
                     state.sessions.open_group(group);
@@ -1098,23 +1084,6 @@ fn delete_thread(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
     with_visit(state, vec![Command::Delete(thread)])
 }
 
-/// Asks for `group` and its threads to be deleted, hiding the threads at
-/// once, detaching them and moving the cursor to the neighbouring row.
-fn delete_group(state: &mut AppState, group: GroupId) -> Vec<Command> {
-    let neighbour = state.sessions.row_neighbour(SidebarItem::Group(group));
-    let threads: Vec<ThreadId> = state
-        .sessions
-        .group_threads(group)
-        .map(|thread| thread.id)
-        .collect();
-    for thread in threads {
-        state.sessions.deleting.insert(thread);
-        state.attached.remove(&thread);
-    }
-    state.sessions.cursor = neighbour;
-    with_visit(state, vec![Command::DeleteGroup(group)])
-}
-
 /// Asks for `project`'s draft to be discarded, moving the cursor to the
 /// neighbouring row.
 fn discard_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
@@ -1172,14 +1141,45 @@ where
         DraftTarget::Project(project) => edit_draft(state, project, |draft| {
             edit(&mut draft.model, &mut draft.permission);
         }),
-        DraftTarget::Group(group) => match state.sessions.group_draft_mut(group) {
-            Some(draft) => {
-                edit(&mut draft.model, &mut draft.permission);
+        DraftTarget::Group(group) => match state.sessions.group_defaults_mut(group) {
+            Some(defaults) => {
+                edit(&mut defaults.model, &mut defaults.permission);
                 vec![Command::SaveGroupDraft(group)]
             }
             None => vec![],
         },
     }
+}
+
+/// What `␣m`/`␣a` set for the cursor, with its current model and
+/// permission: a project's draft, or on a group's draft or card the group's
+/// defaults.
+fn setting_target(sessions: &Sessions) -> Option<(DraftTarget, Option<&str>, Option<&str>)> {
+    match (
+        sessions.cursor?,
+        sessions.selected_draft(),
+        sessions.selected_group(),
+    ) {
+        (SidebarItem::Draft(_), Some((project, draft)), _) => Some((
+            DraftTarget::Project(project.id),
+            draft.model.as_deref(),
+            draft.permission.as_deref(),
+        )),
+        (SidebarItem::Group(_), _, Some((_, group))) => Some(group_setting(group)),
+        (SidebarItem::GroupDraft(_), _, Some((_, group))) if group.draft => {
+            Some(group_setting(group))
+        }
+        _ => None,
+    }
+}
+
+/// `group`'s defaults as a model or permission picker's target.
+fn group_setting(group: &Group) -> (DraftTarget, Option<&str>, Option<&str>) {
+    (
+        DraftTarget::Group(group.id),
+        group.defaults.model.as_deref(),
+        group.defaults.permission.as_deref(),
+    )
 }
 
 /// Opens `picker` and gives it the keys.
@@ -1388,7 +1388,7 @@ mod tests {
     use crate::feat::picker::list::{BranchRow, PERMISSION_MODES, PickerItem, WorkspaceChoice};
     use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
-        AttachTarget, Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project,
+        AttachTarget, Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project,
         ProjectId, ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId,
         ThreadStatus,
     };
@@ -2880,7 +2880,8 @@ mod tests {
             pinned_at: None,
             settled_at: settled.then(|| at(5)),
             active_since: SystemTime::UNIX_EPOCH,
-            draft: None,
+            draft: false,
+            defaults: GroupDefaults::default(),
         };
         if let Some(project) = state.sessions.projects.first_mut() {
             project.groups = vec![group];
@@ -2971,10 +2972,11 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            draft: Some(GroupDraft {
+            draft: true,
+            defaults: GroupDefaults {
                 model: model.map(str::to_owned),
                 permission: None,
-            }),
+            },
         };
         if let Some(project) = state.sessions.projects.first_mut() {
             project.groups = vec![group];
@@ -2996,41 +2998,52 @@ mod tests {
         state
     }
 
+    /// `state` with group 9's defaults on `model` in `permission` mode.
+    fn with_defaults(mut state: AppState, model: &str, permission: &str) -> AppState {
+        if let Some(defaults) = state.sessions.group_defaults_mut(GroupId(9)) {
+            defaults.model = Some(model.to_owned());
+            defaults.permission = Some(permission.to_owned());
+        }
+        state
+    }
+
     #[rstest::rstest]
-    fn n_on_a_grouped_thread_starts_a_sibling_with_its_model() {
-        // Given thread 2 of group 9 selected, running opus.
-        let mut state = with_model(
+    fn n_on_a_grouped_thread_starts_a_sibling_with_the_groups_defaults() {
+        // Given thread 2 of group 9 selected, running haiku, and the group's
+        // defaults on opus in auto mode.
+        let state = with_model(
             grouped_state(false, SidebarItem::Thread(ThreadId(2))),
             2,
-            "opus",
+            "haiku",
         );
+        let mut state = with_defaults(state, "opus", "auto");
 
         // When handling NewSibling.
         let commands = IntentHandler::handle(&Intent::NewSibling, &mut state);
 
-        // Then the sessions actor is asked for a sibling on thread 2's model.
+        // Then the sessions actor is asked for a sibling on the defaults.
         assert_eq!(
             commands,
             vec![Command::StartSibling {
                 group: GroupId(9),
                 model: Some("opus".into()),
-                permission_mode: None,
+                permission_mode: Some("auto".into()),
                 from: Some(SidebarItem::Thread(ThreadId(2))),
             }],
-            "n on a grouped thread should start a sibling with its settings"
+            "n on a grouped thread should start a sibling with the group's defaults"
         );
     }
 
     #[rstest::rstest]
-    fn n_on_a_card_takes_the_newest_threads_settings() {
-        // Given group 9's card selected, newest thread 2 on opus and thread 1
-        // on haiku.
+    fn n_on_a_card_takes_the_groups_default_model() {
+        // Given group 9's card selected, its newest thread on haiku and its
+        // defaults on opus.
         let state = with_model(
             grouped_state(false, SidebarItem::Group(GroupId(9))),
             2,
-            "opus",
+            "haiku",
         );
-        let mut state = with_model(state, 1, "haiku");
+        let mut state = with_defaults(state, "opus", "auto");
 
         // When handling NewSibling.
         let commands = IntentHandler::handle(&Intent::NewSibling, &mut state);
@@ -3043,7 +3056,7 @@ mod tests {
         assert_eq!(
             model.as_deref(),
             Some("opus"),
-            "n on a card should take the newest thread's model"
+            "n on a card should take the group's default model"
         );
     }
 
@@ -3462,7 +3475,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn confirming_the_delete_group_confirm_hides_every_thread() {
+    fn confirming_the_delete_group_confirm_hides_nothing_yet() {
         // Given Yes highlighted in group 9's delete confirm.
         let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
         answer_yes(&Intent::DeleteThread, &mut state);
@@ -3470,11 +3483,12 @@ mod tests {
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then both its threads are being deleted.
+        // Then no thread is hidden and the cursor stays on the card: the
+        // sessions actor may still refuse the delete.
         assert_eq!(
-            state.sessions.deleting,
-            [ThreadId(1), ThreadId(2)].into(),
-            "deleting a group should hide its threads"
+            (state.sessions.deleting.is_empty(), state.sessions.cursor),
+            (true, Some(SidebarItem::Group(GroupId(9)))),
+            "a group delete should show nothing gone before the actor agrees"
         );
     }
 
@@ -3556,10 +3570,125 @@ mod tests {
         );
     }
 
-    /// Group 9's draft model, as the app state has it.
+    #[rstest::rstest]
+    #[case::model(Intent::PickModel, PickerKind::Model { target: DraftTarget::Group(GroupId(9)) })]
+    #[case::permission(
+        Intent::PickPermission,
+        PickerKind::Permission { target: DraftTarget::Group(GroupId(9)) }
+    )]
+    fn leader_m_and_a_on_a_card_open_the_groups_setting_picker(
+        #[case] intent: Intent,
+        #[case] kind: PickerKind,
+    ) {
+        // Given a started group's card selected.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+
+        // When handling the pick.
+        IntentHandler::handle(&intent, &mut state);
+
+        // Then the group's picker is open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&kind),
+            "␣m/␣a on a card should pick the group's default"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_model_on_a_card_sets_the_groups_default() {
+        // Given a started group's card and its model picker with Claude Opus
+        // 5.5, after Default, highlighted.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the group's default model is claude-opus-5-5.
+        assert_eq!(
+            group_draft_model(&state).as_deref(),
+            Some("claude-opus-5-5"),
+            "the picked model should be the group's default"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_model_on_a_card_saves_it() {
+        // Given a started group's card and its model picker with Claude Opus
+        // 5.5 highlighted.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to save the group's defaults.
+        assert_eq!(
+            commands,
+            vec![Command::SaveGroupDraft(GroupId(9))],
+            "a card's model pick should be saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_model_on_a_card_leaves_its_threads_alone() {
+        // Given a started group's card, thread 2 running haiku, and the
+        // model picker with Claude Opus 5.5 highlighted.
+        let mut state = with_model(
+            grouped_state(false, SidebarItem::Group(GroupId(9))),
+            2,
+            "haiku",
+        );
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then thread 2 still runs haiku.
+        let model = state
+            .sessions
+            .threads()
+            .find(|thread| thread.id == ThreadId(2))
+            .and_then(|thread| thread.model.clone());
+        assert_eq!(
+            model.as_deref(),
+            Some("haiku"),
+            "a running thread keeps its model"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_m_on_a_card_shows_the_groups_default_as_current() {
+        // Given a started group's card whose default is Claude Opus 5.5.
+        let mut state = with_defaults(
+            grouped_state(false, SidebarItem::Group(GroupId(9))),
+            "claude-opus-5-5",
+            "auto",
+        );
+
+        // When handling PickModel.
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+
+        // Then the picker highlights the group's default.
+        let highlighted = state
+            .picker
+            .as_ref()
+            .and_then(PickerState::selected)
+            .cloned();
+        assert_eq!(
+            highlighted,
+            Some(PickerItem::Setting(Some("claude-opus-5-5"))),
+            "the card's picker should start on the group's default"
+        );
+    }
+
+    /// Group 9's default model, as the app state has it.
     fn group_draft_model(state: &AppState) -> Option<String> {
-        let (_, _, draft) = state.sessions.selected_group_draft()?;
-        draft.model.clone()
+        let (_, group) = state.sessions.selected_group()?;
+        group.defaults.model.clone()
     }
 
     #[rstest::rstest]
@@ -5251,7 +5380,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn filter_projects_lists_research_and_learn_after_the_projects() {
+    fn filter_projects_lists_research_and_learn_after_all_projects() {
         // Given Learn, alpha, Research and beta, in that order.
         let mut state = with_projects(&["learn", "alpha", "research", "beta"]);
         for (project, kind) in state.sessions.projects.iter_mut().zip([
@@ -5265,7 +5394,8 @@ mod tests {
         // When handling FilterProjects.
         IntentHandler::handle(&Intent::FilterProjects, &mut state);
 
-        // Then Research and Learn follow the projects, once each.
+        // Then Research and Learn follow All projects, once each, before the
+        // projects.
         let rows: Vec<PickerItem> = state
             .picker
             .iter()
@@ -5282,12 +5412,12 @@ mod tests {
             rows,
             vec![
                 PickerItem::AllProjects,
-                project_row(2, "alpha"),
-                project_row(4, "beta"),
                 own(3, "research", ProjectKind::Research),
                 own(1, "learn", ProjectKind::Learn),
+                project_row(2, "alpha"),
+                project_row(4, "beta"),
             ],
-            "Research and Learn should end the project filter"
+            "Research and Learn should come right after All projects"
         );
     }
 
@@ -6128,7 +6258,8 @@ mod tests {
                 pinned_at: None,
                 settled_at: None,
                 active_since: SystemTime::UNIX_EPOCH,
-                draft: None,
+                draft: false,
+                defaults: GroupDefaults::default(),
             }];
         }
         AppState {

@@ -187,9 +187,9 @@ pub struct Draft {
     pub from: Option<String>,
 }
 
-/// The session setup for a group's first thread, before it starts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupDraft {
+/// A group's default session setup: its draft's, and each new sibling's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupDefaults {
     /// The `--model`; `None` = Claude's default.
     pub model: Option<String>,
     /// The `--permission-mode`; `None` = Claude's default.
@@ -214,8 +214,10 @@ pub struct Group {
     pub settled_at: Option<SystemTime>,
     /// Sorts Active: the later of its creation and its latest un-settle.
     pub active_since: SystemTime,
-    /// Some while the group has no thread yet.
-    pub draft: Option<GroupDraft>,
+    /// The model and permission its draft and each `n` sibling start with.
+    pub defaults: GroupDefaults,
+    /// Whether it shows its draft: while it has no thread yet.
+    pub draft: bool,
 }
 
 /// A directory the user starts sessions in.
@@ -377,12 +379,14 @@ pub struct Sessions {
     /// The latest failure; shown until the next intent or a later success.
     pub error: Option<String>,
     /// A session start waits for the user to trust this directory in an
-    /// interactive `claude`.
+    /// interactive `claude`; the sessions actor clears it when the start goes
+    /// ahead or fails.
     pub trust: Option<PathBuf>,
     /// A started draft's thread for the frontend to attach to.
     pub attach: Option<ThreadId>,
     /// Threads hidden while their `claude rm` runs. The intent handler
-    /// inserts; the sessions actor removes.
+    /// inserts a lone thread, the sessions actor a deleted group's threads;
+    /// the sessions actor removes.
     pub deleting: HashSet<ThreadId>,
     /// The project the sidebar is filtered to; `None` = all projects.
     pub filter: Option<ProjectId>,
@@ -570,13 +574,13 @@ impl Sessions {
             .and_then(|project| project.draft.as_mut())
     }
 
-    /// Group `id`'s draft, if it still has one.
-    pub fn group_draft_mut(&mut self, id: GroupId) -> Option<&mut GroupDraft> {
+    /// Group `id`'s default model and permission, if the group still exists.
+    pub fn group_defaults_mut(&mut self, id: GroupId) -> Option<&mut GroupDefaults> {
         self.projects
             .iter_mut()
             .flat_map(|project| project.groups.iter_mut())
             .find(|group| group.id == id)
-            .and_then(|group| group.draft.as_mut())
+            .map(|group| &mut group.defaults)
     }
 
     /// The project holding the thread or group under the cursor.
@@ -604,14 +608,11 @@ impl Sessions {
         }
     }
 
-    /// The group draft under the cursor, with its group and project, if the
-    /// group still has one.
-    pub fn selected_group_draft(&self) -> Option<(&Project, &Group, &GroupDraft)> {
+    /// The group whose draft is under the cursor, with its project, if the
+    /// group still has its draft.
+    pub fn selected_group_draft(&self) -> Option<(&Project, &Group)> {
         match self.cursor? {
-            SidebarItem::GroupDraft(id) => {
-                let (project, group) = self.group(id)?;
-                group.draft.as_ref().map(|draft| (project, group, draft))
-            }
+            SidebarItem::GroupDraft(id) => self.group(id).filter(|(_, group)| group.draft),
             _ => None,
         }
     }
@@ -873,7 +874,7 @@ impl Sessions {
             .filter(|thread| !self.deleting.contains(&thread.id))
             .filter(|thread| named || self.lists(thread))
             .collect();
-        let draft = group.draft.is_some() && (named || self.title_matches(NEW_THREAD).is_some());
+        let draft = group.draft && (named || self.title_matches(NEW_THREAD).is_some());
         (draft || !threads.is_empty()).then_some(Entry::Group {
             project,
             group,
@@ -986,7 +987,7 @@ impl Sessions {
     }
 
     /// Group `id` and its project, if it still exists.
-    fn group(&self, id: GroupId) -> Option<(&Project, &Group)> {
+    pub fn group(&self, id: GroupId) -> Option<(&Project, &Group)> {
         self.projects.iter().find_map(|project| {
             project
                 .groups
@@ -1104,7 +1105,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
         ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::TextInput;
@@ -2453,7 +2454,8 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            draft: None,
+            draft: false,
+            defaults: GroupDefaults::default(),
         }
     }
 
@@ -2532,10 +2534,11 @@ mod tests {
         let sessions = grouped_sessions(
             vec![],
             vec![Group {
-                draft: Some(GroupDraft {
+                draft: true,
+                defaults: GroupDefaults {
                     model: None,
                     permission: None,
-                }),
+                },
                 ..group(9, GroupKind::Feature)
             }],
         );
