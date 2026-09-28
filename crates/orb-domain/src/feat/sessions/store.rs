@@ -11,8 +11,9 @@
 //! kind (one the user added, or orb's Research or Learn folder), and it keeps
 //! each project's groups: their kind, name, directory, branch, pin and settle
 //! state, and the session setup of their draft. Each thread keeps the group it
-//! belongs to. The schema grows through an ordered list of migrations. Times
-//! are milliseconds since the Unix epoch.
+//! belongs to. It also keeps the jump list's rows, oldest first. The schema
+//! grows through an ordered list of migrations. Times are milliseconds since
+//! the Unix epoch.
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,9 @@ use error_stack::{Report, ResultExt};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use wherror::Error;
 
-use super::state::{DraftWorkspace, GroupId, GroupKind, ProjectId, ProjectKind, ThreadId};
+use super::state::{
+    DraftWorkspace, GroupId, GroupKind, ProjectId, ProjectKind, SidebarItem, ThreadId,
+};
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -298,6 +301,7 @@ const MIGRATIONS: &[&str] = &[
       UNIQUE (project_id, kind, name));
     ALTER TABLE threads ADD COLUMN group_id INTEGER REFERENCES groups(id);
 ",
+    "CREATE TABLE jumps (position INTEGER PRIMARY KEY, kind TEXT NOT NULL, item_id INTEGER NOT NULL);",
 ];
 
 impl Store {
@@ -770,6 +774,49 @@ impl Store {
         Ok(())
     }
 
+    /// The saved jump list's rows, oldest first; a row of an unknown kind is
+    /// skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be read.
+    pub fn jumps(&self) -> Result<Vec<SidebarItem>, Report<StoreError>> {
+        let rows = self
+            .query("SELECT kind, item_id FROM jumps ORDER BY position", |row| {
+                Ok(jump_item(&row.get::<_, String>(0)?, row.get(1)?))
+            })
+            .attach("failed to read the jump list")?;
+        Ok(rows.into_iter().flatten().collect())
+    }
+
+    /// Saves the jump list's rows, oldest first, replacing what was saved.
+    /// The Settled header is never saved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be written.
+    pub fn save_jumps(&self, items: &[SidebarItem]) -> Result<(), Report<StoreError>> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .change_context(StoreError)
+            .attach("failed to start saving the jump list")?;
+        tx.execute("DELETE FROM jumps", [])
+            .change_context(StoreError)
+            .attach("failed to clear the saved jump list")?;
+        for (position, (kind, id)) in items.iter().filter_map(|&item| jump_kind(item)).enumerate() {
+            tx.execute(
+                "INSERT INTO jumps (position, kind, item_id) VALUES (?1, ?2, ?3)",
+                params![position, kind, id],
+            )
+            .change_context(StoreError)
+            .attach("failed to save a jump")?;
+        }
+        tx.commit()
+            .change_context(StoreError)
+            .attach("failed to commit the jump list")
+    }
+
     fn query<T, F>(&self, sql: &str, map: F) -> Result<Vec<T>, Report<StoreError>>
     where
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
@@ -948,6 +995,28 @@ fn ui_row(row: &Row<'_>) -> rusqlite::Result<Ui> {
     })
 }
 
+/// How a jump-list row is saved: its kind and id; the Settled header isn't.
+fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
+    match item {
+        SidebarItem::Thread(id) => Some(("thread", id.0)),
+        SidebarItem::Draft(id) => Some(("draft", id.0)),
+        SidebarItem::Group(id) => Some(("group", id.0)),
+        SidebarItem::GroupDraft(id) => Some(("group_draft", id.0)),
+        SidebarItem::SettledShelf => None,
+    }
+}
+
+/// The jump-list row saved as `kind` and `id`; `None` for an unknown kind.
+fn jump_item(kind: &str, id: i64) -> Option<SidebarItem> {
+    match kind {
+        "thread" => Some(SidebarItem::Thread(ThreadId(id))),
+        "draft" => Some(SidebarItem::Draft(ProjectId(id))),
+        "group" => Some(SidebarItem::Group(GroupId(id))),
+        "group_draft" => Some(SidebarItem::GroupDraft(GroupId(id))),
+        _ => None,
+    }
+}
+
 /// A project's last-used settings; an unknown workspace loads as local.
 fn last_used_row(row: &Row<'_>) -> rusqlite::Result<LastUsed> {
     Ok(LastUsed {
@@ -974,8 +1043,8 @@ mod tests {
 
     use super::{
         DraftRow, DraftWorkspace, GroupId, GroupKind, GroupRow, LastUsed, LastWorkspace,
-        MIGRATIONS, NewGroup, NewThread, ProjectId, ProjectKind, SettledOverride, Store,
-        StoreError, ThreadRow, Ui,
+        MIGRATIONS, NewGroup, NewThread, ProjectId, ProjectKind, SettledOverride, SidebarItem,
+        Store, StoreError, ThreadId, ThreadRow, Ui,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -1280,6 +1349,43 @@ mod tests {
             (user_version(&path)?, threads.len(), has_schema),
             (MIGRATIONS.len(), 1, true),
             "migration v8 should keep threads and add groups, projects.kind and threads.group_id"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_a_v8_database_adds_jumps_and_keeps_its_threads() -> Result<(), Report<StoreError>>
+    {
+        // Given a database at schema version 8 holding a project and a thread.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        {
+            let conn = Connection::open(&path).change_context(StoreError)?;
+            for sql in MIGRATIONS
+                .get(..8)
+                .ok_or_else(|| Report::new(StoreError).attach("no v8 migrations"))?
+            {
+                conn.execute_batch(sql).change_context(StoreError)?;
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
+                 INSERT INTO threads (project_id, short_id, cwd, created_at)
+                 VALUES (1, '28bf38e2', '/tmp/orb', 1000);
+                 PRAGMA user_version = 8;",
+            )
+            .change_context(StoreError)?;
+        }
+
+        // When opening the store and loading.
+        let store = Store::open(&path)?;
+        let threads = store.load()?.1;
+
+        // Then it's at the latest version, the thread survives, and the jump
+        // list reads back empty.
+        assert_eq!(
+            (user_version(&path)?, threads.len(), store.jumps()?),
+            (MIGRATIONS.len(), 1, Vec::new()),
+            "migration v9 should keep threads and add an empty jumps table"
         );
         Ok(())
     }
@@ -2037,6 +2143,51 @@ mod tests {
 
         // Then nothing is set.
         assert_eq!(ui, Ui::default(), "a fresh store has no layout settings");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saved_jumps_read_back() -> Result<(), Report<StoreError>> {
+        // Given a fresh store.
+        let store = Store::open_in_memory()?;
+
+        // When saving a jump list of every kind of row.
+        let jumps = vec![
+            SidebarItem::Thread(ThreadId(3)),
+            SidebarItem::GroupDraft(GroupId(9)),
+            SidebarItem::Draft(ProjectId(1)),
+            SidebarItem::Group(GroupId(9)),
+        ];
+        store.save_jumps(&jumps)?;
+
+        // Then the same rows read back in the same order.
+        assert_eq!(
+            store.jumps()?,
+            jumps,
+            "the saved jump list should read back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saving_jumps_again_replaces_them() -> Result<(), Report<StoreError>> {
+        // Given a store with threads 1 and 2 saved as the jump list.
+        let store = Store::open_in_memory()?;
+        store.save_jumps(&[
+            SidebarItem::Thread(ThreadId(1)),
+            SidebarItem::Thread(ThreadId(2)),
+        ])?;
+
+        // When saving thread 3 alone.
+        let jumps = vec![SidebarItem::Thread(ThreadId(3))];
+        store.save_jumps(&jumps)?;
+
+        // Then only thread 3 reads back.
+        assert_eq!(
+            store.jumps()?,
+            jumps,
+            "the latest jump list should replace the old"
+        );
         Ok(())
     }
 

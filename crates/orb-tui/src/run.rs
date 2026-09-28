@@ -746,7 +746,10 @@ impl App {
                 let _ = self.sessions.tell(sessions_actor::SaveUi).try_send();
                 Ok(())
             }
-            Command::SaveJumps => Ok(()),
+            Command::SaveJumps => {
+                let _ = self.sessions.tell(sessions_actor::SaveJumps).try_send();
+                Ok(())
+            }
             Command::RemoveProject(id) => {
                 let _ = self
                     .sessions
