@@ -49,6 +49,10 @@ pub enum Intent {
     LeavePane,
     /// Detach the selected thread from its pane, keeping the keys where they are.
     DetachSelected,
+    /// Move back to the previous row in the jump list.
+    JumpBack,
+    /// Move forward to the next row in the jump list, after a jump back.
+    JumpForward,
     /// Open the project picker to open that project's draft.
     NewSession,
     /// Open the project filter picker to filter the sidebar to one project,
@@ -149,6 +153,8 @@ impl fmt::Display for Intent {
             Self::Attach => "attach",
             Self::Detach => "back to orb",
             Self::DetachSelected => "detach",
+            Self::JumpBack => "jump back",
+            Self::JumpForward => "jump forward",
             Self::NewSession => "new session",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",

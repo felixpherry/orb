@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::feat::dashboard::state::DashboardCursor;
+use crate::feat::jumps::state::JumpList;
 use crate::feat::picker::state::PickerState;
 use crate::feat::sessions::state::{Sessions, ThreadId};
 use crate::feat::sidebar::state::{Rename, SidebarView};
@@ -54,4 +55,9 @@ pub struct AppState {
     pub rename: Option<Rename>,
     /// The user's home directory; what the directory picker's `~/` means.
     pub home: PathBuf,
+    /// The rows `<C-o>`/`<C-i>` move between. Written by the intent handler
+    /// (recording jumps, moving through the list, dropping a deleted thread
+    /// or discarded draft) and by the sessions actor, its owner (restoring the
+    /// saved list, and dropping a deleted group's rows).
+    pub jumps: JumpList,
 }

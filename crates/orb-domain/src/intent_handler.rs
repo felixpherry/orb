@@ -9,6 +9,7 @@ use crate::feat::git::validator::{
     validate_switch_branch,
 };
 use crate::feat::git::worktree::previous_worktree;
+use crate::feat::jumps::validator::{validate_jump_back, validate_jump_forward};
 use crate::feat::pane::validator::{validate_attach, validate_detach};
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
 use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
@@ -58,12 +59,16 @@ impl IntentHandler {
                 with_visit(state, vec![])
             }
             Intent::SelectFirst => {
+                let from = state.sessions.cursor;
                 state.sessions.select_first();
-                with_visit(state, vec![])
+                let commands = record_jump(state, from);
+                with_visit(state, commands)
             }
             Intent::SelectLast => {
+                let from = state.sessions.cursor;
                 state.sessions.select_last();
-                with_visit(state, vec![])
+                let commands = record_jump(state, from);
+                with_visit(state, commands)
             }
             Intent::SelectHalfPageDown => {
                 state.sessions.half_page_down(&state.sidebar.layout);
@@ -172,6 +177,24 @@ impl IntentHandler {
                 Ok(()) => {
                     state.focus = Focus::Sidebar;
                     vec![Command::Detach, Command::RefreshSessions]
+                }
+                Err(_) => vec![],
+            },
+            Intent::JumpBack => match validate_jump_back(state) {
+                Ok(()) => {
+                    let target = state
+                        .jumps
+                        .back(state.sessions.cursor, |item| state.sessions.jumpable(item));
+                    land(state, target)
+                }
+                Err(_) => vec![],
+            },
+            Intent::JumpForward => match validate_jump_forward(state) {
+                Ok(()) => {
+                    let target = state
+                        .jumps
+                        .forward(state.sessions.cursor, |item| state.sessions.jumpable(item));
+                    land(state, target)
                 }
                 Err(_) => vec![],
             },
@@ -1078,27 +1101,33 @@ fn still_deletable(state: &AppState, item: SidebarItem) -> bool {
     state.sessions.cursor == Some(item) && validate_delete(state).is_ok()
 }
 
-/// Asks for `thread` to be deleted, hiding it at once, detaching it and moving
-/// the cursor to the neighbouring row.
+/// Asks for `thread` to be deleted, hiding it at once, detaching it, dropping
+/// it from the jump list and moving the cursor to the neighbouring row.
 fn delete_thread(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
     let neighbour = state.sessions.row_neighbour(SidebarItem::Thread(thread));
     state.sessions.deleting.insert(thread);
     state.attached.remove(&thread);
+    state.jumps.remove(SidebarItem::Thread(thread));
     state.sessions.cursor = neighbour;
-    with_visit(state, vec![Command::Delete(thread)])
+    with_visit(state, vec![Command::Delete(thread), Command::SaveJumps])
 }
 
-/// Asks for `project`'s draft to be discarded, moving the cursor to the
-/// neighbouring row.
+/// Asks for `project`'s draft to be discarded, dropping it from the jump list
+/// and moving the cursor to the neighbouring row.
 fn discard_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
     state.sessions.cursor = state.sessions.row_neighbour(SidebarItem::Draft(project));
-    with_visit(state, vec![Command::DiscardDraft(project)])
+    state.jumps.remove(SidebarItem::Draft(project));
+    with_visit(
+        state,
+        vec![Command::DiscardDraft(project), Command::SaveJumps],
+    )
 }
 
 /// Selects `project`'s draft and gives the keys to its form, asking the
 /// sessions actor to create the draft when the project has none. A filter to
-/// another project goes back to all projects.
+/// another project goes back to all projects. It's a jump.
 fn open_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
+    let from = state.sessions.cursor;
     let exists = state
         .sessions
         .projects
@@ -1117,6 +1146,7 @@ fn open_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
         .then_some(Command::CreateDraft(project))
         .into_iter()
         .chain(outside.then_some(Command::SaveUi))
+        .chain(record_jump(state, from))
         .collect()
 }
 
@@ -1220,9 +1250,21 @@ fn selected_group_id(state: &AppState) -> Option<GroupId> {
     state.sessions.selected_group().map(|(_, group)| group.id)
 }
 
-/// Attaches to the selected thread's session, adding it to the attached
-/// threads and showing its pane, unless the thread can't be attached to.
+/// Attaches to the selected thread's session and records entering it as a
+/// jump, unless the thread can't be attached to.
 fn attach_thread(state: &mut AppState) -> Vec<Command> {
+    let mut commands = show_pane(state);
+    if let (false, Some(id)) = (commands.is_empty(), state.sessions.selected_id()) {
+        state.jumps.record(SidebarItem::Thread(id));
+        commands.push(Command::SaveJumps);
+    }
+    commands
+}
+
+/// Attaches to the selected thread's session, adding it to the attached
+/// threads and showing its pane with the keys in it, unless the thread can't
+/// be attached to.
+fn show_pane(state: &mut AppState) -> Vec<Command> {
     match (validate_attach(state), state.sessions.selected_thread()) {
         (Ok(()), Some(thread)) => {
             let target = AttachTarget {
@@ -1363,8 +1405,10 @@ fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         (Intent::PickerNext, _) => sessions.select_next_match(),
         (Intent::PickerPrev, _) => sessions.select_prev_match(),
         (Intent::PickerConfirm, _) if sessions.cursor.is_some() => {
-            sessions.search = None;
+            let from = sessions.search.take().and_then(|search| search.return_to);
             state.focus = Focus::Sidebar;
+            let commands = record_jump(state, from);
+            return with_visit(state, commands);
         }
         (Intent::PickerConfirm | Intent::PickerCancel, _) => {
             sessions.cancel_search();
@@ -1373,6 +1417,46 @@ fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         _ => return vec![],
     }
     with_visit(state, vec![])
+}
+
+/// Records the move from `from` to the cursor as a jump and asks for the list
+/// to be saved; nothing when the cursor didn't move.
+fn record_jump(state: &mut AppState, from: Option<SidebarItem>) -> Vec<Command> {
+    let to = state.sessions.cursor;
+    if from == to {
+        return vec![];
+    }
+    state.jumps.jump(from, to);
+    vec![Command::SaveJumps]
+}
+
+/// Lands a jump back or forward on `target`: the cursor moves there and its
+/// row is revealed. From a pane, the keys follow into the target's pane while
+/// orb is attached to it, else go to the sidebar (the dashboard while it's
+/// hidden); elsewhere they stay put.
+fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
+    let Some(target) = target else {
+        return vec![];
+    };
+    let from_pane = state.focus == Focus::Attached;
+    state.sessions.cursor = Some(target);
+    state.sessions.reveal(target);
+    let pane = match target {
+        SidebarItem::Thread(id) if from_pane && state.attached.contains(&id) => show_pane(state),
+        _ => vec![],
+    };
+    let mut commands = vec![Command::SaveJumps];
+    match (from_pane, pane.is_empty()) {
+        (true, true) => {
+            state.focus = match validate_focus_sidebar(state) {
+                Ok(()) => Focus::Sidebar,
+                Err(_) => Focus::Dashboard,
+            };
+            commands.extend([Command::Detach, Command::RefreshSessions]);
+        }
+        _ => commands.extend(pane),
+    }
+    with_visit(state, commands)
 }
 
 /// `commands`, then a visit to the thread under the cursor, if any.
@@ -1389,6 +1473,7 @@ mod tests {
 
     use crate::command::Workspace;
     use crate::feat::git::git_service::GitRef;
+    use crate::feat::jumps::state::JumpList;
     use crate::feat::picker::list::{BranchRow, PERMISSION_MODES, PickerItem, WorkspaceChoice};
     use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
@@ -1831,6 +1916,7 @@ mod tests {
                     cwd: "/work/1".into(),
                 }),
                 Command::RefreshSessions,
+                Command::SaveJumps,
             ],
             "Attach should target the selected thread, then refresh"
         );
@@ -2149,6 +2235,7 @@ mod tests {
                     cwd: "/work/2".into(),
                 }),
                 Command::RefreshSessions,
+                Command::SaveJumps,
             ],
             "FocusRight should attach to the selected thread, then refresh"
         );
@@ -2342,7 +2429,7 @@ mod tests {
         // Then the sessions actor is asked to create alpha's draft.
         assert_eq!(
             commands,
-            vec![Command::CreateDraft(ProjectId(1))],
+            vec![Command::CreateDraft(ProjectId(1)), Command::SaveJumps],
             "picking a project without a draft should create one"
         );
     }
@@ -2359,7 +2446,10 @@ mod tests {
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then no draft is created.
-        assert!(commands.is_empty(), "a project keeps its one draft");
+        assert!(
+            !commands.contains(&Command::CreateDraft(ProjectId(1))),
+            "a project keeps its one draft"
+        );
     }
 
     #[rstest::rstest]
@@ -4084,9 +4174,8 @@ mod tests {
         let commands = IntentHandler::handle(&intent, &mut state);
 
         // Then the thread it lands on is visited.
-        assert_eq!(
-            commands,
-            vec![Command::Visit(ThreadId(expected))],
+        assert!(
+            commands.contains(&Command::Visit(ThreadId(expected))),
             "{intent:?} should visit thread {expected}"
         );
     }
@@ -5678,7 +5767,11 @@ mod tests {
         // Then alpha's draft is created and the cleared filter saved.
         assert_eq!(
             commands,
-            vec![Command::CreateDraft(ProjectId(1)), Command::SaveUi],
+            vec![
+                Command::CreateDraft(ProjectId(1)),
+                Command::SaveUi,
+                Command::SaveJumps
+            ],
             "clearing the filter should save it"
         );
     }
@@ -5696,7 +5789,10 @@ mod tests {
         // Then the filter stays, and isn't saved.
         assert_eq!(
             (state.sessions.filter, commands),
-            (Some(ProjectId(1)), vec![Command::CreateDraft(ProjectId(1))]),
+            (
+                Some(ProjectId(1)),
+                vec![Command::CreateDraft(ProjectId(1)), Command::SaveJumps]
+            ),
             "a project inside the filter leaves it alone"
         );
     }
@@ -6437,5 +6533,486 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["GT-514-login"], "the slug should keep case");
+    }
+
+    /// Threads 1 and 2 (listed 2, 1) with the cursor on thread 2, the keys
+    /// in `focus`, the threads in `attached` attached, and `jumps` listed,
+    /// oldest first.
+    fn jumping(focus: Focus, attached: &[i64], jumps: &[SidebarItem]) -> AppState {
+        AppState {
+            focus,
+            attached: attached.iter().copied().map(ThreadId).collect(),
+            jumps: JumpList::from_saved(jumps.to_vec()),
+            ..state_with(
+                vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+                2,
+            )
+        }
+    }
+
+    #[rstest::rstest]
+    fn attach_on_b_after_a_lists_a_then_b() {
+        // Given thread 1 entered, then the cursor moved to thread 2.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+        state.sessions.cursor = Some(on_thread(1));
+        IntentHandler::handle(&Intent::Attach, &mut state);
+        state.focus = Focus::Sidebar;
+        state.sessions.cursor = Some(on_thread(2));
+
+        // When handling Attach on thread 2.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the jump list is thread 1, then thread 2.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(1), on_thread(2)],
+            "entering each pane should record it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_returns_save_jumps() {
+        // Given thread 2 selected.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the jump list is saved.
+        assert!(
+            commands.contains(&Command::SaveJumps),
+            "entering a pane should save the jump list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_first_records_the_row_left_then_the_first_row() {
+        // Given the cursor on thread 1, the last row.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+        state.sessions.cursor = Some(on_thread(1));
+
+        // When handling SelectFirst (`gg`).
+        IntentHandler::handle(&Intent::SelectFirst, &mut state);
+
+        // Then thread 1, then thread 2, are recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(1), on_thread(2)],
+            "gg should record where it left and where it landed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_first_on_the_first_row_records_nothing() {
+        // Given the cursor on thread 2, the first row.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+
+        // When handling SelectFirst (`gg`).
+        IntentHandler::handle(&Intent::SelectFirst, &mut state);
+
+        // Then the jump list is still empty.
+        assert!(state.jumps.entries().is_empty(), "gg in place isn't a jump");
+    }
+
+    #[rstest::rstest]
+    fn select_last_returns_save_jumps() {
+        // Given the cursor on thread 2, the first row.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+
+        // When handling SelectLast (`G`).
+        let commands = IntentHandler::handle(&Intent::SelectLast, &mut state);
+
+        // Then the jump list is saved.
+        assert!(
+            commands.contains(&Command::SaveJumps),
+            "G should save the jump list"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::SelectNext)]
+    #[case(Intent::SelectHalfPageDown)]
+    fn plain_cursor_moves_record_nothing(#[case] intent: Intent) {
+        // Given the cursor on thread 2, the first row.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+
+        // When moving the cursor down.
+        IntentHandler::handle(&intent, &mut state);
+
+        // Then the jump list is still empty.
+        assert!(state.jumps.entries().is_empty(), "{intent:?} isn't a jump");
+    }
+
+    #[rstest::rstest]
+    fn search_confirm_on_a_match_records_the_row_before_search_then_the_match() {
+        // Given a search for "fix" started from thread 2, on match thread 3.
+        let mut state = searching("fix", Some(3));
+
+        // When handling PickerConfirm (`⏎`).
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then thread 2, then thread 3, are recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(2), on_thread(3)],
+            "a search ⏎ should record where it left and where it landed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_session_pick_records_the_previous_row_then_the_draft() {
+        // Given the project picker opened from alpha's thread 11, on beta.
+        let mut state = with_projects(&["alpha", "beta"]);
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.threads = vec![thread(11, ThreadStatus::Idle)];
+        }
+        state.sessions.cursor = Some(on_thread(11));
+        IntentHandler::handle(&Intent::NewSession, &mut state);
+        highlight(&mut state, &project_row(2, "beta"));
+
+        // When picking beta.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then thread 11, then beta's draft, are recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(11), SidebarItem::Draft(ProjectId(2))],
+            "a ␣n pick should record where it left and the draft"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_moves_the_cursor_to_the_older_row() {
+        // Given thread 1 listed before the cursor's thread 2.
+        let mut state = jumping(Focus::Sidebar, &[], &[on_thread(1), on_thread(2)]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the cursor is on thread 1.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(1)),
+            "<C-o> should land on the older row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_forward_after_jump_back_returns_to_the_row() {
+        // Given a jump back from thread 2 to thread 1.
+        let mut state = jumping(Focus::Sidebar, &[], &[on_thread(1), on_thread(2)]);
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // When handling JumpForward.
+        IntentHandler::handle(&Intent::JumpForward, &mut state);
+
+        // Then the cursor is back on thread 2.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(2)),
+            "<C-i> should undo <C-o>"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_returns_save_jumps() {
+        // Given thread 1 listed before the cursor's thread 2.
+        let mut state = jumping(Focus::Sidebar, &[], &[on_thread(1), on_thread(2)]);
+
+        // When handling JumpBack.
+        let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the jump list is saved.
+        assert!(
+            commands.contains(&Command::SaveJumps),
+            "<C-o> should save the jump list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_without_a_target_returns_no_commands() {
+        // Given only the cursor's thread listed.
+        let mut state = jumping(Focus::Sidebar, &[], &[on_thread(2)]);
+
+        // When handling JumpBack.
+        let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then nothing happens.
+        assert!(commands.is_empty(), "<C-o> with nowhere to go does nothing");
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_a_pane_onto_an_attached_thread_focuses_its_pane() {
+        // Given the keys in thread 2's pane, with thread 1 attached and listed.
+        let mut state = jumping(Focus::Attached, &[1, 2], &[on_thread(1), on_thread(2)]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the keys are in thread 1's pane.
+        assert_eq!(
+            (state.focus, state.sessions.selected_id()),
+            (Focus::Attached, Some(ThreadId(1))),
+            "<C-o> from a pane should follow into the target's pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_a_pane_onto_an_attached_thread_returns_attach() {
+        // Given the keys in thread 2's pane, with thread 1 attached and listed.
+        let mut state = jumping(Focus::Attached, &[1, 2], &[on_thread(1), on_thread(2)]);
+
+        // When handling JumpBack.
+        let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the loop shows thread 1's pane.
+        assert!(
+            commands.contains(&Command::Attach(AttachTarget {
+                thread: ThreadId(1),
+                argv: vec!["claude".into(), "attach".into(), "t1".into()],
+                cwd: "/work/1".into(),
+            })),
+            "<C-o> onto a live pane should show it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_into_a_pane_adds_no_entry() {
+        // Given the keys in thread 2's pane, with thread 1 attached and listed.
+        let mut state = jumping(Focus::Attached, &[1, 2], &[on_thread(1), on_thread(2)]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the list is unchanged.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(1), on_thread(2)],
+            "landing in a pane isn't itself a jump"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_the_sidebar_onto_an_attached_thread_keeps_the_sidebar_focused() {
+        // Given the sidebar on thread 2, with thread 1 attached and listed.
+        let mut state = jumping(Focus::Sidebar, &[1], &[on_thread(1), on_thread(2)]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the sidebar keeps the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Sidebar,
+            "a sidebar <C-o> never moves the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_onto_a_thread_without_a_pane_returns_no_attach() {
+        // Given the sidebar on thread 2, with thread 1 listed and unattached.
+        let mut state = jumping(Focus::Sidebar, &[], &[on_thread(1), on_thread(2)]);
+
+        // When handling JumpBack.
+        let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then it only saves the list and visits thread 1.
+        assert_eq!(
+            commands,
+            vec![Command::SaveJumps, Command::Visit(ThreadId(1))],
+            "<C-o> must never attach"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_a_pane_onto_a_thread_without_a_pane_focuses_the_sidebar() {
+        // Given the keys in thread 2's pane, with thread 1 listed and unattached.
+        let mut state = jumping(Focus::Attached, &[2], &[on_thread(1), on_thread(2)]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the sidebar has the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Sidebar,
+            "<C-o> out of a pane onto a row without one goes to the sidebar"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_a_pane_onto_a_thread_without_a_pane_returns_detach() {
+        // Given the keys in thread 2's pane, with thread 1 listed and unattached.
+        let mut state = jumping(Focus::Attached, &[2], &[on_thread(1), on_thread(2)]);
+
+        // When handling JumpBack.
+        let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the pane loses the keys.
+        assert!(
+            commands.contains(&Command::Detach),
+            "leaving a pane should detach its keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_a_pane_with_the_sidebar_hidden_focuses_the_dashboard() {
+        // Given the keys in thread 2's pane with the sidebar hidden, and
+        // thread 1 listed and unattached.
+        let mut state = jumping(Focus::Attached, &[2], &[on_thread(1), on_thread(2)]);
+        state.sidebar.hidden = true;
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the dashboard has the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Dashboard,
+            "with the sidebar hidden, <C-o> out of a pane goes to the dashboard"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_onto_a_draft_returns_no_start() {
+        // Given the sidebar on thread 1, with the project's draft listed.
+        let mut state = drafting(
+            draft(DraftWorkspace::Local),
+            vec![thread(1, ThreadStatus::Idle)],
+        );
+        state.focus = Focus::Sidebar;
+        state.sessions.cursor = Some(on_thread(1));
+        state.jumps = JumpList::from_saved(vec![SidebarItem::Draft(ProjectId(1)), on_thread(1)]);
+
+        // When handling JumpBack.
+        let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then it only saves the list.
+        assert_eq!(
+            commands,
+            vec![Command::SaveJumps],
+            "<C-o> onto a draft must not start it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_skips_a_row_hidden_by_the_filter() {
+        // Given the sidebar filtered to beta on thread 22, with beta's
+        // thread 21, then alpha's thread 11, listed before it.
+        let mut state = with_projects(&["alpha", "beta"]);
+        if let [alpha, beta] = state.sessions.projects.as_mut_slice() {
+            alpha.threads = vec![thread(11, ThreadStatus::Idle)];
+            beta.threads = vec![
+                thread(21, ThreadStatus::Idle),
+                thread(22, ThreadStatus::Idle),
+            ];
+        }
+        state.sessions.filter = Some(ProjectId(2));
+        state.sessions.cursor = Some(on_thread(22));
+        state.jumps = JumpList::from_saved(vec![on_thread(21), on_thread(11), on_thread(22)]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then it lands on thread 21.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(21)),
+            "<C-o> should skip rows the filter hides"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_onto_a_thread_in_a_folded_group_opens_it() {
+        // Given group 9 folded with the cursor on its card, and its thread 1
+        // listed before the card.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        state.sessions.folded.insert(GroupId(9));
+        state.jumps = JumpList::from_saved(vec![on_thread(1), SidebarItem::Group(GroupId(9))]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the group is open.
+        assert!(
+            !state.sessions.folded.contains(&GroupId(9)),
+            "<C-o> into a folded group should open it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_onto_a_thread_in_a_settled_closed_group_opens_it_and_the_shelf() {
+        // Given settled group 9 closed under a closed shelf with the cursor on
+        // its card, and its thread 1 listed before the card.
+        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
+        state.jumps = JumpList::from_saved(vec![on_thread(1), SidebarItem::Group(GroupId(9))]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the group and the shelf are open.
+        assert!(
+            state.sessions.opened.contains(&GroupId(9)) && state.sessions.shelf_open,
+            "<C-o> into a settled group should open it and the shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_after_a_delete_skips_the_deleted_thread() {
+        // Given threads 3, 2 and 1 listed, and 1, 3, 2 in the jump list, with
+        // thread 2 deleted from the sidebar (the cursor moves to thread 1).
+        let mut state = state_with(
+            (1..=3).map(|id| thread(id, ThreadStatus::Idle)).collect(),
+            2,
+        );
+        state.jumps = JumpList::from_saved(vec![on_thread(1), on_thread(3), on_thread(2)]);
+        answer_yes(&Intent::DeleteThread, &mut state);
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then it lands on thread 3.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(3)),
+            "a deleted thread is never a target"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_drops_the_thread_from_the_jump_list() {
+        // Given threads 1 and 2 in the jump list, and Yes highlighted in
+        // selected thread 2's delete confirm.
+        let mut state = jumping(Focus::Sidebar, &[], &[on_thread(1), on_thread(2)]);
+        answer_yes(&Intent::DeleteThread, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then only thread 1 is left.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(1)],
+            "deleting should drop the thread from the jump list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn discard_drops_the_draft_from_the_jump_list() {
+        // Given the selected draft in the jump list, and Yes highlighted in
+        // its discard confirm.
+        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
+        state.jumps = JumpList::from_saved(vec![SidebarItem::Draft(ProjectId(1))]);
+        answer_yes(&Intent::DeleteThread, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the jump list is empty.
+        assert!(
+            state.jumps.entries().is_empty(),
+            "discarding should drop the draft from the jump list"
+        );
     }
 }
