@@ -389,6 +389,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 
 **To experiment** (sketched; scope decided in the planning session):
 - `<C-o>`/`<C-i>` jump back/forward through the selected-row history, as in neovim, from any focus including the attached pane. Open: while attached they reach Claude today — `Ctrl+O` is Claude's transcript toggle (research §1), and a legacy terminal sends `<C-i>` as `Tab`, so orb can tell it from `Tab` only under the kitty keyboard protocol · what counts as a jump (every `j`/`k` or only bigger moves like attach, `gg`/`G`, a search `⏎`) · whether a jump back re-attaches.
+- A smoother trust swap. After the user answers Claude's trust prompt in an untrusted folder, orb swaps the trust pane for the thread's own pane about 1 s later, on the start's next retry; the swap flickers, and keys typed in that second are lost. The user accepted it "ok for now" (2026-09-28). Open: `claude attach` needs a `--bg` session id, so the interactive `claude` can't be adopted · watching `~/.claude.json` would read Claude's internal format, and trust can come from a parent folder or the git root.
 
 **Dropped in M9:**
 - Codex behind `SessionHost` — orb supports Claude Code as its only provider (RECORD `(identity)`), and another provider is a milestone of its own.

@@ -46,55 +46,55 @@ Entries are added or amended **only with human approval**.
 - (sessions) Session status is read by polling `claude agents --json --all` every second while a thread is busy or waiting or orb is attached, and every 5 seconds otherwise.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
 - (sessions) A thread's title is the name given with `r` in the sidebar, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
-- (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread is a three-line tree node showing its status icon, title, and time, then its project and status word, then its branch.
+- (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread outside a group is a three-line tree node showing its status icon, title, and time, then its project and status word, then its branch.
 - (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the sidebar search has the keys and a shown/total count of drafts and threads, and the selected row's first line highlighted.
 - (pane) Attaching runs `claude attach <id>` in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
 - (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the dashboard, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
 - (pane) The right-hand area shows the selected thread's Claude pane while orb is attached to that thread, except while the dashboard has the keys; otherwise it shows the dashboard.
-- (sidebar) Pinned threads come first, then Active threads, then a collapsible Settled shelf at the bottom of the sidebar.
+- (sidebar) Pinned rows (lone threads and groups) come first, then active ones, then a collapsible Settled shelf at the bottom of the sidebar.
 - (sidebar) A thread shows a green check and "done" when its latest turn ended after the user last selected it.
-- (settle) Any new turn, approval request, or input request un-settles a thread.
-- (settle) An unpinned thread auto-settles after 3 days without turn activity, unless the user un-settled it since that activity or orb is attached to it.
+- (settle) Any new turn, approval request, or input request un-settles a lone thread, or the group of a thread in one.
+- (settle) An unpinned lone thread or group auto-settles after 3 days without turn activity in any of its threads, unless the user un-settled it since that activity or orb is attached to one of them.
 - (settle) Settling a thread stops its Claude session (`claude stop`); attaching resumes it.
 - (sessions) Deleting a thread runs `claude rm` and removes it from orb; its transcript stays in Claude's projects directory.
-- (keybinds) In the sidebar, `p` pins or unpins the selected thread, `s` settles or un-settles it, and `d` deletes it (on a draft, discards it); settling, deleting and discarding ask a `No`/`Yes` confirm first.
+- (keybinds) In the sidebar, `p` pins or unpins and `s` settles or un-settles the selected lone thread or group, and `d` deletes a thread or group (on a draft, discards it); settling, deleting and discarding ask a `No`/`Yes` confirm first.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled thread closes the shelf.
 - (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order.
 - (projects) The project picker lists projects by their threads' latest activity, else when they were added, until filter text is typed.
 - (projects) The project picker filters on each project's name and path.
-- (projects) Projects are added only from the `␣p` directory picker.
+- (projects) Projects are added only from the `␣p` directory picker, except orb's `Research` and `Learn` projects, which the first `␣gr`/`␣gl` adds.
 - (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, wrapping from the last to the first and back, `<C-d>`/`<C-u>` move half a page, stopping at the ends, `⏎` picks, and `Esc` cancels.
 - (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
-- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, the selected thread's or draft's branch and project, and the latest error in red on the left; `N running` or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
+- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, the selected thread's or draft's branch and project (`<project>/<group>` in a group), and the latest error in red on the left; `N running` or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
 - (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
 - (picker) Every picker is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide with its name centred in the top border, a > prompt over an orange rule, numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
 - (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · <C-x> remove · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, discard and Initialize Git confirms, and `⏎ select · Esc close` otherwise.
 - (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
-- (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>` on branch `orb/<hex>`.
-- (worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w`) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
+- (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>`, on branch `orb/<hex>`, or on the group's slug branch for a Feature group.
+- (worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w` and for a Feature group) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
 - (worktrees) A session start that fails removes the worktree and branch orb created for it.
 - (worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from the thread's title; the directory keeps its name.
-- (worktrees) Deleting a thread leaves its worktree on disk.
+- (worktrees) Deleting a thread, in a group or not, leaves its worktree on disk; only deleting a whole Feature group removes one.
 - (worktrees) A thread's workspace can change only before its first prompt; orb then starts a new session in the new workspace, with the same model and permission, and removes the old one.
 - (keybinds) `␣w` in the sidebar or dashboard opens the workspace picker: current checkout or worktree, a new worktree, or the project's previous worktree.
 - (keybinds) `␣b` in the sidebar or dashboard opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.
 - (branches) After a thread's first prompt, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any thread in the same directory is working or waiting.
-- (trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and retries the start when it exits or the user presses `<C-\>` or `<C-h>`.
-- (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session with those settings and attaches while the draft is still selected and no picker, rename box or search has the keys.
-- (drafts) Each project has at most one draft; drafts persist to orb's store and sit above pinned threads in the sidebar.
+- (trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and tries the start again every second, so once the user trusts the directory the new thread's pane replaces it in place, with the keys in it; it also retries once when that `claude` exits or the user presses `<C-\>` or `<C-h>`.
+- (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session with those settings and attaches while the draft's thread is still selected; if a picker, the rename box, the search or a pane has the keys when it comes up, orb attaches once the keys are back in the sidebar or dashboard, leaving them there.
+- (drafts) Each project has at most one draft of its own, and each group has at most one; drafts persist to orb's store and a project's draft sits above pinned threads in the sidebar.
 - (drafts) Draft settings default to the project's last-used workspace, model and permission, falling back to the last-used model and permission from any project and a local checkout; a new worktree's base branch defaults to the project's default branch.
 - (drafts) A new-worktree draft creates its worktree only when started; the dashboard's Branch item shows the ref it will start from as `From <ref>`.
 - (drafts) In a draft on the project's root or in an existing worktree, picking a branch checks it out there right away; a branch checked out in the root or another worktree moves the draft there instead, and in a worktree the default branch takes the draft back to the root.
 - (drafts) A draft of a project that isn't a git repository has no workspace or base branch, starts in the project's directory, and `␣w`/`␣b` offer to initialize git.
 - (drafts) The model picker lists `Default`, then T3 Code's current Claude models by name, then its legacy models under a `Legacy models` heading; orb passes the picked model's full ID to `--model`.
 - (keybinds) On a draft, `⏎` in the sidebar or on the dashboard's Start item starts it, and `␣w`/`␣b`/`␣m`/`␣a` in either pick its workspace, base branch, model, and permission.
-- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` and the dashboard's `m`/`a` only on a draft, `␣w`/`␣b`/`␣t`/`␣g`/`␣v` and the dashboard's `o`/`w`/`b`/`t`/`g`/`v` only on a thread or draft, and `p`/`s`/`r` in the sidebar only on a thread.
-- (keybinds) `␣t` opens a shell, `␣g` lazygit, and `␣v` `nvim .` in the selected thread's or draft's directory, in the sidebar or dashboard.
+- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` and the dashboard's `m`/`a` only on a draft, a group's draft or a group's card; `␣w` and the dashboard's `w` only on a lone thread or a project's draft; `␣b` and the dashboard's `b` only there and on a started Feature group's card; `␣t`/`␣gg`/`␣v` and the dashboard's `t`/`g`/`v` only with a thread, draft or group selected; the dashboard's `o` only on a thread or draft; `p`/`s` in the sidebar only on a lone thread or a group's card; `r` only on a thread; and `n` only on a group's card or a thread in it.
+- (keybinds) `␣t` opens a shell, `␣gg` lazygit, and `␣v` `nvim .` in the selected thread's, draft's or group's directory, in the sidebar or dashboard.
 - (zellij) Tool handoff opens each tool as a full-screen floating zellij pane named `orb:<directory>:<tool>`, which closes when the tool exits.
 - (zellij) Tool handoff focuses an existing pane of the same name, switching to its tab, instead of opening a second one.
 - (zellij) A draft's tools open in its worktree, or in the project root for a local or new-worktree draft.
@@ -105,7 +105,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `␣e` hides or shows the sidebar; while it's hidden the right-hand area takes the full width, and `<C-h>` and resizing do nothing.
 - (keybinds) In the sidebar or dashboard, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
 - (sidebar) The sidebar's width and project filter persist across restarts.
-- (keybinds) `␣f` in the sidebar opens the project filter: `All projects`, then the projects in `␣n` order.
+- (keybinds) `␣f` in the sidebar opens the project filter: `All projects`, then Research and Learn once `␣gr`/`␣gl` has added them, then the projects in `␣n` order.
 - (sidebar) While a project filter is set, the sidebar lists only that project's drafts and threads, and its input box shows the project after the > prompt.
 - (sidebar) Picking a project in `␣n` outside the project filter clears the filter.
 - (keybinds) `<C-x>` in the project filter removes the highlighted project after a `No`/`Yes` confirm.
@@ -119,23 +119,49 @@ Entries are added or amended **only with human approval**.
 - (sessions) A `/rename` to a name different from the thread's previous `custom-title` replaces its `r` name.
 - (keybinds) In the sidebar, `r` opens a Rename Session box filled in with the thread's title; `⏎` saves, an empty `⏎` clears the `r` name, and `Esc` cancels.
 - (keybinds) In the sidebar, `/` or `i` moves the keys to its input box; typing filters, `<C-j>`/`<C-k>` or `↓`/`↑` move between matches, wrapping from the last to the first and back, `⏎` clears the text and keeps the cursor on the match (or, with no match, acts as `Esc`), and `Esc` clears it and puts the cursor back where it was.
-- (sidebar) While searching, the sidebar lists only drafts and threads whose title fuzzy-matches the typed text, in sidebar order and including settled threads, with the matched characters highlighted.
+- (sidebar) While searching, the sidebar lists drafts and threads whose title fuzzy-matches the typed text, and every thread of a group whose name matches, in sidebar order and including settled ones, with matched characters highlighted.
 - (sidebar) The input box shows the search text after the > prompt, after the filtered project if there is one.
 - (sidebar) While the sidebar has the keys, a steady block cursor sits on the first cell of the selected row.
 - (tui) The rename box, the sidebar search and the pickers show a steady bar cursor.
 - (tui) The mode line shows `INSERT` while typing in the rename box or the sidebar search.
 - (keybinds) The which-key popup is drawn like LazyVim's default which-key (helix) in tokyonight-moon: a rounded box in the bottom-right corner on the mode line, the pending keys in its top border (`␣` for Space), one `key ➜ icon desc` row per next key with groups as `+name`, in which-key's order (letters and digits before symbols, lowercase before its capital), and `esc close  ⌫ back` on its last row; rows that don't fit are cut off.
 - (dashboard) While no Claude pane is shown, the right-hand area shows a LazyVim-style dashboard: a gradient ORB banner, a context line, a menu of the selection's actions, and a footer counting working threads, threads and projects.
-- (dashboard) The dashboard's menu lists `o` Open session, `w` Workspace and `b` Branch on a thread; `o` Start session, `w` and `b` (only in a git repository), `m` Model and `a` Permission with their current values on a draft; `t` Shell, `g` Lazygit and `v` Neovim on either; and `n` New session, `p` Add project, `f` Filter projects and `q` Quit always.
+- (dashboard) The dashboard's menu lists `o` Open session, `w` Workspace and `b` Branch on a lone thread, and only `o` on a thread in a group; `o` Start session, `w` and `b` (only in a git repository), `m` Model and `a` Permission with their current values on a project's draft; `o`, `m` and `a` on a group's draft; `b` Branch on a started Feature group's card, then `m` and `a` (the group's defaults) on any group's card; `t` Shell, `g` Lazygit and `v` Neovim on any thread, draft or group; and `n` New session, `p` Add project, `f` Filter projects and `q` Quit always.
 - (keybinds) On the dashboard, `j`/`k` or `↓`/`↑` move the menu cursor, wrapping from the last item to the first and back, `⏎` runs the highlighted item, and an item's letter runs it directly.
-- (dashboard) The menu cursor starts on the first item (Open/Start session, or New session with nothing selected) and goes back there whenever the selection changes.
+- (dashboard) The menu cursor starts on the first item (Open/Start session on a thread or draft, Branch on a started Feature group's card, Model on any other card, else New session) and goes back there whenever the selection changes.
 - (dashboard) While the Settled shelf's header is selected, the dashboard's context line shows the shelf hint.
 - (dashboard) When the Claude pane fails to start, the reason shows in red under the dashboard's footer; other errors, such as a failed `claude --bg` or `claude agents`, show on the mode line.
 - (dashboard) While the dashboard has the keys, a steady block cursor sits on the first cell of the highlighted item's label.
 - (pane) orb keeps a separate `claude attach` pane for each attached thread, and selecting another thread leaves it running.
-- (pane) orb is attached to a thread from `⏎` into its pane until `<C-\>`, settling or deleting the thread detaches it, or its Claude exits.
+- (pane) orb is attached to a thread from `⏎` into its pane until `<C-\>`, settling or deleting the thread or its group detaches it, or its Claude exits.
 - (keybinds) In the sidebar, `<C-\>` on an attached thread detaches it and keeps the keys in the sidebar.
 - (sidebar) An idle thread orb is attached to shows a filled `FG` (`#c8d3f5`) circle in place of the hollow idle circle; with unseen output it still shows the green done check.
 - (sidebar) While the list overflows the sidebar, the Settled header stays on its bottom row until scrolling brings it into view.
 - (sidebar) While a search lists settled matches, the Settled header shows the open folder.
 - (tui) Typed text too long for the sidebar search, a picker's input or the rename box shows its end, keeping the cursor in view.
+- (groups) A group is a Feature, Research or Learn group whose threads all run in one directory: a Feature group's worktree, or `~/.orb/research/<name>/` or `~/.orb/learn/<name>/`.
+- (keybinds) `␣gf` picks a project and a name and adds a Feature group; `␣gr`/`␣gl` take a name and add a Research/Learn group; each starts with a draft.
+- (keybinds) The group name box is the rename box titled `New Feature group`, `New Research group` or `New Learn group`; after `⏎` it stays open until orb has made the group, and a refused name leaves it open with the reason on the mode line.
+- (groups) A group name is refused when the project already has a group of that kind with its slug (`Group <slug> already exists`), when a Feature group's branch already exists (`branch <slug> already exists in <project>`), or when a Research/Learn folder already exists (`~/.orb/<kind>/<slug> already exists`).
+- (groups) A group's slug is its name with each run of whitespace turned into `-`, case kept; a name using `/ \ ~ ^ : ? * [` or `..`, or starting with `-` or `.`, is refused with `Name can't use <char>`.
+- (groups) A Feature group's worktree is created when its draft starts, on a branch named for the group's slug, which orb never renames.
+- (groups) Research and Learn groups belong to orb's `Research` and `Learn` projects, which `␣n` doesn't list.
+- (groups) A new Research or Learn folder is copied from `~/.orb/templates/<kind>/`, which orb writes from its built-in default when it's missing.
+- (sidebar) Making a group outside the project filter clears the filter; a refused name leaves it set.
+- (sidebar) Outside the Settled shelf, a group is a three-line card (status, slug, time; kind, project, roll-up status; branch or folder, one icon per thread, fold chevron) with its threads as one-line rows under it, newest first.
+- (sidebar) On the Settled shelf, a group is one line (kind icon, slug, thread count and time since it settled), with its threads under it while it's open.
+- (keybinds) In the sidebar, `l` opens a group, `h` closes it from any of its rows and puts the cursor on its card, and `⏎` on a group's card toggles it; on a settled group `l` also opens the Settled shelf, and `h` on a closed one closes the shelf.
+- (sidebar) Active groups start open and settled groups closed; fold state is kept in memory only.
+- (keybinds) `n` on an unsettled group's card or a thread in it starts a sibling at the top of the group, in its directory, with the group's default model and permission, opening the group if it's folded.
+- (groups) `n` does nothing on a settled group, and on a group with only its draft it shows `Group already has a draft`.
+- (keybinds) On a group's draft, `⏎` starts it; `␣m`/`␣a` there or on the group's card pick the group's one default model and permission, which its draft and every `n` sibling start with, leaving running threads alone; a group's draft has no workspace or base-branch pick.
+- (zellij) A group card's and group draft's tools open in the group's directory, or in the project root before a Feature group's worktree exists.
+- (groups) Settling a group is refused with `Can't settle while Claude is working` while any of its threads has a turn underway, and it stops the group's idle sessions.
+- (groups) Deleting a group runs `claude rm` for each of its threads, then deletes the group and its directory: its own folder under `~/.orb/<kind>/`, or its worktree (`git worktree remove --force`) and then the slug branch orb made for it (`git branch -d`).
+- (groups) Deleting a Feature group whose slug branch has commits `git branch -d` calls unmerged (not in its upstream if it has one, else not in `HEAD`) is refused before anything is touched or hidden, with `branch <slug> has unmerged commits`; a branch the group was switched to with `␣b` is never deleted.
+- (groups) Deleting a Feature group keeps its worktree and branch, showing `kept the worktree: another thread works in it`, while a thread outside the group still works in that worktree.
+- (groups) If a thread's `claude rm` fails while its group is being deleted, that thread and the group stay, with the reason on the mode line.
+- (picker) `d` on a group's card asks `Delete group and its worktree?` for a started Feature group, `Delete group and its folder?` for a Research or Learn group, and `Delete group?` for a Feature group that never started.
+- (groups) A group always keeps at least one draft or thread; `d` on its last one is refused with `Group needs at least one draft or thread`.
+- (keybinds) `␣b` (and the dashboard's `b`) on a started Feature group's card switches its worktree's branch for the group and every thread in it; `␣b` isn't bound on a group's other rows, and `␣w` is bound on none.
+- (groups) Groups and each thread's group persist to orb's store (store migration v8 added the `groups` table and `threads.group_id`).
