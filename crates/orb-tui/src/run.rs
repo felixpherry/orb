@@ -29,11 +29,16 @@
 //! tab orb's pane is on, where a click on the notification goes back to.
 //!
 //! When a session start waits for the user to trust a directory, a pane of
-//! its own, over any thread's, runs an interactive `claude` there. Leaving
-//! it, by its exit, `<C-\>` or `<C-h>`, asks the sessions actor to try the
-//! start again. When a started draft's thread comes up still selected, the
-//! loop attaches to it, unless the user is typing in a picker, the rename
-//! box or the sidebar search, or is already attached.
+//! its own, over any thread's, runs an interactive `claude` there. The
+//! sessions actor tries the start again every second, so once the user
+//! trusts the directory the pane gives way to the new thread's, keys and
+//! all. Leaving it, by its exit, `<C-\>` or `<C-h>`, asks the actor to try
+//! the start once more. When a started draft's thread comes up still selected, the
+//! loop attaches to it. If the user is typing in a picker, the rename box or
+//! the sidebar search, or is in a pane (the trust pane included), it waits,
+//! and attaches once the keys are back in the sidebar or the dashboard,
+//! leaving them there with the pane drawn, as long as the thread is still
+//! selected.
 //!
 //! After each frame the outer terminal's cursor takes the shape of where the
 //! keys are: a block in the sidebar, a bar in a text input, Claude's own
@@ -149,16 +154,38 @@ fn trust_to_open(trust: Option<&Path>, opened: Option<&Path>) -> Option<PathBuf>
     trust.filter(|&dir| Some(dir) != opened).map(Path::to_owned)
 }
 
-/// Whether to attach to `started`, a started draft's thread: only while it's
-/// the selected thread and the user is neither typing (in a picker, the
-/// rename box or the search) nor attached.
-fn attaches(started: Option<ThreadId>, selected: Option<ThreadId>, focus: Focus) -> bool {
-    started.is_some()
-        && started == selected
-        && !matches!(
-            focus,
-            Focus::Picker | Focus::Rename | Focus::Search | Focus::Attached
-        )
+/// Whether the open trust pane should close: its start no longer waits,
+/// because it went ahead once Claude trusted the directory, or failed.
+fn trust_ended(open: bool, trust: Option<&Path>) -> bool {
+    open && trust.is_none()
+}
+
+/// What the loop does with a started draft's request to attach to its thread.
+#[derive(Debug, PartialEq, Eq)]
+enum StartedAttach {
+    /// There's no request, or its thread is no longer selected: drop it.
+    Drop,
+    /// The user is typing (a picker, the rename box, the search) or in a pane
+    /// (the trust pane too): keep the request until the keys are back.
+    Wait,
+    /// Attach now. `keep_keys` leaves the keys where they are, for a request
+    /// that waited, so a `<C-h>` out of the trust pane isn't undone.
+    Attach { keep_keys: bool },
+}
+
+/// What to do with `started`, a started draft's thread, given the selection,
+/// where the keys are, and whether the request has `waited` already.
+fn started_attach(
+    started: Option<ThreadId>,
+    selected: Option<ThreadId>,
+    focus: Focus,
+    waited: bool,
+) -> StartedAttach {
+    match focus {
+        _ if started.is_none() || started != selected => StartedAttach::Drop,
+        Focus::Picker | Focus::Rename | Focus::Search | Focus::Attached => StartedAttach::Wait,
+        Focus::Sidebar | Focus::Dashboard => StartedAttach::Attach { keep_keys: waited },
+    }
 }
 
 /// The pane the right-hand area draws: none while the dashboard has the
@@ -241,6 +268,9 @@ struct App {
     pane_error: Option<String>,
     /// The directory a trust pane was opened for, while its start waits.
     opened_trust: Option<PathBuf>,
+    /// A started draft's attach request is waiting for the keys to come back
+    /// to the sidebar or the dashboard.
+    attach_waited: bool,
     /// The environment attached sessions run with.
     claude_env: Vec<(OsString, OsString)>,
     /// Opens tools; `None` outside zellij.
@@ -284,6 +314,7 @@ impl App {
             trust: None,
             pane_error: None,
             opened_trust: None,
+            attach_waited: false,
             claude_env,
             zellij,
             notifier,
@@ -370,6 +401,7 @@ impl App {
             }
             self.announce();
             self.reconcile(terminal.backend_mut())?;
+            self.close_ended_trust(terminal.backend_mut())?;
             self.open_trust(terminal.backend_mut())?;
             self.open_started(terminal.backend_mut())?;
             let now = Instant::now();
@@ -878,28 +910,79 @@ impl App {
         }
     }
 
-    /// Attaches to a started draft's thread if it's still selected. The
-    /// request is taken either way, so it never fires later. A failure the
-    /// start still reported (saving the store) stays on the mode line.
+    /// Attaches to a started draft's thread while it's still selected, as
+    /// [`started_attach`] decides: at once, or, if the user was typing or in
+    /// a pane when it came up, once the keys are back in the sidebar or the
+    /// dashboard, leaving them there with the pane drawn (as `<C-h>` does). A
+    /// request whose thread is no longer selected is dropped for good. A
+    /// failure the start still reported (saving the store) stays on the mode
+    /// line.
     fn open_started<W>(&mut self, out: &mut W) -> io::Result<()>
     where
         W: Write,
     {
-        let commands = {
+        let (commands, keep_keys) = {
             let mut state = self.state.write();
-            let started = state.sessions.attach.take();
-            if !attaches(started, state.sessions.selected_id(), state.focus) {
-                return Ok(());
-            }
+            let decision = started_attach(
+                state.sessions.attach,
+                state.sessions.selected_id(),
+                state.focus,
+                self.attach_waited,
+            );
+            self.attach_waited = decision == StartedAttach::Wait;
+            let keep_keys = match decision {
+                StartedAttach::Wait => return Ok(()),
+                StartedAttach::Drop => {
+                    state.sessions.attach = None;
+                    return Ok(());
+                }
+                StartedAttach::Attach { keep_keys } => keep_keys,
+            };
+            state.sessions.attach = None;
+            let focus = state.focus;
             let error = state.sessions.error.take();
             let commands = IntentHandler::handle(&Intent::Attach, &mut state);
             state.sessions.error = error;
-            commands
+            if keep_keys {
+                state.focus = focus;
+            }
+            (commands, keep_keys)
         };
         for command in &commands {
             self.execute(command, out)?;
         }
+        if keep_keys {
+            // The pane loses the keys, as on `<C-h>`.
+            self.execute(&Command::Detach, out)?;
+        }
         Ok(())
+    }
+
+    /// Closes the trust pane once its start no longer waits (see
+    /// [`trust_ended`]), without asking for another try. Keys that were in it
+    /// go to the sidebar for a moment, so the started thread's attach, which
+    /// the actor asks for right after, takes them into the thread's pane:
+    /// the trust pane gives way to the thread in place.
+    fn close_ended_trust<W>(&mut self, out: &mut W) -> io::Result<()>
+    where
+        W: Write,
+    {
+        let ended = trust_ended(
+            self.trust.is_some(),
+            self.state.read().sessions.trust.as_deref(),
+        );
+        if !ended {
+            return Ok(());
+        }
+        self.trust = None;
+        self.attach_waited = false;
+        {
+            let mut app = self.state.write();
+            if app.focus == Focus::Attached {
+                app.focus = Focus::Sidebar;
+            }
+        }
+        outer_terminal::set_mouse_capture(out, false)
     }
 
     /// Closes the trust pane, leaving the thread panes running, returns to
@@ -1039,8 +1122,8 @@ mod tests {
     use ratatui::crossterm::cursor::SetCursorStyle;
 
     use super::{
-        after_pane, announces, attaches, cursor_style, list_directories, shown_pane, to_drop,
-        trust_to_open,
+        StartedAttach, after_pane, announces, cursor_style, list_directories, shown_pane,
+        started_attach, to_drop, trust_ended, trust_to_open,
     };
 
     #[rstest::rstest]
@@ -1142,6 +1225,31 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn open_trust_pane_closes_once_its_start_no_longer_waits() {
+        // Given the trust pane open and the start no longer waiting on trust.
+
+        // When deciding whether to close it.
+        let ended = trust_ended(true, None);
+
+        // Then it closes.
+        assert!(
+            ended,
+            "a started (or failed) start should end the trust pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn trust_pane_stays_while_its_start_waits() {
+        // Given the trust pane open for /tmp/x and the start still waiting.
+
+        // When deciding whether to close it.
+        let ended = trust_ended(true, Some(Path::new("/tmp/x")));
+
+        // Then it stays.
+        assert!(!ended, "the trust pane stays while trust is awaited");
+    }
+
+    #[rstest::rstest]
     fn trust_pane_opens_for_a_new_trust_request() {
         // Given a start waiting on /tmp/x and no trust pane opened.
         let trust = Path::new("/tmp/x");
@@ -1176,23 +1284,31 @@ mod tests {
         // Given thread 1 started from a draft and still selected.
         let started = Some(ThreadId(1));
 
-        // When deciding whether to attach in `focus`.
-        let attach = attaches(started, started, focus);
+        // When deciding what to do in `focus`.
+        let decision = started_attach(started, started, focus, false);
 
-        // Then orb attaches.
-        assert!(attach, "a still-selected started thread should attach");
+        // Then orb attaches, taking the keys into the pane.
+        assert_eq!(
+            decision,
+            StartedAttach::Attach { keep_keys: false },
+            "a still-selected started thread should attach"
+        );
     }
 
     #[rstest::rstest]
-    fn started_thread_is_not_attached_after_the_selection_moved() {
+    fn started_thread_is_dropped_after_the_selection_moved() {
         // Given thread 1 started from a draft while thread 2 is selected.
         let started = Some(ThreadId(1));
 
-        // When deciding whether to attach.
-        let attach = attaches(started, Some(ThreadId(2)), Focus::Sidebar);
+        // When deciding what to do.
+        let decision = started_attach(started, Some(ThreadId(2)), Focus::Sidebar, false);
 
-        // Then orb stays where the user is.
-        assert!(!attach, "a moved selection shouldn't attach");
+        // Then the request is dropped.
+        assert_eq!(
+            decision,
+            StartedAttach::Drop,
+            "a moved selection shouldn't attach"
+        );
     }
 
     #[rstest::rstest]
@@ -1200,26 +1316,55 @@ mod tests {
     #[case(Focus::Rename)]
     #[case(Focus::Search)]
     #[case(Focus::Attached)]
-    fn started_thread_is_not_attached_while_typing_or_in_a_pane(#[case] focus: Focus) {
-        // Given thread 1 started from a draft and still selected.
+    fn started_thread_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
+        // Given thread 1 started from a draft and still selected, e.g. while
+        // the trust pane has the keys.
         let started = Some(ThreadId(1));
 
-        // When deciding whether to attach in `focus`.
-        let attach = attaches(started, started, focus);
+        // When deciding what to do in `focus`.
+        let decision = started_attach(started, started, focus, false);
 
-        // Then orb leaves the user where they are.
-        assert!(!attach, "no attach while in {focus:?}");
+        // Then the request waits instead of being dropped.
+        assert_eq!(
+            decision,
+            StartedAttach::Wait,
+            "the attach should wait in {focus:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Sidebar)]
+    #[case(Focus::Dashboard)]
+    fn waited_started_thread_attaches_once_the_keys_are_back(#[case] focus: Focus) {
+        // Given thread 1's attach request waited while the user was in the
+        // trust pane, and the thread is still selected.
+        let started = Some(ThreadId(1));
+
+        // When deciding what to do after `<C-h>` or `<C-\>` put the keys in
+        // `focus`.
+        let decision = started_attach(started, started, focus, true);
+
+        // Then orb attaches and leaves the keys there.
+        assert_eq!(
+            decision,
+            StartedAttach::Attach { keep_keys: true },
+            "a waited attach should survive leaving the trust pane"
+        );
     }
 
     #[rstest::rstest]
     fn nothing_started_attaches_nothing() {
         // Given no started thread and nothing selected.
 
-        // When deciding whether to attach.
-        let attach = attaches(None, None, Focus::Sidebar);
+        // When deciding what to do.
+        let decision = started_attach(None, None, Focus::Sidebar, false);
 
-        // Then orb doesn't attach.
-        assert!(!attach, "no started thread, no attach");
+        // Then there's nothing to attach.
+        assert_eq!(
+            decision,
+            StartedAttach::Drop,
+            "no started thread, no attach"
+        );
     }
 
     #[rstest::rstest]

@@ -37,7 +37,7 @@ mod tests {
     use super::{OpenToolError, validate_open_tool};
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
         ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
@@ -89,10 +89,11 @@ mod tests {
                         pinned_at: None,
                         settled_at: None,
                         active_since: SystemTime::UNIX_EPOCH,
-                        draft: Some(GroupDraft {
+                        draft: true,
+                        defaults: GroupDefaults {
                             model: None,
                             permission: None,
-                        }),
+                        },
                     }],
                     kind: ProjectKind::Normal,
                 }],

@@ -218,7 +218,7 @@ mod tests {
 
     use jiff::tz::{self, TimeZone};
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
         ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::{AppState, Focus};
@@ -707,7 +707,8 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            draft: None,
+            draft: false,
+            defaults: GroupDefaults::default(),
         }
     }
 
@@ -762,10 +763,11 @@ mod tests {
         with_sessions(Sessions {
             projects: vec![Project {
                 groups: vec![Group {
-                    draft: Some(GroupDraft {
+                    draft: true,
+                    defaults: GroupDefaults {
                         model: None,
                         permission: None,
-                    }),
+                    },
                     ..group
                 }],
                 ..project(1, title, vec![child])

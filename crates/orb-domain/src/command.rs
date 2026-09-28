@@ -98,11 +98,12 @@ pub enum Command {
     },
     /// Start the group's first thread from its draft.
     StartGroupDraft(GroupId),
-    /// Save the group's draft settings as they now are in the app state.
+    /// Save the group's default model and permission (its draft's and each
+    /// new sibling's) as they now are in the app state.
     SaveGroupDraft(GroupId),
     /// Start a thread at the top of `group`, in its directory, with `model`
-    /// and `permission_mode`; select and attach it if the cursor is still on
-    /// `from`.
+    /// and `permission_mode` (the group's defaults); select and attach it if
+    /// the cursor is still on `from`.
     StartSibling {
         group: GroupId,
         model: Option<String>,
@@ -118,7 +119,8 @@ pub enum Command {
     /// Bring the group back from the Settled shelf and keep it active.
     UnsettleGroup(GroupId),
     /// Delete every thread of the group and its Claude session, then the
-    /// group and its folder or worktree.
+    /// group and its folder or worktree; a Feature group whose slug branch
+    /// isn't merged is kept whole.
     DeleteGroup(GroupId),
 }
 

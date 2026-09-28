@@ -188,6 +188,17 @@ impl Git for GitCli {
         self.succeeds(repo, ["show-ref", "--verify", "--quiet", &refname])
     }
 
+    fn is_merged(&self, repo: &Path, branch: &str) -> bool {
+        let upstream = format!("{branch}@{{upstream}}");
+        let target = if self.succeeds(repo, ["rev-parse", "--verify", "--quiet", &upstream]) {
+            upstream
+        } else {
+            "HEAD".to_owned()
+        };
+        let refname = format!("refs/heads/{branch}");
+        self.succeeds(repo, ["merge-base", "--is-ancestor", &refname, &target])
+    }
+
     fn has_remote_branch(&self, repo: &Path, branch: &str) -> bool {
         let refname = format!("refs/remotes/origin/{branch}");
         self.succeeds(repo, ["show-ref", "--verify", "--quiet", &refname])
@@ -724,6 +735,83 @@ mod tests {
 
         // Then only origin's branch is known.
         assert_eq!(known, expected, "origin/{branch} known");
+        Ok(())
+    }
+
+    /// A repo on `main` with a branch `slug` one commit ahead of it.
+    fn slug_ahead(sandbox: &Sandbox) -> Result<PathBuf, Report<GitError>> {
+        let repo = sandbox.repo("repo", "main")?;
+        sandbox.run(&repo, ["checkout", "-q", "-b", "slug"])?;
+        sandbox.commit(&repo, 2000)?;
+        sandbox.run(&repo, ["checkout", "-q", "main"])?;
+        Ok(repo)
+    }
+
+    #[rstest::rstest]
+    fn branch_with_a_commit_head_lacks_is_not_merged() -> Result<(), Report<GitError>> {
+        // Given `slug` one commit ahead of HEAD, with no upstream.
+        let sandbox = Sandbox::new()?;
+        let repo = slug_ahead(&sandbox)?;
+
+        // When asking whether it's merged.
+        let merged = sandbox.git().is_merged(&repo, "slug");
+
+        // Then it isn't, as `git branch -d` says.
+        assert!(!merged, "a commit only slug has keeps it unmerged");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn branch_in_heads_history_is_merged() -> Result<(), Report<GitError>> {
+        // Given `slug` one commit ahead, then fast-forwarded into HEAD.
+        let sandbox = Sandbox::new()?;
+        let repo = slug_ahead(&sandbox)?;
+        sandbox.run(&repo, ["merge", "-q", "--ff-only", "slug"])?;
+
+        // When asking whether it's merged.
+        let merged = sandbox.git().is_merged(&repo, "slug");
+
+        // Then it is.
+        assert!(merged, "slug's commits are all in HEAD");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn branch_in_its_upstreams_history_is_merged() -> Result<(), Report<GitError>> {
+        // Given `slug` one commit ahead of HEAD, pushed to its upstream.
+        let sandbox = Sandbox::new()?;
+        let repo = slug_ahead(&sandbox)?;
+        let origin = sandbox.repo("origin", "main")?;
+        sandbox.add_remote(&repo, "origin", &origin)?;
+        sandbox.run(&repo, ["push", "-q", "-u", "origin", "slug"])?;
+
+        // When asking whether it's merged.
+        let merged = sandbox.git().is_merged(&repo, "slug");
+
+        // Then it is, as `git branch -d` deletes it.
+        assert!(merged, "a branch its upstream has is merged");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn branch_ahead_of_its_upstream_is_not_merged_even_in_head() -> Result<(), Report<GitError>> {
+        // Given `slug` pushed to its upstream, then a commit on top, merged
+        // into HEAD.
+        let sandbox = Sandbox::new()?;
+        let repo = slug_ahead(&sandbox)?;
+        let origin = sandbox.repo("origin", "main")?;
+        sandbox.add_remote(&repo, "origin", &origin)?;
+        sandbox.run(&repo, ["push", "-q", "-u", "origin", "slug"])?;
+        sandbox.run(&repo, ["checkout", "-q", "slug"])?;
+        sandbox.commit(&repo, 3000)?;
+        sandbox.run(&repo, ["checkout", "-q", "main"])?;
+        sandbox.run(&repo, ["merge", "-q", "--ff-only", "slug"])?;
+
+        // When asking whether it's merged.
+        let merged = sandbox.git().is_merged(&repo, "slug");
+
+        // Then it isn't: `git branch -d` checks the upstream first.
+        assert!(!merged, "the upstream lacks slug's last commit");
         Ok(())
     }
 

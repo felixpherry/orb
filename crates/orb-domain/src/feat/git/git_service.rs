@@ -1,6 +1,6 @@
 //! What orb asks of git: the branches a thread could switch to, a project's
 //! default branch, making, checking out, renaming and removing worktrees and
-//! branches, and making a directory a repository.
+//! branches, whether a branch is merged, and making a directory a repository.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -97,6 +97,10 @@ pub trait Git: Send + Sync {
 
     /// Whether the local branch exists.
     fn branch_exists(&self, repo: &Path, branch: &str) -> bool;
+
+    /// Whether `git branch -d` would take the local `branch` as merged: it is
+    /// in its upstream's history when it has one, else in `HEAD`'s.
+    fn is_merged(&self, repo: &Path, branch: &str) -> bool;
 
     /// Whether `origin/<branch>` is known, as of the last fetch.
     fn has_remote_branch(&self, repo: &Path, branch: &str) -> bool;
@@ -222,6 +226,11 @@ impl GitService {
     /// Whether the local branch exists.
     pub fn branch_exists(&self, repo: &Path, branch: &str) -> bool {
         self.git.branch_exists(repo, branch)
+    }
+
+    /// Whether `git branch -d` would take the local `branch` as merged.
+    pub fn is_merged(&self, repo: &Path, branch: &str) -> bool {
+        self.git.is_merged(repo, branch)
     }
 
     /// Whether `origin/<branch>` is known, as of the last fetch.

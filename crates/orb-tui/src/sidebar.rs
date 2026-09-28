@@ -166,11 +166,7 @@ fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
         .iter()
         .map(|project| {
             usize::from(project.draft.is_some())
-                + project
-                    .groups
-                    .iter()
-                    .filter(|group| group.draft.is_some())
-                    .count()
+                + project.groups.iter().filter(|group| group.draft).count()
         })
         .sum::<usize>();
     let threads = sessions
@@ -544,8 +540,8 @@ fn render_group_card(
     );
     let icons = group
         .draft
-        .iter()
-        .map(|_| (PENCIL, YELLOW))
+        .then_some((PENCIL, YELLOW))
+        .into_iter()
         .chain(threads.iter().map(|thread| {
             let (glyph, _, colour) = status(thread, attached.contains(&thread.id), now);
             (glyph, colour)
@@ -1034,7 +1030,7 @@ mod tests {
 
     use orb_domain::TextInput;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
         ProjectKind, Search, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::SidebarLayout;
@@ -2286,10 +2282,11 @@ mod tests {
             pinned_at: None,
             settled_at: settled.then(|| at(20)),
             active_since: SystemTime::UNIX_EPOCH,
-            draft: draft.then_some(GroupDraft {
+            draft,
+            defaults: GroupDefaults {
                 model: None,
                 permission: None,
-            }),
+            },
         };
         let threads = if draft {
             vec![]
@@ -2346,10 +2343,11 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            draft: draft.then_some(GroupDraft {
+            draft,
+            defaults: GroupDefaults {
                 model: None,
                 permission: None,
-            }),
+            },
         };
         let threads = threads
             .into_iter()
