@@ -121,6 +121,8 @@ fn title(kind: &PickerKind) -> &'static str {
         PickerKind::SettleThread { .. } => "Settle thread?",
         PickerKind::DeleteThread { .. } => "Delete thread?",
         PickerKind::DiscardDraft { .. } => "Discard draft?",
+        PickerKind::SettleGroup { .. } => "Settle group?",
+        PickerKind::DeleteGroup { .. } => "Delete group?",
     }
 }
 
@@ -134,6 +136,8 @@ fn hints(kind: &PickerKind) -> Line<'static> {
         | PickerKind::SettleThread { .. }
         | PickerKind::DeleteThread { .. }
         | PickerKind::DiscardDraft { .. }
+        | PickerKind::SettleGroup { .. }
+        | PickerKind::DeleteGroup { .. }
         | PickerKind::InitGit { .. } => &[("⏎", "confirm"), ("Esc", "cancel")],
         _ => &[("⏎", "select"), ("Esc", "close")],
     };
@@ -460,7 +464,7 @@ mod tests {
     use orb_domain::feat::git::git_service::GitRef;
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::{DraftTarget, PickTarget, PickerState};
-    use orb_domain::feat::sessions::state::{ProjectId, ThreadId};
+    use orb_domain::feat::sessions::state::{GroupId, ProjectId, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
@@ -691,6 +695,8 @@ mod tests {
         PickerState::discard_draft(ProjectId(1), Focus::Sidebar),
         "Discard draft?"
     )]
+    #[case(PickerState::settle_group(GroupId(9), Focus::Sidebar), "Settle group?")]
+    #[case(PickerState::delete_group(GroupId(9), Focus::Sidebar), "Delete group?")]
     fn picker_is_titled_by_its_kind(#[case] picker: PickerState, #[case] title: &str) {
         // Given a picker of some kind.
 

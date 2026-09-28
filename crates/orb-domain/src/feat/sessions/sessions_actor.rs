@@ -50,7 +50,14 @@
 //! last-used model and permission, and is selected, and saves them as the
 //! user edits them. Starting it starts the group's first thread: a Feature
 //! group in a new worktree on the branch named after it, which becomes the
-//! group's directory, and a Research or Learn group in its folder.
+//! group's directory, and a Research or Learn group in its folder. `n`
+//! starts a sibling at the top of a group, in its directory. A group is
+//! pinned, settled and deleted as a whole: pinning a settled group un-settles
+//! it, settling it stops its idle sessions, and deleting it deletes each
+//! thread, then the group (never its directory). A group auto-settles when
+//! no thread has had turn activity for three days, unless it is pinned, was
+//! just un-settled, or orb is attached to one of its threads; a turn in any
+//! of its threads un-settles it.
 //!
 //! It adds projects and removes them: a removed project leaves `␣n` and the
 //! project filter and loses its draft, its threads stay, and adding it again
@@ -63,6 +70,7 @@
 //! polled since orb started finishes a turn, or starts needing an approval or
 //! an answer, in any project, unless the thread is being deleted.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -132,7 +140,8 @@ pub struct SessionsActorDeps {
 /// groups, the threads' statuses, titles, pins and settles, the latest `claude` error,
 /// the directory a start waits to be trusted in, and the started thread the
 /// frontend should attach to. It also restores the sidebar's width and
-/// project filter, and selects a new group's draft. The intent handler also moves the cursor, opens and closes
+/// project filter, selects a new group's draft, and moves the cursor to a
+/// sibling it started. The intent handler also moves the cursor, opens and closes
 /// the shelf, marks a start as starting, edits a draft's fields before asking
 /// for them to be saved, and resizes or filters the sidebar before asking for
 /// that to be saved.
@@ -280,6 +289,37 @@ pub struct StartGroupDraft(pub GroupId);
 #[derive(Debug)]
 pub struct SaveGroupDraft(pub GroupId);
 
+/// Start a thread at the top of `group`, in its directory, with `model` and
+/// `permission_mode`; select and attach it if the cursor is still on `from`.
+#[derive(Debug)]
+pub struct StartSibling {
+    pub group: GroupId,
+    pub model: Option<String>,
+    pub permission_mode: Option<String>,
+    pub from: Option<SidebarItem>,
+}
+
+/// Pin group `.0`; a settled group un-settles.
+#[derive(Debug)]
+pub struct PinGroup(pub GroupId);
+
+/// Unpin group `.0`.
+#[derive(Debug)]
+pub struct UnpinGroup(pub GroupId);
+
+/// Settle group `.0` and stop its idle sessions, unless one of its threads is
+/// mid-turn.
+#[derive(Debug)]
+pub struct SettleGroup(pub GroupId);
+
+/// Un-settle group `.0` and keep it active.
+#[derive(Debug)]
+pub struct UnsettleGroup(pub GroupId);
+
+/// Delete every thread of group `.0` and its session, then the group.
+#[derive(Debug)]
+pub struct DeleteGroup(pub GroupId);
+
 /// A session start in flight: what it is for, where it runs, the branch
 /// checked out there when known, the worktree orb made for it, if any, and
 /// the options the session starts with.
@@ -299,8 +339,13 @@ enum StartKind {
         project: ProjectId,
         workspace: LastWorkspace,
     },
-    /// The first thread of group `group` in `project`, from its draft.
-    GroupDraft { project: ProjectId, group: GroupId },
+    /// A thread of group `group` in `project`: its first, from its draft,
+    /// or a sibling. The cursor follows the thread if it's still on `from`.
+    Group {
+        project: ProjectId,
+        group: GroupId,
+        from: Option<SidebarItem>,
+    },
     /// An existing, prompt-less thread moving out of `old_cwd`.
     Move {
         thread: ThreadId,
@@ -636,6 +681,87 @@ impl Message<SaveGroupDraft> for SessionsActor {
     }
 }
 
+impl Message<StartSibling> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        StartSibling {
+            group,
+            model,
+            permission_mode,
+            from,
+        }: StartSibling,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let options = SessionOptions {
+            model,
+            permission_mode,
+        };
+        self.start_sibling(group, options, from).await;
+    }
+}
+
+impl Message<PinGroup> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        PinGroup(id): PinGroup,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.pin_group(id);
+    }
+}
+
+impl Message<UnpinGroup> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        UnpinGroup(id): UnpinGroup,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.unpin_group(id);
+    }
+}
+
+impl Message<SettleGroup> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        SettleGroup(id): SettleGroup,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.settle_group(id).await;
+    }
+}
+
+impl Message<UnsettleGroup> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        UnsettleGroup(id): UnsettleGroup,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.unsettle_group(id);
+    }
+}
+
+impl Message<DeleteGroup> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        DeleteGroup(id): DeleteGroup,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.delete_group(id).await;
+    }
+}
+
 impl SessionsActor {
     /// Shows the saved projects, threads and drafts, sizes the sidebar as it
     /// was saved, kept within its bounds, filters it to the saved project if
@@ -786,6 +912,8 @@ impl SessionsActor {
             }
             statuses.push(status);
         }
+        let changed_groups =
+            self.follow_groups(&statuses, &attached, now, &mut to_stop, &mut error);
         let changed = {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
@@ -803,12 +931,68 @@ impl SessionsActor {
                     changed |= show(thread, row, status);
                 }
             }
+            for row in self
+                .groups
+                .iter()
+                .filter(|row| changed_groups.contains(&row.id))
+            {
+                if let Some(shown) = group_mut(sessions, row.id) {
+                    *shown = group(row, &self.rows);
+                    changed = true;
+                }
+            }
             changed
         };
         if changed {
             (self.wake)();
         }
         to_stop
+    }
+
+    /// Follows each group's settle lifecycle from its threads' polled rows
+    /// and `statuses` (index-aligned with the rows), saving the groups that
+    /// changed. Adds the idle sessions of a group that auto-settled to
+    /// `to_stop`, and sets `error` when a save fails. Returns the groups that
+    /// changed.
+    fn follow_groups(
+        &mut self,
+        statuses: &[ThreadStatus],
+        attached: &HashSet<ThreadId>,
+        now: i64,
+        to_stop: &mut Vec<String>,
+        error: &mut Option<String>,
+    ) -> Vec<GroupId> {
+        let mut changed_groups = Vec::new();
+        for group_row in &mut self.groups {
+            let children: Vec<(&ThreadRow, ThreadStatus)> = self
+                .rows
+                .iter()
+                .zip(statuses)
+                .filter(|(row, _)| row.group_id == Some(group_row.id))
+                .map(|(row, status)| (row, *status))
+                .collect();
+            let Some(latest) = children.iter().map(|(row, _)| row.last_activity_at).max() else {
+                continue;
+            };
+            let before = group_row.clone();
+            let in_progress = children.iter().any(|(_, status)| status.in_progress());
+            let held = children.iter().any(|(row, _)| attached.contains(&row.id));
+            if follow_group(group_row, latest, in_progress, held, now) {
+                to_stop.extend(
+                    children
+                        .iter()
+                        .filter(|(_, status)| *status == ThreadStatus::Idle)
+                        .map(|(row, _)| row.short_id.clone()),
+                );
+            }
+            if *group_row != before {
+                if self.store.save_group(group_row).is_err() {
+                    *error = Some(SAVE_FAILED.to_owned());
+                }
+                changed_groups.push(group_row.id);
+            }
+        }
+        changed_groups
     }
 
     /// Gives project `id` a draft unless it has one: the project's last-used
@@ -1089,7 +1273,14 @@ impl SessionsActor {
                 };
                 self.finish_draft(project, &used, thread);
             }
-            (Ok(created), StartKind::GroupDraft { project, group }) => {
+            (
+                Ok(created),
+                StartKind::Group {
+                    project,
+                    group,
+                    from,
+                },
+            ) => {
                 let thread = self.save_new(
                     project,
                     &cwd,
@@ -1098,7 +1289,7 @@ impl SessionsActor {
                     &options,
                     Some(group),
                 );
-                self.finish_group_draft(project, group, &cwd, thread);
+                self.finish_group_start(project, group, from, &cwd, thread);
             }
             (
                 Ok(created),
@@ -1215,7 +1406,11 @@ impl SessionsActor {
             }
         };
         let pending = PendingStart {
-            kind: StartKind::GroupDraft { project, group: id },
+            kind: StartKind::Group {
+                project,
+                group: id,
+                from: Some(SidebarItem::GroupDraft(id)),
+            },
             cwd,
             branch,
             made,
@@ -1224,14 +1419,62 @@ impl SessionsActor {
         self.start(pending, true).await;
     }
 
-    /// Replaces group `group_id`'s draft with its first thread `created`, in
-    /// `cwd` (a Feature group's directory from now on). If the group draft was
-    /// still selected, selects the thread and asks the frontend to attach, in
-    /// the same state write. Doesn't record last-used settings.
-    fn finish_group_draft(
+    /// Starts a thread at the top of group `id`, in its directory, with
+    /// `options`; the cursor follows it if it's still on `from`.
+    async fn start_sibling(
+        &mut self,
+        id: GroupId,
+        options: SessionOptions,
+        from: Option<SidebarItem>,
+    ) {
+        let found = self
+            .state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .find_map(|project| {
+                let group = project.groups.iter().find(|group| group.id == id)?;
+                Some((project.id, group.kind, group.dir.clone()))
+            });
+        let Some((project, kind, dir)) = found else {
+            return self.end_start(Err("the group is gone".to_owned()));
+        };
+        let cwd = match dir {
+            Some(dir) if dir.is_dir() => dir,
+            dir => {
+                let dir = dir.unwrap_or_default();
+                return self.end_start(Err(format!("folder no longer exists: {}", dir.display())));
+            }
+        };
+        let branch = match kind {
+            GroupKind::Feature => current_branch(&self.services.git, &cwd),
+            GroupKind::Research | GroupKind::Learn => None,
+        };
+        let pending = PendingStart {
+            kind: StartKind::Group {
+                project,
+                group: id,
+                from,
+            },
+            cwd,
+            branch,
+            made: None,
+            options,
+        };
+        self.start(pending, true).await;
+    }
+
+    /// Adds group `group_id`'s thread `created`, first in its project: its
+    /// first thread replaces the draft, in `cwd` (a Feature group's directory
+    /// from now on). If the cursor is still on `from`, selects the thread and
+    /// asks the frontend to attach, in the same state write. Doesn't record
+    /// last-used settings.
+    fn finish_group_start(
         &mut self,
         project_id: ProjectId,
         group_id: GroupId,
+        from: Option<SidebarItem>,
         cwd: &Path,
         created: Result<Thread, String>,
     ) {
@@ -1258,7 +1501,7 @@ impl SessionsActor {
             }
             let id = thread.id;
             project.threads.insert(0, thread);
-            if sessions.cursor == Some(SidebarItem::GroupDraft(group_id)) {
+            if sessions.cursor == from {
                 sessions.cursor = Some(SidebarItem::Thread(id));
                 sessions.attach = Some(id);
             }
@@ -1828,6 +2071,20 @@ impl SessionsActor {
         self.edit(id, |row, _| row.pinned_at = None);
     }
 
+    /// Pins a group; pinning a settled group un-settles it.
+    fn pin_group(&mut self, id: GroupId) {
+        self.edit_group(id, |row, now| {
+            row.pinned_at = row.pinned_at.or(Some(now));
+            if row.settled_override == Some(SettledOverride::Settled) {
+                unsettle_group_row(row, now);
+            }
+        });
+    }
+
+    fn unpin_group(&mut self, id: GroupId) {
+        self.edit_group(id, |row, _| row.pinned_at = None);
+    }
+
     /// Gives a thread orb's own name; `None` goes back to Claude's title.
     fn rename(&mut self, id: ThreadId, title: Option<String>) {
         self.edit(id, |row, _| row.renamed_title = title);
@@ -1851,6 +2108,30 @@ impl SessionsActor {
 
     fn unsettle(&mut self, id: ThreadId) {
         self.edit(id, unsettle_row);
+    }
+
+    /// Settles a group none of whose threads is mid-turn, then stops its
+    /// idle sessions. A turn that started after the key press wins.
+    async fn settle_group(&mut self, id: GroupId) {
+        let children: Vec<(String, ThreadStatus)> = self
+            .rows
+            .iter()
+            .filter(|row| row.group_id == Some(id))
+            .filter_map(|row| Some((row.short_id.clone(), self.status(row.id)?)))
+            .collect();
+        if children.iter().any(|(_, status)| status.in_progress()) {
+            return;
+        }
+        self.edit_group(id, settle_group_row);
+        for (short_id, status) in children {
+            if status == ThreadStatus::Idle {
+                self.stop(&short_id).await;
+            }
+        }
+    }
+
+    fn unsettle_group(&mut self, id: GroupId) {
+        self.edit_group(id, unsettle_group_row);
     }
 
     /// Marks a thread's latest turn seen.
@@ -1895,6 +2176,38 @@ impl SessionsActor {
         (self.wake)();
     }
 
+    /// Deletes each of group `id`'s threads as `delete` does, then, once none
+    /// is left, the group. A thread whose session couldn't be removed stays
+    /// in the group, shown again with the reason, and so does the group. The
+    /// group's directory stays on disk.
+    async fn delete_group(&mut self, id: GroupId) {
+        let threads: Vec<ThreadId> = self
+            .rows
+            .iter()
+            .filter(|row| row.group_id == Some(id))
+            .map(|row| row.id)
+            .collect();
+        for thread in threads {
+            self.delete(thread).await;
+        }
+        if self.rows.iter().any(|row| row.group_id == Some(id)) {
+            return;
+        }
+        let deleted = self.store.delete_group(id);
+        self.groups.retain(|row| row.id != id);
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            for project in &mut sessions.projects {
+                project.groups.retain(|group| group.id != id);
+            }
+            if deleted.is_err() {
+                sessions.error = Some(SAVE_FAILED.to_owned());
+            }
+        }
+        (self.wake)();
+    }
+
     /// Saves the sidebar's width and project filter, showing why if it can't.
     fn save_ui(&self) {
         let ui = {
@@ -1930,6 +2243,30 @@ impl SessionsActor {
             if let Some(thread) = thread_mut(sessions, id) {
                 let status = thread.status;
                 show(thread, row, status);
+            }
+        }
+        (self.wake)();
+    }
+
+    /// Changes group `id`'s saved row with `change` (given the time now),
+    /// then saves and shows it. Does nothing if the group is gone.
+    fn edit_group<F>(&mut self, id: GroupId, change: F)
+    where
+        F: FnOnce(&mut GroupRow, i64),
+    {
+        let Some(row) = self.groups.iter_mut().find(|row| row.id == id) else {
+            return;
+        };
+        change(row, now_ms());
+        let saved = self.store.save_group(row);
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            if saved.is_err() {
+                sessions.error = Some(SAVE_FAILED.to_owned());
+            }
+            if let Some(shown) = group_mut(sessions, id) {
+                *shown = group(row, &self.rows);
             }
         }
         (self.wake)();
@@ -1997,6 +2334,8 @@ struct Moved {
 ///   kept active or orb is attached to it;
 /// - the selected thread's latest turn is seen.
 ///
+/// A grouped row's settle lifecycle is its group's (see [`follow_group`]).
+///
 /// Returns whether it auto-settled with an idle session to stop.
 fn follow_activity(
     row: &mut ThreadRow,
@@ -2009,7 +2348,9 @@ fn follow_activity(
     if was_in_progress && !status.in_progress() {
         row.last_activity_at = now;
     }
-    if status.in_progress()
+    let grouped = row.group_id.is_some();
+    if !grouped
+        && status.in_progress()
         && let Some(settled_override) = row.settled_override
     {
         if settled_override == SettledOverride::Settled {
@@ -2018,7 +2359,8 @@ fn follow_activity(
         row.settled_override = None;
         row.settled_at = None;
     }
-    let auto_settle = row.settled_override.is_none()
+    let auto_settle = !grouped
+        && row.settled_override.is_none()
         && row.pinned_at.is_none()
         && !status.in_progress()
         && !attached
@@ -2030,6 +2372,39 @@ fn follow_activity(
         row.last_visited_at = now;
     }
     auto_settle && status == ThreadStatus::Idle
+}
+
+/// Follows a group's settle lifecycle, given its threads' `latest` turn
+/// activity and whether any of them has a turn `in_progress` or is
+/// `attached`:
+/// - a turn underway un-settles the group and ends its kept-active mark;
+/// - an unpinned group idle for [`AUTO_SETTLE_AFTER`] settles as of
+///   `latest`, unless it is kept active, in progress, or attached.
+///
+/// Returns whether it auto-settled.
+fn follow_group(
+    row: &mut GroupRow,
+    latest: i64,
+    in_progress: bool,
+    attached: bool,
+    now: i64,
+) -> bool {
+    if in_progress && let Some(settled_override) = row.settled_override {
+        if settled_override == SettledOverride::Settled {
+            row.unsettled_at = Some(now);
+        }
+        row.settled_override = None;
+        row.settled_at = None;
+    }
+    let auto_settle = row.settled_override.is_none()
+        && row.pinned_at.is_none()
+        && !in_progress
+        && !attached
+        && now.saturating_sub(latest) >= AUTO_SETTLE_AFTER;
+    if auto_settle {
+        settle_group_row(row, latest);
+    }
+    auto_settle
 }
 
 /// Settles `row` onto the shelf as of `at`, unpinning it.
@@ -2048,6 +2423,34 @@ fn unsettle_row(row: &mut ThreadRow, now: i64) {
     }
     row.settled_override = Some(SettledOverride::Active);
     row.settled_at = None;
+}
+
+/// Settles group `row` onto the shelf as of `at`, unpinning it, as
+/// [`settle_row`] does for a thread.
+fn settle_group_row(row: &mut GroupRow, at: i64) {
+    row.settled_override = Some(SettledOverride::Settled);
+    row.settled_at = Some(at);
+    row.unsettled_at = None;
+    row.pinned_at = None;
+}
+
+/// Un-settles group `row` and keeps it active until its next turn activity,
+/// as [`unsettle_row`] does for a thread.
+fn unsettle_group_row(row: &mut GroupRow, now: i64) {
+    if row.settled_override != Some(SettledOverride::Active) {
+        row.unsettled_at = Some(now);
+    }
+    row.settled_override = Some(SettledOverride::Active);
+    row.settled_at = None;
+}
+
+/// The shown group with id `id`.
+fn group_mut(sessions: &mut Sessions, id: GroupId) -> Option<&mut Group> {
+    sessions
+        .projects
+        .iter_mut()
+        .flat_map(|project| &mut project.groups)
+        .find(|group| group.id == id)
 }
 
 /// The shown thread with id `id`.
@@ -2447,8 +2850,8 @@ mod tests {
         ProjectId, ProjectKind, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::store::{
-        DraftRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store, StoreError,
-        ThreadRow, Ui,
+        DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store,
+        StoreError, ThreadRow, Ui,
     };
     use crate::feat::sessions::transcript::transcript_path;
 
@@ -7961,6 +8364,852 @@ mod tests {
             saved,
             vec![Some("sonnet".to_owned())],
             "the group draft's model should be saved"
+        );
+        Ok(())
+    }
+
+    /// A store whose orb project has a `kind` group `GT-514-login`, in `dir`
+    /// when given, holding one thread per short id, each created an hour ago.
+    fn store_with_group(
+        kind: GroupKind,
+        dir: Option<&Path>,
+        short_ids: &[&str],
+    ) -> Result<(Store, GroupId, Vec<ThreadId>), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        let project_id = orb_project(&store)?;
+        let group = store.insert_group(&NewGroup {
+            project_id,
+            kind,
+            name: SLUG_BRANCH.to_owned(),
+            dir: dir.map(Path::to_owned),
+            branch: (kind == GroupKind::Feature).then(|| SLUG_BRANCH.to_owned()),
+            created_at: 1,
+            draft_model: None,
+            draft_permission_mode: None,
+        })?;
+        let threads = short_ids
+            .iter()
+            .map(|short_id| {
+                store.insert_thread(&NewThread {
+                    project_id,
+                    short_id: (*short_id).to_owned(),
+                    cwd: dir.unwrap_or(Path::new(PROJECT_ROOT)).to_owned(),
+                    created_at: now_ms() - HOUR_MS,
+                    model: None,
+                    permission_mode: None,
+                    group_id: Some(group),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok((store, group, threads))
+    }
+
+    /// The saved row of group `id`.
+    fn saved_group(store: &Store, id: GroupId) -> Result<GroupRow, Report<StoreError>> {
+        store
+            .load()?
+            .3
+            .into_iter()
+            .find(|row| row.id == id)
+            .ok_or_else(|| Report::new(StoreError).attach(format!("group {id:?} isn't saved")))
+    }
+
+    /// Saves `change` over group `id`'s saved row.
+    fn resave_group<F>(store: &Store, id: GroupId, change: F) -> Result<(), Report<StoreError>>
+    where
+        F: FnOnce(GroupRow) -> GroupRow,
+    {
+        store.save_group(&change(saved_group(store, id)?))
+    }
+
+    /// Opus in auto mode.
+    fn opus_auto() -> SessionOptions {
+        SessionOptions {
+            model: Some("opus".to_owned()),
+            permission_mode: Some("auto".to_owned()),
+        }
+    }
+
+    /// A Research group in a temp folder holding thread `aa`, with the actor
+    /// started on `host` and the cursor on `aa`.
+    fn sibling_group(
+        host: &Arc<FakeHost>,
+    ) -> Result<(tempfile::TempDir, GroupId, ThreadId, SessionsActor, State), Report<StoreError>>
+    {
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let (store, group, threads) =
+            store_with_group(GroupKind::Research, Some(dir.path()), &["aa"])?;
+        let thread = threads
+            .first()
+            .copied()
+            .ok_or_else(|| Report::new(StoreError).attach("aa isn't saved"))?;
+        let (actor, state) = start(store, host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.cursor = Some(SidebarItem::Thread(thread));
+        Ok((dir, group, thread, actor, state))
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn sibling_starts_in_the_groups_directory() -> Result<(), Report<StoreError>> {
+        // Given a Research group in its folder, holding thread aa.
+        let host = FakeHost::creating(Ok("bb"));
+        let (dir, group, thread, mut actor, _state) = sibling_group(&host)?;
+
+        // When starting a sibling from aa.
+        actor
+            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
+            .await;
+
+        // Then the session starts in the group's folder.
+        assert_eq!(
+            host.created_in(),
+            vec![dir.path().to_owned()],
+            "a sibling should start in its group's directory"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn sibling_starts_with_the_given_model_and_permission() -> Result<(), Report<StoreError>>
+    {
+        // Given a Research group holding thread aa.
+        let host = FakeHost::creating(Ok("bb"));
+        let (_dir, group, thread, mut actor, _state) = sibling_group(&host)?;
+
+        // When starting a sibling on opus in auto mode.
+        actor
+            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
+            .await;
+
+        // Then the session starts with them.
+        assert_eq!(
+            host.created_with(),
+            vec![opus_auto()],
+            "the sibling should start with the given settings"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn sibling_is_the_groups_first_thread() -> Result<(), Report<StoreError>> {
+        // Given a Research group holding thread aa.
+        let host = FakeHost::creating(Ok("bb"));
+        let (_dir, group, thread, mut actor, state) = sibling_group(&host)?;
+
+        // When starting sibling bb.
+        actor
+            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
+            .await;
+
+        // Then bb is listed first in the group.
+        let first = state
+            .read()
+            .sessions
+            .group_threads(group)
+            .next()
+            .map(|thread| thread.attach_argv.clone());
+        assert_eq!(
+            first,
+            Some(vec![OsString::from("bb")]),
+            "a sibling should go to the top of its group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn sibling_is_saved_in_the_group() -> Result<(), Report<StoreError>> {
+        // Given a Research group holding thread aa.
+        let host = FakeHost::creating(Ok("bb"));
+        let (_dir, group, thread, mut actor, _state) = sibling_group(&host)?;
+
+        // When starting sibling bb.
+        actor
+            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
+            .await;
+
+        // Then bb is saved in the group.
+        assert_eq!(
+            saved(&actor.store, "bb")?.group_id,
+            Some(group),
+            "a sibling should be saved in its group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn sibling_started_from_the_selected_row_is_selected_and_attached()
+    -> Result<(), Report<StoreError>> {
+        // Given the cursor still on thread aa of a Research group.
+        let host = FakeHost::creating(Ok("bb"));
+        let (_dir, group, thread, mut actor, state) = sibling_group(&host)?;
+
+        // When starting a sibling from aa.
+        actor
+            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
+            .await;
+
+        // Then the sibling is selected and attached.
+        let sessions = &state.read().sessions;
+        let sibling = sessions.group_threads(group).next().map(|thread| thread.id);
+        assert_eq!(
+            (sessions.cursor, sessions.attach),
+            (sibling.map(SidebarItem::Thread), sibling),
+            "the cursor should follow the sibling"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn sibling_started_after_the_cursor_moved_keeps_the_cursor()
+    -> Result<(), Report<StoreError>> {
+        // Given a sibling asked for from thread aa, with the cursor since
+        // moved to the group's card.
+        let host = FakeHost::creating(Ok("bb"));
+        let (_dir, group, thread, mut actor, state) = sibling_group(&host)?;
+        state.write().sessions.cursor = Some(SidebarItem::Group(group));
+
+        // When the sibling starts.
+        actor
+            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
+            .await;
+
+        // Then the cursor stays on the card, and nothing is attached.
+        let sessions = &state.read().sessions;
+        assert_eq!(
+            (sessions.cursor, sessions.attach),
+            (Some(SidebarItem::Group(group)), None),
+            "a moved cursor should stay put"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(GroupKind::Feature)]
+    #[case(GroupKind::Research)]
+    #[case(GroupKind::Learn)]
+    #[tokio::test]
+    async fn sibling_in_a_missing_directory_fails(
+        #[case] kind: GroupKind,
+    ) -> Result<(), Report<StoreError>> {
+        // Given a `kind` group whose directory is gone, with a start in flight.
+        let (store, group, threads) =
+            store_with_group(kind, Some(Path::new("/nonexistent/GT-514-login")), &["aa"])?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.starting = true;
+
+        // When starting a sibling.
+        actor
+            .start_sibling(
+                group,
+                opus_auto(),
+                threads.first().copied().map(SidebarItem::Thread),
+            )
+            .await;
+
+        // Then the start ends with the missing folder on the mode line.
+        let sessions = &state.read().sessions;
+        assert_eq!(
+            (
+                sessions
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("folder no longer exists")),
+                sessions.starting
+            ),
+            (true, false),
+            "a missing directory should fail the start"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pinning_a_group_saves_its_pin() -> Result<(), Report<StoreError>> {
+        // Given a group holding thread aa.
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa"])?;
+        let (mut actor, _state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When pinning it.
+        actor.pin_group(group);
+
+        // Then the pin is saved.
+        assert!(
+            saved_group(&actor.store, group)?.pinned_at.is_some(),
+            "the group's pin should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pinning_a_settled_group_unsettles_it() -> Result<(), Report<StoreError>> {
+        // Given a settled group holding thread aa.
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa"])?;
+        resave_group(&store, group, |row| GroupRow {
+            settled_override: Some(SettledOverride::Settled),
+            settled_at: Some(now_ms() - HOUR_MS),
+            ..row
+        })?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When pinning it.
+        actor.pin_group(group);
+
+        // Then it's no longer shown as settled.
+        assert_eq!(
+            shown_group(&state, group).map(|group| group.settled_at),
+            Some(None),
+            "pinning a settled group should un-settle it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pinning_a_group_keeps_its_directory() -> Result<(), Report<StoreError>> {
+        // Given a group in /work/GT-514-login holding thread aa.
+        let dir = PathBuf::from("/work/GT-514-login");
+        let (store, group, _) = store_with_group(GroupKind::Feature, Some(&dir), &["aa"])?;
+        let (mut actor, _state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When pinning it.
+        actor.pin_group(group);
+
+        // Then its saved directory is unchanged.
+        assert_eq!(
+            saved_group(&actor.store, group)?.dir,
+            Some(dir),
+            "pinning shouldn't lose the group's directory"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn unpinning_a_group_clears_its_pin() -> Result<(), Report<StoreError>> {
+        // Given a pinned group holding thread aa.
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa"])?;
+        resave_group(&store, group, |row| GroupRow {
+            pinned_at: Some(now_ms() - HOUR_MS),
+            ..row
+        })?;
+        let (mut actor, _state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When unpinning it.
+        actor.unpin_group(group);
+
+        // Then no pin is saved.
+        assert_eq!(
+            saved_group(&actor.store, group)?.pinned_at,
+            None,
+            "the group's pin should be cleared"
+        );
+        Ok(())
+    }
+
+    /// A Feature group holding `short_ids`, polled on `host`, so each thread
+    /// has its listed status.
+    async fn polled_group(
+        host: &Arc<FakeHost>,
+        short_ids: &[&str],
+    ) -> Result<(GroupId, Vec<ThreadId>, SessionsActor, State), Report<StoreError>> {
+        let (store, group, threads) = store_with_group(GroupKind::Feature, None, short_ids)?;
+        let (mut actor, state) = start(store, host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        Ok((group, threads, actor, state))
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settling_a_group_marks_it_settled() -> Result<(), Report<StoreError>> {
+        // Given a group holding idle thread aa.
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (group, _, mut actor, state) = polled_group(&host, &["aa"]).await?;
+
+        // When settling it.
+        actor.settle_group(group).await;
+
+        // Then it is saved and shown settled.
+        let row = saved_group(&actor.store, group)?;
+        assert_eq!(
+            (
+                row.settled_override,
+                row.settled_at.is_some(),
+                shown_group(&state, group)
+                    .and_then(|shown| shown.settled_at)
+                    .is_some()
+            ),
+            (Some(SettledOverride::Settled), true, true),
+            "the group should move to the Settled shelf"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settling_a_group_stops_every_idle_thread() -> Result<(), Report<StoreError>> {
+        // Given a group whose threads aa and bb are idle and cc stopped.
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Idle),
+            record("cc", ThreadStatus::Stopped),
+        ]);
+        let (group, _, mut actor, _state) = polled_group(&host, &["aa", "bb", "cc"]).await?;
+
+        // When settling it.
+        actor.settle_group(group).await;
+
+        // Then the idle sessions are stopped.
+        let mut stopped = host.stopped();
+        stopped.sort();
+        assert_eq!(
+            stopped,
+            vec!["aa".to_owned(), "bb".to_owned()],
+            "settling a group should stop its idle sessions"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settling_a_group_with_a_working_thread_is_ignored() -> Result<(), Report<StoreError>> {
+        // Given a group whose thread bb started a turn after the key press.
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Working),
+        ]);
+        let (group, _, mut actor, _state) = polled_group(&host, &["aa", "bb"]).await?;
+
+        // When settling it.
+        actor.settle_group(group).await;
+
+        // Then it stays unsettled.
+        assert_eq!(
+            saved_group(&actor.store, group)?.settled_override,
+            None,
+            "a turn underway wins over the settle"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn unsettling_a_group_keeps_it_active() -> Result<(), Report<StoreError>> {
+        // Given a settled group holding thread aa.
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa"])?;
+        resave_group(&store, group, |row| GroupRow {
+            settled_override: Some(SettledOverride::Settled),
+            settled_at: Some(now_ms() - HOUR_MS),
+            ..row
+        })?;
+        let (mut actor, _state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When un-settling it.
+        actor.unsettle_group(group);
+
+        // Then it is kept active.
+        assert_eq!(
+            saved_group(&actor.store, group)?.settled_override,
+            Some(SettledOverride::Active),
+            "an un-settled group stays active until its next turn"
+        );
+        Ok(())
+    }
+
+    /// Leaves each of the saved threads `short_ids` idle for four days, and
+    /// returns the latest of their last activities.
+    fn group_idle_for_four_days(
+        store: &Store,
+        short_ids: &[&str],
+    ) -> Result<i64, Report<StoreError>> {
+        let mut latest = 0;
+        for short_id in short_ids {
+            latest = latest.max(idle_for_four_days(store, short_id)?);
+        }
+        Ok(latest)
+    }
+
+    /// Idle records for each of `short_ids`.
+    fn idle_records(short_ids: &[&str]) -> Vec<SessionRecord> {
+        short_ids
+            .iter()
+            .map(|short_id| record(short_id, ThreadStatus::Idle))
+            .collect()
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn group_idle_for_three_days_auto_settles() -> Result<(), Report<StoreError>> {
+        // Given a group whose threads aa and bb are idle for four days.
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa", "bb"])?;
+        let latest = group_idle_for_four_days(&store, &["aa", "bb"])?;
+        let host = FakeHost::listing(idle_records(&["aa", "bb"]));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the group is settled as of its latest thread activity.
+        let row = saved_group(&actor.store, group)?;
+        assert_eq!(
+            (row.settled_override, row.settled_at),
+            (Some(SettledOverride::Settled), Some(latest)),
+            "a long-idle group should settle as of its latest activity"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn group_auto_settle_stops_its_idle_threads() -> Result<(), Report<StoreError>> {
+        // Given a group whose threads aa and bb are idle for four days.
+        let (store, _, _) = store_with_group(GroupKind::Feature, None, &["aa", "bb"])?;
+        group_idle_for_four_days(&store, &["aa", "bb"])?;
+        let host = FakeHost::listing(idle_records(&["aa", "bb"]));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then both sessions are stopped.
+        let mut stopped = host.stopped();
+        stopped.sort();
+        assert_eq!(
+            stopped,
+            vec!["aa".to_owned(), "bb".to_owned()],
+            "a group auto-settle should stop its idle sessions"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn group_with_an_attached_thread_never_auto_settles() -> Result<(), Report<StoreError>> {
+        // Given orb attached to aa, in a group whose threads are idle for four days.
+        let (store, group, threads) = store_with_group(GroupKind::Feature, None, &["aa", "bb"])?;
+        group_idle_for_four_days(&store, &["aa", "bb"])?;
+        let host = FakeHost::listing(idle_records(&["aa", "bb"]));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        {
+            let mut app = state.write();
+            app.focus = Focus::Sidebar;
+            app.attached.extend(threads.first().copied());
+        }
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the group stays active.
+        assert_eq!(
+            shown_group(&state, group).map(|group| group.settled_at),
+            Some(None),
+            "stopping an attached session would kill orb's pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn group_with_recent_activity_never_auto_settles() -> Result<(), Report<StoreError>> {
+        // Given a group whose thread aa is idle for four days and bb was active an hour ago.
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa", "bb"])?;
+        idle_for_four_days(&store, "aa")?;
+        let host = FakeHost::listing(idle_records(&["aa", "bb"]));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the group stays active.
+        assert_eq!(
+            shown_group(&state, group).map(|group| group.settled_at),
+            Some(None),
+            "one recently active thread keeps its group active"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pinned_group_never_auto_settles() -> Result<(), Report<StoreError>> {
+        // Given a pinned group whose threads are idle for four days.
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa", "bb"])?;
+        group_idle_for_four_days(&store, &["aa", "bb"])?;
+        resave_group(&store, group, |row| GroupRow {
+            pinned_at: Some(now_ms() - 5 * DAY_MS),
+            ..row
+        })?;
+        let host = FakeHost::listing(idle_records(&["aa", "bb"]));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the group stays active.
+        assert_eq!(
+            shown_group(&state, group).map(|group| group.settled_at),
+            Some(None),
+            "a pin keeps the group in view"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn new_turn_in_a_thread_unsettles_its_group() -> Result<(), Report<StoreError>> {
+        // Given a settled group whose thread aa starts a turn.
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa", "bb"])?;
+        resave_group(&store, group, |row| GroupRow {
+            settled_override: Some(SettledOverride::Settled),
+            settled_at: Some(now_ms() - HOUR_MS),
+            ..row
+        })?;
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Working),
+            record("bb", ThreadStatus::Stopped),
+        ]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the group is no longer settled.
+        assert_eq!(
+            shown_group(&state, group).map(|group| group.settled_at),
+            Some(None),
+            "turn activity in a thread should un-settle its group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn grouped_thread_never_auto_settles_itself() -> Result<(), Report<StoreError>> {
+        // Given a group whose threads aa and bb are idle for four days.
+        let (store, _, _) = store_with_group(GroupKind::Feature, None, &["aa", "bb"])?;
+        group_idle_for_four_days(&store, &["aa", "bb"])?;
+        let host = FakeHost::listing(idle_records(&["aa", "bb"]));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling, which auto-settles the group.
+        actor.poll().await;
+
+        // Then the thread's own settle field stays unused.
+        assert_eq!(
+            saved(&actor.store, "aa")?.settled_override,
+            None,
+            "a grouped thread settles only through its group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_group_removes_every_session() -> Result<(), Report<StoreError>> {
+        // Given a group holding idle threads aa and bb.
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Idle),
+        ]);
+        let (group, _, mut actor, _state) = polled_group(&host, &["aa", "bb"]).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then both sessions are removed.
+        let mut removed = host.removed();
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec!["aa".to_owned(), "bb".to_owned()],
+            "deleting a group should remove its Claude sessions"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_group_forgets_it() -> Result<(), Report<StoreError>> {
+        // Given a group holding idle threads aa and bb.
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Idle),
+        ]);
+        let (group, _, mut actor, state) = polled_group(&host, &["aa", "bb"]).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then neither the group nor its threads are saved or shown.
+        let (_, threads, _, groups) = actor.store.load()?;
+        assert_eq!(
+            (
+                groups.iter().any(|row| row.id == group),
+                threads.len(),
+                shown_group(&state, group).is_some()
+            ),
+            (false, 0, false),
+            "a deleted group should be forgotten"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_group_leaves_its_directory() -> Result<(), Report<StoreError>> {
+        // Given a Research group in a folder, holding idle thread aa.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let (store, group, _) = store_with_group(GroupKind::Research, Some(dir.path()), &["aa"])?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then its folder is still there.
+        assert!(dir.path().is_dir(), "a group's directory is never removed");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_draft_only_group_forgets_it() -> Result<(), Report<StoreError>> {
+        // Given a group with no thread yet.
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &[])?;
+        let (mut actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then it is neither saved nor shown.
+        assert_eq!(
+            (
+                actor.store.load()?.3.iter().any(|row| row.id == group),
+                shown_group(&state, group).is_some()
+            ),
+            (false, false),
+            "d on a draft-only group's card discards it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleted_group_name_can_be_used_again() -> Result<(), Report<StoreError>> {
+        // Given Feature group `GT-514-login` created in the orb project, then
+        // deleted.
+        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
+        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
+        let group = groups_of(&state)
+            .first()
+            .map(|group| group.id)
+            .ok_or_else(|| Report::new(StoreError).attach("the group wasn't created"))?;
+        actor.delete_group(group).await;
+
+        // When creating it again.
+        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
+
+        // Then it shows again, with no error.
+        let names: Vec<String> = groups_of(&state).into_iter().map(|g| g.name).collect();
+        assert_eq!(
+            (names, error_of(&state)),
+            (vec!["GT-514-login".to_owned()], None),
+            "a deleted group's name is free again"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_remove_keeps_the_groups_thread() -> Result<(), Report<StoreError>> {
+        // Given a group whose thread aa is being deleted but can't be removed.
+        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
+        let (group, threads, mut actor, state) = polled_group(&host, &["aa"]).await?;
+        state
+            .write()
+            .sessions
+            .deleting
+            .extend(threads.iter().copied());
+
+        // When deleting the group.
+        actor.delete_group(group).await;
+
+        // Then aa shows again.
+        let shown_again: Vec<bool> = threads
+            .iter()
+            .map(|id| shown(&state, *id).is_some() && !state.read().sessions.deleting.contains(id))
+            .collect();
+        assert_eq!(
+            shown_again,
+            vec![true],
+            "a session that wasn't removed would keep running unseen"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_remove_keeps_the_group() -> Result<(), Report<StoreError>> {
+        // Given a group whose thread aa can't be removed.
+        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
+        let (group, _, mut actor, state) = polled_group(&host, &["aa"]).await?;
+
+        // When deleting the group.
+        actor.delete_group(group).await;
+
+        // Then the group is still saved and shown.
+        assert_eq!(
+            (
+                actor.store.load()?.3.iter().any(|row| row.id == group),
+                shown_group(&state, group).is_some()
+            ),
+            (true, true),
+            "a group keeps the thread it couldn't delete"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_group_remove_shows_the_reason() -> Result<(), Report<StoreError>> {
+        // Given a group whose thread aa can't be removed.
+        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
+        let (group, _, mut actor, state) = polled_group(&host, &["aa"]).await?;
+
+        // When deleting the group.
+        actor.delete_group(group).await;
+
+        // Then the reason is the error.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("rm: busy"),
+            "the mode line should show why the delete failed"
         );
         Ok(())
     }

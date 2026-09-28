@@ -4,7 +4,8 @@
 //! In the sidebar and the dashboard, keys go through a which-key keymap whose
 //! scope is the focus and what the sidebar cursor is on; `<Space>` is the
 //! leader and shows a popup. A key that does nothing for the selection isn't
-//! bound there (`␣m`/`␣a` on a thread, `p`/`s`/`r` off a thread, `␣w`/`␣b`
+//! bound there (`␣m`/`␣a` on a thread, `p`/`s` off a lone thread or a
+//! group's card, `r` off a thread, `␣w`/`␣b`
 //! and the tool keys `␣t`/`␣gg`/`␣v` with nothing selected, and the
 //! dashboard's `m`/`a` off a draft and `o`/`w`/`b`/`t`/`g`/`v` with nothing
 //! selected), so the popups don't offer it. On the dashboard each menu item's
@@ -17,8 +18,9 @@
 //! them for removing a project from the project filter. The rename box (`r`)
 //! and the sidebar search (`/` or `i`) use the picker's keys. On a group's
 //! card, draft or threads, `l`/`h` open and close the group, and `␣w`/`␣b`
-//! aren't bound. `␣gf`/`␣gr`/`␣gl` add a Feature, Research or Learn group in
-//! every scope.
+//! aren't bound. `n` on a group's card or thread starts a sibling; `d` on a
+//! card deletes the group.
+//! `␣gf`/`␣gr`/`␣gl` add a Feature, Research or Learn group in every scope.
 
 use std::fmt;
 
@@ -98,11 +100,14 @@ pub(crate) enum Scope {
     SidebarDraft,
     /// The sidebar with no thread or draft selected.
     SidebarEmpty,
-    /// The sidebar on a group's card: fold keys, but no pin, settle or rename.
+    /// The sidebar on a group's card: fold keys, pin, settle, delete and a
+    /// sibling, but no rename.
     SidebarGroup,
-    /// The sidebar on a thread in a group: fold keys and rename.
+    /// The sidebar on a thread in a group: fold keys, rename, delete and a
+    /// sibling; no pin or settle.
     SidebarGroupThread,
-    /// The sidebar on a group's draft: fold keys and its setting pickers.
+    /// The sidebar on a group's draft: fold keys, its setting pickers, and
+    /// `d`, which is refused.
     SidebarGroupDraft,
     /// The dashboard on a thread.
     Dashboard,
@@ -249,15 +254,18 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     for scope in [Scope::Sidebar, Scope::SidebarGroupThread] {
         keymap.bind("r", Intent::Rename, KeyCategory::Threads, scope);
     }
-    keymap
-        .bind("p", Intent::TogglePin, KeyCategory::Threads, Scope::Sidebar)
-        .bind(
-            "s",
-            Intent::ToggleSettle,
-            KeyCategory::Threads,
-            Scope::Sidebar,
-        );
-    for scope in [Scope::Sidebar, Scope::SidebarDraft] {
+    for scope in [Scope::Sidebar, Scope::SidebarGroup] {
+        keymap
+            .bind("p", Intent::TogglePin, KeyCategory::Threads, scope)
+            .bind("s", Intent::ToggleSettle, KeyCategory::Threads, scope);
+    }
+    for scope in [Scope::SidebarGroup, Scope::SidebarGroupThread] {
+        keymap.bind("n", Intent::NewSibling, KeyCategory::Sessions, scope);
+    }
+    for scope in [Scope::Sidebar, Scope::SidebarDraft]
+        .into_iter()
+        .chain(SIDEBAR_GROUPS)
+    {
         keymap.bind("d", Intent::DeleteThread, KeyCategory::Threads, scope);
     }
     for scope in DASHBOARD {
@@ -1114,6 +1122,13 @@ mod tests {
     #[case(Scope::SidebarGroup, KeyCode::Enter, Intent::Attach)]
     #[case(Scope::SidebarGroup, KeyCode::Char('l'), Intent::OpenGroup)]
     #[case(Scope::SidebarGroup, KeyCode::Char('h'), Intent::CloseGroup)]
+    #[case(Scope::SidebarGroup, KeyCode::Char('p'), Intent::TogglePin)]
+    #[case(Scope::SidebarGroup, KeyCode::Char('s'), Intent::ToggleSettle)]
+    #[case(Scope::SidebarGroup, KeyCode::Char('d'), Intent::DeleteThread)]
+    #[case(Scope::SidebarGroupThread, KeyCode::Char('d'), Intent::DeleteThread)]
+    #[case(Scope::SidebarGroupDraft, KeyCode::Char('d'), Intent::DeleteThread)]
+    #[case(Scope::SidebarGroup, KeyCode::Char('n'), Intent::NewSibling)]
+    #[case(Scope::SidebarGroupThread, KeyCode::Char('n'), Intent::NewSibling)]
     #[case(Scope::SidebarGroupThread, KeyCode::Char('j'), Intent::SelectNext)]
     #[case(Scope::SidebarGroupThread, KeyCode::Enter, Intent::Attach)]
     #[case(Scope::SidebarGroupThread, KeyCode::Char('l'), Intent::OpenGroup)]
@@ -1136,6 +1151,40 @@ mod tests {
 
         // Then it yields its intent.
         assert_eq!(intent.as_ref(), Some(&expected), "{code:?} in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    #[case('p')]
+    #[case('s')]
+    fn pin_and_settle_are_unbound_on_a_grouped_thread(#[case] pressed: char) {
+        // Given the keymap on a thread in a group.
+        let mut keys = Keys::new(keymap(), Scope::SidebarGroupThread);
+
+        // When pressing `p` or `s`.
+        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
+
+        // Then nothing happens: its group is pinned and settled instead.
+        assert_eq!(intent, None, "{pressed} on a grouped thread");
+    }
+
+    #[rstest::rstest]
+    fn n_is_unbound_off_a_group(
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarDraft,
+            Scope::SidebarEmpty,
+            Scope::SidebarGroupDraft
+        )]
+        scope: Scope,
+    ) {
+        // Given the keymap off a group's card or thread.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing `n`.
+        let intent = press(&mut keys, key(KeyCode::Char('n')));
+
+        // Then nothing happens.
+        assert_eq!(intent, None, "n in {scope:?}");
     }
 
     #[rstest::rstest]

@@ -3,13 +3,16 @@
 //! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
 //! frontend loop; session commands (drafts, add or remove a project, move to
 //! another workspace, switch branch, refresh, pin, rename, settle, delete,
-//! visit, save the sidebar's width and filter, create and start groups, save a
-//! group draft) go to the sessions actor.
+//! visit, save the sidebar's width and filter, create and start groups, start a
+//! group's sibling, pin, settle and delete groups, save a group draft) go to
+//! the sessions actor.
 
 use std::path::PathBuf;
 
 use crate::feat::git::git_service::GitRef;
-use crate::feat::sessions::state::{AttachTarget, GroupId, GroupKind, ProjectId, ThreadId};
+use crate::feat::sessions::state::{
+    AttachTarget, GroupId, GroupKind, ProjectId, SidebarItem, ThreadId,
+};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// Something that must happen in response to an intent.
@@ -94,6 +97,26 @@ pub enum Command {
     StartGroupDraft(GroupId),
     /// Save the group's draft settings as they now are in the app state.
     SaveGroupDraft(GroupId),
+    /// Start a thread at the top of `group`, in its directory, with `model`
+    /// and `permission_mode`; select and attach it if the cursor is still on
+    /// `from`.
+    StartSibling {
+        group: GroupId,
+        model: Option<String>,
+        permission_mode: Option<String>,
+        from: Option<SidebarItem>,
+    },
+    /// Pin the group to the top of the sidebar; a settled group un-settles.
+    PinGroup(GroupId),
+    /// Unpin the group.
+    UnpinGroup(GroupId),
+    /// Move the group to the Settled shelf and stop its idle sessions.
+    SettleGroup(GroupId),
+    /// Bring the group back from the Settled shelf and keep it active.
+    UnsettleGroup(GroupId),
+    /// Delete every thread of the group and its Claude session, then the
+    /// group; its directory stays on disk.
+    DeleteGroup(GroupId),
 }
 
 /// Where a thread's session runs.
