@@ -67,6 +67,10 @@ pub enum PickerKind {
     DeleteThread { thread: ThreadId },
     /// `d` on a draft: confirm discarding it.
     DiscardDraft { project: ProjectId },
+    /// `s` on a group's card: confirm settling it.
+    SettleGroup { group: GroupId },
+    /// `d` on a group's card: confirm deleting it and its threads.
+    DeleteGroup { group: GroupId },
 }
 
 /// The open picker.
@@ -153,6 +157,16 @@ impl PickerState {
     /// selected.
     pub fn discard_draft(project: ProjectId, return_to: Focus) -> Self {
         Self::confirm(PickerKind::DiscardDraft { project }, return_to)
+    }
+
+    /// The `No`/`Yes` confirm for settling `group`, with `No` selected.
+    pub fn settle_group(group: GroupId, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::SettleGroup { group }, return_to)
+    }
+
+    /// The `No`/`Yes` confirm for deleting `group`, with `No` selected.
+    pub fn delete_group(group: GroupId, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::DeleteGroup { group }, return_to)
     }
 
     /// A `No`/`Yes` confirm of `kind`, with `No` selected.
@@ -548,7 +562,7 @@ mod tests {
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::{LEGACY_MODELS, PickerItem};
-    use crate::feat::sessions::state::{ProjectId, ThreadId};
+    use crate::feat::sessions::state::{GroupId, ProjectId, ThreadId};
 
     const HOME: &str = "/home/u";
 
@@ -1095,6 +1109,19 @@ mod tests {
         let picker = PickerState::remove_project(ProjectId(1), Focus::Sidebar);
 
         // Then No is highlighted, so ⏎ alone removes nothing.
+        assert_eq!(
+            picker.selected(),
+            Some(&PickerItem::Confirm(false)),
+            "No should be the default"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settle_group_confirm_starts_on_no() {
+        // Given / When opening the confirm for settling group 9.
+        let picker = PickerState::settle_group(GroupId(9), Focus::Sidebar);
+
+        // Then No is highlighted, so ⏎ alone settles nothing.
         assert_eq!(
             picker.selected(),
             Some(&PickerItem::Confirm(false)),

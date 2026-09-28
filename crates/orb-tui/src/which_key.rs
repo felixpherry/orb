@@ -135,7 +135,7 @@ fn key_name(key: &KeyEvent) -> String {
 /// The icon and its colour for an intent (mini.icons style).
 fn look(intent: &Intent) -> (&'static str, Color) {
     match intent {
-        Intent::NewSession => ("\u{f067}", GREEN),
+        Intent::NewSession | Intent::NewSibling => ("\u{f067}", GREEN),
         Intent::AddProject | Intent::OpenGroup => (FOLDER_OPEN, BLUE),
         Intent::FilterProjects => ("\u{f0b0}", CYAN),
         Intent::PickModel => ("\u{f0e7}", MAGENTA),
@@ -501,6 +501,33 @@ mod tests {
         let row = format!("│ x ➜ {icon} {label}");
         assert!(
             lines.iter().any(|line| line.contains(&row)),
+            "the screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_sibling_shows_the_plus_icon() {
+        // Given a keymap with `␣x` bound to NewSibling, and Space pressed.
+        let keys = {
+            let mut km = Keymap::new();
+            km.bind(
+                "<leader>x",
+                Intent::NewSibling,
+                KeyCategory::Sessions,
+                Scope::Sidebar,
+            );
+            leader(Keys::new(km, Scope::Sidebar))
+        };
+
+        // When drawing the popup.
+        let buffer = draw(&keys, SCREEN);
+
+        // Then the `x` row shows the plus icon.
+        let lines = lines(&buffer);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("│ x ➜ \u{f067} new sibling")),
             "the screen was {lines:#?}"
         );
     }

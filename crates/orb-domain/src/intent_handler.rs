@@ -20,10 +20,10 @@ use crate::feat::sessions::state::{
     Search, SidebarItem, ThreadId, group_slug,
 };
 use crate::feat::sessions::validator::{
-    NewGroupError, SETTLE_IN_PROGRESS, ToggleSettleError, validate_close_group,
-    validate_close_shelf, validate_delete, validate_new_group, validate_open_group,
-    validate_open_shelf, validate_pick_setting, validate_start_draft, validate_start_group_draft,
-    validate_toggle_pin, validate_toggle_settle,
+    DeleteError, LAST_IN_GROUP, NewGroupError, SETTLE_IN_PROGRESS, ToggleSettleError,
+    validate_close_group, validate_close_shelf, validate_delete, validate_new_group,
+    validate_new_sibling, validate_open_group, validate_open_shelf, validate_pick_setting,
+    validate_start_draft, validate_start_group_draft, validate_toggle_pin, validate_toggle_settle,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
@@ -513,6 +513,22 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
+                Some(&PickerKind::SettleGroup { group }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Confirm(true)) => settle_group(state, group),
+                        _ => vec![],
+                    }
+                }
+                Some(&PickerKind::DeleteGroup { group }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Confirm(true))
+                            if still_deletable(state, SidebarItem::Group(group)) =>
+                        {
+                            delete_group(state, group)
+                        }
+                        _ => vec![],
+                    }
+                }
                 Some(&PickerKind::DeleteThread { thread }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::Confirm(true))
@@ -632,6 +648,35 @@ impl IntentHandler {
                 vec![]
             }
             Intent::NewGroup(kind) => open_group_name(state, *kind, None),
+            Intent::NewSibling => match (validate_new_sibling(state), selected_group_id(state)) {
+                (Ok(()), Some(group)) => {
+                    let (model, permission_mode) = state
+                        .sessions
+                        .selected_thread()
+                        .or_else(|| state.sessions.group_threads(group).next())
+                        .map(|thread| (thread.model.clone(), thread.permission.clone()))
+                        .unwrap_or_default();
+                    let from = state.sessions.cursor;
+                    state.sessions.open_group(group);
+                    state.sessions.starting = true;
+                    vec![Command::StartSibling {
+                        group,
+                        model,
+                        permission_mode,
+                        from,
+                    }]
+                }
+                _ => vec![],
+            },
+            Intent::TogglePin if matches!(state.sessions.cursor, Some(SidebarItem::Group(_))) => {
+                match (validate_toggle_pin(state), state.sessions.selected_group()) {
+                    (Ok(()), Some((_, group))) => match group.pinned_at {
+                        Some(_) => vec![Command::UnpinGroup(group.id)],
+                        None => vec![Command::PinGroup(group.id)],
+                    },
+                    _ => vec![],
+                }
+            }
             Intent::TogglePin => {
                 match (validate_toggle_pin(state), state.sessions.selected_thread()) {
                     (Ok(()), Some(thread)) => match thread.pinned_at {
@@ -661,6 +706,28 @@ impl IntentHandler {
                 state.focus = Focus::Search;
                 vec![]
             }
+            Intent::ToggleSettle
+                if matches!(state.sessions.cursor, Some(SidebarItem::Group(_))) =>
+            {
+                match (
+                    validate_toggle_settle(state),
+                    state.sessions.selected_group(),
+                ) {
+                    (Ok(()), Some((_, group))) if group.settled_at.is_some() => {
+                        vec![Command::UnsettleGroup(group.id)]
+                    }
+                    (Ok(()), Some((_, group))) => {
+                        let picker = PickerState::settle_group(group.id, state.focus);
+                        open_picker(state, picker);
+                        vec![]
+                    }
+                    (Err(ToggleSettleError::InProgress), _) => {
+                        state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
+                        vec![]
+                    }
+                    _ => vec![],
+                }
+            }
             Intent::ToggleSettle => {
                 match (
                     validate_toggle_settle(state),
@@ -688,6 +755,14 @@ impl IntentHandler {
                 }
                 (Ok(()), Some(SidebarItem::Thread(id))) => {
                     open_picker(state, PickerState::delete_thread(id, state.focus));
+                    vec![]
+                }
+                (Ok(()), Some(SidebarItem::Group(group))) => {
+                    open_picker(state, PickerState::delete_group(group, state.focus));
+                    vec![]
+                }
+                (Err(DeleteError::LastInGroup), _) => {
+                    state.sessions.error = Some(LAST_IN_GROUP.to_owned());
                     vec![]
                 }
                 _ => vec![],
@@ -928,6 +1003,36 @@ fn settle(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
     }
 }
 
+/// Settles `group`, answered `Yes` in its confirm, if the cursor is still on
+/// its card and it is still unsettled with no turn underway. Settling
+/// detaches its threads and moves the cursor to the neighbouring card; a turn
+/// that started meanwhile shows the refusal on the mode line.
+fn settle_group(state: &mut AppState, group: GroupId) -> Vec<Command> {
+    let on_card = state.sessions.cursor == Some(SidebarItem::Group(group));
+    match (
+        validate_toggle_settle(state),
+        state.sessions.selected_group(),
+    ) {
+        (Ok(()), Some((_, shown))) if on_card && shown.settled_at.is_none() => {
+            let threads: Vec<ThreadId> = state
+                .sessions
+                .group_threads(group)
+                .map(|thread| thread.id)
+                .collect();
+            for thread in &threads {
+                state.attached.remove(thread);
+            }
+            state.sessions.cursor = state.sessions.card_neighbour(SidebarItem::Group(group));
+            with_visit(state, vec![Command::SettleGroup(group)])
+        }
+        (Err(ToggleSettleError::InProgress), _) if on_card => {
+            state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
+            vec![]
+        }
+        _ => vec![],
+    }
+}
+
 /// Whether `item`, answered `Yes` in its delete or discard confirm, is still
 /// under the cursor and can still be deleted.
 fn still_deletable(state: &AppState, item: SidebarItem) -> bool {
@@ -942,6 +1047,23 @@ fn delete_thread(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
     state.attached.remove(&thread);
     state.sessions.cursor = neighbour;
     with_visit(state, vec![Command::Delete(thread)])
+}
+
+/// Asks for `group` and its threads to be deleted, hiding the threads at
+/// once, detaching them and moving the cursor to the neighbouring row.
+fn delete_group(state: &mut AppState, group: GroupId) -> Vec<Command> {
+    let neighbour = state.sessions.row_neighbour(SidebarItem::Group(group));
+    let threads: Vec<ThreadId> = state
+        .sessions
+        .group_threads(group)
+        .map(|thread| thread.id)
+        .collect();
+    for thread in threads {
+        state.sessions.deleting.insert(thread);
+        state.attached.remove(&thread);
+    }
+    state.sessions.cursor = neighbour;
+    with_visit(state, vec![Command::DeleteGroup(group)])
 }
 
 /// Asks for `project`'s draft to be discarded, moving the cursor to the
@@ -1241,7 +1363,7 @@ mod tests {
         ProjectId, ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId,
         ThreadStatus,
     };
-    use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
+    use crate::feat::sessions::validator::{LAST_IN_GROUP, SETTLE_IN_PROGRESS};
     use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
@@ -2711,7 +2833,7 @@ mod tests {
     /// `settled`, and the cursor on `cursor`.
     fn grouped_state(settled: bool, cursor: SidebarItem) -> AppState {
         let mut state = state_at(
-            [1, 2]
+            [2, 1]
                 .map(|id| Thread {
                     group: Some(GroupId(9)),
                     ..thread(id, ThreadStatus::Idle)
@@ -2760,6 +2882,413 @@ mod tests {
             project.groups = vec![group];
         }
         state
+    }
+
+    /// `state` with thread `id` running `model`.
+    fn with_model(mut state: AppState, id: i64, model: &str) -> AppState {
+        if let Some(thread) = state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| &mut project.threads)
+            .find(|thread| thread.id == ThreadId(id))
+        {
+            thread.model = Some(model.to_owned());
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn n_on_a_grouped_thread_starts_a_sibling_with_its_model() {
+        // Given thread 2 of group 9 selected, running opus.
+        let mut state = with_model(
+            grouped_state(false, SidebarItem::Thread(ThreadId(2))),
+            2,
+            "opus",
+        );
+
+        // When handling NewSibling.
+        let commands = IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then the sessions actor is asked for a sibling on thread 2's model.
+        assert_eq!(
+            commands,
+            vec![Command::StartSibling {
+                group: GroupId(9),
+                model: Some("opus".into()),
+                permission_mode: None,
+                from: Some(SidebarItem::Thread(ThreadId(2))),
+            }],
+            "n on a grouped thread should start a sibling with its settings"
+        );
+    }
+
+    #[rstest::rstest]
+    fn n_on_a_card_takes_the_newest_threads_settings() {
+        // Given group 9's card selected, newest thread 2 on opus and thread 1
+        // on haiku.
+        let state = with_model(
+            grouped_state(false, SidebarItem::Group(GroupId(9))),
+            2,
+            "opus",
+        );
+        let mut state = with_model(state, 1, "haiku");
+
+        // When handling NewSibling.
+        let commands = IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then the sibling runs opus.
+        let model = commands.iter().find_map(|command| match command {
+            Command::StartSibling { model, .. } => model.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            model.as_deref(),
+            Some("opus"),
+            "n on a card should take the newest thread's model"
+        );
+    }
+
+    #[rstest::rstest]
+    fn n_on_a_folded_group_opens_it() {
+        // Given the cursor on group 9's card, folded.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        state.sessions.folded.insert(GroupId(9));
+
+        // When handling NewSibling.
+        IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then the group is no longer folded.
+        assert!(
+            !state.sessions.folded.contains(&GroupId(9)),
+            "n on a folded card should open the group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn n_marks_starting() {
+        // Given the cursor on group 9's card.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+
+        // When handling NewSibling.
+        IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then a start is in flight.
+        assert!(
+            state.sessions.starting,
+            "starting a sibling should mark the start in flight"
+        );
+    }
+
+    #[rstest::rstest]
+    fn n_while_starting_does_nothing() {
+        // Given the cursor on group 9's card while a start is in flight.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        state.sessions.starting = true;
+
+        // When handling NewSibling.
+        let commands = IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then nothing is asked of the sessions actor.
+        assert!(commands.is_empty(), "one start at a time");
+    }
+
+    #[rstest::rstest]
+    fn p_on_a_card_pins_the_group() {
+        // Given the cursor on group 9's card, unpinned.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+
+        // When handling TogglePin.
+        let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
+
+        // Then the sessions actor is asked to pin the group.
+        assert_eq!(
+            commands,
+            vec![Command::PinGroup(GroupId(9))],
+            "p on a card should pin its group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn p_on_a_pinned_card_unpins_the_group() {
+        // Given the cursor on group 9's card, pinned.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        if let Some(group) = state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| &mut project.groups)
+            .next()
+        {
+            group.pinned_at = Some(at(5));
+        }
+
+        // When handling TogglePin.
+        let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
+
+        // Then the sessions actor is asked to unpin the group.
+        assert_eq!(
+            commands,
+            vec![Command::UnpinGroup(GroupId(9))],
+            "p on a pinned card should unpin its group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn p_on_a_grouped_thread_does_nothing() {
+        // Given the cursor on thread 1 of group 9.
+        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
+
+        // When handling TogglePin.
+        let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
+
+        // Then nothing is asked of the sessions actor.
+        assert!(
+            commands.is_empty(),
+            "a grouped thread is pinned with its group"
+        );
+    }
+
+    /// `state` with thread `id` in `status`.
+    fn with_status(mut state: AppState, id: i64, status: ThreadStatus) -> AppState {
+        if let Some(thread) = state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| &mut project.threads)
+            .find(|thread| thread.id == ThreadId(id))
+        {
+            thread.status = status;
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn s_on_a_card_opens_the_settle_group_confirm() {
+        // Given the cursor on group 9's card.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then its settle confirm is open with No selected.
+        assert_eq!(
+            open_confirm(&state),
+            Some((
+                &PickerKind::SettleGroup { group: GroupId(9) },
+                Some(&PickerItem::Confirm(false))
+            )),
+            "s on a card should ask to settle the group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_the_settle_group_confirm_emits_settle_group() {
+        // Given Yes highlighted in group 9's settle confirm.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        answer_yes(&Intent::ToggleSettle, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to settle the group.
+        assert!(
+            commands.contains(&Command::SettleGroup(GroupId(9))),
+            "Yes on the settle group confirm should return SettleGroup"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settling_a_group_detaches_its_threads() {
+        // Given threads 1 and 2 of group 9 attached, and Yes highlighted in
+        // its settle confirm.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        state.attached.extend([ThreadId(1), ThreadId(2)]);
+        answer_yes(&Intent::ToggleSettle, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then neither thread is attached.
+        assert!(
+            state.attached.is_empty(),
+            "settling a group should detach its threads"
+        );
+    }
+
+    #[rstest::rstest]
+    fn settling_a_group_selects_the_next_card() {
+        // Given group 9 beside lone thread 3, and Yes highlighted in the
+        // group's settle confirm.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.threads.push(thread(3, ThreadStatus::Idle));
+        }
+        answer_yes(&Intent::ToggleSettle, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the lone thread's card is selected.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Thread(ThreadId(3))),
+            "settling a group should select the neighbouring card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn s_on_a_card_with_a_working_thread_shows_the_in_progress_error() {
+        // Given the cursor on group 9's card while thread 2 is working.
+        let mut state = with_status(
+            grouped_state(false, SidebarItem::Group(GroupId(9))),
+            2,
+            ThreadStatus::Working,
+        );
+
+        // When handling ToggleSettle.
+        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the mode line says why.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some(SETTLE_IN_PROGRESS),
+            "a group with a turn underway can't settle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn s_on_a_settled_card_unsettles_the_group() {
+        // Given the cursor on settled group 9's card.
+        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
+
+        // When handling ToggleSettle.
+        let commands = IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then the sessions actor is asked to un-settle the group.
+        assert_eq!(
+            commands,
+            vec![Command::UnsettleGroup(GroupId(9))],
+            "s on a settled card should un-settle its group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn s_on_a_grouped_thread_does_nothing() {
+        // Given the cursor on thread 1 of group 9.
+        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
+
+        // When handling ToggleSettle.
+        let commands = IntentHandler::handle(&Intent::ToggleSettle, &mut state);
+
+        // Then nothing is asked and no confirm opens.
+        assert_eq!(
+            (commands, state.picker.is_some()),
+            (vec![], false),
+            "a grouped thread is settled with its group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn d_on_a_groups_only_thread_shows_the_last_in_group_error() {
+        // Given group 9 holding only thread 1, which is selected.
+        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.threads.retain(|thread| thread.id == ThreadId(1));
+        }
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then the mode line says why.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some(LAST_IN_GROUP),
+            "a group keeps its last thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn d_on_a_group_draft_shows_the_last_in_group_error() {
+        // Given the group draft selected.
+        let mut state = group_drafting(None);
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then the mode line says why.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some(LAST_IN_GROUP),
+            "a group keeps its draft"
+        );
+    }
+
+    #[rstest::rstest]
+    fn d_on_a_grouped_thread_with_a_sibling_opens_the_delete_confirm() {
+        // Given thread 2 of group 9 selected, beside thread 1.
+        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(2)));
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then its delete confirm is open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::DeleteThread {
+                thread: ThreadId(2)
+            }),
+            "d on a grouped thread with a sibling should ask to delete it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn d_on_a_card_opens_the_delete_group_confirm() {
+        // Given the cursor on group 9's card.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then the group's delete confirm is open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::DeleteGroup { group: GroupId(9) }),
+            "d on a card should ask to delete the group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_the_delete_group_confirm_hides_every_thread() {
+        // Given Yes highlighted in group 9's delete confirm.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        answer_yes(&Intent::DeleteThread, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then both its threads are being deleted.
+        assert_eq!(
+            state.sessions.deleting,
+            [ThreadId(1), ThreadId(2)].into(),
+            "deleting a group should hide its threads"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_the_delete_group_confirm_emits_delete_group() {
+        // Given Yes highlighted in group 9's delete confirm.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+        answer_yes(&Intent::DeleteThread, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to delete the group.
+        assert!(
+            commands.contains(&Command::DeleteGroup(GroupId(9))),
+            "Yes on the delete group confirm should return DeleteGroup"
+        );
     }
 
     #[rstest::rstest]

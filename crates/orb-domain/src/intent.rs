@@ -54,16 +54,16 @@ pub enum Intent {
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
     FilterProjects,
-    /// Pin or unpin the selected thread.
+    /// Pin or unpin the selected lone thread or group.
     TogglePin,
     /// Open the rename box for the selected thread, filled in with its title.
     Rename,
     /// Move the keys to the sidebar's input box to search thread titles.
     Search,
-    /// Un-settle the selected thread, or ask to settle it.
+    /// Un-settle the selected lone thread or group, or ask to settle it.
     ToggleSettle,
-    /// Ask to delete the selected thread and its Claude session, or to discard
-    /// the selected draft.
+    /// Ask to delete the selected thread or group and its Claude sessions, or
+    /// to discard the selected draft.
     DeleteThread,
     /// Show the Settled shelf's threads.
     OpenShelf,
@@ -76,6 +76,10 @@ pub enum Intent {
     CloseGroup,
     /// Start a new group of `kind`: pick its project (Feature), then name it.
     NewGroup(GroupKind),
+    /// Start a sibling at the top of the selected group, in its directory,
+    /// with the selected thread's model and permission (the newest thread's
+    /// on the card).
+    NewSibling,
     /// Open the directory picker to add a project.
     AddProject,
     /// Open the workspace picker for the selected draft, or the selected
@@ -163,6 +167,7 @@ impl fmt::Display for Intent {
             Self::NewGroup(GroupKind::Feature) => "feature group",
             Self::NewGroup(GroupKind::Research) => "research group",
             Self::NewGroup(GroupKind::Learn) => "learn group",
+            Self::NewSibling => "new sibling",
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",
@@ -219,6 +224,16 @@ mod tests {
         assert_eq!(
             Intent::NewGroup(kind).to_string(),
             expected,
+            "which-key label"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_sibling_displays_as_new_sibling() {
+        // Given / When / Then: which-key labels NewSibling "new sibling".
+        assert_eq!(
+            Intent::NewSibling.to_string(),
+            "new sibling",
             "which-key label"
         );
     }

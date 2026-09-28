@@ -740,6 +740,58 @@ impl App {
                     .try_send();
                 Ok(())
             }
+            Command::StartSibling {
+                group,
+                model,
+                permission_mode,
+                from,
+            } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::StartSibling {
+                        group: *group,
+                        model: model.clone(),
+                        permission_mode: permission_mode.clone(),
+                        from: *from,
+                    })
+                    .try_send();
+                Ok(())
+            }
+            Command::PinGroup(group) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::PinGroup(*group))
+                    .try_send();
+                Ok(())
+            }
+            Command::UnpinGroup(group) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::UnpinGroup(*group))
+                    .try_send();
+                Ok(())
+            }
+            Command::SettleGroup(group) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::SettleGroup(*group))
+                    .try_send();
+                Ok(())
+            }
+            Command::UnsettleGroup(group) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::UnsettleGroup(*group))
+                    .try_send();
+                Ok(())
+            }
+            Command::DeleteGroup(group) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::DeleteGroup(*group))
+                    .try_send();
+                Ok(())
+            }
         }
     }
 

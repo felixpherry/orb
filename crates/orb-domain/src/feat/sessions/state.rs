@@ -350,13 +350,14 @@ pub struct Search {
 /// Written by the sessions actor (projects and their drafts, `error`,
 /// `starting` when a start ends, `trust`, `attach`, the cursor and `filter`
 /// after a restore, the cursor when a still-selected draft becomes a thread,
-/// the cursor on a new group's draft,
+/// or when a sibling starts from the still-selected row, the cursor on a new
+/// group's draft,
 /// removing a thread from `deleting`, pushing `notices`) and by the intent
 /// handler (the cursor on navigation, settle and delete, `shelf_open`,
 /// `folded` and `opened`,
 /// `starting` when a start begins, a draft's fields when the user picks them,
-/// adding a thread to `deleting`, `filter`). The frontend loop takes `attach`
-/// and `notices`.
+/// adding a thread (or a group's threads) to `deleting`, `filter`). The
+/// frontend loop takes `attach` and `notices`.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
@@ -613,6 +614,12 @@ impl Sessions {
             }
             _ => None,
         }
+    }
+
+    /// Group `id`'s threads not being deleted, newest first.
+    pub fn group_threads(&self, id: GroupId) -> impl Iterator<Item = &Thread> {
+        self.shown_threads()
+            .filter(move |thread| thread.group == Some(id))
     }
 
     /// The id of the thread under the cursor, if it still exists.
@@ -2741,6 +2748,31 @@ mod tests {
             selected,
             Some(GroupId(9)),
             "a grouped thread should select its group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_threads_skips_threads_being_deleted() {
+        // Given group 9's threads 2 and 1, with 2 being deleted.
+        let sessions = Sessions {
+            deleting: [ThreadId(2)].into_iter().collect(),
+            ..grouped_sessions(
+                vec![grouped(thread(2), 9), grouped(thread(1), 9)],
+                vec![group(9, GroupKind::Feature)],
+            )
+        };
+
+        // When listing the group's threads.
+        let ids: Vec<ThreadId> = sessions
+            .group_threads(GroupId(9))
+            .map(|thread| thread.id)
+            .collect();
+
+        // Then only thread 1 is listed.
+        assert_eq!(
+            ids,
+            vec![ThreadId(1)],
+            "a thread being deleted shouldn't be listed"
         );
     }
 
