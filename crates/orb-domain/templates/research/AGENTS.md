@@ -1,14 +1,15 @@
 # Research
 
 This folder is one research question. One session orchestrates it: it plans,
-hands focused tasks to subagents, keeps the shared record in `state.md`, and
-answers only when the evidence is enough.
+hands focused tasks to subagents, keeps the shared record in `state.md` and
+the data sources in `SOURCES.md`, and answers only when the evidence is
+enough.
 
 ## Which part of this file is yours
 
 - **You were dispatched for a gap** (your prompt names a gap ID like `G3`):
   follow only "Subagents" below. Don't dispatch agents and don't edit
-  `state.md`.
+  `state.md` or `SOURCES.md`.
 - **Otherwise you're the orchestrator.** Follow "Orchestrator". If `state.md`
   says `Status: running` and you didn't start that round in this session,
   another thread may be orchestrating: ask the user before you write anything.
@@ -17,9 +18,9 @@ answers only when the evidence is enough.
 
 Five kinds of entry, each with an ID. Never call anything a "fact".
 
-- **Evidence (E)**: an observation, with where it came from. "The response
-  was 212 KB" is evidence; "payloads are small" is not. Evidence made by an
-  analysis says which one (`from: A1`).
+- **Evidence (E)**: an observation, with the source it came from and where in
+  that source. "The response was 212 KB" is evidence; "payloads are small" is
+  not. Evidence made by an analysis says which one (`from: A1`).
 - **Analysis (A)**: a transformation of evidence: a script, a simulation, a
   query, a calculation. It names its inputs, method, parameters and
   assumptions. Its outputs are new evidence.
@@ -48,8 +49,10 @@ Round: 2
 
 ## Evidence
 - E1: 30 days of production requests, 4.1M rows.
-  source: evidence/requests.csv, exported by the user. by: user. at: 2026-09-20
+  source: prod-requests. by: user. at: 2026-09-20
 - E2: 15m TTL gives a 66% hit rate. from: A1. at: 2026-09-21
+- E5: Cache entries are written with a fixed 15m TTL.
+  source: app src/cache.rs:42. by: collector (G2). at: 2026-09-21
 
 ## Analyses
 - A1: TTL simulation. inputs: E1. method: analyses/ttl_sim.py.
@@ -77,6 +80,28 @@ Round: 2
 Big raw data goes in `evidence/`, scripts in `analyses/`; `state.md` points at
 them by path.
 
+### Sources
+
+Every place real data comes from is listed once in `SOURCES.md`, under a
+short name. Evidence cites that name plus where in it (a file and line, a
+query, a time range). A source says what it is, where it is, which version,
+how to get at it, and whether it may be changed:
+
+```markdown
+# Sources
+
+- app: the service's repo. ~/dev/app at a1b2c3d (main). read-only.
+- prod-requests: 30 days of production request logs, exported by the user
+  on 2026-09-20 with `logs export --since 30d`. evidence/requests.csv.
+- staging-api: https://staging.example.com, queried with curl. Staging data,
+  not production.
+```
+
+Pin a repo to its commit. If it moves on, add a new source for the new
+commit instead of editing the old one, so earlier evidence still points at
+the code it was read from. Never change a repo or system that's a source:
+experiment on a copy in `analyses/`.
+
 ## Orchestrator
 
 You manage uncertainty; subagents do the investigating. Read `state.md` and
@@ -84,23 +109,30 @@ the files it points at, and hand everything else to a subagent.
 
 1. **Start or resume.** If `state.md` exists, read it and continue from its
    open gaps. Never start over. If it doesn't, write the question, the success
-   criteria (what a finished answer must establish), and `Status: running`.
-   If the question is ambiguous, ask the user before planning.
+   criteria (what a finished answer must establish), and `Status: running`,
+   and list in `SOURCES.md` every source the question names (a repo with its
+   current commit, a system, a file). If the question is ambiguous, ask the
+   user before planning.
 2. **Find the gaps.** What is unknown, and what evidence would settle it?
    Write each as a gap.
 3. **Dispatch.** Hand open gaps to subagents, at most 3 at a time, in
    parallel when they don't depend on each other. Each prompt contains: the
-   gap's fields, the IDs it builds on, the path to `state.md`, the matching
-   role section from "Subagents" (copied in full), and "Return" below.
+   gap's fields, the IDs it builds on, the paths to `state.md` and
+   `SOURCES.md`, the matching role section from "Subagents" (copied in
+   full), and "Return" below.
    Mark the gap `running`.
-4. **Merge.** You are the only writer of `state.md`. Give new entries the
-   next free IDs and rewrite their references. Reject or fix before writing:
-   - evidence with no source, or an interpretation posing as evidence;
+4. **Merge.** You are the only writer of `state.md` and `SOURCES.md`. Give
+   new entries the next free IDs and rewrite their references, and add the
+   sources they return. Reject or fix before writing:
+   - evidence whose source isn't in `SOURCES.md` or returned with it, evidence
+     that doesn't say where in the source, or an interpretation posing as
+     evidence;
    - a claim that cites no evidence, or is wider than its evidence (make it
      a hypothesis);
    - an analysis with no assumptions listed;
    - a gap without `known`, `unknown`, `method` and `done when`.
-5. **Critique.** Dispatch the critic on `state.md` alone (no transcripts).
+5. **Critique.** Dispatch the critic on `state.md` and `SOURCES.md` alone
+   (no transcripts).
    Record its verdict on each claim, and add the gaps it finds.
 6. **Decide.**
    - Open research gaps left: go to 3 and bump `Round`.
@@ -123,8 +155,9 @@ Set `Status: paused`, save `state.md`, then ask the user for exactly what
 each `needs_user` gap needs, why, and in what form (a file to put in
 `evidence/`, a command to run, a value). Then stop.
 
-When the user answers, save what they gave as evidence (`by: user`), close
-the gap, set `Status: running`, and continue from step 4.
+When the user answers, add what they gave to `SOURCES.md` (what it is, how
+they got it, when) and save it as evidence (`by: user`), close the gap, set
+`Status: running`, and continue from step 4.
 
 ### Synthesis
 
@@ -138,15 +171,18 @@ State only claims the critic said hold. Then set `Status: done`.
 
 ## Subagents
 
-Do only your gap. Don't edit `state.md`. Put raw output in
-`evidence/<gap>-<name>` and scripts in `analyses/<gap>-<name>`. Never guess
-to fill missing data: report it as a user gap.
+Do only your gap. Don't edit `state.md` or `SOURCES.md`. Put raw output in
+`evidence/<gap>-<name>` and scripts in `analyses/<gap>-<name>`. Never change a
+source: experiment on a copy. Never guess to fill missing data: report it as
+a user gap.
 
 ### Collector
 
 Get evidence: read code, logs, files and docs; run commands, queries and
-experiments. Report what you observed, where, and when, quoting output or
-pointing at the file you saved. Don't conclude what it means. If what you can
+experiments. Report what you observed, which source and where in it, and
+when, quoting output or pointing at the file you saved. A source not yet in
+`SOURCES.md` goes in your return, described the same way. Don't conclude what
+it means. If what you can
 reach isn't representative of what the gap asks about, say so and return
 `needs_user_input`.
 
@@ -166,7 +202,8 @@ Attack the record; don't propose an answer. For each claim, return a verdict
 - the same unstated assumption in several entries;
 - evidence that contradicts other evidence or a claim;
 - analysis assumptions that don't hold;
-- generalising from too little data;
+- generalising from too little data, or from a source that isn't what the
+  question is about (staging for production, a sample for the whole);
 - what would falsify the leading hypothesis, and whether anyone has looked;
 - references to IDs that don't exist, and gaps too vague to act on.
 
@@ -179,6 +216,7 @@ End with this block, using `new-E1`, `new-C1`, … as IDs:
 ```markdown
 status: complete | needs_more_research | needs_user_input
 
+sources:
 evidence:
 analyses:
 claims:
