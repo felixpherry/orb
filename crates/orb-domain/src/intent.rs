@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::feat::sessions::state::GroupKind;
 use crate::feat::zellij::zellij_service::Tool;
 
 /// A user action produced by the keymap and applied by the
@@ -73,6 +74,8 @@ pub enum Intent {
     /// Hide the selected group's children and select its card; on a settled
     /// group already closed, close the Settled shelf.
     CloseGroup,
+    /// Start a new group of `kind`: pick its project (Feature), then name it.
+    NewGroup(GroupKind),
     /// Open the directory picker to add a project.
     AddProject,
     /// Open the workspace picker for the selected draft, or the selected
@@ -157,6 +160,9 @@ impl fmt::Display for Intent {
             Self::CloseShelf => "close settled",
             Self::OpenGroup => "open group",
             Self::CloseGroup => "close group",
+            Self::NewGroup(GroupKind::Feature) => "feature group",
+            Self::NewGroup(GroupKind::Research) => "research group",
+            Self::NewGroup(GroupKind::Learn) => "learn group",
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",
@@ -178,6 +184,7 @@ impl fmt::Display for Intent {
 #[cfg(test)]
 mod tests {
     use super::Intent;
+    use crate::feat::sessions::state::GroupKind;
     use crate::feat::zellij::zellij_service::Tool;
 
     #[rstest::rstest]
@@ -199,6 +206,19 @@ mod tests {
         assert_eq!(
             Intent::DetachSelected.to_string(),
             "detach",
+            "which-key label"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(GroupKind::Feature, "feature group")]
+    #[case(GroupKind::Research, "research group")]
+    #[case(GroupKind::Learn, "learn group")]
+    fn new_group_displays_its_kind(#[case] kind: GroupKind, #[case] expected: &str) {
+        // Given / When / Then: which-key labels NewGroup by its kind.
+        assert_eq!(
+            Intent::NewGroup(kind).to_string(),
+            expected,
             "which-key label"
         );
     }

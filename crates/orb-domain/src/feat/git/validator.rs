@@ -14,6 +14,8 @@ use crate::feat::sessions::state::{DraftWorkspace, Sessions};
 pub enum ChangeWorkspaceError {
     /// The cursor isn't on a thread or a draft.
     NoSelection,
+    /// The thread is in a group, whose directory is fixed.
+    Grouped,
     /// A session is already being started.
     Starting,
     /// The thread has had its first prompt. `worktree` is whether it runs in
@@ -27,7 +29,8 @@ pub enum ChangeWorkspaceError {
 /// # Errors
 ///
 /// Returns [`ChangeWorkspaceError::NoSelection`] without a selected thread or
-/// draft, [`ChangeWorkspaceError::Starting`] while a start is in flight, and
+/// draft, [`ChangeWorkspaceError::Grouped`] on a thread in a group,
+/// [`ChangeWorkspaceError::Starting`] while a start is in flight, and
 /// [`ChangeWorkspaceError::Locked`] once the thread has a transcript or a turn
 /// underway.
 pub fn validate_change_workspace(state: &AppState) -> Result<(), ChangeWorkspaceError> {
@@ -38,6 +41,7 @@ pub fn validate_change_workspace(state: &AppState) -> Result<(), ChangeWorkspace
         sessions.selected_project(),
     ) {
         (None, None, _) | (None, Some(_), None) => Err(ChangeWorkspaceError::NoSelection),
+        (None, Some(thread), _) if thread.group.is_some() => Err(ChangeWorkspaceError::Grouped),
         _ if sessions.starting => Err(ChangeWorkspaceError::Starting),
         (None, Some(thread), Some(project))
             if thread.transcript.is_some() || thread.status.in_progress() =>
@@ -60,6 +64,8 @@ pub const BUSY_DIRECTORY: &str = "Claude is working in this directory";
 pub enum SwitchBranchError {
     /// The cursor isn't on a thread or a draft.
     NoSelection,
+    /// The thread is in a group, whose directory is fixed.
+    Grouped,
     /// A session is already being started.
     Starting,
     /// A thread in the directory the checkout would change is working or
@@ -76,13 +82,15 @@ pub enum SwitchBranchError {
 /// # Errors
 ///
 /// Returns [`SwitchBranchError::NoSelection`] without a selected thread or
-/// draft, [`SwitchBranchError::Starting`] while a start is in flight, and
+/// draft, [`SwitchBranchError::Grouped`] on a thread in a group,
+/// [`SwitchBranchError::Starting`] while a start is in flight, and
 /// [`SwitchBranchError::Busy`] while any thread in the same directory is in
 /// progress.
 pub fn validate_switch_branch(state: &AppState) -> Result<(), SwitchBranchError> {
     let sessions = &state.sessions;
     match (sessions.selected_draft(), sessions.selected_thread()) {
         (None, None) => Err(SwitchBranchError::NoSelection),
+        (None, Some(thread)) if thread.group.is_some() => Err(SwitchBranchError::Grouped),
         _ if sessions.starting => Err(SwitchBranchError::Starting),
         (Some((_, draft)), _) if !draft.repo => Ok(()),
         (Some((project, draft)), _) => match &draft.workspace {
@@ -115,8 +123,8 @@ mod tests {
     };
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, GroupId, Project, ProjectId, ProjectKind, Sessions, SidebarItem,
+        Thread, ThreadId, ThreadStatus,
     };
 
     /// One project at `/work` whose only thread, selected, runs in the root
@@ -397,6 +405,52 @@ mod tests {
             result,
             Ok(()),
             "a new-worktree draft only records its base branch"
+        );
+    }
+
+    /// [`selected`] with the thread, prompt-less, in group 9.
+    fn grouped() -> AppState {
+        let mut state = selected(None);
+        if let Some(thread) = state
+            .sessions
+            .projects
+            .first_mut()
+            .and_then(|project| project.threads.first_mut())
+        {
+            thread.group = Some(GroupId(9));
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn change_workspace_rejected_on_a_grouped_thread() {
+        // Given a prompt-less selected thread in a group.
+        let state = grouped();
+
+        // When validating a workspace change.
+        let result = validate_change_workspace(&state);
+
+        // Then validation fails with Grouped.
+        assert_eq!(
+            result,
+            Err(ChangeWorkspaceError::Grouped),
+            "a group's directory is fixed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_rejected_on_a_grouped_thread() {
+        // Given a selected thread in a group.
+        let state = grouped();
+
+        // When validating a branch switch.
+        let result = validate_switch_branch(&state);
+
+        // Then validation fails with Grouped.
+        assert_eq!(
+            result,
+            Err(SwitchBranchError::Grouped),
+            "a group's directory is fixed"
         );
     }
 }

@@ -147,7 +147,7 @@ mod tests {
         Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem,
         Thread, ThreadId, ThreadStatus,
     };
-    use orb_domain::feat::sidebar::state::{Rename, SidebarView};
+    use orb_domain::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use orb_domain::{AppState, Focus, TextInput};
     use orb_term::{Pane, PaneCommand, PaneSize};
     use ratatui::Terminal;
@@ -434,7 +434,7 @@ mod tests {
     fn renaming(focus: Focus) -> AppState {
         AppState {
             rename: Some(Rename {
-                thread: ThreadId(1),
+                target: RenameTarget::Thread(ThreadId(1)),
                 input: TextInput::new("Fix"),
             }),
             ..selected(focus)

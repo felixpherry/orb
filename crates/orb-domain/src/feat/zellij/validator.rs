@@ -8,21 +8,24 @@ use crate::AppState;
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum OpenToolError {
-    /// The cursor isn't on a thread or a draft.
+    /// The cursor isn't on a thread, a draft or a group row.
     NoSelection,
 }
 
-/// Allow opening a tool when a thread or a draft is selected.
+/// Allow opening a tool when a thread, a draft, a group card or a group draft
+/// is selected.
 ///
 /// # Errors
 ///
-/// Returns [`OpenToolError::NoSelection`] without a selected thread or draft.
+/// Returns [`OpenToolError::NoSelection`] without a selected thread, draft or
+/// group row.
 pub fn validate_open_tool(state: &AppState) -> Result<(), OpenToolError> {
     match (
         state.sessions.selected_draft(),
         state.sessions.selected_thread(),
+        state.sessions.selected_group(),
     ) {
-        (None, None) => Err(OpenToolError::NoSelection),
+        (None, None, None) => Err(OpenToolError::NoSelection),
         _ => Ok(()),
     }
 }
@@ -34,12 +37,12 @@ mod tests {
     use super::{OpenToolError, validate_open_tool};
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
-    /// One project at `/work` with a thread and a draft, the cursor on
-    /// `cursor`.
+    /// One project at `/work` with a thread, a draft and group 9 (still a
+    /// draft), the cursor on `cursor`.
     fn state_at(cursor: Option<SidebarItem>) -> AppState {
         AppState {
             sessions: Sessions {
@@ -76,7 +79,21 @@ mod tests {
                         model: None,
                         permission: None,
                     }],
-                    groups: vec![],
+                    groups: vec![Group {
+                        id: GroupId(9),
+                        kind: GroupKind::Research,
+                        name: "tokio-cancel".into(),
+                        dir: Some("/orb/research/tokio-cancel".into()),
+                        branch: None,
+                        created_at: SystemTime::UNIX_EPOCH,
+                        pinned_at: None,
+                        settled_at: None,
+                        active_since: SystemTime::UNIX_EPOCH,
+                        draft: Some(GroupDraft {
+                            model: None,
+                            permission: None,
+                        }),
+                    }],
                     kind: ProjectKind::Normal,
                 }],
                 cursor,
@@ -116,5 +133,19 @@ mod tests {
 
         // Then it is allowed.
         assert_eq!(result, Ok(()), "a thread or draft has a directory");
+    }
+
+    #[rstest::rstest]
+    #[case(SidebarItem::Group(GroupId(9)))]
+    #[case(SidebarItem::GroupDraft(GroupId(9)))]
+    fn open_tool_allowed_on_a_group_row(#[case] cursor: SidebarItem) {
+        // Given a selected group card or group draft.
+        let state = state_at(Some(cursor));
+
+        // When validating opening a tool.
+        let result = validate_open_tool(&state);
+
+        // Then it is allowed.
+        assert_eq!(result, Ok(()), "a group row has a directory");
     }
 }

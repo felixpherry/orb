@@ -420,6 +420,7 @@ mod tests {
     use std::time::SystemTime;
 
     use orb_domain::AppState;
+    use orb_domain::feat::picker::list::setting_label;
     use orb_domain::feat::sessions::state::{
         Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, NEW_THREAD, Project,
         ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
@@ -707,6 +708,23 @@ mod tests {
             context.contains(&format!("orb/GT-514-login  ·  {NEW_THREAD}")),
             "context line was '{context}'"
         );
+    }
+
+    #[rstest::rstest]
+    fn group_draft_menu_shows_its_model() {
+        // Given Feature group GT-514-login's draft on opus, selected.
+        let mut state = in_group(SidebarItem::GroupDraft(GroupId(9)));
+        if let Some(draft) = state.sessions.group_draft_mut(GroupId(9)) {
+            draft.model = Some("opus".to_owned());
+        }
+
+        // When drawing the dashboard 80×40.
+        let (buf, _) = draw(&state, None, 80, 40);
+
+        // Then the Model row shows opus's name.
+        let row = line_with(&buf, "Model");
+        let expected = format!("Model  {}", setting_label(Some("opus")));
+        assert!(row.contains(&expected), "Model row was '{row}'");
     }
 
     #[rstest::rstest]

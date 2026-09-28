@@ -7,6 +7,10 @@
 //! search narrows the sidebar to the threads and drafts whose title matches
 //! what the user types, and ends with the cursor on the match or back where
 //! it was.
+//!
+//! Threads can work together in a group: a Feature group shares one worktree
+//! on a branch named after it, and a Research or Learn group shares a folder
+//! under orb's own directory, copied from the user's template for the kind.
 
 pub mod child_env;
 pub mod claude_supervisor;
@@ -14,5 +18,6 @@ pub mod session_host;
 pub mod sessions_actor;
 pub mod state;
 pub mod store;
+pub mod template;
 pub mod transcript;
 pub mod validator;

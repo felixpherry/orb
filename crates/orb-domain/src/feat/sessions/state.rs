@@ -39,6 +39,13 @@ pub enum GroupKind {
     Learn,
 }
 
+/// A group's slug: `name`'s words joined by `-`, case kept (`GT-514 login`
+/// → `GT-514-login`).
+#[must_use]
+pub fn group_slug(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join("-")
+}
+
 /// Whether a project is one the user added, or one of orb's own folders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectKind {
@@ -343,6 +350,7 @@ pub struct Search {
 /// Written by the sessions actor (projects and their drafts, `error`,
 /// `starting` when a start ends, `trust`, `attach`, the cursor and `filter`
 /// after a restore, the cursor when a still-selected draft becomes a thread,
+/// the cursor on a new group's draft,
 /// removing a thread from `deleting`, pushing `notices`) and by the intent
 /// handler (the cursor on navigation, settle and delete, `shelf_open`,
 /// `folded` and `opened`,
@@ -559,6 +567,15 @@ impl Sessions {
             .iter_mut()
             .find(|project| project.id == id)
             .and_then(|project| project.draft.as_mut())
+    }
+
+    /// Group `id`'s draft, if it still has one.
+    pub fn group_draft_mut(&mut self, id: GroupId) -> Option<&mut GroupDraft> {
+        self.projects
+            .iter_mut()
+            .flat_map(|project| project.groups.iter_mut())
+            .find(|group| group.id == id)
+            .and_then(|group| group.draft.as_mut())
     }
 
     /// The project holding the thread or group under the cursor.

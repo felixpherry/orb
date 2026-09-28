@@ -1,12 +1,81 @@
 //! Checks whether the user's sidebar actions can proceed: starting the
 //! selected draft or picking its model or permission mode, pinning, settling
-//! or deleting the selected thread, discarding the selected draft, and opening
-//! or closing the Settled shelf or a group.
+//! or deleting the selected thread, discarding the selected draft, opening
+//! or closing the Settled shelf or a group, and creating a group.
 
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::SidebarItem;
+use crate::feat::sessions::state::{GroupKind, ProjectKind, SidebarItem, group_slug};
+use crate::feat::sidebar::state::{Rename, RenameTarget};
+
+/// Why creating a group from the name box can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum NewGroupError {
+    /// The box isn't naming a new group, or the slug is empty.
+    Empty,
+    /// The slug uses something git branches or folder names can't: the char
+    /// or sequence.
+    Invalid(String),
+    /// A group of that kind and slug already exists in the project: the
+    /// mode-line text.
+    Taken(String),
+}
+
+/// Characters a group's slug can't hold anywhere.
+const INVALID_CHARS: [char; 8] = ['/', '\\', '~', '^', ':', '?', '*', '['];
+
+/// The mode-line text for a `kind` group's `slug` that's taken in `project`
+/// (its title).
+#[must_use]
+pub fn group_taken(kind: GroupKind, slug: &str, project: &str) -> String {
+    match kind {
+        GroupKind::Feature => format!("branch {slug} already exists in {project}"),
+        GroupKind::Research => format!("~/.orb/research/{slug} already exists"),
+        GroupKind::Learn => format!("~/.orb/learn/{slug} already exists"),
+    }
+}
+
+/// Allow creating the group the name box names, once its slug is a usable
+/// branch and folder name no group of its kind in its project has, settled
+/// groups included.
+///
+/// # Errors
+///
+/// Returns [`NewGroupError::Empty`] when the box isn't naming a new group or
+/// the slug is empty, [`NewGroupError::Invalid`] with the offending char or
+/// sequence when the slug holds one of `/ \ ~ ^ : ? * [`, starts with `-` or
+/// `.`, or holds `..`, and [`NewGroupError::Taken`] with the mode-line text
+/// when the project already has that group.
+pub fn validate_new_group(state: &AppState) -> Result<(), NewGroupError> {
+    let Some(Rename {
+        target: RenameTarget::NewGroup { kind, project },
+        input,
+    }) = &state.rename
+    else {
+        return Err(NewGroupError::Empty);
+    };
+    let slug = group_slug(input.text());
+    let invalid = slug
+        .matches(INVALID_CHARS)
+        .next()
+        .or_else(|| ["-", "."].into_iter().find(|lead| slug.starts_with(lead)))
+        .or_else(|| slug.contains("..").then_some(".."));
+    let in_project = state.sessions.projects.iter().find(|p| match kind {
+        GroupKind::Feature => Some(p.id) == *project,
+        GroupKind::Research => p.kind == ProjectKind::Research && !p.removed,
+        GroupKind::Learn => p.kind == ProjectKind::Learn && !p.removed,
+    });
+    match (slug.is_empty(), invalid, in_project) {
+        (true, _, _) => Err(NewGroupError::Empty),
+        (false, Some(what), _) => Err(NewGroupError::Invalid(what.to_owned())),
+        (false, None, Some(p)) if p.groups.iter().any(|g| g.kind == *kind && g.name == slug) => {
+            Err(NewGroupError::Taken(group_taken(*kind, &slug, &p.title)))
+        }
+        (false, None, _) => Ok(()),
+    }
+}
 
 /// Why settling or un-settling can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -109,28 +178,53 @@ pub fn validate_start_draft(state: &AppState) -> Result<(), StartDraftError> {
     }
 }
 
+/// Why starting the selected group draft can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum StartGroupDraftError {
+    /// The cursor isn't on a group draft.
+    NoDraft,
+    /// A session is already being started.
+    Starting,
+}
+
+/// Allow starting the selected group draft, one start at a time.
+///
+/// # Errors
+///
+/// Returns [`StartGroupDraftError::NoDraft`] without a selected group draft,
+/// and [`StartGroupDraftError::Starting`] while a start is in flight.
+pub fn validate_start_group_draft(state: &AppState) -> Result<(), StartGroupDraftError> {
+    match state.sessions.selected_group_draft() {
+        None => Err(StartGroupDraftError::NoDraft),
+        Some(_) if state.sessions.starting => Err(StartGroupDraftError::Starting),
+        Some(_) => Ok(()),
+    }
+}
+
 /// Why picking the selected draft's model or permission mode can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum PickSettingError {
-    /// The cursor isn't on a draft.
+    /// The cursor isn't on a draft or group draft.
     NoDraft,
     /// A session is being started, maybe from the draft.
     Starting,
 }
 
-/// Allow picking the selected draft's model or permission mode between
-/// session starts.
+/// Allow picking the selected draft's or group draft's model or permission
+/// mode between session starts.
 ///
 /// # Errors
 ///
-/// Returns [`PickSettingError::NoDraft`] without a selected draft, and
-/// [`PickSettingError::Starting`] while a start is in flight.
+/// Returns [`PickSettingError::NoDraft`] without a selected draft or group
+/// draft, and [`PickSettingError::Starting`] while a start is in flight.
 pub fn validate_pick_setting(state: &AppState) -> Result<(), PickSettingError> {
-    match state.sessions.selected_draft() {
-        None => Err(PickSettingError::NoDraft),
-        Some(_) if state.sessions.starting => Err(PickSettingError::Starting),
-        Some(_) => Ok(()),
+    let sessions = &state.sessions;
+    match (sessions.selected_draft(), sessions.selected_group_draft()) {
+        (None, None) => Err(PickSettingError::NoDraft),
+        _ if sessions.starting => Err(PickSettingError::Starting),
+        _ => Ok(()),
     }
 }
 
@@ -231,15 +325,17 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        CloseGroupError, DeleteError, OpenGroupError, PickSettingError, StartDraftError,
-        ToggleSettleError, validate_close_group, validate_delete, validate_open_group,
-        validate_pick_setting, validate_start_draft, validate_toggle_settle,
+        CloseGroupError, DeleteError, NewGroupError, OpenGroupError, PickSettingError,
+        StartDraftError, StartGroupDraftError, ToggleSettleError, validate_close_group,
+        validate_delete, validate_new_group, validate_open_group, validate_pick_setting,
+        validate_start_draft, validate_start_group_draft, validate_toggle_settle,
     };
-    use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project, ProjectId,
+        ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
+    use crate::feat::sidebar::state::{Rename, RenameTarget};
+    use crate::{AppState, TextInput};
 
     /// One project whose local draft is selected, with a start in flight if
     /// `starting`.
@@ -496,5 +592,205 @@ mod tests {
             Err(CloseGroupError::NoGroup),
             "only a group's rows can close a group"
         );
+    }
+
+    /// Project `orb` (1) and orb's Research project (2), each holding a
+    /// settled `GT-514-login` group of its kind, with the name box for a new
+    /// `kind` group holding `text`, in `orb` for a Feature group.
+    fn naming(kind: GroupKind, text: &str) -> AppState {
+        let project =
+            |id: i64, title: &str, project_kind: ProjectKind, group_kind: GroupKind| Project {
+                id: ProjectId(id),
+                title: title.into(),
+                root: format!("/{title}").into(),
+                created_at: SystemTime::UNIX_EPOCH,
+                removed: false,
+                draft: None,
+                threads: vec![],
+                groups: vec![Group {
+                    id: GroupId(id),
+                    kind: group_kind,
+                    name: "GT-514-login".into(),
+                    dir: None,
+                    branch: None,
+                    created_at: SystemTime::UNIX_EPOCH,
+                    pinned_at: None,
+                    settled_at: Some(SystemTime::UNIX_EPOCH),
+                    active_since: SystemTime::UNIX_EPOCH,
+                    draft: None,
+                }],
+                kind: project_kind,
+            };
+        AppState {
+            sessions: Sessions {
+                projects: vec![
+                    project(1, "orb", ProjectKind::Normal, GroupKind::Feature),
+                    project(2, "Research", ProjectKind::Research, GroupKind::Research),
+                ],
+                ..Sessions::default()
+            },
+            rename: Some(Rename {
+                target: RenameTarget::NewGroup {
+                    kind,
+                    project: (kind == GroupKind::Feature).then_some(ProjectId(1)),
+                },
+                input: TextInput::new(text),
+            }),
+            ..AppState::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case("a/b", "/")]
+    #[case("a\\b", "\\")]
+    #[case("~x", "~")]
+    #[case("a^b", "^")]
+    #[case("a:b", ":")]
+    #[case("a?b", "?")]
+    #[case("a*b", "*")]
+    #[case("a[b", "[")]
+    #[case("-x", "-")]
+    #[case(".x", ".")]
+    #[case("a..b", "..")]
+    fn new_group_rejected_with_an_invalid_char(#[case] text: &str, #[case] what: &str) {
+        // Given the name box holding the text.
+        let state = naming(GroupKind::Research, text);
+
+        // When validating the new group.
+        let result = validate_new_group(&state);
+
+        // Then it names what can't be used.
+        assert_eq!(
+            result,
+            Err(NewGroupError::Invalid(what.to_owned())),
+            "{text:?} should be refused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_group_rejected_when_the_slug_is_empty() {
+        // Given the name box holding only spaces.
+        let state = naming(GroupKind::Research, "   ");
+
+        // When validating the new group.
+        let result = validate_new_group(&state);
+
+        // Then it's refused as empty.
+        assert_eq!(result, Err(NewGroupError::Empty), "a blank name");
+    }
+
+    #[rstest::rstest]
+    #[case(GroupKind::Feature, "branch GT-514-login already exists in orb")]
+    #[case(GroupKind::Research, "~/.orb/research/GT-514-login already exists")]
+    fn new_group_rejected_when_taken_in_the_project(
+        #[case] kind: GroupKind,
+        #[case] expected: &str,
+    ) {
+        // Given the name box holding a settled group's name.
+        let state = naming(kind, "GT-514 login");
+
+        // When validating the new group.
+        let result = validate_new_group(&state);
+
+        // Then it's refused with the taken text.
+        assert_eq!(
+            result,
+            Err(NewGroupError::Taken(expected.to_owned())),
+            "a taken {kind:?} slug"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_group_allowed_for_a_fresh_slug() {
+        // Given the name box holding a name no group has.
+        let state = naming(GroupKind::Research, "tokio cancel");
+
+        // When validating the new group.
+        let result = validate_new_group(&state);
+
+        // Then it's allowed.
+        assert_eq!(result, Ok(()), "a fresh slug");
+    }
+
+    /// One project holding Research group 7, still a draft, with the cursor
+    /// on `cursor` and a start in flight if `starting`.
+    fn group_draft_at(cursor: SidebarItem, starting: bool) -> AppState {
+        AppState {
+            sessions: Sessions {
+                projects: vec![Project {
+                    id: ProjectId(1),
+                    title: "Research".into(),
+                    root: "/research".into(),
+                    created_at: SystemTime::UNIX_EPOCH,
+                    removed: false,
+                    draft: None,
+                    threads: vec![],
+                    groups: vec![Group {
+                        id: GroupId(7),
+                        kind: GroupKind::Research,
+                        name: "tokio-cancel".into(),
+                        dir: Some("/research/tokio-cancel".into()),
+                        branch: None,
+                        created_at: SystemTime::UNIX_EPOCH,
+                        pinned_at: None,
+                        settled_at: None,
+                        active_since: SystemTime::UNIX_EPOCH,
+                        draft: Some(GroupDraft {
+                            model: None,
+                            permission: None,
+                        }),
+                    }],
+                    kind: ProjectKind::Research,
+                }],
+                cursor: Some(cursor),
+                starting,
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        }
+    }
+
+    #[rstest::rstest]
+    fn start_group_draft_rejected_while_starting() {
+        // Given the group draft selected while a start is in flight.
+        let state = group_draft_at(SidebarItem::GroupDraft(GroupId(7)), true);
+
+        // When validating a group draft start.
+        let result = validate_start_group_draft(&state);
+
+        // Then validation fails with Starting.
+        assert_eq!(
+            result,
+            Err(StartGroupDraftError::Starting),
+            "one start at a time"
+        );
+    }
+
+    #[rstest::rstest]
+    fn start_group_draft_rejected_off_a_group_draft() {
+        // Given the cursor on the group's card.
+        let state = group_draft_at(SidebarItem::Group(GroupId(7)), false);
+
+        // When validating a group draft start.
+        let result = validate_start_group_draft(&state);
+
+        // Then validation fails with NoDraft.
+        assert_eq!(
+            result,
+            Err(StartGroupDraftError::NoDraft),
+            "only a group draft row starts a group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pick_setting_allowed_on_a_group_draft() {
+        // Given the group draft selected.
+        let state = group_draft_at(SidebarItem::GroupDraft(GroupId(7)), false);
+
+        // When validating a setting pick.
+        let result = validate_pick_setting(&state);
+
+        // Then it's allowed.
+        assert_eq!(result, Ok(()), "a group draft has settings to pick");
     }
 }

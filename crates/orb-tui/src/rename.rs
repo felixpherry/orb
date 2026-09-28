@@ -1,9 +1,11 @@
-//! The rename box: a LazyVim-style input titled `Rename Session`, centred at
-//! the top of the screen, where the user types orb's own name for a thread.
+//! The name box: a LazyVim-style input centred at the top of the screen,
+//! where the user types orb's own name for a thread (`Rename Session`), or
+//! the name of a new group (`New Feature group` and so on).
 
 use crate::picker::visible;
 use crate::sidebar::{BLUE1, FG, YELLOW};
-use orb_domain::feat::sidebar::state::Rename;
+use orb_domain::feat::sessions::state::GroupKind;
+use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::Style;
@@ -32,7 +34,7 @@ pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer) -> Position 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(YELLOW))
-        .title(" Rename Session ")
+        .title(title(rename.target))
         .title_style(Style::new().fg(YELLOW))
         .title_alignment(Alignment::Center);
     let inner = block.inner(popup);
@@ -57,11 +59,30 @@ pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer) -> Position 
     Position::new(inner.x + x, inner.y)
 }
 
+/// The box's title for what it names.
+fn title(target: RenameTarget) -> &'static str {
+    match target {
+        RenameTarget::Thread(_) => " Rename Session ",
+        RenameTarget::NewGroup {
+            kind: GroupKind::Feature,
+            ..
+        } => " New Feature group ",
+        RenameTarget::NewGroup {
+            kind: GroupKind::Research,
+            ..
+        } => " New Research group ",
+        RenameTarget::NewGroup {
+            kind: GroupKind::Learn,
+            ..
+        } => " New Learn group ",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use orb_domain::TextInput;
-    use orb_domain::feat::sessions::state::ThreadId;
-    use orb_domain::feat::sidebar::state::Rename;
+    use orb_domain::feat::sessions::state::{GroupKind, ProjectId, ThreadId};
+    use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
     use ratatui::buffer::Buffer;
     use ratatui::layout::{Position, Rect};
 
@@ -70,10 +91,15 @@ mod tests {
 
     /// The rename box holding `text` drawn on a 100x10 screen.
     fn drawn(text: &str) -> (Buffer, Position) {
+        drawn_for(RenameTarget::Thread(ThreadId(1)), text)
+    }
+
+    /// The name box for `target` holding `text` drawn on a 100x10 screen.
+    fn drawn_for(target: RenameTarget, text: &str) -> (Buffer, Position) {
         let area = Rect::new(0, 0, 100, 10);
         let mut buf = Buffer::empty(area);
         let rename = Rename {
-            thread: ThreadId(1),
+            target,
             input: TextInput::new(text),
         };
         let cursor = render(&rename, area, &mut buf);
@@ -110,14 +136,27 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn box_is_titled_rename_session() {
+    #[case(RenameTarget::Thread(ThreadId(1)), " Rename Session ")]
+    #[case(
+        RenameTarget::NewGroup { kind: GroupKind::Feature, project: Some(ProjectId(1)) },
+        " New Feature group "
+    )]
+    #[case(
+        RenameTarget::NewGroup { kind: GroupKind::Research, project: None },
+        " New Research group "
+    )]
+    #[case(
+        RenameTarget::NewGroup { kind: GroupKind::Learn, project: None },
+        " New Learn group "
+    )]
+    fn box_is_titled_by_its_target(#[case] target: RenameTarget, #[case] title: &str) {
         // Given a 100-column screen.
-        // When drawing the rename box.
-        let (buf, _) = drawn("Fix the sidebar");
+        // When drawing the name box for the target.
+        let (buf, _) = drawn_for(target, "Fix the sidebar");
 
-        // Then its top border carries the title.
+        // Then its top border carries the target's title.
         assert!(
-            row(&buf, 2).contains(" Rename Session "),
+            row(&buf, 2).contains(title),
             "the box's title: {:?}",
             row(&buf, 2)
         );

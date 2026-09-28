@@ -41,6 +41,17 @@
 //! select it. A thread being deleted is hidden from the sidebar until its
 //! session is removed; if the removal fails, it shows again.
 //!
+//! It creates groups. A Feature group is refused while its branch exists; it
+//! gets its worktree when its draft starts. A Research or Learn group lives in
+//! orb's own project for its kind, added when first needed, in a new folder
+//! copied from the user's template for the kind; orb writes that template
+//! from its built-in default when it's missing, and never overwrites a
+//! folder that already exists. A new group's draft takes the project's
+//! last-used model and permission, and is selected, and saves them as the
+//! user edits them. Starting it starts the group's first thread: a Feature
+//! group in a new worktree on the branch named after it, which becomes the
+//! group's directory, and a Research or Learn group in its folder.
+//!
 //! It adds projects and removes them: a removed project leaves `␣n` and the
 //! project filter and loses its draft, its threads stay, and adding it again
 //! restores it.
@@ -53,6 +64,7 @@
 //! an answer, in any project, unless the thread is being deleted.
 
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -66,13 +78,16 @@ use super::session_host::{
     SessionHostError, SessionHostService, SessionOptions, SessionRecord, WorkspaceUntrusted,
 };
 use super::state::{
-    Draft, DraftWorkspace, Group, GroupDraft, NEW_THREAD, Notice, NoticeKind, Project, ProjectId,
-    ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+    Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, NEW_THREAD, Notice, NoticeKind,
+    Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
 };
 use super::store::{
-    DraftRow, GroupRow, LastUsed, LastWorkspace, NewThread, SettledOverride, Store, ThreadRow, Ui,
+    DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store,
+    ThreadRow, Ui,
 };
+use super::template;
 use super::transcript::{locate, scan_title};
+use super::validator::group_taken;
 use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
@@ -91,6 +106,8 @@ const SLOW_POLL: Duration = Duration::from_secs(5);
 const AUTO_SETTLE_AFTER: i64 = 3 * 24 * 60 * 60 * 1000;
 /// The error shown when orb's store can't be written.
 const SAVE_FAILED: &str = "couldn't save orb's state";
+/// The error shown when a group's folder can't be made.
+const FOLDER_UNMADE: &str = "couldn't make the folder";
 /// The error shown when a started session can't be saved or shown.
 const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
 /// How many random worktree names to try before giving up.
@@ -105,15 +122,17 @@ pub struct SessionsActorDeps {
     pub claude_dir: PathBuf,
     /// Where orb makes new worktrees.
     pub worktrees_root: PathBuf,
+    /// orb's own folder (`~/.orb`): the Research/Learn roots and templates.
+    pub orb_root: PathBuf,
     /// Tells the frontend to redraw.
     pub wake: Wake,
 }
 
-/// Owns [`Sessions`](super::state::Sessions): the projects and their drafts,
-/// the threads' statuses, titles, pins and settles, the latest `claude` error,
+/// Owns [`Sessions`](super::state::Sessions): the projects, their drafts and
+/// groups, the threads' statuses, titles, pins and settles, the latest `claude` error,
 /// the directory a start waits to be trusted in, and the started thread the
 /// frontend should attach to. It also restores the sidebar's width and
-/// project filter. The intent handler also moves the cursor, opens and closes
+/// project filter, and selects a new group's draft. The intent handler also moves the cursor, opens and closes
 /// the shelf, marks a start as starting, edits a draft's fields before asking
 /// for them to be saved, and resizes or filters the sidebar before asking for
 /// that to be saved.
@@ -123,11 +142,14 @@ pub struct SessionsActor {
     store: Store,
     claude_dir: PathBuf,
     worktrees_root: PathBuf,
+    orb_root: PathBuf,
     wake: Wake,
     /// Cuts the ticker's wait short so it polls now.
     poke: Arc<Notify>,
     /// The saved threads, as last written to the store.
     rows: Vec<ThreadRow>,
+    /// The saved groups, as last written to the store.
+    groups: Vec<GroupRow>,
     /// The start waiting for the user to trust its directory.
     pending: Option<PendingStart>,
 }
@@ -241,6 +263,23 @@ pub struct SaveUi;
 #[derive(Debug)]
 pub struct RemoveProject(pub ProjectId);
 
+/// Create a `kind` group named `name` (a slug) with a draft: in `project`
+/// for a Feature group, else in orb's own project for the kind.
+#[derive(Debug)]
+pub struct CreateGroup {
+    pub kind: GroupKind,
+    pub project: Option<ProjectId>,
+    pub name: String,
+}
+
+/// Start group `.0`'s first thread from its draft.
+#[derive(Debug)]
+pub struct StartGroupDraft(pub GroupId);
+
+/// Save group `.0`'s draft settings as the app state has them.
+#[derive(Debug)]
+pub struct SaveGroupDraft(pub GroupId);
+
 /// A session start in flight: what it is for, where it runs, the branch
 /// checked out there when known, the worktree orb made for it, if any, and
 /// the options the session starts with.
@@ -260,6 +299,8 @@ enum StartKind {
         project: ProjectId,
         workspace: LastWorkspace,
     },
+    /// The first thread of group `group` in `project`, from its draft.
+    GroupDraft { project: ProjectId, group: GroupId },
     /// An existing, prompt-less thread moving out of `old_cwd`.
     Move {
         thread: ThreadId,
@@ -555,6 +596,46 @@ impl Message<RemoveProject> for SessionsActor {
     }
 }
 
+impl Message<CreateGroup> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        CreateGroup {
+            kind,
+            project,
+            name,
+        }: CreateGroup,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.create_group(kind, project, name);
+    }
+}
+
+impl Message<StartGroupDraft> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        StartGroupDraft(id): StartGroupDraft,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.start_group_draft(id).await;
+    }
+}
+
+impl Message<SaveGroupDraft> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        SaveGroupDraft(id): SaveGroupDraft,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.save_group_draft(id);
+    }
+}
+
 impl SessionsActor {
     /// Shows the saved projects, threads and drafts, sizes the sidebar as it
     /// was saved, kept within its bounds, filters it to the saved project if
@@ -567,6 +648,7 @@ impl SessionsActor {
             store,
             claude_dir,
             worktrees_root,
+            orb_root,
             wake,
         } = deps;
         let (projects, rows, drafts, groups, error) = match store.load() {
@@ -626,9 +708,11 @@ impl SessionsActor {
             store,
             claude_dir,
             worktrees_root,
+            orb_root,
             wake,
             poke: Arc::default(),
             rows,
+            groups,
             pending: None,
         }
     }
@@ -810,6 +894,31 @@ impl SessionsActor {
         (self.wake)();
     }
 
+    /// Saves group `id`'s draft model and permission as the app state has them.
+    fn save_group_draft(&mut self, id: GroupId) {
+        let draft = self
+            .state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .flat_map(|project| &project.groups)
+            .find(|group| group.id == id)
+            .and_then(|group| group.draft.clone());
+        let Some(draft) = draft else {
+            return;
+        };
+        let Some(row) = self.groups.iter_mut().find(|row| row.id == id) else {
+            return;
+        };
+        row.draft_model = draft.model;
+        row.draft_permission_mode = draft.permission;
+        if self.store.save_group(row).is_err() {
+            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+            (self.wake)();
+        }
+    }
+
     /// Checks `git_ref` out in `cwd` for project `id`'s draft. A checkout in
     /// the project's root moves a draft in a worktree back to the root.
     fn checkout_draft(&mut self, id: ProjectId, git_ref: &GitRef, cwd: &Path) {
@@ -909,7 +1018,7 @@ impl SessionsActor {
                 )));
             }
             DraftWorkspace::NewWorktree => {
-                match self.add_worktree(&root, draft.branch.as_deref()) {
+                match self.add_worktree(&root, draft.branch.as_deref(), None) {
                     Ok(made) => (LastWorkspace::NewWorktree, made.path.clone(), Some(made)),
                     Err(report) => return self.end_start(Err(git_reason(&report))),
                 }
@@ -971,13 +1080,25 @@ impl SessionsActor {
         } = pending;
         match (created, kind) {
             (Ok(created), StartKind::Draft { project, workspace }) => {
-                let thread = self.save_new(project, &cwd, &created.short_id, branch, &options);
+                let thread =
+                    self.save_new(project, &cwd, &created.short_id, branch, &options, None);
                 let used = LastUsed {
                     workspace,
                     model: options.model,
                     permission_mode: options.permission_mode,
                 };
                 self.finish_draft(project, &used, thread);
+            }
+            (Ok(created), StartKind::GroupDraft { project, group }) => {
+                let thread = self.save_new(
+                    project,
+                    &cwd,
+                    &created.short_id,
+                    branch,
+                    &options,
+                    Some(group),
+                );
+                self.finish_group_draft(project, group, &cwd, thread);
             }
             (
                 Ok(created),
@@ -1047,6 +1168,105 @@ impl SessionsActor {
         self.end_start(result);
     }
 
+    /// Starts group `id`'s first thread from its draft, with its model and
+    /// permission: a Feature group in a new worktree of its project on the
+    /// branch named after it, refused while that branch exists; a Research or
+    /// Learn group in its folder.
+    async fn start_group_draft(&mut self, id: GroupId) {
+        let found = self
+            .state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .find_map(|project| {
+                let group = project.groups.iter().find(|group| group.id == id)?;
+                let draft = group.draft.clone()?;
+                Some((
+                    project.id,
+                    project.root.clone(),
+                    project.title.clone(),
+                    group.clone(),
+                    draft,
+                ))
+            });
+        let Some((project, root, title, group, draft)) = found else {
+            return self.end_start(Err("the draft is gone".to_owned()));
+        };
+        let options = SessionOptions {
+            model: draft.model,
+            permission_mode: draft.permission,
+        };
+        let (cwd, branch, made) = match (group.kind, group.dir) {
+            (GroupKind::Feature, _) => {
+                let branch = group.branch.unwrap_or(group.name);
+                if self.services.git.branch_exists(&root, &branch) {
+                    return self.end_start(Err(group_taken(GroupKind::Feature, &branch, &title)));
+                }
+                match self.add_worktree(&root, None, Some(&branch)) {
+                    Ok(made) => (made.path.clone(), Some(branch), Some(made)),
+                    Err(report) => return self.end_start(Err(git_reason(&report))),
+                }
+            }
+            (_, Some(dir)) if dir.is_dir() => (dir, None, None),
+            (_, dir) => {
+                let dir = dir.unwrap_or_default();
+                return self.end_start(Err(format!("folder no longer exists: {}", dir.display())));
+            }
+        };
+        let pending = PendingStart {
+            kind: StartKind::GroupDraft { project, group: id },
+            cwd,
+            branch,
+            made,
+            options,
+        };
+        self.start(pending, true).await;
+    }
+
+    /// Replaces group `group_id`'s draft with its first thread `created`, in
+    /// `cwd` (a Feature group's directory from now on). If the group draft was
+    /// still selected, selects the thread and asks the frontend to attach, in
+    /// the same state write. Doesn't record last-used settings.
+    fn finish_group_draft(
+        &mut self,
+        project_id: ProjectId,
+        group_id: GroupId,
+        cwd: &Path,
+        created: Result<Thread, String>,
+    ) {
+        let result = created.and_then(|thread| {
+            let saved = match self.groups.iter_mut().find(|row| row.id == group_id) {
+                Some(row) => {
+                    row.dir.get_or_insert_with(|| cwd.to_owned());
+                    self.store
+                        .save_group(row)
+                        .map_err(|_report| SAVE_FAILED.to_owned())
+                }
+                None => Err(NEW_SESSION_UNSAVED.to_owned()),
+            };
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            let project = sessions
+                .projects
+                .iter_mut()
+                .find(|project| project.id == project_id)
+                .ok_or_else(|| NEW_SESSION_UNSAVED.to_owned())?;
+            if let Some(group) = project.groups.iter_mut().find(|group| group.id == group_id) {
+                group.dir.get_or_insert_with(|| cwd.to_owned());
+                group.draft = None;
+            }
+            let id = thread.id;
+            project.threads.insert(0, thread);
+            if sessions.cursor == Some(SidebarItem::GroupDraft(group_id)) {
+                sessions.cursor = Some(SidebarItem::Thread(id));
+                sessions.attach = Some(id);
+            }
+            saved
+        });
+        self.end_start(result);
+    }
+
     /// Ends a session start: stops showing it as starting and shows `result`'s
     /// error, or clears the error and polls the new session now.
     fn end_start(&self, result: Result<(), String>) {
@@ -1112,7 +1332,7 @@ impl SessionsActor {
             }
             Workspace::NewWorktree => {
                 let made = self
-                    .add_worktree(&root, None)
+                    .add_worktree(&root, None, None)
                     .map_err(|report| git_reason(&report))?;
                 (made.path.clone(), Some(made))
             }
@@ -1126,14 +1346,15 @@ impl SessionsActor {
         })
     }
 
-    /// Makes a new worktree of the repository at `repo` on a new `orb/<hex>`
-    /// branch, from `base` (else the default branch) as origin has it, else as
-    /// it is locally. A ref of another remote, like `upstream/x`, is used as it
-    /// is.
+    /// Makes a new worktree of the repository at `repo` on the new branch
+    /// `branch` (else a new `orb/<hex>` one), from `base` (else the default
+    /// branch) as origin has it, else as it is locally. A ref of another
+    /// remote, like `upstream/x`, is used as it is.
     fn add_worktree(
         &self,
         repo: &Path,
         base: Option<&str>,
+        branch: Option<&str>,
     ) -> Result<MadeWorktree, Report<GitError>> {
         let git = &self.services.git;
         let base = match base {
@@ -1146,7 +1367,7 @@ impl SessionsActor {
                 let hex = hex(attempt);
                 (
                     new_worktree_path(&self.worktrees_root, repo, &hex),
-                    format!("orb/{hex}"),
+                    branch.map_or_else(|| format!("orb/{hex}"), str::to_owned),
                 )
             })
             .find(|(path, branch)| !path.exists() && !git.branch_exists(repo, branch))
@@ -1337,7 +1558,7 @@ impl SessionsActor {
     }
 
     /// Saves a session just started in `cwd` on `branch` with `options`
-    /// under the project.
+    /// under the project, in `group` if any.
     fn save_new(
         &mut self,
         project_id: ProjectId,
@@ -1345,6 +1566,7 @@ impl SessionsActor {
         short_id: &str,
         branch: Option<String>,
         options: &SessionOptions,
+        group: Option<GroupId>,
     ) -> Result<Thread, String> {
         let now = now_ms();
         let new = NewThread {
@@ -1354,7 +1576,7 @@ impl SessionsActor {
             created_at: now,
             model: options.model.clone(),
             permission_mode: options.permission_mode.clone(),
-            group_id: None,
+            group_id: group,
         };
         let Ok(id) = self.store.insert_thread(&new) else {
             return Err(NEW_SESSION_UNSAVED.to_owned());
@@ -1410,29 +1632,167 @@ impl SessionsActor {
             match added {
                 Ok(id) => {
                     sessions.error = None;
-                    match sessions
-                        .projects
-                        .iter_mut()
-                        .find(|project| project.id == id)
+                    show_project(sessions, id, title, root, ProjectKind::Normal, now);
+                }
+                Err(error) => sessions.error = Some(error),
+            }
+        }
+        (self.wake)();
+    }
+
+    /// Creates a `kind` group named `name` with a draft, and selects the
+    /// draft. Research/Learn: orb's project for the kind (added or restored),
+    /// then the folder `<orb_root>/<kind>/<name>` copied from
+    /// `<orb_root>/templates/<kind>`, seeded first when missing. Feature:
+    /// refused while the branch `name` exists. Any refusal or failure shows on
+    /// the mode line and leaves no group; a folder this call made is removed
+    /// again.
+    fn create_group(&mut self, kind: GroupKind, project: Option<ProjectId>, name: String) {
+        let now = now_ms();
+        let own = own_folder(kind);
+        let resolved = match (own, project) {
+            (Some((project_kind, dir, title)), _) => {
+                let root = self.orb_root.join(dir);
+                fs::create_dir_all(&root)
+                    .map_err(|_error| FOLDER_UNMADE.to_owned())
+                    .and_then(|()| {
+                        self.store
+                            .add_project(&root, title, project_kind, now)
+                            .map_err(|_report| SAVE_FAILED.to_owned())
+                    })
+                    .map(|id| (id, root, title.to_owned()))
+            }
+            (None, Some(id)) => self
+                .state
+                .read()
+                .sessions
+                .projects
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| (id, p.root.clone(), p.title.clone()))
+                .ok_or_else(|| "the project is gone".to_owned()),
+            (None, None) => Err("the project is gone".to_owned()),
+        };
+        let created = resolved
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|(id, root, title)| self.new_group(kind, *id, root, title, name, now));
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            if let (Some((project_kind, ..)), Ok((id, root, title))) = (own, &resolved) {
+                show_project(
+                    sessions,
+                    *id,
+                    title.clone(),
+                    root.clone(),
+                    project_kind,
+                    now,
+                );
+            }
+            match created {
+                Ok(group) => {
+                    sessions.cursor = Some(SidebarItem::GroupDraft(group.id));
+                    sessions.error = None;
+                    if let Some(p) = resolved
+                        .ok()
+                        .and_then(|(id, ..)| sessions.projects.iter_mut().find(|p| p.id == id))
                     {
-                        Some(project) => project.removed = false,
-                        None => sessions.projects.push(Project {
-                            id,
-                            title,
-                            root,
-                            created_at: from_ms(now),
-                            threads: Vec::new(),
-                            draft: None,
-                            removed: false,
-                            kind: ProjectKind::Normal,
-                            groups: Vec::new(),
-                        }),
+                        p.groups.push(group);
                     }
                 }
                 Err(error) => sessions.error = Some(error),
             }
         }
         (self.wake)();
+    }
+
+    /// Saves a `kind` group `name` in `project` (rooted at `root`, titled
+    /// `title`) with its folder, if it has one, and returns how it shows.
+    /// The error is the mode-line text.
+    fn new_group(
+        &mut self,
+        kind: GroupKind,
+        project: ProjectId,
+        root: &Path,
+        title: &str,
+        name: String,
+        now: i64,
+    ) -> Result<Group, String> {
+        let taken = self
+            .groups
+            .iter()
+            .any(|row| row.project_id == project && row.kind == kind && row.name == name);
+        if taken {
+            return Err(group_taken(kind, &name, title));
+        }
+        let (dir, branch) = match own_folder(kind) {
+            None if self.services.git.branch_exists(root, &name) => {
+                return Err(group_taken(kind, &name, title));
+            }
+            None => (None, Some(name.clone())),
+            Some((_, kind_dir, _)) => {
+                let dir = root.join(&name);
+                if dir.exists() {
+                    return Err(group_taken(kind, &name, title));
+                }
+                let template = self.orb_root.join("templates").join(kind_dir);
+                let seeded = if template.exists() {
+                    Ok(())
+                } else {
+                    template::seed(&template, kind)
+                };
+                let copied = seeded.and_then(|()| template::copy(&template, &dir));
+                if copied.is_err() {
+                    let _ = fs::remove_dir_all(&dir);
+                    return Err(FOLDER_UNMADE.to_owned());
+                }
+                (Some(dir), None)
+            }
+        };
+        let settings = self
+            .store
+            .last_used(project)
+            .ok()
+            .flatten()
+            .or_else(|| self.store.latest_last_used().ok().flatten());
+        let (draft_model, draft_permission_mode) = settings
+            .map(|used| (used.model, used.permission_mode))
+            .unwrap_or_default();
+        let inserted = self.store.insert_group(&NewGroup {
+            project_id: project,
+            kind,
+            name: name.clone(),
+            dir: dir.clone(),
+            branch: branch.clone(),
+            created_at: now,
+            draft_model: draft_model.clone(),
+            draft_permission_mode: draft_permission_mode.clone(),
+        });
+        let Ok(id) = inserted else {
+            if let Some(dir) = &dir {
+                let _ = fs::remove_dir_all(dir);
+            }
+            return Err(SAVE_FAILED.to_owned());
+        };
+        let row = GroupRow {
+            id,
+            project_id: project,
+            kind,
+            name,
+            dir,
+            branch,
+            created_at: now,
+            pinned_at: None,
+            settled_override: None,
+            settled_at: None,
+            unsettled_at: None,
+            draft_model,
+            draft_permission_mode,
+        };
+        let shown = group(&row, &self.rows);
+        self.groups.push(row);
+        Ok(shown)
     }
 
     /// Removes project `id` from `␣n` and the project filter and discards its
@@ -1983,6 +2343,53 @@ fn draft_of(row: &DraftRow) -> Draft {
     }
 }
 
+/// Shows project `id` in `sessions`: restores it if removed, taking `kind`
+/// unless that's [`ProjectKind::Normal`] (as the store keeps a saved kind),
+/// or adds it.
+fn show_project(
+    sessions: &mut Sessions,
+    id: ProjectId,
+    title: String,
+    root: PathBuf,
+    kind: ProjectKind,
+    now: i64,
+) {
+    match sessions
+        .projects
+        .iter_mut()
+        .find(|project| project.id == id)
+    {
+        Some(project) => {
+            project.removed = false;
+            if kind != ProjectKind::Normal {
+                project.kind = kind;
+            }
+        }
+        None => sessions.projects.push(Project {
+            id,
+            title,
+            root,
+            created_at: from_ms(now),
+            threads: Vec::new(),
+            draft: None,
+            removed: false,
+            kind,
+            groups: Vec::new(),
+        }),
+    }
+}
+
+/// orb's own folder for a `kind` group: its project's kind, its folder's
+/// name under orb's directory, and its project's title. `None` for a Feature
+/// group, which lives in the user's project.
+fn own_folder(kind: GroupKind) -> Option<(ProjectKind, &'static str, &'static str)> {
+    match kind {
+        GroupKind::Feature => None,
+        GroupKind::Research => Some((ProjectKind::Research, "research", "Research")),
+        GroupKind::Learn => Some((ProjectKind::Learn, "learn", "Learn")),
+    }
+}
+
 /// A project's title: its directory's name, else the whole path.
 fn project_title(root: &Path) -> String {
     root.file_name().map_or_else(
@@ -2036,8 +2443,8 @@ mod tests {
         SessionRecord, WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, GroupDraft, GroupKind, Notice, NoticeKind, ProjectId, ProjectKind,
-        SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Notice, NoticeKind,
+        ProjectId, ProjectKind, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::store::{
         DraftRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store, StoreError,
@@ -2050,6 +2457,7 @@ mod tests {
     const CURRENT_BRANCH: &str = "dev";
     const NO_CLAUDE_DIR: &str = "/nonexistent/claude";
     const WORKTREES_ROOT: &str = "/nonexistent/worktrees";
+    const ORB_ROOT: &str = "/nonexistent/orb";
     /// Why git refuses outside a repository.
     const NOT_A_REPO: &str = "fatal: not a git repository";
     const UNTRUSTED: &str =
@@ -2540,6 +2948,18 @@ mod tests {
         git: &Arc<FakeGit>,
         claude_dir: &Path,
     ) -> (SessionsActor, State) {
+        start_in(store, host, git, claude_dir, Path::new(ORB_ROOT))
+    }
+
+    /// Starts the actor on `store` with `git`, making worktrees under
+    /// [`WORKTREES_ROOT`] and groups' folders under `orb_root`.
+    fn start_in(
+        store: Store,
+        host: &Arc<FakeHost>,
+        git: &Arc<FakeGit>,
+        claude_dir: &Path,
+        orb_root: &Path,
+    ) -> (SessionsActor, State) {
         let state = State::default();
         let actor = SessionsActor::restore(SessionsActorDeps {
             services: Services {
@@ -2550,6 +2970,7 @@ mod tests {
             store,
             claude_dir: claude_dir.to_owned(),
             worktrees_root: PathBuf::from(WORKTREES_ROOT),
+            orb_root: orb_root.to_owned(),
             wake: Arc::new(|| {}),
         });
         (actor, state)
@@ -6975,6 +7396,572 @@ mod tests {
             .map(|notice| notice.thread)
             .collect();
         assert_eq!(notified, [id], "the filter shouldn't hide notices");
+        Ok(())
+    }
+
+    /// The orb project, last started with sonnet in plan mode, with the actor
+    /// started on `git` and a temp folder as orb's own directory.
+    fn creating(
+        git: &Arc<FakeGit>,
+    ) -> Result<(tempfile::TempDir, ProjectId, SessionsActor, State), Report<StoreError>> {
+        let orb_root = tempfile::tempdir().change_context(StoreError)?;
+        let store = Store::open_in_memory()?;
+        let orb = orb_project(&store)?;
+        store.record_last_used(orb, &used(LastWorkspace::NewWorktree), 10)?;
+        let (actor, state) = start_in(
+            store,
+            &FakeHost::listing(Vec::new()),
+            git,
+            Path::new(NO_CLAUDE_DIR),
+            orb_root.path(),
+        );
+        Ok((orb_root, orb, actor, state))
+    }
+
+    /// Every group the sidebar has, in project order.
+    fn groups_of(state: &State) -> Vec<Group> {
+        state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .flat_map(|project| project.groups.clone())
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn creating_a_research_group_seeds_a_missing_template() -> Result<(), Report<StoreError>> {
+        // Given no Research template.
+        let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+
+        // When creating Research group `tokio-cancel`.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then the template is written.
+        assert!(
+            orb_root
+                .path()
+                .join("templates/research/AGENTS.md")
+                .is_file(),
+            "a missing template should be seeded"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_research_group_copies_the_template() -> Result<(), Report<StoreError>> {
+        // Given no Research template.
+        let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+
+        // When creating Research group `tokio-cancel`.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then its folder has AGENTS.md and a CLAUDE.md link to it.
+        let dir = orb_root.path().join("research/tokio-cancel");
+        let link = fs::read_link(dir.join("CLAUDE.md")).change_context(StoreError)?;
+        assert_eq!(
+            (dir.join("AGENTS.md").is_file(), link),
+            (true, PathBuf::from("AGENTS.md")),
+            "the folder should be the template's copy"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_research_group_adds_the_research_project() -> Result<(), Report<StoreError>> {
+        // Given no Research project.
+        let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+
+        // When creating Research group `tokio-cancel`.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then orb's Research project shows, rooted in orb's research folder.
+        let research: Vec<(String, PathBuf)> = state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .filter(|project| project.kind == ProjectKind::Research)
+            .map(|project| (project.title.clone(), project.root.clone()))
+            .collect();
+        assert_eq!(
+            research,
+            vec![("Research".to_owned(), orb_root.path().join("research"))],
+            "the Research project should be added"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_learn_group_uses_the_learn_folder() -> Result<(), Report<StoreError>> {
+        // Given no Learn project.
+        let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+
+        // When creating Learn group `rust-async`.
+        actor.create_group(GroupKind::Learn, None, "rust-async".into());
+
+        // Then its folder is under orb's learn folder.
+        assert!(
+            orb_root.path().join("learn/rust-async").is_dir(),
+            "a Learn group's folder should be under learn/"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_group_keeps_a_curated_template() -> Result<(), Report<StoreError>> {
+        // Given a Research template the user wrote.
+        let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+        let template = orb_root.path().join("templates/research");
+        fs::create_dir_all(&template).change_context(StoreError)?;
+        fs::write(template.join("AGENTS.md"), "mine").change_context(StoreError)?;
+
+        // When creating Research group `tokio-cancel`.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then the folder gets the user's AGENTS.md.
+        let text = fs::read_to_string(orb_root.path().join("research/tokio-cancel/AGENTS.md"))
+            .change_context(StoreError)?;
+        assert_eq!(text, "mine", "a curated template should be copied as is");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_group_selects_its_draft() -> Result<(), Report<StoreError>> {
+        // Given the orb project.
+        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
+
+        // When creating Feature group `GT-514-login` in it.
+        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
+
+        // Then the cursor is on the new group's draft.
+        let ids: Vec<SidebarItem> = groups_of(&state)
+            .iter()
+            .map(|group| SidebarItem::GroupDraft(group.id))
+            .collect();
+        assert_eq!(
+            (state.read().sessions.cursor, ids.len()),
+            (ids.first().copied(), 1),
+            "the new group's draft should be selected"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_group_saves_it() -> Result<(), Report<StoreError>> {
+        // Given the orb project, last started with sonnet.
+        let (_orb_root, orb, mut actor, _state) = creating(&FakeGit::local())?;
+
+        // When creating Feature group `GT-514-login` in it.
+        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
+
+        // Then the store has it, with sonnet for its draft.
+        let saved: Vec<(String, Option<String>)> = actor
+            .store
+            .load()?
+            .3
+            .into_iter()
+            .map(|row| (row.name, row.draft_model))
+            .collect();
+        assert_eq!(
+            saved,
+            vec![("GT-514-login".to_owned(), Some("sonnet".to_owned()))],
+            "the group should be saved with the last-used model"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_group_over_an_existing_folder_is_refused() -> Result<(), Report<StoreError>> {
+        // Given a folder `x` already under orb's research folder.
+        let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+        fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
+
+        // When creating Research group `x`.
+        actor.create_group(GroupKind::Research, None, "x".into());
+
+        // Then the mode line says the folder exists.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("~/.orb/research/x already exists"),
+            "an existing folder should be refused"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn refused_group_over_an_existing_folder_adds_no_group() -> Result<(), Report<StoreError>> {
+        // Given a folder `x` already under orb's research folder.
+        let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+        fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
+
+        // When creating Research group `x`.
+        actor.create_group(GroupKind::Research, None, "x".into());
+
+        // Then no group shows or is saved.
+        assert_eq!(
+            (groups_of(&state).len(), actor.store.load()?.3.len()),
+            (0, 0),
+            "a refused group should leave nothing"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_feature_group_on_an_existing_branch_is_refused() -> Result<(), Report<StoreError>>
+    {
+        // Given the orb project, where branch `GT-514-login` exists.
+        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::having("GT-514-login"))?;
+
+        // When creating Feature group `GT-514-login` in it.
+        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
+
+        // Then the mode line says the branch exists, and no group shows.
+        assert_eq!(
+            (error_of(&state), groups_of(&state).len()),
+            (
+                Some("branch GT-514-login already exists in orb".to_owned()),
+                0
+            ),
+            "an existing branch should refuse the group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_feature_group_makes_no_worktree() -> Result<(), Report<StoreError>> {
+        // Given the orb project.
+        let git = FakeGit::local();
+        let (_orb_root, orb, mut actor, state) = creating(&git)?;
+
+        // When creating Feature group `GT-514-login` in it.
+        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
+
+        // Then no worktree is added and the group has no directory yet.
+        let dirs: Vec<Option<PathBuf>> = groups_of(&state).into_iter().map(|g| g.dir).collect();
+        assert_eq!(
+            (git.added(), dirs),
+            (None, vec![None]),
+            "a Feature group's worktree waits for its start"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn creating_a_taken_group_twice_is_refused() -> Result<(), Report<StoreError>> {
+        // Given Research group `tokio-cancel` just created.
+        let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // When creating it again.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then the second is refused as taken, and one group shows.
+        assert_eq!(
+            (error_of(&state), groups_of(&state).len()),
+            (
+                Some("~/.orb/research/tokio-cancel already exists".to_owned()),
+                1
+            ),
+            "a second create of the same group should be refused"
+        );
+        Ok(())
+    }
+
+    const SLUG_BRANCH: &str = "GT-514-login";
+
+    /// A store whose orb project has a `kind` group `GT-514-login` with a
+    /// draft on opus in auto mode, in `dir` when given, and the actor started
+    /// on `host` and `git` with the group draft selected.
+    fn group_draft(
+        kind: GroupKind,
+        dir: Option<PathBuf>,
+        host: &Arc<FakeHost>,
+        git: &Arc<FakeGit>,
+    ) -> Result<(GroupId, SessionsActor, State), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        let project_id = orb_project(&store)?;
+        let id = store.insert_group(&NewGroup {
+            project_id,
+            kind,
+            name: SLUG_BRANCH.to_owned(),
+            dir,
+            branch: (kind == GroupKind::Feature).then(|| SLUG_BRANCH.to_owned()),
+            created_at: 1,
+            draft_model: Some("opus".to_owned()),
+            draft_permission_mode: Some("auto".to_owned()),
+        })?;
+        let (actor, state) = start_with(store, host, git, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.cursor = Some(SidebarItem::GroupDraft(id));
+        Ok((id, actor, state))
+    }
+
+    /// Group `id` as the sidebar shows it.
+    fn shown_group(state: &State, id: GroupId) -> Option<Group> {
+        groups_of(state).into_iter().find(|group| group.id == id)
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_feature_group_draft_adds_the_worktree_on_its_slug_branch()
+    -> Result<(), Report<StoreError>> {
+        // Given a Feature group draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (id, mut actor, _state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then git adds an orb worktree on the group's slug branch.
+        let added = git
+            .added()
+            .map(|(path, branch)| (path.starts_with(WORKTREES_ROOT), branch));
+        assert_eq!(
+            added,
+            Some((true, SLUG_BRANCH.to_owned())),
+            "the worktree should be on the slug branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_feature_group_draft_starts_the_thread_in_the_worktree()
+    -> Result<(), Report<StoreError>> {
+        // Given a Feature group draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (id, mut actor, _state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then the session starts in the worktree git added.
+        assert_eq!(
+            host.created_in(),
+            git.added()
+                .map(|(path, _)| path)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "the first thread should start in the new worktree"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn started_feature_group_keeps_the_worktree_as_its_dir() -> Result<(), Report<StoreError>>
+    {
+        // Given a Feature group draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then the group's directory is the worktree, shown and saved.
+        let worktree = git.added().map(|(path, _)| path);
+        let saved = actor.store.load()?.3.into_iter().find_map(|row| row.dir);
+        assert_eq!(
+            (shown_group(&state, id).and_then(|group| group.dir), saved),
+            (worktree.clone(), worktree),
+            "the worktree should be the group's directory from now on"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_group_draft_puts_its_thread_in_the_group() -> Result<(), Report<StoreError>>
+    {
+        // Given a Feature group draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then the new thread is in the group, which has no draft any more.
+        let grouped: Vec<Option<GroupId>> = state
+            .read()
+            .sessions
+            .threads()
+            .map(|thread| thread.group)
+            .collect();
+        let draft = shown_group(&state, id).and_then(|group| group.draft);
+        assert_eq!(
+            (grouped, draft),
+            (vec![Some(id)], None),
+            "the group's first thread should replace its draft"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_selected_group_draft_selects_and_attaches_the_thread()
+    -> Result<(), Report<StoreError>> {
+        // Given a selected Feature group draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then the new thread is selected and attached.
+        let sessions = &state.read().sessions;
+        let thread = sessions.threads().next().map(|thread| thread.id);
+        assert_eq!(
+            (sessions.cursor, sessions.attach),
+            (thread.map(SidebarItem::Thread), thread),
+            "the started thread should be selected and attached"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_research_group_draft_runs_in_its_folder() -> Result<(), Report<StoreError>>
+    {
+        // Given a Research group draft with its folder.
+        let folder = tempfile::tempdir().change_context(StoreError)?;
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (id, mut actor, _state) = group_draft(
+            GroupKind::Research,
+            Some(folder.path().to_owned()),
+            &host,
+            &git,
+        )?;
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then the session starts in the folder, and git adds no worktree.
+        assert_eq!(
+            (host.created_in(), git.added()),
+            (vec![folder.path().to_owned()], None),
+            "a Research group should start in its folder"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_group_draft_uses_its_model_and_permission() -> Result<(), Report<StoreError>>
+    {
+        // Given a Feature group draft on opus in auto mode.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (id, mut actor, _state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then the session starts with them.
+        assert_eq!(
+            host.created_with(),
+            vec![SessionOptions {
+                model: Some("opus".to_owned()),
+                permission_mode: Some("auto".to_owned()),
+            }],
+            "the group draft's settings should start the session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn feature_group_start_fails_when_the_branch_appeared() -> Result<(), Report<StoreError>>
+    {
+        // Given a Feature group draft whose branch was made outside orb.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::having(SLUG_BRANCH));
+        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then the mode line says the branch exists, and the draft stays.
+        assert_eq!(
+            (
+                error_of(&state),
+                shown_group(&state, id).is_some_and(|group| group.draft.is_some())
+            ),
+            (
+                Some("branch GT-514-login already exists in orb".to_owned()),
+                true
+            ),
+            "an existing branch should refuse the start"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_group_draft_start_keeps_the_draft() -> Result<(), Report<StoreError>> {
+        // Given a Feature group draft and a host that refuses to start a session.
+        let (host, git) = (FakeHost::creating(Err("claude failed")), FakeGit::local());
+        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then the group keeps its draft, and the worktree made for it is removed.
+        let removed = git.added().is_some_and(|(path, _)| {
+            git.calls()
+                .contains(&GitCall::RemoveWorktree { path, force: true })
+        });
+        assert_eq!(
+            (
+                shown_group(&state, id).is_some_and(|group| group.draft.is_some()),
+                removed
+            ),
+            (true, true),
+            "a failed start should leave the group as it was"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_keeps_a_feature_groups_slug_branch() -> Result<(), Report<StoreError>> {
+        // Given a Claude-titled thread in an orb worktree on a group's slug branch.
+        let (claude_dir, store, _) =
+            worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), SLUG_BRANCH)?;
+        let host = FakeHost::listing(Vec::new());
+        let git = FakeGit::local();
+        let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
+
+        // When a poll sees its turn end.
+        end_turn(&mut actor, &host).await;
+
+        // Then no branch was renamed.
+        assert_eq!(git.renamed(), None, "a slug branch is never renamed");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saving_a_group_draft_persists_its_model() -> Result<(), Report<StoreError>> {
+        // Given a group draft whose model was changed to sonnet.
+        let (host, git) = (FakeHost::listing(Vec::new()), FakeGit::local());
+        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+        if let Some(draft) = state.write().sessions.group_draft_mut(id) {
+            draft.model = Some("sonnet".to_owned());
+        }
+
+        // When saving it.
+        actor.save_group_draft(id);
+
+        // Then the store has sonnet for the group's draft.
+        let saved: Vec<Option<String>> = actor
+            .store
+            .load()?
+            .3
+            .into_iter()
+            .map(|row| row.draft_model)
+            .collect();
+        assert_eq!(
+            saved,
+            vec![Some("sonnet".to_owned())],
+            "the group draft's model should be saved"
+        );
         Ok(())
     }
 }

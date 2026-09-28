@@ -3,12 +3,13 @@
 //! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
 //! frontend loop; session commands (drafts, add or remove a project, move to
 //! another workspace, switch branch, refresh, pin, rename, settle, delete,
-//! visit, save the sidebar's width and filter) go to the sessions actor.
+//! visit, save the sidebar's width and filter, create and start groups, save a
+//! group draft) go to the sessions actor.
 
 use std::path::PathBuf;
 
 use crate::feat::git::git_service::GitRef;
-use crate::feat::sessions::state::{AttachTarget, ProjectId, ThreadId};
+use crate::feat::sessions::state::{AttachTarget, GroupId, GroupKind, ProjectId, ThreadId};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// Something that must happen in response to an intent.
@@ -82,6 +83,17 @@ pub enum Command {
     /// Remove the project from `␣n` and the project filter and discard its
     /// draft; its threads stay.
     RemoveProject(ProjectId),
+    /// Create a `kind` group named `name` (a slug) in `project`, or for
+    /// Research/Learn in orb's own project for the kind, with a draft.
+    CreateGroup {
+        kind: GroupKind,
+        project: Option<ProjectId>,
+        name: String,
+    },
+    /// Start the group's first thread from its draft.
+    StartGroupDraft(GroupId),
+    /// Save the group's draft settings as they now are in the app state.
+    SaveGroupDraft(GroupId),
 }
 
 /// Where a thread's session runs.
