@@ -115,8 +115,12 @@ impl IntentHandler {
                 // Widening the right side narrows the sidebar.
                 let changed = match (validate_resize(state), state.focus, intent) {
                     (Ok(()), Focus::Sidebar, Intent::WidenFocused)
-                    | (Ok(()), Focus::Dashboard, Intent::NarrowFocused) => state.sidebar.widen(),
-                    (Ok(()), Focus::Sidebar | Focus::Dashboard, _) => state.sidebar.narrow(),
+                    | (Ok(()), Focus::Dashboard | Focus::Attached, Intent::NarrowFocused) => {
+                        state.sidebar.widen()
+                    }
+                    (Ok(()), Focus::Sidebar | Focus::Dashboard | Focus::Attached, _) => {
+                        state.sidebar.narrow()
+                    }
                     _ => false,
                 };
                 changed.then_some(Command::SaveUi).into_iter().collect()
@@ -1703,6 +1707,8 @@ mod tests {
     #[case(Intent::NarrowFocused, Focus::Sidebar, 28)]
     #[case(Intent::WidenFocused, Focus::Dashboard, 28)]
     #[case(Intent::NarrowFocused, Focus::Dashboard, 36)]
+    #[case(Intent::WidenFocused, Focus::Attached, 28)]
+    #[case(Intent::NarrowFocused, Focus::Attached, 36)]
     fn resize_moves_the_sidebars_edge_a_step(
         #[case] intent: Intent,
         #[case] focus: Focus,
@@ -1742,6 +1748,8 @@ mod tests {
     #[case(Intent::WidenFocused, Focus::Dashboard, 24)]
     #[case(Intent::WidenFocused, Focus::Sidebar, 80)]
     #[case(Intent::NarrowFocused, Focus::Dashboard, 80)]
+    #[case(Intent::WidenFocused, Focus::Attached, 24)]
+    #[case(Intent::NarrowFocused, Focus::Attached, 80)]
     fn resize_stops_at_the_sidebars_bounds(
         #[case] intent: Intent,
         #[case] focus: Focus,
