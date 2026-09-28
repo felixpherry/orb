@@ -615,6 +615,16 @@ impl App {
                     .try_send();
                 Ok(())
             }
+            Command::CheckoutGroup { group, git_ref } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::CheckoutGroup {
+                        group: *group,
+                        git_ref: git_ref.clone(),
+                    })
+                    .try_send();
+                Ok(())
+            }
             Command::ListBranches(cwd) => {
                 let refs = self.git.refs(cwd);
                 let mut app = self.state.write();

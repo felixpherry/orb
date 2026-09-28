@@ -17,9 +17,11 @@
 //! typed characters as filter text and has its own fixed keys, `<C-x>` among
 //! them for removing a project from the project filter. The rename box (`r`)
 //! and the sidebar search (`/` or `i`) use the picker's keys. On a group's
-//! card, draft or threads, `l`/`h` open and close the group, and `␣w`/`␣b`
-//! aren't bound. `n` on a group's card or thread starts a sibling; `d` on a
-//! card deletes the group.
+//! card, draft or threads, `l`/`h` open and close the group. `␣w` isn't bound
+//! on them, and `␣b` (the dashboard's `b` too) only on the card of a Feature
+//! group whose worktree exists, where it switches that worktree's branch.
+//! `n` on a group's card or thread starts a sibling; `d` on a card deletes
+//! the group.
 //! `␣gf`/`␣gr`/`␣gl` add a Feature, Research or Learn group in every scope.
 
 use std::fmt;
@@ -61,8 +63,11 @@ impl fmt::Display for KeyCategory {
 pub(crate) enum Selection {
     Thread,
     Draft,
-    /// A group's card.
+    /// A group's card with no worktree: a Research or Learn group, or a
+    /// Feature group before its draft starts.
     GroupCard,
+    /// A Feature group's card once its worktree exists.
+    WorktreeCard,
     /// A thread in a group.
     GroupThread,
     /// A group's draft.
@@ -84,6 +89,11 @@ impl Selection {
             (None, Some(_), _, _) => Self::GroupDraft,
             (None, None, Some(_), Some(_)) => Self::GroupThread,
             (None, None, Some(_), None) => Self::Thread,
+            (None, None, None, Some((_, group)))
+                if group.kind == GroupKind::Feature && group.dir.is_some() =>
+            {
+                Self::WorktreeCard
+            }
             (None, None, None, Some(_)) => Self::GroupCard,
             (None, None, None, None) => Self::Nothing,
         }
@@ -103,6 +113,9 @@ pub(crate) enum Scope {
     /// The sidebar on a group's card: fold keys, pin, settle, delete and a
     /// sibling, but no rename.
     SidebarGroup,
+    /// The sidebar on a started Feature group's card: [`Scope::SidebarGroup`]'s
+    /// keys and its worktree's branch.
+    SidebarWorktreeGroup,
     /// The sidebar on a thread in a group: fold keys, rename, delete and a
     /// sibling; no pin or settle.
     SidebarGroupThread,
@@ -117,6 +130,9 @@ pub(crate) enum Scope {
     DashboardEmpty,
     /// The dashboard on a group's card: the tools only.
     DashboardGroup,
+    /// The dashboard on a started Feature group's card: its worktree's branch
+    /// and the tools.
+    DashboardWorktreeGroup,
     /// The dashboard on a thread in a group: no workspace or branch.
     DashboardGroupThread,
     /// The dashboard on a group's draft: its setting pickers too.
@@ -131,6 +147,7 @@ impl Scope {
             (Focus::Dashboard, Selection::Draft) => Self::DashboardDraft,
             (Focus::Dashboard, Selection::Nothing) => Self::DashboardEmpty,
             (Focus::Dashboard, Selection::GroupCard) => Self::DashboardGroup,
+            (Focus::Dashboard, Selection::WorktreeCard) => Self::DashboardWorktreeGroup,
             (Focus::Dashboard, Selection::GroupThread) => Self::DashboardGroupThread,
             (Focus::Dashboard, Selection::GroupDraft) => Self::DashboardGroupDraft,
             (
@@ -149,6 +166,10 @@ impl Scope {
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::GroupCard,
             ) => Self::SidebarGroup,
+            (
+                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Selection::WorktreeCard,
+            ) => Self::SidebarWorktreeGroup,
             (
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::GroupThread,
@@ -170,29 +191,33 @@ pub(crate) type Keys = WhichKeyState<KeyEvent, Scope, Intent, KeyCategory>;
     reason = "one binding per key keeps the whole keymap in one place"
 )]
 pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
-    const SIDEBAR_GROUPS: [Scope; 3] = [
+    const SIDEBAR_GROUPS: [Scope; 4] = [
         Scope::SidebarGroup,
+        Scope::SidebarWorktreeGroup,
         Scope::SidebarGroupThread,
         Scope::SidebarGroupDraft,
     ];
-    const DASHBOARD_GROUPS: [Scope; 3] = [
+    const DASHBOARD_GROUPS: [Scope; 4] = [
         Scope::DashboardGroup,
+        Scope::DashboardWorktreeGroup,
         Scope::DashboardGroupThread,
         Scope::DashboardGroupDraft,
     ];
-    const SIDEBAR: [Scope; 6] = [
+    const SIDEBAR: [Scope; 7] = [
         Scope::Sidebar,
         Scope::SidebarDraft,
         Scope::SidebarEmpty,
         Scope::SidebarGroup,
+        Scope::SidebarWorktreeGroup,
         Scope::SidebarGroupThread,
         Scope::SidebarGroupDraft,
     ];
-    const DASHBOARD: [Scope; 6] = [
+    const DASHBOARD: [Scope; 7] = [
         Scope::Dashboard,
         Scope::DashboardDraft,
         Scope::DashboardEmpty,
         Scope::DashboardGroup,
+        Scope::DashboardWorktreeGroup,
         Scope::DashboardGroupThread,
         Scope::DashboardGroupDraft,
     ];
@@ -254,12 +279,20 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     for scope in [Scope::Sidebar, Scope::SidebarGroupThread] {
         keymap.bind("r", Intent::Rename, KeyCategory::Threads, scope);
     }
-    for scope in [Scope::Sidebar, Scope::SidebarGroup] {
+    for scope in [
+        Scope::Sidebar,
+        Scope::SidebarGroup,
+        Scope::SidebarWorktreeGroup,
+    ] {
         keymap
             .bind("p", Intent::TogglePin, KeyCategory::Threads, scope)
             .bind("s", Intent::ToggleSettle, KeyCategory::Threads, scope);
     }
-    for scope in [Scope::SidebarGroup, Scope::SidebarGroupThread] {
+    for scope in [
+        Scope::SidebarGroup,
+        Scope::SidebarWorktreeGroup,
+        Scope::SidebarGroupThread,
+    ] {
         keymap.bind("n", Intent::NewSibling, KeyCategory::Sessions, scope);
     }
     for scope in [Scope::Sidebar, Scope::SidebarDraft]
@@ -322,6 +355,10 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         ),
         (Scope::DashboardEmpty, &[]),
         (Scope::DashboardGroup, &[Shell, Lazygit, Neovim]),
+        (
+            Scope::DashboardWorktreeGroup,
+            &[Branch, Shell, Lazygit, Neovim],
+        ),
         (Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim]),
         (
             Scope::DashboardGroupDraft,
@@ -373,19 +410,27 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         Scope::Dashboard,
         Scope::DashboardDraft,
     ] {
-        keymap
-            .bind(
-                "<leader>w",
-                Intent::ChangeWorkspace,
-                KeyCategory::Sessions,
-                scope,
-            )
-            .bind(
-                "<leader>b",
-                Intent::SwitchBranch,
-                KeyCategory::Sessions,
-                scope,
-            );
+        keymap.bind(
+            "<leader>w",
+            Intent::ChangeWorkspace,
+            KeyCategory::Sessions,
+            scope,
+        );
+    }
+    for scope in [
+        Scope::Sidebar,
+        Scope::SidebarDraft,
+        Scope::SidebarWorktreeGroup,
+        Scope::Dashboard,
+        Scope::DashboardDraft,
+        Scope::DashboardWorktreeGroup,
+    ] {
+        keymap.bind(
+            "<leader>b",
+            Intent::SwitchBranch,
+            KeyCategory::Sessions,
+            scope,
+        );
     }
     for scope in [
         Scope::Sidebar,
@@ -779,6 +824,7 @@ mod tests {
         &[Start, Workspace, Branch, Model, Permission, Shell, Lazygit, Neovim]
     )]
     #[case::group(Scope::DashboardGroup, &[Shell, Lazygit, Neovim])]
+    #[case::worktree_group(Scope::DashboardWorktreeGroup, &[Branch, Shell, Lazygit, Neovim])]
     #[case::group_thread(Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim])]
     #[case::group_draft(
         Scope::DashboardGroupDraft,
@@ -1025,9 +1071,15 @@ mod tests {
     #[case(Focus::Dashboard, Selection::Draft, Scope::DashboardDraft)]
     #[case(Focus::Dashboard, Selection::Nothing, Scope::DashboardEmpty)]
     #[case(Focus::Sidebar, Selection::GroupCard, Scope::SidebarGroup)]
+    #[case(Focus::Sidebar, Selection::WorktreeCard, Scope::SidebarWorktreeGroup)]
     #[case(Focus::Sidebar, Selection::GroupThread, Scope::SidebarGroupThread)]
     #[case(Focus::Sidebar, Selection::GroupDraft, Scope::SidebarGroupDraft)]
     #[case(Focus::Dashboard, Selection::GroupCard, Scope::DashboardGroup)]
+    #[case(
+        Focus::Dashboard,
+        Selection::WorktreeCard,
+        Scope::DashboardWorktreeGroup
+    )]
     #[case(Focus::Dashboard, Selection::GroupThread, Scope::DashboardGroupThread)]
     #[case(Focus::Dashboard, Selection::GroupDraft, Scope::DashboardGroupDraft)]
     fn scope_follows_focus_and_the_selection(
@@ -1062,8 +1114,8 @@ mod tests {
         }
     }
 
-    /// One project holding group 9 with thread 1 and group 10 with a draft,
-    /// with the cursor on `cursor`.
+    /// One project holding group 9 with thread 1, group 10 with a draft, and
+    /// group 11 in its worktree, with the cursor on `cursor`.
     fn grouped(cursor: SidebarItem) -> Sessions {
         Sessions {
             projects: vec![Project {
@@ -1091,7 +1143,14 @@ mod tests {
                     model: None,
                     permission: None,
                 }],
-                groups: vec![group(9, false), group(10, true)],
+                groups: vec![
+                    group(9, false),
+                    group(10, true),
+                    Group {
+                        dir: Some("/wt/orb-1a2b3c4d".into()),
+                        ..group(11, false)
+                    },
+                ],
                 kind: ProjectKind::Normal,
             }],
             cursor: Some(cursor),
@@ -1101,6 +1160,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case::card(SidebarItem::Group(GroupId(9)), Selection::GroupCard)]
+    #[case::worktree_card(SidebarItem::Group(GroupId(11)), Selection::WorktreeCard)]
     #[case::grouped_thread(SidebarItem::Thread(ThreadId(1)), Selection::GroupThread)]
     #[case::group_draft(SidebarItem::GroupDraft(GroupId(10)), Selection::GroupDraft)]
     fn selection_follows_the_cursors_group_row(
@@ -1128,6 +1188,10 @@ mod tests {
     #[case(Scope::SidebarGroupThread, KeyCode::Char('d'), Intent::DeleteThread)]
     #[case(Scope::SidebarGroupDraft, KeyCode::Char('d'), Intent::DeleteThread)]
     #[case(Scope::SidebarGroup, KeyCode::Char('n'), Intent::NewSibling)]
+    #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('l'), Intent::OpenGroup)]
+    #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('p'), Intent::TogglePin)]
+    #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('d'), Intent::DeleteThread)]
+    #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('n'), Intent::NewSibling)]
     #[case(Scope::SidebarGroupThread, KeyCode::Char('n'), Intent::NewSibling)]
     #[case(Scope::SidebarGroupThread, KeyCode::Char('j'), Intent::SelectNext)]
     #[case(Scope::SidebarGroupThread, KeyCode::Enter, Intent::Attach)]
@@ -1188,7 +1252,31 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_w_and_b_are_unbound_in_group_scopes(
+    fn leader_w_is_unbound_in_group_scopes(
+        #[values(
+            Scope::SidebarGroup,
+            Scope::SidebarWorktreeGroup,
+            Scope::SidebarGroupThread,
+            Scope::SidebarGroupDraft,
+            Scope::DashboardGroup,
+            Scope::DashboardWorktreeGroup,
+            Scope::DashboardGroupThread,
+            Scope::DashboardGroupDraft
+        )]
+        scope: Scope,
+    ) {
+        // Given the leader popup's keys in a group scope.
+        let keys = leader_popup(scope);
+
+        // When looking for `w`.
+        let found = keys.contains(&key(KeyCode::Char('w')));
+
+        // Then it isn't listed.
+        assert!(!found, "w in the {scope:?} leader popup");
+    }
+
+    #[rstest::rstest]
+    fn leader_b_is_unbound_on_group_rows_without_a_worktree(
         #[values(
             Scope::SidebarGroup,
             Scope::SidebarGroupThread,
@@ -1199,14 +1287,30 @@ mod tests {
         )]
         scope: Scope,
     ) {
-        // Given the leader popup's keys in a group scope.
+        // Given the leader popup's keys on a group's thread, draft, or a card
+        // with no worktree.
         let keys = leader_popup(scope);
 
-        // When looking for `w` and `b`.
-        let found = ['w', 'b'].map(|c| keys.contains(&key(KeyCode::Char(c))));
+        // When looking for `b`.
+        let found = keys.contains(&key(KeyCode::Char('b')));
 
-        // Then neither is listed.
-        assert_eq!(found, [false; 2], "w/b in the {scope:?} leader popup");
+        // Then it isn't listed.
+        assert!(!found, "b in the {scope:?} leader popup");
+    }
+
+    #[rstest::rstest]
+    fn leader_b_switches_branch_on_a_worktree_card(
+        #[values(Scope::SidebarWorktreeGroup, Scope::DashboardWorktreeGroup)] scope: Scope,
+    ) {
+        // Given Space already pressed on a started Feature group's card.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `b`.
+        let intent = press(&mut keys, key(KeyCode::Char('b')));
+
+        // Then it switches the worktree's branch.
+        assert_eq!(intent, Some(Intent::SwitchBranch), "Space b in {scope:?}");
     }
 
     /// The keys the leader popup lists in `scope`.
@@ -1320,9 +1424,11 @@ mod tests {
             Scope::Dashboard,
             Scope::DashboardDraft,
             Scope::SidebarGroup,
+            Scope::SidebarWorktreeGroup,
             Scope::SidebarGroupThread,
             Scope::SidebarGroupDraft,
             Scope::DashboardGroup,
+            Scope::DashboardWorktreeGroup,
             Scope::DashboardGroupThread,
             Scope::DashboardGroupDraft
         )]
@@ -1402,12 +1508,14 @@ mod tests {
     #[case(Scope::SidebarDraft, "abefgmnptvw")]
     #[case(Scope::SidebarEmpty, "efgnp")]
     #[case(Scope::SidebarGroup, "efgnptv")]
+    #[case(Scope::SidebarWorktreeGroup, "befgnptv")]
     #[case(Scope::SidebarGroupThread, "efgnptv")]
     #[case(Scope::SidebarGroupDraft, "aefgmnptv")]
     #[case(Scope::Dashboard, "begnptvw")]
     #[case(Scope::DashboardDraft, "abegmnptvw")]
     #[case(Scope::DashboardEmpty, "egnp")]
     #[case(Scope::DashboardGroup, "egnptv")]
+    #[case(Scope::DashboardWorktreeGroup, "begnptv")]
     #[case(Scope::DashboardGroupThread, "egnptv")]
     #[case(Scope::DashboardGroupDraft, "aegmnptv")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {

@@ -12,7 +12,7 @@
 pub mod state;
 
 use crate::Intent;
-use crate::feat::sessions::state::Sessions;
+use crate::feat::sessions::state::{GroupKind, Sessions};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// One dashboard menu entry.
@@ -93,6 +93,11 @@ pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
         (None, Some(_), None) => (&[Open, Workspace, Branch], true),
         (None, None, Some(_)) if sessions.selected_group_draft().is_some() => {
             (&[Start, Model, Permission], true)
+        }
+        (None, None, Some((_, group)))
+            if group.kind == GroupKind::Feature && group.dir.is_some() =>
+        {
+            (&[Branch], true)
         }
         (None, None, Some(_)) => (&[], true),
         (None, None, None) => (&[], false),
@@ -252,8 +257,43 @@ pub(crate) mod tests {
     }
 
     #[rstest::rstest]
+    fn feature_card_with_a_worktree_lists_branch_first() {
+        // Given a selected card of a Feature group whose worktree exists.
+        let sessions = {
+            let mut sessions = grouped(SidebarItem::Group(GroupId(9)), false);
+            if let Some(group) = sessions
+                .projects
+                .first_mut()
+                .and_then(|project| project.groups.first_mut())
+            {
+                group.dir = Some("/wt/orb-1a2b3c4d".into());
+            }
+            sessions
+        };
+
+        // When listing the dashboard's items.
+        let items = items(&sessions);
+
+        // Then Branch leads the general items and the tools.
+        assert_eq!(
+            items,
+            [
+                Branch,
+                NewSession,
+                AddProject,
+                FilterProjects,
+                Shell,
+                Lazygit,
+                Neovim,
+                Quit
+            ],
+            "a started Feature card's dashboard items"
+        );
+    }
+
+    #[rstest::rstest]
     fn group_card_lists_the_general_items_and_tools() {
-        // Given a selected group card.
+        // Given a selected card of a group with no worktree yet.
         let sessions = grouped(SidebarItem::Group(GroupId(9)), false);
 
         // When listing the dashboard's items.

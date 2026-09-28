@@ -15,11 +15,13 @@ use crate::feat::picker::list::{
 };
 use crate::feat::sessions::state::{GroupId, GroupKind, ProjectId, ThreadId};
 
-/// What a workspace or branch picker sets up: a thread, or a project's draft.
+/// What a workspace or branch picker sets up: a thread, a project's draft,
+/// or (branch only) a Feature group's worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickTarget {
     Thread(ThreadId),
     Draft(ProjectId),
+    Group(GroupId),
 }
 
 /// What a model or permission picker sets: a project's draft, or a group's.
@@ -569,7 +571,7 @@ mod tests {
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::{LEGACY_MODELS, PickerItem};
-    use crate::feat::sessions::state::{GroupId, ProjectId, ThreadId};
+    use crate::feat::sessions::state::{GroupId, ProjectId, ProjectKind, ThreadId};
 
     const HOME: &str = "/home/u";
 
@@ -619,6 +621,7 @@ mod tests {
                 id: ProjectId(id),
                 title: title.to_owned(),
                 root: PathBuf::from("/tmp").join(title),
+                kind: ProjectKind::Normal,
             };
             let mut picker =
                 PickerState::projects(vec![project(1, "orb"), project(2, "jinn")], Focus::Sidebar);

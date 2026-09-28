@@ -85,6 +85,9 @@ pub struct Rename {
     /// The name being typed, starting from the thread's title, or empty for
     /// a new group.
     pub input: TextInput,
+    /// `⏎` asked the sessions actor for the new group: it closes the box
+    /// once the group is made, or leaves it open with its refusal.
+    pub creating: bool,
 }
 
 /// How the last frame laid the sidebar's list out.
