@@ -115,7 +115,7 @@ pub enum Command {
     /// Bring the group back from the Settled shelf and keep it active.
     UnsettleGroup(GroupId),
     /// Delete every thread of the group and its Claude session, then the
-    /// group; its directory stays on disk.
+    /// group and its folder or worktree.
     DeleteGroup(GroupId),
 }
 

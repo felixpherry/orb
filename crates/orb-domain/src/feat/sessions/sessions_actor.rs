@@ -54,10 +54,11 @@
 //! starts a sibling at the top of a group, in its directory. A group is
 //! pinned, settled and deleted as a whole: pinning a settled group un-settles
 //! it, settling it stops its idle sessions, and deleting it deletes each
-//! thread, then the group (never its directory). A group auto-settles when
-//! no thread has had turn activity for three days, unless it is pinned, was
-//! just un-settled, or orb is attached to one of its threads; a turn in any
-//! of its threads un-settles it.
+//! thread, then the group and its directory: a Research or Learn folder, or a
+//! Feature worktree (forced) and its branch unless that isn't merged. A group
+//! auto-settles when no thread has had turn activity for three days, unless
+//! it is pinned, was just un-settled, or orb is attached to one of its
+//! threads; a turn in any of its threads un-settles it.
 //!
 //! It adds projects and removes them: a removed project leaves `␣n` and the
 //! project filter and loses its draft, its threads stay, and adding it again
@@ -71,8 +72,9 @@
 //! an answer, in any project, unless the thread is being deleted.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -116,6 +118,11 @@ const AUTO_SETTLE_AFTER: i64 = 3 * 24 * 60 * 60 * 1000;
 const SAVE_FAILED: &str = "couldn't save orb's state";
 /// The error shown when a group's folder can't be made.
 const FOLDER_UNMADE: &str = "couldn't make the folder";
+/// The error shown when a deleted group's folder can't be removed.
+const FOLDER_UNREMOVED: &str = "couldn't remove the folder";
+/// The error shown when a deleted Feature group's worktree is kept because a
+/// thread outside the group still works in it.
+const WORKTREE_IN_USE: &str = "kept the worktree: another thread works in it";
 /// The error shown when a started session can't be saved or shown.
 const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
 /// How many random worktree names to try before giving up.
@@ -2178,8 +2185,9 @@ impl SessionsActor {
 
     /// Deletes each of group `id`'s threads as `delete` does, then, once none
     /// is left, the group. A thread whose session couldn't be removed stays
-    /// in the group, shown again with the reason, and so does the group. The
-    /// group's directory stays on disk.
+    /// in the group, shown again with the reason, and so does the group.
+    /// Then its directory goes too (see `clear_group_dir`); if that fails,
+    /// the group is still deleted and the reason shows.
     async fn delete_group(&mut self, id: GroupId) {
         let threads: Vec<ThreadId> = self
             .rows
@@ -2194,18 +2202,75 @@ impl SessionsActor {
             return;
         }
         let deleted = self.store.delete_group(id);
-        self.groups.retain(|row| row.id != id);
+        let cleared = match self.groups.iter().position(|row| row.id == id) {
+            Some(index) => {
+                let row = self.groups.remove(index);
+                self.clear_group_dir(&row)
+            }
+            None => Ok(()),
+        };
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
             for project in &mut sessions.projects {
                 project.groups.retain(|group| group.id != id);
             }
-            if deleted.is_err() {
-                sessions.error = Some(SAVE_FAILED.to_owned());
+            match (deleted, cleared) {
+                (Err(_), _) => sessions.error = Some(SAVE_FAILED.to_owned()),
+                (Ok(()), Err(error)) => sessions.error = Some(error),
+                (Ok(()), Ok(())) => {}
             }
         }
         (self.wake)();
+    }
+
+    /// Removes deleted group `row`'s directory. For a Research or Learn group,
+    /// that's its own folder directly under orb's folder for the kind (already
+    /// gone counts as done). For a started Feature group, it's the orb
+    /// worktree, forced, then its branch if git agrees it's merged. Any other
+    /// directory is left alone. The error is the mode-line text.
+    fn clear_group_dir(&self, row: &GroupRow) -> Result<(), String> {
+        let Some(dir) = &row.dir else {
+            return Ok(());
+        };
+        match own_folder(row.kind) {
+            None => self.remove_group_worktree(row, dir),
+            Some((_, kind_dir, _))
+                if dir.parent() == Some(self.orb_root.join(kind_dir).as_path())
+                    && dir.file_name() == Some(OsStr::new(&row.name)) =>
+            {
+                match fs::remove_dir_all(dir) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(_) => Err(FOLDER_UNREMOVED.to_owned()),
+                }
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// Force-removes Feature group `row`'s orb worktree at `dir`, then
+    /// safe-deletes its branch (an unmerged one stays, with git's reason).
+    /// Neither is touched while a thread outside the group works there.
+    fn remove_group_worktree(&self, row: &GroupRow, dir: &Path) -> Result<(), String> {
+        let Some(root) = self
+            .project_root(row.project_id)
+            .filter(|_| is_orb_worktree(&self.worktrees_root, dir))
+        else {
+            return Ok(());
+        };
+        if self.rows.iter().any(|thread| thread.cwd == dir) {
+            return Err(WORKTREE_IN_USE.to_owned());
+        }
+        let git = &self.services.git;
+        git.remove_worktree(&root, dir, true)
+            .map_err(|report| git_reason(&report))?;
+        let branch = row.branch.as_deref().unwrap_or(&row.name);
+        if git.branch_exists(&root, branch) {
+            git.delete_branch(&root, branch, false)
+                .map_err(|report| git_reason(&report))?;
+        }
+        Ok(())
     }
 
     /// Saves the sidebar's width and project filter, showing why if it can't.
@@ -3076,6 +3141,8 @@ mod tests {
         init: Result<(), String>,
         /// The branches origin had at the last fetch.
         remote: Vec<String>,
+        /// Whether `delete_branch` without force finds the branch merged.
+        merged: bool,
         calls: Mutex<Vec<GitCall>>,
     }
 
@@ -3089,6 +3156,7 @@ mod tests {
                 repo: true,
                 init: Ok(()),
                 remote: Vec::new(),
+                merged: true,
                 calls: Mutex::default(),
             }
         }
@@ -3121,6 +3189,15 @@ mod tests {
         fn having(branch: &str) -> Arc<Self> {
             Arc::new(Self {
                 existing: Some(branch.to_owned()),
+                ..Self::answering()
+            })
+        }
+
+        /// A repository without an `origin` where `branch` exists, unmerged.
+        fn unmerged(branch: &str) -> Arc<Self> {
+            Arc::new(Self {
+                existing: Some(branch.to_owned()),
+                merged: false,
                 ..Self::answering()
             })
         }
@@ -3247,6 +3324,10 @@ mod tests {
                 branch: branch.to_owned(),
                 force,
             });
+            if !force && !self.merged {
+                return Err(Report::new(GitError)
+                    .attach(format!("error: the branch '{branch}' is not fully merged")));
+            }
             Ok(())
         }
 
@@ -8072,6 +8153,8 @@ mod tests {
     }
 
     const SLUG_BRANCH: &str = "GT-514-login";
+    /// git's reason for refusing to safe-delete [`SLUG_BRANCH`].
+    const UNMERGED: &str = "error: the branch 'GT-514-login' is not fully merged";
 
     /// A store whose orb project has a `kind` group `GT-514-login` with a
     /// draft on opus in auto mode, in `dir` when given, and the actor started
@@ -8737,6 +8820,52 @@ mod tests {
         Ok((group, threads, actor, state))
     }
 
+    /// A started Feature group in the orb worktree [`HEX_WORKTREE`] on
+    /// [`SLUG_BRANCH`], holding idle thread aa, polled once, on `git`.
+    async fn started_feature_group(
+        git: &Arc<FakeGit>,
+    ) -> Result<(GroupId, SessionsActor, State), Report<StoreError>> {
+        let (store, group, _) =
+            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start_with(store, &host, git, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        Ok((group, actor, state))
+    }
+
+    /// Makes Research group `GT-514-login`'s own folder under `orb_root`.
+    fn research_folder(orb_root: &Path) -> Result<PathBuf, Report<StoreError>> {
+        let dir = orb_root.join("research").join(SLUG_BRANCH);
+        fs::create_dir_all(&dir).change_context(StoreError)?;
+        Ok(dir)
+    }
+
+    /// A Research group in its own `dir` under `orb_root`, holding idle thread
+    /// aa, polled once.
+    async fn research_group(
+        orb_root: &Path,
+        dir: &Path,
+    ) -> Result<(GroupId, SessionsActor, State), Report<StoreError>> {
+        let (store, group, _) = store_with_group(GroupKind::Research, Some(dir), &["aa"])?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start_in(
+            store,
+            &host,
+            &FakeGit::local(),
+            Path::new(NO_CLAUDE_DIR),
+            orb_root,
+        );
+        actor.poll().await;
+        Ok((group, actor, state))
+    }
+
+    /// Whether `git` was asked to remove any worktree.
+    fn removed_a_worktree(git: &FakeGit) -> bool {
+        git.calls()
+            .iter()
+            .any(|call| matches!(call, GitCall::RemoveWorktree { .. }))
+    }
+
     #[rstest::rstest]
     #[tokio::test]
     async fn settling_a_group_marks_it_settled() -> Result<(), Report<StoreError>> {
@@ -9077,8 +9206,9 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn deleting_a_group_leaves_its_directory() -> Result<(), Report<StoreError>> {
-        // Given a Research group in a folder, holding idle thread aa.
+    async fn deleting_a_group_leaves_a_folder_outside_orbs_own() -> Result<(), Report<StoreError>> {
+        // Given a Research group whose folder isn't under orb's research
+        // folder, holding idle thread aa.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let (store, group, _) = store_with_group(GroupKind::Research, Some(dir.path()), &["aa"])?;
         let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
@@ -9088,8 +9218,11 @@ mod tests {
         // When deleting it.
         actor.delete_group(group).await;
 
-        // Then its folder is still there.
-        assert!(dir.path().is_dir(), "a group's directory is never removed");
+        // Then that folder is still there.
+        assert!(
+            dir.path().is_dir(),
+            "only a group's own folder under orb's is removed"
+        );
         Ok(())
     }
 
@@ -9210,6 +9343,253 @@ mod tests {
             error_of(&state).as_deref(),
             Some("rm: busy"),
             "the mode line should show why the delete failed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_research_group_removes_its_folder() -> Result<(), Report<StoreError>> {
+        // Given a Research group in its own folder under orb's, holding idle
+        // thread aa.
+        let orb_root = tempfile::tempdir().change_context(StoreError)?;
+        let dir = research_folder(orb_root.path())?;
+        let (group, mut actor, _state) = research_group(orb_root.path(), &dir).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then its folder is gone.
+        assert!(!dir.exists(), "deleting a group should remove its folder");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_research_group_whose_folder_is_gone_shows_no_error()
+    -> Result<(), Report<StoreError>> {
+        // Given a Research group whose own folder was already removed by hand.
+        let orb_root = tempfile::tempdir().change_context(StoreError)?;
+        let dir = research_folder(orb_root.path())?;
+        let (group, mut actor, state) = research_group(orb_root.path(), &dir).await?;
+        fs::remove_dir_all(&dir).change_context(StoreError)?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then no error shows.
+        assert_eq!(
+            error_of(&state),
+            None,
+            "an already-removed folder counts as removed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleted_research_group_name_can_be_used_again() -> Result<(), Report<StoreError>> {
+        // Given Research group `tokio-cancel` created, then deleted.
+        let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+        let group = groups_of(&state)
+            .first()
+            .map(|group| group.id)
+            .ok_or_else(|| Report::new(StoreError).attach("the group wasn't created"))?;
+        actor.delete_group(group).await;
+
+        // When creating it again.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then it shows again, with no error.
+        let names: Vec<String> = groups_of(&state).into_iter().map(|g| g.name).collect();
+        assert_eq!(
+            (names, error_of(&state)),
+            (vec!["tokio-cancel".to_owned()], None),
+            "a deleted Research group's folder is gone, so its name is free"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_force_removes_its_worktree() -> Result<(), Report<StoreError>>
+    {
+        // Given a started Feature group in an orb worktree.
+        let git = FakeGit::having(SLUG_BRANCH);
+        let (group, mut actor, _state) = started_feature_group(&git).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then its worktree is removed with force.
+        assert!(
+            git.calls().contains(&GitCall::RemoveWorktree {
+                path: HEX_WORKTREE.into(),
+                force: true,
+            }),
+            "the worktree should go even with changes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_safe_deletes_its_branch() -> Result<(), Report<StoreError>> {
+        // Given a started Feature group on its slug branch.
+        let git = FakeGit::having(SLUG_BRANCH);
+        let (group, mut actor, _state) = started_feature_group(&git).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then its branch is deleted without force.
+        assert!(
+            git.calls().contains(&GitCall::DeleteBranch {
+                branch: SLUG_BRANCH.into(),
+                force: false,
+            }),
+            "the branch should be deleted only if merged"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_an_unmerged_branch_shows_why()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose branch isn't merged.
+        let git = FakeGit::unmerged(SLUG_BRANCH);
+        let (group, mut actor, state) = started_feature_group(&git).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then git's reason is the error.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some(UNMERGED),
+            "the mode line should say why the branch stayed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_an_unmerged_branch_still_forgets_it()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose branch isn't merged.
+        let git = FakeGit::unmerged(SLUG_BRANCH);
+        let (group, mut actor, state) = started_feature_group(&git).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then it is neither saved nor shown.
+        assert_eq!(
+            (
+                actor.store.load()?.3.iter().any(|row| row.id == group),
+                shown_group(&state, group).is_some()
+            ),
+            (false, false),
+            "an unmerged branch never keeps the group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_never_started_feature_group_touches_no_git()
+    -> Result<(), Report<StoreError>> {
+        // Given a Feature group that has only its draft.
+        let git = FakeGit::having(SLUG_BRANCH);
+        let (store, group, _) = store_with_group(GroupKind::Feature, None, &[])?;
+        let (mut actor, _state) = start_with(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &git,
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then git removes no worktree and deletes no branch.
+        let touched = git.calls().iter().any(|call| {
+            matches!(
+                call,
+                GitCall::RemoveWorktree { .. } | GitCall::DeleteBranch { .. }
+            )
+        });
+        assert!(!touched, "a never-started group has nothing on disk");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_keeps_a_worktree_a_lone_thread_uses()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group in an orb worktree where lone thread
+        // cc also works.
+        let git = FakeGit::having(SLUG_BRANCH);
+        let (store, group, _) =
+            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
+        store.insert_thread(&NewThread {
+            project_id: saved_group(&store, group)?.project_id,
+            short_id: "cc".to_owned(),
+            cwd: HEX_WORKTREE.into(),
+            created_at: now_ms() - HOUR_MS,
+            model: None,
+            permission_mode: None,
+            group_id: None,
+        })?;
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("cc", ThreadStatus::Idle),
+        ]);
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting the group.
+        actor.delete_group(group).await;
+
+        // Then the worktree is not removed.
+        assert!(
+            !removed_a_worktree(&git),
+            "a worktree another thread works in must stay"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_group_child_leaves_the_worktree() -> Result<(), Report<StoreError>> {
+        // Given a started Feature group in an orb worktree, holding idle
+        // threads aa and bb.
+        let git = FakeGit::having(SLUG_BRANCH);
+        let (store, _, threads) = store_with_group(
+            GroupKind::Feature,
+            Some(Path::new(HEX_WORKTREE)),
+            &["aa", "bb"],
+        )?;
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Idle),
+        ]);
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        let bb = threads
+            .get(1)
+            .copied()
+            .ok_or_else(|| Report::new(StoreError).attach("bb wasn't saved"))?;
+
+        // When deleting bb alone.
+        actor.delete(bb).await;
+
+        // Then the worktree is not removed.
+        assert!(
+            !removed_a_worktree(&git),
+            "deleting one thread of a group never touches its directory"
         );
         Ok(())
     }

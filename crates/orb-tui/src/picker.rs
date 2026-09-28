@@ -27,6 +27,7 @@ use orb_domain::feat::picker::list::{
     ALL_PROJECTS, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label, setting_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
+use orb_domain::feat::sessions::state::GroupKind;
 use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -122,7 +123,12 @@ fn title(kind: &PickerKind) -> &'static str {
         PickerKind::DeleteThread { .. } => "Delete thread?",
         PickerKind::DiscardDraft { .. } => "Discard draft?",
         PickerKind::SettleGroup { .. } => "Settle group?",
-        PickerKind::DeleteGroup { .. } => "Delete group?",
+        PickerKind::DeleteGroup { dir: None, .. } => "Delete group?",
+        PickerKind::DeleteGroup {
+            dir: Some(GroupKind::Feature),
+            ..
+        } => "Delete group and its worktree?",
+        PickerKind::DeleteGroup { dir: Some(_), .. } => "Delete group and its folder?",
     }
 }
 
@@ -464,7 +470,7 @@ mod tests {
     use orb_domain::feat::git::git_service::GitRef;
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::{DraftTarget, PickTarget, PickerState};
-    use orb_domain::feat::sessions::state::{GroupId, ProjectId, ThreadId};
+    use orb_domain::feat::sessions::state::{GroupId, GroupKind, ProjectId, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
@@ -696,7 +702,18 @@ mod tests {
         "Discard draft?"
     )]
     #[case(PickerState::settle_group(GroupId(9), Focus::Sidebar), "Settle group?")]
-    #[case(PickerState::delete_group(GroupId(9), Focus::Sidebar), "Delete group?")]
+    #[case(
+        PickerState::delete_group(GroupId(9), None, Focus::Sidebar),
+        "Delete group?"
+    )]
+    #[case(
+        PickerState::delete_group(GroupId(9), Some(GroupKind::Feature), Focus::Sidebar),
+        "Delete group and its worktree?"
+    )]
+    #[case(
+        PickerState::delete_group(GroupId(9), Some(GroupKind::Research), Focus::Sidebar),
+        "Delete group and its folder?"
+    )]
     fn picker_is_titled_by_its_kind(#[case] picker: PickerState, #[case] title: &str) {
         // Given a picker of some kind.
 
