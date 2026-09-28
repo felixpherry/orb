@@ -591,3 +591,25 @@ The user ran a throwaway probe script inside a zellij pane in kitty on this mach
   - `impl TryFrom<std::time::SystemTime> for jiff::Timestamp` (`Error = jiff::Error`) fails only outside jiff's range, about years −9999 to 9999.
   - `TimeZone::to_datetime(&self, Timestamp) -> civil::DateTime` looks up the offset for that instant (`to_offset(timestamp)`), so a zone read once still follows DST transitions.
   - `civil::DateTime::hour()` and `minute()` return `i8`. `DateTime::strftime("%H:%M")` also exists (it returns a `Display`). orb formats with `format!("{:02}:{:02}", ..)`.
+
+## 16. Jump list keys (verified 2026-09-28, Claude Code 2.1.283, kitty 0.48.2, zellij 0.45.0)
+
+The jump list takes `<C-o>`/`<C-i>` inside the attached pane, so Claude's transcript moves to `ctrl+shift+o`. No key was pressed for these checks: kitty's side was read from its own config loader and bytecode, Claude's from its bundle and docs. Tags as in §6.
+
+### kitty **[verified: kitty 0.48.2 config loader + bytecode]**
+- Before this change, the user's `kitty.conf` (and its one `include`, `catppuccin-mocha.conf`) had no `clear_all_shortcuts`, no `kitty_mod` line and no `ctrl+shift+o` line, so kitty's defaults applied.
+- Loaded with kitty's own loader (`kitty +runpy`, `kitty.config.load_config("~/.config/kitty/kitty.conf")`), the effective keymap has `kitty_mod` = 5 (ctrl|shift) and `SingleKey(mods=5, key=ord('o'))` → `pass_selection_to_program`. kitty 0.48.2 has no `--debug-config` flag; the same dump is the `debug_config` action.
+- kitty passes a mapped key on to the program only when its action returns `True` (`Boss.dispatch_action`: `if passthrough is not True: return True`, i.e. consumed). `Window.pass_selection_to_program` returns `None` on every path, including with no selection. So by default **kitty swallows `ctrl+shift+o`** and it never reaches zellij, orb or Claude.
+- Fix, applied 2026-09-28 with the user's approval: `map ctrl+shift+o no_op` appended to `kitty.conf`. Re-loaded, the key's candidates are `['pass_selection_to_program', '']`: kitty stores `no_op` as an empty definition. `Mappings.matching_key_actions` picks the later `''`. `Boss.combine('')` resolves it to no actions (`alias_map.resolve_aliases('', 'map')` → `[]`), so `consumed` stays `False` and the key goes to the program.
+- It takes effect after kitty reloads its config (`ctrl+shift+F5`) or restarts. Live delivery through kitty → zellij → orb → Claude is confirmed only by the user's walk (Phase 5).
+
+### zellij **[verified: config]**
+- `~/.config/zellij/config.kdl` has `keybinds clear-defaults=true` and no Ctrl+Shift+O bind, so zellij passes it through.
+
+### `~/.claude/keybindings.json` **[verified: bundle 2.1.283 + docs: code.claude.com/docs/en/keybindings]**
+- Shape: `{"$schema": …, "$docs": …, "bindings": [{"context": "<Context>", "bindings": {"<keystroke>": "<action>" | null}}]}`. `$schema` (`https://www.schemastore.org/claude-code-keybindings.json`) and `$docs` (`https://code.claude.com/docs/en/keybindings`) are optional per the docs; the bundle's own keybindings skill says to always include them.
+- `app:toggleTranscript` is in the `Global` context. The bundle's defaults: `{context:"Global",bindings:{"ctrl+c":"app:interrupt","ctrl+d":"app:exit","ctrl+t":"app:toggleTodos","ctrl+o":"app:toggleTranscript","ctrl+shift+b":"app:toggleBrief",…}}`.
+- User bindings are keystroke → action and add to the defaults; only `null` unbinds a key. So adding `ctrl+shift+o` keeps `ctrl+o` bound too. The file is watched and applied without a restart. **[docs]**
+- Key names are case-insensitive; `ctrl+shift+o` is written with `shift+`, not as `ctrl+O`. **[docs]**
+- Reserved (can't be rebound): Ctrl+C, Ctrl+D, Ctrl+M (Enter), Ctrl+[ (Escape), **Ctrl+I (always Tab)**, Ctrl+H. So Claude has no Ctrl+I action of its own for orb's `<C-i>` to shadow. **[docs]**
+- Written 2026-09-28 with only `"ctrl+shift+o": "app:toggleTranscript"` in `Global`; the file didn't exist before.
