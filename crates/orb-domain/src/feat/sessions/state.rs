@@ -810,6 +810,48 @@ impl Sessions {
         }
     }
 
+    /// Whether a jump can land on `item`: it still exists, isn't being
+    /// deleted, and the project filter lists it. Never the Settled header.
+    pub fn jumpable(&self, item: SidebarItem) -> bool {
+        let mut projects = self.listed_projects();
+        match item {
+            SidebarItem::Thread(id) => {
+                !self.deleting.contains(&id)
+                    && projects.any(|project| project.threads.iter().any(|t| t.id == id))
+            }
+            SidebarItem::Draft(id) => projects
+                .any(|project| project.id == id && !project.removed && project.draft.is_some()),
+            SidebarItem::Group(id) => {
+                projects.any(|project| project.groups.iter().any(|group| group.id == id))
+            }
+            SidebarItem::GroupDraft(id) => projects.any(|project| {
+                project
+                    .groups
+                    .iter()
+                    .any(|group| group.id == id && group.draft)
+            }),
+            SidebarItem::SettledShelf => false,
+        }
+    }
+
+    /// Opens what hides `item`, the row a jump just put the cursor on: its
+    /// group, for a group's thread or draft (a settled group opens the
+    /// Settled shelf too). A lone settled thread is listed while the cursor
+    /// is on it.
+    pub fn reveal(&mut self, item: SidebarItem) {
+        let group = match item {
+            SidebarItem::GroupDraft(id) => Some(id),
+            SidebarItem::Thread(id) => self
+                .threads()
+                .find(|thread| thread.id == id)
+                .and_then(|thread| thread.group),
+            SidebarItem::Draft(_) | SidebarItem::Group(_) | SidebarItem::SettledShelf => None,
+        };
+        if let Some(group) = group {
+            self.open_group(group);
+        }
+    }
+
     /// How many threads have `status`, not counting threads being deleted.
     pub fn status_count(&self, status: ThreadStatus) -> usize {
         self.shown_threads()
@@ -1102,6 +1144,7 @@ pub struct AttachTarget {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::time::{Duration, SystemTime};
 
     use super::{
@@ -2826,5 +2869,109 @@ mod tests {
 
         // Then only project 1 is listed.
         assert_eq!(ids, vec![1], "orb's own projects shouldn't be listed");
+    }
+
+    #[rstest::rstest]
+    #[case(on(1))]
+    #[case(on_draft(1))]
+    fn jumpable_skips_a_row_the_filter_hides(#[case] item: SidebarItem) {
+        // Given two projects, filtered to project 2.
+        let sessions = two_projects(Some(2));
+
+        // When asking whether project 1's row is jumpable.
+        let jumpable = sessions.jumpable(item);
+
+        // Then it isn't.
+        assert!(!jumpable, "{item:?} is hidden by the filter");
+    }
+
+    #[rstest::rstest]
+    fn jumpable_skips_a_thread_being_deleted() {
+        // Given thread 1 being deleted.
+        let sessions = Sessions {
+            deleting: HashSet::from([ThreadId(1)]),
+            ..sessions(vec![thread(1)], None)
+        };
+
+        // When asking whether thread 1 is jumpable.
+        let jumpable = sessions.jumpable(on(1));
+
+        // Then it isn't.
+        assert!(!jumpable, "a thread being deleted is gone");
+    }
+
+    #[rstest::rstest]
+    fn jumpable_accepts_a_listed_thread() {
+        // Given thread 1 listed.
+        let sessions = sessions(vec![thread(1)], None);
+
+        // When asking whether thread 1 is jumpable.
+        let jumpable = sessions.jumpable(on(1));
+
+        // Then it is.
+        assert!(jumpable, "a listed thread is a jump target");
+    }
+
+    #[rstest::rstest]
+    fn reveal_unfolds_a_folded_group() {
+        // Given group 9 folded, with the cursor put on its thread 1.
+        let mut sessions = Sessions {
+            folded: HashSet::from([GroupId(9)]),
+            cursor: Some(on(1)),
+            ..grouped_sessions(
+                vec![grouped(thread(1), 9)],
+                vec![group(9, GroupKind::Feature)],
+            )
+        };
+
+        // When revealing thread 1.
+        sessions.reveal(on(1));
+
+        // Then the group is open again.
+        assert!(
+            !sessions.folded.contains(&GroupId(9)),
+            "a jump should open the thread's folded group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reveal_opens_a_settled_group_and_the_shelf() {
+        // Given settled group 9, closed under a closed shelf, with the cursor
+        // put on its thread 1.
+        let mut sessions = Sessions {
+            cursor: Some(on(1)),
+            ..grouped_sessions(
+                vec![grouped(thread(1), 9)],
+                vec![Group {
+                    settled_at: Some(at(5)),
+                    ..group(9, GroupKind::Feature)
+                }],
+            )
+        };
+
+        // When revealing thread 1.
+        sessions.reveal(on(1));
+
+        // Then the group and the shelf are open.
+        assert!(
+            sessions.opened.contains(&GroupId(9)) && sessions.shelf_open,
+            "a jump should open the settled group and its shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reveal_keeps_a_lone_settled_thread_listed() {
+        // Given settled thread 1 under a closed shelf, with the cursor put
+        // on it.
+        let mut sessions = sessions(vec![thread(2), settled(1, 10)], Some(on(1)));
+
+        // When revealing thread 1.
+        sessions.reveal(on(1));
+
+        // Then the sidebar lists it.
+        assert!(
+            items(&sessions).contains(&on(1)),
+            "the jump's settled thread should be listed"
+        );
     }
 }

@@ -3,7 +3,7 @@
 //! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
 //! frontend loop; session commands (drafts, add or remove a project, move to
 //! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle, delete,
-//! visit, save the sidebar's width and filter, create and start groups, start a
+//! visit, save the sidebar's width and filter, save the jump list, create and start groups, start a
 //! group's sibling, pin, settle and delete groups, save a group draft) go to
 //! the sessions actor.
 
@@ -86,6 +86,8 @@ pub enum Command {
     /// Save the sidebar's width and project filter as they now are in the
     /// app state.
     SaveUi,
+    /// Save the jump list as it now is in the app state.
+    SaveJumps,
     /// Remove the project from `␣n` and the project filter and discard its
     /// draft; its threads stay.
     RemoveProject(ProjectId),
