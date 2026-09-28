@@ -253,18 +253,24 @@ pub fn validate_start_group_draft(state: &AppState) -> Result<(), StartGroupDraf
 pub enum NewSiblingError {
     /// The cursor isn't on a group's card or one of its threads.
     NoGroup,
+    /// The group is settled: `n` works only on an active group.
+    Settled,
     /// The group has no thread yet: its draft starts it instead.
     NoThread,
     /// A session is already being started.
     Starting,
 }
 
-/// Allow a sibling from a group's card or thread, one start at a time, once
-/// the group has a thread.
+/// What the mode line says when `n` is pressed on a group that has only its draft.
+pub const STARTS_FROM_DRAFT: &str = "A group starts from its draft — ⏎ on New thread";
+
+/// Allow a sibling from an active group's card or thread, one start at a
+/// time, once the group has a thread.
 ///
 /// # Errors
 ///
 /// Returns [`NewSiblingError::NoGroup`] off a group's card or thread,
+/// [`NewSiblingError::Settled`] on a settled group,
 /// [`NewSiblingError::Starting`] while a start is in flight, and
 /// [`NewSiblingError::NoThread`] for a group that has no thread yet.
 pub fn validate_new_sibling(state: &AppState) -> Result<(), NewSiblingError> {
@@ -275,6 +281,7 @@ pub fn validate_new_sibling(state: &AppState) -> Result<(), NewSiblingError> {
     };
     match group {
         None => Err(NewSiblingError::NoGroup),
+        Some((_, group)) if group.settled_at.is_some() => Err(NewSiblingError::Settled),
         Some(_) if sessions.starting => Err(NewSiblingError::Starting),
         Some((_, group)) if sessions.group_threads(group.id).next().is_none() => {
             Err(NewSiblingError::NoThread)
@@ -995,6 +1002,37 @@ mod tests {
             result,
             Err(NewSiblingError::NoThread),
             "a draft-only group starts from its draft"
+        );
+    }
+
+    /// `state` with every group settled.
+    fn settled(mut state: AppState) -> AppState {
+        for group in state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| &mut project.groups)
+        {
+            group.settled_at = Some(SystemTime::UNIX_EPOCH);
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    #[case(SidebarItem::Group(GroupId(7)))]
+    #[case(SidebarItem::Thread(ThreadId(1)))]
+    fn new_sibling_rejected_on_a_settled_group(#[case] cursor: SidebarItem) {
+        // Given the cursor on a settled group's card or thread.
+        let state = settled(grouped_at(cursor, &[ThreadStatus::Idle], false));
+
+        // When validating a sibling start.
+        let result = validate_new_sibling(&state);
+
+        // Then validation fails with Settled.
+        assert_eq!(
+            result,
+            Err(NewSiblingError::Settled),
+            "n works only on an active group"
         );
     }
 

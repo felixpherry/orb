@@ -13,7 +13,7 @@ use crate::feat::picker::list::{
     BranchRow, LEGACY_MODELS, MODELS, Matches, Model, PERMISSION_MODES, PickerItem, PickerList,
     model,
 };
-use crate::feat::sessions::state::{GroupId, ProjectId, ThreadId};
+use crate::feat::sessions::state::{GroupId, GroupKind, ProjectId, ThreadId};
 
 /// What a workspace or branch picker sets up: a thread, or a project's draft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +69,14 @@ pub enum PickerKind {
     DiscardDraft { project: ProjectId },
     /// `s` on a group's card: confirm settling it.
     SettleGroup { group: GroupId },
-    /// `d` on a group's card: confirm deleting it and its threads.
-    DeleteGroup { group: GroupId },
+    /// `d` on a group's card: confirm deleting it, its threads and its
+    /// directory. `dir` is the group's kind when it has a directory on disk
+    /// (a Feature group's worktree once started, a Research/Learn folder),
+    /// else `None`.
+    DeleteGroup {
+        group: GroupId,
+        dir: Option<GroupKind>,
+    },
 }
 
 /// The open picker.
@@ -164,9 +170,10 @@ impl PickerState {
         Self::confirm(PickerKind::SettleGroup { group }, return_to)
     }
 
-    /// The `No`/`Yes` confirm for deleting `group`, with `No` selected.
-    pub fn delete_group(group: GroupId, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::DeleteGroup { group }, return_to)
+    /// The `No`/`Yes` confirm for deleting `group` and, when `dir` is some,
+    /// its directory of that kind, with `No` selected.
+    pub fn delete_group(group: GroupId, dir: Option<GroupKind>, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::DeleteGroup { group, dir }, return_to)
     }
 
     /// A `No`/`Yes` confirm of `kind`, with `No` selected.

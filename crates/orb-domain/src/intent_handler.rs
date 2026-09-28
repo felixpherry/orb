@@ -20,10 +20,11 @@ use crate::feat::sessions::state::{
     Search, SidebarItem, ThreadId, group_slug,
 };
 use crate::feat::sessions::validator::{
-    DeleteError, LAST_IN_GROUP, NewGroupError, SETTLE_IN_PROGRESS, ToggleSettleError,
-    validate_close_group, validate_close_shelf, validate_delete, validate_new_group,
-    validate_new_sibling, validate_open_group, validate_open_shelf, validate_pick_setting,
-    validate_start_draft, validate_start_group_draft, validate_toggle_pin, validate_toggle_settle,
+    DeleteError, LAST_IN_GROUP, NewGroupError, NewSiblingError, SETTLE_IN_PROGRESS,
+    STARTS_FROM_DRAFT, ToggleSettleError, validate_close_group, validate_close_shelf,
+    validate_delete, validate_new_group, validate_new_sibling, validate_open_group,
+    validate_open_shelf, validate_pick_setting, validate_start_draft, validate_start_group_draft,
+    validate_toggle_pin, validate_toggle_settle,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
@@ -519,7 +520,7 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
-                Some(&PickerKind::DeleteGroup { group }) => {
+                Some(&PickerKind::DeleteGroup { group, .. }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::Confirm(true))
                             if still_deletable(state, SidebarItem::Group(group)) =>
@@ -666,6 +667,10 @@ impl IntentHandler {
                         from,
                     }]
                 }
+                (Err(NewSiblingError::NoThread), _) => {
+                    state.sessions.error = Some(STARTS_FROM_DRAFT.to_owned());
+                    vec![]
+                }
                 _ => vec![],
             },
             Intent::TogglePin if matches!(state.sessions.cursor, Some(SidebarItem::Group(_))) => {
@@ -758,7 +763,11 @@ impl IntentHandler {
                     vec![]
                 }
                 (Ok(()), Some(SidebarItem::Group(group))) => {
-                    open_picker(state, PickerState::delete_group(group, state.focus));
+                    let dir = state
+                        .sessions
+                        .selected_group()
+                        .and_then(|(_, group)| group.dir.as_ref().map(|_| group.kind));
+                    open_picker(state, PickerState::delete_group(group, dir, state.focus));
                     vec![]
                 }
                 (Err(DeleteError::LastInGroup), _) => {
@@ -1363,7 +1372,7 @@ mod tests {
         ProjectId, ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId,
         ThreadStatus,
     };
-    use crate::feat::sessions::validator::{LAST_IN_GROUP, SETTLE_IN_PROGRESS};
+    use crate::feat::sessions::validator::{LAST_IN_GROUP, SETTLE_IN_PROGRESS, STARTS_FROM_DRAFT};
     use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
@@ -2994,6 +3003,88 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case(SidebarItem::Group(GroupId(9)))]
+    #[case(SidebarItem::Thread(ThreadId(1)))]
+    fn n_on_a_settled_group_starts_nothing(#[case] cursor: SidebarItem) {
+        // Given the cursor on settled group 9's card or thread.
+        let mut state = grouped_state(true, cursor);
+
+        // When handling NewSibling.
+        let commands = IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then nothing is asked of the sessions actor.
+        assert!(commands.is_empty(), "n works only on an active group");
+    }
+
+    #[rstest::rstest]
+    fn n_on_a_settled_group_opens_nothing() {
+        // Given the cursor on settled group 9's card, the shelf closed.
+        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
+        state.sessions.shelf_open = false;
+
+        // When handling NewSibling.
+        IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then neither the shelf nor the group opens.
+        assert_eq!(
+            (
+                state.sessions.shelf_open,
+                state.sessions.opened.contains(&GroupId(9))
+            ),
+            (false, false),
+            "n on a settled group should open nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn n_on_a_settled_group_shows_no_error() {
+        // Given the cursor on settled group 9's card.
+        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
+
+        // When handling NewSibling.
+        IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then the mode line stays quiet.
+        assert_eq!(
+            state.sessions.error, None,
+            "n on a settled group is a silent no-op"
+        );
+    }
+
+    #[rstest::rstest]
+    fn n_on_a_draft_only_group_shows_the_start_hint() {
+        // Given the cursor on the card of group 9, still a draft.
+        let mut state = group_drafting(None);
+        state.sessions.cursor = Some(SidebarItem::Group(GroupId(9)));
+
+        // When handling NewSibling.
+        IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then the mode line points at the draft.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some(STARTS_FROM_DRAFT),
+            "n on a draft-only group should point at its draft"
+        );
+    }
+
+    #[rstest::rstest]
+    fn n_on_a_draft_only_group_starts_nothing() {
+        // Given the cursor on the card of group 9, still a draft.
+        let mut state = group_drafting(None);
+        state.sessions.cursor = Some(SidebarItem::Group(GroupId(9)));
+
+        // When handling NewSibling.
+        let commands = IntentHandler::handle(&Intent::NewSibling, &mut state);
+
+        // Then no start happens.
+        assert!(
+            commands.is_empty() && !state.sessions.starting,
+            "a draft-only group starts from its draft, not n"
+        );
+    }
+
+    #[rstest::rstest]
     fn p_on_a_card_pins_the_group() {
         // Given the cursor on group 9's card, unpinned.
         let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
@@ -3253,8 +3344,31 @@ mod tests {
         // Then the group's delete confirm is open.
         assert_eq!(
             state.picker.as_ref().map(PickerState::kind),
-            Some(&PickerKind::DeleteGroup { group: GroupId(9) }),
+            Some(&PickerKind::DeleteGroup {
+                group: GroupId(9),
+                dir: Some(GroupKind::Feature)
+            }),
             "d on a card should ask to delete the group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn d_on_a_never_started_feature_card_confirms_without_a_worktree() {
+        // Given the cursor on the card of Feature group 9, still a draft.
+        let mut state = group_drafting(None);
+        state.sessions.cursor = Some(SidebarItem::Group(GroupId(9)));
+
+        // When handling DeleteThread.
+        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+
+        // Then the group's delete confirm names no directory.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::DeleteGroup {
+                group: GroupId(9),
+                dir: None
+            }),
+            "a never-started Feature group has no worktree to delete"
         );
     }
 

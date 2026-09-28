@@ -4,7 +4,7 @@
 //! previous worktree, the one the workspace picker offers.
 
 use std::hash::{BuildHasher, RandomState};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -31,9 +31,14 @@ pub fn new_worktree_path(worktrees_root: &Path, repo_root: &Path, hex: &str) -> 
     worktrees_root.join(repo).join(format!("orb-{hex}"))
 }
 
-/// Whether `cwd` is a worktree orb made.
+/// Whether `cwd` is a worktree orb made: inside orb's worktrees root, never
+/// the root itself, and with no `..` that could climb back out of it.
 pub fn is_orb_worktree(worktrees_root: &Path, cwd: &Path) -> bool {
-    cwd.starts_with(worktrees_root)
+    cwd != worktrees_root
+        && cwd.starts_with(worktrees_root)
+        && !cwd
+            .components()
+            .any(|component| component == Component::ParentDir)
 }
 
 /// The branch orb made with the worktree at `cwd`, `orb/<hex>`, when `cwd` is
@@ -88,7 +93,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
-    use super::{hex_branch, previous_worktree, slug};
+    use super::{hex_branch, is_orb_worktree, previous_worktree, slug};
     use crate::feat::sessions::state::{
         Project, ProjectId, ProjectKind, Thread, ThreadId, ThreadStatus,
     };
@@ -170,6 +175,27 @@ mod tests {
             expected,
             "hex branch of {cwd} should be {expected:?}"
         );
+    }
+
+    #[rstest::rstest]
+    #[case("/home/u/.orb/worktrees/orb/orb-0a1b2c3d", true)]
+    #[case("/home/u/.orb/worktrees", false)]
+    #[case("/home/u/.orb/worktrees/", false)]
+    #[case("/home/u/.orb/worktrees/orb/../..", false)]
+    #[case("/home/u/.orb/worktrees/../research/x", false)]
+    #[case("/home/u/dev/orb", false)]
+    fn orb_worktree_is_strictly_inside_the_worktrees_root(
+        #[case] cwd: &str,
+        #[case] expected: bool,
+    ) {
+        // Given orb's worktrees root.
+        let root = Path::new("/home/u/.orb/worktrees");
+
+        // When asking whether cwd is an orb worktree.
+        let orb = is_orb_worktree(root, Path::new(cwd));
+
+        // Then only a path strictly inside the root, without `..`, is one.
+        assert_eq!(orb, expected, "{cwd} should be an orb worktree: {expected}");
     }
 
     #[rstest::rstest]
