@@ -1251,11 +1251,13 @@ fn selected_group_id(state: &AppState) -> Option<GroupId> {
 }
 
 /// Attaches to the selected thread's session and records entering it as a
-/// jump, unless the thread can't be attached to.
+/// jump, unless the thread can't be attached to or is the row the last
+/// `<C-o>`/`<C-i>` landed on.
 fn attach_thread(state: &mut AppState) -> Vec<Command> {
     let mut commands = show_pane(state);
-    if let (false, Some(id)) = (commands.is_empty(), state.sessions.selected_id()) {
-        state.jumps.record(SidebarItem::Thread(id));
+    if let (false, Some(id)) = (commands.is_empty(), state.sessions.selected_id())
+        && state.jumps.enter(SidebarItem::Thread(id))
+    {
         commands.push(Command::SaveJumps);
     }
     commands
@@ -6789,6 +6791,44 @@ mod tests {
             state.jumps.entries(),
             [on_thread(1), on_thread(2)],
             "landing in a pane isn't itself a jump"
+        );
+    }
+
+    #[rstest::rstest]
+    fn re_entering_the_pane_jump_back_landed_in_keeps_jump_forward() {
+        // Given a jump back from thread 2's pane into thread 1's, then
+        // <C-h> to the sidebar and <C-l> back into thread 1's pane.
+        let mut state = jumping(Focus::Attached, &[1, 2], &[on_thread(1), on_thread(2)]);
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+        IntentHandler::handle(&Intent::FocusSidebar, &mut state);
+        IntentHandler::handle(&Intent::FocusRight, &mut state);
+
+        // When handling JumpForward.
+        IntentHandler::handle(&Intent::JumpForward, &mut state);
+
+        // Then the cursor is back on thread 2.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(2)),
+            "re-entering the landed pane should keep <C-i>"
+        );
+    }
+
+    #[rstest::rstest]
+    fn re_entering_the_pane_jump_back_landed_in_returns_no_save_jumps() {
+        // Given a jump back from thread 2's pane into thread 1's, then
+        // <C-h> to the sidebar.
+        let mut state = jumping(Focus::Attached, &[1, 2], &[on_thread(1), on_thread(2)]);
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+        IntentHandler::handle(&Intent::FocusSidebar, &mut state);
+
+        // When handling FocusRight back into thread 1's pane.
+        let commands = IntentHandler::handle(&Intent::FocusRight, &mut state);
+
+        // Then the list isn't saved: nothing was recorded.
+        assert!(
+            !commands.contains(&Command::SaveJumps),
+            "re-entering the landed pane records nothing to save"
         );
     }
 

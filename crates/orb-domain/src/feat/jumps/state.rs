@@ -49,6 +49,18 @@ impl JumpList {
         self.at = None;
     }
 
+    /// Records entering `item`'s pane, unless it's the row the last
+    /// `<C-o>`/`<C-i>` landed on: coming back into that pane keeps the place
+    /// in the list, so `<C-i>` still goes forward. Returns whether it
+    /// recorded.
+    pub fn enter(&mut self, item: SidebarItem) -> bool {
+        let browsing = self.at.and_then(|at| self.entries.get(at)) == Some(&item);
+        if !browsing {
+            self.record(item);
+        }
+        !browsing
+    }
+
     /// Records a jump: the row it left, then the row it landed on.
     pub fn jump(&mut self, from: Option<SidebarItem>, to: Option<SidebarItem>) {
         for item in [from, to].into_iter().flatten() {
@@ -273,6 +285,23 @@ mod tests {
 
         // Then there's nowhere to go: recording thread 21 drops thread 1.
         assert_eq!(target, None, "<C-o> must not land on a dropped row");
+    }
+
+    #[rstest::rstest]
+    fn entering_the_row_back_landed_on_keeps_forward() {
+        // Given threads 1 and 2, gone back from thread 3 to thread 2.
+        let mut list = list_of(&[1, 2]);
+        list.back(Some(on(3)), anywhere);
+
+        // When entering thread 2's pane again.
+        list.enter(on(2));
+
+        // Then going forward from thread 2 still lands on thread 3.
+        assert_eq!(
+            list.forward(Some(on(2)), anywhere),
+            Some(on(3)),
+            "re-entering the landed row should keep <C-i>"
+        );
     }
 
     #[rstest::rstest]

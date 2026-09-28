@@ -69,7 +69,7 @@ The demo shows, in order: the sidebar and dashboard, the which-key popup, approv
 
 On the dashboard, each menu item's letter runs it directly, and `j`/`k` plus `⏎` work too.
 
-`<C-o>`/`<C-i>` work like neovim's jump list. Entering a thread's pane, `gg`/`G`, a search `⏎` and a `␣n` pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump moves the cursor, and shows the thread's pane only while orb is still attached to it. It never attaches, starts a draft or clears the project filter.
+`<C-o>`/`<C-i>` work like neovim's jump list. Entering a thread's pane, `gg`/`G`, a search `⏎` and a `␣n` pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. Entering the pane of the row the last `<C-o>`/`<C-i>` landed on isn't a new jump, so `<C-i>` still goes forward. orb keeps the newest 20 rows, each at most once, across restarts. A jump moves the cursor, and shows the thread's pane only while orb is still attached to it. It never attaches, starts a draft or clears the project filter.
 
 Inside the Claude pane orb takes `<C-o>`, which is Claude's transcript key. To keep the transcript on `ctrl+shift+o`, add it to `~/.claude/keybindings.json` (`ctrl+o` stays bound for `claude` outside orb):
 
