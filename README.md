@@ -48,6 +48,7 @@ The demo shows, in order: the sidebar and dashboard, the which-key popup, approv
 | `⏎` | Attach to the thread, start the draft, or open/close the group |
 | `<C-\>` | Detach and go back to orb |
 | `<C-h>` / `<C-l>` | Focus the sidebar / the right-hand side |
+| `<C-o>` / `<C-i>` | Jump back / forward through the jump list (sidebar, dashboard and the Claude pane) |
 | `/` or `i` | Search thread titles and group names |
 | `r` | Rename the thread |
 | `l` / `h` | Open / close the group (or the Settled shelf) |
@@ -67,6 +68,22 @@ The demo shows, in order: the sidebar and dashboard, the which-key popup, approv
 | `q` | Quit orb (sessions keep running) |
 
 On the dashboard, each menu item's letter runs it directly, and `j`/`k` plus `⏎` work too.
+
+`<C-o>`/`<C-i>` work like neovim's jump list. Entering a thread's pane, `gg`/`G`, a search `⏎` and a `␣n` pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump moves the cursor, and shows the thread's pane only while orb is still attached to it. It never attaches, starts a draft or clears the project filter.
+
+Inside the Claude pane orb takes `<C-o>`, which is Claude's transcript key. To keep the transcript on `ctrl+shift+o`, add it to `~/.claude/keybindings.json` (`ctrl+o` stays bound for `claude` outside orb):
+
+```json
+{
+  "$schema": "https://www.schemastore.org/claude-code-keybindings.json",
+  "$docs": "https://code.claude.com/docs/en/keybindings",
+  "bindings": [
+    { "context": "Global", "bindings": { "ctrl+shift+o": "app:toggleTranscript" } }
+  ]
+}
+```
+
+kitty maps `ctrl+shift+o` to `pass_selection_to_program` by default and swallows it, so also add `map ctrl+shift+o no_op` to `kitty.conf` and reload kitty (`ctrl+shift+F5`).
 
 ## Development
 
