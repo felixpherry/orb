@@ -33,7 +33,8 @@ The demo shows, in order: the sidebar and dashboard, the which-key popup, approv
 - **The real Claude, attached.** `⏎` runs `claude attach` in a terminal pane inside orb, so every slash command, permission prompt and picker works. Each attached thread keeps its own pane.
 - **Worktrees built in.** A new session can get its own worktree under `~/.orb/worktrees/`. Once Claude names the thread, its `orb/<hex>` branch is renamed to match the title.
 - **Drafts.** Set up the project, workspace, base branch, model and permission before starting a session.
-- **Tools where the code is.** `␣t` opens a shell, `␣g` lazygit and `␣v` `nvim .` in the thread's directory, as a full-screen zellij floating pane.
+- **Groups.** Threads that belong together share one directory and sit under one card: a **Feature** group's worktree (on a branch named after the group, like `GT-514-login`), or a **Research** or **Learn** folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/` (orb writes a default `AGENTS.md` there first). `n` starts another thread in the group at once. Groups are pinned, settled and deleted as a whole; deleting one leaves its folder and branch on disk, so the same name is refused until you remove them.
+- **Tools where the code is.** `␣t` opens a shell, `␣gg` lazygit and `␣v` `nvim .` in the thread's directory, as a full-screen zellij floating pane.
 - **Notifications.** When orb isn't focused, you get a macOS notification when a thread finishes, needs approval or needs input.
 - **LazyVim look.** A snacks-style explorer, a dashboard start screen, a lualine mode line, a helix which-key popup and vim.ui.select pickers, all in tokyonight-moon.
 
@@ -44,20 +45,23 @@ The demo shows, in order: the sidebar and dashboard, the which-key popup, approv
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `gg` / `G`, `<C-d>` / `<C-u>` | Move in the sidebar |
-| `⏎` | Attach to the thread, or start the draft |
+| `⏎` | Attach to the thread, start the draft, or open/close the group |
 | `<C-\>` | Detach and go back to orb |
 | `<C-h>` / `<C-l>` | Focus the sidebar / the right-hand side |
-| `/` or `i` | Search thread titles |
+| `/` or `i` | Search thread titles and group names |
 | `r` | Rename the thread |
-| `p` | Pin or unpin |
-| `s` | Settle (after a `No`/`Yes` confirm) or un-settle |
-| `d` | Delete the thread or discard the draft (after a `No`/`Yes` confirm) |
+| `l` / `h` | Open / close the group (or the Settled shelf) |
+| `n` | New thread in the group, with the selected (on the card, the newest) thread's model and permission |
+| `p` | Pin or unpin (a lone thread or a group) |
+| `s` | Settle (after a `No`/`Yes` confirm) or un-settle (a lone thread or a group) |
+| `d` | Delete the thread or the group, or discard the draft (after a `No`/`Yes` confirm); a group's last thread can't be deleted |
 | `␣n` | New session (project picker) |
+| `␣gf` / `␣gr` / `␣gl` | New Feature (project picker, then a name) / Research / Learn group |
 | `␣p` | Add a project |
 | `␣f` | Filter by project (`<C-x>` removes one) |
-| `␣w` / `␣b` | Workspace / branch picker |
-| `␣m` / `␣a` | Model / permission picker (drafts) |
-| `␣t` / `␣g` / `␣v` | Shell / lazygit / Neovim |
+| `␣w` / `␣b` | Workspace / branch picker (not in a group) |
+| `␣m` / `␣a` | Model / permission picker (drafts, a group's too) |
+| `␣t` / `␣gg` / `␣v` | Shell / lazygit / Neovim |
 | `␣e` | Hide or show the sidebar |
 | `<C-Left>` / `<C-Right>` | Narrow / widen the focused side |
 | `q` | Quit orb (sessions keep running) |
