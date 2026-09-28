@@ -674,7 +674,7 @@ Written in multi-attach's Verification step (not a milestone).
 
 The `(settle)` auto-settle entry and the `(sessions)` poll-cadence entry keep their wording; "attached" now means "has a live pane", which the new `(pane)` entries define.
 
-### Jump list
+### Jump list (written)
 
 Written in the jump list's Verification step (not a milestone).
 
