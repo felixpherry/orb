@@ -261,6 +261,9 @@ struct App {
     /// Each attached thread's `claude attach`, kept while other threads are
     /// selected.
     panes: HashMap<ThreadId, Pane>,
+    /// The thread whose pane last got the keys, so the pane loses focus when
+    /// the keys move on even though the selection already has.
+    focused_pane: Option<ThreadId>,
     /// The interactive `claude` where the user trusts a directory, drawn over
     /// any thread's pane while it's open.
     trust: Option<Pane>,
@@ -311,6 +314,7 @@ impl App {
             git,
             keys: Keys::new(keymap::keymap(), scope),
             panes: HashMap::new(),
+            focused_pane: None,
             trust: None,
             pane_error: None,
             opened_trust: None,
@@ -464,12 +468,15 @@ impl App {
                         }
                     },
                     Focus::Sidebar | Focus::Dashboard => {
-                        match keymap::layout_route(key).or(match focus {
-                            Focus::Sidebar => keymap::sidebar_route(key),
-                            _ => None,
-                        }) {
+                        match keymap::layout_route(key)
+                            .or_else(|| keymap::jump_route(key))
+                            .or(match focus {
+                                Focus::Sidebar => keymap::sidebar_route(key),
+                                _ => None,
+                            }) {
                             Some(intent) => {
-                                // A resize or a detach ends any key sequence in progress.
+                                // A resize, a jump or a detach ends any key
+                                // sequence in progress.
                                 self.keys.dismiss();
                                 Some(intent)
                             }
@@ -540,6 +547,10 @@ impl App {
     {
         match command {
             Command::Attach(target) => {
+                let left = self.focused_pane.take().filter(|id| *id != target.thread);
+                if let Some(pane) = left.and_then(|id| self.panes.get(&id)) {
+                    pane.focus(false);
+                }
                 if self.panes.get(&target.thread).is_none_or(Pane::has_exited) {
                     match self.spawn_pane(target.argv.clone(), target.cwd.clone()) {
                         Some(pane) => {
@@ -557,6 +568,7 @@ impl App {
                 }
                 if let Some(pane) = self.panes.get(&target.thread) {
                     pane.focus(true);
+                    self.focused_pane = Some(target.thread);
                 }
                 outer_terminal::set_mouse_capture(out, true)
             }
@@ -564,10 +576,14 @@ impl App {
                 if self.trust.is_some() {
                     return self.leave_trust(out);
                 }
-                // `Intent::Detach` already gave the dashboard the keys, so
-                // the pane is looked up directly rather than as shown.
-                let selected = self.state.read().sessions.selected_id();
-                if let Some(pane) = selected.and_then(|id| self.panes.get(&id)) {
+                // `Intent::Detach` already gave the dashboard the keys, and a
+                // jump already moved the selection, so the pane is the one
+                // that last got the keys rather than the shown one.
+                let focused = self
+                    .focused_pane
+                    .take()
+                    .or_else(|| self.state.read().sessions.selected_id());
+                if let Some(pane) = focused.and_then(|id| self.panes.get(&id)) {
                     pane.focus(false);
                 }
                 outer_terminal::set_mouse_capture(out, false)

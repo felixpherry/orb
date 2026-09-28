@@ -12,10 +12,12 @@
 //! it. On the dashboard each menu item's
 //! letter runs it, `j`/`k` or `↓`/`↑` move the menu cursor, and `⏎` runs the
 //! highlighted item. `<C-Right>`/`<C-Left>` resize the focused side
-//! outside which-key, which can't name them. In the sidebar, `<C-\>` detaches
-//! the selected attached thread, also outside which-key. While attached,
-//! every key goes to Claude except `<C-\>`, `<C-h>` and the resize keys,
-//! which resize the pane as they do the dashboard. An open picker takes
+//! outside which-key, which can't name them, and `<C-o>`/`<C-i>` move back
+//! and forward through the jump list, also outside which-key. In the
+//! sidebar, `<C-\>` detaches the selected attached thread, outside which-key
+//! too. While attached, every key goes to Claude except `<C-\>`, `<C-h>`,
+//! the jump keys, and the resize keys, which resize the pane as they do the
+//! dashboard. An open picker takes
 //! typed characters as filter text and has its own fixed keys, `<C-x>` among
 //! them for removing a project from the project filter. The rename box (`r`)
 //! and the sidebar search (`/` or `i`) use the picker's keys. On a group's
@@ -520,7 +522,21 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
         (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Route::Intent(Intent::Detach),
         // Claude can't bind `<C-h>`: it's Backspace in a legacy terminal.
         (KeyCode::Char('h'), KeyModifiers::CONTROL) => Route::Intent(Intent::LeavePane),
-        _ => layout_route(key).map_or(Route::Forward, Route::Intent),
+        _ => jump_route(key)
+            .or_else(|| layout_route(key))
+            .map_or(Route::Forward, Route::Intent),
+    }
+}
+
+/// The jump `key` asks for in the sidebar, the dashboard or the attached
+/// pane: `<C-o>` goes back through the jump list and `<C-i>` forward. Only
+/// bare Ctrl matches, so `ctrl+shift+o` and Tab still reach Claude. `None`
+/// for any other key.
+pub(crate) fn jump_route(key: KeyEvent) -> Option<Intent> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) => Some(Intent::JumpBack),
+        (KeyCode::Char('i'), KeyModifiers::CONTROL) => Some(Intent::JumpForward),
+        _ => None,
     }
 }
 
@@ -588,8 +604,8 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     use super::{
-        Keys, Route, Scope, Selection, attached_route, keymap, layout_route, picker_route, press,
-        sidebar_route,
+        Keys, Route, Scope, Selection, attached_route, jump_route, keymap, layout_route,
+        picker_route, press, sidebar_route,
     };
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1745,6 +1761,79 @@ mod tests {
             Route::Intent(expected),
             "<C-{code}> should resize while attached"
         );
+    }
+
+    #[rstest::rstest]
+    #[case('o', Intent::JumpBack)]
+    #[case('i', Intent::JumpForward)]
+    fn ctrl_o_and_ctrl_i_jump_while_attached(#[case] c: char, #[case] expected: Intent) {
+        // Given `<C-o>` or `<C-i>`.
+        let key = ctrl(c);
+
+        // When routing it while attached.
+        let routed = attached_route(key);
+
+        // Then it moves through the jump list instead of reaching Claude.
+        assert_eq!(
+            routed,
+            Route::Intent(expected),
+            "<C-{c}> should jump while attached"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(KeyCode::Tab, KeyModifiers::NONE)]
+    #[case(KeyCode::Char('o'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)]
+    #[case(KeyCode::Char('O'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)]
+    fn tab_and_ctrl_shift_o_are_forwarded_while_attached(
+        #[case] code: KeyCode,
+        #[case] modifiers: KeyModifiers,
+    ) {
+        // Given Tab or `ctrl+shift+o` in either of its kitty forms.
+        let key = KeyEvent::new(code, modifiers);
+
+        // When routing it while attached.
+        let routed = attached_route(key);
+
+        // Then it goes to Claude.
+        assert_eq!(
+            routed,
+            Route::Forward,
+            "{code} with {modifiers} should be forwarded"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case('o', Intent::JumpBack)]
+    #[case('i', Intent::JumpForward)]
+    fn ctrl_o_and_ctrl_i_jump_in_the_sidebar_and_dashboard(
+        #[case] c: char,
+        #[case] expected: Intent,
+    ) {
+        // Given `<C-o>` or `<C-i>`.
+        let pressed = ctrl(c);
+
+        // When routing it in the sidebar or dashboard.
+        let intent = jump_route(pressed);
+
+        // Then it moves through the jump list.
+        assert_eq!(intent, Some(expected), "<C-{c}> should jump");
+    }
+
+    #[rstest::rstest]
+    #[case(key(KeyCode::Tab))]
+    #[case(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL | KeyModifiers::SHIFT))]
+    #[case(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::CONTROL | KeyModifiers::SHIFT))]
+    #[case(key(KeyCode::Char('o')))]
+    #[case(key(KeyCode::Char('i')))]
+    fn other_keys_do_not_jump(#[case] pressed: KeyEvent) {
+        // Given a key other than `<C-o>` and `<C-i>`.
+
+        // When routing it in the sidebar or dashboard.
+        let intent = jump_route(pressed);
+
+        // Then it's left to the keymap.
+        assert_eq!(intent, None, "{pressed:?} shouldn't jump");
     }
 
     #[rstest::rstest]
