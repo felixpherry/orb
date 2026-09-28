@@ -71,7 +71,8 @@
 //! restores it.
 //!
 //! It restores the sidebar's saved width and project filter at start, and
-//! saves them when asked.
+//! saves them when asked. It does the same for the jump list, dropping saved
+//! rows that no longer exist, and drops a deleted group's rows from it.
 //!
 //! It queues a notice for the frontend to announce when a thread it has
 //! polled since orb started finishes a turn, or starts needing an approval or
@@ -112,6 +113,7 @@ use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{
     hex, hex_branch, is_orb_worktree, new_worktree_path, previous_worktree, slug,
 };
+use crate::feat::jumps::state::JumpList;
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
 use crate::{AppState, Focus};
 
@@ -289,6 +291,10 @@ pub struct Visit(pub ThreadId);
 /// state.
 #[derive(Debug)]
 pub struct SaveUi;
+
+/// Save the jump list as it now is in the app state.
+#[derive(Debug)]
+pub struct SaveJumps;
 
 /// Remove a project from `␣n` and the project filter and discard its draft.
 #[derive(Debug)]
@@ -663,6 +669,18 @@ impl Message<SaveUi> for SessionsActor {
     }
 }
 
+impl Message<SaveJumps> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: SaveJumps,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.save_jumps();
+    }
+}
+
 impl Message<RemoveProject> for SessionsActor {
     type Reply = ();
 
@@ -800,7 +818,8 @@ impl SessionsActor {
     /// Shows the saved projects, threads and drafts, sizes the sidebar as it
     /// was saved, kept within its bounds, filters it to the saved project if
     /// that's still shown and not removed, and selects its first row. Each
-    /// draft learns what git says about it.
+    /// draft learns what git says about it. The saved jump list comes back
+    /// without the rows that no longer exist.
     fn restore(deps: SessionsActorDeps) -> Self {
         let SessionsActorDeps {
             services,
@@ -852,9 +871,19 @@ impl SessionsActor {
                 .iter()
                 .any(|project| project.id == id && !project.removed)
         });
+        let jumps = {
+            let saved = store.jumps().unwrap_or_default();
+            JumpList::from_saved(
+                saved
+                    .into_iter()
+                    .filter(|&item| exists(&projects, item))
+                    .collect(),
+            )
+        };
         {
             let mut app = state.write();
             app.sidebar.width = ui.sidebar_width.map_or(DEFAULT_WIDTH, clamp_width);
+            app.jumps = jumps;
             let sessions = &mut app.sessions;
             sessions.projects = projects;
             sessions.cursor = None;
@@ -2266,8 +2295,9 @@ impl SessionsActor {
     /// the group is still deleted and the reason shows. A Feature group whose
     /// slug branch the delete would remove isn't merged is refused first,
     /// with the reason, and nothing changes. Otherwise its threads are hidden
-    /// and detached at once, and a cursor on the group moves to the
-    /// neighbouring row (a thread there counts as visited).
+    /// and detached at once, its card, draft and threads leave the jump list,
+    /// and a cursor on the group moves to the neighbouring row (a thread
+    /// there counts as visited).
     async fn delete_group(&mut self, id: GroupId) {
         let threads: Vec<ThreadId> = self
             .rows
@@ -2287,13 +2317,17 @@ impl SessionsActor {
             if on_group {
                 sessions.cursor = sessions.row_neighbour(SidebarItem::Group(id));
             }
+            app.jumps.remove(SidebarItem::Group(id));
+            app.jumps.remove(SidebarItem::GroupDraft(id));
             for thread in &threads {
                 sessions.deleting.insert(*thread);
                 app.attached.remove(thread);
+                app.jumps.remove(SidebarItem::Thread(*thread));
             }
             on_group.then(|| sessions.selected_id()).flatten()
         };
         (self.wake)();
+        self.save_jumps();
         if let Some(neighbour) = neighbour {
             self.visit(neighbour);
         }
@@ -2416,6 +2450,15 @@ impl SessionsActor {
             }
         };
         if self.store.save_ui(&ui).is_err() {
+            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+            (self.wake)();
+        }
+    }
+
+    /// Saves the jump list, showing why if it can't.
+    fn save_jumps(&self) {
+        let jumps = self.state.read().jumps.entries().to_vec();
+        if self.store.save_jumps(&jumps).is_err() {
             self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
             (self.wake)();
         }
@@ -2835,6 +2878,19 @@ fn thread(row: &ThreadRow, status: ThreadStatus, attach_argv: Vec<OsString>) -> 
     }
 }
 
+/// Whether saved jump-list row `item` still names something in `projects`,
+/// shown or not: its thread, its project (for a draft) or its group.
+fn exists(projects: &[Project], item: SidebarItem) -> bool {
+    projects.iter().any(|project| match item {
+        SidebarItem::Thread(id) => project.threads.iter().any(|thread| thread.id == id),
+        SidebarItem::Draft(id) => project.id == id,
+        SidebarItem::Group(id) | SidebarItem::GroupDraft(id) => {
+            project.groups.iter().any(|group| group.id == id)
+        }
+        SidebarItem::SettledShelf => false,
+    })
+}
+
 /// How a saved group looks: a draft exactly while no saved thread is in it.
 fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
     Group {
@@ -3061,6 +3117,7 @@ mod tests {
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService};
     use crate::feat::git::validator::BUSY_DIRECTORY;
     use crate::feat::git::worktree::hex_branch;
+    use crate::feat::jumps::state::JumpList;
     use crate::feat::sessions::session_host::{
         CreatedSession, SessionHost, SessionHostError, SessionHostService, SessionOptions,
         SessionRecord, WorkspaceUntrusted,
@@ -5955,6 +6012,52 @@ mod tests {
             project_filter: None,
         })?;
         Ok(store)
+    }
+
+    #[rstest::rstest]
+    fn restore_drops_a_saved_jump_to_a_missing_thread() -> Result<(), Report<StoreError>> {
+        // Given a saved jump list naming thread aa and a thread that's gone.
+        let (store, id) = store_with_thread("aa")?;
+        let gone = SidebarItem::Thread(ThreadId(id.0 + 1));
+        store.save_jumps(&[SidebarItem::Thread(id), gone])?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then only thread aa is in the jump list.
+        assert_eq!(
+            state.read().jumps.entries(),
+            [SidebarItem::Thread(id)],
+            "a saved jump to a missing thread should be dropped"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saving_jumps_writes_the_jump_list() -> Result<(), Report<StoreError>> {
+        // Given a started actor whose jump list holds thread aa.
+        let (store, id) = store_with_thread("aa")?;
+        let (actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+        state.write().jumps = JumpList::from_saved(vec![SidebarItem::Thread(id)]);
+
+        // When saving the jump list.
+        actor.save_jumps();
+
+        // Then the store holds it.
+        assert_eq!(
+            actor.store.jumps()?,
+            vec![SidebarItem::Thread(id)],
+            "the jump list should be saved"
+        );
+        Ok(())
     }
 
     #[rstest::rstest]
@@ -9689,6 +9792,70 @@ mod tests {
             ),
             (false, 0, false),
             "a deleted group should be forgotten"
+        );
+        Ok(())
+    }
+
+    /// The jump list after `group` holding `threads` was listed in it (its
+    /// card, its draft and each thread) with project 1's draft kept apart.
+    fn group_jumps(group: GroupId, threads: &[ThreadId]) -> JumpList {
+        let rows = [
+            SidebarItem::Draft(ProjectId(1)),
+            SidebarItem::Group(group),
+            SidebarItem::GroupDraft(group),
+        ];
+        JumpList::from_saved(
+            rows.into_iter()
+                .chain(threads.iter().map(|&id| SidebarItem::Thread(id)))
+                .collect(),
+        )
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_group_drops_its_rows_from_the_jump_list() -> Result<(), Report<StoreError>>
+    {
+        // Given a group holding idle threads aa and bb, with its card, draft
+        // and threads in the jump list after project 1's draft.
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Idle),
+        ]);
+        let (group, threads, mut actor, state) = polled_group(&host, &["aa", "bb"]).await?;
+        state.write().jumps = group_jumps(group, &threads);
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then only project 1's draft is left in the jump list.
+        assert_eq!(
+            state.read().jumps.entries(),
+            [SidebarItem::Draft(ProjectId(1))],
+            "a deleted group's card, draft and threads should leave the jump list"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_group_saves_the_pruned_jump_list() -> Result<(), Report<StoreError>> {
+        // Given a group holding idle threads aa and bb, with its card, draft
+        // and threads in the jump list after project 1's draft.
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Idle),
+        ]);
+        let (group, threads, mut actor, state) = polled_group(&host, &["aa", "bb"]).await?;
+        state.write().jumps = group_jumps(group, &threads);
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then the saved jump list holds only project 1's draft.
+        assert_eq!(
+            actor.store.jumps()?,
+            vec![SidebarItem::Draft(ProjectId(1))],
+            "deleting a group should save the jump list without its rows"
         );
         Ok(())
     }
