@@ -535,8 +535,8 @@ impl Store {
     }
 
     /// Updates everything about a group that changes after it's created: its
-    /// directory, pin and settle state, and draft setup. Its project, kind,
-    /// name and branch stay as inserted.
+    /// directory, branch, pin and settle state, and draft setup. Its project,
+    /// kind and name stay as inserted.
     ///
     /// # Errors
     ///
@@ -548,7 +548,7 @@ impl Store {
             .execute(
                 "UPDATE groups SET dir = ?2, pinned_at = ?3, settled_override = ?4,
                         settled_at = ?5, unsettled_at = ?6, draft_model = ?7,
-                        draft_permission_mode = ?8
+                        draft_permission_mode = ?8, branch = ?9
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -559,6 +559,7 @@ impl Store {
                     row.unsettled_at,
                     row.draft_model,
                     row.draft_permission_mode,
+                    row.branch,
                 ],
             )
             .change_context(StoreError)
@@ -1500,9 +1501,11 @@ mod tests {
             .pop()
             .ok_or_else(|| Report::new(StoreError).attach("the group wasn't saved"))?;
 
-        // When saving its directory, pin, settle state, and draft setup.
+        // When saving its directory, branch, pin, settle state, and draft
+        // setup.
         let updated = GroupRow {
             dir: Some(PathBuf::from("/wt/orb-GT-514-login")),
+            branch: Some("GT-514-login-v2".to_owned()),
             pinned_at: Some(3_000),
             settled_override: Some(SettledOverride::Settled),
             settled_at: Some(4_000),

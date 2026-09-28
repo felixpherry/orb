@@ -8,16 +8,18 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
-use crate::feat::sessions::state::ProjectId;
+use crate::feat::sessions::state::{ProjectId, ProjectKind};
 
 /// One row a picker can show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerItem {
-    /// A project, matched on its name and path.
+    /// A project, matched on its name and path; one of orb's own (Research,
+    /// Learn) only on its name.
     Project {
         id: ProjectId,
         title: String,
         root: PathBuf,
+        kind: ProjectKind,
     },
     /// A subdirectory, matched on its name.
     Directory { name: String },
@@ -473,6 +475,11 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
     // A project is matched on "title\nroot". Typed text never holds a line
     // break, so every offset falls on one side of it.
     let (label, title_len) = match item {
+        PickerItem::Project {
+            title,
+            kind: ProjectKind::Research | ProjectKind::Learn,
+            ..
+        } => (title.clone(), None),
         PickerItem::Project { title, root, .. } => {
             (format!("{title}\n{}", root.display()), Some(title.len()))
         }
@@ -512,7 +519,7 @@ mod tests {
 
     use super::{BranchRow, Matches, PickerItem, PickerList, setting_label};
     use crate::feat::git::git_service::GitRef;
-    use crate::feat::sessions::state::ProjectId;
+    use crate::feat::sessions::state::{ProjectId, ProjectKind};
 
     fn directories(names: &[&str]) -> Vec<PickerItem> {
         names
@@ -528,6 +535,7 @@ mod tests {
             id: ProjectId(id),
             title: title.to_owned(),
             root: PathBuf::from(root),
+            kind: ProjectKind::Normal,
         }
     }
 

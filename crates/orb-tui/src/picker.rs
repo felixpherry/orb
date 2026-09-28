@@ -27,7 +27,7 @@ use orb_domain::feat::picker::list::{
     ALL_PROJECTS, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label, setting_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
-use orb_domain::feat::sessions::state::GroupKind;
+use orb_domain::feat::sessions::state::{GroupKind, ProjectKind};
 use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -270,6 +270,14 @@ fn row_content(
     home: &Path,
 ) -> (Vec<Span<'static>>, Option<RightColumn>) {
     match item {
+        PickerItem::Project {
+            title,
+            kind: ProjectKind::Research | ProjectKind::Learn,
+            ..
+        } => {
+            let folder = icon(FOLDER, badge(title, true).style.fg.unwrap_or(BLUE));
+            (labelled(folder, title, &matches.name), None)
+        }
         PickerItem::Project { title, root, .. } => {
             let shown = tilde(root, home);
             let named = shown.ends_with(title.as_str());
@@ -470,7 +478,7 @@ mod tests {
     use orb_domain::feat::git::git_service::GitRef;
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::{DraftTarget, PickTarget, PickerState};
-    use orb_domain::feat::sessions::state::{GroupId, GroupKind, ProjectId, ThreadId};
+    use orb_domain::feat::sessions::state::{GroupId, GroupKind, ProjectId, ProjectKind, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
@@ -487,6 +495,7 @@ mod tests {
             id: ProjectId(id),
             title: title.to_owned(),
             root: root.into(),
+            kind: ProjectKind::Normal,
         }
     }
 
@@ -1336,6 +1345,37 @@ mod tests {
         assert!(
             matches!(rows, (Some((_, all)), Some((_, orb))) if all < orb),
             "rows were at {rows:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn research_row_reads_just_its_name() {
+        // Given the project filter over orb and orb's Research project.
+        let research = PickerItem::Project {
+            id: ProjectId(2),
+            title: "Research".to_owned(),
+            root: "/Users/me/.orb/research".into(),
+            kind: ProjectKind::Research,
+        };
+        let picker = PickerState::project_filter(
+            vec![project(1, "orb", "/Users/me/dev/orb"), research],
+            None,
+            Focus::Sidebar,
+        );
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 16);
+
+        // Then Research's row, the second, is its folder and name, with no
+        // path or title on the right.
+        let row = lines(&buf)
+            .into_iter()
+            .find(|line| line.contains("Research"))
+            .map(|line| line.trim_matches(['│', ' ']).to_owned());
+        assert_eq!(
+            row,
+            Some(format!("2. {FOLDER} Research")),
+            "the Research row"
         );
     }
 

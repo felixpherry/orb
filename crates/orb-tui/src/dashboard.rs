@@ -305,6 +305,7 @@ fn value(state: &AppState, item: DashboardItem) -> Option<String> {
         (DashboardItem::Workspace, None, Some(thread)) => Some(tilde(&thread.cwd, home)),
         (DashboardItem::Branch, Some((_, draft)), _) => Some(branch_label(draft)),
         (DashboardItem::Branch, None, Some(thread)) => thread.branch.clone(),
+        (DashboardItem::Branch, None, None) => sessions.selected_group()?.1.branch.clone(),
         (DashboardItem::Model, Some((_, draft)), _) => {
             Some(setting_label(draft.model.as_deref()).to_owned())
         }
@@ -725,6 +726,30 @@ mod tests {
         let row = line_with(&buf, "Model");
         let expected = format!("Model  {}", setting_label(Some("opus")));
         assert!(row.contains(&expected), "Model row was '{row}'");
+    }
+
+    #[rstest::rstest]
+    fn started_feature_card_menu_shows_its_branch() {
+        // Given Feature group GT-514-login's card selected, its worktree on
+        // `main`.
+        let mut state = in_group(SidebarItem::Group(GroupId(9)));
+        if let Some(group) = state
+            .sessions
+            .projects
+            .first_mut()
+            .and_then(|project| project.groups.first_mut())
+        {
+            group.dir = Some("/wt/orb-1a2b3c4d".into());
+            group.branch = Some("main".to_owned());
+            group.draft = None;
+        }
+
+        // When drawing the dashboard 80×40.
+        let (buf, _) = draw(&state, None, 80, 40);
+
+        // Then the Branch row shows the group's branch.
+        let row = line_with(&buf, "Branch");
+        assert!(row.contains("Branch  main"), "Branch row was '{row}'");
     }
 
     #[rstest::rstest]

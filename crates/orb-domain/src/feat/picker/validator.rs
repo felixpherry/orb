@@ -130,7 +130,7 @@ mod tests {
     };
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
-    use crate::feat::sessions::state::{ProjectId, Sessions};
+    use crate::feat::sessions::state::{ProjectId, ProjectKind, Sessions};
     use crate::{AppState, Focus};
 
     const HOME: &str = "/home/me";
@@ -140,6 +140,7 @@ mod tests {
             id: ProjectId(1),
             title: "alpha".into(),
             root: "/alpha".into(),
+            kind: ProjectKind::Normal,
         }
     }
 

@@ -97,7 +97,7 @@ use super::store::{
 };
 use super::template;
 use super::transcript::{locate, scan_title};
-use super::validator::group_taken;
+use super::validator::{group_exists, on_disk};
 use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
@@ -106,6 +106,7 @@ use crate::feat::git::worktree::{
     hex, hex_branch, is_orb_worktree, new_worktree_path, previous_worktree, slug,
 };
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
+use crate::{AppState, Focus};
 
 /// How long to wait between polls while a turn is underway or orb is attached
 /// to any thread.
@@ -224,6 +225,13 @@ pub struct SwitchBranch {
     pub thread: ThreadId,
     pub git_ref: GitRef,
     pub to_root: bool,
+}
+
+/// Check a branch out in a group's worktree, moving every thread in it.
+#[derive(Debug)]
+pub struct CheckoutGroup {
+    pub group: GroupId,
+    pub git_ref: GitRef,
 }
 
 /// Try the start that waits for trust once more, now that the user had the
@@ -509,6 +517,18 @@ impl Message<SwitchBranch> for SessionsActor {
         } else {
             self.check_out(thread, &git_ref);
         }
+    }
+}
+
+impl Message<CheckoutGroup> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        CheckoutGroup { group, git_ref }: CheckoutGroup,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.check_out_group(group, &git_ref);
     }
 }
 
@@ -1399,7 +1419,7 @@ impl SessionsActor {
             (GroupKind::Feature, _) => {
                 let branch = group.branch.unwrap_or(group.name);
                 if self.services.git.branch_exists(&root, &branch) {
-                    return self.end_start(Err(group_taken(GroupKind::Feature, &branch, &title)));
+                    return self.end_start(Err(on_disk(GroupKind::Feature, &branch, &title)));
                 }
                 match self.add_worktree(&root, None, Some(&branch)) {
                     Ok(made) => (made.path.clone(), Some(branch), Some(made)),
@@ -1691,6 +1711,19 @@ impl SessionsActor {
         self.end_start(result);
     }
 
+    /// Checks `git_ref` out in group `id`'s worktree, which moves every
+    /// thread in it.
+    fn check_out_group(&mut self, id: GroupId, git_ref: &GitRef) {
+        let dir = self
+            .groups
+            .iter()
+            .find(|row| row.id == id)
+            .and_then(|row| row.dir.clone());
+        if let Some(dir) = dir {
+            let _ = self.check_out_in(&dir, git_ref);
+        }
+    }
+
     /// Checks `git_ref` out in thread `id`'s directory.
     fn check_out(&mut self, id: ThreadId, git_ref: &GitRef) {
         let cwd = self
@@ -1758,9 +1791,9 @@ impl SessionsActor {
         }
     }
 
-    /// Saves and shows `branch` on every thread in `cwd`, and on the draft
-    /// there: a local draft of a project rooted there, or one in that
-    /// worktree.
+    /// Saves and shows `branch` on every thread in `cwd`, on the group whose
+    /// worktree it is, and on the draft there: a local draft of a project
+    /// rooted there, or one in that worktree.
     fn show_branch(&mut self, cwd: &Path, branch: &str) -> Result<(), String> {
         let mut saved = Ok(());
         let mut app = self.state.write();
@@ -1772,6 +1805,19 @@ impl SessionsActor {
             if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
                 let status = thread.status;
                 show(thread, row, status);
+            }
+        }
+        for row in self
+            .groups
+            .iter_mut()
+            .filter(|row| row.dir.as_deref() == Some(cwd))
+        {
+            row.branch = Some(branch.to_owned());
+            if self.store.save_group(row).is_err() {
+                saved = Err(SAVE_FAILED.to_owned());
+            }
+            if let Some(shown) = group_mut(&mut app.sessions, row.id) {
+                *shown = group(row, &self.rows);
             }
         }
         for project in &mut app.sessions.projects {
@@ -1896,7 +1942,9 @@ impl SessionsActor {
     /// `<orb_root>/templates/<kind>`, seeded first when missing. Feature:
     /// refused while the branch `name` exists. Any refusal or failure shows on
     /// the mode line and leaves no group; a folder this call made is removed
-    /// again.
+    /// again. The name box that asked closes once the group is made, and
+    /// otherwise stays open with its text. A made group outside the project
+    /// filter clears the filter, and saves that.
     fn create_group(&mut self, kind: GroupKind, project: Option<ProjectId>, name: String) {
         let now = now_ms();
         let own = own_folder(kind);
@@ -1927,8 +1975,9 @@ impl SessionsActor {
             .as_ref()
             .map_err(Clone::clone)
             .and_then(|(id, root, title)| self.new_group(kind, *id, root, title, name, now));
-        {
+        let unfiltered = {
             let mut app = self.state.write();
+            let app = &mut *app;
             let sessions = &mut app.sessions;
             if let (Some((project_kind, ..)), Ok((id, root, title))) = (own, &resolved) {
                 show_project(
@@ -1940,19 +1989,31 @@ impl SessionsActor {
                     now,
                 );
             }
-            match created {
-                Ok(group) => {
+            let made = created.is_ok();
+            let unfiltered = match (created, resolved) {
+                (Ok(group), Ok((id, ..))) => {
                     sessions.cursor = Some(SidebarItem::GroupDraft(group.id));
                     sessions.error = None;
-                    if let Some(p) = resolved
-                        .ok()
-                        .and_then(|(id, ..)| sessions.projects.iter_mut().find(|p| p.id == id))
-                    {
+                    if let Some(p) = sessions.projects.iter_mut().find(|p| p.id == id) {
                         p.groups.push(group);
                     }
+                    let outside = sessions.filter.is_some_and(|filter| filter != id);
+                    if outside {
+                        sessions.filter = None;
+                    }
+                    outside
                 }
-                Err(error) => sessions.error = Some(error),
-            }
+                (Ok(_), Err(_)) => false,
+                (Err(error), _) => {
+                    sessions.error = Some(error);
+                    false
+                }
+            };
+            answer_name_box(app, made);
+            unfiltered
+        };
+        if unfiltered {
+            self.save_ui();
         }
         (self.wake)();
     }
@@ -1974,17 +2035,17 @@ impl SessionsActor {
             .iter()
             .any(|row| row.project_id == project && row.kind == kind && row.name == name);
         if taken {
-            return Err(group_taken(kind, &name, title));
+            return Err(group_exists(&name));
         }
         let (dir, branch) = match own_folder(kind) {
             None if self.services.git.branch_exists(root, &name) => {
-                return Err(group_taken(kind, &name, title));
+                return Err(on_disk(kind, &name, title));
             }
             None => (None, Some(name.clone())),
             Some((_, kind_dir, _)) => {
                 let dir = root.join(&name);
                 if dir.exists() {
-                    return Err(group_taken(kind, &name, title));
+                    return Err(on_disk(kind, &name, title));
                 }
                 let template = self.orb_root.join("templates").join(kind_dir);
                 let seeded = if template.exists() {
@@ -2250,8 +2311,10 @@ impl SessionsActor {
     }
 
     /// Force-removes Feature group `row`'s orb worktree at `dir`, then
-    /// safe-deletes its branch (an unmerged one stays, with git's reason).
-    /// Neither is touched while a thread outside the group works there.
+    /// safe-deletes the branch orb made for it, named after the group (an
+    /// unmerged one stays, with git's reason). A branch the group was
+    /// switched to is the user's and stays. Neither is touched while a
+    /// thread outside the group works there.
     fn remove_group_worktree(&self, row: &GroupRow, dir: &Path) -> Result<(), String> {
         let Some(root) = self
             .project_root(row.project_id)
@@ -2265,7 +2328,7 @@ impl SessionsActor {
         let git = &self.services.git;
         git.remove_worktree(&root, dir, true)
             .map_err(|report| git_reason(&report))?;
-        let branch = row.branch.as_deref().unwrap_or(&row.name);
+        let branch = row.name.as_str();
         if git.branch_exists(&root, branch) {
             git.delete_branch(&root, branch, false)
                 .map_err(|report| git_reason(&report))?;
@@ -2516,6 +2579,22 @@ fn group_mut(sessions: &mut Sessions, id: GroupId) -> Option<&mut Group> {
         .iter_mut()
         .flat_map(|project| &mut project.groups)
         .find(|group| group.id == id)
+}
+
+/// Answers the name box that asked for a group, if it's still waiting: closes
+/// it once the group is `made`, else leaves it open with its text for another
+/// try.
+fn answer_name_box(app: &mut AppState, made: bool) {
+    match (&mut app.rename, made) {
+        (Some(rename), false) if rename.creating => rename.creating = false,
+        (Some(rename), true) if rename.creating => {
+            app.rename = None;
+            if app.focus == Focus::Rename {
+                app.focus = Focus::Sidebar;
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The shown thread with id `id`.
@@ -2901,6 +2980,7 @@ mod tests {
 
     use super::{FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms};
     use crate::Focus;
+    use crate::TextInput;
     use crate::command::Workspace;
     use crate::common::{Services, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService};
@@ -2919,6 +2999,7 @@ mod tests {
         StoreError, ThreadRow, Ui,
     };
     use crate::feat::sessions::transcript::transcript_path;
+    use crate::feat::sidebar::state::{Rename, RenameTarget};
 
     const PROJECT_ROOT: &str = "/tmp/orb";
     /// The branch checked out wherever the fake git lists refs.
@@ -8143,11 +8224,163 @@ mod tests {
         // Then the second is refused as taken, and one group shows.
         assert_eq!(
             (error_of(&state), groups_of(&state).len()),
-            (
-                Some("~/.orb/research/tokio-cancel already exists".to_owned()),
-                1
-            ),
+            (Some("Group tokio-cancel already exists".to_owned()), 1),
             "a second create of the same group should be refused"
+        );
+        Ok(())
+    }
+
+    /// Opens the name box for a new `kind` group in `project` holding `text`,
+    /// as `⏎` leaves it: waiting for the actor, with the keys.
+    fn waiting_name_box(state: &State, kind: GroupKind, project: Option<ProjectId>, text: &str) {
+        let mut app = state.write();
+        app.rename = Some(Rename {
+            target: RenameTarget::NewGroup { kind, project },
+            input: TextInput::new(text),
+            creating: true,
+        });
+        app.focus = Focus::Rename;
+    }
+
+    /// The name box's text and whether it waits, and the focus.
+    fn name_box_of(state: &State) -> (Option<(String, bool)>, Focus) {
+        let app = state.read();
+        let shown = app
+            .rename
+            .as_ref()
+            .map(|rename| (rename.input.text().to_owned(), rename.creating));
+        (shown, app.focus)
+    }
+
+    #[rstest::rstest]
+    fn made_group_closes_its_name_box() -> Result<(), Report<StoreError>> {
+        // Given the name box waiting for Research group `tokio-cancel`.
+        let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+        waiting_name_box(&state, GroupKind::Research, None, "tokio cancel");
+
+        // When creating it.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then the box is closed and the sidebar has the keys.
+        assert_eq!(
+            name_box_of(&state),
+            (None, Focus::Sidebar),
+            "a made group should close its name box"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn group_refused_on_an_existing_branch_keeps_its_name_box_open()
+    -> Result<(), Report<StoreError>> {
+        // Given the name box waiting for Feature group `GT-514-login` in orb,
+        // where that branch exists.
+        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::having("GT-514-login"))?;
+        waiting_name_box(&state, GroupKind::Feature, Some(orb), "GT-514 login");
+
+        // When creating it.
+        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
+
+        // Then the box stays open with the name, no longer waiting.
+        assert_eq!(
+            name_box_of(&state),
+            (Some(("GT-514 login".to_owned(), false)), Focus::Rename),
+            "an existing branch should keep the name box open"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn group_refused_on_an_existing_folder_keeps_its_name_box_open()
+    -> Result<(), Report<StoreError>> {
+        // Given the name box waiting for Research group `x`, whose folder
+        // exists.
+        let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+        fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
+        waiting_name_box(&state, GroupKind::Research, None, "x");
+
+        // When creating it.
+        actor.create_group(GroupKind::Research, None, "x".into());
+
+        // Then the box stays open with the name, no longer waiting.
+        assert_eq!(
+            name_box_of(&state),
+            (Some(("x".to_owned(), false)), Focus::Rename),
+            "an existing folder should keep the name box open"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn made_group_outside_the_filter_clears_it() -> Result<(), Report<StoreError>> {
+        // Given the sidebar filtered to orb.
+        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
+        state.write().sessions.filter = Some(orb);
+
+        // When creating Research group `tokio-cancel`, outside orb.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then the filter goes back to all projects.
+        assert_eq!(
+            state.read().sessions.filter,
+            None,
+            "a group outside the filter should clear it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn made_group_outside_the_filter_saves_the_cleared_filter() -> Result<(), Report<StoreError>> {
+        // Given the sidebar filtered to orb, and that saved.
+        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
+        state.write().sessions.filter = Some(orb);
+        actor.save_ui();
+
+        // When creating Research group `tokio-cancel`, outside orb.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then the store holds no filter.
+        assert_eq!(
+            actor.store.ui()?.project_filter,
+            None,
+            "the cleared filter should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn made_group_inside_the_filter_keeps_it() -> Result<(), Report<StoreError>> {
+        // Given the sidebar filtered to orb.
+        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
+        state.write().sessions.filter = Some(orb);
+
+        // When creating Feature group `GT-514-login` in orb.
+        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
+
+        // Then the filter stays on orb.
+        assert_eq!(
+            state.read().sessions.filter,
+            Some(orb),
+            "a group inside the filter should keep it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn refused_group_keeps_the_filter() -> Result<(), Report<StoreError>> {
+        // Given the sidebar filtered to orb, and Research folder `x` on disk.
+        let (orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
+        fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
+        state.write().sessions.filter = Some(orb);
+
+        // When creating Research group `x`.
+        actor.create_group(GroupKind::Research, None, "x".into());
+
+        // Then the filter stays on orb.
+        assert_eq!(
+            state.read().sessions.filter,
+            Some(orb),
+            "a refused group should leave the filter alone"
         );
         Ok(())
     }
@@ -9450,6 +9683,97 @@ mod tests {
                 force: false,
             }),
             "the branch should be deleted only if merged"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_switched_feature_group_keeps_the_branch_it_was_switched_to()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group switched to the user's branch `main`.
+        let git = FakeGit::having("main");
+        let (group, mut actor, _state) = started_feature_group(&git).await?;
+        actor.check_out_group(group, &git_ref("main", false));
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then `main` isn't deleted: only the slug branch is orb's.
+        assert!(
+            !git.calls().contains(&GitCall::DeleteBranch {
+                branch: "main".into(),
+                force: false,
+            }),
+            "a branch the group was switched to should stay"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn switching_a_groups_branch_shows_it_on_the_group() -> Result<(), Report<StoreError>> {
+        // Given a started Feature group on its slug branch.
+        let (group, mut actor, state) = started_feature_group(&FakeGit::local()).await?;
+
+        // When switching its worktree to `main`.
+        actor.check_out_group(group, &git_ref("main", false));
+
+        // Then the card shows `main`.
+        assert_eq!(
+            shown_group(&state, group).and_then(|group| group.branch),
+            Some("main".to_owned()),
+            "the group should show its new branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn switching_a_groups_branch_saves_it() -> Result<(), Report<StoreError>> {
+        // Given a started Feature group on its slug branch.
+        let (group, mut actor, _state) = started_feature_group(&FakeGit::local()).await?;
+
+        // When switching its worktree to `main`.
+        actor.check_out_group(group, &git_ref("main", false));
+
+        // Then the saved group is on `main`.
+        assert_eq!(
+            saved_group(&actor.store, group)?.branch.as_deref(),
+            Some("main"),
+            "the group's new branch should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn switching_a_groups_branch_moves_every_thread_in_it() -> Result<(), Report<StoreError>>
+    {
+        // Given a started Feature group holding idle threads aa and bb.
+        let (store, group, threads) = store_with_group(
+            GroupKind::Feature,
+            Some(Path::new(HEX_WORKTREE)),
+            &["aa", "bb"],
+        )?;
+        let host = FakeHost::listing(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Idle),
+        ]);
+        let (mut actor, state) =
+            start_with(store, &host, &FakeGit::local(), Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When switching its worktree to `main`.
+        actor.check_out_group(group, &git_ref("main", false));
+
+        // Then both threads show `main`.
+        let branches: Vec<Option<String>> =
+            threads.iter().map(|id| branch_of(&state, *id)).collect();
+        assert_eq!(
+            branches,
+            vec![Some("main".to_owned()); 2],
+            "every thread in the worktree should show the new branch"
         );
         Ok(())
     }

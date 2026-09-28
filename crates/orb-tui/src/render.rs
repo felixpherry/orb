@@ -436,6 +436,7 @@ mod tests {
             rename: Some(Rename {
                 target: RenameTarget::Thread(ThreadId(1)),
                 input: TextInput::new("Fix"),
+                creating: false,
             }),
             ..selected(focus)
         }

@@ -101,6 +101,7 @@ mod tests {
         let rename = Rename {
             target,
             input: TextInput::new(text),
+            creating: false,
         };
         let cursor = render(&rename, area, &mut buf);
         (buf, cursor)

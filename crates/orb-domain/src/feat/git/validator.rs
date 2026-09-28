@@ -1,12 +1,13 @@
 //! Checks whether the user's git actions on the selected thread or draft can
-//! proceed: changing its workspace, and switching its branch.
+//! proceed: changing its workspace, and switching its branch (also on a
+//! Feature group's card, for the group's worktree).
 
 use std::path::Path;
 
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::{DraftWorkspace, Sessions};
+use crate::feat::sessions::state::{DraftWorkspace, GroupKind, Sessions, SidebarItem};
 
 /// Why changing the selected thread's or draft's workspace can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -58,14 +59,18 @@ pub fn validate_change_workspace(state: &AppState) -> Result<(), ChangeWorkspace
 /// [`SwitchBranchError::Busy`].
 pub const BUSY_DIRECTORY: &str = "Claude is working in this directory";
 
-/// Why switching the selected thread's or draft's branch can't proceed.
+/// Why switching the selected thread's, draft's or group's branch can't
+/// proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum SwitchBranchError {
-    /// The cursor isn't on a thread or a draft.
+    /// The cursor isn't on a thread, a draft or a group's card.
     NoSelection,
-    /// The thread is in a group, whose directory is fixed.
+    /// The thread is in a group, whose branch is switched from its card.
     Grouped,
+    /// The card's group has no worktree: a Research or Learn group, or a
+    /// Feature group before its draft starts.
+    NoWorktree,
     /// A session is already being started.
     Starting,
     /// A thread in the directory the checkout would change is working or
@@ -73,32 +78,47 @@ pub enum SwitchBranchError {
     Busy,
 }
 
-/// Allow switching the selected thread's or draft's branch unless a start is
-/// in flight or a turn is underway in the directory a checkout would change.
-/// A local draft checks out in the project's root, and an existing-worktree
-/// draft in its worktree; a new-worktree draft only records its base, and a
-/// draft whose project isn't a git repository is offered `git init` instead.
+/// Allow switching the selected thread's, draft's or Feature group card's
+/// branch unless a start is in flight or a turn is underway in the directory
+/// a checkout would change. A local draft checks out in the project's root,
+/// an existing-worktree draft in its worktree, and a group in its worktree; a
+/// new-worktree draft only records its base, and a draft whose project isn't
+/// a git repository is offered `git init` instead.
 ///
 /// # Errors
 ///
-/// Returns [`SwitchBranchError::NoSelection`] without a selected thread or
-/// draft, [`SwitchBranchError::Grouped`] on a thread in a group,
-/// [`SwitchBranchError::Starting`] while a start is in flight, and
+/// Returns [`SwitchBranchError::NoSelection`] without a selected thread,
+/// draft or group card, [`SwitchBranchError::Grouped`] on a thread in a
+/// group, [`SwitchBranchError::NoWorktree`] on a card whose group has no
+/// worktree, [`SwitchBranchError::Starting`] while a start is in flight, and
 /// [`SwitchBranchError::Busy`] while any thread in the same directory is in
 /// progress.
 pub fn validate_switch_branch(state: &AppState) -> Result<(), SwitchBranchError> {
     let sessions = &state.sessions;
-    match (sessions.selected_draft(), sessions.selected_thread()) {
-        (None, None) => Err(SwitchBranchError::NoSelection),
-        (None, Some(thread)) if thread.group.is_some() => Err(SwitchBranchError::Grouped),
+    let card = match sessions.cursor {
+        Some(SidebarItem::Group(_)) => sessions.selected_group(),
+        _ => None,
+    };
+    match (sessions.selected_draft(), sessions.selected_thread(), card) {
+        (None, None, None) => Err(SwitchBranchError::NoSelection),
+        (None, Some(thread), _) if thread.group.is_some() => Err(SwitchBranchError::Grouped),
+        (None, None, Some((_, group))) if group.kind != GroupKind::Feature => {
+            Err(SwitchBranchError::NoWorktree)
+        }
         _ if sessions.starting => Err(SwitchBranchError::Starting),
-        (Some((_, draft)), _) if !draft.repo => Ok(()),
-        (Some((project, draft)), _) => match &draft.workspace {
+        (Some((_, draft)), ..) if !draft.repo => Ok(()),
+        (Some((project, draft)), ..) => match &draft.workspace {
             DraftWorkspace::Existing(path) => not_busy(sessions, path),
             DraftWorkspace::NewWorktree => Ok(()),
             DraftWorkspace::Local => not_busy(sessions, &project.root),
         },
-        (None, Some(thread)) => not_busy(sessions, &thread.cwd),
+        (None, Some(thread), _) => not_busy(sessions, &thread.cwd),
+        (None, None, Some((_, group))) => group
+            .dir
+            .as_deref()
+            .map_or(Err(SwitchBranchError::NoWorktree), |dir| {
+                not_busy(sessions, dir)
+            }),
     }
 }
 
@@ -123,8 +143,8 @@ mod tests {
     };
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, GroupId, Project, ProjectId, ProjectKind, Sessions, SidebarItem,
-        Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupId, GroupKind, Project, ProjectId, ProjectKind,
+        Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
     /// One project at `/work` whose only thread, selected, runs in the root
@@ -451,6 +471,87 @@ mod tests {
             result,
             Err(SwitchBranchError::Grouped),
             "a group's directory is fixed"
+        );
+    }
+
+    /// [`grouped`] with the cursor on group 9's card: a `kind` group, in
+    /// `dir` when given.
+    fn on_card(kind: GroupKind, dir: Option<&str>) -> AppState {
+        let mut state = grouped();
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.groups = vec![Group {
+                id: GroupId(9),
+                kind,
+                name: "GT-514-login".into(),
+                dir: dir.map(Into::into),
+                branch: None,
+                created_at: SystemTime::UNIX_EPOCH,
+                pinned_at: None,
+                settled_at: None,
+                active_since: SystemTime::UNIX_EPOCH,
+                draft: None,
+            }];
+        }
+        state.sessions.cursor = Some(SidebarItem::Group(GroupId(9)));
+        state
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_allowed_on_a_started_feature_card() {
+        // Given a Feature group's card, its worktree at /wt/orb-1a2b3c4d.
+        let state = on_card(GroupKind::Feature, Some("/wt/orb-1a2b3c4d"));
+
+        // When validating a branch switch.
+        let result = validate_switch_branch(&state);
+
+        // Then it's allowed.
+        assert_eq!(result, Ok(()), "a Feature card switches its worktree");
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_rejected_on_a_feature_card_while_its_thread_works() {
+        // Given a Feature group's card, its worktree at /work, where its
+        // thread is working.
+        let mut state = on_card(GroupKind::Feature, Some("/work"));
+        if let Some(thread) = state
+            .sessions
+            .projects
+            .first_mut()
+            .and_then(|project| project.threads.first_mut())
+        {
+            thread.status = ThreadStatus::Working;
+        }
+
+        // When validating a branch switch.
+        let result = validate_switch_branch(&state);
+
+        // Then validation fails with Busy.
+        assert_eq!(
+            result,
+            Err(SwitchBranchError::Busy),
+            "a checkout would change files under the group's running turn"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::research(GroupKind::Research, Some("/orb/research/x"))]
+    #[case::learn(GroupKind::Learn, Some("/orb/learn/x"))]
+    #[case::unstarted_feature(GroupKind::Feature, None)]
+    fn switch_branch_rejected_on_a_card_without_a_worktree(
+        #[case] kind: GroupKind,
+        #[case] dir: Option<&str>,
+    ) {
+        // Given a card whose group has no worktree.
+        let state = on_card(kind, dir);
+
+        // When validating a branch switch.
+        let result = validate_switch_branch(&state);
+
+        // Then validation fails with NoWorktree.
+        assert_eq!(
+            result,
+            Err(SwitchBranchError::NoWorktree),
+            "a {kind:?} card at {dir:?} has no worktree"
         );
     }
 }

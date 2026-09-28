@@ -22,15 +22,25 @@ pub enum NewGroupError {
     /// A group of that kind and slug already exists in the project: the
     /// mode-line text.
     Taken(String),
+    /// `⏎` already asked for the group, and the sessions actor hasn't
+    /// answered yet.
+    Creating,
 }
 
 /// Characters a group's slug can't hold anywhere.
 const INVALID_CHARS: [char; 8] = ['/', '\\', '~', '^', ':', '?', '*', '['];
 
-/// The mode-line text for a `kind` group's `slug` that's taken in `project`
-/// (its title).
+/// The mode-line text for a group `slug` that another group of its kind in
+/// its project already has.
 #[must_use]
-pub fn group_taken(kind: GroupKind, slug: &str, project: &str) -> String {
+pub fn group_exists(slug: &str) -> String {
+    format!("Group {slug} already exists")
+}
+
+/// The mode-line text for a `kind` group's `slug` whose branch (in `project`,
+/// its title) or folder is already on disk.
+#[must_use]
+pub fn on_disk(kind: GroupKind, slug: &str, project: &str) -> String {
     match kind {
         GroupKind::Feature => format!("branch {slug} already exists in {project}"),
         GroupKind::Research => format!("~/.orb/research/{slug} already exists"),
@@ -47,16 +57,21 @@ pub fn group_taken(kind: GroupKind, slug: &str, project: &str) -> String {
 /// Returns [`NewGroupError::Empty`] when the box isn't naming a new group or
 /// the slug is empty, [`NewGroupError::Invalid`] with the offending char or
 /// sequence when the slug holds one of `/ \ ~ ^ : ? * [`, starts with `-` or
-/// `.`, or holds `..`, and [`NewGroupError::Taken`] with the mode-line text
-/// when the project already has that group.
+/// `.`, or holds `..`, [`NewGroupError::Taken`] with the mode-line text
+/// when the project already has that group, and [`NewGroupError::Creating`]
+/// while the box's group is being made.
 pub fn validate_new_group(state: &AppState) -> Result<(), NewGroupError> {
     let Some(Rename {
         target: RenameTarget::NewGroup { kind, project },
         input,
+        creating,
     }) = &state.rename
     else {
         return Err(NewGroupError::Empty);
     };
+    if *creating {
+        return Err(NewGroupError::Creating);
+    }
     let slug = group_slug(input.text());
     let invalid = slug
         .matches(INVALID_CHARS)
@@ -72,7 +87,7 @@ pub fn validate_new_group(state: &AppState) -> Result<(), NewGroupError> {
         (true, _, _) => Err(NewGroupError::Empty),
         (false, Some(what), _) => Err(NewGroupError::Invalid(what.to_owned())),
         (false, None, Some(p)) if p.groups.iter().any(|g| g.kind == *kind && g.name == slug) => {
-            Err(NewGroupError::Taken(group_taken(*kind, &slug, &p.title)))
+            Err(NewGroupError::Taken(group_exists(&slug)))
         }
         (false, None, _) => Ok(()),
     }
@@ -164,7 +179,7 @@ pub enum DeleteError {
 }
 
 /// What the mode line says when `d` would leave a group empty.
-pub const LAST_IN_GROUP: &str = "A group keeps at least one thread — d on the group row";
+pub const LAST_IN_GROUP: &str = "Group needs at least one draft or thread";
 
 /// Allow deleting the selected thread, whatever it is doing, unless it is its
 /// group's last; deleting the selected group; and discarding the selected
@@ -262,7 +277,7 @@ pub enum NewSiblingError {
 }
 
 /// What the mode line says when `n` is pressed on a group that has only its draft.
-pub const STARTS_FROM_DRAFT: &str = "A group starts from its draft — ⏎ on New thread";
+pub const STARTS_FROM_DRAFT: &str = "Group already has a draft";
 
 /// Allow a sibling from an active group's card or thread, one start at a
 /// time, once the group has a thread.
@@ -724,6 +739,7 @@ mod tests {
                     project: (kind == GroupKind::Feature).then_some(ProjectId(1)),
                 },
                 input: TextInput::new(text),
+                creating: false,
             }),
             ..AppState::default()
         }
@@ -769,24 +785,38 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(GroupKind::Feature, "branch GT-514-login already exists in orb")]
-    #[case(GroupKind::Research, "~/.orb/research/GT-514-login already exists")]
-    fn new_group_rejected_when_taken_in_the_project(
-        #[case] kind: GroupKind,
-        #[case] expected: &str,
-    ) {
+    #[case(GroupKind::Feature)]
+    #[case(GroupKind::Research)]
+    fn new_group_rejected_when_taken_in_the_project(#[case] kind: GroupKind) {
         // Given the name box holding a settled group's name.
         let state = naming(kind, "GT-514 login");
 
         // When validating the new group.
         let result = validate_new_group(&state);
 
-        // Then it's refused with the taken text.
+        // Then it's refused because a group has the name.
         assert_eq!(
             result,
-            Err(NewGroupError::Taken(expected.to_owned())),
+            Err(NewGroupError::Taken(
+                "Group GT-514-login already exists".to_owned()
+            )),
             "a taken {kind:?} slug"
         );
+    }
+
+    #[rstest::rstest]
+    fn new_group_rejected_while_the_group_is_being_made() {
+        // Given the name box holding a fresh name that `⏎` already asked for.
+        let mut state = naming(GroupKind::Research, "tokio cancel");
+        if let Some(rename) = &mut state.rename {
+            rename.creating = true;
+        }
+
+        // When validating the new group.
+        let result = validate_new_group(&state);
+
+        // Then it's refused until the actor answers.
+        assert_eq!(result, Err(NewGroupError::Creating), "a second ⏎");
     }
 
     #[rstest::rstest]

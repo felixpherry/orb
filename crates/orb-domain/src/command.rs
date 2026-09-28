@@ -2,7 +2,7 @@
 //! has updated [`AppState`](crate::AppState). Pane commands,
 //! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
 //! frontend loop; session commands (drafts, add or remove a project, move to
-//! another workspace, switch branch, refresh, pin, rename, settle, delete,
+//! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle, delete,
 //! visit, save the sidebar's width and filter, create and start groups, start a
 //! group's sibling, pin, settle and delete groups, save a group draft) go to
 //! the sessions actor.
@@ -52,6 +52,9 @@ pub enum Command {
         git_ref: GitRef,
         to_root: bool,
     },
+    /// Check the branch out in the group's worktree, which moves every thread
+    /// in it.
+    CheckoutGroup { group: GroupId, git_ref: GitRef },
     /// List the refs of the directory's repository into the open branch picker.
     ListBranches(PathBuf),
     /// Focus the tool's zellij pane for the directory, else open one.
