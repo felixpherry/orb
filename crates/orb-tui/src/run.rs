@@ -711,6 +711,35 @@ impl App {
                     .try_send();
                 Ok(())
             }
+            Command::CreateGroup {
+                kind,
+                project,
+                name,
+            } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::CreateGroup {
+                        kind: *kind,
+                        project: *project,
+                        name: name.clone(),
+                    })
+                    .try_send();
+                Ok(())
+            }
+            Command::StartGroupDraft(group) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::StartGroupDraft(*group))
+                    .try_send();
+                Ok(())
+            }
+            Command::SaveGroupDraft(group) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::SaveGroupDraft(*group))
+                    .try_send();
+                Ok(())
+            }
         }
     }
 

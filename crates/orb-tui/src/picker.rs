@@ -109,7 +109,7 @@ fn popup_rect(area: Rect, shown: u16, total: u16) -> Rect {
 /// The picker's name, centred in its top border.
 fn title(kind: &PickerKind) -> &'static str {
     match kind {
-        PickerKind::Projects => "Projects",
+        PickerKind::Projects | PickerKind::GroupProject => "Projects",
         PickerKind::ProjectFilter => "Filter projects",
         PickerKind::Directories { .. } => "Add project",
         PickerKind::Workspace { .. } => "Workspace",
@@ -459,7 +459,7 @@ mod tests {
     use orb_domain::Focus;
     use orb_domain::feat::git::git_service::GitRef;
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
-    use orb_domain::feat::picker::state::{PickTarget, PickerState};
+    use orb_domain::feat::picker::state::{DraftTarget, PickTarget, PickerState};
     use orb_domain::feat::sessions::state::{ProjectId, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
@@ -660,11 +660,15 @@ mod tests {
         "Add project"
     )]
     #[case(PickerState::project_filter(vec![PickerItem::AllProjects], None, Focus::Sidebar), "Filter projects")]
+    #[case(PickerState::group_project(vec![], Focus::Sidebar), "Projects")]
     #[case(workspace(), "Workspace")]
     #[case(branches(vec![branch("main", None)]), "Branches")]
-    #[case(PickerState::models(ProjectId(1), None, Focus::Dashboard), "Model")]
     #[case(
-        PickerState::permissions(ProjectId(1), None, Focus::Dashboard),
+        PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard),
+        "Model"
+    )]
+    #[case(
+        PickerState::permissions(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard),
         "Permission mode"
     )]
     #[case(
@@ -757,7 +761,8 @@ mod tests {
     fn heading_is_not_numbered() {
         // Given a model picker, whose five current models come before the
         // Legacy models heading.
-        let picker = PickerState::models(ProjectId(1), None, Focus::Dashboard);
+        let picker =
+            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -935,7 +940,8 @@ mod tests {
     #[rstest::rstest]
     fn model_row_starts_with_the_claude_mark() {
         // Given a model picker.
-        let picker = PickerState::models(ProjectId(1), None, Focus::Dashboard);
+        let picker =
+            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -953,7 +959,8 @@ mod tests {
     #[rstest::rstest]
     fn permission_row_starts_with_a_shield() {
         // Given a permission picker.
-        let picker = PickerState::permissions(ProjectId(1), None, Focus::Dashboard);
+        let picker =
+            PickerState::permissions(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -1215,7 +1222,11 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_lists_default_first() {
         // Given a model picker.
-        let picker = PickerState::models(ProjectId(1), Some("sonnet"), Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some("sonnet"),
+            Focus::Dashboard,
+        );
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -1231,7 +1242,8 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_names_the_models() {
         // Given a model picker.
-        let picker = PickerState::models(ProjectId(1), None, Focus::Dashboard);
+        let picker =
+            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -1247,7 +1259,8 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_labels_the_legacy_models() {
         // Given a model picker.
-        let picker = PickerState::models(ProjectId(1), None, Focus::Dashboard);
+        let picker =
+            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);

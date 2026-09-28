@@ -5,7 +5,7 @@
 //! scope is the focus and what the sidebar cursor is on; `<Space>` is the
 //! leader and shows a popup. A key that does nothing for the selection isn't
 //! bound there (`␣m`/`␣a` on a thread, `p`/`s`/`r` off a thread, `␣w`/`␣b`
-//! and the tool keys `␣t`/`␣g`/`␣v` with nothing selected, and the
+//! and the tool keys `␣t`/`␣gg`/`␣v` with nothing selected, and the
 //! dashboard's `m`/`a` off a draft and `o`/`w`/`b`/`t`/`g`/`v` with nothing
 //! selected), so the popups don't offer it. On the dashboard each menu item's
 //! letter runs it, `j`/`k` or `↓`/`↑` move the menu cursor, and `⏎` runs the
@@ -17,7 +17,8 @@
 //! them for removing a project from the project filter. The rename box (`r`)
 //! and the sidebar search (`/` or `i`) use the picker's keys. On a group's
 //! card, draft or threads, `l`/`h` open and close the group, and `␣w`/`␣b`
-//! aren't bound.
+//! aren't bound. `␣gf`/`␣gr`/`␣gl` add a Feature, Research or Learn group in
+//! every scope.
 
 use std::fmt;
 
@@ -25,7 +26,7 @@ use orb_domain::feat::dashboard::DashboardItem::{
     AddProject, Branch, FilterProjects, Lazygit, Model, Neovim, NewSession, Open, Permission, Quit,
     Shell, Start, Workspace,
 };
-use orb_domain::feat::sessions::state::Sessions;
+use orb_domain::feat::sessions::state::{GroupKind, Sessions};
 use orb_domain::feat::zellij::zellij_service::Tool;
 use orb_domain::{Focus, Intent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -192,6 +193,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     ];
     let mut keymap = Keymap::new();
     keymap.describe_group("<leader>", "leader");
+    keymap.describe_group("<leader>g", "group");
     for scope in SIDEBAR {
         keymap
             .bind("j", Intent::SelectNext, KeyCategory::Navigation, scope)
@@ -331,12 +333,31 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         }
     }
     for scope in SIDEBAR.into_iter().chain(DASHBOARD) {
-        keymap.bind(
-            "<leader>e",
-            Intent::ToggleSidebar,
-            KeyCategory::Navigation,
-            scope,
-        );
+        keymap
+            .bind(
+                "<leader>e",
+                Intent::ToggleSidebar,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>gf",
+                Intent::NewGroup(GroupKind::Feature),
+                KeyCategory::Sessions,
+                scope,
+            )
+            .bind(
+                "<leader>gr",
+                Intent::NewGroup(GroupKind::Research),
+                KeyCategory::Sessions,
+                scope,
+            )
+            .bind(
+                "<leader>gl",
+                Intent::NewGroup(GroupKind::Learn),
+                KeyCategory::Sessions,
+                scope,
+            );
     }
     for scope in [
         Scope::Sidebar,
@@ -376,7 +397,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind(
-                "<leader>g",
+                "<leader>gg",
                 Intent::OpenTool(Tool::Lazygit),
                 KeyCategory::Tools,
                 scope,
@@ -1206,10 +1227,7 @@ mod tests {
             Scope::DashboardDraft
         )]
         scope: Scope,
-        #[values(('t', Tool::Shell), ('g', Tool::Lazygit), ('v', Tool::Nvim))] binding: (
-            char,
-            Tool,
-        ),
+        #[values(('t', Tool::Shell), ('v', Tool::Nvim))] binding: (char, Tool),
     ) {
         // Given Space already pressed.
         let (pressed, tool) = binding;
@@ -1238,11 +1256,130 @@ mod tests {
         // Given the leader popup's keys in the scope.
         let keys = leader_popup(scope);
 
-        // When looking for `t`, `g` and `v`.
-        let found = ['t', 'g', 'v'].map(|c| keys.contains(&key(KeyCode::Char(c))));
+        // When looking for `t` and `v`.
+        let found = ['t', 'v'].map(|c| keys.contains(&key(KeyCode::Char(c))));
 
-        // Then all three are listed exactly when a thread or draft is selected.
-        assert_eq!(found, [listed; 3], "t/g/v in the {scope:?} leader popup");
+        // Then both are listed exactly when a thread or draft is selected.
+        assert_eq!(found, [listed; 2], "t/v in the {scope:?} leader popup");
+    }
+
+    #[rstest::rstest]
+    fn leader_gg_opens_lazygit(
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarDraft,
+            Scope::Dashboard,
+            Scope::DashboardDraft,
+            Scope::SidebarGroup,
+            Scope::SidebarGroupThread,
+            Scope::SidebarGroupDraft,
+            Scope::DashboardGroup,
+            Scope::DashboardGroupThread,
+            Scope::DashboardGroupDraft
+        )]
+        scope: Scope,
+    ) {
+        // Given Space and `g` already pressed.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+        press(&mut keys, key(KeyCode::Char('g')));
+
+        // When pressing `g` again.
+        let intent = press(&mut keys, key(KeyCode::Char('g')));
+
+        // Then it opens lazygit.
+        assert_eq!(
+            intent,
+            Some(Intent::OpenTool(Tool::Lazygit)),
+            "Space g g in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_g_new_group_keys_yield_their_kind(
+        #[values(Scope::SidebarEmpty, Scope::DashboardGroup)] scope: Scope,
+        #[values(
+            ('f', GroupKind::Feature),
+            ('r', GroupKind::Research),
+            ('l', GroupKind::Learn)
+        )]
+        binding: (char, GroupKind),
+    ) {
+        // Given Space and `g` already pressed.
+        let (pressed, kind) = binding;
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+        press(&mut keys, key(KeyCode::Char('g')));
+
+        // When pressing the kind's key.
+        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
+
+        // Then it starts a group of that kind.
+        assert_eq!(
+            intent,
+            Some(Intent::NewGroup(kind)),
+            "Space g {pressed} in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::SidebarEmpty, &['f', 'l', 'r'])]
+    #[case(Scope::DashboardEmpty, &['f', 'l', 'r'])]
+    #[case(Scope::Sidebar, &['f', 'g', 'l', 'r'])]
+    #[case(Scope::SidebarGroupDraft, &['f', 'g', 'l', 'r'])]
+    #[case(Scope::Dashboard, &['f', 'g', 'l', 'r'])]
+    fn leader_g_popup_lists_the_scopes_group_keys(#[case] scope: Scope, #[case] expected: &[char]) {
+        // Given orb's keymap in the scope.
+        let keymap = keymap();
+
+        // When listing the keys under Space g.
+        let mut found: Vec<char> = keymap
+            .get_children_at_path(&[key(KeyCode::Char(' ')), key(KeyCode::Char('g'))], &scope)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, _)| match key.code {
+                KeyCode::Char(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        found.sort_unstable();
+
+        // Then they are the scope's group keys.
+        assert_eq!(found, expected, "Space g keys in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::Sidebar, "befgnptvw")]
+    #[case(Scope::SidebarDraft, "abefgmnptvw")]
+    #[case(Scope::SidebarEmpty, "efgnp")]
+    #[case(Scope::SidebarGroup, "efgnptv")]
+    #[case(Scope::SidebarGroupThread, "efgnptv")]
+    #[case(Scope::SidebarGroupDraft, "aefgmnptv")]
+    #[case(Scope::Dashboard, "begnptvw")]
+    #[case(Scope::DashboardDraft, "abegmnptvw")]
+    #[case(Scope::DashboardEmpty, "egnp")]
+    #[case(Scope::DashboardGroup, "egnptv")]
+    #[case(Scope::DashboardGroupThread, "egnptv")]
+    #[case(Scope::DashboardGroupDraft, "aegmnptv")]
+    fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
+        // Given orb's keymap in the scope.
+        let popup = leader_popup(scope);
+
+        // When listing the leader popup's keys, sorted.
+        let found: String = {
+            let mut chars: Vec<char> = popup
+                .into_iter()
+                .filter_map(|key| match key.code {
+                    KeyCode::Char(c) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            chars.sort_unstable();
+            chars.into_iter().collect()
+        };
+
+        // Then they are the scope's row of the spec's scope table.
+        assert_eq!(found, expected, "Space keys in {scope:?}");
     }
 
     #[rstest::rstest]

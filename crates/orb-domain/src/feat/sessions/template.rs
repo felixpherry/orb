@@ -1,0 +1,202 @@
+//! Group folder templates: the folder a new Research or Learn group is copied
+//! from, written from orb's built-in default when the user has none.
+
+use std::fs;
+use std::os::unix::fs::symlink;
+use std::path::Path;
+
+use error_stack::{Report, ResultExt};
+use wherror::Error;
+
+use super::state::GroupKind;
+
+/// The built-in `AGENTS.md` for a Research group.
+const RESEARCH: &str = include_str!("../../../templates/research/AGENTS.md");
+/// The built-in `AGENTS.md` for a Learn group.
+const LEARN: &str = include_str!("../../../templates/learn/AGENTS.md");
+
+/// A template couldn't be written or copied.
+#[derive(Debug, Error)]
+#[error(debug)]
+pub struct TemplateError;
+
+/// Writes the built-in template for `kind` into `dir` (made if missing):
+/// `AGENTS.md`, and `CLAUDE.md` as a symlink to it.
+///
+/// # Errors
+///
+/// Returns an error for a Feature kind, which has no template, or if a write
+/// fails.
+pub fn seed(dir: &Path, kind: GroupKind) -> Result<(), Report<TemplateError>> {
+    let text = match kind {
+        GroupKind::Research => RESEARCH,
+        GroupKind::Learn => LEARN,
+        GroupKind::Feature => {
+            return Err(Report::new(TemplateError).attach("a Feature group has no template"));
+        }
+    };
+    fs::create_dir_all(dir)
+        .change_context(TemplateError)
+        .attach("failed to make the template folder")?;
+    fs::write(dir.join("AGENTS.md"), text)
+        .change_context(TemplateError)
+        .attach("failed to write AGENTS.md")?;
+    symlink("AGENTS.md", dir.join("CLAUDE.md"))
+        .change_context(TemplateError)
+        .attach("failed to link CLAUDE.md")
+}
+
+/// Copies `from` into `to`, which must not exist yet, keeping symlinks as
+/// symlinks.
+///
+/// # Errors
+///
+/// Returns an error if `to` exists, or if a read or write fails.
+pub fn copy(from: &Path, to: &Path) -> Result<(), Report<TemplateError>> {
+    #[expect(
+        clippy::create_dir,
+        reason = "`to` must not exist yet, so a user's folder is never written into"
+    )]
+    let made = fs::create_dir(to);
+    made.change_context(TemplateError)
+        .attach(format!("failed to make {}", to.display()))?;
+    let entries = fs::read_dir(from)
+        .change_context(TemplateError)
+        .attach(format!("failed to read {}", from.display()))?;
+    for entry in entries {
+        let entry = entry.change_context(TemplateError)?;
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        let kind = fs::symlink_metadata(&src)
+            .change_context(TemplateError)?
+            .file_type();
+        match (kind.is_dir(), kind.is_symlink()) {
+            (true, _) => copy(&src, &dst)?,
+            (_, true) => fs::read_link(&src)
+                .and_then(|target| symlink(target, &dst))
+                .change_context(TemplateError)
+                .attach(format!("failed to link {}", dst.display()))?,
+            _ => {
+                fs::copy(&src, &dst)
+                    .change_context(TemplateError)
+                    .attach(format!("failed to copy {}", src.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "tests propagate setup failures with `?` and assert on the outcome"
+)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use error_stack::{Report, ResultExt};
+
+    use super::{RESEARCH, TemplateError, copy, seed};
+    use crate::feat::sessions::state::GroupKind;
+
+    #[rstest::rstest]
+    fn seed_writes_agents_md() -> Result<(), Report<TemplateError>> {
+        // Given an empty temp folder.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+        let dir = root.path().join("research");
+
+        // When seeding the Research template.
+        seed(&dir, GroupKind::Research)?;
+
+        // Then AGENTS.md holds the built-in text.
+        let text = fs::read_to_string(dir.join("AGENTS.md")).change_context(TemplateError)?;
+        assert_eq!(text, RESEARCH, "AGENTS.md should be the built-in text");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn seed_links_claude_md_to_agents_md() -> Result<(), Report<TemplateError>> {
+        // Given an empty temp folder.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+
+        // When seeding the Learn template.
+        seed(root.path(), GroupKind::Learn)?;
+
+        // Then CLAUDE.md links to its sibling AGENTS.md.
+        let target = fs::read_link(root.path().join("CLAUDE.md")).change_context(TemplateError)?;
+        assert_eq!(
+            target,
+            Path::new("AGENTS.md"),
+            "CLAUDE.md should link to AGENTS.md"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn seed_refuses_a_feature_kind() -> Result<(), Report<TemplateError>> {
+        // Given an empty temp folder.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+
+        // When seeding a Feature template.
+        let seeded = seed(root.path(), GroupKind::Feature);
+
+        // Then it's refused.
+        assert!(seeded.is_err(), "a Feature group has no template");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn copy_keeps_symlinks_as_symlinks() -> Result<(), Report<TemplateError>> {
+        // Given a seeded template.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+        let (from, to) = (root.path().join("from"), root.path().join("to"));
+        seed(&from, GroupKind::Research)?;
+
+        // When copying it.
+        copy(&from, &to)?;
+
+        // Then the copy's CLAUDE.md is still a symlink.
+        let meta = fs::symlink_metadata(to.join("CLAUDE.md")).change_context(TemplateError)?;
+        assert!(meta.is_symlink(), "CLAUDE.md should stay a symlink");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn copy_copies_nested_files() -> Result<(), Report<TemplateError>> {
+        // Given a template with `notes/a.md`.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+        let (from, to) = (root.path().join("from"), root.path().join("to"));
+        fs::create_dir_all(from.join("notes")).change_context(TemplateError)?;
+        fs::write(from.join("notes/a.md"), "hello").change_context(TemplateError)?;
+
+        // When copying it.
+        copy(&from, &to)?;
+
+        // Then the copy has the nested file with the same text.
+        let text = fs::read_to_string(to.join("notes/a.md")).change_context(TemplateError)?;
+        assert_eq!(text, "hello", "nested files should be copied");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn copy_refuses_an_existing_destination() -> Result<(), Report<TemplateError>> {
+        // Given a seeded template and a destination holding `mine.md`.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+        let (from, to) = (root.path().join("from"), root.path().join("to"));
+        seed(&from, GroupKind::Research)?;
+        fs::create_dir_all(&to).change_context(TemplateError)?;
+        fs::write(to.join("mine.md"), "mine").change_context(TemplateError)?;
+
+        // When copying into it.
+        let copied = copy(&from, &to);
+
+        // Then it's refused and the existing file is untouched.
+        let text = fs::read_to_string(to.join("mine.md")).change_context(TemplateError)?;
+        assert_eq!(
+            (copied.is_err(), text.as_str()),
+            (true, "mine"),
+            "an existing destination should be refused and left alone"
+        );
+        Ok(())
+    }
+}

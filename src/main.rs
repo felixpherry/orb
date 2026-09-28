@@ -75,7 +75,8 @@ fn main() -> Result<(), Report<OrbError>> {
         ZellijService::new(Arc::new(cli), shell, home.clone(), pane)
     });
     let store = Store::open(&home.join(".orb/userdata/state.sqlite")).change_context(OrbError)?;
-    let worktrees_root = home.join(".orb/worktrees");
+    let orb_root = home.join(".orb");
+    let worktrees_root = orb_root.join("worktrees");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
     let _context = runtime.enter();
     let state = State::new(AppState {
@@ -94,6 +95,7 @@ fn main() -> Result<(), Report<OrbError>> {
         store,
         claude_dir,
         worktrees_root,
+        orb_root,
         wake: frontend.waker(),
     });
     frontend

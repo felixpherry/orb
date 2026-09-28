@@ -19,7 +19,7 @@ use ratatui_which_key::{Key as _, NodeResult};
 use crate::keymap::Keys;
 use crate::sidebar::{
     BG_DARK, BLUE, BLUE1, BORDER, COMMENT, CYAN, DARK5, FOLDER, FOLDER_OPEN, GREEN, MAGENTA,
-    ORANGE, RED, YELLOW,
+    ORANGE, RED, YELLOW, kind_look,
 };
 
 /// One row of the popup: a next key and what it does.
@@ -136,7 +136,7 @@ fn key_name(key: &KeyEvent) -> String {
 fn look(intent: &Intent) -> (&'static str, Color) {
     match intent {
         Intent::NewSession => ("\u{f067}", GREEN),
-        Intent::AddProject => (FOLDER_OPEN, BLUE),
+        Intent::AddProject | Intent::OpenGroup => (FOLDER_OPEN, BLUE),
         Intent::FilterProjects => ("\u{f0b0}", CYAN),
         Intent::PickModel => ("\u{f0e7}", MAGENTA),
         Intent::PickPermission => ("\u{f023}", YELLOW),
@@ -147,6 +147,8 @@ fn look(intent: &Intent) -> (&'static str, Color) {
         Intent::OpenTool(Tool::Nvim) => ("\u{e62b}", GREEN),
         Intent::ToggleSidebar => ("\u{f0db}", BLUE1),
         Intent::SelectFirst => ("\u{f062}", BLUE),
+        Intent::NewGroup(kind) => kind_look(*kind),
+        Intent::CloseGroup => (FOLDER, BLUE),
         _ => ("\u{f111}", DARK5),
     }
 }
@@ -210,10 +212,12 @@ mod tests {
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
+    use ratatui::style::Color;
     use ratatui_which_key::Keymap;
 
     use super::render;
     use crate::keymap::{KeyCategory, Keys, Scope, keymap, press};
+    use crate::sidebar::{BLUE2, FOLDER, FOLDER_OPEN, GREEN1, PURPLE};
 
     const SCREEN: Rect = Rect::new(0, 0, 80, 20);
 
@@ -409,6 +413,94 @@ mod tests {
         let lines = lines(&buffer);
         assert!(
             !lines.iter().any(|line| line.contains('╭')),
+            "the screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_popup_shows_g_as_the_group_group() {
+        // Given Space pressed on a thread.
+        let keys = leader_on_thread();
+
+        // When drawing the popup.
+        let buffer = draw(&keys, SCREEN);
+
+        // Then the `g` row reads `g ➜ <folder> +group`.
+        let lines = lines(&buffer);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("│ g ➜ \u{f07b} +group")),
+            "the screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case('f', "\u{f126}", GREEN1)]
+    #[case('r', "\u{f0c3}", BLUE2)]
+    #[case('l', "\u{f02d}", PURPLE)]
+    fn new_group_rows_show_their_kind_icon(
+        #[case] pressed: char,
+        #[case] icon: &str,
+        #[case] colour: Color,
+    ) {
+        // Given Space and `g` pressed on a thread.
+        let keys = {
+            let mut keys = leader_on_thread();
+            press(
+                &mut keys,
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            );
+            keys
+        };
+
+        // When drawing the popup.
+        let buffer = draw(&keys, SCREEN);
+
+        // Then the kind's row has the kind's icon in its colour.
+        let row = format!("{pressed} ➜ ");
+        let lines = lines(&buffer);
+        let cell = buffer
+            .area
+            .positions()
+            .filter(|at| {
+                lines
+                    .get(usize::from(at.y))
+                    .is_some_and(|l| l.contains(&row))
+            })
+            .filter_map(|at| buffer.cell(at))
+            .find(|cell| cell.symbol() == icon)
+            .map(|cell| (cell.symbol().to_owned(), cell.fg));
+        assert_eq!(
+            cell,
+            Some((icon.to_owned(), colour)),
+            "the icon on the {pressed} row"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::OpenGroup, FOLDER_OPEN, "open group")]
+    #[case(Intent::CloseGroup, FOLDER, "close group")]
+    fn fold_intents_show_folder_icons(
+        #[case] intent: Intent,
+        #[case] icon: &str,
+        #[case] label: &str,
+    ) {
+        // Given a keymap with `␣x` bound to the intent, and Space pressed.
+        let keys = {
+            let mut km = Keymap::new();
+            km.bind("<leader>x", intent, KeyCategory::Navigation, Scope::Sidebar);
+            leader(Keys::new(km, Scope::Sidebar))
+        };
+
+        // When drawing the popup.
+        let buffer = draw(&keys, SCREEN);
+
+        // Then the `x` row shows the folder icon.
+        let lines = lines(&buffer);
+        let row = format!("│ x ➜ {icon} {label}");
+        assert!(
+            lines.iter().any(|line| line.contains(&row)),
             "the screen was {lines:#?}"
         );
     }

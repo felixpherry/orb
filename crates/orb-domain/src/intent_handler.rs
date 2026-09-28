@@ -11,20 +11,21 @@ use crate::feat::git::validator::{
 use crate::feat::git::worktree::previous_worktree;
 use crate::feat::pane::validator::{validate_attach, validate_detach};
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
-use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
+use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
 use crate::feat::picker::validator::{
     validate_add_directory, validate_open_directory, validate_pick_project, validate_remove_project,
 };
 use crate::feat::sessions::state::{
-    AttachTarget, Draft, DraftWorkspace, GroupId, Project, ProjectId, ProjectKind, Search,
-    SidebarItem, ThreadId,
+    AttachTarget, Draft, DraftWorkspace, GroupId, GroupKind, Project, ProjectId, ProjectKind,
+    Search, SidebarItem, ThreadId, group_slug,
 };
 use crate::feat::sessions::validator::{
-    SETTLE_IN_PROGRESS, ToggleSettleError, validate_close_group, validate_close_shelf,
-    validate_delete, validate_open_group, validate_open_shelf, validate_pick_setting,
-    validate_start_draft, validate_toggle_pin, validate_toggle_settle,
+    NewGroupError, SETTLE_IN_PROGRESS, ToggleSettleError, validate_close_group,
+    validate_close_shelf, validate_delete, validate_new_group, validate_open_group,
+    validate_open_shelf, validate_pick_setting, validate_start_draft, validate_start_group_draft,
+    validate_toggle_pin, validate_toggle_settle,
 };
-use crate::feat::sidebar::state::Rename;
+use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
 use crate::feat::zellij::validator::validate_open_tool;
 use crate::{AppState, Command, Focus, Intent, TextInput};
@@ -141,6 +142,15 @@ impl IntentHandler {
                     state.sessions.toggle_group(id);
                 }
                 vec![]
+            }
+            Intent::Attach if matches!(state.sessions.cursor, Some(SidebarItem::GroupDraft(_))) => {
+                match (validate_start_group_draft(state), state.sessions.cursor) {
+                    (Ok(()), Some(SidebarItem::GroupDraft(group))) => {
+                        state.sessions.starting = true;
+                        vec![Command::StartGroupDraft(group)]
+                    }
+                    _ => vec![],
+                }
             }
             Intent::Attach => attach_thread(state),
             Intent::Detach => {
@@ -373,44 +383,64 @@ impl IntentHandler {
                 validate_open_tool(state),
                 state.sessions.selected_draft(),
                 state.sessions.selected_thread(),
+                state.sessions.selected_group(),
             ) {
-                (Ok(()), Some((project, draft)), _) => vec![Command::OpenTool {
+                (Ok(()), Some((project, draft)), ..) => vec![Command::OpenTool {
                     tool: *tool,
                     cwd: draft_dir(project, draft),
                 }],
-                (Ok(()), None, Some(thread)) => vec![Command::OpenTool {
+                (Ok(()), None, Some(thread), _) => vec![Command::OpenTool {
                     tool: *tool,
                     cwd: thread.cwd.clone(),
+                }],
+                (Ok(()), None, None, Some((project, group))) => vec![Command::OpenTool {
+                    tool: *tool,
+                    cwd: group.dir.clone().unwrap_or_else(|| project.root.clone()),
                 }],
                 _ => vec![],
             },
             Intent::PickModel => {
-                match (
+                let sessions = &state.sessions;
+                let picker = match (
                     validate_pick_setting(state),
-                    state.sessions.selected_draft(),
+                    sessions.selected_draft(),
+                    sessions.selected_group_draft(),
                 ) {
-                    (Ok(()), Some((project, draft))) => {
-                        let current = draft.model.as_deref();
-                        let picker = PickerState::models(project.id, current, state.focus);
-                        open_picker(state, picker);
-                        vec![]
+                    (Ok(()), Some((project, draft)), _) => {
+                        Some((DraftTarget::Project(project.id), draft.model.as_deref()))
                     }
-                    _ => vec![],
+                    (Ok(()), None, Some((_, group, draft))) => {
+                        Some((DraftTarget::Group(group.id), draft.model.as_deref()))
+                    }
+                    _ => None,
                 }
+                .map(|(target, current)| PickerState::models(target, current, state.focus));
+                if let Some(picker) = picker {
+                    open_picker(state, picker);
+                }
+                vec![]
             }
             Intent::PickPermission => {
-                match (
+                let sessions = &state.sessions;
+                let picker = match (
                     validate_pick_setting(state),
-                    state.sessions.selected_draft(),
+                    sessions.selected_draft(),
+                    sessions.selected_group_draft(),
                 ) {
-                    (Ok(()), Some((project, draft))) => {
-                        let current = draft.permission.as_deref();
-                        let picker = PickerState::permissions(project.id, current, state.focus);
-                        open_picker(state, picker);
-                        vec![]
+                    (Ok(()), Some((project, draft)), _) => Some((
+                        DraftTarget::Project(project.id),
+                        draft.permission.as_deref(),
+                    )),
+                    (Ok(()), None, Some((_, group, draft))) => {
+                        Some((DraftTarget::Group(group.id), draft.permission.as_deref()))
                     }
-                    _ => vec![],
+                    _ => None,
                 }
+                .map(|(target, current)| PickerState::permissions(target, current, state.focus));
+                if let Some(picker) = picker {
+                    open_picker(state, picker);
+                }
+                vec![]
             }
             Intent::PickerOpen => match validate_open_directory(state) {
                 Ok(()) => list(state.picker.as_mut().and_then(PickerState::open_directory)),
@@ -451,19 +481,23 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
-                Some(&PickerKind::Model { project }) => {
+                Some(&PickerKind::Model { target }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
-                        Some(&PickerItem::Setting(value)) => edit_draft(state, project, |draft| {
-                            draft.model = value.map(str::to_owned);
-                        }),
+                        Some(&PickerItem::Setting(value)) => {
+                            edit_setting(state, target, |model, _| {
+                                *model = value.map(str::to_owned);
+                            })
+                        }
                         _ => vec![],
                     }
                 }
-                Some(&PickerKind::Permission { project }) => {
+                Some(&PickerKind::Permission { target }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
-                        Some(&PickerItem::Setting(value)) => edit_draft(state, project, |draft| {
-                            draft.permission = value.map(str::to_owned);
-                        }),
+                        Some(&PickerItem::Setting(value)) => {
+                            edit_setting(state, target, |_, permission| {
+                                *permission = value.map(str::to_owned);
+                            })
+                        }
                         _ => vec![],
                     }
                 }
@@ -503,6 +537,14 @@ impl IntentHandler {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::AllProjects) => filter_to(state, None),
                         Some(&PickerItem::Project { id, .. }) => filter_to(state, Some(id)),
+                        _ => vec![],
+                    }
+                }
+                Some(PickerKind::GroupProject) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(&PickerItem::Project { id, .. }) => {
+                            open_group_name(state, GroupKind::Feature, Some(id))
+                        }
                         _ => vec![],
                     }
                 }
@@ -579,6 +621,17 @@ impl IntentHandler {
                 }
                 _ => vec![],
             },
+            Intent::NewGroup(GroupKind::Feature) => {
+                let items = state
+                    .sessions
+                    .projects_by_recency()
+                    .into_iter()
+                    .map(project_item)
+                    .collect();
+                open_picker(state, PickerState::group_project(items, state.focus));
+                vec![]
+            }
+            Intent::NewGroup(kind) => open_group_name(state, *kind, None),
             Intent::TogglePin => {
                 match (validate_toggle_pin(state), state.sessions.selected_thread()) {
                     (Ok(()), Some(thread)) => match thread.pinned_at {
@@ -591,7 +644,7 @@ impl IntentHandler {
             Intent::Rename => match (validate_rename(state), state.sessions.selected_thread()) {
                 (Ok(()), Some(thread)) => {
                     let rename = Rename {
-                        thread: thread.id,
+                        target: RenameTarget::Thread(thread.id),
                         input: TextInput::new(thread.title.as_deref().unwrap_or_default()),
                     };
                     state.rename = Some(rename);
@@ -938,10 +991,44 @@ where
     }
 }
 
+/// Applies `edit` to `target`'s model and permission and asks the sessions
+/// actor to save them; nothing when the draft is gone.
+fn edit_setting<F>(state: &mut AppState, target: DraftTarget, edit: F) -> Vec<Command>
+where
+    F: FnOnce(&mut Option<String>, &mut Option<String>),
+{
+    match target {
+        DraftTarget::Project(project) => edit_draft(state, project, |draft| {
+            edit(&mut draft.model, &mut draft.permission);
+        }),
+        DraftTarget::Group(group) => match state.sessions.group_draft_mut(group) {
+            Some(draft) => {
+                edit(&mut draft.model, &mut draft.permission);
+                vec![Command::SaveGroupDraft(group)]
+            }
+            None => vec![],
+        },
+    }
+}
+
 /// Opens `picker` and gives it the keys.
 fn open_picker(state: &mut AppState, picker: PickerState) {
     state.picker = Some(picker);
     state.focus = Focus::Picker;
+}
+
+/// Opens the empty name box for a new `kind` group in `project`.
+fn open_group_name(
+    state: &mut AppState,
+    kind: GroupKind,
+    project: Option<ProjectId>,
+) -> Vec<Command> {
+    state.rename = Some(Rename {
+        target: RenameTarget::NewGroup { kind, project },
+        input: TextInput::default(),
+    });
+    state.focus = Focus::Rename;
+    vec![]
 }
 
 /// Closes the picker and gives the keys back to where it was opened from.
@@ -1000,17 +1087,27 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         (Intent::PickerDeleteWord, Some(rename)) => rename.input.delete_word(),
         (Intent::PickerCursorLeft, Some(rename)) => rename.input.cursor_left(),
         (Intent::PickerCursorRight, Some(rename)) => rename.input.cursor_right(),
+        (
+            Intent::PickerConfirm,
+            Some(Rename {
+                target: RenameTarget::NewGroup { .. },
+                ..
+            }),
+        ) => return confirm_group_name(state),
         (Intent::PickerConfirm, _) => {
             state.focus = Focus::Sidebar;
             return state
                 .rename
                 .take()
-                .map(|rename| {
-                    let title = rename.input.text().trim();
-                    Command::RenameThread {
-                        thread: rename.thread,
-                        title: (!title.is_empty()).then(|| title.to_owned()),
+                .and_then(|rename| match rename.target {
+                    RenameTarget::Thread(thread) => {
+                        let title = rename.input.text().trim();
+                        Some(Command::RenameThread {
+                            thread,
+                            title: (!title.is_empty()).then(|| title.to_owned()),
+                        })
                     }
+                    RenameTarget::NewGroup { .. } => None,
                 })
                 .into_iter()
                 .collect();
@@ -1022,6 +1119,62 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         _ => {}
     }
     vec![]
+}
+
+/// `⏎` in the name box for a new group: an empty name does nothing, an
+/// invalid or taken one shows why on the mode line, both keeping the box open;
+/// a valid one closes the box and asks for the group.
+fn confirm_group_name(state: &mut AppState) -> Vec<Command> {
+    match validate_new_group(state) {
+        Err(NewGroupError::Empty) => {}
+        Err(NewGroupError::Invalid(what)) => {
+            state.sessions.error = Some(format!("Name can't use {what}"));
+        }
+        Err(NewGroupError::Taken(text)) => state.sessions.error = Some(text),
+        Ok(()) => return create_group(state),
+    }
+    vec![]
+}
+
+/// Closes the name box and asks the sessions actor for the group it names. A
+/// filter to another project than the group's goes back to all projects.
+fn create_group(state: &mut AppState) -> Vec<Command> {
+    let Some(Rename {
+        target: RenameTarget::NewGroup { kind, project },
+        input,
+    }) = state.rename.take()
+    else {
+        return vec![];
+    };
+    state.focus = Focus::Sidebar;
+    let own = |own: ProjectKind| {
+        state
+            .sessions
+            .projects
+            .iter()
+            .find(|p| p.kind == own && !p.removed)
+            .map(|p| p.id)
+    };
+    let target = match kind {
+        GroupKind::Feature => project,
+        GroupKind::Research => own(ProjectKind::Research),
+        GroupKind::Learn => own(ProjectKind::Learn),
+    };
+    let outside = state
+        .sessions
+        .filter
+        .is_some_and(|filter| Some(filter) != target);
+    if outside {
+        state.sessions.filter = None;
+    }
+    [Command::CreateGroup {
+        kind,
+        project,
+        name: group_slug(input.text()),
+    }]
+    .into_iter()
+    .chain(outside.then_some(Command::SaveUi))
+    .collect()
 }
 
 /// What a picker key does in the sidebar search: edit the text, putting the
@@ -1082,13 +1235,14 @@ mod tests {
     use crate::command::Workspace;
     use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::{BranchRow, PERMISSION_MODES, PickerItem, WorkspaceChoice};
-    use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
+    use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
-        AttachTarget, Draft, DraftWorkspace, Group, GroupId, GroupKind, Project, ProjectId,
-        ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        AttachTarget, Draft, DraftWorkspace, Group, GroupDraft, GroupId, GroupKind, Project,
+        ProjectId, ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId,
+        ThreadStatus,
     };
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
-    use crate::feat::sidebar::state::{Rename, SidebarView};
+    use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
 
@@ -2583,6 +2737,136 @@ mod tests {
         state
     }
 
+    /// One project holding Feature group 9, still a draft on `model`, with
+    /// the group draft selected.
+    fn group_drafting(model: Option<&str>) -> AppState {
+        let mut state = state_at(vec![], SidebarItem::GroupDraft(GroupId(9)));
+        let group = Group {
+            id: GroupId(9),
+            kind: GroupKind::Feature,
+            name: "GT-514-login".into(),
+            dir: None,
+            branch: Some("GT-514-login".into()),
+            created_at: SystemTime::UNIX_EPOCH,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            draft: Some(GroupDraft {
+                model: model.map(str::to_owned),
+                permission: None,
+            }),
+        };
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.groups = vec![group];
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_group_draft_starts_it() {
+        // Given the group draft selected.
+        let mut state = group_drafting(None);
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the sessions actor is asked to start it.
+        assert_eq!(
+            commands,
+            vec![Command::StartGroupDraft(GroupId(9))],
+            "⏎ on a group draft should start it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_group_draft_marks_starting() {
+        // Given the group draft selected.
+        let mut state = group_drafting(None);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then a start is in flight.
+        assert!(
+            state.sessions.starting,
+            "starting a group draft should mark the start in flight"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_group_draft_while_starting_does_nothing() {
+        // Given the group draft selected while a start is in flight.
+        let mut state = group_drafting(None);
+        state.sessions.starting = true;
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then nothing starts.
+        assert!(commands.is_empty(), "one start at a time");
+    }
+
+    #[rstest::rstest]
+    fn leader_m_on_a_group_draft_opens_its_model_picker() {
+        // Given the group draft selected.
+        let mut state = group_drafting(None);
+
+        // When handling PickModel.
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+
+        // Then the group draft's model picker is open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Model {
+                target: DraftTarget::Group(GroupId(9))
+            }),
+            "␣m on a group draft should open its model picker"
+        );
+    }
+
+    /// Group 9's draft model, as the app state has it.
+    fn group_draft_model(state: &AppState) -> Option<String> {
+        let (_, _, draft) = state.sessions.selected_group_draft()?;
+        draft.model.clone()
+    }
+
+    #[rstest::rstest]
+    fn picking_a_model_for_a_group_draft_sets_it() {
+        // Given the group draft's model picker with Claude Opus 5.5, after
+        // Default, highlighted.
+        let mut state = group_drafting(None);
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the group draft runs claude-opus-5-5.
+        assert_eq!(
+            group_draft_model(&state).as_deref(),
+            Some("claude-opus-5-5"),
+            "the picked model should be the group draft's"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_model_for_a_group_draft_saves_it() {
+        // Given the group draft's model picker with Claude Opus 5.5 highlighted.
+        let mut state = group_drafting(None);
+        IntentHandler::handle(&Intent::PickModel, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to save the group draft.
+        assert_eq!(
+            commands,
+            vec![Command::SaveGroupDraft(GroupId(9))],
+            "a group draft's model pick should be saved"
+        );
+    }
+
     #[rstest::rstest]
     fn l_on_a_folded_group_opens_it() {
         // Given the cursor on group 9's card, folded.
@@ -3669,7 +3953,7 @@ mod tests {
             )),
             Some((
                 PickerKind::Model {
-                    project: ProjectId(1)
+                    target: DraftTarget::Project(ProjectId(1))
                 },
                 Some(PickerItem::Setting(None))
             )),
@@ -4104,6 +4388,63 @@ mod tests {
         assert!(commands.is_empty(), "a tool needs a thread or draft");
     }
 
+    #[rstest::rstest]
+    fn open_tool_on_a_group_card_uses_the_group_dir() {
+        // Given a group card selected, its group in `/work/GT-514-login`.
+        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
+
+        // When handling OpenTool.
+        let commands = IntentHandler::handle(&Intent::OpenTool(Tool::Lazygit), &mut state);
+
+        // Then lazygit opens in the group's directory.
+        assert_eq!(
+            commands,
+            vec![Command::OpenTool {
+                tool: Tool::Lazygit,
+                cwd: "/work/GT-514-login".into(),
+            }],
+            "a card's tools open in its group's directory"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_tool_on_an_unstarted_feature_group_uses_the_project_root() {
+        // Given a Feature group draft with no directory yet, in `/work`.
+        let mut state = group_drafting(None);
+
+        // When handling OpenTool.
+        let commands = IntentHandler::handle(&Intent::OpenTool(Tool::Lazygit), &mut state);
+
+        // Then lazygit opens in the project's root.
+        assert_eq!(
+            commands,
+            vec![Command::OpenTool {
+                tool: Tool::Lazygit,
+                cwd: "/work".into(),
+            }],
+            "an unstarted Feature group has only its project's root"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_tool_on_a_grouped_thread_uses_its_cwd() {
+        // Given grouped thread 1 selected, running in `/work/1`.
+        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
+
+        // When handling OpenTool.
+        let commands = IntentHandler::handle(&Intent::OpenTool(Tool::Shell), &mut state);
+
+        // Then the shell opens where the thread runs.
+        assert_eq!(
+            commands,
+            vec![Command::OpenTool {
+                tool: Tool::Shell,
+                cwd: "/work/1".into(),
+            }],
+            "a grouped thread's tools open in its own directory"
+        );
+    }
+
     /// The picker row for project `id` of [`with_projects`].
     fn project_row(id: i64, title: &str) -> PickerItem {
         PickerItem::Project {
@@ -4499,7 +4840,7 @@ mod tests {
         AppState {
             focus: Focus::Rename,
             rename: Some(Rename {
-                thread: ThreadId(1),
+                target: RenameTarget::Thread(ThreadId(1)),
                 input: TextInput::new(text),
             }),
             ..titled(Some("Fix the sidebar"))
@@ -4895,7 +5236,7 @@ mod tests {
         assert_eq!(
             state.picker.as_ref().map(PickerState::kind),
             Some(&PickerKind::Model {
-                project: ProjectId(1)
+                target: DraftTarget::Project(ProjectId(1))
             }),
             "⏎ on Model should open the model picker"
         );
@@ -4937,6 +5278,302 @@ mod tests {
             dashboard_index(&state),
             0,
             "a new selection should start on Open"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_gf_opens_the_group_project_picker() {
+        // Given a project.
+        let mut state = with_projects(&["alpha"]);
+
+        // When handling NewGroup(Feature).
+        IntentHandler::handle(&Intent::NewGroup(GroupKind::Feature), &mut state);
+
+        // Then the group project picker has the keys.
+        assert_eq!(
+            (state.focus, state.picker.as_ref().map(PickerState::kind)),
+            (Focus::Picker, Some(&PickerKind::GroupProject)),
+            "␣gf should open the group project picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_project_picker_lists_only_normal_projects() {
+        // Given alpha and orb's Research project.
+        let mut state = with_projects(&["alpha", "research"]);
+        if let Some(project) = state.sessions.projects.get_mut(1) {
+            project.kind = ProjectKind::Research;
+        }
+
+        // When handling NewGroup(Feature).
+        IntentHandler::handle(&Intent::NewGroup(GroupKind::Feature), &mut state);
+
+        // Then only alpha is listed.
+        let rows: Vec<PickerItem> = state
+            .picker
+            .iter()
+            .flat_map(PickerState::shown)
+            .map(|(item, _)| item.clone())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![project_row(1, "alpha")],
+            "a Feature group can't be in Research"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_group_project_opens_the_feature_name_box() {
+        // Given the group project picker on alpha.
+        let mut state = with_projects(&["alpha"]);
+        IntentHandler::handle(&Intent::NewGroup(GroupKind::Feature), &mut state);
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the name box names a Feature group in alpha, with the keys.
+        assert_eq!(
+            (state.rename.map(|rename| rename.target), state.focus),
+            (
+                Some(RenameTarget::NewGroup {
+                    kind: GroupKind::Feature,
+                    project: Some(ProjectId(1)),
+                }),
+                Focus::Rename
+            ),
+            "picking a project should open the name box"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_gr_opens_the_research_name_box() {
+        // Given no projects.
+        let mut state = AppState::default();
+
+        // When handling NewGroup(Research).
+        IntentHandler::handle(&Intent::NewGroup(GroupKind::Research), &mut state);
+
+        // Then an empty name box names a Research group, with the keys.
+        assert_eq!(
+            (
+                state.rename.as_ref().map(|rename| rename.target),
+                rename_text(&state),
+                state.focus
+            ),
+            (
+                Some(RenameTarget::NewGroup {
+                    kind: GroupKind::Research,
+                    project: None,
+                }),
+                Some(""),
+                Focus::Rename
+            ),
+            "␣gr should open the name box"
+        );
+    }
+
+    /// orb's Research project holding group `tokio-cancel`, with the name box
+    /// for a new Research group holding `text`.
+    fn naming_research(text: &str) -> AppState {
+        let mut state = with_projects(&["Research"]);
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.kind = ProjectKind::Research;
+            project.groups = vec![Group {
+                id: GroupId(9),
+                kind: GroupKind::Research,
+                name: "tokio-cancel".into(),
+                dir: Some("/Research/tokio-cancel".into()),
+                branch: None,
+                created_at: SystemTime::UNIX_EPOCH,
+                pinned_at: None,
+                settled_at: None,
+                active_since: SystemTime::UNIX_EPOCH,
+                draft: None,
+            }];
+        }
+        AppState {
+            focus: Focus::Rename,
+            rename: Some(Rename {
+                target: RenameTarget::NewGroup {
+                    kind: GroupKind::Research,
+                    project: None,
+                },
+                input: TextInput::new(text),
+            }),
+            ..state
+        }
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_group_name_closes_the_box() {
+        // Given the name box holding a fresh name.
+        let mut state = naming_research("tokio select");
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the box is closed and the sidebar has the keys.
+        assert_eq!(
+            (state.rename.is_none(), state.focus),
+            (true, Focus::Sidebar),
+            "a valid name should close the box"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_taken_group_name_shows_the_error() {
+        // Given the name box holding the taken name.
+        let mut state = naming_research("tokio-cancel");
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the mode line says the folder exists.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some("~/.orb/research/tokio-cancel already exists"),
+            "a taken name should show why"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_taken_group_name_keeps_the_box_open() {
+        // Given the name box holding the taken name.
+        let mut state = naming_research("tokio cancel");
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the box keeps the name and the keys.
+        assert_eq!(
+            (rename_text(&state), state.focus),
+            (Some("tokio cancel"), Focus::Rename),
+            "a taken name should keep the box open"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_an_invalid_group_name_shows_the_char() {
+        // Given the name box holding `a/b`.
+        let mut state = naming_research("a/b");
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the mode line names the slash.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some("Name can't use /"),
+            "an invalid name should show the char"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_an_empty_group_name_does_nothing() {
+        // Given the name box holding only spaces.
+        let mut state = naming_research("   ");
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing is emitted and the box stays open with the keys.
+        assert_eq!(
+            (commands, rename_text(&state), state.focus),
+            (vec![], Some("   "), Focus::Rename),
+            "an empty name should do nothing"
+        );
+    }
+
+    /// Projects alpha (1) and beta (2), filtered to `filter`, with the name
+    /// box for a new `kind` group in `project` holding `text`.
+    fn naming_group(
+        kind: GroupKind,
+        project: Option<i64>,
+        filter: Option<i64>,
+        text: &str,
+    ) -> AppState {
+        let mut state = with_projects(&["alpha", "beta"]);
+        state.sessions.filter = filter.map(ProjectId);
+        AppState {
+            focus: Focus::Rename,
+            rename: Some(Rename {
+                target: RenameTarget::NewGroup {
+                    kind,
+                    project: project.map(ProjectId),
+                },
+                input: TextInput::new(text),
+            }),
+            ..state
+        }
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_group_name_emits_create_group() {
+        // Given the name box for a new Research group holding `tokio cancel`.
+        let mut state = naming_group(GroupKind::Research, None, None, "tokio cancel");
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the group is asked for under its slug.
+        assert_eq!(
+            commands,
+            vec![Command::CreateGroup {
+                kind: GroupKind::Research,
+                project: None,
+                name: "tokio-cancel".into(),
+            }],
+            "a valid name should ask for the group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn feature_group_slug_keeps_case() {
+        // Given the name box for a new Feature group in alpha holding
+        // `GT-514 login`.
+        let mut state = naming_group(GroupKind::Feature, Some(1), None, "GT-514 login");
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the slug keeps the name's case.
+        let names: Vec<&str> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::CreateGroup { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["GT-514-login"], "the slug should keep case");
+    }
+
+    #[rstest::rstest]
+    fn creating_a_group_outside_the_filter_clears_it() {
+        // Given the sidebar filtered to beta and a new Feature group in alpha.
+        let mut state = naming_group(GroupKind::Feature, Some(1), Some(2), "login");
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the filter goes back to all projects.
+        assert_eq!(
+            state.sessions.filter, None,
+            "a group outside the filter should clear it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn creating_a_group_outside_the_filter_saves_the_ui() {
+        // Given the sidebar filtered to beta and a new Feature group in alpha.
+        let mut state = naming_group(GroupKind::Feature, Some(1), Some(2), "login");
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the cleared filter is saved.
+        assert!(
+            commands.contains(&Command::SaveUi),
+            "a cleared filter should be saved"
         );
     }
 }

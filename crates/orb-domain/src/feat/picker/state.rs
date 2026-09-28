@@ -13,7 +13,7 @@ use crate::feat::picker::list::{
     BranchRow, LEGACY_MODELS, MODELS, Matches, Model, PERMISSION_MODES, PickerItem, PickerList,
     model,
 };
-use crate::feat::sessions::state::{ProjectId, ThreadId};
+use crate::feat::sessions::state::{GroupId, ProjectId, ThreadId};
 
 /// What a workspace or branch picker sets up: a thread, or a project's draft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,11 +22,20 @@ pub enum PickTarget {
     Draft(ProjectId),
 }
 
+/// What a model or permission picker sets: a project's draft, or a group's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftTarget {
+    Project(ProjectId),
+    Group(GroupId),
+}
+
 /// What an open picker picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerKind {
     /// `␣n`: pick a project to start a session in.
     Projects,
+    /// `␣gf`: pick the project a new Feature group is for.
+    GroupProject,
     /// `␣p`: pick a directory to add as a project. `listed` is the directory
     /// text (e.g. `~/dev/`) the items were read from; `None` while the input
     /// isn't a path.
@@ -41,13 +50,13 @@ pub enum PickerKind {
         cwd: PathBuf,
         unstarted: bool,
     },
-    /// `␣m`: pick the model of `project`'s draft.
-    Model { project: ProjectId },
+    /// `␣m`: pick the model of `target`'s draft.
+    Model { target: DraftTarget },
     /// `␣w` or `␣b` on a draft whose project isn't a git repository: make it
     /// one.
     InitGit { project: ProjectId },
-    /// `␣a`: pick the permission mode of `project`'s draft.
-    Permission { project: ProjectId },
+    /// `␣a`: pick the permission mode of `target`'s draft.
+    Permission { target: DraftTarget },
     /// `␣f`: pick the project the sidebar is filtered to, or all of them.
     ProjectFilter,
     /// `<C-x>` in the project filter: confirm removing `project`.
@@ -85,6 +94,15 @@ impl PickerState {
             home: PathBuf::new(),
             page: 0,
             wanted: None,
+        }
+    }
+
+    /// A project picker for a new Feature group over `items`, in the order
+    /// given.
+    pub fn group_project(items: Vec<PickerItem>, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::GroupProject,
+            ..Self::projects(items, return_to)
         }
     }
 
@@ -196,10 +214,10 @@ impl PickerState {
         }
     }
 
-    /// A model picker for `project`'s draft: `Default`, then [`MODELS`], then
+    /// A model picker for `target`'s draft: `Default`, then [`MODELS`], then
     /// a `Legacy models` heading over [`LEGACY_MODELS`], with `current`
     /// selected, also when it's one of a model's aliases.
-    pub fn models(project: ProjectId, current: Option<&str>, return_to: Focus) -> Self {
+    pub fn models(target: DraftTarget, current: Option<&str>, return_to: Focus) -> Self {
         let ids = |models: &[Model]| {
             models
                 .iter()
@@ -212,22 +230,17 @@ impl PickerState {
             .chain(ids(&LEGACY_MODELS))
             .collect();
         let current = current.map(|value| model(value).map_or(value, |model| model.id));
-        Self::settings(PickerKind::Model { project }, items, current, return_to)
+        Self::settings(PickerKind::Model { target }, items, current, return_to)
     }
 
-    /// A permission-mode picker for `project`'s draft: `Default`, then
+    /// A permission-mode picker for `target`'s draft: `Default`, then
     /// [`PERMISSION_MODES`], with `current` selected.
-    pub fn permissions(project: ProjectId, current: Option<&str>, return_to: Focus) -> Self {
+    pub fn permissions(target: DraftTarget, current: Option<&str>, return_to: Focus) -> Self {
         let items = std::iter::once(None)
             .chain(PERMISSION_MODES.map(Some))
             .map(PickerItem::Setting)
             .collect();
-        Self::settings(
-            PickerKind::Permission { project },
-            items,
-            current,
-            return_to,
-        )
+        Self::settings(PickerKind::Permission { target }, items, current, return_to)
     }
 
     /// A `kind` picker over `items`, with the setting `current` selected, else
@@ -531,7 +544,7 @@ pub fn expand(dir_text: &str, home: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{PickTarget, PickerState, expand, split_path};
+    use super::{DraftTarget, PickTarget, PickerState, expand, split_path};
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::{LEGACY_MODELS, PickerItem};
@@ -903,7 +916,8 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_lists_default_then_the_models() {
         // Given / When opening a model picker for a draft with no model.
-        let picker = PickerState::models(ProjectId(1), None, Focus::Dashboard);
+        let picker =
+            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
 
         // Then Default comes first, then every model ID, current then legacy.
         assert_eq!(
@@ -929,7 +943,8 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_heads_the_legacy_models() {
         // Given / When opening a model picker.
-        let picker = PickerState::models(ProjectId(1), None, Focus::Dashboard);
+        let picker =
+            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
 
         // Then the Legacy models heading sits between Sonnet 5 and Fable 5.
         let rows: Vec<&PickerItem> = picker.shown().map(|(item, _)| item).collect();
@@ -950,8 +965,11 @@ mod tests {
     #[rstest::rstest]
     fn moving_down_skips_the_legacy_heading() {
         // Given a model picker on Claude Sonnet 5, the last current model.
-        let mut picker =
-            PickerState::models(ProjectId(1), Some("claude-sonnet-5"), Focus::Dashboard);
+        let mut picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some("claude-sonnet-5"),
+            Focus::Dashboard,
+        );
 
         // When moving down.
         picker.next();
@@ -968,7 +986,8 @@ mod tests {
     fn moving_down_from_the_last_model_wraps_to_default() {
         // Given a model picker on the last legacy model.
         let last = LEGACY_MODELS.last().map(|model| model.id);
-        let mut picker = PickerState::models(ProjectId(1), last, Focus::Dashboard);
+        let mut picker =
+            PickerState::models(DraftTarget::Project(ProjectId(1)), last, Focus::Dashboard);
 
         // When moving down.
         picker.next();
@@ -984,7 +1003,11 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_selects_the_current_legacy_model() {
         // Given / When opening a model picker for a draft on Claude Haiku 4.5.
-        let picker = PickerState::models(ProjectId(1), Some("claude-haiku-4-5"), Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some("claude-haiku-4-5"),
+            Focus::Dashboard,
+        );
 
         // Then Claude Haiku 4.5 is selected.
         assert_eq!(
@@ -1004,7 +1027,11 @@ mod tests {
         #[case] id: &'static str,
     ) {
         // Given / When opening a model picker for a draft on an alias.
-        let picker = PickerState::models(ProjectId(1), Some(alias), Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some(alias),
+            Focus::Dashboard,
+        );
 
         // Then that model is selected.
         assert_eq!(
@@ -1017,7 +1044,11 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_selects_default_for_an_unknown_model() {
         // Given / When opening a model picker for a draft on a value no model has.
-        let picker = PickerState::models(ProjectId(1), Some("opus[1m]"), Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some("opus[1m]"),
+            Focus::Dashboard,
+        );
 
         // Then Default is selected.
         assert_eq!(
@@ -1030,7 +1061,11 @@ mod tests {
     #[rstest::rstest]
     fn permission_picker_selects_the_current_mode() {
         // Given / When opening a permission picker for a draft in plan mode.
-        let picker = PickerState::permissions(ProjectId(1), Some("plan"), Focus::Dashboard);
+        let picker = PickerState::permissions(
+            DraftTarget::Project(ProjectId(1)),
+            Some("plan"),
+            Focus::Dashboard,
+        );
 
         // Then plan is selected.
         assert_eq!(

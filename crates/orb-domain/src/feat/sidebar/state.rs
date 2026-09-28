@@ -1,8 +1,8 @@
 //! The sidebar's size and visibility, the last frame's row layout, and the
-//! thread being renamed.
+//! name box, which names a thread, or a new group.
 
 use crate::TextInput;
-use crate::feat::sessions::state::ThreadId;
+use crate::feat::sessions::state::{GroupKind, ProjectId, ThreadId};
 
 /// The sidebar's width in columns until the user resizes it.
 pub const DEFAULT_WIDTH: u16 = 32;
@@ -64,12 +64,26 @@ impl SidebarView {
     }
 }
 
-/// A thread being renamed: which one, and the name typed so far.
+/// What the name box names: a thread, or a group about to be created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameTarget {
+    /// The thread being renamed.
+    Thread(ThreadId),
+    /// A new `kind` group. `project` is `None` for Research/Learn, whose
+    /// project the actor finds.
+    NewGroup {
+        kind: GroupKind,
+        project: Option<ProjectId>,
+    },
+}
+
+/// The name box: what it names, and the name typed so far.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rename {
-    /// The thread the name is for.
-    pub thread: ThreadId,
-    /// The name being typed, starting from the thread's title.
+    /// What the name is for.
+    pub target: RenameTarget,
+    /// The name being typed, starting from the thread's title, or empty for
+    /// a new group.
     pub input: TextInput,
 }
 
