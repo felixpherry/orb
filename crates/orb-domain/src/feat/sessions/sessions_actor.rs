@@ -3131,6 +3131,9 @@ mod tests {
         StoreError, ThreadRow, Ui,
     };
     use crate::feat::sessions::transcript::transcript_path;
+    use crate::feat::sessions::workspace_trust::{
+        WorkspaceTrust, WorkspaceTrustError, WorkspaceTrustService,
+    };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
 
     const PROJECT_ROOT: &str = "/tmp/orb";
@@ -3357,6 +3360,8 @@ mod tests {
         /// Whether `is_merged` and `delete_branch` without force find the
         /// branch merged.
         merged: bool,
+        /// What `project_path` answers.
+        project: Option<PathBuf>,
         calls: Mutex<Vec<GitCall>>,
     }
 
@@ -3371,6 +3376,7 @@ mod tests {
                 init: Ok(()),
                 remote: Vec::new(),
                 merged: true,
+                project: None,
                 calls: Mutex::default(),
             }
         }
@@ -3579,6 +3585,23 @@ mod tests {
             });
             Ok(())
         }
+
+        fn project_path(&self, _cwd: &Path) -> Option<PathBuf> {
+            self.project.clone()
+        }
+    }
+
+    /// A trust service that accepts every folder.
+    struct FakeTrust;
+
+    impl WorkspaceTrust for FakeTrust {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn trust(&self, _dir: &Path) -> Result<(), Report<WorkspaceTrustError>> {
+            Ok(())
+        }
     }
 
     fn record(short_id: &str, status: ThreadStatus) -> SessionRecord {
@@ -3667,6 +3690,7 @@ mod tests {
             services: Services {
                 session_host: SessionHostService::new(host.clone()),
                 git: GitService::new(git.clone()),
+                workspace_trust: WorkspaceTrustService::new(Arc::new(FakeTrust)),
             },
             state: state.clone(),
             store,
@@ -10332,6 +10356,7 @@ mod tests {
             services: Services {
                 session_host: SessionHostService::new(host),
                 git: GitService::new(git.clone()),
+                workspace_trust: WorkspaceTrustService::new(Arc::new(FakeTrust)),
             },
             state: state.clone(),
             store,
