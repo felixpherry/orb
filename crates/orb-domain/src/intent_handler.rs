@@ -1716,6 +1716,7 @@ mod tests {
     #[rstest::rstest]
     #[case(Focus::Sidebar)]
     #[case(Focus::Dashboard)]
+    #[case(Focus::Attached)]
     fn toggle_sidebar_hides_a_shown_sidebar(#[case] focus: Focus) {
         // Given a shown sidebar.
         let mut state = laid_out(focus, 32, false);
@@ -1770,6 +1771,38 @@ mod tests {
             state.focus,
             Focus::Sidebar,
             "showing the sidebar should focus it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hiding_the_sidebar_from_the_pane_keeps_the_pane_focused() {
+        // Given a shown sidebar, with the Claude pane focused.
+        let mut state = laid_out(Focus::Attached, 32, false);
+
+        // When handling ToggleSidebar (`<C-b>`).
+        IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
+
+        // Then the pane keeps the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Attached,
+            "<C-b> should hide the sidebar and keep the pane focused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn showing_the_sidebar_from_the_pane_focuses_it() {
+        // Given a hidden sidebar, with the Claude pane focused.
+        let mut state = laid_out(Focus::Attached, 32, true);
+
+        // When handling ToggleSidebar (`<C-b>`).
+        IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
+
+        // Then the sidebar has the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Sidebar,
+            "<C-b> should show the sidebar and focus it"
         );
     }
 

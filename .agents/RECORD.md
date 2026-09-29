@@ -38,7 +38,8 @@ Entries are added or amended **only with human approval**.
 - (pane) While attached, keys, paste, mouse, and focus events are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb captures the mouse only while attached and forwards the child's OSC 52 clipboard writes to its outer terminal.
-- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the dashboard, `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden, `<C-Right>`/`<C-Left>`, which resize the pane as on the dashboard, and `<C-o>`/`<C-i>`, which move through the jump list.
+- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the dashboard, `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden, `<C-b>`, which hides or shows the sidebar as `␣e` does, `<C-Right>`/`<C-Left>`, which resize the pane as on the dashboard, and `<C-o>`/`<C-i>`, which move through the jump list.
+- (keybinds) While attached, Claude's background-task shortcut works only as `Ctrl+X Ctrl+B`, because orb takes `<C-b>`.
 - (identity) orb supports Claude Code as its only provider.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
