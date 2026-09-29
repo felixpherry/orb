@@ -227,6 +227,18 @@ impl Git for GitCli {
         self.run(cwd, ["branch", "-m", old, new])?;
         Ok(())
     }
+
+    fn project_path(&self, cwd: &Path) -> Option<PathBuf> {
+        let common = self
+            .run(
+                cwd,
+                ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .ok()?;
+        Path::new(common.strip_suffix('\n').unwrap_or(&common))
+            .parent()
+            .map(Path::to_owned)
+    }
 }
 
 /// A report whose reason is git's first stderr line, else
@@ -712,6 +724,44 @@ mod tests {
 
         // Then git refuses.
         assert!(refs.is_err(), "a plain directory has no refs");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn project_path_of_a_worktree_is_its_main_repository() -> Result<(), Report<GitError>> {
+        // Given a worktree of `repo`.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.repo("repo", "main")?;
+        let worktree = sandbox.path("worktree");
+        sandbox
+            .git()
+            .add_worktree(&repo, &worktree, "side", "main")?;
+
+        // When resolving the worktree's project path.
+        let project = sandbox.git().project_path(&worktree);
+
+        // Then it is the main repository's real path.
+        let expected = repo.canonicalize().change_context(GitError)?;
+        assert_eq!(
+            project,
+            Some(expected),
+            "a worktree belongs to its main repository"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn project_path_outside_a_repository_is_none() -> Result<(), Report<GitError>> {
+        // Given a plain directory.
+        let sandbox = Sandbox::new()?;
+        let dir = sandbox.path("plain");
+        fs::create_dir_all(&dir).change_context(GitError)?;
+
+        // When resolving its project path.
+        let project = sandbox.git().project_path(&dir);
+
+        // Then there is none.
+        assert_eq!(project, None, "a plain directory has no project path");
         Ok(())
     }
 

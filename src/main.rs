@@ -15,6 +15,9 @@ use orb_domain::feat::sessions::claude_supervisor::ClaudeSupervisor;
 use orb_domain::feat::sessions::session_host::SessionHostService;
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
 use orb_domain::feat::sessions::store::Store;
+use orb_domain::feat::sessions::workspace_trust::{
+    ClaudeConfigTrust, WorkspaceTrustService, claude_config_file,
+};
 use orb_domain::feat::zellij::zellij_cli::ZellijCli;
 use orb_domain::feat::zellij::zellij_service::ZellijService;
 use orb_domain::{AppState, Services, State};
@@ -30,8 +33,9 @@ fn main() -> Result<(), Report<OrbError>> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| Report::new(OrbError).attach("HOME is not set"))?;
-    let claude_dir =
-        std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from);
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    let claude_config = claude_config_file(config_dir.as_deref(), &home);
+    let claude_dir = config_dir.unwrap_or_else(|| home.join(".claude"));
     let claude_env = child_env(std::env::vars_os());
     let tz = TimeZone::system();
     let session = std::env::var_os("ZELLIJ_SESSION_NAME");
@@ -87,6 +91,9 @@ fn main() -> Result<(), Report<OrbError>> {
     let services = Services {
         session_host: SessionHostService::new(Arc::new(ClaudeSupervisor::new(claude_env.clone()))),
         git: GitService::new(Arc::new(GitCli::new(claude_env.clone()))),
+        workspace_trust: WorkspaceTrustService::new(Arc::new(ClaudeConfigTrust::new(
+            claude_config,
+        ))),
     };
     let git = services.git.clone();
     let sessions = spawn_sessions_actor(SessionsActorDeps {

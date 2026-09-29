@@ -11,6 +11,9 @@
 //! Threads can work together in a group: a Feature group shares one worktree
 //! on a branch named after it, and a Research or Learn group shares a folder
 //! under orb's own directory, copied from the user's template for the kind.
+//!
+//! When Claude refuses a folder the user hasn't trusted, orb can record the
+//! user's trust in Claude's own config.
 
 pub mod child_env;
 pub mod claude_supervisor;
@@ -21,3 +24,4 @@ pub mod store;
 pub mod template;
 pub mod transcript;
 pub mod validator;
+pub mod workspace_trust;
