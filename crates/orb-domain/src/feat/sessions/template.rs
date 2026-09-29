@@ -10,37 +10,80 @@ use wherror::Error;
 
 use super::state::GroupKind;
 
-/// The built-in `AGENTS.md` for a Research group.
-const RESEARCH: &str = include_str!("../../../templates/research/AGENTS.md");
-/// The built-in `AGENTS.md` for a Learn group.
-const LEARN: &str = include_str!("../../../templates/learn/AGENTS.md");
+/// The built-in Research template: each file's path in the folder and its text.
+const RESEARCH: &[(&str, &str)] = &[
+    (
+        "AGENTS.md",
+        include_str!("../../../templates/research/AGENTS.md"),
+    ),
+    (
+        "SOURCES.md",
+        include_str!("../../../templates/research/SOURCES.md"),
+    ),
+    (
+        ".gitignore",
+        include_str!("../../../templates/research/.gitignore"),
+    ),
+    (
+        ".claude/settings.json",
+        include_str!("../../../templates/research/.claude/settings.json"),
+    ),
+    (
+        ".claude/agents/investigator.md",
+        include_str!("../../../templates/research/.claude/agents/investigator.md"),
+    ),
+    (
+        ".claude/agents/falsifier.md",
+        include_str!("../../../templates/research/.claude/agents/falsifier.md"),
+    ),
+    (
+        ".claude/agents/simulator.md",
+        include_str!("../../../templates/research/.claude/agents/simulator.md"),
+    ),
+    (
+        ".claude/research/CONVENTIONS.md",
+        include_str!("../../../templates/research/.claude/research/CONVENTIONS.md"),
+    ),
+    (
+        ".claude/research/REPORT_TEMPLATE.md",
+        include_str!("../../../templates/research/.claude/research/REPORT_TEMPLATE.md"),
+    ),
+];
+/// The built-in Learn template: each file's path in the folder and its text.
+const LEARN: &[(&str, &str)] = &[(
+    "AGENTS.md",
+    include_str!("../../../templates/learn/AGENTS.md"),
+)];
 
 /// A template couldn't be written or copied.
 #[derive(Debug, Error)]
 #[error(debug)]
 pub struct TemplateError;
 
-/// Writes the built-in template for `kind` into `dir` (made if missing):
-/// `AGENTS.md`, and `CLAUDE.md` as a symlink to it.
+/// Writes the built-in template for `kind` into `dir` (made if missing): its
+/// files, and `CLAUDE.md` as a symlink to `AGENTS.md`.
 ///
 /// # Errors
 ///
 /// Returns an error for a Feature kind, which has no template, or if a write
 /// fails.
 pub fn seed(dir: &Path, kind: GroupKind) -> Result<(), Report<TemplateError>> {
-    let text = match kind {
+    let files = match kind {
         GroupKind::Research => RESEARCH,
         GroupKind::Learn => LEARN,
         GroupKind::Feature => {
             return Err(Report::new(TemplateError).attach("a Feature group has no template"));
         }
     };
-    fs::create_dir_all(dir)
-        .change_context(TemplateError)
-        .attach("failed to make the template folder")?;
-    fs::write(dir.join("AGENTS.md"), text)
-        .change_context(TemplateError)
-        .attach("failed to write AGENTS.md")?;
+    for (path, text) in files {
+        let file = dir.join(path);
+        fs::create_dir_all(file.parent().unwrap_or(dir))
+            .change_context(TemplateError)
+            .attach(format!("failed to make the folder for {path}"))?;
+        fs::write(&file, text)
+            .change_context(TemplateError)
+            .attach(format!("failed to write {path}"))?;
+    }
     symlink("AGENTS.md", dir.join("CLAUDE.md"))
         .change_context(TemplateError)
         .attach("failed to link CLAUDE.md")
@@ -100,7 +143,7 @@ mod tests {
     use crate::feat::sessions::state::GroupKind;
 
     #[rstest::rstest]
-    fn seed_writes_agents_md() -> Result<(), Report<TemplateError>> {
+    fn seed_writes_every_research_kit_file() -> Result<(), Report<TemplateError>> {
         // Given an empty temp folder.
         let root = tempfile::tempdir().change_context(TemplateError)?;
         let dir = root.path().join("research");
@@ -108,9 +151,19 @@ mod tests {
         // When seeding the Research template.
         seed(&dir, GroupKind::Research)?;
 
-        // Then AGENTS.md holds the built-in text.
-        let text = fs::read_to_string(dir.join("AGENTS.md")).change_context(TemplateError)?;
-        assert_eq!(text, RESEARCH, "AGENTS.md should be the built-in text");
+        // Then every kit file holds its built-in text.
+        let wrong: Vec<&str> = RESEARCH
+            .iter()
+            .filter(|(path, text)| {
+                fs::read_to_string(dir.join(path)).ok().as_deref() != Some(*text)
+            })
+            .map(|(path, _)| *path)
+            .collect();
+        assert_eq!(
+            wrong,
+            Vec::<&str>::new(),
+            "every kit file should be the built-in text"
+        );
         Ok(())
     }
 
@@ -128,6 +181,50 @@ mod tests {
             target,
             Path::new("AGENTS.md"),
             "CLAUDE.md should link to AGENTS.md"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn seed_links_research_claude_md_to_agents_md() -> Result<(), Report<TemplateError>> {
+        // Given an empty temp folder.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+
+        // When seeding the Research template.
+        seed(root.path(), GroupKind::Research)?;
+
+        // Then CLAUDE.md links to its sibling AGENTS.md.
+        let target = fs::read_link(root.path().join("CLAUDE.md")).change_context(TemplateError)?;
+        assert_eq!(
+            target,
+            Path::new("AGENTS.md"),
+            "CLAUDE.md should link to AGENTS.md"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn seed_writes_only_agents_md_for_learn() -> Result<(), Report<TemplateError>> {
+        // Given an empty temp folder.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+
+        // When seeding the Learn template.
+        seed(root.path(), GroupKind::Learn)?;
+
+        // Then the folder holds exactly AGENTS.md and CLAUDE.md.
+        let names = {
+            let mut names = fs::read_dir(root.path())
+                .change_context(TemplateError)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<Result<Vec<_>, _>>()
+                .change_context(TemplateError)?;
+            names.sort();
+            names
+        };
+        assert_eq!(
+            names,
+            ["AGENTS.md", "CLAUDE.md"],
+            "Learn should seed only AGENTS.md and its link"
         );
         Ok(())
     }
@@ -175,6 +272,25 @@ mod tests {
         // Then the copy has the nested file with the same text.
         let text = fs::read_to_string(to.join("notes/a.md")).change_context(TemplateError)?;
         assert_eq!(text, "hello", "nested files should be copied");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn copy_copies_dotfiles() -> Result<(), Report<TemplateError>> {
+        // Given a template with `.claude/agents/x.md`.
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+        let (from, to) = (root.path().join("from"), root.path().join("to"));
+        fs::create_dir_all(from.join(".claude/agents")).change_context(TemplateError)?;
+        fs::write(from.join(".claude/agents/x.md"), "hello").change_context(TemplateError)?;
+
+        // When copying it.
+        copy(&from, &to)?;
+
+        // Then the copy has the dotfile folder's file.
+        assert!(
+            to.join(".claude/agents/x.md").is_file(),
+            "dotfile folders should be copied"
+        );
         Ok(())
     }
 

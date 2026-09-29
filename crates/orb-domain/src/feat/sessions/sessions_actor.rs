@@ -8303,6 +8303,25 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn creating_a_research_group_copies_the_kit() -> Result<(), Report<StoreError>> {
+        // Given no Research template.
+        let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
+
+        // When creating Research group `tokio-cancel`.
+        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+
+        // Then its folder has the kit's investigator subagent.
+        assert!(
+            orb_root
+                .path()
+                .join("research/tokio-cancel/.claude/agents/investigator.md")
+                .is_file(),
+            "the folder should get the research kit"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn creating_a_research_group_adds_the_research_project() -> Result<(), Report<StoreError>> {
         // Given no Research project.
         let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
