@@ -1052,7 +1052,7 @@ impl App {
     }
 
     fn retry_start(&self) {
-        let _ = self.sessions.tell(sessions_actor::RetryStart).try_send();
+        let _ = self.sessions.tell(sessions_actor::DeclineTrust).try_send();
     }
 
     /// Runs `argv` in `cwd` in a pane the size of the pane area, with

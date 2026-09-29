@@ -30,11 +30,12 @@
 //! draft, there. It makes a draft's project a git repository when asked.
 //!
 //! When Claude refuses to start in a directory it hasn't been trusted in, the
-//! start waits: the actor asks the frontend for an interactive `claude` there,
-//! tries the start again on every poll (each second while it waits), so it
-//! goes ahead as soon as the user trusts the directory, and once more when
-//! asked, when the user leaves that `claude`. A refusal on that last try
-//! fails the start.
+//! start waits while the actor asks the frontend to have the user trust
+//! Claude's project path for it: the git root, the main repository for a
+//! worktree, or the directory itself outside git. On yes it marks the path
+//! trusted in Claude's config and tries the start once more; a refusal then
+//! fails the start. On no, the start fails as `Workspace not trusted`. Either
+//! way a worktree made for a failed start is removed.
 //!
 //! It keeps each thread's place in the sidebar: pinning, settling onto the
 //! Settled shelf (which stops the session), un-settling, and deleting. A turn
@@ -135,6 +136,10 @@ const FOLDER_UNREMOVED: &str = "couldn't remove the folder";
 const WORKTREE_IN_USE: &str = "kept the worktree: another thread works in it";
 /// The error shown when a started session can't be saved or shown.
 const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
+/// The error shown when Claude's config can't be updated to trust a folder.
+const TRUST_UNSAVED: &str = "couldn't trust the folder";
+/// The error shown when the user declines to trust a start's folder.
+const TRUST_DECLINED: &str = "Workspace not trusted";
 /// How many random worktree names to try before giving up.
 const WORKTREE_NAME_ATTEMPTS: u32 = 8;
 
@@ -155,9 +160,9 @@ pub struct SessionsActorDeps {
 
 /// Owns [`Sessions`](super::state::Sessions): the projects, their drafts and
 /// groups, the threads' statuses, titles, pins and settles, the latest `claude` error,
-/// the directory a start waits to be trusted in, and the started thread the
-/// frontend should attach to. It also restores the sidebar's width and
-/// project filter, selects a new group's draft, and moves the cursor to a
+/// Claude's project path a start waits to be trusted in, and the started
+/// thread the frontend should attach to. It also restores the sidebar's width
+/// and project filter, selects a new group's draft, and moves the cursor to a
 /// sibling it started. The intent handler also moves the cursor, opens and closes
 /// the shelf, marks a start as starting, edits a draft's fields before asking
 /// for them to be saved, and resizes or filters the sidebar before asking for
@@ -176,8 +181,9 @@ pub struct SessionsActor {
     rows: Vec<ThreadRow>,
     /// The saved groups, as last written to the store.
     groups: Vec<GroupRow>,
-    /// The start waiting for the user to trust its directory.
-    pending: Option<PendingStart>,
+    /// The start waiting for the user to trust Claude's project path for it,
+    /// and that path.
+    pending: Option<(PendingStart, PathBuf)>,
 }
 
 /// Poll the session host now.
@@ -243,10 +249,15 @@ pub struct CheckoutGroup {
     pub git_ref: GitRef,
 }
 
-/// Try the start that waits for trust once more, now that the user had the
-/// chance to trust its directory.
+/// Mark the waiting start's project path trusted in Claude's config, as the
+/// user said yes, and try the start once more.
 #[derive(Debug)]
-pub struct RetryStart;
+pub struct TrustWorkspace;
+
+/// End the waiting start as a failed one, as the user declined to trust its
+/// project path.
+#[derive(Debug)]
+pub struct DeclineTrust;
 
 /// Add a directory as a project.
 #[derive(Debug)]
@@ -545,15 +556,27 @@ impl Message<CheckoutGroup> for SessionsActor {
     }
 }
 
-impl Message<RetryStart> for SessionsActor {
+impl Message<TrustWorkspace> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        _msg: RetryStart,
+        _msg: TrustWorkspace,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.retry_start().await;
+        self.trust_workspace().await;
+    }
+}
+
+impl Message<DeclineTrust> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: DeclineTrust,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.decline_trust();
     }
 }
 
@@ -906,19 +929,15 @@ impl SessionsActor {
         }
     }
 
-    /// Asks the host what every session is doing and shows it, then tries a
-    /// start waiting for trust again. Returns how long to wait before the
-    /// next poll: a second while a turn is underway, orb is attached, or a
-    /// start waits for trust.
+    /// Asks the host what every session is doing and shows it. Returns how
+    /// long to wait before the next poll: a second while a turn is underway
+    /// or orb is attached.
     async fn poll(&mut self) -> Duration {
         if let Err(report) = self.sync().await {
             self.fail(&report);
         }
-        if let Some(pending) = self.pending.take() {
-            self.start(pending, true).await;
-        }
         let app = self.state.read();
-        if app.sessions.any_in_progress() || !app.attached.is_empty() || self.pending.is_some() {
+        if app.sessions.any_in_progress() || !app.attached.is_empty() {
             FAST_POLL
         } else {
             SLOW_POLL
@@ -1300,10 +1319,9 @@ impl SessionsActor {
 
     /// Starts a session for `pending` and finishes what it was for. If Claude
     /// hasn't been trusted in its directory and `allow_trust`, the start waits
-    /// for the user to trust it (asking the frontend once). Otherwise the
-    /// trust request ends first, so the frontend closes its trust pane before
-    /// the thread shows. If it fails, the reason shows and a worktree made
-    /// for it is removed.
+    /// for the user to trust Claude's project path for it (asking the
+    /// frontend once). If it fails, the reason shows and a worktree made for
+    /// it is removed.
     async fn start(&mut self, pending: PendingStart, allow_trust: bool) {
         let created = self
             .services
@@ -1314,18 +1332,21 @@ impl SessionsActor {
             && allow_trust
             && report.contains::<WorkspaceUntrusted>()
         {
+            let dir = self
+                .services
+                .git
+                .project_path(&pending.cwd)
+                .unwrap_or_else(|| pending.cwd.clone());
             let asked = {
                 let mut app = self.state.write();
-                app.sessions.trust.replace(pending.cwd.clone()).as_ref() == Some(&pending.cwd)
+                app.sessions.trust.replace(dir.clone()).as_ref() == Some(&dir)
             };
-            self.pending = Some(pending);
+            self.pending = Some((pending, dir));
             if !asked {
                 (self.wake)();
             }
             return;
         }
-        // The frontend closes its trust pane before the thread shows.
-        self.state.write().sessions.trust = None;
         let PendingStart {
             kind,
             cwd,
@@ -1387,13 +1408,37 @@ impl SessionsActor {
         }
     }
 
-    /// Tries the start waiting for trust once more; a second refusal fails it.
-    async fn retry_start(&mut self) {
-        let Some(pending) = self.pending.take() else {
+    /// Marks the waiting start's project path trusted in Claude's config and
+    /// tries the start once more; a second refusal fails it. If the path
+    /// can't be marked, the start fails and a worktree made for it is removed.
+    async fn trust_workspace(&mut self) {
+        let Some((pending, dir)) = self.pending.take() else {
             return;
         };
         self.state.write().sessions.trust = None;
-        self.start(pending, false).await;
+        match self.services.workspace_trust.trust(&dir) {
+            Ok(()) => self.start(pending, false).await,
+            Err(_) => {
+                if let Some(made) = &pending.made {
+                    self.remove_made(made);
+                }
+                self.end_start(Err(TRUST_UNSAVED.to_owned()));
+            }
+        }
+    }
+
+    /// Ends the waiting start as a failed one, as the user declined to trust
+    /// its project path: the draft stays, a worktree made for it is removed,
+    /// and `Workspace not trusted` shows.
+    fn decline_trust(&mut self) {
+        let Some((pending, _)) = self.pending.take() else {
+            return;
+        };
+        self.state.write().sessions.trust = None;
+        if let Some(made) = &pending.made {
+            self.remove_made(made);
+        }
+        self.end_start(Err(TRUST_DECLINED.to_owned()));
     }
 
     /// Replaces project `project_id`'s draft with the thread `created` from
@@ -3386,6 +3431,14 @@ mod tests {
             Arc::new(Self::answering())
         }
 
+        /// A repository without an `origin` whose project path is `project`.
+        fn in_project(project: &str) -> Arc<Self> {
+            Arc::new(Self {
+                project: Some(PathBuf::from(project)),
+                ..Self::answering()
+            })
+        }
+
         /// A repository with an `origin` that answers fetches with `fetch`.
         fn with_origin(fetch: Result<bool, &str>) -> Arc<Self> {
             Arc::new(Self {
@@ -3591,16 +3644,51 @@ mod tests {
         }
     }
 
-    /// A trust service that accepts every folder.
-    struct FakeTrust;
+    /// A trust service that records the folders it trusts, and may refuse.
+    struct FakeTrust {
+        fails: bool,
+        /// The folders `trust` was called on, in order.
+        trusted: Mutex<Vec<PathBuf>>,
+    }
+
+    impl FakeTrust {
+        fn accepting() -> Arc<Self> {
+            Arc::new(Self {
+                fails: false,
+                trusted: Mutex::default(),
+            })
+        }
+
+        fn failing() -> Arc<Self> {
+            Arc::new(Self {
+                fails: true,
+                trusted: Mutex::default(),
+            })
+        }
+
+        fn trusted(&self) -> Vec<PathBuf> {
+            self.trusted
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
 
     impl WorkspaceTrust for FakeTrust {
         fn name(&self) -> &'static str {
             "fake"
         }
 
-        fn trust(&self, _dir: &Path) -> Result<(), Report<WorkspaceTrustError>> {
-            Ok(())
+        fn trust(&self, dir: &Path) -> Result<(), Report<WorkspaceTrustError>> {
+            self.trusted
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(dir.to_owned());
+            if self.fails {
+                Err(Report::new(WorkspaceTrustError).attach("config unwritable"))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -3673,15 +3761,23 @@ mod tests {
         git: &Arc<FakeGit>,
         claude_dir: &Path,
     ) -> (SessionsActor, State) {
-        start_in(store, host, git, claude_dir, Path::new(ORB_ROOT))
+        start_in(
+            store,
+            host,
+            git,
+            &FakeTrust::accepting(),
+            claude_dir,
+            Path::new(ORB_ROOT),
+        )
     }
 
-    /// Starts the actor on `store` with `git`, making worktrees under
-    /// [`WORKTREES_ROOT`] and groups' folders under `orb_root`.
+    /// Starts the actor on `store` with `git` and `trust`, making worktrees
+    /// under [`WORKTREES_ROOT`] and groups' folders under `orb_root`.
     fn start_in(
         store: Store,
         host: &Arc<FakeHost>,
         git: &Arc<FakeGit>,
+        trust: &Arc<FakeTrust>,
         claude_dir: &Path,
         orb_root: &Path,
     ) -> (SessionsActor, State) {
@@ -3690,7 +3786,7 @@ mod tests {
             services: Services {
                 session_host: SessionHostService::new(host.clone()),
                 git: GitService::new(git.clone()),
-                workspace_trust: WorkspaceTrustService::new(Arc::new(FakeTrust)),
+                workspace_trust: WorkspaceTrustService::new(trust.clone()),
             },
             state: state.clone(),
             store,
@@ -7634,40 +7730,71 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn untrusted_draft_start_asks_for_trust_in_the_root() -> Result<(), Report<StoreError>> {
-        // Given a local draft and claude refusing the project's untrusted root.
+    async fn untrusted_draft_start_asks_for_trust_in_the_project_path()
+    -> Result<(), Report<StoreError>> {
+        // Given a local draft whose project path is `/tmp/main`, and claude
+        // refusing it as untrusted.
         let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (host, git) = (
+            FakeHost::untrusted(1, Ok("bb")),
+            FakeGit::in_project("/tmp/main"),
+        );
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
 
         // When starting the draft.
         actor.start_draft(project).await;
 
-        // Then the start waits for the root to be trusted.
+        // Then the start waits for the project path to be trusted.
         assert_eq!(
             trust_of(&state),
-            Some(PathBuf::from(PROJECT_ROOT)),
-            "the project's root should be offered for trust"
+            Some(PathBuf::from("/tmp/main")),
+            "claude's project path should be offered for trust"
         );
         Ok(())
     }
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn untrusted_worktree_asks_for_trust_in_the_worktree() -> Result<(), Report<StoreError>> {
-        // Given claude refusing a new, untrusted worktree.
-        let (store, id) = store_with_thread("aa")?;
+    async fn untrusted_start_without_a_project_path_asks_for_trust_in_its_directory()
+    -> Result<(), Report<StoreError>> {
+        // Given a local draft with no project path, and claude refusing its
+        // untrusted root.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
         let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(project).await;
+
+        // Then the start waits for its own directory to be trusted.
+        assert_eq!(
+            trust_of(&state),
+            Some(PathBuf::from(PROJECT_ROOT)),
+            "the start's directory should be offered for trust"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn untrusted_worktree_asks_for_trust_in_the_main_repo() -> Result<(), Report<StoreError>>
+    {
+        // Given claude refusing a new, untrusted worktree of the project.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (
+            FakeHost::untrusted(1, Ok("bb")),
+            FakeGit::in_project(PROJECT_ROOT),
+        );
         let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
 
         // When moving a thread to a new worktree.
         actor.move_thread(id, Workspace::NewWorktree).await;
 
-        // Then the start waits for the refused worktree itself to be trusted.
+        // Then the start waits for the main repository to be trusted.
         assert_eq!(
             trust_of(&state),
-            host.created_in().last().cloned(),
-            "the refused worktree should be offered for trust"
+            Some(PathBuf::from(PROJECT_ROOT)),
+            "the worktree's main repository should be offered for trust"
         );
         Ok(())
     }
@@ -7694,115 +7821,111 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn retry_after_trust_starts_the_session() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for its directory to be trusted.
+    async fn poll_does_not_retry_a_start_waiting_for_trust() -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust.
         let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
         let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When retrying the start after the user trusted it.
-        actor.retry_start().await;
-
-        // Then the new thread shows.
-        assert_eq!(
-            state.read().sessions.threads().count(),
-            1,
-            "the retried start should add the thread"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn poll_starts_a_draft_waiting_for_trust_once_trusted() -> Result<(), Report<StoreError>>
-    {
-        // Given a draft start waiting for its root to be trusted, which the
-        // user has just trusted.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When the next poll runs, with the trust pane still open.
-        actor.poll().await;
-
-        // Then the new thread shows.
-        assert_eq!(
-            state.read().sessions.threads().count(),
-            1,
-            "a start should go ahead as soon as the directory is trusted"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn trusted_start_on_a_poll_ends_the_trust_request() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust, now trusted.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When the next poll starts it.
-        actor.poll().await;
-
-        // Then no trust is asked for any more, so the trust pane closes.
-        assert_eq!(trust_of(&state), None, "the trust pane should give way");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn poll_keeps_a_start_waiting_while_still_untrusted() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust, still untrusted.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(2, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.start_draft(project).await;
 
         // When the next poll runs.
         actor.poll().await;
 
-        // Then the start still waits on the root, with no error.
+        // Then no second session start is tried.
         assert_eq!(
-            (trust_of(&state), error_of(&state)),
-            (Some(PathBuf::from(PROJECT_ROOT)), None),
-            "an untrusted retry should keep waiting quietly"
+            host.created_in().len(),
+            1,
+            "only the user's answer should retry the start"
         );
         Ok(())
     }
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn poll_waits_one_second_while_a_start_waits_for_trust() -> Result<(), Report<StoreError>>
-    {
-        // Given a draft start waiting for trust, still untrusted.
+    async fn poll_waits_five_seconds_while_a_start_waits_for_trust()
+    -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust.
         let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(2, Ok("bb"));
+        let host = FakeHost::untrusted(1, Ok("bb"));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.start_draft(project).await;
 
         // When polling.
         let next = actor.poll().await;
 
-        // Then the next poll comes in a second.
-        assert_eq!(next, FAST_POLL, "trust should be noticed within a second");
+        // Then the next poll comes at the idle pace.
+        assert_eq!(
+            next, SLOW_POLL,
+            "a pending trust shouldn't speed up polling"
+        );
         Ok(())
     }
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn retry_refused_again_shows_the_error() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust, and the directory still untrusted.
+    async fn trusting_the_workspace_saves_trust_for_the_project_path()
+    -> Result<(), Report<StoreError>> {
+        // Given a local draft start waiting for `/tmp/main` to be trusted.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let (host, git, trust) = (
+            FakeHost::untrusted(1, Ok("bb")),
+            FakeGit::in_project("/tmp/main"),
+            FakeTrust::accepting(),
+        );
+        let (mut actor, _state) = start_in(
+            store,
+            &host,
+            &git,
+            &trust,
+            Path::new(NO_CLAUDE_DIR),
+            Path::new(ORB_ROOT),
+        );
+        actor.start_draft(project).await;
+
+        // When the user trusts the workspace.
+        actor.trust_workspace().await;
+
+        // Then the project path is marked trusted.
+        assert_eq!(
+            trust.trusted(),
+            vec![PathBuf::from("/tmp/main")],
+            "claude's project path should be saved as trusted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn trusting_the_workspace_starts_the_thread() -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust, which claude accepts next.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.start_draft(project).await;
+
+        // When the user trusts the workspace.
+        actor.trust_workspace().await;
+
+        // Then the new thread shows.
+        assert_eq!(
+            state.read().sessions.threads().count(),
+            1,
+            "a trusted start should add the thread"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn trusted_start_refused_again_shows_the_error() -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust, which claude refuses again.
         let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
         let host = FakeHost::untrusted(2, Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.start_draft(project).await;
 
-        // When retrying the start.
-        actor.retry_start().await;
+        // When the user trusts the workspace.
+        actor.trust_workspace().await;
 
         // Then claude's refusal shows.
         assert_eq!(
@@ -7815,15 +7938,17 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn retry_refused_again_removes_the_new_worktree() -> Result<(), Report<StoreError>> {
-        // Given a move to a new worktree waiting for trust, still untrusted.
+    async fn trusted_start_refused_again_removes_the_new_worktree() -> Result<(), Report<StoreError>>
+    {
+        // Given a move to a new worktree waiting for trust, which claude
+        // refuses again.
         let (store, id) = store_with_thread("aa")?;
         let (host, git) = (FakeHost::untrusted(2, Ok("bb")), FakeGit::local());
         let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
         actor.move_thread(id, Workspace::NewWorktree).await;
 
-        // When retrying the start.
-        actor.retry_start().await;
+        // When the user trusts the workspace.
+        actor.trust_workspace().await;
 
         // Then the worktree orb made is force-removed.
         let (path, _branch) = git
@@ -7832,28 +7957,223 @@ mod tests {
         assert!(
             git.calls()
                 .contains(&GitCall::RemoveWorktree { path, force: true }),
-            "a failed retry should remove the worktree made for it"
+            "a refused retry should remove the worktree made for it"
         );
         Ok(())
     }
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn retry_refused_again_does_not_ask_for_trust() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust, and the directory still untrusted.
+    async fn trusted_start_refused_again_does_not_ask_for_trust() -> Result<(), Report<StoreError>>
+    {
+        // Given a draft start waiting for trust, which claude refuses again.
         let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
         let host = FakeHost::untrusted(2, Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.start_draft(project).await;
 
-        // When retrying the start.
-        actor.retry_start().await;
+        // When the user trusts the workspace.
+        actor.trust_workspace().await;
 
         // Then no trust is asked for again.
         assert_eq!(
             trust_of(&state),
             None,
-            "a retry should never reopen the trust prompt"
+            "a retry should never ask for trust again"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_trust_save_shows_why() -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust, and Claude's config unwritable.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) = start_in(
+            store,
+            &host,
+            &FakeGit::local(),
+            &FakeTrust::failing(),
+            Path::new(NO_CLAUDE_DIR),
+            Path::new(ORB_ROOT),
+        );
+        actor.start_draft(project).await;
+
+        // When the user trusts the workspace.
+        actor.trust_workspace().await;
+
+        // Then the start fails, saying the folder couldn't be trusted.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("couldn't trust the folder"),
+            "an unsaved trust should fail the start"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_trust_save_removes_the_new_worktree() -> Result<(), Report<StoreError>> {
+        // Given a move to a new worktree waiting for trust, and Claude's
+        // config unwritable.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_in(
+            store,
+            &host,
+            &git,
+            &FakeTrust::failing(),
+            Path::new(NO_CLAUDE_DIR),
+            Path::new(ORB_ROOT),
+        );
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // When the user trusts the workspace.
+        actor.trust_workspace().await;
+
+        // Then the worktree orb made is force-removed.
+        let (path, _branch) = git
+            .added()
+            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
+        assert!(
+            git.calls()
+                .contains(&GitCall::RemoveWorktree { path, force: true }),
+            "an unsaved trust should remove the worktree made for the start"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn trusting_the_workspace_without_a_waiting_start_saves_nothing()
+    -> Result<(), Report<StoreError>> {
+        // Given no start waiting for trust.
+        let (store, _project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let trust = FakeTrust::accepting();
+        let (mut actor, _state) = start_in(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &FakeGit::local(),
+            &trust,
+            Path::new(NO_CLAUDE_DIR),
+            Path::new(ORB_ROOT),
+        );
+
+        // When the user trusts the workspace.
+        actor.trust_workspace().await;
+
+        // Then nothing is marked trusted.
+        assert!(
+            trust.trusted().is_empty(),
+            "trust with nothing waiting should save nothing"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn declining_trust_removes_the_new_worktree() -> Result<(), Report<StoreError>> {
+        // Given a move to a new worktree waiting for trust.
+        let (store, id) = store_with_thread("aa")?;
+        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
+        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        actor.move_thread(id, Workspace::NewWorktree).await;
+
+        // When the user declines to trust the workspace.
+        actor.decline_trust();
+
+        // Then the worktree orb made is force-removed.
+        let (path, _branch) = git
+            .added()
+            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
+        assert!(
+            git.calls()
+                .contains(&GitCall::RemoveWorktree { path, force: true }),
+            "a declined start should remove the worktree made for it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn declining_trust_shows_workspace_not_trusted() -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.start_draft(project).await;
+
+        // When the user declines to trust the workspace.
+        actor.decline_trust();
+
+        // Then the start fails as not trusted.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("Workspace not trusted"),
+            "a declined start should say the workspace isn't trusted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn declining_trust_ends_the_trust_request() -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.start_draft(project).await;
+
+        // When the user declines to trust the workspace.
+        actor.decline_trust();
+
+        // Then no trust is asked for any more.
+        assert_eq!(
+            trust_of(&state),
+            None,
+            "a declined start should stop asking for trust"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn declining_trust_keeps_the_draft() -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for trust.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.start_draft(project).await;
+
+        // When the user declines to trust the workspace.
+        actor.decline_trust();
+
+        // Then the draft still shows.
+        assert!(
+            shown_draft(&state, project).is_some(),
+            "a declined start should keep the draft"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn declining_trust_without_a_waiting_start_shows_nothing()
+    -> Result<(), Report<StoreError>> {
+        // Given no start waiting for trust.
+        let (store, _project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When the user declines to trust the workspace.
+        actor.decline_trust();
+
+        // Then no error shows.
+        assert_eq!(
+            error_of(&state),
+            None,
+            "declining with nothing waiting should show nothing"
         );
         Ok(())
     }
@@ -8271,6 +8591,7 @@ mod tests {
             store,
             &FakeHost::listing(Vec::new()),
             git,
+            &FakeTrust::accepting(),
             Path::new(NO_CLAUDE_DIR),
             orb_root.path(),
         );
@@ -8850,11 +9171,10 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn trusted_group_draft_start_on_a_poll_selects_and_attaches_the_thread()
+    async fn trusted_group_draft_start_selects_and_attaches_the_thread()
     -> Result<(), Report<StoreError>> {
         // Given a selected Research group draft whose start waits for its
-        // folder to be trusted, which the user has just trusted in the trust
-        // pane.
+        // folder to be trusted.
         let folder = tempfile::tempdir().change_context(StoreError)?;
         let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
         let (id, mut actor, state) = group_draft(
@@ -8865,8 +9185,8 @@ mod tests {
         )?;
         actor.start_group_draft(id).await;
 
-        // When the next poll runs.
-        actor.poll().await;
+        // When the user trusts the folder.
+        actor.trust_workspace().await;
 
         // Then its thread is selected and to be attached.
         let sessions = &state.read().sessions;
@@ -9487,6 +9807,7 @@ mod tests {
             store,
             &host,
             &FakeGit::local(),
+            &FakeTrust::accepting(),
             Path::new(NO_CLAUDE_DIR),
             orb_root,
         );
@@ -10356,7 +10677,7 @@ mod tests {
             services: Services {
                 session_host: SessionHostService::new(host),
                 git: GitService::new(git.clone()),
-                workspace_trust: WorkspaceTrustService::new(Arc::new(FakeTrust)),
+                workspace_trust: WorkspaceTrustService::new(FakeTrust::accepting()),
             },
             state: state.clone(),
             store,
