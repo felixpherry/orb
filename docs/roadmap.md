@@ -685,7 +685,7 @@ Written in the jump list's Verification step (not a milestone).
 - ``(jumps) Deleted rows, rows hidden by the project filter, and the Settled header are skipped, and a folded group opens on arrival.``
 - ``(jumps) orb persists the newest 20 jump-list rows to its store (store migration v9 added the `jumps` table); a row already in the list moves to the newest slot.``
 
-### Trust confirm
+### Trust confirm (written)
 
 Written in trust confirm's Verification step (not a milestone).
 
