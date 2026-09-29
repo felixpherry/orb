@@ -79,6 +79,10 @@ pub enum PickerKind {
         group: GroupId,
         dir: Option<GroupKind>,
     },
+    /// Claude refused a session start in `dir`, Claude's project path for it
+    /// (the git root, the main repository for a worktree, else the folder):
+    /// confirm trusting it.
+    TrustWorkspace { dir: PathBuf },
 }
 
 /// The open picker.
@@ -176,6 +180,11 @@ impl PickerState {
     /// its directory of that kind, with `No` selected.
     pub fn delete_group(group: GroupId, dir: Option<GroupKind>, return_to: Focus) -> Self {
         Self::confirm(PickerKind::DeleteGroup { group, dir }, return_to)
+    }
+
+    /// The `No`/`Yes` confirm for trusting `dir`, with `No` selected.
+    pub fn trust_workspace(dir: PathBuf, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::TrustWorkspace { dir }, return_to)
     }
 
     /// A `No`/`Yes` confirm of `kind`, with `No` selected.
@@ -1132,6 +1141,19 @@ mod tests {
         let picker = PickerState::settle_group(GroupId(9), Focus::Sidebar);
 
         // Then No is highlighted, so ⏎ alone settles nothing.
+        assert_eq!(
+            picker.selected(),
+            Some(&PickerItem::Confirm(false)),
+            "No should be the default"
+        );
+    }
+
+    #[rstest::rstest]
+    fn trust_workspace_confirm_starts_on_no() {
+        // Given / When opening the confirm for trusting /work.
+        let picker = PickerState::trust_workspace(PathBuf::from("/work"), Focus::Sidebar);
+
+        // Then No is highlighted, so ⏎ alone trusts nothing.
         assert_eq!(
             picker.selected(),
             Some(&PickerItem::Confirm(false)),

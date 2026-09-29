@@ -28,17 +28,14 @@
 //! announces the notices only if none is. That thread also asks zellij which
 //! tab orb's pane is on, where a click on the notification goes back to.
 //!
-//! When a session start waits for the user to trust a directory, a pane of
-//! its own, over any thread's, runs an interactive `claude` there. The
-//! sessions actor tries the start again every second, so once the user
-//! trusts the directory the pane gives way to the new thread's, keys and
-//! all. Leaving it, by its exit, `<C-\>` or `<C-h>`, asks the actor to try
-//! the start once more. When a started draft's thread comes up still selected, the
-//! loop attaches to it. If the user is typing in a picker, the rename box or
-//! the sidebar search, or is in a pane (the trust pane included), it waits,
-//! and attaches once the keys are back in the sidebar or the dashboard,
-//! leaving them there with the pane drawn, as long as the thread is still
-//! selected.
+//! When a session start waits for the user to trust a folder, the loop asks
+//! with a `No`/`Yes` confirm naming it, in place of any picker, the rename box
+//! or the sidebar search; a thread's pane that had the keys loses them, as on
+//! `<C-h>`. When a started draft's thread comes up still selected, the loop
+//! attaches to it. If the user is typing in a picker, the rename box or the
+//! sidebar search, or is in a pane, it waits, and attaches once the keys are
+//! back in the sidebar or the dashboard, leaving them there with the pane
+//! drawn, as long as the thread is still selected.
 //!
 //! After each frame the outer terminal's cursor takes the shape of where the
 //! keys are: a block in the sidebar, a bar in a text input, Claude's own
@@ -60,6 +57,7 @@ use jiff::tz::TimeZone;
 use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::notify::notifier::NotifierService;
+use orb_domain::feat::picker::state::PickerState;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
 use orb_domain::feat::zellij::zellij_service::{
@@ -148,16 +146,25 @@ enum LoopEvent {
     StateChanged,
 }
 
-/// The directory to open a trust pane in: the one a start waits on, unless
-/// its pane was already opened.
+/// The folder to ask the user to trust: the one a start waits on, unless it
+/// was asked already.
 fn trust_to_open(trust: Option<&Path>, opened: Option<&Path>) -> Option<PathBuf> {
     trust.filter(|&dir| Some(dir) != opened).map(Path::to_owned)
 }
 
-/// Whether the open trust pane should close: its start no longer waits,
-/// because it went ahead once Claude trusted the directory, or failed.
-fn trust_ended(open: bool, trust: Option<&Path>) -> bool {
-    open && trust.is_none()
+/// Where the keys go once the trust confirm closes, given where they were
+/// when it opened, the `return_to` of a picker it replaces, and whether the
+/// sidebar is hidden: back to the sidebar or the dashboard; to where a
+/// replaced picker would have returned them; to the sidebar from the rename
+/// box or the search; from a pane, to the sidebar (the dashboard while it's
+/// hidden), as `<C-h>` leaves it drawn.
+fn trust_return_to(focus: Focus, replaced: Option<Focus>, sidebar_hidden: bool) -> Focus {
+    match focus {
+        Focus::Sidebar | Focus::Dashboard => focus,
+        Focus::Picker => replaced.unwrap_or(Focus::Sidebar),
+        Focus::Attached if sidebar_hidden => Focus::Dashboard,
+        Focus::Rename | Focus::Search | Focus::Attached => Focus::Sidebar,
+    }
 }
 
 /// What the loop does with a started draft's request to attach to its thread.
@@ -165,11 +172,11 @@ fn trust_ended(open: bool, trust: Option<&Path>) -> bool {
 enum StartedAttach {
     /// There's no request, or its thread is no longer selected: drop it.
     Drop,
-    /// The user is typing (a picker, the rename box, the search) or in a pane
-    /// (the trust pane too): keep the request until the keys are back.
+    /// The user is typing (a picker, the rename box, the search) or in a
+    /// pane: keep the request until the keys are back.
     Wait,
     /// Attach now. `keep_keys` leaves the keys where they are, for a request
-    /// that waited, so a `<C-h>` out of the trust pane isn't undone.
+    /// that waited.
     Attach { keep_keys: bool },
 }
 
@@ -189,17 +196,16 @@ fn started_attach(
 }
 
 /// The pane the right-hand area draws: none while the dashboard has the
-/// keys, else the trust pane while it's open, else the selected thread's.
-fn shown_pane<'a, P>(
-    trust: Option<&'a P>,
-    panes: &'a HashMap<ThreadId, P>,
+/// keys, else the selected thread's.
+fn shown_pane<P>(
+    panes: &HashMap<ThreadId, P>,
     selected: Option<ThreadId>,
     focus: Focus,
-) -> Option<&'a P> {
+) -> Option<&P> {
     match focus {
         Focus::Dashboard => None,
         Focus::Attached | Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search => {
-            trust.or_else(|| panes.get(&selected?))
+            panes.get(&selected?)
         }
     }
 }
@@ -264,12 +270,9 @@ struct App {
     /// The thread whose pane last got the keys, so the pane loses focus when
     /// the keys move on even though the selection already has.
     focused_pane: Option<ThreadId>,
-    /// The interactive `claude` where the user trusts a directory, drawn over
-    /// any thread's pane while it's open.
-    trust: Option<Pane>,
     /// Shown on the right when `claude attach` couldn't start.
     pane_error: Option<String>,
-    /// The directory a trust pane was opened for, while its start waits.
+    /// The folder the trust confirm was opened for, while its start waits.
     opened_trust: Option<PathBuf>,
     /// A started draft's attach request is waiting for the keys to come back
     /// to the sidebar or the dashboard.
@@ -315,7 +318,6 @@ impl App {
             keys: Keys::new(keymap::keymap(), scope),
             panes: HashMap::new(),
             focused_pane: None,
-            trust: None,
             pane_error: None,
             opened_trust: None,
             attach_waited: false,
@@ -339,20 +341,15 @@ impl App {
                 render::layout(terminal.size()?.into(), &self.state.read().sidebar);
             self.pane_area = pane_area;
             let size = PaneSize::from(pane_area);
-            for pane in self.trust.iter_mut().chain(self.panes.values_mut()) {
+            for pane in self.panes.values_mut() {
                 pane.resize(size);
             }
             let now = SystemTime::now();
             let mut drawn = (None, None);
             terminal.draw(|frame| {
                 let state = self.state.read();
-                let pane = shown_pane(
-                    self.trust.as_ref(),
-                    &self.panes,
-                    state.sessions.selected_id(),
-                    state.focus,
-                )
-                .filter(|pane| !pane.has_exited());
+                let pane = shown_pane(&self.panes, state.sessions.selected_id(), state.focus)
+                    .filter(|pane| !pane.has_exited());
                 drawn = render::render(
                     frame,
                     &state,
@@ -405,11 +402,10 @@ impl App {
             }
             self.announce();
             self.reconcile(terminal.backend_mut())?;
-            self.close_ended_trust(terminal.backend_mut())?;
-            self.open_trust(terminal.backend_mut())?;
+            self.ask_trust(terminal.backend_mut())?;
             self.open_started(terminal.backend_mut())?;
             let now = Instant::now();
-            for pane in self.trust.iter().chain(self.panes.values()) {
+            for pane in self.panes.values() {
                 pane.flush_expired_sync(now);
             }
         }
@@ -425,11 +421,7 @@ impl App {
             .sessions
             .spinning()
             .then(|| Instant::now() + SPINNER_FRAME);
-        let sync = self
-            .trust
-            .iter()
-            .chain(self.panes.values())
-            .filter_map(Pane::sync_deadline);
+        let sync = self.panes.values().filter_map(Pane::sync_deadline);
         tick.into_iter().chain(sync).min()
     }
 
@@ -438,12 +430,7 @@ impl App {
     fn attached_pane(&self) -> Option<&Pane> {
         let state = self.state.read();
         match state.focus {
-            Focus::Attached => shown_pane(
-                self.trust.as_ref(),
-                &self.panes,
-                state.sessions.selected_id(),
-                state.focus,
-            ),
+            Focus::Attached => shown_pane(&self.panes, state.sessions.selected_id(), state.focus),
             Focus::Sidebar | Focus::Dashboard | Focus::Picker | Focus::Rename | Focus::Search => {
                 None
             }
@@ -524,17 +511,14 @@ impl App {
                     pane.focus(false);
                 }
             }
-            // Resize and the rest: the next iteration lays out and redraws.
-            LoopEvent::Input(_) | LoopEvent::Pane(PaneEvent::Output) | LoopEvent::StateChanged => {}
+            // Resize and the rest: the next iteration lays out and redraws;
+            // `reconcile` sweeps exited thread panes.
+            LoopEvent::Input(_)
+            | LoopEvent::Pane(PaneEvent::Output | PaneEvent::Exited)
+            | LoopEvent::StateChanged => {}
             LoopEvent::InputFailed(error) => return Err(error),
             LoopEvent::Pane(PaneEvent::Clipboard(text)) => {
                 outer_terminal::copy_to_clipboard(out, &text)?;
-            }
-            LoopEvent::Pane(PaneEvent::Exited) => {
-                // `reconcile` sweeps exited thread panes.
-                if self.trust.as_ref().is_some_and(Pane::has_exited) {
-                    self.leave_trust(out)?;
-                }
             }
         }
         Ok(())
@@ -573,9 +557,6 @@ impl App {
                 outer_terminal::set_mouse_capture(out, true)
             }
             Command::Detach => {
-                if self.trust.is_some() {
-                    return self.leave_trust(out);
-                }
                 // `Intent::Detach` already gave the dashboard the keys, and a
                 // jump already moved the selection, so the pane is the one
                 // that last got the keys rather than the shown one.
@@ -629,6 +610,17 @@ impl App {
                     .sessions
                     .tell(sessions_actor::StartDraft(*project))
                     .try_send();
+                Ok(())
+            }
+            Command::TrustWorkspace => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::TrustWorkspace)
+                    .try_send();
+                Ok(())
+            }
+            Command::DeclineTrust => {
+                let _ = self.sessions.tell(sessions_actor::DeclineTrust).try_send();
                 Ok(())
             }
             Command::DiscardDraft(project) => {
@@ -878,13 +870,7 @@ impl App {
                 app.attached.remove(id);
             }
             let left = app.focus == Focus::Attached
-                && shown_pane(
-                    self.trust.as_ref(),
-                    &self.panes,
-                    app.sessions.selected_id(),
-                    app.focus,
-                )
-                .is_none();
+                && shown_pane(&self.panes, app.sessions.selected_id(), app.focus).is_none();
             if left {
                 app.focus = after_pane(app.focus);
             }
@@ -896,38 +882,41 @@ impl App {
         Ok(())
     }
 
-    /// Opens an interactive `claude` in its own pane, over any thread's, when
-    /// a session start begins waiting for the user to trust its directory, and
-    /// attaches to it, closing the rename box if it was open.
-    fn open_trust<W>(&mut self, out: &mut W) -> io::Result<()>
+    /// Asks the user, with the `No`/`Yes` confirm, to trust the folder a
+    /// session start begins waiting on, once per request (see
+    /// [`trust_to_open`]). It takes the place of an open picker, the rename
+    /// box or the search; a thread's pane that had the keys loses them, as on
+    /// `<C-h>`. Where the keys go after is [`trust_return_to`].
+    fn ask_trust<W>(&mut self, out: &mut W) -> io::Result<()>
     where
         W: Write,
     {
         let trust = self.state.read().sessions.trust.clone();
-        let open = trust_to_open(trust.as_deref(), self.opened_trust.as_deref());
+        let ask = trust_to_open(trust.as_deref(), self.opened_trust.as_deref());
         self.opened_trust = trust;
-        let Some(dir) = open else {
+        let Some(dir) = ask else {
             return Ok(());
         };
-        match self.spawn_pane(vec![OsString::from("claude")], dir) {
-            Some(pane) => {
-                pane.focus(true);
-                self.trust = Some(pane);
-                self.pane_error = None;
-                {
-                    let mut app = self.state.write();
-                    app.rename = None;
-                    app.sessions.search = None;
-                    app.focus = Focus::Attached;
-                }
-                outer_terminal::set_mouse_capture(out, true)
-            }
-            None => {
-                self.pane_error = Some("couldn't start claude".to_owned());
-                self.retry_start();
-                Ok(())
-            }
+        self.keys.dismiss();
+        let from_pane = {
+            let mut app = self.state.write();
+            let return_to = trust_return_to(
+                app.focus,
+                app.picker.as_ref().map(PickerState::return_to),
+                app.sidebar.hidden,
+            );
+            let from_pane = app.focus == Focus::Attached;
+            app.rename = None;
+            app.sessions.search = None;
+            app.picker = Some(PickerState::trust_workspace(dir, return_to));
+            app.focus = Focus::Picker;
+            from_pane
+        };
+        if from_pane {
+            // The pane loses the keys, as on `<C-h>`.
+            self.execute(&Command::Detach, out)?;
         }
+        Ok(())
     }
 
     /// Attaches to a started draft's thread while it's still selected, as
@@ -978,49 +967,6 @@ impl App {
         Ok(())
     }
 
-    /// Closes the trust pane once its start no longer waits (see
-    /// [`trust_ended`]), without asking for another try. Keys that were in it
-    /// go to the sidebar for a moment, so the started thread's attach, which
-    /// the actor asks for right after, takes them into the thread's pane:
-    /// the trust pane gives way to the thread in place.
-    fn close_ended_trust<W>(&mut self, out: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
-        let ended = trust_ended(
-            self.trust.is_some(),
-            self.state.read().sessions.trust.as_deref(),
-        );
-        if !ended {
-            return Ok(());
-        }
-        self.trust = None;
-        self.attach_waited = false;
-        {
-            let mut app = self.state.write();
-            if app.focus == Focus::Attached {
-                app.focus = Focus::Sidebar;
-            }
-        }
-        outer_terminal::set_mouse_capture(out, false)
-    }
-
-    /// Closes the trust pane, leaving the thread panes running, returns to
-    /// the dashboard unless `<C-h>` already moved the keys to the sidebar, and
-    /// tries the waiting session start again.
-    fn leave_trust<W>(&mut self, out: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
-        self.trust = None;
-        {
-            let mut app = self.state.write();
-            app.focus = after_pane(app.focus);
-        }
-        self.retry_start();
-        outer_terminal::set_mouse_capture(out, false)
-    }
-
     /// Takes the sessions actor's notices and announces them as
     /// [`announces`] decides, telling the notifier which zellij tab orb's
     /// pane is on so a click can go back there. Each zellij call can take up
@@ -1049,10 +995,6 @@ impl App {
                     }
                 }
             });
-    }
-
-    fn retry_start(&self) {
-        let _ = self.sessions.tell(sessions_actor::DeclineTrust).try_send();
     }
 
     /// Runs `argv` in `cwd` in a pane the size of the pane area, with
@@ -1143,7 +1085,7 @@ mod tests {
 
     use super::{
         StartedAttach, after_pane, announces, cursor_style, list_directories, shown_pane,
-        started_attach, to_drop, trust_ended, trust_to_open,
+        started_attach, to_drop, trust_return_to, trust_to_open,
     };
 
     #[rstest::rstest]
@@ -1245,56 +1187,55 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn open_trust_pane_closes_once_its_start_no_longer_waits() {
-        // Given the trust pane open and the start no longer waiting on trust.
-
-        // When deciding whether to close it.
-        let ended = trust_ended(true, None);
-
-        // Then it closes.
-        assert!(
-            ended,
-            "a started (or failed) start should end the trust pane"
-        );
-    }
-
-    #[rstest::rstest]
-    fn trust_pane_stays_while_its_start_waits() {
-        // Given the trust pane open for /tmp/x and the start still waiting.
-
-        // When deciding whether to close it.
-        let ended = trust_ended(true, Some(Path::new("/tmp/x")));
-
-        // Then it stays.
-        assert!(!ended, "the trust pane stays while trust is awaited");
-    }
-
-    #[rstest::rstest]
-    fn trust_pane_opens_for_a_new_trust_request() {
-        // Given a start waiting on /tmp/x and no trust pane opened.
+    fn trust_confirm_opens_for_a_new_trust_request() {
+        // Given a start waiting on /tmp/x and no trust confirm opened.
         let trust = Path::new("/tmp/x");
 
-        // When deciding what to open.
+        // When deciding what to ask.
         let open = trust_to_open(Some(trust), None);
 
-        // Then a trust pane opens in /tmp/x.
+        // Then a trust confirm opens for /tmp/x.
         assert_eq!(
             open,
             Some(PathBuf::from("/tmp/x")),
-            "a new trust request should open the pane"
+            "a new trust request should open the confirm"
         );
     }
 
     #[rstest::rstest]
-    fn trust_pane_is_not_reopened_while_the_same_trust_waits() {
-        // Given a start waiting on /tmp/x whose trust pane was opened.
+    fn trust_confirm_is_not_reopened_while_the_same_trust_waits() {
+        // Given a start waiting on /tmp/x whose trust confirm was opened.
         let trust = Path::new("/tmp/x");
 
-        // When deciding what to open.
+        // When deciding what to ask.
         let open = trust_to_open(Some(trust), Some(trust));
 
         // Then nothing opens.
-        assert_eq!(open, None, "the same request shouldn't reopen the pane");
+        assert_eq!(open, None, "the same request shouldn't reopen the confirm");
+    }
+
+    #[rstest::rstest]
+    #[case::sidebar(Focus::Sidebar, None, false, Focus::Sidebar)]
+    #[case::dashboard(Focus::Dashboard, None, false, Focus::Dashboard)]
+    #[case::replaced_picker(Focus::Picker, Some(Focus::Dashboard), false, Focus::Dashboard)]
+    #[case::rename(Focus::Rename, None, false, Focus::Sidebar)]
+    #[case::search(Focus::Search, None, false, Focus::Sidebar)]
+    #[case::pane(Focus::Attached, None, false, Focus::Sidebar)]
+    #[case::pane_hidden_sidebar(Focus::Attached, None, true, Focus::Dashboard)]
+    fn trust_confirm_returns_the_keys_to(
+        #[case] focus: Focus,
+        #[case] replaced: Option<Focus>,
+        #[case] sidebar_hidden: bool,
+        #[case] expected: Focus,
+    ) {
+        // Given / When the trust confirm opens with the keys in `focus`.
+        let return_to = trust_return_to(focus, replaced, sidebar_hidden);
+
+        // Then it gives them back to `expected`, never to a picker.
+        assert_eq!(
+            return_to, expected,
+            "where the keys go after the confirm from {focus:?}"
+        );
     }
 
     #[rstest::rstest]
@@ -1338,7 +1279,7 @@ mod tests {
     #[case(Focus::Attached)]
     fn started_thread_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
         // Given thread 1 started from a draft and still selected, e.g. while
-        // the trust pane has the keys.
+        // a picker has the keys.
         let started = Some(ThreadId(1));
 
         // When deciding what to do in `focus`.
@@ -1356,19 +1297,18 @@ mod tests {
     #[case(Focus::Sidebar)]
     #[case(Focus::Dashboard)]
     fn waited_started_thread_attaches_once_the_keys_are_back(#[case] focus: Focus) {
-        // Given thread 1's attach request waited while the user was in the
-        // trust pane, and the thread is still selected.
+        // Given thread 1's attach request waited while the user was in a
+        // picker, and the thread is still selected.
         let started = Some(ThreadId(1));
 
-        // When deciding what to do after `<C-h>` or `<C-\>` put the keys in
-        // `focus`.
+        // When deciding what to do once the keys are back in `focus`.
         let decision = started_attach(started, started, focus, true);
 
         // Then orb attaches and leaves the keys there.
         assert_eq!(
             decision,
             StartedAttach::Attach { keep_keys: true },
-            "a waited attach should survive leaving the trust pane"
+            "a waited attach should keep the keys where they came back to"
         );
     }
 
@@ -1431,28 +1371,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn shown_pane_is_the_trust_pane_while_it_is_open() {
-        // Given the trust pane open and thread 1's pane, with 1 selected and attached.
-        let panes = HashMap::from([(ThreadId(1), "thread 1")]);
-
-        // When choosing the pane to show.
-        let shown = shown_pane(Some(&"trust"), &panes, Some(ThreadId(1)), Focus::Attached);
-
-        // Then it is the trust pane.
-        assert_eq!(
-            shown,
-            Some(&"trust"),
-            "the trust pane is shown over any thread's"
-        );
-    }
-
-    #[rstest::rstest]
     fn shown_pane_is_the_selected_threads_pane() {
         // Given panes for threads 1 and 2, with 2 selected in the sidebar.
         let panes = HashMap::from([(ThreadId(1), "thread 1"), (ThreadId(2), "thread 2")]);
 
         // When choosing the pane to show.
-        let shown = shown_pane(None, &panes, Some(ThreadId(2)), Focus::Sidebar);
+        let shown = shown_pane(&panes, Some(ThreadId(2)), Focus::Sidebar);
 
         // Then it is thread 2's pane.
         assert_eq!(
@@ -1468,7 +1392,7 @@ mod tests {
         let panes = HashMap::from([(ThreadId(1), "thread 1")]);
 
         // When choosing the pane to show.
-        let shown = shown_pane(None, &panes, Some(ThreadId(1)), Focus::Dashboard);
+        let shown = shown_pane(&panes, Some(ThreadId(1)), Focus::Dashboard);
 
         // Then no pane is shown.
         assert_eq!(shown, None, "the dashboard hides every pane");
