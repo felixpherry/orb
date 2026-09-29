@@ -2,7 +2,7 @@
 
 use wherror::Error;
 
-use crate::{AppState, Focus};
+use crate::AppState;
 
 /// Why a jump back or forward can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -10,19 +10,14 @@ use crate::{AppState, Focus};
 pub enum JumpError {
     /// No row in that direction is reachable.
     NoTarget,
-    /// The keys are in the interactive `claude` asking to trust a directory.
-    InTrustPane,
 }
 
-/// Allow `<C-o>` while an older reachable row is listed, outside the trust
-/// pane.
+/// Allow `<C-o>` while an older reachable row is listed.
 ///
 /// # Errors
 ///
-/// Returns [`JumpError::InTrustPane`] while the trust pane has the keys, and
-/// [`JumpError::NoTarget`] when no older row is reachable.
+/// Returns [`JumpError::NoTarget`] when no older row is reachable.
 pub fn validate_jump_back(state: &AppState) -> Result<(), JumpError> {
-    outside_trust(state)?;
     state
         .jumps
         .peek_back(state.sessions.cursor, |item| state.sessions.jumpable(item))
@@ -30,15 +25,12 @@ pub fn validate_jump_back(state: &AppState) -> Result<(), JumpError> {
         .ok_or(JumpError::NoTarget)
 }
 
-/// Allow `<C-i>` after a `<C-o>` while a newer reachable row is listed,
-/// outside the trust pane.
+/// Allow `<C-i>` after a `<C-o>` while a newer reachable row is listed.
 ///
 /// # Errors
 ///
-/// Returns [`JumpError::InTrustPane`] while the trust pane has the keys, and
-/// [`JumpError::NoTarget`] when no newer row is reachable.
+/// Returns [`JumpError::NoTarget`] when no newer row is reachable.
 pub fn validate_jump_forward(state: &AppState) -> Result<(), JumpError> {
-    outside_trust(state)?;
     state
         .jumps
         .peek_forward(state.sessions.cursor, |item| state.sessions.jumpable(item))
@@ -46,25 +38,16 @@ pub fn validate_jump_forward(state: &AppState) -> Result<(), JumpError> {
         .ok_or(JumpError::NoTarget)
 }
 
-/// Rejects a jump while the trust pane has the keys: leaving it must go
-/// through `<C-\>`'s trust handling.
-fn outside_trust(state: &AppState) -> Result<(), JumpError> {
-    match (state.focus, &state.sessions.trust) {
-        (Focus::Attached, Some(_)) => Err(JumpError::InTrustPane),
-        _ => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::SystemTime;
 
     use super::{JumpError, validate_jump_back};
+    use crate::AppState;
     use crate::feat::jumps::state::JumpList;
     use crate::feat::sessions::state::{
         Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
-    use crate::{AppState, Focus};
 
     fn thread(id: i64) -> Thread {
         Thread {
@@ -124,24 +107,6 @@ mod tests {
 
         // Then there's nowhere to go.
         assert_eq!(result, Err(JumpError::NoTarget), "<C-o> needs an older row");
-    }
-
-    #[rstest::rstest]
-    fn jump_back_in_the_trust_pane_is_rejected() {
-        // Given the trust pane holding the keys, with an older row listed.
-        let mut state = jumping(&[1, 2]);
-        state.focus = Focus::Attached;
-        state.sessions.trust = Some("/work".into());
-
-        // When validating a jump back.
-        let result = validate_jump_back(&state);
-
-        // Then the trust pane keeps the keys.
-        assert_eq!(
-            result,
-            Err(JumpError::InTrustPane),
-            "<C-o> must not leave the trust pane"
-        );
     }
 
     #[rstest::rstest]

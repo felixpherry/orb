@@ -378,9 +378,9 @@ pub struct Sessions {
     pub starting: bool,
     /// The latest failure; shown until the next intent or a later success.
     pub error: Option<String>,
-    /// A session start waits for the user to trust this directory in an
-    /// interactive `claude`; the sessions actor clears it when the start goes
-    /// ahead or fails.
+    /// A session start waits for the user to trust this folder, Claude's
+    /// project path for the start; the sessions actor clears it when the user
+    /// answers.
     pub trust: Option<PathBuf>,
     /// A started draft's thread for the frontend to attach to.
     pub attach: Option<ThreadId>,
