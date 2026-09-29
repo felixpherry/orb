@@ -45,9 +45,9 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 }
 
 /// Draws the whole frame. `pane` is the pane the frontend shows on the right
-/// (the trust pane, or the selected attached thread's); its cursor shows only
-/// while attached. Without one, the right side shows the dashboard, with
-/// `pane_error` saying why the session couldn't start. While the sidebar or
+/// (the selected attached thread's); its cursor shows only while attached.
+/// Without one, the right side shows the dashboard, with `pane_error` saying
+/// why the session couldn't start. While the sidebar or
 /// the dashboard has the keys, the cursor sits on the first cell of its
 /// selected row or highlighted item's label. The mode line's clock shows
 /// `now` in `tz`. Returns the sidebar's layout unless it's hidden, and how

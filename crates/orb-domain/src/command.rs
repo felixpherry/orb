@@ -4,8 +4,8 @@
 //! frontend loop; session commands (drafts, add or remove a project, move to
 //! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle, delete,
 //! visit, save the sidebar's width and filter, save the jump list, create and start groups, start a
-//! group's sibling, pin, settle and delete groups, save a group draft) go to
-//! the sessions actor.
+//! group's sibling, pin, settle and delete groups, save a group draft, answer a trust confirm) go
+//! to the sessions actor.
 
 use std::path::PathBuf;
 
@@ -124,6 +124,12 @@ pub enum Command {
     /// group and its folder or worktree; a Feature group whose slug branch
     /// isn't merged is kept whole.
     DeleteGroup(GroupId),
+    /// Mark the folder the waiting session start asks about trusted in
+    /// Claude's config, and try the start again.
+    TrustWorkspace,
+    /// End the waiting session start as a failed one: the user didn't trust
+    /// its folder.
+    DeclineTrust,
 }
 
 /// Where a thread's session runs.
