@@ -5486,6 +5486,26 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    fn confirming_the_trust_confirm_with_both_rows_filtered_away_returns_decline_trust() {
+        // Given the trust confirm with Yes highlighted, then `zz` typed so its
+        // filter hides both No and Yes.
+        let mut state = trusting();
+        highlight(&mut state, &PickerItem::Confirm(true));
+        IntentHandler::handle(&Intent::PickerInput('z'), &mut state);
+        IntentHandler::handle(&Intent::PickerInput('z'), &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the waiting start is declined.
+        assert_eq!(
+            commands,
+            vec![Command::DeclineTrust],
+            "confirming with nothing shown should decline the trust"
+        );
+    }
+
     /// [`filtering`], then `<C-x>` on alpha.
     fn removing_alpha(filter: Option<i64>, cursor: SidebarItem) -> AppState {
         let mut state = filtering(filter, cursor);
