@@ -707,7 +707,7 @@ Written in the pane sidebar toggle's Verification step (not a milestone).
 **Add**
 - ``(keybinds) While attached, Claude's background-task shortcut works only as `Ctrl+X Ctrl+B`, because orb takes `<C-b>`.``
 
-### Fetch timeout
+### Fetch timeout (written)
 
 Written in the fetch timeout's Verification step (not a milestone).
 

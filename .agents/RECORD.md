@@ -69,7 +69,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, wrapping from the last to the first and back, `<C-d>`/`<C-u>` move half a page, stopping at the ends, `⏎` picks, and `Esc` cancels.
 - (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
-- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, the selected thread's or draft's branch and project (`<project>/<group>` in a group), and the latest error in red on the left; `N running` or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
+- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, the selected thread's or draft's branch and project (`<project>/<group>` in a group), and the latest error in red on the left; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
 - (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
 - (picker) Every picker is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide with its name centred in the top border, a > prompt over an orange rule, numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
@@ -77,6 +77,7 @@ Entries are added or amended **only with human approval**.
 - (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>`, on branch `orb/<hex>`, or on the group's slug branch for a Feature group.
 - (worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w` and for a Feature group) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
+- (worktrees) Start's `git fetch` from `origin` is bounded by 15 s, after which git is killed and the start fails with `git fetch origin <base> timed out after 15 s`.
 - (worktrees) A session start that fails removes the worktree and branch orb created for it.
 - (worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from the thread's title; the directory keeps its name.
 - (worktrees) Deleting a thread, in a group or not, leaves its worktree on disk; only deleting a whole Feature group removes one.
