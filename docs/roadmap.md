@@ -719,7 +719,7 @@ Written in the fetch timeout's Verification step (not a milestone).
 **Add**
 - ``(worktrees) Start's `git fetch` from `origin` is bounded by 15 s, after which git is killed and the start fails with `git fetch origin <base> timed out after 15 s`.``
 
-### Incognito
+### Incognito (written)
 
 Written in incognito's Verification step (not a milestone).
 
