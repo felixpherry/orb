@@ -350,7 +350,8 @@ pub struct Search {
 /// orb's projects, threads and drafts, and where the sidebar's cursor is.
 ///
 /// Written by the sessions actor (projects and their drafts, `error`,
-/// `starting` when a start ends, `trust`, `attach`, the cursor and `filter`
+/// `starting` when a start ends, `fetching`, `trust`, `attach`, the cursor
+/// and `filter`
 /// after a restore, the cursor when a still-selected draft becomes a thread,
 /// or when a sibling starts from the still-selected row, the cursor on a new
 /// group's draft,
@@ -376,6 +377,9 @@ pub struct Sessions {
     pub opened: HashSet<GroupId>,
     /// A new session is being created.
     pub starting: bool,
+    /// The origin ref a start is fetching, like `origin/main`; none when no
+    /// fetch is running. Written only by the sessions actor.
+    pub fetching: Option<String>,
     /// The latest failure; shown until the next intent or a later success.
     pub error: Option<String>,
     /// A session start waits for the user to trust this folder, Claude's
