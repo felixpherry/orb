@@ -3,7 +3,7 @@
 //! Its menu lists what the sidebar's selection can do: open a thread or start
 //! a draft, change its workspace, branch and (for a draft) model and
 //! permission, open a tool in its directory, and the always-available new
-//! session, add project, filter projects and quit. On a group's rows, the
+//! session, incognito, add project, filter projects and quit. On a group's rows, the
 //! menu has no workspace or branch: the group owns its directory. A group's
 //! card and draft pick the group's default model and permission. Each item
 //! has a single key that runs it; a cursor moves over the items and `⏎` runs
@@ -28,6 +28,8 @@ pub enum DashboardItem {
     Model,
     Permission,
     NewSession,
+    /// Start a new session in orb's Incognito project.
+    Incognito,
     AddProject,
     FilterProjects,
     Shell,
@@ -46,6 +48,7 @@ impl DashboardItem {
             Self::Model => 'm',
             Self::Permission => 'a',
             Self::NewSession => 'n',
+            Self::Incognito => 'i',
             Self::AddProject => 'p',
             Self::FilterProjects => 'f',
             Self::Shell => 't',
@@ -64,6 +67,7 @@ impl DashboardItem {
             Self::Model => Intent::PickModel,
             Self::Permission => Intent::PickPermission,
             Self::NewSession => Intent::NewSession,
+            Self::Incognito => Intent::NewIncognito,
             Self::AddProject => Intent::AddProject,
             Self::FilterProjects => Intent::FilterProjects,
             Self::Shell => Intent::OpenTool(Tool::Shell),
@@ -78,8 +82,8 @@ impl DashboardItem {
 /// always there.
 pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
     use DashboardItem::{
-        AddProject, Branch, FilterProjects, Lazygit, Model, Neovim, NewSession, Open, Permission,
-        Quit, Shell, Start, Workspace,
+        AddProject, Branch, FilterProjects, Incognito, Lazygit, Model, Neovim, NewSession, Open,
+        Permission, Quit, Shell, Start, Workspace,
     };
     let (own, tools): (&[DashboardItem], bool) = match (
         sessions.selected_draft(),
@@ -109,7 +113,7 @@ pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
         &[]
     };
     own.iter()
-        .chain(&[NewSession, AddProject, FilterProjects])
+        .chain(&[NewSession, Incognito, AddProject, FilterProjects])
         .chain(tools)
         .chain(&[Quit])
         .copied()
@@ -121,10 +125,11 @@ pub(crate) mod tests {
     use std::time::SystemTime;
 
     use super::DashboardItem::{
-        AddProject, Branch, FilterProjects, Lazygit, Model, Neovim, NewSession, Open, Permission,
-        Quit, Shell, Start, Workspace,
+        AddProject, Branch, FilterProjects, Incognito, Lazygit, Model, Neovim, NewSession, Open,
+        Permission, Quit, Shell, Start, Workspace,
     };
     use super::items;
+    use crate::Intent;
     use crate::feat::sessions::state::{
         Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
         ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
@@ -220,6 +225,7 @@ pub(crate) mod tests {
             [
                 Open,
                 NewSession,
+                Incognito,
                 AddProject,
                 FilterProjects,
                 Shell,
@@ -247,6 +253,7 @@ pub(crate) mod tests {
                 Model,
                 Permission,
                 NewSession,
+                Incognito,
                 AddProject,
                 FilterProjects,
                 Shell,
@@ -285,6 +292,7 @@ pub(crate) mod tests {
                 Model,
                 Permission,
                 NewSession,
+                Incognito,
                 AddProject,
                 FilterProjects,
                 Shell,
@@ -312,6 +320,7 @@ pub(crate) mod tests {
                 Model,
                 Permission,
                 NewSession,
+                Incognito,
                 AddProject,
                 FilterProjects,
                 Shell,
@@ -339,6 +348,7 @@ pub(crate) mod tests {
                 Workspace,
                 Branch,
                 NewSession,
+                Incognito,
                 AddProject,
                 FilterProjects,
                 Shell,
@@ -368,6 +378,7 @@ pub(crate) mod tests {
                 Model,
                 Permission,
                 NewSession,
+                Incognito,
                 AddProject,
                 FilterProjects,
                 Shell,
@@ -395,6 +406,7 @@ pub(crate) mod tests {
                 Model,
                 Permission,
                 NewSession,
+                Incognito,
                 AddProject,
                 FilterProjects,
                 Shell,
@@ -419,8 +431,22 @@ pub(crate) mod tests {
         // Then only the general items and Quit are listed.
         assert_eq!(
             items,
-            [NewSession, AddProject, FilterProjects, Quit],
+            [NewSession, Incognito, AddProject, FilterProjects, Quit],
             "the dashboard's items with {cursor:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn incognito_item_runs_new_incognito_on_i() {
+        // Given the dashboard's Incognito item.
+        // When reading its key and intent.
+        let bound = (Incognito.key(), Incognito.intent());
+
+        // Then `i` starts an incognito session.
+        assert_eq!(
+            bound,
+            ('i', Intent::NewIncognito),
+            "the Incognito item should run NewIncognito on i"
         );
     }
 }

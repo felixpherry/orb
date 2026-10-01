@@ -23,9 +23,9 @@ use crate::feat::sessions::state::{
 use crate::feat::sessions::validator::{
     DeleteError, LAST_IN_GROUP, NewGroupError, NewSiblingError, SETTLE_IN_PROGRESS,
     STARTS_FROM_DRAFT, ToggleSettleError, validate_close_group, validate_close_shelf,
-    validate_delete, validate_new_group, validate_new_sibling, validate_open_group,
-    validate_open_shelf, validate_pick_setting, validate_start_draft, validate_start_group_draft,
-    validate_toggle_pin, validate_toggle_settle,
+    validate_delete, validate_new_group, validate_new_incognito, validate_new_sibling,
+    validate_open_group, validate_open_shelf, validate_pick_setting, validate_start_draft,
+    validate_start_group_draft, validate_toggle_pin, validate_toggle_settle,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
@@ -219,19 +219,32 @@ impl IntentHandler {
                 open_picker(state, PickerState::projects(items, state.focus));
                 vec![]
             }
+            Intent::NewIncognito => match (
+                validate_new_incognito(state),
+                state
+                    .sessions
+                    .own_project(ProjectKind::Incognito)
+                    .map(|project| project.id),
+            ) {
+                (Ok(()), Some(project)) => {
+                    let mut commands = open_draft(state, project);
+                    state.sessions.starting = true;
+                    commands.push(Command::StartDraft(project));
+                    commands
+                }
+                _ => vec![],
+            },
             Intent::FilterProjects => {
                 let items = std::iter::once(PickerItem::AllProjects)
                     .chain(
-                        [ProjectKind::Research, ProjectKind::Learn]
-                            .into_iter()
-                            .filter_map(|kind| {
-                                state
-                                    .sessions
-                                    .projects
-                                    .iter()
-                                    .find(|project| project.kind == kind && !project.removed)
-                            })
-                            .map(project_item),
+                        [
+                            ProjectKind::Research,
+                            ProjectKind::Learn,
+                            ProjectKind::Incognito,
+                        ]
+                        .into_iter()
+                        .filter_map(|kind| state.sessions.own_project(kind))
+                        .map(project_item),
                     )
                     .chain(
                         state
@@ -5582,13 +5595,121 @@ mod tests {
         );
     }
 
+    /// Projects alpha (1) and orb's Incognito project (2), which has a draft
+    /// when `with_draft`; nothing selected.
+    fn incognito(with_draft: bool) -> AppState {
+        let mut state = with_projects(&["alpha", "incognito"]);
+        for project in state.sessions.projects.iter_mut().skip(1) {
+            project.kind = ProjectKind::Incognito;
+            project.draft = with_draft.then(|| draft(DraftWorkspace::Local));
+        }
+        state
+    }
+
     #[rstest::rstest]
-    fn filter_projects_lists_research_and_learn_after_all_projects() {
-        // Given Learn, alpha, Research and beta, in that order.
-        let mut state = with_projects(&["learn", "alpha", "research", "beta"]);
+    fn new_incognito_without_a_draft_creates_then_starts_it() {
+        // Given the Incognito project without a draft.
+        let mut state = incognito(false);
+
+        // When handling NewIncognito.
+        let commands = IntentHandler::handle(&Intent::NewIncognito, &mut state);
+
+        // Then the draft is created first and started last.
+        assert_eq!(
+            commands,
+            vec![
+                Command::CreateDraft(ProjectId(2)),
+                Command::SaveJumps,
+                Command::StartDraft(ProjectId(2)),
+            ],
+            "a missing incognito draft should be created, then started"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_incognito_with_a_draft_starts_it_without_creating_one() {
+        // Given the Incognito project with a draft.
+        let mut state = incognito(true);
+
+        // When handling NewIncognito.
+        let commands = IntentHandler::handle(&Intent::NewIncognito, &mut state);
+
+        // Then the existing draft is started without a CreateDraft.
+        assert_eq!(
+            commands,
+            vec![Command::SaveJumps, Command::StartDraft(ProjectId(2))],
+            "an existing incognito draft should just be started"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_incognito_selects_the_incognito_draft() {
+        // Given the Incognito project and nothing selected.
+        let mut state = incognito(false);
+
+        // When handling NewIncognito.
+        IntentHandler::handle(&Intent::NewIncognito, &mut state);
+
+        // Then the cursor is on the Incognito draft.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Draft(ProjectId(2))),
+            "the incognito draft should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_incognito_marks_a_start_in_flight() {
+        // Given the Incognito project and no start in flight.
+        let mut state = incognito(true);
+
+        // When handling NewIncognito.
+        IntentHandler::handle(&Intent::NewIncognito, &mut state);
+
+        // Then a start is in flight.
+        assert!(
+            state.sessions.starting,
+            "an incognito start should mark a start in flight"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_incognito_clears_a_filter_to_another_project() {
+        // Given the sidebar filtered to alpha.
+        let mut state = incognito(true);
+        state.sessions.filter = Some(ProjectId(1));
+
+        // When handling NewIncognito.
+        IntentHandler::handle(&Intent::NewIncognito, &mut state);
+
+        // Then the filter is cleared.
+        assert_eq!(
+            state.sessions.filter, None,
+            "a filter hiding the incognito draft should be cleared"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_incognito_while_starting_returns_nothing() {
+        // Given the Incognito project while a start is in flight.
+        let mut state = incognito(true);
+        state.sessions.starting = true;
+
+        // When handling NewIncognito.
+        let commands = IntentHandler::handle(&Intent::NewIncognito, &mut state);
+
+        // Then nothing is returned.
+        assert!(commands.is_empty(), "one start at a time");
+    }
+
+    #[rstest::rstest]
+    fn filter_projects_lists_orbs_projects_after_all_projects() {
+        // Given Learn, alpha, Incognito, Research and beta, in that order.
+        let mut state = with_projects(&["learn", "alpha", "incognito", "research", "beta"]);
         for (project, kind) in state.sessions.projects.iter_mut().zip([
             ProjectKind::Learn,
             ProjectKind::Normal,
+            ProjectKind::Incognito,
             ProjectKind::Research,
         ]) {
             project.kind = kind;
@@ -5597,8 +5718,8 @@ mod tests {
         // When handling FilterProjects.
         IntentHandler::handle(&Intent::FilterProjects, &mut state);
 
-        // Then Research and Learn follow All projects, once each, before the
-        // projects.
+        // Then Research, Learn and Incognito follow All projects, once each,
+        // before the projects.
         let rows: Vec<PickerItem> = state
             .picker
             .iter()
@@ -5615,12 +5736,13 @@ mod tests {
             rows,
             vec![
                 PickerItem::AllProjects,
-                own(3, "research", ProjectKind::Research),
+                own(4, "research", ProjectKind::Research),
                 own(1, "learn", ProjectKind::Learn),
+                own(3, "incognito", ProjectKind::Incognito),
                 project_row(2, "alpha"),
-                project_row(4, "beta"),
+                project_row(5, "beta"),
             ],
-            "Research and Learn should come right after All projects"
+            "Research, Learn and Incognito should come right after All projects"
         );
     }
 
@@ -6292,10 +6414,10 @@ mod tests {
         // When handling DashboardPrev.
         IntentHandler::handle(&Intent::DashboardPrev, &mut state);
 
-        // Then the last of the thread's ten items is highlighted.
+        // Then the last of the thread's eleven items is highlighted.
         assert_eq!(
             dashboard_index(&state),
-            9,
+            10,
             "previous on the first item wraps"
         );
     }

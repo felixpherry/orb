@@ -74,7 +74,7 @@ mod tests {
 
     #[rstest::rstest]
     fn cursor_stays_within_a_shrunken_item_list() {
-        // Given the cursor on the last of a git draft's twelve items.
+        // Given the cursor on the last of a git draft's thirteen items.
         let mut sessions = sessions(Some(true), Some(SidebarItem::Draft(ProjectId(1))));
         let mut cursor = DashboardCursor::default();
         cursor.prev(&sessions);

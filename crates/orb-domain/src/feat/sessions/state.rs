@@ -424,6 +424,14 @@ impl Sessions {
         projects
     }
 
+    /// orb's own project of `kind` (Research, Learn or Incognito), unless it
+    /// was removed.
+    pub fn own_project(&self, kind: ProjectKind) -> Option<&Project> {
+        self.projects
+            .iter()
+            .find(|project| project.kind == kind && !project.removed)
+    }
+
     /// Every thread in sidebar order: project by project, newest first.
     pub fn threads(&self) -> impl Iterator<Item = &Thread> {
         self.projects
