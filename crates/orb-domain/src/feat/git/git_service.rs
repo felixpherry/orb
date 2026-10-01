@@ -59,7 +59,8 @@ pub trait Git: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error if the fetch fails for any other reason.
+    /// Returns an error if the fetch fails for any other reason, or takes
+    /// longer than its time limit.
     fn fetch(&self, repo: &Path, branch: &str) -> Result<bool, Report<GitError>>;
 
     /// Adds a worktree at `path` on a new `branch` started from `base`.
@@ -181,7 +182,8 @@ impl GitService {
     ///
     /// # Errors
     ///
-    /// Returns an error if the fetch fails for any other reason.
+    /// Returns an error if the fetch fails for any other reason, or takes
+    /// longer than its time limit.
     pub fn fetch(&self, repo: &Path, branch: &str) -> Result<bool, Report<GitError>> {
         self.git.fetch(repo, branch)
     }
