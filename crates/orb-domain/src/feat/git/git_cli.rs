@@ -2,31 +2,60 @@
 //!
 //! Every `git` process runs against the directory it's given (`git -C`), with
 //! orb's child environment, no stdin, and no terminal prompts, so a remote
-//! that wants credentials fails instead of drawing over orb. When git fails,
-//! the first line it printed to stderr becomes the reason.
+//! that wants credentials fails instead of drawing over orb. A fetch is killed
+//! after 15 s, so an origin that can't be reached fails the fetch instead of
+//! hanging it. When git fails, the first line it printed to stderr becomes the
+//! reason.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use error_stack::Report;
 
 use super::git_service::{Git, GitError, GitRef};
+use crate::common::{Finished, run_within};
 
 /// What `git fetch` prints when the remote lacks the branch.
 const MISSING_REMOTE_REF: &str = "couldn't find remote ref";
+
+/// How long `git fetch` may take before orb gives up on origin.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Runs the `git` on `PATH`.
 #[derive(Debug, Clone)]
 pub struct GitCli {
     /// The environment every `git` process gets.
     env: Vec<(OsString, OsString)>,
+    /// How long a fetch may take before it's killed.
+    fetch_limit: Duration,
 }
 
 impl GitCli {
     /// A git whose processes run with exactly `env`.
     pub fn new(env: Vec<(OsString, OsString)>) -> Self {
-        Self { env }
+        Self {
+            env,
+            fetch_limit: FETCH_TIMEOUT,
+        }
+    }
+
+    /// A `git` in `dir` with orb's environment and no terminal prompts.
+    fn command<I, S>(&self, dir: &Path, args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env_clear()
+            .envs(self.env.iter().map(|(key, value)| (key, value)))
+            .env("GIT_TERMINAL_PROMPT", "0");
+        command
     }
 
     fn output<I, S>(&self, dir: &Path, args: I) -> Result<Output, Report<GitError>>
@@ -34,19 +63,10 @@ impl GitCli {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .env_clear()
-            .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .env("GIT_TERMINAL_PROMPT", "0")
+        self.command(dir, args)
             .stdin(Stdio::null())
             .output()
-            .map_err(|error| {
-                let reason = format!("couldn't run git: {error}");
-                Report::new(error).change_context(GitError).attach(reason)
-            })
+            .map_err(couldnt_run)
     }
 
     /// Runs git in `dir`; returns its stdout.
@@ -132,7 +152,17 @@ impl Git for GitCli {
 
     fn fetch(&self, repo: &Path, branch: &str) -> Result<bool, Report<GitError>> {
         let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-        let output = self.output(repo, ["fetch", "--quiet", "origin", &refspec])?;
+        let command = self.command(repo, ["fetch", "--quiet", "origin", &refspec]);
+        let output = match run_within(command, self.fetch_limit).map_err(couldnt_run)? {
+            Finished::Exited(output) => output,
+            Finished::TimedOut => {
+                let reason = format!(
+                    "git fetch origin {branch} timed out after {} s",
+                    self.fetch_limit.as_secs()
+                );
+                return Err(Report::new(GitError).attach(reason));
+            }
+        };
         if output.status.success() {
             Ok(true)
         } else if String::from_utf8_lossy(&output.stderr).contains(MISSING_REMOTE_REF) {
@@ -250,6 +280,12 @@ fn failure(output: &Output, subcommand: &str) -> Report<GitError> {
         .find(|line| !line.is_empty())
         .map_or_else(|| format!("git {subcommand} failed"), str::to_owned);
     Report::new(GitError).attach(reason)
+}
+
+/// The reason when git can't be started at all.
+fn couldnt_run(error: std::io::Error) -> Report<GitError> {
+    let reason = format!("couldn't run git: {error}");
+    Report::new(error).change_context(GitError).attach(reason)
 }
 
 fn non_empty(text: &str) -> Option<String> {
@@ -394,7 +430,9 @@ fn ordered(
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
@@ -907,6 +945,34 @@ mod tests {
                 .is_some_and(|reason| reason.contains("does not appear to be a git repository")),
             "the reason should be git's, got {reason:?}"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn fetch_times_out_against_an_origin_that_never_answers() -> Result<(), Report<GitError>> {
+        // Given an origin on a local port that takes connections but never
+        // answers, and a git whose fetch limit is 1 s.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.repo("repo", "main")?;
+        let listener = TcpListener::bind("127.0.0.1:0").change_context(GitError)?;
+        let port = listener.local_addr().change_context(GitError)?.port();
+        let url = format!("http://127.0.0.1:{port}/repo.git");
+        sandbox.run(&repo, ["remote", "add", "origin", &url])?;
+        let git = GitCli {
+            env: sandbox.env.clone(),
+            fetch_limit: Duration::from_secs(1),
+        };
+
+        // When fetching `main`.
+        let reason = reason(git.fetch(&repo, "main"));
+
+        // Then the fetch fails as timed out.
+        assert_eq!(
+            reason.as_deref(),
+            Some("git fetch origin main timed out after 1 s"),
+            "a fetch that outlives its limit should time out"
+        );
+        drop(listener);
         Ok(())
     }
 

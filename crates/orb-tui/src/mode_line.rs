@@ -4,8 +4,9 @@
 //! On the left, the mode in a block of its colour, an arrow into the
 //! selected thread's or draft's branch, then its project and the latest
 //! error in red. On a group's rows, the branch is the group's and the
-//! project reads `<project>/<slug>`. On the right, `N running` or
-//! `starting session…` with a spinner, how many threads need an approval or
+//! project reads `<project>/<slug>`. On the right, `N running`,
+//! `fetching origin/<base>…` while Start fetches, or `starting session…`
+//! with a spinner, how many threads need an approval or
 //! an answer, the selected row's place among the listed rows, and the local
 //! time in the mode's colour. When the line is too narrow, the right side stays whole and the
 //! left side is cut at its end.
@@ -144,12 +145,18 @@ fn right(sessions: &Sessions, colour: Color, now: SystemTime, tz: &TimeZone) -> 
     Line::from(spans)
 }
 
-/// `<spinner> starting session…`, `<spinner> N running`, or nothing.
+/// `<spinner> fetching origin/<b>…` while a start fetches, `<spinner> starting
+/// session…`, `<spinner> N running`, or nothing.
 fn activity(sessions: &Sessions, now: SystemTime) -> Option<String> {
-    match (sessions.starting, sessions.working_count()) {
-        (true, _) => Some(format!("{} starting session…", spinner(now))),
-        (false, 0) => None,
-        (false, working) => Some(format!("{} {working} running", spinner(now))),
+    match (
+        sessions.starting,
+        &sessions.fetching,
+        sessions.working_count(),
+    ) {
+        (true, Some(fetching), _) => Some(format!("{} fetching {fetching}…", spinner(now))),
+        (true, None, _) => Some(format!("{} starting session…", spinner(now))),
+        (false, _, 0) => None,
+        (false, _, working) => Some(format!("{} {working} running", spinner(now))),
     }
 }
 
@@ -570,6 +577,42 @@ mod tests {
         // Then it says a session is starting.
         let text = text(&buffer);
         assert!(text.contains("starting session…"), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn activity_shows_the_fetch_in_progress() {
+        // Given a session being started while origin/main is fetched.
+        let state = with_sessions(Sessions {
+            starting: true,
+            fetching: Some("origin/main".to_owned()),
+            ..sessions(vec![])
+        });
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then it says origin/main is being fetched.
+        let text = text(&buffer);
+        assert!(
+            text.contains("fetching origin/main…"),
+            "mode line was '{text}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn activity_ignores_a_fetch_without_a_start() {
+        // Given a fetch left set with no session being started and no thread working.
+        let state = with_sessions(Sessions {
+            fetching: Some("origin/main".to_owned()),
+            ..sessions(vec![])
+        });
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then it says nothing about fetching.
+        let text = text(&buffer);
+        assert!(!text.contains("fetching"), "mode line was '{text}'");
     }
 
     #[rstest::rstest]
