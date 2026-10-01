@@ -34,6 +34,7 @@ The demo shows, in order: the sidebar and dashboard, the which-key popup, approv
 - **Worktrees built in.** A new session can get its own worktree under `~/.orb/worktrees/`. Once Claude names the thread, its `orb/<hex>` branch is renamed to match the title.
 - **Drafts.** Set up the project, workspace, base branch, model and permission before starting a session.
 - **Groups.** Threads that belong together share one directory and sit under one card: a **Feature** group's worktree (on a branch named after the group, like `GT-514-login`), or a **Research** or **Learn** folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/` (orb writes a default there first: for Research, a research kit with an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions, a report template and `SOURCES.md`; for Learn, an `AGENTS.md`). Each group has a default model and permission, set with `␣m`/`␣a` on its card or draft. `n` starts another thread in an active group at once with those defaults (on a group that has only its draft, `⏎` on the draft starts it first); threads already running keep theirs. `␣b` on a started Feature group's card switches its worktree's branch, which moves every thread in it. A name another group has, or whose branch or folder already exists, is refused with the name box still open. Groups are pinned, settled and deleted as a whole. Deleting one also removes its folder, or its worktree (even with changes) and the branch orb made for it, which frees the name. A Feature group whose branch has unmerged commits (as `git branch -d` sees it) isn't deleted at all, and the mode line says `branch <name> has unmerged commits`.
+- **Incognito.** `␣i` (or `i` on the dashboard) starts a Claude session outside any project at once and attaches, with no picker or draft step. Every incognito thread runs in orb's `Incognito` project at `/tmp/orb-incognito/`, which orb creates at start and again before each incognito start. The first one asks `Trust /private/tmp/orb-incognito?` once, and later ones don't. Incognito threads are normal threads: they settle, delete, rename and resume like any other. `␣n` doesn't list Incognito, and `␣f` lists it after Research and Learn. `␣w`/`␣b` aren't bound on its rows, and its draft never shows Workspace or Branch, even if the folder becomes a git repository.
 - **Tools where the code is.** `␣t` opens a shell, `␣gg` lazygit and `␣v` `nvim .` in the thread's directory, as a full-screen zellij floating pane.
 - **Notifications.** When orb isn't focused, you get a macOS notification when a thread finishes, needs approval or needs input.
 - **LazyVim look.** A snacks-style explorer, a dashboard start screen, a lualine mode line, a helix which-key popup and vim.ui.select pickers, all in tokyonight-moon.
@@ -57,17 +58,18 @@ The demo shows, in order: the sidebar and dashboard, the which-key popup, approv
 | `s` | Settle (after a `No`/`Yes` confirm) or un-settle (a lone thread or a group) |
 | `d` | Delete the thread or the group, or discard the draft (after a `No`/`Yes` confirm); a group's last thread can't be deleted |
 | `␣n` | New session (project picker) |
+| `␣i` | New incognito session in `/tmp/orb-incognito/`, started and attached at once |
 | `␣gf` / `␣gr` / `␣gl` | New Feature (project picker, then a name) / Research / Learn group |
 | `␣p` | Add a project |
-| `␣f` | Filter by project, with Research and Learn right after All projects (`<C-x>` removes one) |
-| `␣w` / `␣b` | Workspace / branch picker (not in a group; `␣b` also on a started Feature group's card) |
+| `␣f` | Filter by project, with Research, Learn and Incognito right after All projects (`<C-x>` removes one) |
+| `␣w` / `␣b` | Workspace / branch picker (not in a group or the Incognito project; `␣b` also on a started Feature group's card) |
 | `␣m` / `␣a` | Model / permission picker (drafts; on a group's card or draft, the group's defaults) |
 | `␣t` / `␣gg` / `␣v` | Shell / lazygit / Neovim |
 | `␣e` | Hide or show the sidebar |
 | `<C-Left>` / `<C-Right>` | Narrow / widen the focused side |
 | `q` | Quit orb (sessions keep running) |
 
-On the dashboard, each menu item's letter runs it directly, and `j`/`k` plus `⏎` work too.
+On the dashboard, each menu item's letter runs it directly (there `i` is Incognito; in the sidebar it searches), and `j`/`k` plus `⏎` work too.
 
 `<C-o>`/`<C-i>` work like neovim's jump list. Entering a thread's pane, `gg`/`G`, a search `⏎` and a `␣n` pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. Entering the pane of the row the last `<C-o>`/`<C-i>` landed on isn't a new jump, so `<C-i>` still goes forward. orb keeps the newest 20 rows, each at most once, across restarts. A jump moves the cursor, and shows the thread's pane only while orb is still attached to it. It never attaches, starts a draft or clears the project filter.
 
