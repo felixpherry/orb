@@ -226,12 +226,7 @@ impl IntentHandler {
                     .own_project(ProjectKind::Incognito)
                     .map(|project| project.id),
             ) {
-                (Ok(()), Some(project)) => {
-                    let mut commands = open_draft(state, project);
-                    state.sessions.starting = true;
-                    commands.push(Command::StartDraft(project));
-                    commands
-                }
+                (Ok(()), Some(project)) => open_draft(state, project),
                 _ => vec![],
             },
             Intent::FilterProjects => {
@@ -5607,38 +5602,34 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn new_incognito_without_a_draft_creates_then_starts_it() {
+    fn new_incognito_without_a_draft_creates_it_without_starting_it() {
         // Given the Incognito project without a draft.
         let mut state = incognito(false);
 
         // When handling NewIncognito.
         let commands = IntentHandler::handle(&Intent::NewIncognito, &mut state);
 
-        // Then the draft is created first and started last.
+        // Then the draft is created, and not started.
         assert_eq!(
             commands,
-            vec![
-                Command::CreateDraft(ProjectId(2)),
-                Command::SaveJumps,
-                Command::StartDraft(ProjectId(2)),
-            ],
-            "a missing incognito draft should be created, then started"
+            vec![Command::CreateDraft(ProjectId(2)), Command::SaveJumps],
+            "a missing incognito draft should be created, not started"
         );
     }
 
     #[rstest::rstest]
-    fn new_incognito_with_a_draft_starts_it_without_creating_one() {
+    fn new_incognito_with_a_draft_neither_creates_nor_starts_one() {
         // Given the Incognito project with a draft.
         let mut state = incognito(true);
 
         // When handling NewIncognito.
         let commands = IntentHandler::handle(&Intent::NewIncognito, &mut state);
 
-        // Then the existing draft is started without a CreateDraft.
+        // Then only the jump is saved: no CreateDraft, no StartDraft.
         assert_eq!(
             commands,
-            vec![Command::SaveJumps, Command::StartDraft(ProjectId(2))],
-            "an existing incognito draft should just be started"
+            vec![Command::SaveJumps],
+            "an existing incognito draft should just be opened"
         );
     }
 
@@ -5659,17 +5650,34 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn new_incognito_marks_a_start_in_flight() {
+    fn new_incognito_focuses_the_dashboard() {
+        // Given the Incognito project and the sidebar focused.
+        let mut state = incognito(true);
+        state.focus = Focus::Sidebar;
+
+        // When handling NewIncognito.
+        IntentHandler::handle(&Intent::NewIncognito, &mut state);
+
+        // Then the dashboard has the focus, ready for ⏎ to start the draft.
+        assert_eq!(
+            state.focus,
+            Focus::Dashboard,
+            "the incognito draft should open on the dashboard"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_incognito_doesnt_mark_a_start_in_flight() {
         // Given the Incognito project and no start in flight.
         let mut state = incognito(true);
 
         // When handling NewIncognito.
         IntentHandler::handle(&Intent::NewIncognito, &mut state);
 
-        // Then a start is in flight.
+        // Then no start is in flight.
         assert!(
-            state.sessions.starting,
-            "an incognito start should mark a start in flight"
+            !state.sessions.starting,
+            "opening the incognito draft shouldn't mark a start in flight"
         );
     }
 
@@ -5690,16 +5698,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn new_incognito_while_starting_returns_nothing() {
+    fn new_incognito_while_starting_still_selects_the_incognito_draft() {
         // Given the Incognito project while a start is in flight.
         let mut state = incognito(true);
         state.sessions.starting = true;
 
         // When handling NewIncognito.
-        let commands = IntentHandler::handle(&Intent::NewIncognito, &mut state);
+        IntentHandler::handle(&Intent::NewIncognito, &mut state);
 
-        // Then nothing is returned.
-        assert!(commands.is_empty(), "one start at a time");
+        // Then the cursor is on the Incognito draft.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Draft(ProjectId(2))),
+            "a start in flight shouldn't stop the incognito draft opening"
+        );
     }
 
     #[rstest::rstest]

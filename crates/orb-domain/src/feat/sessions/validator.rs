@@ -2,8 +2,8 @@
 //! selected draft or picking its model or permission mode, pinning the
 //! selected lone thread or group, settling or deleting the selected thread
 //! or group, discarding the selected draft, opening or closing the Settled shelf or a
-//! group, creating a group, starting a group's sibling, and starting an
-//! incognito session.
+//! group, creating a group, starting a group's sibling, and opening the
+//! incognito draft.
 
 use wherror::Error;
 
@@ -237,26 +237,23 @@ pub fn validate_start_draft(state: &AppState) -> Result<(), StartDraftError> {
     }
 }
 
-/// Why starting an incognito session can't proceed.
+/// Why opening the incognito draft can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum NewIncognitoError {
     /// orb has no Incognito project (it adds one at start), or it was removed.
     NoProject,
-    /// A session is already being started.
-    Starting,
 }
 
-/// Allow starting an incognito session, one start at a time.
+/// Allow opening the incognito draft.
 ///
 /// # Errors
 ///
 /// Returns [`NewIncognitoError::NoProject`] without a non-removed Incognito
-/// project, and [`NewIncognitoError::Starting`] while a start is in flight.
+/// project.
 pub fn validate_new_incognito(state: &AppState) -> Result<(), NewIncognitoError> {
     match state.sessions.own_project(ProjectKind::Incognito) {
         None => Err(NewIncognitoError::NoProject),
-        Some(_) if state.sessions.starting => Err(NewIncognitoError::Starting),
         Some(_) => Ok(()),
     }
 }
@@ -545,8 +542,8 @@ mod tests {
     }
 
     /// orb's Incognito project, `removed` or not, with no draft and nothing
-    /// selected; a start is in flight when `starting`.
-    fn incognito_project(removed: bool, starting: bool) -> AppState {
+    /// selected.
+    fn incognito_project(removed: bool) -> AppState {
         AppState {
             sessions: Sessions {
                 projects: vec![Project {
@@ -560,7 +557,6 @@ mod tests {
                     groups: vec![],
                     kind: ProjectKind::Incognito,
                 }],
-                starting,
                 ..Sessions::default()
             },
             ..AppState::default()
@@ -569,34 +565,18 @@ mod tests {
 
     #[rstest::rstest]
     #[case::none(AppState::default())]
-    #[case::removed(incognito_project(true, false))]
+    #[case::removed(incognito_project(true))]
     fn new_incognito_rejected_without_an_incognito_project(#[case] state: AppState) {
         // Given no Incognito project, or only a removed one.
 
-        // When validating an incognito start.
+        // When validating opening the incognito draft.
         let result = validate_new_incognito(&state);
 
         // Then validation fails with NoProject.
         assert_eq!(
             result,
             Err(NewIncognitoError::NoProject),
-            "an incognito start needs the Incognito project"
-        );
-    }
-
-    #[rstest::rstest]
-    fn new_incognito_rejected_while_starting() {
-        // Given the Incognito project while a start is in flight.
-        let state = incognito_project(false, true);
-
-        // When validating an incognito start.
-        let result = validate_new_incognito(&state);
-
-        // Then validation fails with Starting.
-        assert_eq!(
-            result,
-            Err(NewIncognitoError::Starting),
-            "one start at a time"
+            "the incognito draft needs the Incognito project"
         );
     }
 
