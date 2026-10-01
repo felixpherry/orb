@@ -18,6 +18,7 @@ Then:
 2. `␣n` picks a project and opens a draft. `␣w`, `␣b`, `␣m` and `␣a` set its workspace, branch, model and permission.
 3. `⏎` starts the session and attaches you to Claude.
 4. `<C-\>` takes you back to orb. The session keeps running in Claude's background supervisor, even after you quit orb.
+5. For related threads, `␣gf`, `␣gr` and `␣gl` make a Feature, Research or Learn group. For a quick question outside any project, `␣i` opens an Incognito draft.
 
 ## Demo
 
@@ -25,16 +26,32 @@ Then:
 
 [Watch it as an MP4](docs/demo/demo.mp4)
 
-The demo shows, in order: the sidebar and dashboard, the which-key popup, approving a tool call, answering Claude's question, two attached sessions at once, search, rename, pin, settling and the Settled shelf, deleting, hiding and resizing the sidebar, the project filter, adding a project, starting a session in a new worktree (model, permission, workspace and branch pickers), and then Neovim, lazygit and a shell opened in that worktree.
+The demo shows, in order:
+
+1. The sidebar and the dashboard start screen, then the which-key popup and its `+group` menu.
+2. Approving a tool call and answering Claude's question, with both sessions attached at once.
+3. Jumping back with `<C-o>`.
+4. Search, rename and pin.
+5. A Feature group: its card, folding it, and a new thread started with `n`.
+6. Settling (with its `No`/`Yes` confirm), the Settled shelf, and deleting.
+7. Hiding and resizing the sidebar.
+8. Adding a project, and the `Initialize Git` offer for a folder that isn't a git repository.
+9. Starting a session in a new worktree through the model, permission, workspace and branch pickers.
+10. Lazygit, a shell and Neovim opened in that worktree.
+11. Making a Feature group and a Research group, and starting the Research group's draft.
+12. An Incognito session, with its `Trust /tmp/orb-incognito?` confirm.
+13. The project filter (with Research and Incognito listed), removing a project, and filtering to one.
 
 ## Features
 
 - **One list for every session.** The sidebar shows each thread's status (working, needs approval, needs input, done), its project, branch and elapsed time, across all projects. Pinned threads sit on top, and quiet ones settle onto a collapsible shelf.
 - **The real Claude, attached.** `⏎` runs `claude attach` in a terminal pane inside orb, so every slash command, permission prompt and picker works. Each attached thread keeps its own pane.
 - **Worktrees built in.** A new session can get its own worktree under `~/.orb/worktrees/`. Once Claude names the thread, its `orb/<hex>` branch is renamed to match the title.
-- **Drafts.** Set up the project, workspace, base branch, model and permission before starting a session.
+- **Drafts.** Set up the project, workspace, base branch, model and permission before starting a session. A draft in a folder that isn't a git repository starts in that folder, and `␣w`/`␣b` there offer to initialize git.
+- **Trust handled for you.** When Claude refuses a folder it hasn't been trusted in, orb asks `Trust <path>?` (`No` selected). `Yes` marks it trusted in Claude's `.claude.json` and retries the start.
 - **Groups.** Threads that belong together share one directory and sit under one card: a **Feature** group's worktree (on a branch named after the group, like `GT-514-login`), or a **Research** or **Learn** folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/` (orb writes a default there first: for Research, a research kit with an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions, a report template and `SOURCES.md`; for Learn, an `AGENTS.md`). Each group has a default model and permission, set with `␣m`/`␣a` on its card or draft. `n` starts another thread in an active group at once with those defaults (on a group that has only its draft, `⏎` on the draft starts it first); threads already running keep theirs. `␣b` on a started Feature group's card switches its worktree's branch, which moves every thread in it. A name another group has, or whose branch or folder already exists, is refused with the name box still open. Groups are pinned, settled and deleted as a whole. Deleting one also removes its folder, or its worktree (even with changes) and the branch orb made for it, which frees the name. A Feature group whose branch has unmerged commits (as `git branch -d` sees it) isn't deleted at all, and the mode line says `branch <name> has unmerged commits`.
 - **Incognito.** `␣i` (or `i` on the dashboard) opens the Incognito draft, for a Claude session outside any project, with no picker step; `⏎` starts it, as on any draft. Every incognito thread runs in orb's `Incognito` project at `/tmp/orb-incognito/`, which orb creates at start and again before each incognito start. The first one asks `Trust /tmp/orb-incognito?` once (orb writes Claude's trust for its realpath, `/private/tmp/orb-incognito` on macOS), and later ones don't. Incognito threads are normal threads: they settle, delete, rename and resume like any other. `␣n` doesn't list Incognito, and `␣f` lists it after Research and Learn. `␣w`/`␣b` aren't bound on its rows, and its draft never shows Workspace or Branch, even if the folder becomes a git repository.
+- **Find and jump.** `/` searches thread titles and group names, `␣f` narrows the sidebar to one project, and `<C-o>`/`<C-i>` move back and forward through a jump list, as in neovim.
 - **Tools where the code is.** `␣t` opens a shell, `␣gg` lazygit and `␣v` `nvim .` in the thread's directory, as a full-screen zellij floating pane.
 - **Notifications.** When orb isn't focused, you get a macOS notification when a thread finishes, needs approval or needs input.
 - **LazyVim look.** A snacks-style explorer, a dashboard start screen, a lualine mode line, a helix which-key popup and vim.ui.select pickers, all in tokyonight-moon.
@@ -48,6 +65,7 @@ The demo shows, in order: the sidebar and dashboard, the which-key popup, approv
 | `j` / `k`, `gg` / `G`, `<C-d>` / `<C-u>` | Move in the sidebar |
 | `⏎` | Attach to the thread, start the draft, or open/close the group |
 | `<C-\>` | Detach and go back to orb |
+| `<C-b>` | In the Claude pane, hide or show the sidebar; the keys stay in the pane (Claude's background-task key is then `Ctrl+X Ctrl+B`) |
 | `<C-h>` / `<C-l>` | Focus the sidebar / the right-hand side |
 | `<C-o>` / `<C-i>` | Jump back / forward through the jump list (sidebar, dashboard and the Claude pane) |
 | `/` or `i` | Search thread titles and group names |
