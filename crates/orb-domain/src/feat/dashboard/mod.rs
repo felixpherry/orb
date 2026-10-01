@@ -29,7 +29,7 @@ pub enum DashboardItem {
     Model,
     Permission,
     NewSession,
-    /// Start a new session in orb's Incognito project.
+    /// Open orb's Incognito project's draft.
     Incognito,
     AddProject,
     FilterProjects,
@@ -514,7 +514,7 @@ pub(crate) mod tests {
         // When reading its key and intent.
         let bound = (Incognito.key(), Incognito.intent());
 
-        // Then `i` starts an incognito session.
+        // Then `i` opens the incognito draft.
         assert_eq!(
             bound,
             ('i', Intent::NewIncognito),

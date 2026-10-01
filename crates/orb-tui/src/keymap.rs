@@ -20,8 +20,8 @@
 //! dashboard. An open picker takes
 //! typed characters as filter text and has its own fixed keys, `<C-x>` among
 //! them for removing a project from the project filter. The rename box (`r`)
-//! and the sidebar search (`/` or `i`) use the picker's keys. `␣i` starts an
-//! incognito session in every scope; on the dashboard, `i` does too. On a
+//! and the sidebar search (`/` or `i`) use the picker's keys. `␣i` opens orb's
+//! Incognito draft in every scope; on the dashboard, `i` does too. On a
 //! group's card, draft or threads, `l`/`h` open and close the group. `␣w` isn't bound
 //! on them, and `␣b` (the dashboard's `b` too) only on the card of a Feature
 //! group whose worktree exists, where it switches that worktree's branch.
@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_i_starts_incognito_in_every_scope(
+    fn leader_i_opens_incognito_in_every_scope(
         #[values(
             Scope::Sidebar,
             Scope::SidebarDraft,
@@ -1112,16 +1112,16 @@ mod tests {
         // When pressing `i`.
         let intent = press(&mut keys, key(KeyCode::Char('i')));
 
-        // Then it starts an incognito session.
+        // Then it opens the incognito draft.
         assert_eq!(
             intent,
             Some(Intent::NewIncognito),
-            "␣i should start incognito in {scope:?}"
+            "␣i should open incognito in {scope:?}"
         );
     }
 
     #[rstest::rstest]
-    fn i_starts_incognito_on_the_dashboard(
+    fn i_opens_incognito_on_the_dashboard(
         #[values(
             Scope::Dashboard,
             Scope::DashboardDraft,
@@ -1141,11 +1141,11 @@ mod tests {
         // When pressing `i`.
         let intent = press(&mut keys, key(KeyCode::Char('i')));
 
-        // Then it starts an incognito session.
+        // Then it opens the incognito draft.
         assert_eq!(
             intent,
             Some(Intent::NewIncognito),
-            "i should start incognito in {scope:?}"
+            "i should open incognito in {scope:?}"
         );
     }
 

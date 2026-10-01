@@ -55,8 +55,8 @@ pub enum Intent {
     JumpForward,
     /// Open the project picker to open that project's draft.
     NewSession,
-    /// Start a new session in orb's Incognito project at once, creating its
-    /// draft first when it has none.
+    /// Open orb's Incognito project's draft, creating it when it has none,
+    /// like picking a project in the project picker; `⏎` then starts it.
     NewIncognito,
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
