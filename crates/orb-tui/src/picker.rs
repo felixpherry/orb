@@ -278,7 +278,7 @@ fn row_content(
     match item {
         PickerItem::Project {
             title,
-            kind: ProjectKind::Research | ProjectKind::Learn,
+            kind: ProjectKind::Research | ProjectKind::Learn | ProjectKind::Incognito,
             ..
         } => {
             let folder = icon(FOLDER, badge(title, true).style.fg.unwrap_or(BLUE));

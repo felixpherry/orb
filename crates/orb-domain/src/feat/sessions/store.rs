@@ -885,6 +885,7 @@ fn project_kind_text(kind: ProjectKind) -> Option<&'static str> {
         ProjectKind::Normal => None,
         ProjectKind::Research => Some("research"),
         ProjectKind::Learn => Some("learn"),
+        ProjectKind::Incognito => Some("incognito"),
     }
 }
 
@@ -893,6 +894,7 @@ fn project_kind(text: Option<&str>) -> ProjectKind {
     match text {
         Some("research") => ProjectKind::Research,
         Some("learn") => ProjectKind::Learn,
+        Some("incognito") => ProjectKind::Incognito,
         _ => ProjectKind::Normal,
     }
 }
@@ -1522,6 +1524,34 @@ mod tests {
             kinds,
             vec![ProjectKind::Research],
             "adding an existing root as Research should set its kind"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn incognito_project_kind_loads_back() -> Result<(), Report<StoreError>> {
+        // Given a store with an Incognito project.
+        let store = Store::open_in_memory()?;
+        store.add_project(
+            Path::new("/tmp/orb-incognito"),
+            "Incognito",
+            ProjectKind::Incognito,
+            500,
+        )?;
+
+        // When loading.
+        let kinds: Vec<ProjectKind> = store
+            .load()?
+            .0
+            .into_iter()
+            .map(|project| project.kind)
+            .collect();
+
+        // Then its kind is Incognito.
+        assert_eq!(
+            kinds,
+            vec![ProjectKind::Incognito],
+            "an Incognito project should load back as Incognito"
         );
         Ok(())
     }

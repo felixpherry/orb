@@ -127,7 +127,7 @@ const SLOW_POLL: Duration = Duration::from_secs(5);
 const AUTO_SETTLE_AFTER: i64 = 3 * 24 * 60 * 60 * 1000;
 /// The error shown when orb's store can't be written.
 const SAVE_FAILED: &str = "couldn't save orb's state";
-/// The error shown when a group's folder can't be made.
+/// The error shown when a group's or the Incognito folder can't be made.
 const FOLDER_UNMADE: &str = "couldn't make the folder";
 /// The error shown when a deleted group's folder can't be removed.
 const FOLDER_UNREMOVED: &str = "couldn't remove the folder";
@@ -154,6 +154,9 @@ pub struct SessionsActorDeps {
     pub worktrees_root: PathBuf,
     /// orb's own folder (`~/.orb`): the Research/Learn roots and templates.
     pub orb_root: PathBuf,
+    /// orb's Incognito project's root (`/tmp/orb-incognito`), made at start
+    /// and before each Incognito start.
+    pub incognito_root: PathBuf,
     /// Tells the frontend to redraw.
     pub wake: Wake,
 }
@@ -161,12 +164,12 @@ pub struct SessionsActorDeps {
 /// Owns [`Sessions`](super::state::Sessions): the projects, their drafts and
 /// groups, the threads' statuses, titles, pins and settles, the latest `claude` error,
 /// Claude's project path a start waits to be trusted in, and the started
-/// thread the frontend should attach to. It also restores the sidebar's width
-/// and project filter, selects a new group's draft, and moves the cursor to a
-/// sibling it started. The intent handler also moves the cursor, opens and closes
-/// the shelf, marks a start as starting, edits a draft's fields before asking
-/// for them to be saved, and resizes or filters the sidebar before asking for
-/// that to be saved.
+/// thread the frontend should attach to. It adds orb's Incognito project at
+/// start. It also restores the sidebar's width and project filter, selects a
+/// new group's draft, and moves the cursor to a sibling it started. The intent
+/// handler also moves the cursor, opens and closes the shelf, marks a start as
+/// starting, edits a draft's fields before asking for them to be saved, and
+/// resizes or filters the sidebar before asking for that to be saved.
 pub struct SessionsActor {
     services: Services,
     state: State,
@@ -842,7 +845,8 @@ impl SessionsActor {
     /// was saved, kept within its bounds, filters it to the saved project if
     /// that's still shown and not removed, and selects its first row. Each
     /// draft learns what git says about it. The saved jump list comes back
-    /// without the rows that no longer exist.
+    /// without the rows that no longer exist. orb's Incognito project is added
+    /// (or un-removed) and its folder made first.
     fn restore(deps: SessionsActorDeps) -> Self {
         let SessionsActorDeps {
             services,
@@ -851,10 +855,24 @@ impl SessionsActor {
             claude_dir,
             worktrees_root,
             orb_root,
+            incognito_root,
             wake,
         } = deps;
+        let _ = fs::create_dir_all(&incognito_root);
+        let added = store.add_project(
+            &incognito_root,
+            "Incognito",
+            ProjectKind::Incognito,
+            now_ms(),
+        );
         let (projects, rows, drafts, groups, error) = match store.load() {
-            Ok((projects, rows, drafts, groups)) => (projects, rows, drafts, groups, None),
+            Ok((projects, rows, drafts, groups)) => (
+                projects,
+                rows,
+                drafts,
+                groups,
+                added.err().map(|_report| SAVE_FAILED.to_owned()),
+            ),
             Err(_) => (
                 Vec::new(),
                 Vec::new(),
@@ -1142,7 +1160,7 @@ impl SessionsActor {
     /// Saves project `id`'s draft as the app state has it, first bringing
     /// what git says about it up to date; see [`with_git`].
     fn save_draft(&mut self, id: ProjectId) {
-        let Some((root, draft)) = self.draft(id) else {
+        let Some((root, _, draft)) = self.draft(id) else {
             return;
         };
         let seen = with_git(&self.services.git, &root, draft.clone());
@@ -1256,11 +1274,15 @@ impl SessionsActor {
     /// Starts a session from project `id`'s draft, with its model and
     /// permission: in the project's root, in its existing worktree, or in a
     /// new worktree made now from the draft's base branch. A draft of a
-    /// project that isn't a git repository always starts in the root.
+    /// project that isn't a git repository always starts in the root. An
+    /// Incognito draft's folder is made first when missing.
     async fn start_draft(&mut self, id: ProjectId) {
-        let Some((root, draft)) = self.draft(id) else {
+        let Some((root, kind, draft)) = self.draft(id) else {
             return self.end_start(Err("the draft is gone".to_owned()));
         };
+        if kind == ProjectKind::Incognito && fs::create_dir_all(&root).is_err() {
+            return self.end_start(Err(FOLDER_UNMADE.to_owned()));
+        }
         let options = SessionOptions {
             model: draft.model,
             permission_mode: draft.permission,
@@ -1306,15 +1328,15 @@ impl SessionsActor {
         self.start(pending, true).await;
     }
 
-    /// Project `id`'s root and draft, if it has one.
-    fn draft(&self, id: ProjectId) -> Option<(PathBuf, Draft)> {
+    /// Project `id`'s root, kind and draft, if it has one.
+    fn draft(&self, id: ProjectId) -> Option<(PathBuf, ProjectKind, Draft)> {
         self.state
             .read()
             .sessions
             .projects
             .iter()
             .find(|project| project.id == id)
-            .and_then(|project| Some((project.root.clone(), project.draft.clone()?)))
+            .and_then(|project| Some((project.root.clone(), project.kind, project.draft.clone()?)))
     }
 
     /// Starts a session for `pending` and finishes what it was for. If Claude
@@ -3187,6 +3209,7 @@ mod tests {
     const NO_CLAUDE_DIR: &str = "/nonexistent/claude";
     const WORKTREES_ROOT: &str = "/nonexistent/worktrees";
     const ORB_ROOT: &str = "/nonexistent/orb";
+    const INCOGNITO_ROOT: &str = "/nonexistent/orb-incognito";
     /// Why git refuses outside a repository.
     const NOT_A_REPO: &str = "fatal: not a git repository";
     const UNTRUSTED: &str =
@@ -3205,6 +3228,9 @@ mod tests {
         removed: Mutex<Vec<String>>,
         /// The directories `create` was called in, in order.
         created_in: Mutex<Vec<PathBuf>>,
+        /// Whether each `create`'s directory existed when it was called, in
+        /// order.
+        cwd_existed: Mutex<Vec<bool>>,
         /// The options `create` was called with, in order.
         created_with: Mutex<Vec<SessionOptions>>,
         /// How many more creates refuse an untrusted directory before
@@ -3222,6 +3248,7 @@ mod tests {
                 stopped: Mutex::default(),
                 removed: Mutex::default(),
                 created_in: Mutex::default(),
+                cwd_existed: Mutex::default(),
                 created_with: Mutex::default(),
                 untrusted: Mutex::default(),
             }
@@ -3284,6 +3311,13 @@ mod tests {
                 .clone()
         }
 
+        fn cwd_existed(&self) -> Vec<bool> {
+            self.cwd_existed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
         fn created_with(&self) -> Vec<SessionOptions> {
             self.created_with
                 .lock()
@@ -3311,6 +3345,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(cwd.to_owned());
+            self.cwd_existed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(cwd.is_dir());
             self.created_with
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -3768,6 +3806,7 @@ mod tests {
             &FakeTrust::accepting(),
             claude_dir,
             Path::new(ORB_ROOT),
+            Path::new(INCOGNITO_ROOT),
         )
     }
 
@@ -3780,6 +3819,7 @@ mod tests {
         trust: &Arc<FakeTrust>,
         claude_dir: &Path,
         orb_root: &Path,
+        incognito_root: &Path,
     ) -> (SessionsActor, State) {
         let state = State::default();
         let actor = SessionsActor::restore(SessionsActorDeps {
@@ -3793,6 +3833,7 @@ mod tests {
             claude_dir: claude_dir.to_owned(),
             worktrees_root: PathBuf::from(WORKTREES_ROOT),
             orb_root: orb_root.to_owned(),
+            incognito_root: incognito_root.to_owned(),
             wake: Arc::new(|| {}),
         });
         (actor, state)
@@ -5670,6 +5711,7 @@ mod tests {
             .sessions
             .projects
             .iter()
+            .filter(|project| project.kind == ProjectKind::Normal)
             .map(|project| project.root.clone())
             .collect();
         assert_eq!(
@@ -5742,7 +5784,12 @@ mod tests {
 
         // Then no project is saved.
         assert!(
-            actor.store.load()?.0.is_empty(),
+            !actor
+                .store
+                .load()?
+                .0
+                .iter()
+                .any(|project| project.root == Path::new("/nonexistent/project")),
             "a missing directory shouldn't be saved"
         );
         Ok(())
@@ -6330,6 +6377,171 @@ mod tests {
         Ok(())
     }
 
+    /// Starts the actor on `store` with `incognito_root` as orb's Incognito
+    /// folder.
+    fn start_incognito(
+        store: Store,
+        host: &Arc<FakeHost>,
+        incognito_root: &Path,
+    ) -> (SessionsActor, State) {
+        start_in(
+            store,
+            host,
+            &FakeGit::local(),
+            &FakeTrust::accepting(),
+            Path::new(NO_CLAUDE_DIR),
+            Path::new(ORB_ROOT),
+            incognito_root,
+        )
+    }
+
+    /// The titles of the Incognito projects the sidebar has.
+    fn incognito_titles(state: &State) -> Vec<String> {
+        state
+            .read()
+            .sessions
+            .projects
+            .iter()
+            .filter(|project| project.kind == ProjectKind::Incognito)
+            .map(|project| project.title.clone())
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn restore_adds_the_incognito_project() -> Result<(), Report<StoreError>> {
+        // Given an empty store.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let root = dir.path().join("incognito");
+
+        // When the actor starts.
+        let (_actor, state) = start_incognito(
+            Store::open_in_memory()?,
+            &FakeHost::listing(Vec::new()),
+            &root,
+        );
+
+        // Then it has an Incognito project titled Incognito.
+        assert_eq!(
+            incognito_titles(&state),
+            vec!["Incognito".to_owned()],
+            "start should add orb's Incognito project"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_keeps_one_incognito_project() -> Result<(), Report<StoreError>> {
+        // Given a store that already holds the Incognito project.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let root = dir.path().join("incognito");
+        let store = Store::open_in_memory()?;
+        store.add_project(&root, "Incognito", ProjectKind::Incognito, 0)?;
+
+        // When the actor starts.
+        let (_actor, state) = start_incognito(store, &FakeHost::listing(Vec::new()), &root);
+
+        // Then there's still one Incognito project.
+        assert_eq!(
+            incognito_titles(&state).len(),
+            1,
+            "start shouldn't add the Incognito project twice"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_makes_the_incognito_folder() -> Result<(), Report<StoreError>> {
+        // Given a missing Incognito folder.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let root = dir.path().join("incognito");
+
+        // When the actor starts.
+        let (_actor, _state) = start_incognito(
+            Store::open_in_memory()?,
+            &FakeHost::listing(Vec::new()),
+            &root,
+        );
+
+        // Then the folder exists.
+        assert!(root.is_dir(), "start should make the Incognito folder");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_un_removes_the_incognito_project() -> Result<(), Report<StoreError>> {
+        // Given a removed Incognito project.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let root = dir.path().join("incognito");
+        let store = Store::open_in_memory()?;
+        let id = store.add_project(&root, "Incognito", ProjectKind::Incognito, 0)?;
+        store.remove_project(id, 1)?;
+
+        // When the actor starts.
+        let (_actor, state) = start_incognito(store, &FakeHost::listing(Vec::new()), &root);
+
+        // Then it isn't removed.
+        assert_eq!(
+            removed_of(&state, id),
+            Some(false),
+            "start should bring back a removed Incognito project"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn incognito_start_makes_its_folder_first() -> Result<(), Report<StoreError>> {
+        // Given the Incognito project with a local draft, its folder deleted
+        // after start.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let root = dir.path().join("incognito");
+        let store = Store::open_in_memory()?;
+        let id = store.add_project(&root, "Incognito", ProjectKind::Incognito, 0)?;
+        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start_incognito(store, &host, &root);
+        fs::remove_dir_all(&root).change_context(StoreError)?;
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the folder existed when the host started the session.
+        assert_eq!(
+            host.cwd_existed(),
+            vec![true],
+            "an Incognito start should make its folder before starting"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn incognito_start_fails_when_its_folder_cant_be_made() -> Result<(), Report<StoreError>>
+    {
+        // Given the Incognito project with a local draft, rooted under a
+        // regular file.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let file = dir.path().join("file");
+        fs::write(&file, "").change_context(StoreError)?;
+        let root = file.join("incognito");
+        let store = Store::open_in_memory()?;
+        let id = store.add_project(&root, "Incognito", ProjectKind::Incognito, 0)?;
+        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start_incognito(store, &host, &root);
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the mode line says the folder couldn't be made.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("couldn't make the folder"),
+            "an Incognito start should fail when its folder can't be made"
+        );
+        Ok(())
+    }
+
     #[rstest::rstest]
     fn adding_a_removed_project_restores_it() -> Result<(), Report<StoreError>> {
         // Given a directory that's a removed project.
@@ -6485,6 +6697,7 @@ mod tests {
             .sessions
             .projects
             .iter()
+            .filter(|project| project.kind == ProjectKind::Normal)
             .map(|project| project.created_at)
             .collect();
         assert_eq!(
@@ -6575,6 +6788,7 @@ mod tests {
             .sessions
             .projects
             .iter()
+            .filter(|project| project.kind == ProjectKind::Normal)
             .map(|project| project.draft.clone())
             .collect();
         assert_eq!(
@@ -7879,6 +8093,7 @@ mod tests {
             &trust,
             Path::new(NO_CLAUDE_DIR),
             Path::new(ORB_ROOT),
+            Path::new(INCOGNITO_ROOT),
         );
         actor.start_draft(project).await;
 
@@ -7997,6 +8212,7 @@ mod tests {
             &FakeTrust::failing(),
             Path::new(NO_CLAUDE_DIR),
             Path::new(ORB_ROOT),
+            Path::new(INCOGNITO_ROOT),
         );
         actor.start_draft(project).await;
 
@@ -8026,6 +8242,7 @@ mod tests {
             &FakeTrust::failing(),
             Path::new(NO_CLAUDE_DIR),
             Path::new(ORB_ROOT),
+            Path::new(INCOGNITO_ROOT),
         );
         actor.move_thread(id, Workspace::NewWorktree).await;
 
@@ -8058,6 +8275,7 @@ mod tests {
             &trust,
             Path::new(NO_CLAUDE_DIR),
             Path::new(ORB_ROOT),
+            Path::new(INCOGNITO_ROOT),
         );
 
         // When the user trusts the workspace.
@@ -8594,6 +8812,7 @@ mod tests {
             &FakeTrust::accepting(),
             Path::new(NO_CLAUDE_DIR),
             orb_root.path(),
+            Path::new(INCOGNITO_ROOT),
         );
         Ok((orb_root, orb, actor, state))
     }
@@ -9810,6 +10029,7 @@ mod tests {
             &FakeTrust::accepting(),
             Path::new(NO_CLAUDE_DIR),
             orb_root,
+            Path::new(INCOGNITO_ROOT),
         );
         actor.poll().await;
         Ok((group, actor, state))
@@ -10684,6 +10904,7 @@ mod tests {
             claude_dir: PathBuf::from(NO_CLAUDE_DIR),
             worktrees_root: PathBuf::from(WORKTREES_ROOT),
             orb_root: PathBuf::from(ORB_ROOT),
+            incognito_root: PathBuf::from(INCOGNITO_ROOT),
             wake,
         });
         actor.poll().await;

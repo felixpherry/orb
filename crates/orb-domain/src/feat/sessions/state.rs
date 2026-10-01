@@ -55,6 +55,8 @@ pub enum ProjectKind {
     Research,
     /// orb's folder that holds Learn groups.
     Learn,
+    /// orb's folder for chats outside any project (`/tmp/orb-incognito`).
+    Incognito,
 }
 
 /// What a thread's Claude session is doing.
@@ -402,8 +404,8 @@ pub struct Sessions {
 impl Sessions {
     /// The projects the user added and didn't remove, most recently active
     /// first: by their threads' latest activity, else when they were added.
-    /// Ties go by title, then id. orb's Research and Learn projects aren't
-    /// listed.
+    /// Ties go by title, then id. orb's own projects (Research, Learn,
+    /// Incognito) aren't listed.
     pub fn projects_by_recency(&self) -> Vec<&Project> {
         let mut projects: Vec<&Project> = self
             .projects
@@ -2851,7 +2853,8 @@ mod tests {
     #[rstest::rstest]
     #[case(ProjectKind::Research)]
     #[case(ProjectKind::Learn)]
-    fn projects_by_recency_skips_research_and_learn(#[case] kind: ProjectKind) {
+    #[case(ProjectKind::Incognito)]
+    fn projects_by_recency_skips_orbs_own_projects(#[case] kind: ProjectKind) {
         // Given project 1, and project 2 of `kind`.
         let sessions = Sessions {
             projects: vec![
