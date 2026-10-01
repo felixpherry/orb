@@ -19,7 +19,7 @@ use super::state::ThreadStatus;
 pub struct SessionHostError;
 
 /// Marks a [`SessionHostError`] as Claude refusing a directory it hasn't been
-/// trusted in yet. Running `claude` there and accepting its prompt fixes it.
+/// trusted in yet.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkspaceUntrusted;
 

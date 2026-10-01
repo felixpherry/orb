@@ -38,7 +38,8 @@ Entries are added or amended **only with human approval**.
 - (pane) While attached, keys, paste, mouse, and focus events are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb captures the mouse only while attached and forwards the child's OSC 52 clipboard writes to its outer terminal.
-- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the dashboard, `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden, `<C-Right>`/`<C-Left>`, which resize the pane as on the dashboard, and `<C-o>`/`<C-i>`, which move through the jump list.
+- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the dashboard, `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden, `<C-b>`, which hides or shows the sidebar and keeps the keys in the pane, `<C-Right>`/`<C-Left>`, which resize the pane as on the dashboard, and `<C-o>`/`<C-i>`, which move through the jump list.
+- (keybinds) While attached, Claude's background-task shortcut works only as `Ctrl+X Ctrl+B`, because orb takes `<C-b>`.
 - (identity) orb supports Claude Code as its only provider.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
@@ -72,7 +73,7 @@ Entries are added or amended **only with human approval**.
 - (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
 - (picker) Every picker is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide with its name centred in the top border, a > prompt over an orange rule, numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
-- (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · <C-x> remove · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, discard and Initialize Git confirms, and `⏎ select · Esc close` otherwise.
+- (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · <C-x> remove · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, discard, trust and Initialize Git confirms, and `⏎ select · Esc close` otherwise.
 - (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>`, on branch `orb/<hex>`, or on the group's slug branch for a Feature group.
 - (worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w` and for a Feature group) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
@@ -84,7 +85,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `␣b` in the sidebar or dashboard opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the thread's directory.
 - (branches) After a thread's first prompt, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any thread in the same directory is working or waiting.
-- (trust) When Claude refuses an untrusted directory, orb opens an interactive `claude` in the pane and tries the start again every second, so once the user trusts the directory the new thread's pane replaces it in place, with the keys in it; it also retries once when that `claude` exits or the user presses `<C-\>` or `<C-h>`.
+- (trust) When Claude refuses an untrusted directory, orb asks `Trust <path>?` in a `No`/`Yes` confirm with `No` selected, naming Claude's project path (the git root, the main repo for a worktree, or the folder itself outside git).
 - (drafts) A draft holds only session setup (project, workspace, base branch, model, permission); starting it launches an idle `claude --bg` session with those settings and attaches while the draft's thread is still selected; if a picker, the rename box, the search or a pane has the keys when it comes up, orb attaches once the keys are back in the sidebar or dashboard, leaving them there.
 - (drafts) Each project has at most one draft of its own, and each group has at most one; drafts persist to orb's store and a project's draft sits above pinned threads in the sidebar.
 - (drafts) Draft settings default to the project's last-used workspace, model and permission, falling back to the last-used model and permission from any project and a local checkout; a new worktree's base branch defaults to the project's default branch.
@@ -170,3 +171,7 @@ Entries are added or amended **only with human approval**.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one; it never attaches, starts a draft, or clears the project filter.
 - (jumps) Deleted rows, rows hidden by the project filter, and the Settled header are skipped, and a folded group opens on arrival.
 - (jumps) orb persists the newest 20 jump-list rows to its store (store migration v9 added the `jumps` table); a row already in the list moves to the newest slot.
+- (groups) orb's built-in Research template is a research kit: an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions its agents follow, a report template and an empty `SOURCES.md`.
+- (groups) A Research folder shares no files with other Research folders.
+- (trust) `Yes` on the trust confirm marks that path trusted in Claude's `.claude.json`, keeping every other key, and retries the start once; if that write fails, the start fails with `couldn't trust the folder`.
+- (trust) `No` or `Esc` on the trust confirm, or `⏎` while its filter hides both rows, ends the start as a failed one, keeping the draft and showing `Workspace not trusted`.
