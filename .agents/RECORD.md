@@ -65,7 +65,7 @@ Entries are added or amended **only with human approval**.
 - (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order.
 - (projects) The project picker lists projects by their threads' latest activity, else when they were added, until filter text is typed.
 - (projects) The project picker filters on each project's name and path.
-- (projects) Projects are added only from the `␣p` directory picker, except orb's `Research` and `Learn` projects, which the first `␣gr`/`␣gl` adds.
+- (projects) Projects are added only from the `␣p` directory picker, except orb's `Research` and `Learn` projects, which the first `␣gr`/`␣gl` adds, and its `Incognito` project, which orb adds at start.
 - (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, wrapping from the last to the first and back, `<C-d>`/`<C-u>` move half a page, stopping at the ends, `⏎` picks, and `Esc` cancels.
 - (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
@@ -95,7 +95,7 @@ Entries are added or amended **only with human approval**.
 - (drafts) A draft of a project that isn't a git repository has no workspace or base branch, starts in the project's directory, and `␣w`/`␣b` offer to initialize git.
 - (drafts) The model picker lists `Default`, then T3 Code's current Claude models by name, then its legacy models under a `Legacy models` heading; orb passes the picked model's full ID to `--model`.
 - (keybinds) On a draft, `⏎` in the sidebar or on the dashboard's Start item starts it, and `␣w`/`␣b`/`␣m`/`␣a` in either pick its workspace, base branch, model, and permission.
-- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` and the dashboard's `m`/`a` only on a draft, a group's draft or a group's card; `␣w` and the dashboard's `w` only on a lone thread or a project's draft; `␣b` and the dashboard's `b` only there and on a started Feature group's card; `␣t`/`␣gg`/`␣v` and the dashboard's `t`/`g`/`v` only with a thread, draft or group selected; the dashboard's `o` only on a thread or draft; `p`/`s` in the sidebar only on a lone thread or a group's card; `r` only on a thread; and `n` only on a group's card or a thread in it.
+- (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣m`/`␣a` and the dashboard's `m`/`a` only on a draft, a group's draft or a group's card; `␣w` and the dashboard's `w` only on a lone thread or a project's draft, outside the Incognito project; `␣b` and the dashboard's `b` only there and on a started Feature group's card; `␣t`/`␣gg`/`␣v` and the dashboard's `t`/`g`/`v` only with a thread, draft or group selected; the dashboard's `o` only on a thread or draft; `p`/`s` in the sidebar only on a lone thread or a group's card; `r` only on a thread; and `n` only on a group's card or a thread in it.
 - (keybinds) `␣t` opens a shell, `␣gg` lazygit, and `␣v` `nvim .` in the selected thread's, draft's or group's directory, in the sidebar or dashboard.
 - (zellij) Tool handoff opens each tool as a full-screen floating zellij pane named `orb:<directory>:<tool>`, which closes when the tool exits.
 - (zellij) Tool handoff focuses an existing pane of the same name, switching to its tab, instead of opening a second one.
@@ -107,7 +107,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `␣e` hides or shows the sidebar; while it's hidden the right-hand area takes the full width, and `<C-h>` and resizing do nothing.
 - (keybinds) In the sidebar, the dashboard or the attached pane, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
 - (sidebar) The sidebar's width and project filter persist across restarts.
-- (keybinds) `␣f` in the sidebar opens the project filter: `All projects`, then Research and Learn once `␣gr`/`␣gl` has added them, then the projects in `␣n` order.
+- (keybinds) `␣f` in the sidebar opens the project filter: `All projects`, then Research and Learn once `␣gr`/`␣gl` has added them, then Incognito, then the projects in `␣n` order.
 - (sidebar) While a project filter is set, the sidebar lists only that project's drafts and threads, and its input box shows the project after the > prompt.
 - (sidebar) Picking a project in `␣n` outside the project filter clears the filter.
 - (keybinds) `<C-x>` in the project filter removes the highlighted project after a `No`/`Yes` confirm.
@@ -128,7 +128,7 @@ Entries are added or amended **only with human approval**.
 - (tui) The mode line shows `INSERT` while typing in the rename box or the sidebar search.
 - (keybinds) The which-key popup is drawn like LazyVim's default which-key (helix) in tokyonight-moon: a rounded box in the bottom-right corner on the mode line, the pending keys in its top border (`␣` for Space), one `key ➜ icon desc` row per next key with groups as `+name`, in which-key's order (letters and digits before symbols, lowercase before its capital), and `esc close  ⌫ back` on its last row; rows that don't fit are cut off.
 - (dashboard) While no Claude pane is shown, the right-hand area shows a LazyVim-style dashboard: a gradient ORB banner, a context line, a menu of the selection's actions, and a footer counting working threads, threads and projects.
-- (dashboard) The dashboard's menu lists `o` Open session, `w` Workspace and `b` Branch on a lone thread, and only `o` on a thread in a group; `o` Start session, `w` and `b` (only in a git repository), `m` Model and `a` Permission with their current values on a project's draft; `o`, `m` and `a` on a group's draft; `b` Branch on a started Feature group's card, then `m` and `a` (the group's defaults) on any group's card; `t` Shell, `g` Lazygit and `v` Neovim on any thread, draft or group; and `n` New session, `p` Add project, `f` Filter projects and `q` Quit always.
+- (dashboard) The dashboard's menu lists `o` Open session, `w` Workspace and `b` Branch on a lone thread, and only `o` on a thread in a group or in the Incognito project; `o` Start session, `w` and `b` (only in a git repository, and not on the Incognito draft), `m` Model and `a` Permission with their current values on a project's draft; `o`, `m` and `a` on a group's draft; `b` Branch on a started Feature group's card, then `m` and `a` (the group's defaults) on any group's card; `t` Shell, `g` Lazygit and `v` Neovim on any thread, draft or group; and `n` New session, `i` Incognito, `p` Add project, `f` Filter projects and `q` Quit always.
 - (keybinds) On the dashboard, `j`/`k` or `↓`/`↑` move the menu cursor, wrapping from the last item to the first and back, `⏎` runs the highlighted item, and an item's letter runs it directly.
 - (dashboard) The menu cursor starts on the first item (Open/Start session on a thread or draft, Branch on a started Feature group's card, Model on any other card, else New session) and goes back there whenever the selection changes.
 - (dashboard) While the Settled shelf's header is selected, the dashboard's context line shows the shelf hint.
@@ -176,3 +176,7 @@ Entries are added or amended **only with human approval**.
 - (groups) A Research folder shares no files with other Research folders.
 - (trust) `Yes` on the trust confirm marks that path trusted in Claude's `.claude.json`, keeping every other key, and retries the start once; if that write fails, the start fails with `couldn't trust the folder`.
 - (trust) `No` or `Esc` on the trust confirm, or `⏎` while its filter hides both rows, ends the start as a failed one, keeping the draft and showing `Workspace not trusted`.
+- (incognito) orb's `Incognito` project runs its threads in `/tmp/orb-incognito/`, which orb creates at start and before each incognito start.
+- (keybinds) `␣i` in the sidebar or dashboard, and `i` on the dashboard, open the Incognito draft, creating it from its default settings when it has none; `⏎` starts it.
+- (incognito) `␣n` doesn't list orb's `Incognito` project.
+- (incognito) Incognito threads settle, delete, rename and resume like any other thread.
