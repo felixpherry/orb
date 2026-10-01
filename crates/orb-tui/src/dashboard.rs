@@ -44,6 +44,7 @@ const CHIP: &str = "\u{f2db}";
 const SHIELD: &str = "\u{f132}";
 const EXIT: &str = "\u{f08b}";
 const ROCKET: &str = "\u{f135}";
+const SECRET: &str = "\u{f21b}";
 
 /// ORB in ANSI Shadow, as LazyVim's header.
 const SHADOW: [&str; 6] = [
@@ -283,6 +284,7 @@ fn look(item: DashboardItem) -> (&'static str, &'static str) {
         DashboardItem::Model => (CHIP, "Model"),
         DashboardItem::Permission => (SHIELD, "Permission"),
         DashboardItem::NewSession => (PLUS, "New session"),
+        DashboardItem::Incognito => (SECRET, "Incognito"),
         DashboardItem::AddProject => (FOLDER, "Add project"),
         DashboardItem::FilterProjects => (FUNNEL, "Filter projects"),
         DashboardItem::Shell => (TERMINAL, "Shell"),
@@ -588,7 +590,7 @@ mod tests {
         let columns: Vec<u16> = cells.iter().map(|(x, _, _)| *x).collect();
         assert_eq!(
             (keys.as_str(), columns),
-            ("owbnpftgvq", vec![69; 10]),
+            ("owbnipftgvq", vec![69; 11]),
             "the menu's keys"
         );
     }
@@ -631,19 +633,19 @@ mod tests {
 
     #[rstest::rstest]
     fn short_area_leaves_no_blank_line_between_items() {
-        // Given a selected thread, whose ten items with blank lines between
+        // Given a selected thread, whose eleven items with blank lines between
         // them don't fit 20 rows.
         let state = selected_thread();
 
         // When drawing the dashboard 80×20.
         let (buf, _) = draw(&state, None, 80, 20);
 
-        // Then the items' keys are on ten consecutive rows.
+        // Then the items' keys are on eleven consecutive rows.
         let rows: Vec<u16> = orange(&buf).iter().map(|(_, y, _)| *y).collect();
         let first = rows.first().copied().unwrap_or_default();
         assert_eq!(
             rows,
-            (first..first + 10).collect::<Vec<_>>(),
+            (first..first + 11).collect::<Vec<_>>(),
             "the items' rows"
         );
     }

@@ -20,8 +20,9 @@
 //! dashboard. An open picker takes
 //! typed characters as filter text and has its own fixed keys, `<C-x>` among
 //! them for removing a project from the project filter. The rename box (`r`)
-//! and the sidebar search (`/` or `i`) use the picker's keys. On a group's
-//! card, draft or threads, `l`/`h` open and close the group. `␣w` isn't bound
+//! and the sidebar search (`/` or `i`) use the picker's keys. `␣i` starts an
+//! incognito session in every scope; on the dashboard, `i` does too. On a
+//! group's card, draft or threads, `l`/`h` open and close the group. `␣w` isn't bound
 //! on them, and `␣b` (the dashboard's `b` too) only on the card of a Feature
 //! group whose worktree exists, where it switches that worktree's branch.
 //! `␣m`/`␣a` on a card pick the group's default model and permission (its
@@ -32,8 +33,8 @@
 use std::fmt;
 
 use orb_domain::feat::dashboard::DashboardItem::{
-    AddProject, Branch, FilterProjects, Lazygit, Model, Neovim, NewSession, Open, Permission, Quit,
-    Shell, Start, Workspace,
+    AddProject, Branch, FilterProjects, Incognito, Lazygit, Model, Neovim, NewSession, Open,
+    Permission, Quit, Shell, Start, Workspace,
 };
 use orb_domain::feat::sessions::state::{GroupKind, Sessions};
 use orb_domain::feat::zellij::zellij_service::Tool;
@@ -375,7 +376,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     ] {
         for item in items
             .iter()
-            .chain(&[NewSession, AddProject, FilterProjects, Quit])
+            .chain(&[NewSession, Incognito, AddProject, FilterProjects, Quit])
         {
             let category = match item {
                 Shell | Lazygit | Neovim => KeyCategory::Tools,
@@ -391,6 +392,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 "<leader>e",
                 Intent::ToggleSidebar,
                 KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>i",
+                Intent::NewIncognito,
+                KeyCategory::Sessions,
                 scope,
             )
             .bind(
@@ -592,8 +599,8 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
 #[cfg(test)]
 mod tests {
     use orb_domain::feat::dashboard::DashboardItem::{
-        self, AddProject, Branch, FilterProjects, Lazygit, Model, Neovim, NewSession, Open,
-        Permission, Quit, Shell, Start, Workspace,
+        self, AddProject, Branch, FilterProjects, Incognito, Lazygit, Model, Neovim, NewSession,
+        Open, Permission, Quit, Shell, Start, Workspace,
     };
     use std::time::SystemTime;
 
@@ -848,9 +855,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::general_on_a_thread(Scope::Dashboard, &[NewSession, AddProject, FilterProjects, Quit])]
-    #[case::general_on_a_draft(Scope::DashboardDraft, &[NewSession, AddProject, FilterProjects, Quit])]
-    #[case::general_on_nothing(Scope::DashboardEmpty, &[NewSession, AddProject, FilterProjects, Quit])]
+    #[case::general_on_a_thread(Scope::Dashboard, &[NewSession, Incognito, AddProject, FilterProjects, Quit])]
+    #[case::general_on_a_draft(Scope::DashboardDraft, &[NewSession, Incognito, AddProject, FilterProjects, Quit])]
+    #[case::general_on_nothing(Scope::DashboardEmpty, &[NewSession, Incognito, AddProject, FilterProjects, Quit])]
     #[case::thread(Scope::Dashboard, &[Open, Workspace, Branch, Shell, Lazygit, Neovim])]
     #[case::draft(
         Scope::DashboardDraft,
@@ -939,7 +946,16 @@ mod tests {
 
     #[rstest::rstest]
     fn slash_and_i_search_in_every_sidebar_scope(
-        #[values(Scope::Sidebar, Scope::SidebarDraft, Scope::SidebarEmpty)] scope: Scope,
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarDraft,
+            Scope::SidebarEmpty,
+            Scope::SidebarGroup,
+            Scope::SidebarWorktreeGroup,
+            Scope::SidebarGroupThread,
+            Scope::SidebarGroupDraft
+        )]
+        scope: Scope,
         #[values('/', 'i')] pressed: char,
     ) {
         // Given the keymap in a sidebar scope.
@@ -983,6 +999,68 @@ mod tests {
             intent.as_ref(),
             Some(&expected),
             "the key for {expected} in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_i_starts_incognito_in_every_scope(
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarDraft,
+            Scope::SidebarEmpty,
+            Scope::SidebarGroup,
+            Scope::SidebarWorktreeGroup,
+            Scope::SidebarGroupThread,
+            Scope::SidebarGroupDraft,
+            Scope::Dashboard,
+            Scope::DashboardDraft,
+            Scope::DashboardEmpty,
+            Scope::DashboardGroup,
+            Scope::DashboardWorktreeGroup,
+            Scope::DashboardGroupThread,
+            Scope::DashboardGroupDraft
+        )]
+        scope: Scope,
+    ) {
+        // Given Space already pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `i`.
+        let intent = press(&mut keys, key(KeyCode::Char('i')));
+
+        // Then it starts an incognito session.
+        assert_eq!(
+            intent,
+            Some(Intent::NewIncognito),
+            "␣i should start incognito in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn i_starts_incognito_on_the_dashboard(
+        #[values(
+            Scope::Dashboard,
+            Scope::DashboardDraft,
+            Scope::DashboardEmpty,
+            Scope::DashboardGroup,
+            Scope::DashboardWorktreeGroup,
+            Scope::DashboardGroupThread,
+            Scope::DashboardGroupDraft
+        )]
+        scope: Scope,
+    ) {
+        // Given the keymap in a dashboard scope.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing `i`.
+        let intent = press(&mut keys, key(KeyCode::Char('i')));
+
+        // Then it starts an incognito session.
+        assert_eq!(
+            intent,
+            Some(Intent::NewIncognito),
+            "i should start incognito in {scope:?}"
         );
     }
 
@@ -1543,20 +1621,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, "befgnptvw")]
-    #[case(Scope::SidebarDraft, "abefgmnptvw")]
-    #[case(Scope::SidebarEmpty, "efgnp")]
-    #[case(Scope::SidebarGroup, "aefgmnptv")]
-    #[case(Scope::SidebarWorktreeGroup, "abefgmnptv")]
-    #[case(Scope::SidebarGroupThread, "efgnptv")]
-    #[case(Scope::SidebarGroupDraft, "aefgmnptv")]
-    #[case(Scope::Dashboard, "begnptvw")]
-    #[case(Scope::DashboardDraft, "abegmnptvw")]
-    #[case(Scope::DashboardEmpty, "egnp")]
-    #[case(Scope::DashboardGroup, "aegmnptv")]
-    #[case(Scope::DashboardWorktreeGroup, "abegmnptv")]
-    #[case(Scope::DashboardGroupThread, "egnptv")]
-    #[case(Scope::DashboardGroupDraft, "aegmnptv")]
+    #[case(Scope::Sidebar, "befginptvw")]
+    #[case(Scope::SidebarDraft, "abefgimnptvw")]
+    #[case(Scope::SidebarEmpty, "efginp")]
+    #[case(Scope::SidebarGroup, "aefgimnptv")]
+    #[case(Scope::SidebarWorktreeGroup, "abefgimnptv")]
+    #[case(Scope::SidebarGroupThread, "efginptv")]
+    #[case(Scope::SidebarGroupDraft, "aefgimnptv")]
+    #[case(Scope::Dashboard, "beginptvw")]
+    #[case(Scope::DashboardDraft, "abegimnptvw")]
+    #[case(Scope::DashboardEmpty, "eginp")]
+    #[case(Scope::DashboardGroup, "aegimnptv")]
+    #[case(Scope::DashboardWorktreeGroup, "abegimnptv")]
+    #[case(Scope::DashboardGroupThread, "eginptv")]
+    #[case(Scope::DashboardGroupDraft, "aegimnptv")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
         let popup = leader_popup(scope);

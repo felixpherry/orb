@@ -55,6 +55,9 @@ pub enum Intent {
     JumpForward,
     /// Open the project picker to open that project's draft.
     NewSession,
+    /// Start a new session in orb's Incognito project at once, creating its
+    /// draft first when it has none.
+    NewIncognito,
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
     FilterProjects,
@@ -156,6 +159,7 @@ impl fmt::Display for Intent {
             Self::JumpBack => "jump back",
             Self::JumpForward => "jump forward",
             Self::NewSession => "new session",
+            Self::NewIncognito => "incognito",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",
             Self::PickerHalfPageUp | Self::SelectHalfPageUp => "half page up",

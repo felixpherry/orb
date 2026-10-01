@@ -1363,16 +1363,22 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn research_row_reads_just_its_name() {
-        // Given the project filter over orb and orb's Research project.
-        let research = PickerItem::Project {
+    #[case::research(ProjectKind::Research, "Research", "/Users/me/.orb/research")]
+    #[case::incognito(ProjectKind::Incognito, "Incognito", "/tmp/orb-incognito")]
+    fn orbs_own_project_row_reads_just_its_name(
+        #[case] kind: ProjectKind,
+        #[case] title: &str,
+        #[case] root: &str,
+    ) {
+        // Given the project filter over orb and one of orb's own projects.
+        let own = PickerItem::Project {
             id: ProjectId(2),
-            title: "Research".to_owned(),
-            root: "/Users/me/.orb/research".into(),
-            kind: ProjectKind::Research,
+            title: title.to_owned(),
+            root: root.into(),
+            kind,
         };
         let picker = PickerState::project_filter(
-            vec![project(1, "orb", "/Users/me/dev/orb"), research],
+            vec![project(1, "orb", "/Users/me/dev/orb"), own],
             None,
             Focus::Sidebar,
         );
@@ -1380,17 +1386,13 @@ mod tests {
         // When drawing it.
         let buf = draw(&picker, 60, 16);
 
-        // Then Research's row, the second, is its folder and name, with no
-        // path or title on the right.
+        // Then its row, the second, is its folder and name, with no path or
+        // title on the right.
         let row = lines(&buf)
             .into_iter()
-            .find(|line| line.contains("Research"))
+            .find(|line| line.contains(title))
             .map(|line| line.trim_matches(['│', ' ']).to_owned());
-        assert_eq!(
-            row,
-            Some(format!("2. {FOLDER} Research")),
-            "the Research row"
-        );
+        assert_eq!(row, Some(format!("2. {FOLDER} {title}")), "the {title} row");
     }
 
     #[rstest::rstest]
