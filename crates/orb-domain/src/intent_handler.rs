@@ -102,6 +102,11 @@ impl IntentHandler {
                 Err(_) => vec![],
             },
             Intent::ToggleSidebar => match (state.sidebar.hidden, state.focus) {
+                // `<C-b>` in the Claude pane: the keys stay in the pane.
+                (hidden, Focus::Attached) => {
+                    state.sidebar.hidden = !hidden;
+                    vec![]
+                }
                 (true, _) => {
                     state.sidebar.hidden = false;
                     state.focus = Focus::Sidebar;
@@ -165,10 +170,7 @@ impl IntentHandler {
             Intent::Attach => attach_thread(state),
             Intent::Detach => {
                 state.focus = Focus::Dashboard;
-                // The trust pane isn't a thread's: leaving it must not detach the selection.
-                if state.sessions.trust.is_none()
-                    && let Some(id) = state.sessions.selected_id()
-                {
+                if let Some(id) = state.sessions.selected_id() {
                     state.attached.remove(&id);
                 }
                 vec![Command::Detach, Command::RefreshSessions]
@@ -571,6 +573,12 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
+                Some(PickerKind::TrustWorkspace { .. }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Confirm(true)) => vec![Command::TrustWorkspace],
+                        _ => vec![Command::DeclineTrust],
+                    }
+                }
                 Some(PickerKind::ProjectFilter) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::AllProjects) => filter_to(state, None),
@@ -619,10 +627,10 @@ impl IntentHandler {
                     _ => vec![],
                 },
             },
-            Intent::PickerCancel => {
-                close_picker(state);
-                vec![]
-            }
+            Intent::PickerCancel => match close_picker(state).as_ref().map(PickerState::kind) {
+                Some(PickerKind::TrustWorkspace { .. }) => vec![Command::DeclineTrust],
+                _ => vec![],
+            },
             Intent::PickerRemove => match (
                 validate_remove_project(state),
                 state.picker.as_ref().and_then(PickerState::selected),
@@ -1716,6 +1724,7 @@ mod tests {
     #[rstest::rstest]
     #[case(Focus::Sidebar)]
     #[case(Focus::Dashboard)]
+    #[case(Focus::Attached)]
     fn toggle_sidebar_hides_a_shown_sidebar(#[case] focus: Focus) {
         // Given a shown sidebar.
         let mut state = laid_out(focus, 32, false);
@@ -1746,9 +1755,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn toggle_sidebar_shows_a_hidden_sidebar() {
+    #[case(Focus::Dashboard)]
+    #[case(Focus::Attached)]
+    fn toggle_sidebar_shows_a_hidden_sidebar(#[case] focus: Focus) {
         // Given a hidden sidebar.
-        let mut state = laid_out(Focus::Dashboard, 32, true);
+        let mut state = laid_out(focus, 32, true);
 
         // When handling ToggleSidebar.
         IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
@@ -1770,6 +1781,38 @@ mod tests {
             state.focus,
             Focus::Sidebar,
             "showing the sidebar should focus it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hiding_the_sidebar_from_the_pane_keeps_the_pane_focused() {
+        // Given a shown sidebar, with the Claude pane focused.
+        let mut state = laid_out(Focus::Attached, 32, false);
+
+        // When handling ToggleSidebar (`<C-b>`).
+        IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
+
+        // Then the pane keeps the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Attached,
+            "<C-b> should hide the sidebar and keep the pane focused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn showing_the_sidebar_from_the_pane_keeps_the_pane_focused() {
+        // Given a hidden sidebar, with the Claude pane focused.
+        let mut state = laid_out(Focus::Attached, 32, true);
+
+        // When handling ToggleSidebar (`<C-b>`).
+        IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
+
+        // Then the pane keeps the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Attached,
+            "<C-b> should show the sidebar and keep the pane focused"
         );
     }
 
@@ -2066,23 +2109,6 @@ mod tests {
             commands,
             vec![Command::Detach, Command::RefreshSessions],
             "Detach should detach, then refresh"
-        );
-    }
-
-    #[rstest::rstest]
-    fn detach_from_the_trust_pane_keeps_the_selection_attached() {
-        // Given keys going to the trust pane while thread 1 is attached and
-        // selected.
-        let mut state = attached();
-        state.sessions.trust = Some("/work".into());
-
-        // When handling Detach.
-        IntentHandler::handle(&Intent::Detach, &mut state);
-
-        // Then thread 1 is still attached.
-        assert!(
-            state.attached.contains(&ThreadId(1)),
-            "Detach from the trust pane should keep the selected thread attached"
         );
     }
 
@@ -5440,6 +5466,84 @@ mod tests {
     fn answer_yes(intent: &Intent, state: &mut AppState) {
         IntentHandler::handle(intent, state);
         highlight(state, &PickerItem::Confirm(true));
+    }
+
+    /// The trust confirm for `/work` is open, opened from the sidebar.
+    fn trusting() -> AppState {
+        AppState {
+            picker: Some(PickerState::trust_workspace("/work".into(), Focus::Sidebar)),
+            focus: Focus::Picker,
+            ..AppState::default()
+        }
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_trust_confirm_returns_trust_workspace() {
+        // Given the trust confirm with Yes highlighted.
+        let mut state = trusting();
+        highlight(&mut state, &PickerItem::Confirm(true));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the folder is trusted.
+        assert_eq!(
+            commands,
+            vec![Command::TrustWorkspace],
+            "Yes should trust the folder"
+        );
+    }
+
+    #[rstest::rstest]
+    fn no_on_the_trust_confirm_returns_decline_trust() {
+        // Given the trust confirm with No highlighted.
+        let mut state = trusting();
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the waiting start is declined.
+        assert_eq!(
+            commands,
+            vec![Command::DeclineTrust],
+            "No should decline the trust"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cancelling_the_trust_confirm_returns_decline_trust() {
+        // Given the trust confirm.
+        let mut state = trusting();
+
+        // When cancelling it.
+        let commands = IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the waiting start is declined.
+        assert_eq!(
+            commands,
+            vec![Command::DeclineTrust],
+            "Esc should decline the trust"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_the_trust_confirm_with_both_rows_filtered_away_returns_decline_trust() {
+        // Given the trust confirm with Yes highlighted, then `zz` typed so its
+        // filter hides both No and Yes.
+        let mut state = trusting();
+        highlight(&mut state, &PickerItem::Confirm(true));
+        IntentHandler::handle(&Intent::PickerInput('z'), &mut state);
+        IntentHandler::handle(&Intent::PickerInput('z'), &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the waiting start is declined.
+        assert_eq!(
+            commands,
+            vec![Command::DeclineTrust],
+            "confirming with nothing shown should decline the trust"
+        );
     }
 
     /// [`filtering`], then `<C-x>` on alpha.

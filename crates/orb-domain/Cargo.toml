@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 rusqlite = { workspace = true }
 fuzzy-matcher = { workspace = true }
 unicode-segmentation = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

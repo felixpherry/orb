@@ -1,6 +1,7 @@
 //! What orb asks of git: the branches a thread could switch to, a project's
 //! default branch, making, checking out, renaming and removing worktrees and
-//! branches, whether a branch is merged, and making a directory a repository.
+//! branches, whether a branch is merged, making a directory a repository, and
+//! the repository Claude takes a directory to belong to.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -126,6 +127,11 @@ pub trait Git: Send + Sync {
     ///
     /// Returns an error if git refuses, e.g. when `new` exists.
     fn rename_branch(&self, cwd: &Path, old: &str, new: &str) -> Result<(), Report<GitError>>;
+
+    /// Claude's project path for `cwd`: the root of its repository, or the
+    /// main repository's root for a worktree, as a real path. `None` outside
+    /// git.
+    fn project_path(&self, cwd: &Path) -> Option<PathBuf>;
 }
 
 /// The one-line reason a git failure carries.
@@ -263,6 +269,11 @@ impl GitService {
     /// Returns an error if git refuses.
     pub fn rename_branch(&self, cwd: &Path, old: &str, new: &str) -> Result<(), Report<GitError>> {
         self.git.rename_branch(cwd, old, new)
+    }
+
+    /// Claude's project path for `cwd`; `None` outside git.
+    pub fn project_path(&self, cwd: &Path) -> Option<PathBuf> {
+        self.git.project_path(cwd)
     }
 }
 

@@ -522,6 +522,8 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
         (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Route::Intent(Intent::Detach),
         // Claude can't bind `<C-h>`: it's Backspace in a legacy terminal.
         (KeyCode::Char('h'), KeyModifiers::CONTROL) => Route::Intent(Intent::LeavePane),
+        // Claude still backgrounds a task with `Ctrl+X Ctrl+B`.
+        (KeyCode::Char('b'), KeyModifiers::CONTROL) => Route::Intent(Intent::ToggleSidebar),
         _ => jump_route(key)
             .or_else(|| layout_route(key))
             .map_or(Route::Forward, Route::Intent),
@@ -1743,6 +1745,39 @@ mod tests {
             Route::Intent(Intent::LeavePane),
             "<C-h> should leave the pane"
         );
+    }
+
+    #[rstest::rstest]
+    fn ctrl_b_toggles_the_sidebar_while_attached() {
+        // Given `<C-b>`.
+        let key = ctrl('b');
+
+        // When routing it while attached.
+        let routed = attached_route(key);
+
+        // Then it hides or shows the sidebar instead of reaching Claude.
+        assert_eq!(
+            routed,
+            Route::Intent(Intent::ToggleSidebar),
+            "<C-b> should toggle the sidebar while attached"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case('b')]
+    #[case('B')]
+    fn ctrl_shift_b_is_forwarded_while_attached(#[case] c: char) {
+        // Given `ctrl+shift+b` in either of its kitty forms.
+        let key = KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+
+        // When routing it while attached.
+        let routed = attached_route(key);
+
+        // Then it goes to Claude.
+        assert_eq!(routed, Route::Forward, "ctrl+shift+{c} should be forwarded");
     }
 
     #[rstest::rstest]

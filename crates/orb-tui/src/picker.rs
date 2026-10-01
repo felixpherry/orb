@@ -9,7 +9,8 @@
 //! its path, the parent dimmed and the name bright, with the name on the
 //! right when the folder is named differently; so does the project filter,
 //! under an `All projects` row. Confirming a project's removal offers `No`
-//! and `Yes`. The directory picker shows one folder per row; the workspace
+//! and `Yes`; a session start waiting on trust asks `Trust ~/path?` the same
+//! way. The directory picker shows one folder per row; the workspace
 //! picker shows where a thread's session could run, each with its glyph; the
 //! branch picker shows each branch with its badge on the right, dimming the
 //! ones checked out where the thread can't follow and saying where; the model
@@ -75,7 +76,7 @@ pub(crate) fn render(
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BORDER).bg(BG_DARK))
         .style(Style::new().bg(BG_DARK))
-        .title(Line::from(span(format!(" {} ", title(picker.kind())), BLUE)).centered())
+        .title(Line::from(span(format!(" {} ", title(picker.kind(), home)), BLUE)).centered())
         .title_bottom(hints(picker.kind()));
     let inner = block.inner(popup);
     block.render(popup, buf);
@@ -107,9 +108,12 @@ fn popup_rect(area: Rect, shown: u16, total: u16) -> Rect {
     )
 }
 
-/// The picker's name, centred in its top border.
-fn title(kind: &PickerKind) -> &'static str {
-    match kind {
+/// The picker's name, centred in its top border; paths under `home` show as `~/`.
+fn title(kind: &PickerKind, home: &Path) -> Cow<'static, str> {
+    let name = match kind {
+        PickerKind::TrustWorkspace { dir } => {
+            return Cow::Owned(format!("Trust {}?", tilde(dir, home)));
+        }
         PickerKind::Projects | PickerKind::GroupProject => "Projects",
         PickerKind::ProjectFilter => "Filter projects",
         PickerKind::Directories { .. } => "Add project",
@@ -129,7 +133,8 @@ fn title(kind: &PickerKind) -> &'static str {
             ..
         } => "Delete group and its worktree?",
         PickerKind::DeleteGroup { dir: Some(_), .. } => "Delete group and its folder?",
-    }
+    };
+    Cow::Borrowed(name)
 }
 
 /// The picker's keys, dim and right-aligned in its bottom border: each key,
@@ -144,6 +149,7 @@ fn hints(kind: &PickerKind) -> Line<'static> {
         | PickerKind::DiscardDraft { .. }
         | PickerKind::SettleGroup { .. }
         | PickerKind::DeleteGroup { .. }
+        | PickerKind::TrustWorkspace { .. }
         | PickerKind::InitGit { .. } => &[("⏎", "confirm"), ("Esc", "cancel")],
         _ => &[("⏎", "select"), ("Esc", "close")],
     };
@@ -723,6 +729,10 @@ mod tests {
         PickerState::delete_group(GroupId(9), Some(GroupKind::Research), Focus::Sidebar),
         "Delete group and its folder?"
     )]
+    #[case::trust(
+        PickerState::trust_workspace(PathBuf::from("/Users/me/dev/orb"), Focus::Sidebar),
+        "Trust ~/dev/orb?"
+    )]
     fn picker_is_titled_by_its_kind(#[case] picker: PickerState, #[case] title: &str) {
         // Given a picker of some kind.
 
@@ -913,6 +923,10 @@ mod tests {
     )]
     #[case(
         PickerState::discard_draft(ProjectId(1), Focus::Sidebar),
+        "⏎ confirm · Esc cancel"
+    )]
+    #[case::trust(
+        PickerState::trust_workspace(PathBuf::from("/Users/me/dev/orb"), Focus::Sidebar),
         "⏎ confirm · Esc cancel"
     )]
     #[case(workspace(), "⏎ select · Esc close")]
