@@ -477,7 +477,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
     let (label, title_len) = match item {
         PickerItem::Project {
             title,
-            kind: ProjectKind::Research | ProjectKind::Learn,
+            kind: ProjectKind::Research | ProjectKind::Learn | ProjectKind::Incognito,
             ..
         } => (title.clone(), None),
         PickerItem::Project { title, root, .. } => {

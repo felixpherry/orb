@@ -103,6 +103,7 @@ fn main() -> Result<(), Report<OrbError>> {
         claude_dir,
         worktrees_root,
         orb_root,
+        incognito_root: PathBuf::from("/tmp/orb-incognito"),
         wake: frontend.waker(),
     });
     frontend
