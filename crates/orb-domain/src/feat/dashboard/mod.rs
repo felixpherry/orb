@@ -4,7 +4,8 @@
 //! a draft, change its workspace, branch and (for a draft) model and
 //! permission, open a tool in its directory, and the always-available new
 //! session, incognito, add project, filter projects and quit. On a group's rows, the
-//! menu has no workspace or branch: the group owns its directory. A group's
+//! menu has no workspace or branch: the group owns its directory. Nor on
+//! orb's Incognito draft or its threads. A group's
 //! card and draft pick the group's default model and permission. Each item
 //! has a single key that runs it; a cursor moves over the items and `⏎` runs
 //! the highlighted one. The cursor goes back to the first item whenever the
@@ -13,7 +14,7 @@
 pub mod state;
 
 use crate::Intent;
-use crate::feat::sessions::state::{GroupKind, Sessions};
+use crate::feat::sessions::state::{GroupKind, ProjectKind, Sessions};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// One dashboard menu entry.
@@ -90,11 +91,18 @@ pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
         sessions.selected_thread(),
         sessions.selected_group(),
     ) {
-        (Some((_, draft)), _, _) if draft.repo => {
+        (Some((project, draft)), _, _) if draft.repo && project.kind != ProjectKind::Incognito => {
             (&[Start, Workspace, Branch, Model, Permission], true)
         }
         (Some(_), _, _) => (&[Start, Model, Permission], true),
         (None, Some(_), Some(_)) => (&[Open], true),
+        (None, Some(_), None)
+            if sessions
+                .selected_project()
+                .is_some_and(|project| project.kind == ProjectKind::Incognito) =>
+        {
+            (&[Open], true)
+        }
         (None, Some(_), None) => (&[Open, Workspace, Branch], true),
         (None, None, Some(_)) if sessions.selected_group_draft().is_some() => {
             (&[Start, Model, Permission], true)
@@ -209,6 +217,70 @@ pub(crate) mod tests {
             }];
         }
         sessions
+    }
+
+    /// `sessions(repo, Some(cursor))` with project 1 as orb's Incognito project.
+    fn incognito(repo: Option<bool>, cursor: SidebarItem) -> Sessions {
+        let mut sessions = sessions(repo, Some(cursor));
+        sessions
+            .projects
+            .iter_mut()
+            .for_each(|project| project.kind = ProjectKind::Incognito);
+        sessions
+    }
+
+    #[rstest::rstest]
+    fn incognito_thread_lists_open_without_workspace_or_branch() {
+        // Given a selected thread of the Incognito project, outside a group.
+        let sessions = incognito(None, SidebarItem::Thread(ThreadId(1)));
+
+        // When listing the dashboard's items.
+        let items = items(&sessions);
+
+        // Then Open leads, with no Workspace or Branch.
+        assert_eq!(
+            items,
+            [
+                Open,
+                NewSession,
+                Incognito,
+                AddProject,
+                FilterProjects,
+                Shell,
+                Lazygit,
+                Neovim,
+                Quit
+            ],
+            "an incognito thread's dashboard items"
+        );
+    }
+
+    #[rstest::rstest]
+    fn incognito_draft_lists_no_workspace_or_branch_even_in_a_repo() {
+        // Given the Incognito project's draft, in a git repository.
+        let sessions = incognito(Some(true), SidebarItem::Draft(ProjectId(1)));
+
+        // When listing the dashboard's items.
+        let items = items(&sessions);
+
+        // Then Start, Model and Permission lead, with no Workspace or Branch.
+        assert_eq!(
+            items,
+            [
+                Start,
+                Model,
+                Permission,
+                NewSession,
+                Incognito,
+                AddProject,
+                FilterProjects,
+                Shell,
+                Lazygit,
+                Neovim,
+                Quit
+            ],
+            "the incognito draft's dashboard items"
+        );
     }
 
     #[rstest::rstest]
