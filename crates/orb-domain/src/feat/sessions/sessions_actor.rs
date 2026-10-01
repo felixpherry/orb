@@ -163,13 +163,14 @@ pub struct SessionsActorDeps {
 
 /// Owns [`Sessions`](super::state::Sessions): the projects, their drafts and
 /// groups, the threads' statuses, titles, pins and settles, the latest `claude` error,
-/// Claude's project path a start waits to be trusted in, and the started
-/// thread the frontend should attach to. It adds orb's Incognito project at
-/// start. It also restores the sidebar's width and project filter, selects a
-/// new group's draft, and moves the cursor to a sibling it started. The intent
-/// handler also moves the cursor, opens and closes the shelf, marks a start as
-/// starting, edits a draft's fields before asking for them to be saved, and
-/// resizes or filters the sidebar before asking for that to be saved.
+/// the origin ref a start is fetching, Claude's project path a start waits to
+/// be trusted in, and the started thread the frontend should attach to. It
+/// adds orb's Incognito project at start. It also restores the sidebar's width
+/// and project filter, selects a new group's draft, and moves the cursor to a
+/// sibling it started. The intent handler also moves the cursor, opens and
+/// closes the shelf, marks a start as starting, edits a draft's fields before
+/// asking for them to be saved, and resizes or filters the sidebar before
+/// asking for that to be saved.
 pub struct SessionsActor {
     services: Services,
     state: State,
@@ -1742,7 +1743,7 @@ impl SessionsActor {
             Some(base) => base.to_owned(),
             None => git.default_branch(repo)?,
         };
-        let base = start_point(git, repo, &base, |branch| git.fetch(repo, branch))?;
+        let base = start_point(git, repo, &base, |branch| self.fetch(repo, branch))?;
         let (path, branch) = (0..WORKTREE_NAME_ATTEMPTS)
             .map(|attempt| {
                 let hex = hex(attempt);
@@ -1759,6 +1760,17 @@ impl SessionsActor {
             path,
             branch,
         })
+    }
+
+    /// Fetches `branch` from origin, showing `fetching origin/<branch>…`
+    /// while it runs.
+    fn fetch(&self, repo: &Path, branch: &str) -> Result<bool, Report<GitError>> {
+        self.state.write().sessions.fetching = Some(format!("origin/{branch}"));
+        (self.wake)();
+        let fetched = self.services.git.fetch(repo, branch);
+        self.state.write().sessions.fetching = None;
+        (self.wake)();
+        fetched
     }
 
     /// Removes a worktree orb just made, and its branch, discarding anything
@@ -3170,7 +3182,7 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
     use std::time::{Duration, SystemTime};
 
     use async_trait::async_trait;
@@ -3446,6 +3458,10 @@ mod tests {
         /// What `project_path` answers.
         project: Option<PathBuf>,
         calls: Mutex<Vec<GitCall>>,
+        /// The app state `fetch` looks at, once a test watches one.
+        watched: OnceLock<State>,
+        /// What `sessions.fetching` was each time `fetch` ran, while watched.
+        fetching_seen: Mutex<Vec<Option<String>>>,
     }
 
     impl FakeGit {
@@ -3461,6 +3477,8 @@ mod tests {
                 merged: true,
                 project: None,
                 calls: Mutex::default(),
+                watched: OnceLock::new(),
+                fetching_seen: Mutex::default(),
             }
         }
 
@@ -3540,6 +3558,19 @@ mod tests {
                 .clone()
         }
 
+        /// Looks at `state` on every later fetch.
+        fn watch(&self, state: &State) {
+            let _ = self.watched.set(state.clone());
+        }
+
+        /// What `sessions.fetching` read while each watched fetch ran.
+        fn fetching_seen(&self) -> Vec<Option<String>> {
+            self.fetching_seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
         fn record(&self, call: GitCall) {
             self.calls
                 .lock()
@@ -3592,6 +3623,13 @@ mod tests {
 
         fn fetch(&self, _repo: &Path, branch: &str) -> Result<bool, Report<GitError>> {
             self.record(GitCall::Fetch(branch.to_owned()));
+            if let Some(state) = self.watched.get() {
+                let fetching = state.read().sessions.fetching.clone();
+                self.fetching_seen
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(fetching);
+            }
             self.fetch
                 .clone()
                 .map_err(|reason| Report::new(GitError).attach(reason))
@@ -7716,6 +7754,68 @@ mod tests {
 
         // Then no worktree is added.
         assert_eq!(git.added(), None, "a failed fetch shouldn't add a worktree");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn new_worktree_start_shows_the_fetch_while_it_runs() -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft on main, an origin, and git watching the app state.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::with_origin(Ok(true)));
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        git.watch(&state);
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then, while git fetched, the app state showed origin/main being fetched.
+        assert_eq!(
+            git.fetching_seen(),
+            vec![Some("origin/main".to_owned())],
+            "the fetch should show while it runs"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn start_clears_the_fetch_once_it_finishes() -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft on main and an origin that answers.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::with_origin(Ok(true)));
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then no fetch shows any more.
+        assert_eq!(
+            state.read().sessions.fetching,
+            None,
+            "a finished fetch shouldn't keep showing"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_fetch_clears_the_fetch() -> Result<(), Report<StoreError>> {
+        // Given a new-worktree draft on main and an origin that times out.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let git = FakeGit::with_origin(Err("git fetch origin main timed out after 15 s"));
+        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then no fetch shows any more.
+        assert_eq!(
+            state.read().sessions.fetching,
+            None,
+            "a failed fetch shouldn't keep showing"
+        );
         Ok(())
     }
 
