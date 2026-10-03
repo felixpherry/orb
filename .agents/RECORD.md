@@ -35,9 +35,9 @@ Entries are added or amended **only with human approval**.
 - (keybinds) orb has no `:` command line.
 - (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
 - (pane) orb redraws when input, PTY output, child exit, or an actor's state change wakes the loop, and every 100 ms while a thread is working (the spinner's frame); there is no other tick or frame throttle.
-- (pane) While attached, keys, paste, mouse, and focus events are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
+- (pane) While attached, keys, paste, focus events, and mouse events over the pane are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
-- (pane) orb captures the mouse only while attached and forwards the child's OSC 52 clipboard writes to its outer terminal.
+- (pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.
 - (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the dashboard, `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden, `<C-b>`, which hides or shows the sidebar and keeps the keys in the pane, `<C-Right>`/`<C-Left>`, which resize the pane as on the dashboard, `<C-o>`/`<C-i>`, which move through the jump list, and `<C-Space>`, which opens the session picker.
 - (keybinds) While attached, Claude's background-task shortcut works only as `Ctrl+X Ctrl+B`, because orb takes `<C-b>`.
 - (identity) orb supports Claude Code as its only provider.
@@ -168,7 +168,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `␣b` (and the dashboard's `b`) on a started Feature group's card switches its worktree's branch for the group and every thread in it; `␣b` isn't bound on a group's other rows, and `␣w` is bound on none.
 - (groups) Groups and each thread's group persist to orb's store (store migration v8 added the `groups` table and `threads.group_id`).
 - (keybinds) In the sidebar, the dashboard or the attached pane, `<C-o>`/`<C-i>` move back/forward through the jump list, as in neovim.
-- (jumps) A jump is entering a thread's pane (`⏎`, `<C-l>`, or a draft or `n` sibling starting), `gg`/`G`, a search `⏎`, a `␣n` pick, or a session picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.
+- (jumps) A jump is entering a thread's pane (`⏎`, `<C-l>`, a double-click on its row, a click into its pane, or a draft or `n` sibling starting), `gg`/`G`, a search ended by `⏎` or a click, a `␣n` pick, or a session picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one; it never attaches, starts a draft, or clears the project filter.
 - (jumps) Deleted rows, rows hidden by the project filter, and the Settled header are skipped, and a folded group opens on arrival.
 - (jumps) orb persists the newest 20 jump-list rows to its store (store migration v9 added the `jumps` table); a row already in the list moves to the newest slot.
@@ -188,3 +188,13 @@ Entries are added or amended **only with human approval**.
 - (picker) `⏎` in the session picker reveals the thread in the sidebar and attaches to it like `⏎` on its row.
 - (picker) The session picker is drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions, with a lit `s` while settled threads show and `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.
 - (picker) The session picker's preview shows the selected thread's status, branch and model, then its latest exchanges from the transcript (the prompt, the tools Claude ran, and the end of Claude's last reply as Markdown), or `No transcript yet` when there is none, and refreshes while the transcript grows.
+- (mouse) orb captures the mouse from startup until it exits.
+- (mouse) A click on a sidebar row or the sidebar's input box moves the keys to the sidebar, and a click on the right-hand area moves them to the dashboard or into the Claude pane shown there; the click that moves them into the pane isn't forwarded to Claude.
+- (mouse) A double-click is two clicks on the same sidebar or picker row within 500 ms.
+- (mouse) In the sidebar, a click selects a row and a double-click acts as `⏎` on it.
+- (mouse) The wheel over the sidebar moves the selection one row without wrapping while the sidebar has the keys, and otherwise, with no picker or rename box open, scrolls only its view, 3 lines a notch; the view goes back to the selection once the selection moves or the sidebar takes the keys.
+- (mouse) Clicking the sidebar's input box starts a search; during a search, clicking a row ends it as `⏎` does on that row, and clicking the right-hand area ends it as `⏎` does and moves the keys there.
+- (mouse) A click on a dashboard menu item moves the menu cursor to it without running it.
+- (mouse) In a picker, a click selects a row, a double-click picks it, the wheel over its list moves the selection one row without wrapping (over the session picker's preview it does nothing), a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.
+- (mouse) A click outside the rename box cancels it like `Esc`.
+- (mouse) A click on the input line of the sidebar search, a picker or the rename box moves its text cursor to the grapheme under it, to the first shown grapheme on the prompt, or to the end past the text.
