@@ -4,7 +4,8 @@
 //! While the sidebar is hidden, the right side takes the full width.
 //! An open picker is drawn over everything but the mode line, without the
 //! popup (the session and worktree pickers in their own snacks layout), and
-//! so is the rename box while it has the keys.
+//! so is the rename box while it has the keys. A confirm opened over a
+//! picker draws on top of it, and only the confirm takes clicks.
 //! The terminal's cursor is shown only where the keys are: on the sidebar's
 //! selected row, at the text cursor of the picker, the rename box or the
 //! sidebar search, on the dashboard's highlighted item, or in the attached
@@ -18,12 +19,13 @@
 use std::time::SystemTime;
 
 use jiff::tz::TimeZone;
-use orb_domain::feat::picker::state::PickerKind;
+use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::sidebar::state::{SidebarLayout, SidebarView};
 use orb_domain::{AppState, Focus};
 use orb_term::Pane;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Color;
 
 use crate::dashboard;
@@ -114,34 +116,29 @@ pub(crate) fn render(
     let picker_page = match (&state.picker, renaming) {
         (Some(picker), _) => {
             let area = sidebar_area.union(right);
-            let (rows, cursor) = match picker.kind() {
-                PickerKind::Sessions { .. } => session_picker::render(
-                    picker,
-                    &state.sessions,
-                    &state.attached,
-                    now,
-                    area,
-                    frame.buffer_mut(),
-                    picker_scroll,
-                    hits,
-                ),
-                PickerKind::Worktrees => worktree_picker::render(
-                    picker,
-                    state,
-                    now,
-                    area,
-                    frame.buffer_mut(),
-                    picker_scroll,
-                    hits,
-                ),
-                _ => picker::render(
-                    picker,
-                    &state.home,
-                    area,
-                    frame.buffer_mut(),
-                    picker_scroll,
-                    hits,
-                ),
+            let buf = frame.buffer_mut();
+            let (rows, cursor) = match picker.under() {
+                Some(list) => {
+                    render_picker(
+                        list,
+                        state,
+                        now,
+                        area,
+                        buf,
+                        picker_scroll,
+                        &mut HitMap::default(),
+                    );
+                    render_picker(
+                        picker,
+                        state,
+                        now,
+                        area,
+                        buf,
+                        &mut PickerScroll::default(),
+                        hits,
+                    )
+                }
+                None => render_picker(picker, state, now, area, buf, picker_scroll, hits),
             };
             frame.set_cursor_position(cursor);
             Some(rows)
@@ -170,13 +167,46 @@ pub(crate) fn render(
     (sidebar_layout, picker_page)
 }
 
+/// Draws `picker` over `area` with its own look, the session and worktree
+/// pickers in their snacks layout and the rest in the select popup.
+/// Returns how many rows fit and where the terminal cursor goes.
+fn render_picker(
+    picker: &PickerState,
+    state: &AppState,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll: &mut PickerScroll,
+    hits: &mut HitMap,
+) -> (usize, Position) {
+    match picker.kind() {
+        PickerKind::Sessions { .. } => session_picker::render(
+            picker,
+            &state.sessions,
+            &state.attached,
+            now,
+            area,
+            buf,
+            scroll,
+            hits,
+        ),
+        PickerKind::Worktrees => {
+            worktree_picker::render(picker, state, now, area, buf, scroll, hits)
+        }
+        _ => picker::render(picker, &state.home, area, buf, scroll, hits),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::path::PathBuf;
     use std::thread;
     use std::time::{Duration, Instant, SystemTime};
 
     use jiff::tz::TimeZone;
+    use orb_domain::Intent;
+    use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::sessions::state::{
         Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem,
@@ -191,10 +221,12 @@ mod tests {
     use ratatui::layout::{Position, Rect};
 
     use super::{BACKGROUND, layout, render};
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
 
     use crate::keymap::{Keys, Scope, keymap, press};
-    use crate::mouse::HitMap;
+    use crate::mouse::{self, Clicks, HitMap, MouseRoute};
     use crate::picker::PickerScroll;
     use crate::sidebar::SidebarScroll;
 
@@ -433,6 +465,105 @@ mod tests {
         assert!(
             screen.contains(" Worktrees ") && screen.contains("0/0"),
             "screen was\n{screen}"
+        );
+    }
+
+    /// An open `Delete worktree?` confirm over a worktree picker listing
+    /// `orb/orb-1234`.
+    fn delete_worktree_confirm() -> AppState {
+        let path = PathBuf::from("/Users/me/.orb/worktrees/orb/orb-1234");
+        let list = PickerState::worktrees(
+            vec![PickerItem::Worktree {
+                path: path.clone(),
+                label: "orb/orb-1234".to_owned(),
+                split: 4,
+                extra: String::new(),
+            }],
+            Focus::Sidebar,
+        );
+        AppState {
+            focus: Focus::Picker,
+            picker: Some(PickerState::delete_worktree(list, path, false)),
+            ..AppState::default()
+        }
+    }
+
+    /// Where `needle` first shows on `buffer`.
+    fn find(buffer: &Buffer, needle: &str) -> Option<Position> {
+        buffer.area.positions().find(|at| {
+            let rest = Rect::new(at.x, at.y, buffer.area.right() - at.x, 1);
+            text(buffer, rest).starts_with(needle)
+        })
+    }
+
+    #[rstest::rstest]
+    fn delete_worktree_confirm_draws_over_the_worktree_list() {
+        // Given a delete confirm opened over the worktree picker.
+        let state = delete_worktree_confirm();
+
+        // When drawing a frame.
+        let buffer = frame(&state, None, &Keys::new(keymap(), Scope::Sidebar), 20)
+            .backend()
+            .buffer()
+            .clone();
+
+        // Then the list's row and the confirm's title are both on screen.
+        let screen = text(&buffer, buffer.area);
+        assert!(
+            screen.contains("orb/orb-1234") && screen.contains("Delete worktree?"),
+            "screen was\n{screen}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_list_row_behind_the_delete_confirm_cancels_the_confirm() {
+        // Given a delete confirm drawn over the worktree picker.
+        let state = delete_worktree_confirm();
+        let mut hits = HitMap::default();
+        let buffer = {
+            let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
+            let keys = Keys::new(keymap(), Scope::Sidebar);
+            let Ok(_) = terminal.draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    None,
+                    None,
+                    &keys,
+                    SystemTime::UNIX_EPOCH,
+                    &TimeZone::UTC,
+                    &mut SidebarScroll::default(),
+                    &mut PickerScroll::default(),
+                    &mut hits,
+                );
+            });
+            terminal.backend().buffer().clone()
+        };
+        let row = find(&buffer, "orb/orb-1234");
+
+        // When clicking the list's row.
+        let route = row.map(|at| {
+            let event = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: at.x,
+                row: at.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            mouse::route(
+                event,
+                &hits,
+                Focus::Picker,
+                false,
+                &mut Clicks::default(),
+                Instant::now(),
+            )
+        });
+
+        // Then the click cancels the confirm instead of selecting the row.
+        assert_eq!(
+            route,
+            Some(MouseRoute::Intents(vec![Intent::PickerCancel])),
+            "a click behind the confirm should close it"
         );
     }
 
