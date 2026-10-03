@@ -318,6 +318,12 @@ impl PickerList {
         self.input.cursor_right();
     }
 
+    /// Moves the cursor to grapheme `index`, or to the end when the input is
+    /// shorter.
+    pub fn cursor_to(&mut self, index: usize) {
+        self.input.cursor_to(index);
+    }
+
     /// Selects the next shown item, wrapping from the last to the first.
     /// Disabled items are skipped here and by every other move.
     pub fn next(&mut self) {

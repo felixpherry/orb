@@ -104,7 +104,7 @@ pub(crate) fn render(
         Constraint::Fill(1),
     ])
     .areas(inner);
-    let cursor = render_input(picker, input, buf);
+    let cursor = render_input(picker, input, buf, hits);
     Line::from(span("─".repeat(usize::from(rule.width)), ORANGE)).render(rule, buf);
     let page = render_rows(picker, home, rows, buf, scroll, hits);
     (page, cursor)
@@ -185,15 +185,13 @@ fn hints(kind: &PickerKind) -> Line<'static> {
 }
 
 /// The ` > ` prompt and the typed text, its end while it is too long to fit.
-/// Returns the cursor's position.
-fn render_input(picker: &PickerState, area: Rect, buf: &mut Buffer) -> Position {
+/// Returns the cursor's position. Records its line in `hits`.
+fn render_input(picker: &PickerState, area: Rect, buf: &mut Buffer, hits: &mut HitMap) -> Position {
     let prompt = span(" > ", CYAN);
     let prompt_width = prompt.width();
-    let (shown, before) = visible(
-        picker.input(),
-        picker.cursor(),
-        usize::from(area.width).saturating_sub(prompt_width + 1),
-    );
+    let room = usize::from(area.width).saturating_sub(prompt_width + 1);
+    let (shown, before) = visible(picker.input(), picker.cursor(), room);
+    hits.record_text(area, prompt_width, picker.input(), picker.cursor(), room);
     Line::from(vec![prompt, span(shown, FG)]).render(area, buf);
     let x = u16::try_from(prompt_width + before)
         .unwrap_or(u16::MAX)
@@ -442,6 +440,31 @@ pub(crate) fn cut_left(text: &str, width: usize) -> String {
 /// view. Returns it and its width before the cursor.
 pub(crate) fn visible(text: &str, cursor: usize, room: usize) -> (String, usize) {
     let graphemes: Vec<&str> = text.graphemes(true).collect();
+    let (start, before) = dropped(&graphemes, cursor, room);
+    (graphemes.iter().skip(start).copied().collect(), before)
+}
+
+/// The grapheme of `text` drawn `column` columns into what
+/// `visible(text, cursor, room)` shows: either column of a wide grapheme
+/// maps to it, and a column past the end to the grapheme count.
+pub(crate) fn grapheme_at(text: &str, cursor: usize, room: usize, column: usize) -> usize {
+    let graphemes: Vec<&str> = text.graphemes(true).collect();
+    let (start, _) = dropped(&graphemes, cursor, room);
+    let mut left = column;
+    for (index, grapheme) in graphemes.iter().enumerate().skip(start) {
+        let width = Span::raw(*grapheme).width();
+        if left < width {
+            return index;
+        }
+        left -= width;
+    }
+    graphemes.len()
+}
+
+/// How many of `graphemes` `visible` leaves off the start so the cursor (at
+/// grapheme `cursor`) fits in `room` columns, and the width of the rest
+/// before the cursor.
+fn dropped(graphemes: &[&str], cursor: usize, room: usize) -> (usize, usize) {
     let widths: Vec<usize> = graphemes
         .iter()
         .map(|grapheme| Span::raw(*grapheme).width())
@@ -452,7 +475,7 @@ pub(crate) fn visible(text: &str, cursor: usize, room: usize) -> (String, usize)
         before -= widths.get(start).copied().unwrap_or_default();
         start += 1;
     }
-    (graphemes.iter().skip(start).copied().collect(), before)
+    (start, before)
 }
 
 /// `text` with each grapheme holding one of `offsets` (byte offsets into
@@ -510,7 +533,7 @@ mod tests {
     use ratatui::style::Modifier;
     use unicode_segmentation::UnicodeSegmentation;
 
-    use super::{FOLDER, GIT, HISTORY, PickerScroll, SHIELD, render};
+    use super::{FOLDER, GIT, HISTORY, PickerScroll, SHIELD, grapheme_at, render};
     use crate::mouse::HitMap;
     use crate::sidebar::{BLUE1, CLAUDE_LOGO, DARK3, DARK5, FG, ORANGE, VISUAL, badge};
 
@@ -1564,6 +1587,53 @@ mod tests {
         assert!(
             hits.on_overlay(cursor),
             "the popup should be recorded around its input at {cursor:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_maps_the_input_text_to_its_graphemes() {
+        // Given the project picker with "al" typed.
+        let picker = {
+            let mut picker = orb();
+            picker.insert('a');
+            picker.insert('l');
+            picker
+        };
+
+        // When drawing it.
+        let (hits, cursor) = hits_of(&picker, 100, 20);
+
+        // Then the column before the terminal cursor maps to "l".
+        assert_eq!(
+            hits.text_at(Position::new(cursor.x - 1, cursor.y)),
+            Some(1),
+            "the column before the cursor should be the last typed grapheme"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::third_shown("abcdef", 6, 20, 2, 2)]
+    #[case::start_hidden("abcdefghij", 10, 5, 0, 5)]
+    #[case::past_the_end("abc", 3, 20, 10, 3)]
+    #[case::wide_first_column("a漢b", 3, 20, 1, 1)]
+    #[case::wide_second_column("a漢b", 3, 20, 2, 1)]
+    #[case::emoji_second_column("👍x", 2, 20, 1, 0)]
+    #[case::wide_after_hidden_start("ab漢字", 4, 5, 2, 2)]
+    fn grapheme_at_maps_a_column_to_its_grapheme(
+        #[case] text: &str,
+        #[case] cursor: usize,
+        #[case] room: usize,
+        #[case] column: usize,
+        #[case] expected: usize,
+    ) {
+        // Given `text` drawn with its cursor at `cursor` in `room` columns.
+        // When asking which grapheme is `column` columns into what's shown.
+        let grapheme = grapheme_at(text, cursor, room, column);
+
+        // Then it's grapheme `expected`.
+        assert_eq!(
+            grapheme, expected,
+            "column {column} of {text:?} (cursor {cursor}, room {room})"
         );
     }
 }

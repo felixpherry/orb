@@ -153,7 +153,7 @@ fn render_list(
     .areas(inner);
     let shown: Vec<(&PickerItem, &Matches)> = picker.shown().collect();
     let count = format!("{}/{}", shown.len(), picker.total());
-    let cursor = render_input(picker, &count, input, buf);
+    let cursor = render_input(picker, &count, input, buf, hits);
     Line::from(span("─".repeat(usize::from(rule.width)), ORANGE)).render(rule, buf);
     let page = usize::from(rows.height).max(1);
     let offset = scroll.follow(picker.selection(), shown.len(), page);
@@ -175,14 +175,21 @@ fn render_list(
 
 /// The ` > ` prompt and the typed text (its end while too long, as in the
 /// select picker), with `count` dim against the right edge. Returns the
-/// cursor's position.
-fn render_input(picker: &PickerState, count: &str, area: Rect, buf: &mut Buffer) -> Position {
+/// cursor's position. Records its line in `hits`.
+fn render_input(
+    picker: &PickerState,
+    count: &str,
+    area: Rect,
+    buf: &mut Buffer,
+    hits: &mut HitMap,
+) -> Position {
     let prompt = span(" > ", CYAN);
     let prompt_width = prompt.width();
     let count = span(count.to_owned(), DARK3);
     // The count, the cell before it, the right margin and the cursor's cell.
     let room = usize::from(area.width).saturating_sub(prompt_width + count.width() + 3);
     let (shown, before) = visible(picker.input(), picker.cursor(), room);
+    hits.record_text(area, prompt_width, picker.input(), picker.cursor(), room);
     render_split(
         Line::from(vec![prompt, span(shown, FG)]),
         Line::from(count),
@@ -1261,6 +1268,24 @@ mod tests {
             (hits.on_overlay(at), hits.picker_row_at(at)),
             (true, None),
             "the preview should be inside the popup and on no row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_maps_the_input_text_to_its_graphemes() {
+        // Given the session picker over three threads with "on" typed.
+        let sessions = three_threads();
+        let mut picker = picker(&sessions);
+        typed(&mut picker, &['o', 'n']);
+
+        // When drawing it.
+        let (hits, cursor) = hits_of(&picker, &sessions, 160, 40);
+
+        // Then the column before the terminal cursor maps to "n".
+        assert_eq!(
+            hits.text_at(Position::new(cursor.x - 1, cursor.y)),
+            Some(1),
+            "the column before the cursor should be the last typed grapheme"
         );
     }
 }

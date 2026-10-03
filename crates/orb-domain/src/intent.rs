@@ -130,6 +130,9 @@ pub enum Intent {
     /// Move the cursor of the picker, the rename box, or the sidebar search
     /// one grapheme right.
     PickerCursorRight,
+    /// Move the cursor of the picker, the rename box, or the sidebar search
+    /// to this grapheme (a click), or to the end when the text is shorter.
+    PickerCursorTo(usize),
     /// Select the picker's next item, or the sidebar search's next match.
     PickerNext,
     /// Select the picker's previous item, or the sidebar search's previous
@@ -216,6 +219,7 @@ impl fmt::Display for Intent {
             Self::PickerDeleteWord => "delete word",
             Self::PickerCursorLeft => "cursor left",
             Self::PickerCursorRight => "cursor right",
+            Self::PickerCursorTo(_) => "move cursor",
             Self::PickerConfirm => "pick",
             Self::PickerOpen => "open directory",
             Self::PickerCancel => "cancel",
