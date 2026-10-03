@@ -181,7 +181,7 @@ Entries are added or amended **only with human approval**.
 - (incognito) `␣n` doesn't list orb's `Incognito` project.
 - (incognito) Incognito threads settle, delete, rename and resume like any other thread.
 - (keybinds) `␣␣` in the sidebar or dashboard, and `<C-Space>` in the attached pane, open the session picker.
-- (picker) The session picker lists the threads inside the project filter, newest chat first by the later of a thread's current turn start and its last turn end, leaving out the selected thread, threads being deleted, threads Claude no longer knows, and settled threads (a settled group's included) unless `<C-s>` shows them.
+- (picker) The session picker lists the threads inside the project filter, the selected thread included, newest chat first by the later of a thread's current turn start and its last turn end, leaving out threads being deleted, threads Claude no longer knows, and settled threads (a settled group's included) unless `<C-s>` shows them.
 - (keybinds) In the session picker, `<C-s>` shows or hides settled threads and keeps the typed text; settled threads start hidden on every opening, and its other keys are every picker's.
 - (picker) A session picker row is labelled `<project>/title`, or `<group>/title` for a thread in a group, with `New thread` as the title while it has none, and typed text fuzzy-matches the whole label.
 - (picker) The session picker's rows and their order are fixed when it opens, while their status, spinner and time update live, and `⏎` on a thread deleted since, or one Claude no longer knows, only closes it.

@@ -753,10 +753,10 @@ pub fn expand(dir_text: &str, home: &Path) -> PathBuf {
 /// The session picker's rows: the threads of every project inside the
 /// project filter (removed projects too), newest chat first by the later of
 /// the current turn's start and the last turn's end, ties to the higher id.
-/// The selected thread, threads being deleted, `Gone` threads, and settled
-/// threads (or threads of a settled group) unless `settled`, are left out.
+/// The selected thread is listed like any other. Threads being deleted,
+/// `Gone` threads, and settled threads (or threads of a settled group) unless
+/// `settled`, are left out.
 pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
-    let selected = sessions.selected_id();
     let mut rows: Vec<(SystemTime, i64, PickerItem)> = sessions
         .projects
         .iter()
@@ -768,8 +768,7 @@ pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
                 .and_then(|id| project.groups.iter().find(|group| group.id == id));
             let is_settled = thread.settled_at.is_some()
                 || group.is_some_and(|group| group.settled_at.is_some());
-            let left_out = Some(thread.id) == selected
-                || sessions.deleting.contains(&thread.id)
+            let left_out = sessions.deleting.contains(&thread.id)
                 || thread.status == ThreadStatus::Gone
                 || (is_settled && !settled);
             if left_out {
