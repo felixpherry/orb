@@ -18,6 +18,7 @@ use crate::feat::picker::list::{
 use crate::feat::sessions::state::{
     GroupId, GroupKind, NEW_THREAD, ProjectId, Sessions, ThreadId, ThreadStatus,
 };
+use crate::feat::sessions::transcript::Exchange;
 
 /// What a workspace or branch picker sets up: a thread, a project's draft,
 /// or (branch only) a Feature group's worktree.
@@ -92,6 +93,15 @@ pub enum PickerKind {
     Sessions { settled: bool },
 }
 
+/// What the session picker's preview shows for a thread: its transcript's
+/// last exchanges, and the transcript's length when they were read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPreview {
+    pub thread: ThreadId,
+    pub len: u64,
+    pub exchanges: Vec<Exchange>,
+}
+
 /// The open picker.
 #[derive(Debug)]
 pub struct PickerState {
@@ -105,6 +115,8 @@ pub struct PickerState {
     page: usize,
     /// The branch to select when the refs are listed with nothing typed.
     wanted: Option<String>,
+    /// The session picker's preview, as last read.
+    preview: Option<SessionPreview>,
 }
 
 impl PickerState {
@@ -117,6 +129,7 @@ impl PickerState {
             home: PathBuf::new(),
             page: 0,
             wanted: None,
+            preview: None,
         }
     }
 
@@ -130,6 +143,7 @@ impl PickerState {
             home: PathBuf::new(),
             page: 0,
             wanted: None,
+            preview: None,
         }
     }
 
@@ -167,6 +181,7 @@ impl PickerState {
             home: PathBuf::new(),
             page: 0,
             wanted: None,
+            preview: None,
         }
     }
 
@@ -216,6 +231,7 @@ impl PickerState {
             home: PathBuf::new(),
             page: 0,
             wanted: None,
+            preview: None,
         }
     }
 
@@ -228,6 +244,7 @@ impl PickerState {
             home: PathBuf::new(),
             page: 0,
             wanted: None,
+            preview: None,
         }
     }
 
@@ -251,6 +268,7 @@ impl PickerState {
             home: PathBuf::new(),
             page: 0,
             wanted,
+            preview: None,
         }
     }
 
@@ -263,6 +281,7 @@ impl PickerState {
             home: PathBuf::new(),
             page: 0,
             wanted: None,
+            preview: None,
         }
     }
 
@@ -321,6 +340,7 @@ impl PickerState {
             home: PathBuf::new(),
             page: 0,
             wanted: None,
+            preview: None,
         }
     }
 
@@ -340,6 +360,7 @@ impl PickerState {
             home: home.clone(),
             page: 0,
             wanted: None,
+            preview: None,
         };
         (picker, home)
     }
@@ -447,6 +468,39 @@ impl PickerState {
             Some(&PickerItem::Thread { id, .. }) => Some(id),
             _ => None,
         }
+    }
+
+    /// Keeps `exchanges`, read from `thread`'s transcript at `len` bytes, as
+    /// the preview. Dropped unless `thread` is still the selected row, so a
+    /// late read for an old selection never shows.
+    pub fn show_preview(&mut self, thread: ThreadId, len: u64, exchanges: Vec<Exchange>) {
+        if self.selected_thread() == Some(thread) {
+            self.preview = Some(SessionPreview {
+                thread,
+                len,
+                exchanges,
+            });
+        }
+    }
+
+    /// The selected thread's preview; `None` until it's read, or with no
+    /// thread selected.
+    pub fn preview(&self) -> Option<&SessionPreview> {
+        self.preview
+            .as_ref()
+            .filter(|preview| Some(preview.thread) == self.selected_thread())
+    }
+
+    /// Forgets the preview.
+    pub fn clear_preview(&mut self) {
+        self.preview = None;
+    }
+
+    /// Whether the selected thread's transcript, now `len` bytes long, needs
+    /// reading for the preview: nothing was read for it yet, or it was read
+    /// at another length.
+    pub fn wants_preview(&self, len: u64) -> bool {
+        self.selected_thread().is_some() && self.preview().is_none_or(|preview| preview.len != len)
     }
 
     /// Selects the shown row holding `item`; stays put when none does.
@@ -670,6 +724,7 @@ mod tests {
     use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::{LEGACY_MODELS, PickerItem};
     use crate::feat::sessions::state::{GroupId, ProjectId, ProjectKind, ThreadId};
+    use crate::feat::sessions::transcript::Exchange;
 
     const HOME: &str = "/home/u";
 
@@ -1248,5 +1303,81 @@ mod tests {
             Some(&PickerItem::Confirm(false)),
             "No should be the default"
         );
+    }
+
+    /// The session picker over threads 1 (`work/alpha`) and 2 (`work/zulu`),
+    /// with thread 1 selected.
+    fn two_threads() -> PickerState {
+        let row = |id, title: &str| PickerItem::Thread {
+            id: ThreadId(id),
+            label: format!("work/{title}"),
+            split: 5,
+            settled: false,
+        };
+        PickerState::sessions(vec![row(1, "alpha"), row(2, "zulu")], Focus::Sidebar)
+    }
+
+    fn reply(text: &str) -> Vec<Exchange> {
+        vec![Exchange {
+            reply: Some((text.to_owned(), None)),
+            ..Exchange::default()
+        }]
+    }
+
+    #[rstest::rstest]
+    fn show_preview_for_the_selected_thread_is_shown() {
+        // Given the session picker with thread 1 selected.
+        let mut picker = two_threads();
+
+        // When showing a preview read from thread 1's transcript.
+        picker.show_preview(ThreadId(1), 10, reply("Done"));
+
+        // Then the picker's preview is that read.
+        assert_eq!(
+            picker.preview().map(|preview| (
+                preview.thread,
+                preview.len,
+                preview.exchanges.clone()
+            )),
+            Some((ThreadId(1), 10, reply("Done"))),
+            "the selected thread's preview should be shown"
+        );
+    }
+
+    #[rstest::rstest]
+    fn show_preview_for_a_thread_no_longer_selected_is_dropped() {
+        // Given the session picker moved from thread 1 to thread 2.
+        let mut picker = two_threads();
+        picker.next();
+
+        // When a late read for thread 1 arrives.
+        picker.show_preview(ThreadId(1), 10, reply("Done"));
+
+        // Then no preview is shown.
+        assert!(
+            picker.preview().is_none(),
+            "a read for an old selection should be dropped"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::unread(None, true)]
+    #[case::same(Some(10), false)]
+    #[case::grown(Some(5), true)]
+    fn wants_preview_when_the_read_length_differs(
+        #[case] read_at: Option<u64>,
+        #[case] expected: bool,
+    ) {
+        // Given the session picker on thread 1, its preview read at `read_at`.
+        let mut picker = two_threads();
+        if let Some(len) = read_at {
+            picker.show_preview(ThreadId(1), len, vec![]);
+        }
+
+        // When asking whether a 10-byte transcript needs reading.
+        let wants = picker.wants_preview(10);
+
+        // Then it does only when the read length differs.
+        assert_eq!(wants, expected, "preview read at {read_at:?}");
     }
 }

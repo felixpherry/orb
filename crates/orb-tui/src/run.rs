@@ -11,9 +11,10 @@
 //! threads are selected; the right side shows the selected thread's pane
 //! when it's attached, else the dashboard. While attached, input goes
 //! straight to Claude, except the resize keys; otherwise keys go through the resize keys, then the
-//! [`keymap`]. The loop itself reads the directory picker's listings and the
-//! branch picker's refs, and hands tools to zellij, since each takes
-//! milliseconds.
+//! [`keymap`]. The loop itself reads the directory picker's listings, the
+//! branch picker's refs and the session picker's preview, re-reading the
+//! preview whenever the selected thread's transcript changes length, and
+//! hands tools to zellij, since each takes milliseconds.
 //!
 //! `<C-h>` moves the keys from the pane to the sidebar and leaves it drawn,
 //! so `<C-l>` goes back into it; `<C-\>`, in the pane or on the thread in the
@@ -60,10 +61,11 @@ use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::PickerState;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
+use orb_domain::feat::sessions::transcript::read_exchanges;
 use orb_domain::feat::zellij::zellij_service::{
     NOT_IN_ZELLIJ, ZellijError, ZellijService, zellij_reason,
 };
-use orb_domain::{Command, Focus, Intent, IntentHandler, State, Wake};
+use orb_domain::{AppState, Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
@@ -400,6 +402,7 @@ impl App {
             for event in first.into_iter().chain(rx.try_iter()) {
                 self.handle(event, terminal.backend_mut())?;
             }
+            self.refresh_preview();
             self.announce();
             self.reconcile(terminal.backend_mut())?;
             self.ask_trust(terminal.backend_mut())?;
@@ -709,6 +712,10 @@ impl App {
                 }
                 Ok(())
             }
+            Command::LoadPreview { thread, transcript } => {
+                self.load_preview(*thread, transcript);
+                Ok(())
+            }
             Command::RefreshSessions => {
                 let _ = self
                     .sessions
@@ -967,6 +974,26 @@ impl App {
         Ok(())
     }
 
+    /// Reads `thread`'s transcript into the open picker's preview. An
+    /// unreadable transcript gives an empty preview, which shows as no
+    /// transcript.
+    fn load_preview(&self, thread: ThreadId, transcript: &Path) {
+        let (len, exchanges) = read_exchanges(transcript).unwrap_or_default();
+        if let Some(picker) = &mut self.state.write().picker {
+            picker.show_preview(thread, len, exchanges);
+        }
+    }
+
+    /// Reads the session picker's preview again when the selected thread's
+    /// transcript isn't the length it was read at: it grew while the thread
+    /// works, or it was found or replaced (`/clear`) since.
+    fn refresh_preview(&self) {
+        let stale = stale_preview(&self.state.read());
+        if let Some((thread, transcript)) = stale {
+            self.load_preview(thread, &transcript);
+        }
+    }
+
     /// Takes the sessions actor's notices and announces them as
     /// [`announces`] decides, telling the notifier which zellij tab orb's
     /// pane is on so a click can go back there. Each zellij call can take up
@@ -1040,6 +1067,22 @@ fn list_directories(dir: &Path) -> Vec<String> {
         .filter(|entry| fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir()))
         .filter_map(|entry| entry.file_name().into_string().ok())
         .collect()
+}
+
+/// The session picker's selected thread and its transcript, when the
+/// transcript's length isn't the one its preview was read at. A transcript
+/// that can't be measured is left alone.
+fn stale_preview(state: &AppState) -> Option<(ThreadId, PathBuf)> {
+    let picker = state.picker.as_ref()?;
+    let id = picker.selected_thread()?;
+    let transcript = state
+        .sessions
+        .threads()
+        .find(|thread| thread.id == id)?
+        .transcript
+        .as_ref()?;
+    let len = fs::metadata(transcript).ok()?.len();
+    picker.wants_preview(len).then(|| (id, transcript.clone()))
 }
 
 /// Reads terminal events on a background thread and sends them to the loop.

@@ -233,7 +233,7 @@ impl IntentHandler {
             Intent::OpenSessionPicker => {
                 let items = session_items(&state.sessions, false);
                 open_picker(state, PickerState::sessions(items, state.focus));
-                vec![]
+                preview_command(state)
             }
             Intent::FilterProjects => {
                 let items = std::iter::once(PickerItem::AllProjects)
@@ -346,10 +346,20 @@ impl IntentHandler {
             {
                 search_key(intent, state)
             }
-            Intent::PickerInput(ch) => list(state.picker.as_mut().and_then(|p| p.insert(*ch))),
-            Intent::PickerBackspace => list(state.picker.as_mut().and_then(PickerState::backspace)),
+            Intent::PickerInput(ch) => {
+                let before = picked_thread(state);
+                let commands = list(state.picker.as_mut().and_then(|p| p.insert(*ch)));
+                with_preview(state, before, commands)
+            }
+            Intent::PickerBackspace => {
+                let before = picked_thread(state);
+                let commands = list(state.picker.as_mut().and_then(PickerState::backspace));
+                with_preview(state, before, commands)
+            }
             Intent::PickerDeleteWord => {
-                list(state.picker.as_mut().and_then(PickerState::delete_word))
+                let before = picked_thread(state);
+                let commands = list(state.picker.as_mut().and_then(PickerState::delete_word));
+                with_preview(state, before, commands)
             }
             Intent::PickerCursorLeft => {
                 if let Some(picker) = &mut state.picker {
@@ -364,28 +374,32 @@ impl IntentHandler {
                 vec![]
             }
             Intent::PickerNext => {
+                let before = picked_thread(state);
                 if let Some(picker) = &mut state.picker {
                     picker.next();
                 }
-                vec![]
+                with_preview(state, before, vec![])
             }
             Intent::PickerPrev => {
+                let before = picked_thread(state);
                 if let Some(picker) = &mut state.picker {
                     picker.prev();
                 }
-                vec![]
+                with_preview(state, before, vec![])
             }
             Intent::PickerHalfPageDown => {
+                let before = picked_thread(state);
                 if let Some(picker) = &mut state.picker {
                     picker.half_page_down();
                 }
-                vec![]
+                with_preview(state, before, vec![])
             }
             Intent::PickerHalfPageUp => {
+                let before = picked_thread(state);
                 if let Some(picker) = &mut state.picker {
                     picker.half_page_up();
                 }
-                vec![]
+                with_preview(state, before, vec![])
             }
             Intent::SwitchBranch => match (
                 validate_switch_branch(state),
@@ -669,10 +683,11 @@ impl IntentHandler {
                 _ => vec![],
             },
             Intent::PickerToggleSettled => {
+                let before = picked_thread(state);
                 if let Some(picker) = &mut state.picker {
                     picker.toggle_settled(&state.sessions);
                 }
-                vec![]
+                with_preview(state, before, vec![])
             }
             Intent::OpenShelf => match validate_open_shelf(state) {
                 Ok(()) => {
@@ -1270,6 +1285,44 @@ fn group_setting(group: &Group) -> (DraftTarget, Option<&str>, Option<&str>) {
 fn open_picker(state: &mut AppState, picker: PickerState) {
     state.picker = Some(picker);
     state.focus = Focus::Picker;
+}
+
+/// The open session picker's selected thread, if any.
+fn picked_thread(state: &AppState) -> Option<ThreadId> {
+    state.picker.as_ref().and_then(PickerState::selected_thread)
+}
+
+/// `commands`, then [`preview_command`] when the picker's selected thread is
+/// no longer `before`.
+fn with_preview(
+    state: &mut AppState,
+    before: Option<ThreadId>,
+    commands: Vec<Command>,
+) -> Vec<Command> {
+    if picked_thread(state) == before {
+        return commands;
+    }
+    commands.into_iter().chain(preview_command(state)).collect()
+}
+
+/// Asks for the session picker's selected thread's transcript to be read
+/// into its preview. With no thread selected, or a thread with no
+/// transcript yet, it clears the preview instead and asks for nothing.
+fn preview_command(state: &mut AppState) -> Vec<Command> {
+    let Some(picker) = &mut state.picker else {
+        return vec![];
+    };
+    let load = picker.selected_thread().and_then(|id| {
+        let thread = state.sessions.threads().find(|thread| thread.id == id)?;
+        Some((id, thread.transcript.clone()?))
+    });
+    match load {
+        Some((thread, transcript)) => vec![Command::LoadPreview { thread, transcript }],
+        None => {
+            picker.clear_preview();
+            vec![]
+        }
+    }
 }
 
 /// Opens the empty name box for a new `kind` group in `project`.
@@ -7889,5 +7942,220 @@ mod tests {
             Some(on_thread(2)),
             "a gone thread can't be jumped into"
         );
+    }
+
+    /// `thread` with a transcript at `/t/<id>.jsonl`.
+    fn with_transcript(thread: Thread) -> Thread {
+        Thread {
+            transcript: Some(format!("/t/{}.jsonl", thread.id.0).into()),
+            ..thread
+        }
+    }
+
+    /// The `LoadPreview` for thread `id`'s transcript.
+    fn load(id: i64) -> Command {
+        Command::LoadPreview {
+            thread: ThreadId(id),
+            transcript: format!("/t/{id}.jsonl").into(),
+        }
+    }
+
+    /// `alpha` (thread 1, newer) and `zulu` (thread 2), both with
+    /// transcripts, in the open session picker.
+    fn alpha_and_zulu() -> AppState {
+        open_sessions(state_at(
+            vec![
+                named(with_transcript(ended_at(1, 20)), "alpha"),
+                named(with_transcript(ended_at(2, 10)), "zulu"),
+            ],
+            SidebarItem::SettledShelf,
+        ))
+    }
+
+    #[rstest::rstest]
+    fn opening_the_session_picker_loads_the_selected_threads_preview() {
+        // Given thread 1 with a transcript.
+        let mut state = state_at(
+            vec![with_transcript(thread(1, ThreadStatus::Idle))],
+            SidebarItem::SettledShelf,
+        );
+
+        // When handling OpenSessionPicker.
+        let commands = IntentHandler::handle(&Intent::OpenSessionPicker, &mut state);
+
+        // Then thread 1's preview is loaded.
+        assert_eq!(commands, [load(1)], "opening should load the preview");
+    }
+
+    #[rstest::rstest]
+    fn opening_the_session_picker_on_a_thread_without_a_transcript_returns_no_command() {
+        // Given thread 1 without a transcript.
+        let mut state = state_at(
+            vec![thread(1, ThreadStatus::Idle)],
+            SidebarItem::SettledShelf,
+        );
+
+        // When handling OpenSessionPicker.
+        let commands = IntentHandler::handle(&Intent::OpenSessionPicker, &mut state);
+
+        // Then nothing is loaded.
+        assert!(
+            commands.is_empty(),
+            "a thread with no transcript has nothing to read"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selecting_a_thread_without_a_transcript_shows_no_preview() {
+        // Given the session picker on thread 1 (transcript, previewed) above
+        // thread 2 (no transcript).
+        let mut state = open_sessions(state_at(
+            vec![with_transcript(ended_at(1, 20)), ended_at(2, 10)],
+            SidebarItem::SettledShelf,
+        ));
+        if let Some(picker) = &mut state.picker {
+            picker.show_preview(ThreadId(1), 1, vec![]);
+        }
+
+        // When handling PickerNext onto thread 2.
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // Then no preview is shown.
+        assert!(
+            state
+                .picker
+                .as_ref()
+                .and_then(PickerState::preview)
+                .is_none(),
+            "a thread with no transcript should show no preview"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::next(Intent::PickerNext, 3)]
+    #[case::prev(Intent::PickerPrev, 1)]
+    #[case::half_page_down(Intent::PickerHalfPageDown, 3)]
+    #[case::half_page_up(Intent::PickerHalfPageUp, 1)]
+    fn moving_in_the_session_picker_loads_the_new_selections_preview(
+        #[case] intent: Intent,
+        #[case] expected: i64,
+    ) {
+        // Given the session picker on thread 2 of threads 1, 2 and 3, all with
+        // transcripts.
+        let mut state = open_sessions(state_at(
+            vec![
+                with_transcript(ended_at(1, 30)),
+                with_transcript(ended_at(2, 20)),
+                with_transcript(ended_at(3, 10)),
+            ],
+            SidebarItem::SettledShelf,
+        ));
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When handling the move.
+        let commands = IntentHandler::handle(&intent, &mut state);
+
+        // Then the newly selected thread's preview is loaded.
+        assert_eq!(
+            commands,
+            [load(expected)],
+            "{intent:?} should load the preview"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_next_on_a_one_row_session_picker_loads_no_preview() {
+        // Given the session picker over one thread with a transcript.
+        let mut state = open_sessions(state_at(
+            vec![with_transcript(thread(1, ThreadStatus::Idle))],
+            SidebarItem::SettledShelf,
+        ));
+
+        // When handling PickerNext.
+        let commands = IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // Then nothing is loaded, since the selection didn't change.
+        assert!(commands.is_empty(), "the same selection needs no new read");
+    }
+
+    #[rstest::rstest]
+    fn typing_that_selects_another_thread_loads_its_preview() {
+        // Given the session picker over `alpha` (selected) and `zulu`.
+        let mut state = alpha_and_zulu();
+
+        // When typing `z`.
+        let commands = IntentHandler::handle(&Intent::PickerInput('z'), &mut state);
+
+        // Then `zulu`'s preview is loaded.
+        assert_eq!(commands, [load(2)], "the new selection should be loaded");
+    }
+
+    #[rstest::rstest]
+    #[case::backspace(Intent::PickerBackspace)]
+    #[case::delete_word(Intent::PickerDeleteWord)]
+    fn clearing_the_filter_loads_the_first_threads_preview(#[case] intent: Intent) {
+        // Given the session picker over `alpha` and `zulu` with `z` typed.
+        let mut state = typed(alpha_and_zulu(), &['z']);
+
+        // When clearing the typed text.
+        let commands = IntentHandler::handle(&intent, &mut state);
+
+        // Then `alpha`'s preview is loaded.
+        assert_eq!(
+            commands,
+            [load(1)],
+            "{intent:?} should load the first thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn filtering_out_every_thread_loads_no_preview() {
+        // Given the session picker over `alpha` and `zulu`.
+        let mut state = alpha_and_zulu();
+
+        // When typing `q`, which matches neither.
+        let commands = IntentHandler::handle(&Intent::PickerInput('q'), &mut state);
+
+        // Then nothing is loaded.
+        assert!(commands.is_empty(), "no selection has nothing to read");
+    }
+
+    /// The session picker over settled thread 1, last active at `secs`, and
+    /// thread 2, ended at 10 s, both with transcripts.
+    fn settled_last_active_at(secs: u64) -> AppState {
+        open_sessions(state_at(
+            vec![
+                with_transcript(Thread {
+                    last_activity_at: at(secs),
+                    ..settled(1)
+                }),
+                with_transcript(ended_at(2, 10)),
+            ],
+            SidebarItem::SettledShelf,
+        ))
+    }
+
+    #[rstest::rstest]
+    fn showing_settled_threads_loads_the_newly_selected_threads_preview() {
+        // Given settled thread 1, last active at 30 s, hidden above thread 2.
+        let mut state = settled_last_active_at(30);
+
+        // When handling PickerToggleSettled.
+        let commands = IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+
+        // Then thread 1's preview is loaded.
+        assert_eq!(commands, [load(1)], "the new selection should be loaded");
+    }
+
+    #[rstest::rstest]
+    fn showing_settled_threads_that_keeps_the_selection_loads_no_preview() {
+        // Given settled thread 1, last active at 5 s, hidden below thread 2.
+        let mut state = settled_last_active_at(5);
+
+        // When handling PickerToggleSettled.
+        let commands = IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+
+        // Then nothing is loaded.
+        assert!(commands.is_empty(), "the same selection needs no new read");
     }
 }
