@@ -76,6 +76,9 @@ pub enum Intent {
     /// Open the worktree picker over every directory under
     /// `~/.orb/worktrees/<repo>/`, most recently used first.
     OpenWorktreePicker,
+    /// Open the search picker, which finds typed text in the prompts and
+    /// replies of every thread's transcripts, newest message first.
+    OpenSearch,
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
     FilterProjects,
@@ -195,6 +198,7 @@ impl fmt::Display for Intent {
             Self::NewIncognito => "incognito",
             Self::OpenSessionPicker => "sessions",
             Self::OpenWorktreePicker => "worktrees",
+            Self::OpenSearch => "grep",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",
             Self::PickerHalfPageUp | Self::SelectHalfPageUp => "half page up",
@@ -268,6 +272,12 @@ mod tests {
             "worktrees",
             "which-key label"
         );
+    }
+
+    #[rstest::rstest]
+    fn open_search_displays_as_grep() {
+        // Given / When / Then: which-key labels OpenSearch "grep".
+        assert_eq!(Intent::OpenSearch.to_string(), "grep", "which-key label");
     }
 
     #[rstest::rstest]

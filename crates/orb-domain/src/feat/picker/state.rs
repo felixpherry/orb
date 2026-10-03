@@ -538,10 +538,11 @@ impl PickerState {
         self.list.set_items(items, &pattern);
     }
 
-    /// The selected row's thread; `None` unless a thread row is selected.
+    /// The selected row's thread: a thread row's, or a search hit's.
+    /// `None` for any other row.
     pub fn selected_thread(&self) -> Option<ThreadId> {
         match self.list.selected() {
-            Some(&PickerItem::Thread { id, .. }) => Some(id),
+            Some(&PickerItem::Thread { id, .. } | &PickerItem::Hit { thread: id, .. }) => Some(id),
             _ => None,
         }
     }
@@ -788,11 +789,14 @@ impl PickerState {
         self.list.total()
     }
 
-    /// After an edit: re-filter, or start browsing the new directory.
+    /// After an edit: re-filter, or start browsing the new directory. The
+    /// search picker's rows come from the search index, so it keeps them.
     fn edited(&mut self) -> Option<PathBuf> {
         let input = self.list.input().to_owned();
         let PickerKind::Directories { listed } = &mut self.kind else {
-            self.list.refilter(&input);
+            if !matches!(self.kind, PickerKind::Search { .. }) {
+                self.list.refilter(&input);
+            }
             return None;
         };
         match split_path(&input) {
@@ -925,11 +929,16 @@ pub fn worktree_items(app: &AppState) -> Vec<PickerItem> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{DraftTarget, PickTarget, PickerState, expand, split_path};
+    use std::time::UNIX_EPOCH;
+
+    use super::{DraftTarget, PickTarget, PickerState, expand, split_path, thread_label};
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::{LEGACY_MODELS, PickerItem};
-    use crate::feat::sessions::state::{GroupId, ProjectId, ProjectKind, ThreadId};
+    use crate::feat::sessions::state::{
+        Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId, ProjectKind, Thread,
+        ThreadId, ThreadStatus,
+    };
     use crate::feat::sessions::transcript::Exchange;
 
     const HOME: &str = "/home/u";
@@ -1585,5 +1594,138 @@ mod tests {
 
         // Then it does only when the read length differs.
         assert_eq!(wants, expected, "preview read at {read_at:?}");
+    }
+
+    /// A hit row with message id `id` in thread `thread`.
+    fn hit(id: i64, thread: i64) -> PickerItem {
+        PickerItem::Hit {
+            id,
+            thread: ThreadId(thread),
+            label: format!("orb/thread-{thread}"),
+            split: 4,
+            snippet: "the IntentHandler match".to_owned(),
+            lit: Vec::new(),
+            text_lit: Vec::new(),
+            path: PathBuf::from(format!("/t/{thread}.jsonl")),
+            prompt_offset: 0,
+        }
+    }
+
+    /// The search picker, with nothing typed, listing `items`.
+    fn searching(items: Vec<PickerItem>) -> PickerState {
+        let mut picker = PickerState::search(Focus::Sidebar);
+        picker.show_hits("", items, false);
+        picker
+    }
+
+    fn hit_ids(picker: &PickerState) -> Vec<i64> {
+        picker
+            .shown()
+            .filter_map(|(item, _)| match item {
+                PickerItem::Hit { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn selected_thread_is_the_selected_hits_thread() {
+        // Given the search picker over a hit in thread 7.
+        let picker = searching(vec![hit(1, 7)]);
+
+        // When asking for the selected thread.
+        let thread = picker.selected_thread();
+
+        // Then it is the hit's thread.
+        assert_eq!(thread, Some(ThreadId(7)), "a hit should select its thread");
+    }
+
+    #[rstest::rstest]
+    fn typing_in_the_search_picker_keeps_its_rows_and_selection() {
+        // Given the search picker over two hits, the second selected.
+        let mut picker = searching(vec![hit(1, 7), hit(2, 8)]);
+        picker.next();
+
+        // When typing a character.
+        picker.insert('x');
+
+        // Then the rows and the selection are untouched.
+        assert_eq!(
+            (hit_ids(&picker), picker.selection()),
+            (vec![1, 2], 1),
+            "typing should neither refilter nor reselect hits"
+        );
+    }
+
+    #[rstest::rstest]
+    fn show_hits_for_a_query_no_longer_typed_is_ignored() {
+        // Given the search picker with `ab` typed.
+        let mut picker = searching(Vec::new());
+        picker.insert('a');
+        picker.insert('b');
+
+        // When the hits for `a` arrive.
+        picker.show_hits("a", vec![hit(1, 7)], false);
+
+        // Then nothing is listed.
+        assert_eq!(picker.total(), 0, "a stale result should be ignored");
+    }
+
+    #[rstest::rstest]
+    fn thread_label_names_a_group_thread_by_its_group() {
+        // Given project `orb` with group `GT-514-login` holding thread `api`.
+        let group = Group {
+            id: GroupId(1),
+            kind: GroupKind::Feature,
+            name: "GT-514-login".to_owned(),
+            dir: None,
+            branch: None,
+            created_at: UNIX_EPOCH,
+            pinned_at: None,
+            settled_at: None,
+            active_since: UNIX_EPOCH,
+            defaults: GroupDefaults::default(),
+            draft: false,
+        };
+        let thread = Thread {
+            id: ThreadId(1),
+            title: Some("api".to_owned()),
+            cwd: PathBuf::from("/code/orb"),
+            transcript: None,
+            status: ThreadStatus::Idle,
+            turn_started_at: None,
+            attach_argv: Vec::new(),
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: UNIX_EPOCH,
+            created_at: UNIX_EPOCH,
+            last_activity_at: UNIX_EPOCH,
+            unseen: false,
+            group: Some(GroupId(1)),
+            model: None,
+            permission: None,
+        };
+        let project = Project {
+            id: ProjectId(1),
+            title: "orb".to_owned(),
+            root: PathBuf::from("/code/orb"),
+            created_at: UNIX_EPOCH,
+            threads: vec![thread.clone()],
+            draft: None,
+            removed: false,
+            kind: ProjectKind::Normal,
+            groups: vec![group],
+        };
+
+        // When labelling the thread.
+        let label = thread_label(&project, &thread);
+
+        // Then the group names it and the title starts after its slash.
+        assert_eq!(
+            label,
+            ("GT-514-login/api".to_owned(), 13),
+            "a group thread should be labelled by its group"
+        );
     }
 }

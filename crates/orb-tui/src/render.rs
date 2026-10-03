@@ -34,6 +34,7 @@ use crate::mode_line;
 use crate::mouse::HitMap;
 use crate::picker::{self, PickerScroll};
 use crate::rename;
+use crate::search_picker;
 use crate::session_picker;
 use crate::sidebar::{self, SidebarScroll};
 use crate::which_key;
@@ -193,6 +194,7 @@ fn render_picker(
         PickerKind::Worktrees => {
             worktree_picker::render(picker, state, now, area, buf, scroll, hits)
         }
+        PickerKind::Search { .. } => search_picker::render(picker, state, area, buf, scroll, hits),
         _ => picker::render(picker, &state.home, area, buf, scroll, hits),
     }
 }
@@ -208,6 +210,7 @@ mod tests {
     use orb_domain::Intent;
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
+    use orb_domain::feat::search::state::SearchProgress;
     use orb_domain::feat::sessions::state::{
         Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem,
         Thread, ThreadId, ThreadStatus,
@@ -467,6 +470,28 @@ mod tests {
             screen.contains(" Worktrees ") && screen.contains("0/0"),
             "screen was\n{screen}"
         );
+    }
+
+    #[rstest::rstest]
+    fn search_picker_is_drawn_by_its_own_renderer() {
+        // Given an open search picker while one of two transcripts is indexed.
+        let state = AppState {
+            focus: Focus::Picker,
+            picker: Some(PickerState::search(Focus::Sidebar)),
+            search: SearchProgress {
+                indexed: 1,
+                total: 2,
+                error: None,
+            },
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the list title shows the indexing progress.
+        let screen = text(&buffer, buffer.area);
+        assert!(screen.contains("indexing 1/2"), "screen was\n{screen}");
     }
 
     /// An open `Delete worktree?` confirm over a worktree picker listing

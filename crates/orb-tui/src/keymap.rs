@@ -468,6 +468,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind(
+                "<leader>sg",
+                Intent::OpenSearch,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
                 "<leader>e",
                 Intent::ToggleSidebar,
                 KeyCategory::Navigation,
@@ -1204,6 +1210,50 @@ mod tests {
             intent,
             Some(Intent::OpenWorktreePicker),
             "␣sw should open the worktree picker in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_s_g_opens_the_search_picker(
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarEmpty,
+            Scope::SidebarGroup,
+            Scope::Dashboard,
+            Scope::DashboardEmpty,
+            Scope::DashboardGroup
+        )]
+        scope: Scope,
+    ) {
+        // Given Space and `s` already pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+        press(&mut keys, key(KeyCode::Char('s')));
+
+        // When pressing `g`.
+        let intent = press(&mut keys, key(KeyCode::Char('g')));
+
+        // Then it opens the search picker.
+        assert_eq!(
+            intent,
+            Some(Intent::OpenSearch),
+            "␣sg should open the search picker in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_s_g_is_forwarded_while_attached(#[values(' ', 's', 'g')] c: char) {
+        // Given one key of `␣sg`.
+        let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+
+        // When routing it while attached.
+        let routed = attached_route(key);
+
+        // Then it goes to Claude, so `␣sg` never opens the search picker there.
+        assert_eq!(
+            routed,
+            Route::Forward,
+            "{c:?} of ␣sg should be forwarded while attached"
         );
     }
 

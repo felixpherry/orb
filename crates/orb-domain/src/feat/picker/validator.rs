@@ -139,17 +139,24 @@ pub enum PickSessionError {
     Gone,
 }
 
-/// Allow jumping into the thread highlighted in the session picker.
+/// Allow jumping into the thread highlighted in the session picker, or the
+/// thread of the hit highlighted in the search picker.
 ///
 /// # Errors
 ///
-/// Returns [`PickSessionError::NoPicker`] unless the session picker is open,
-/// [`PickSessionError::NoThread`] when nothing is highlighted,
-/// [`PickSessionError::Deleted`] when the thread is gone from the sidebar or
-/// being deleted, and [`PickSessionError::Gone`] when its session is `Gone`.
+/// Returns [`PickSessionError::NoPicker`] unless the session or search
+/// picker is open, [`PickSessionError::NoThread`] when no thread or hit is
+/// highlighted, [`PickSessionError::Deleted`] when the thread is gone from
+/// the sidebar or being deleted, and [`PickSessionError::Gone`] when its
+/// session is `Gone`.
 pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
     let id = match &state.picker {
-        Some(picker) if matches!(picker.kind(), PickerKind::Sessions { .. }) => {
+        Some(picker)
+            if matches!(
+                picker.kind(),
+                PickerKind::Sessions { .. } | PickerKind::Search { .. }
+            ) =>
+        {
             picker.selected_thread().ok_or(PickSessionError::NoThread)?
         }
         _ => return Err(PickSessionError::NoPicker),
@@ -430,6 +437,45 @@ mod tests {
             result,
             Err(PickSessionError::Deleted),
             "a thread being deleted can't be jumped into"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pick_session_checks_a_hits_thread_in_the_search_picker() {
+        // Given the search picker over one hit in thread 1, and no threads in
+        // the sidebar.
+        let picker = {
+            let mut picker = PickerState::search(Focus::Sidebar);
+            picker.show_hits(
+                "",
+                vec![PickerItem::Hit {
+                    id: 1,
+                    thread: ThreadId(1),
+                    label: "work/New thread".into(),
+                    split: 5,
+                    snippet: "fix the bug".into(),
+                    lit: vec![],
+                    text_lit: vec![],
+                    path: "/t/1.jsonl".into(),
+                    prompt_offset: 0,
+                }],
+                false,
+            );
+            picker
+        };
+        let state = AppState {
+            picker: Some(picker),
+            ..AppState::default()
+        };
+
+        // When validating a pick.
+        let result = validate_pick_session(&state);
+
+        // Then the hit's thread is looked up, and it's gone.
+        assert_eq!(
+            result,
+            Err(PickSessionError::Deleted),
+            "a hit's thread is checked like a session row's"
         );
     }
 

@@ -264,6 +264,12 @@ impl IntentHandler {
                 open_picker(state, PickerState::worktrees(items, state.focus));
                 vec![Command::RefreshWorktrees]
             }
+            Intent::OpenSearch => {
+                open_picker(state, PickerState::search(state.focus));
+                vec![Command::SearchTranscripts {
+                    query: String::new(),
+                }]
+            }
             Intent::FilterProjects => {
                 let items = std::iter::once(PickerItem::AllProjects)
                     .chain(
@@ -386,17 +392,20 @@ impl IntentHandler {
             Intent::PickerInput(ch) => {
                 let before = picked_thread(state);
                 let commands = list(state.picker.as_mut().and_then(|p| p.insert(*ch)));
-                with_preview(state, before, commands)
+                let commands = with_preview(state, before, commands);
+                with_search(state, commands)
             }
             Intent::PickerBackspace => {
                 let before = picked_thread(state);
                 let commands = list(state.picker.as_mut().and_then(PickerState::backspace));
-                with_preview(state, before, commands)
+                let commands = with_preview(state, before, commands);
+                with_search(state, commands)
             }
             Intent::PickerDeleteWord => {
                 let before = picked_thread(state);
                 let commands = list(state.picker.as_mut().and_then(PickerState::delete_word));
-                with_preview(state, before, commands)
+                let commands = with_preview(state, before, commands);
+                with_search(state, commands)
             }
             Intent::PickerCursorLeft => {
                 if let Some(picker) = &mut state.picker {
@@ -704,7 +713,7 @@ impl IntentHandler {
                 }) => close_picker(state)
                     .map(|picker| pick_group_branch(&picker))
                     .unwrap_or_default(),
-                Some(PickerKind::Sessions { .. }) => match (
+                Some(PickerKind::Sessions { .. } | PickerKind::Search { .. }) => match (
                     validate_pick_session(state),
                     close_picker(state)
                         .as_ref()
@@ -1277,7 +1286,7 @@ fn open_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
         .collect()
 }
 
-/// Jumps to `thread`, picked in the session picker: puts the cursor on it,
+/// Jumps to `thread`, picked in the session or search picker: puts the cursor on it,
 /// opens what hides its row, and attaches like `⏎` on the row, recording the
 /// move as a jump.
 fn pick_session(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
@@ -1378,6 +1387,18 @@ fn with_preview(
         return commands;
     }
     commands.into_iter().chain(preview_command(state)).collect()
+}
+
+/// `commands`, then a search for the typed text while the search picker is
+/// open.
+fn with_search(state: &AppState, commands: Vec<Command>) -> Vec<Command> {
+    let query = state.picker.as_ref().and_then(PickerState::search_query);
+    commands
+        .into_iter()
+        .chain(query.map(|query| Command::SearchTranscripts {
+            query: query.to_owned(),
+        }))
+        .collect()
 }
 
 /// Asks for the session picker's selected thread's transcript to be read
@@ -9017,5 +9038,168 @@ mod tests {
 
         // Then no picker is open.
         assert!(state.picker.is_none(), "Esc on the list should close it");
+    }
+
+    /// A search hit in `thread`, on `/t/<thread>.jsonl`.
+    fn search_hit(thread: i64) -> PickerItem {
+        PickerItem::Hit {
+            id: thread,
+            thread: ThreadId(thread),
+            label: format!("work/thread {thread}"),
+            split: 5,
+            snippet: "fix the bug".into(),
+            lit: vec![],
+            text_lit: vec![],
+            path: format!("/t/{thread}.jsonl").into(),
+            prompt_offset: 0,
+        }
+    }
+
+    /// The search picker opened over threads 1 and 2 (cursor on 2), `fix`
+    /// typed, and the actor's one hit, in `thread`, listed.
+    fn searching_a_hit_in(thread: i64) -> AppState {
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+        IntentHandler::handle(&Intent::OpenSearch, &mut state);
+        let mut state = typed(state, &['f', 'i', 'x']);
+        if let Some(picker) = &mut state.picker {
+            picker.show_hits("fix", vec![search_hit(thread)], false);
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn open_search_opens_the_search_picker() {
+        // Given threads 1 and 2.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+
+        // When handling OpenSearch.
+        IntentHandler::handle(&Intent::OpenSearch, &mut state);
+
+        // Then the search picker is open and takes the keys.
+        assert_eq!(
+            (state.picker.as_ref().map(PickerState::kind), state.focus),
+            (Some(&PickerKind::Search { overflow: false }), Focus::Picker),
+            "␣sg should open the search picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_search_returns_an_empty_search() {
+        // Given threads 1 and 2.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+
+        // When handling OpenSearch.
+        let commands = IntentHandler::handle(&Intent::OpenSearch, &mut state);
+
+        // Then an empty query is sent, which only catches the index up.
+        assert_eq!(
+            commands,
+            [Command::SearchTranscripts {
+                query: String::new()
+            }],
+            "opening should search for nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::input(Intent::PickerInput('x'), "fix")]
+    #[case::backspace(Intent::PickerBackspace, "f")]
+    #[case::delete_word(Intent::PickerDeleteWord, "")]
+    fn editing_the_search_input_returns_a_search_for_it(
+        #[case] intent: Intent,
+        #[case] query: &str,
+    ) {
+        // Given the search picker with `fi` typed.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+        IntentHandler::handle(&Intent::OpenSearch, &mut state);
+        let mut state = typed(state, &['f', 'i']);
+
+        // When editing the typed text.
+        let commands = IntentHandler::handle(&intent, &mut state);
+
+        // Then the new text is searched for.
+        assert_eq!(
+            commands,
+            [Command::SearchTranscripts {
+                query: query.to_owned()
+            }],
+            "{intent:?} should search for the edited text"
+        );
+    }
+
+    #[rstest::rstest]
+    fn typing_in_the_session_picker_returns_no_search() {
+        // Given the session picker over `alpha` and `zulu`.
+        let mut state = alpha_and_zulu();
+
+        // When typing `z`.
+        let commands = IntentHandler::handle(&Intent::PickerInput('z'), &mut state);
+
+        // Then no search is asked for.
+        assert!(
+            !commands
+                .iter()
+                .any(|command| matches!(command, Command::SearchTranscripts { .. })),
+            "only the search picker searches transcripts"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_hit_moves_the_cursor_to_its_thread() {
+        // Given the search picker on a hit in thread 1, opened on thread 2.
+        let mut state = searching_a_hit_in(1);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the cursor is on thread 1.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(1)),
+            "picking a hit should select its thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_hit_returns_attach_for_its_thread() {
+        // Given the search picker on a hit in thread 1, opened on thread 2.
+        let mut state = searching_a_hit_in(1);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the loop attaches to thread 1.
+        assert!(
+            commands.contains(&Command::Attach(AttachTarget {
+                thread: ThreadId(1),
+                argv: vec!["claude".into(), "attach".into(), "t1".into()],
+                cwd: "/work/1".into(),
+            })),
+            "picking a hit should attach to its thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_hit_of_a_deleted_thread_closes_the_picker() {
+        // Given the search picker on a hit in thread 9, which is gone.
+        let mut state = searching_a_hit_in(9);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the picker is closed.
+        assert!(state.picker.is_none(), "⏎ should still close the picker");
+    }
+
+    #[rstest::rstest]
+    fn picking_a_hit_of_a_deleted_thread_returns_no_commands() {
+        // Given the search picker on a hit in thread 9, which is gone.
+        let mut state = searching_a_hit_in(9);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing happens.
+        assert!(commands.is_empty(), "a gone thread can't be attached");
     }
 }
