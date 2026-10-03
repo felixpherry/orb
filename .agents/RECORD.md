@@ -168,7 +168,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `␣b` (and the dashboard's `b`) on a started Feature group's card switches its worktree's branch for the group and every thread in it; `␣b` isn't bound on a group's other rows, and `␣w` is bound on none.
 - (groups) Groups and each thread's group persist to orb's store (store migration v8 added the `groups` table and `threads.group_id`).
 - (keybinds) In the sidebar, the dashboard or the attached pane, `<C-o>`/`<C-i>` move back/forward through the jump list, as in neovim.
-- (jumps) A jump is entering a thread's pane (`⏎`, `<C-l>`, or a draft or `n` sibling starting), `gg`/`G`, a search `⏎`, or a `␣n` pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.
+- (jumps) A jump is entering a thread's pane (`⏎`, `<C-l>`, or a draft or `n` sibling starting), `gg`/`G`, a search `⏎`, a `␣n` pick, or a session picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one; it never attaches, starts a draft, or clears the project filter.
 - (jumps) Deleted rows, rows hidden by the project filter, and the Settled header are skipped, and a folded group opens on arrival.
 - (jumps) orb persists the newest 20 jump-list rows to its store (store migration v9 added the `jumps` table); a row already in the list moves to the newest slot.
