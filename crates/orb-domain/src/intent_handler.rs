@@ -79,7 +79,27 @@ impl IntentHandler {
                 state.sessions.half_page_up(&state.sidebar.layout);
                 with_visit(state, vec![])
             }
+            Intent::SelectRow(item) if state.focus == Focus::Search => {
+                state.sessions.select_row(*item);
+                search_key(&Intent::PickerConfirm, state)
+            }
+            Intent::SelectRow(item) => {
+                state.sessions.select_row(*item);
+                with_visit(state, vec![])
+            }
+            Intent::SelectWheelNext => {
+                state.sessions.select_below();
+                with_visit(state, vec![])
+            }
+            Intent::SelectWheelPrev => {
+                state.sessions.select_above();
+                with_visit(state, vec![])
+            }
             Intent::FocusRight => focus_right(state),
+            Intent::DashboardHighlight(index) => {
+                state.dashboard.highlight(&state.sessions, *index);
+                vec![]
+            }
             Intent::DashboardNext => {
                 state.dashboard.next(&state.sessions);
                 vec![]
@@ -8157,5 +8177,137 @@ mod tests {
 
         // Then nothing is loaded.
         assert!(commands.is_empty(), "the same selection needs no new read");
+    }
+
+    #[rstest::rstest]
+    fn select_row_selects_that_row() {
+        // Given threads listed 3, 2, 1 with the cursor on thread 2.
+        let mut state = three_titles();
+
+        // When handling SelectRow on thread 3 (a click).
+        IntentHandler::handle(&Intent::SelectRow(on_thread(3)), &mut state);
+
+        // Then the cursor is on thread 3.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(3)),
+            "a click should select its row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_row_on_an_item_not_listed_changes_nothing() {
+        // Given threads listed 3, 2, 1 with the cursor on thread 2.
+        let mut state = three_titles();
+
+        // When handling SelectRow on a thread that isn't listed.
+        IntentHandler::handle(&Intent::SelectRow(on_thread(99)), &mut state);
+
+        // Then the cursor stays on thread 2.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(2)),
+            "a row that isn't listed shouldn't move the cursor"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_row_during_a_search_ends_the_search() {
+        // Given a search for "fix" started from thread 2, on match thread 3.
+        let mut state = searching("fix", Some(3));
+
+        // When handling SelectRow on thread 1.
+        IntentHandler::handle(&Intent::SelectRow(on_thread(1)), &mut state);
+
+        // Then the search is gone and the sidebar has the keys.
+        assert_eq!(
+            (state.sessions.search.is_none(), state.focus),
+            (true, Focus::Sidebar),
+            "a click on a row should end the search as ⏎ does"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_row_during_a_search_records_the_jump_from_where_it_started() {
+        // Given a search for "fix" started from thread 2, on match thread 3.
+        let mut state = searching("fix", Some(3));
+
+        // When handling SelectRow on thread 1.
+        IntentHandler::handle(&Intent::SelectRow(on_thread(1)), &mut state);
+
+        // Then thread 2, then thread 1, are recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(2), on_thread(1)],
+            "a click during a search should record where it left and where it landed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_wheel_next_on_the_last_row_stays_there() {
+        // Given threads listed 3, 2, 1 with the cursor on the last, thread 1.
+        let mut state = three_titles();
+        state.sessions.cursor = Some(on_thread(1));
+
+        // When handling SelectWheelNext (the wheel down).
+        IntentHandler::handle(&Intent::SelectWheelNext, &mut state);
+
+        // Then the cursor stays on thread 1.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(1)),
+            "the wheel shouldn't wrap past the last row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_wheel_prev_on_the_first_row_stays_there() {
+        // Given threads listed 3, 2, 1 with the cursor on the first, thread 3.
+        let mut state = three_titles();
+        state.sessions.cursor = Some(on_thread(3));
+
+        // When handling SelectWheelPrev (the wheel up).
+        IntentHandler::handle(&Intent::SelectWheelPrev, &mut state);
+
+        // Then the cursor stays on thread 3.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(3)),
+            "the wheel shouldn't wrap past the first row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn dashboard_highlight_moves_the_menu_cursor() {
+        // Given a thread's dashboard with the cursor on its first item.
+        let mut state = AppState {
+            focus: Focus::Dashboard,
+            ..state_with(vec![in_root(1)], 1)
+        };
+
+        // When handling DashboardHighlight on the third item (a click).
+        IntentHandler::handle(&Intent::DashboardHighlight(2), &mut state);
+
+        // Then the third item is highlighted.
+        assert_eq!(
+            dashboard_index(&state),
+            2,
+            "a click should highlight its item"
+        );
+    }
+
+    #[rstest::rstest]
+    fn dashboard_highlight_returns_no_commands() {
+        // Given a thread's dashboard with the cursor on its first item.
+        let mut state = AppState {
+            focus: Focus::Dashboard,
+            ..state_with(vec![in_root(1)], 1)
+        };
+
+        // When handling DashboardHighlight on the third item.
+        let commands = IntentHandler::handle(&Intent::DashboardHighlight(2), &mut state);
+
+        // Then nothing runs.
+        assert_eq!(commands, vec![], "highlighting shouldn't run the item");
     }
 }

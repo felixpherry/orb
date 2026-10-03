@@ -35,6 +35,13 @@ impl DashboardCursor {
         self.step(sessions, false);
     }
 
+    /// Highlight the item at `index` for the current selection, or the last
+    /// item when there are fewer.
+    pub fn highlight(&mut self, sessions: &Sessions, index: usize) {
+        self.index = index.min(items(sessions).len().saturating_sub(1));
+        self.on = sessions.cursor;
+    }
+
     fn step(&mut self, sessions: &Sessions, forward: bool) {
         let len = items(sessions).len().max(1);
         let index = self.index(sessions, len);

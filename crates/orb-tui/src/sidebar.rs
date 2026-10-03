@@ -12,7 +12,8 @@
 //! hang below it as one-line rows while it's open. The selected row's first
 //! line is highlighted. Settled threads and groups fold into a shelf at the
 //! bottom, drawn as one-line rows while it's open. The sidebar scrolls to
-//! keep the whole selected row in view.
+//! keep the whole selected row in view, unless the wheel scrolled it while
+//! the keys are elsewhere.
 //!
 //! While the user searches, the typed text follows the prompt, and only
 //! drafts and threads whose title matches it are listed, settled ones
@@ -23,8 +24,8 @@ use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use orb_domain::feat::sessions::state::{
-    Draft, DraftWorkspace, Group, GroupKind, NEW_THREAD, Project, Sessions, SidebarRow, Thread,
-    ThreadId, ThreadStatus,
+    Draft, DraftWorkspace, Group, GroupKind, NEW_THREAD, Project, Sessions, SidebarItem,
+    SidebarRow, Thread, ThreadId, ThreadStatus,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use ratatui::buffer::Buffer;
@@ -34,6 +35,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::mouse::HitMap;
 use crate::picker::{highlight, visible};
 
 /// How far the sidebar is scrolled, kept between frames.
@@ -41,6 +43,37 @@ use crate::picker::{highlight, visible};
 pub(crate) struct SidebarScroll {
     /// The list line drawn on the sidebar's top row.
     offset: u16,
+    /// The selection the wheel scrolled the view on, while the view is
+    /// free of it.
+    #[expect(
+        clippy::option_option,
+        reason = "free on no selection differs from not free"
+    )]
+    free: Option<Option<SidebarItem>>,
+}
+
+impl SidebarScroll {
+    /// Scrolls the view `lines` down (up when negative) without following
+    /// the selection, `cursor`, until it moves or `release` is called.
+    pub(crate) fn scroll_free(&mut self, lines: i16, cursor: Option<SidebarItem>) {
+        self.offset = self.offset.saturating_add_signed(lines);
+        self.free = Some(cursor);
+    }
+
+    /// Brings the view back to the selection on the next draw.
+    pub(crate) fn release(&mut self) {
+        self.free = None;
+    }
+
+    /// Whether this draw leaves the view where the wheel put it: only while
+    /// the selection is still `cursor`, the one it was scrolled on.
+    fn stays_free(&mut self, cursor: Option<SidebarItem>) -> bool {
+        let free = self.free == Some(cursor);
+        if !free {
+            self.free = None;
+        }
+        free
+    }
 }
 
 /// Draws the sidebar into `area`, a blank column short of its right edge: the
@@ -55,6 +88,7 @@ pub(crate) fn render(
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut SidebarScroll,
+    hits: &mut HitMap,
 ) -> (Option<u16>, SidebarLayout, Option<Position>) {
     buf.set_style(area, Style::new().bg(BG_DARK).fg(FG));
     let area = Rect {
@@ -62,13 +96,14 @@ pub(crate) fn render(
         ..area
     };
     let [input, list] = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
+    hits.record_sidebar_input(input);
     let rows = sessions.sidebar();
     let search_cursor = render_input(sessions, &rows, input, buf);
     let layout = SidebarLayout {
         rows: list.height,
         heights: rows.iter().map(height).collect(),
     };
-    let selected_y = render_list(sessions, attached, rows, now, list, buf, scroll);
+    let selected_y = render_list(sessions, attached, rows, now, list, buf, scroll, hits);
     (selected_y, layout, search_cursor)
 }
 
@@ -178,8 +213,12 @@ fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
 
 /// Draws the rows into `area`, scrolled so the selected one is whole on
 /// screen, with the shelf header held on the bottom row while its real line
-/// is below the view. Returns the y of the selected row's first line when
-/// it's there.
+/// is below the view, and records each row's visible lines in `hits`.
+/// Returns the y of the selected row's first line when it's there.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the list's inputs plus the scroll and hit map it updates"
+)]
 fn render_list(
     sessions: &Sessions,
     attached: &HashSet<ThreadId>,
@@ -188,13 +227,15 @@ fn render_list(
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut SidebarScroll,
+    hits: &mut HitMap,
 ) -> Option<u16> {
     let (placed, total) = place(rows, area.height);
     let selected = placed
         .iter()
         .find(|(row, _)| Some(row.item()) == sessions.cursor)
         .map(|(row, top)| (*top, height(row)));
-    if let Some((top, rows)) = selected {
+    let free = scroll.stays_free(sessions.cursor);
+    if let (false, Some((top, rows))) = (free, selected) {
         scroll.offset = scroll
             .offset
             .min(top)
@@ -213,12 +254,13 @@ fn render_list(
             _ => None,
         })
     };
-    if let (Some(_), Some((top, rows))) = (below(scroll.offset), selected) {
+    if let (false, Some(_), Some((top, rows))) = (free, below(scroll.offset), selected) {
         scroll.offset = scroll
             .offset
             .max(top.saturating_add(rows).saturating_sub(area.height - 1));
     }
     let sticky = below(scroll.offset);
+    record_rows(&placed, scroll.offset, sticky.is_some(), area, hits);
     // The whole list, then the lines in view.
     let list = {
         let mut list = Buffer::empty(Rect::new(area.x, 0, area.width, total));
@@ -277,6 +319,41 @@ fn render_list(
         .map(|(top, _)| top)
         .filter(|top| (scroll.offset..scroll.offset.saturating_add(area.height)).contains(top))
         .map(|top| area.y + top - scroll.offset)
+}
+
+/// Records in `hits` the lines of `area` each placed row shows from list
+/// line `offset` down, and the bottom line as the shelf while the header is
+/// `sticky` there. Blank gap lines map to nothing.
+fn record_rows(
+    placed: &[(SidebarRow<'_>, u16)],
+    offset: u16,
+    sticky: bool,
+    area: Rect,
+    hits: &mut HitMap,
+) {
+    let shown = area.height - u16::from(sticky);
+    for (row, top) in placed {
+        let start = (*top).max(offset);
+        let end = top
+            .saturating_add(height(row))
+            .min(offset.saturating_add(shown));
+        if start < end {
+            hits.record_row(
+                Rect::new(area.x, area.y + start - offset, area.width, end - start),
+                row.item(),
+            );
+        }
+    }
+    if sticky {
+        hits.record_row(
+            Rect {
+                y: area.bottom() - 1,
+                height: 1,
+                ..area
+            },
+            SidebarItem::SettledShelf,
+        );
+    }
 }
 
 /// Each row with its top line in the list, and the list's height. Blank lines
@@ -1045,6 +1122,7 @@ mod tests {
         LAST_CHILD_GUIDE, LAST_GUIDE, MAGENTA, ORANGE, PENCIL, PIN, PURPLE, RED, STOPPED_ICON,
         SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
     };
+    use crate::mouse::HitMap;
 
     fn at(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -1153,6 +1231,7 @@ mod tests {
             buf.area,
             &mut buf,
             &mut SidebarScroll::default(),
+            &mut HitMap::default(),
         );
         (buf, selected_y, layout)
     }
@@ -1183,6 +1262,7 @@ mod tests {
             buf.area,
             &mut buf,
             &mut SidebarScroll::default(),
+            &mut HitMap::default(),
         );
         buf
     }
@@ -1435,6 +1515,7 @@ mod tests {
             buf.area,
             &mut buf,
             &mut SidebarScroll::default(),
+            &mut HitMap::default(),
         );
 
         // Then the cursor is after `> `, the folder and space, `orb`, a space
@@ -1499,6 +1580,7 @@ mod tests {
             buf.area,
             &mut buf,
             &mut SidebarScroll::default(),
+            &mut HitMap::default(),
         );
 
         // Then the cursor is right after the shown `end`, clear of the count.
@@ -2799,5 +2881,170 @@ mod tests {
             prompt.trim_end().ends_with(&format!("{expected}│")),
             "line was '{prompt}'"
         );
+    }
+
+    /// Draws a 32-column sidebar `height` lines tall at 1000 s with `scroll`;
+    /// returns the selected row's first line and the hit map it filled.
+    fn render_with(
+        sessions: &Sessions,
+        scroll: &mut SidebarScroll,
+        height: u16,
+    ) -> (Option<u16>, HitMap) {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, height));
+        let mut hits = HitMap::default();
+        let (selected_y, _, _) = render(
+            sessions,
+            &HashSet::new(),
+            at(1000),
+            buf.area,
+            &mut buf,
+            scroll,
+            &mut hits,
+        );
+        (selected_y, hits)
+    }
+
+    /// Threads 1 to 3, thread 3's node on top, with `selected`'s selected.
+    fn three_threads(selected: i64) -> Sessions {
+        select(
+            sessions(vec![
+                thread(1, ThreadStatus::Idle),
+                thread(2, ThreadStatus::Idle),
+                thread(3, ThreadStatus::Idle),
+            ]),
+            selected,
+        )
+    }
+
+    #[rstest::rstest]
+    #[case::second_line(3)]
+    #[case::third_line(4)]
+    fn hit_map_maps_a_scrolled_rows_lower_lines_to_it(#[case] y: u16) {
+        // Given three threads on an 8-line sidebar scrolled to the last one
+        // (thread 1), so thread 2's lower two lines top the list.
+        let sessions = three_threads(1);
+
+        // When rendering the sidebar.
+        let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 8);
+
+        // Then a click on either of those lines lands on thread 2.
+        assert_eq!(
+            hits.row_at(Position::new(1, y)),
+            Some(SidebarItem::Thread(ThreadId(2))),
+            "the row at line {y}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_maps_the_sticky_header_row_to_the_shelf() {
+        // Given four threads and a settled one on a 10-line sidebar, with
+        // the shelf header held on the bottom line.
+        let sessions = overflowing(4, &[5], 4);
+
+        // When rendering the sidebar.
+        let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 10);
+
+        // Then a click on the bottom line lands on the shelf.
+        assert_eq!(
+            hits.row_at(Position::new(1, 9)),
+            Some(SidebarItem::SettledShelf),
+            "the row on the bottom line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_maps_the_shelf_gap_to_nothing() {
+        // Given thread 1 and a settled thread 2 on a 12-line sidebar.
+        let sessions = overflowing(1, &[2], 1);
+
+        // When rendering the sidebar.
+        let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 12);
+
+        // Then a blank line between thread 1 and the shelf header, held at
+        // the bottom, lands on no row.
+        assert_eq!(
+            hits.row_at(Position::new(1, 7)),
+            None,
+            "the row on the gap line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_records_the_input_box() {
+        // Given an empty orb.
+        let sessions = Sessions::default();
+
+        // When rendering the sidebar.
+        let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 8);
+
+        // Then the prompt's line is on the input box.
+        assert!(
+            hits.on_sidebar_input(Position::new(1, 1)),
+            "the prompt line should be on the input box"
+        );
+    }
+
+    #[rstest::rstest]
+    fn free_scroll_leaves_the_selected_row_off_screen() {
+        // Given three threads on an 8-line sidebar with the top one (thread
+        // 3) selected, and the view wheeled 3 lines down.
+        let sessions = three_threads(3);
+        let mut scroll = SidebarScroll::default();
+        scroll.scroll_free(3, sessions.cursor);
+
+        // When rendering the sidebar.
+        let (selected_y, _) = render_with(&sessions, &mut scroll, 8);
+
+        // Then the selected row's first line is off screen.
+        assert_eq!(selected_y, None, "the selected row's first line");
+    }
+
+    #[rstest::rstest]
+    fn free_scroll_stops_at_the_lists_end() {
+        // Given three threads on an 8-line sidebar with thread 3 selected,
+        // and the view wheeled 30 lines down.
+        let sessions = three_threads(3);
+        let mut scroll = SidebarScroll::default();
+        scroll.scroll_free(30, sessions.cursor);
+
+        // When rendering the sidebar.
+        let (_, hits) = render_with(&sessions, &mut scroll, 8);
+
+        // Then the last line shows the list's last row, thread 1.
+        assert_eq!(
+            hits.row_at(Position::new(1, 7)),
+            Some(SidebarItem::Thread(ThreadId(1))),
+            "the row on the bottom line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn free_scroll_snaps_back_once_the_selection_moved() {
+        // Given the view wheeled down while thread 2 was selected, and
+        // thread 3 selected since.
+        let sessions = three_threads(3);
+        let mut scroll = SidebarScroll::default();
+        scroll.scroll_free(3, Some(SidebarItem::Thread(ThreadId(2))));
+
+        // When rendering the sidebar.
+        let (selected_y, _) = render_with(&sessions, &mut scroll, 8);
+
+        // Then the view follows the selection to the top of the list.
+        assert_eq!(selected_y, Some(3), "the selected row's first line");
+    }
+
+    #[rstest::rstest]
+    fn released_scroll_snaps_back_to_the_selection() {
+        // Given the view wheeled down on thread 3, then released.
+        let sessions = three_threads(3);
+        let mut scroll = SidebarScroll::default();
+        scroll.scroll_free(3, sessions.cursor);
+        scroll.release();
+
+        // When rendering the sidebar.
+        let (selected_y, _) = render_with(&sessions, &mut scroll, 8);
+
+        // Then the view follows the selection to the top of the list.
+        assert_eq!(selected_y, Some(3), "the selected row's first line");
     }
 }

@@ -38,6 +38,10 @@
 //! back in the sidebar or the dashboard, leaving them there with the pane
 //! drawn, as long as the thread is still selected.
 //!
+//! orb captures the mouse throughout. Mouse events over the attached pane go
+//! to Claude; the rest are mapped through the last frame's hit map to intents
+//! or a scroll of the sidebar's view (see [`mouse`]).
+//!
 //! After each frame the outer terminal's cursor takes the shape of where the
 //! keys are: a block in the sidebar, a bar in a text input, Claude's own
 //! shape while attached.
@@ -69,11 +73,12 @@ use orb_domain::{AppState, Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEvent};
 use ratatui::layout::Rect;
 use wherror::Error;
 
 use crate::keymap::{self, Keys, Route, Scope, Selection};
+use crate::mouse::{self, Clicks, HitMap, MouseRoute};
 use crate::picker::PickerScroll;
 use crate::sidebar::{SPINNER_FRAME, SidebarScroll};
 use crate::{outer_terminal, render};
@@ -293,6 +298,10 @@ struct App {
     cursor_style: SetCursorStyle,
     sidebar_scroll: SidebarScroll,
     picker_scroll: PickerScroll,
+    /// Where the last frame drew what a click can land on.
+    hits: HitMap,
+    /// The last click, for telling a double-click.
+    clicks: Clicks,
     /// orb's pane has the outer terminal's focus, as its last focus event
     /// said; `true` until one arrives.
     focused: bool,
@@ -332,6 +341,8 @@ impl App {
             cursor_style: SetCursorStyle::DefaultUserShape,
             sidebar_scroll: SidebarScroll::default(),
             picker_scroll: PickerScroll::default(),
+            hits: HitMap::default(),
+            clicks: Clicks::default(),
             focused: true,
         }
     }
@@ -348,6 +359,9 @@ impl App {
             }
             let now = SystemTime::now();
             let mut drawn = (None, None);
+            if self.state.read().focus == Focus::Sidebar {
+                self.sidebar_scroll.release();
+            }
             terminal.draw(|frame| {
                 let state = self.state.read();
                 let pane = shown_pane(&self.panes, state.sessions.selected_id(), state.focus)
@@ -362,6 +376,7 @@ impl App {
                     &self.tz,
                     &mut self.sidebar_scroll,
                     &mut self.picker_scroll,
+                    &mut self.hits,
                 );
             })?;
             // Navigation scrolls by what was just drawn.
@@ -404,9 +419,9 @@ impl App {
             }
             self.refresh_preview();
             self.announce();
-            self.reconcile(terminal.backend_mut())?;
-            self.ask_trust(terminal.backend_mut())?;
-            self.open_started(terminal.backend_mut())?;
+            self.reconcile();
+            self.ask_trust();
+            self.open_started();
             let now = Instant::now();
             for pane in self.panes.values() {
                 pane.flush_expired_sync(now);
@@ -437,6 +452,46 @@ impl App {
             Focus::Sidebar | Focus::Dashboard | Focus::Picker | Focus::Rename | Focus::Search => {
                 None
             }
+        }
+    }
+
+    /// Acts on a mouse event: forwards it to the attached pane, runs the
+    /// intents it maps to (ending any key sequence in progress), or scrolls
+    /// the sidebar's view.
+    fn mouse(&mut self, mouse: MouseEvent) {
+        let (focus, pane_shown, cursor) = {
+            let state = self.state.read();
+            let shown = shown_pane(&self.panes, state.sessions.selected_id(), state.focus)
+                .is_some_and(|pane| !pane.has_exited());
+            (state.focus, shown, state.sessions.cursor)
+        };
+        let route = mouse::route(
+            mouse,
+            &self.hits,
+            focus,
+            pane_shown,
+            &mut self.clicks,
+            Instant::now(),
+        );
+        match route {
+            MouseRoute::Forward => {
+                if let Some(pane) = self.attached_pane() {
+                    pane.mouse(mouse, self.pane_area);
+                }
+            }
+            MouseRoute::Intents(intents) => {
+                self.keys.dismiss();
+                for intent in &intents {
+                    let commands = IntentHandler::handle(intent, &mut self.state.write());
+                    for command in &commands {
+                        self.execute(command);
+                    }
+                }
+            }
+            MouseRoute::ScrollSidebar(lines) => {
+                self.sidebar_scroll.scroll_free(lines, cursor);
+            }
+            MouseRoute::Nothing => {}
         }
     }
 
@@ -488,7 +543,7 @@ impl App {
                 if let Some(intent) = intent {
                     let commands = IntentHandler::handle(&intent, &mut self.state.write());
                     for command in &commands {
-                        self.execute(command, out)?;
+                        self.execute(command);
                     }
                 }
             }
@@ -497,11 +552,7 @@ impl App {
                     pane.paste(&text);
                 }
             }
-            LoopEvent::Input(Event::Mouse(mouse)) => {
-                if let Some(pane) = self.attached_pane() {
-                    pane.mouse(mouse, self.pane_area);
-                }
-            }
+            LoopEvent::Input(Event::Mouse(mouse)) => self.mouse(mouse),
             LoopEvent::Input(Event::FocusGained) => {
                 self.focused = true;
                 if let Some(pane) = self.attached_pane() {
@@ -528,10 +579,7 @@ impl App {
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per command")]
-    fn execute<W>(&mut self, command: &Command, out: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
+    fn execute(&mut self, command: &Command) {
         match command {
             Command::Attach(target) => {
                 let left = self.focused_pane.take().filter(|id| *id != target.thread);
@@ -549,7 +597,7 @@ impl App {
                             let mut app = self.state.write();
                             app.focus = Focus::Dashboard;
                             app.attached.remove(&target.thread);
-                            return Ok(());
+                            return;
                         }
                     }
                 }
@@ -557,7 +605,6 @@ impl App {
                     pane.focus(true);
                     self.focused_pane = Some(target.thread);
                 }
-                outer_terminal::set_mouse_capture(out, true)
             }
             Command::Detach => {
                 // `Intent::Detach` already gave the dashboard the keys, and a
@@ -570,21 +617,18 @@ impl App {
                 if let Some(pane) = focused.and_then(|id| self.panes.get(&id)) {
                     pane.focus(false);
                 }
-                outer_terminal::set_mouse_capture(out, false)
             }
             Command::CreateDraft(project) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::CreateDraft(*project))
                     .try_send();
-                Ok(())
             }
             Command::SaveDraft(project) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::SaveDraft(*project))
                     .try_send();
-                Ok(())
             }
             Command::CheckoutDraft {
                 project,
@@ -599,39 +643,33 @@ impl App {
                         cwd: cwd.clone(),
                     })
                     .try_send();
-                Ok(())
             }
             Command::InitGit(project) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::InitGit(*project))
                     .try_send();
-                Ok(())
             }
             Command::StartDraft(project) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::StartDraft(*project))
                     .try_send();
-                Ok(())
             }
             Command::TrustWorkspace => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::TrustWorkspace)
                     .try_send();
-                Ok(())
             }
             Command::DeclineTrust => {
                 let _ = self.sessions.tell(sessions_actor::DeclineTrust).try_send();
-                Ok(())
             }
             Command::DiscardDraft(project) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::DiscardDraft(*project))
                     .try_send();
-                Ok(())
             }
             Command::MoveThread { thread, to } => {
                 let _ = self
@@ -641,7 +679,6 @@ impl App {
                         to: to.clone(),
                     })
                     .try_send();
-                Ok(())
             }
             Command::SwitchBranch {
                 thread,
@@ -656,7 +693,6 @@ impl App {
                         to_root: *to_root,
                     })
                     .try_send();
-                Ok(())
             }
             Command::CheckoutGroup { group, git_ref } => {
                 let _ = self
@@ -666,7 +702,6 @@ impl App {
                         git_ref: git_ref.clone(),
                     })
                     .try_send();
-                Ok(())
             }
             Command::ListBranches(cwd) => {
                 let refs = self.git.refs(cwd);
@@ -684,7 +719,6 @@ impl App {
                         app.sessions.error = Some(git_reason(&report));
                     }
                 }
-                Ok(())
             }
             Command::OpenTool { tool, cwd } => {
                 let opened = match &self.zellij {
@@ -696,40 +730,33 @@ impl App {
                 if let Err(reason) = opened {
                     self.state.write().sessions.error = Some(reason);
                 }
-                Ok(())
             }
             Command::AddProject(root) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::AddProject(root.clone()))
                     .try_send();
-                Ok(())
             }
             Command::ListDirectories(dir) => {
                 let names = list_directories(dir);
                 if let Some(picker) = &mut self.state.write().picker {
                     picker.show_directories(dir, names);
                 }
-                Ok(())
             }
             Command::LoadPreview { thread, transcript } => {
                 self.load_preview(*thread, transcript);
-                Ok(())
             }
             Command::RefreshSessions => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::RefreshSessions)
                     .try_send();
-                Ok(())
             }
             Command::Pin(id) => {
                 let _ = self.sessions.tell(sessions_actor::Pin(*id)).try_send();
-                Ok(())
             }
             Command::Unpin(id) => {
                 let _ = self.sessions.tell(sessions_actor::Unpin(*id)).try_send();
-                Ok(())
             }
             Command::RenameThread { thread, title } => {
                 let _ = self
@@ -739,38 +766,30 @@ impl App {
                         title: title.clone(),
                     })
                     .try_send();
-                Ok(())
             }
             Command::Settle(id) => {
                 let _ = self.sessions.tell(sessions_actor::Settle(*id)).try_send();
-                Ok(())
             }
             Command::Unsettle(id) => {
                 let _ = self.sessions.tell(sessions_actor::Unsettle(*id)).try_send();
-                Ok(())
             }
             Command::Delete(id) => {
                 let _ = self.sessions.tell(sessions_actor::Delete(*id)).try_send();
-                Ok(())
             }
             Command::Visit(id) => {
                 let _ = self.sessions.tell(sessions_actor::Visit(*id)).try_send();
-                Ok(())
             }
             Command::SaveUi => {
                 let _ = self.sessions.tell(sessions_actor::SaveUi).try_send();
-                Ok(())
             }
             Command::SaveJumps => {
                 let _ = self.sessions.tell(sessions_actor::SaveJumps).try_send();
-                Ok(())
             }
             Command::RemoveProject(id) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::RemoveProject(*id))
                     .try_send();
-                Ok(())
             }
             Command::CreateGroup {
                 kind,
@@ -785,21 +804,18 @@ impl App {
                         name: name.clone(),
                     })
                     .try_send();
-                Ok(())
             }
             Command::StartGroupDraft(group) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::StartGroupDraft(*group))
                     .try_send();
-                Ok(())
             }
             Command::SaveGroupDraft(group) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::SaveGroupDraft(*group))
                     .try_send();
-                Ok(())
             }
             Command::StartSibling {
                 group,
@@ -816,42 +832,36 @@ impl App {
                         from: *from,
                     })
                     .try_send();
-                Ok(())
             }
             Command::PinGroup(group) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::PinGroup(*group))
                     .try_send();
-                Ok(())
             }
             Command::UnpinGroup(group) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::UnpinGroup(*group))
                     .try_send();
-                Ok(())
             }
             Command::SettleGroup(group) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::SettleGroup(*group))
                     .try_send();
-                Ok(())
             }
             Command::UnsettleGroup(group) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::UnsettleGroup(*group))
                     .try_send();
-                Ok(())
             }
             Command::DeleteGroup(group) => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::DeleteGroup(*group))
                     .try_send();
-                Ok(())
             }
         }
     }
@@ -860,10 +870,7 @@ impl App {
     /// attached, which kills their `claude attach`, and takes them out of
     /// `attached`. If the keys were in a pane that's no longer shown, orb
     /// leaves it.
-    fn reconcile<W>(&mut self, out: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
+    fn reconcile(&mut self) {
         let gone = to_drop(
             self.panes.iter().map(|(id, pane)| (*id, pane.has_exited())),
             &self.state.read().attached,
@@ -871,22 +878,15 @@ impl App {
         for id in &gone {
             self.panes.remove(id);
         }
-        let left = {
-            let mut app = self.state.write();
-            for id in &gone {
-                app.attached.remove(id);
-            }
-            let left = app.focus == Focus::Attached
-                && shown_pane(&self.panes, app.sessions.selected_id(), app.focus).is_none();
-            if left {
-                app.focus = after_pane(app.focus);
-            }
-            left
-        };
-        if left {
-            outer_terminal::set_mouse_capture(out, false)?;
+        let mut app = self.state.write();
+        for id in &gone {
+            app.attached.remove(id);
         }
-        Ok(())
+        if app.focus == Focus::Attached
+            && shown_pane(&self.panes, app.sessions.selected_id(), app.focus).is_none()
+        {
+            app.focus = after_pane(app.focus);
+        }
     }
 
     /// Asks the user, with the `No`/`Yes` confirm, to trust the folder a
@@ -894,15 +894,12 @@ impl App {
     /// [`trust_to_open`]). It takes the place of an open picker, the rename
     /// box or the search; a thread's pane that had the keys loses them, as on
     /// `<C-h>`. Where the keys go after is [`trust_return_to`].
-    fn ask_trust<W>(&mut self, out: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
+    fn ask_trust(&mut self) {
         let trust = self.state.read().sessions.trust.clone();
         let ask = trust_to_open(trust.as_deref(), self.opened_trust.as_deref());
         self.opened_trust = trust;
         let Some(dir) = ask else {
-            return Ok(());
+            return;
         };
         self.keys.dismiss();
         let from_pane = {
@@ -921,9 +918,8 @@ impl App {
         };
         if from_pane {
             // The pane loses the keys, as on `<C-h>`.
-            self.execute(&Command::Detach, out)?;
+            self.execute(&Command::Detach);
         }
-        Ok(())
     }
 
     /// Attaches to a started draft's thread while it's still selected, as
@@ -933,10 +929,7 @@ impl App {
     /// request whose thread is no longer selected is dropped for good. A
     /// failure the start still reported (saving the store) stays on the mode
     /// line.
-    fn open_started<W>(&mut self, out: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
+    fn open_started(&mut self) {
         let (commands, keep_keys) = {
             let mut state = self.state.write();
             let decision = started_attach(
@@ -947,10 +940,10 @@ impl App {
             );
             self.attach_waited = decision == StartedAttach::Wait;
             let keep_keys = match decision {
-                StartedAttach::Wait => return Ok(()),
+                StartedAttach::Wait => return,
                 StartedAttach::Drop => {
                     state.sessions.attach = None;
-                    return Ok(());
+                    return;
                 }
                 StartedAttach::Attach { keep_keys } => keep_keys,
             };
@@ -965,13 +958,12 @@ impl App {
             (commands, keep_keys)
         };
         for command in &commands {
-            self.execute(command, out)?;
+            self.execute(command);
         }
         if keep_keys {
             // The pane loses the keys, as on `<C-h>`.
-            self.execute(&Command::Detach, out)?;
+            self.execute(&Command::Detach);
         }
-        Ok(())
     }
 
     /// Reads `thread`'s transcript into the open picker's preview. An

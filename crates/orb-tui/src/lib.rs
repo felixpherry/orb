@@ -4,6 +4,7 @@
 mod dashboard;
 mod keymap;
 mod mode_line;
+mod mouse;
 mod outer_terminal;
 mod picker;
 mod rename;

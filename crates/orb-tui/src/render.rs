@@ -9,6 +9,8 @@
 //! selected row, at the text cursor of the picker, the rename box or the
 //! sidebar search, on the dashboard's highlighted item, or in the attached
 //! pane.
+//! Each frame records where it drew the sidebar's rows and input box and the
+//! dashboard's menu items, so a click maps back to them.
 //! Whatever is left on the terminal's default background gets orb's navy, so
 //! a transparent terminal doesn't show through.
 
@@ -26,6 +28,7 @@ use ratatui::style::Color;
 use crate::dashboard;
 use crate::keymap::Keys;
 use crate::mode_line;
+use crate::mouse::HitMap;
 use crate::picker::{self, PickerScroll};
 use crate::rename;
 use crate::session_picker;
@@ -57,7 +60,7 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// many rows the picker fits when it's open.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the frame's inputs and the two frontend view states it updates"
+    reason = "the frame's inputs, the two frontend view states it updates, and the hit map it fills"
 )]
 pub(crate) fn render(
     frame: &mut Frame,
@@ -69,8 +72,10 @@ pub(crate) fn render(
     tz: &TimeZone,
     scroll: &mut SidebarScroll,
     picker_scroll: &mut PickerScroll,
+    hits: &mut HitMap,
 ) -> (Option<SidebarLayout>, Option<usize>) {
     let [sidebar_area, right, mode_area] = layout(frame.area(), &state.sidebar);
+    *hits = HitMap::new(sidebar_area, right);
     let (selected_y, sidebar_layout, search_cursor) = if state.sidebar.hidden {
         (None, None, None)
     } else {
@@ -81,6 +86,7 @@ pub(crate) fn render(
             sidebar_area,
             frame.buffer_mut(),
             scroll,
+            hits,
         );
         (selected_y, Some(sidebar_layout), search_cursor)
     };
@@ -92,7 +98,7 @@ pub(crate) fn render(
             }
         }
         None => {
-            let at = dashboard::render(state, pane_error, right, frame.buffer_mut());
+            let at = dashboard::render(state, pane_error, right, frame.buffer_mut(), hits);
             if state.focus == Focus::Dashboard && right.contains(at) {
                 frame.set_cursor_position(at);
             }
@@ -168,6 +174,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::keymap::{Keys, Scope, keymap, press};
+    use crate::mouse::HitMap;
     use crate::picker::PickerScroll;
     use crate::sidebar::SidebarScroll;
 
@@ -248,6 +255,7 @@ mod tests {
                 &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
+                &mut HitMap::default(),
             );
         });
         terminal
@@ -302,6 +310,7 @@ mod tests {
                 &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
+                &mut HitMap::default(),
             );
         });
         terminal.backend().buffer().clone()
@@ -524,6 +533,7 @@ mod tests {
                 &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
+                &mut HitMap::default(),
             );
         });
 
@@ -558,6 +568,7 @@ mod tests {
                 &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
+                &mut HitMap::default(),
             );
         });
 
@@ -657,6 +668,7 @@ mod tests {
                 &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
+                &mut HitMap::default(),
             );
         });
         terminal
@@ -890,6 +902,7 @@ mod tests {
                 &TimeZone::UTC,
                 &mut SidebarScroll::default(),
                 &mut PickerScroll::default(),
+                &mut HitMap::default(),
             );
         });
 

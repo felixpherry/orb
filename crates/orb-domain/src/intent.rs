@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::feat::sessions::state::GroupKind;
+use crate::feat::sessions::state::{GroupKind, SidebarItem};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// A user action produced by the keymap and applied by the
@@ -33,6 +33,18 @@ pub enum Intent {
     DashboardPrev,
     /// Run the dashboard's highlighted menu item.
     DashboardRun,
+    /// Select this sidebar row (a click). During a search, end it on that
+    /// row as `⏎` does.
+    SelectRow(SidebarItem),
+    /// Move the sidebar's cursor one row down, stopping on the last row (the
+    /// wheel).
+    SelectWheelNext,
+    /// Move the sidebar's cursor one row up, stopping on the first row (the
+    /// wheel).
+    SelectWheelPrev,
+    /// Highlight the dashboard's menu item at this index without running it
+    /// (a click).
+    DashboardHighlight(usize),
     /// Hide the sidebar, giving the right side the full width, or show it
     /// again.
     ToggleSidebar,
@@ -149,8 +161,10 @@ impl fmt::Display for Intent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Quit => "quit",
-            Self::SelectNext => "next thread",
-            Self::SelectPrev => "previous thread",
+            Self::SelectNext | Self::SelectWheelNext => "next thread",
+            Self::SelectPrev | Self::SelectWheelPrev => "previous thread",
+            Self::SelectRow(_) => "select",
+            Self::DashboardHighlight(_) => "highlight item",
             Self::FocusRight => "focus right",
             Self::FocusSidebar => "focus sidebar",
             Self::DashboardNext | Self::PickerNext => "next item",

@@ -3,9 +3,9 @@
 //!
 //! orb asks for kitty key reports (so every key reaches the child
 //! unambiguously), bracketed paste, and focus changes. The mouse is captured
-//! only while attached, and the child's cursor shape and clipboard copies are
-//! passed through to the outer terminal. Everything is switched back off on
-//! exit and on panic.
+//! from startup until orb exits, and the child's cursor shape and clipboard
+//! copies are passed through to the outer terminal. Everything is switched back
+//! off on exit and on panic.
 
 use std::io::{self, Write};
 use std::panic;
@@ -37,6 +37,7 @@ where
         ),
         EnableBracketedPaste,
         EnableFocusChange,
+        EnableMouseCapture,
     )
 }
 
@@ -70,22 +71,6 @@ pub(crate) fn install_panic_hook() {
     }));
 }
 
-/// Captures the mouse, or gives it back to the outer terminal.
-///
-/// # Errors
-///
-/// Returns an error if writing to the terminal fails.
-pub(crate) fn set_mouse_capture<W>(out: &mut W, on: bool) -> io::Result<()>
-where
-    W: Write,
-{
-    if on {
-        execute!(out, EnableMouseCapture)
-    } else {
-        execute!(out, DisableMouseCapture)
-    }
-}
-
 /// Copies `text` to the system clipboard through the outer terminal (OSC 52).
 ///
 /// # Errors
@@ -113,7 +98,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::copy_to_clipboard;
+    use super::{copy_to_clipboard, enable};
 
     #[rstest::rstest]
     fn clipboard_copy_writes_osc52_sequence() {
@@ -127,6 +112,21 @@ mod tests {
         assert_eq!(
             out, b"\x1b]52;c;aGVsbG8=\x07",
             "copy should write OSC 52 with base64 text"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enable_captures_the_mouse() {
+        // Given an empty output.
+        let mut out = Vec::new();
+
+        // When switching on orb's terminal modes.
+        let _ = enable(&mut out);
+
+        // Then the output turns on SGR mouse reporting.
+        assert!(
+            String::from_utf8_lossy(&out).contains("\x1b[?1006h"),
+            "enable should capture the mouse"
         );
     }
 }
