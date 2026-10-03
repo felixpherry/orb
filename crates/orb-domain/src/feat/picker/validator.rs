@@ -1,6 +1,9 @@
 //! Checks whether the open picker's keys can proceed: `⏎` picking a project
-//! or adding a directory, `Tab` opening one, `<C-x>` removing a project, and
-//! `⏎` picking a thread in the session picker.
+//! or adding a directory, `Tab` opening one, `<C-x>` removing a project,
+//! `⏎` picking a thread in the session picker, and `<C-x>` deleting a
+//! worktree.
+
+use std::time::SystemTime;
 
 use crate::feat::picker::list::PickerItem;
 
@@ -9,6 +12,7 @@ use wherror::Error;
 use crate::AppState;
 use crate::feat::picker::state::PickerKind;
 use crate::feat::sessions::state::ThreadStatus;
+use crate::feat::worktrees::state::{Verdict, users, verdict};
 
 /// Why picking a project can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -160,18 +164,71 @@ pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
     }
 }
 
+/// Why deleting a worktree can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum DeleteWorktreeError {
+    /// No worktree picker is open.
+    NoPicker,
+    /// No worktree row is highlighted.
+    NoSelection,
+    /// A thread in the worktree is attached.
+    Attached,
+    /// A thread in the worktree has a turn underway.
+    MidTurn,
+}
+
+/// Allow asking to delete the worktree highlighted in the worktree picker.
+///
+/// # Errors
+///
+/// Returns [`DeleteWorktreeError::NoPicker`] unless the worktree picker is
+/// open, [`DeleteWorktreeError::NoSelection`] when no row is highlighted,
+/// [`DeleteWorktreeError::Attached`] when a thread in it is attached, and
+/// [`DeleteWorktreeError::MidTurn`] when a thread in it has a turn underway.
+pub fn validate_delete_worktree(state: &AppState) -> Result<(), DeleteWorktreeError> {
+    let path = match &state.picker {
+        Some(picker) if *picker.kind() == PickerKind::Worktrees => picker
+            .selected_worktree()
+            .ok_or(DeleteWorktreeError::NoSelection)?,
+        _ => return Err(DeleteWorktreeError::NoPicker),
+    };
+    let facts = state
+        .worktrees
+        .list
+        .iter()
+        .find(|worktree| worktree.path == path)
+        .and_then(|worktree| worktree.facts.as_ref());
+    // The time only moves the prune countdown, which never refuses.
+    match verdict(
+        &users(state, path),
+        facts,
+        &state.attached,
+        SystemTime::UNIX_EPOCH,
+    ) {
+        Verdict::Attached => Err(DeleteWorktreeError::Attached),
+        Verdict::MidTurn => Err(DeleteWorktreeError::MidTurn),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use std::time::SystemTime;
+
     use super::{
-        AddDirectoryError, OpenDirectoryError, PickProjectError, PickSessionError,
-        RemoveProjectError, validate_add_directory, validate_open_directory, validate_pick_project,
-        validate_pick_session, validate_remove_project,
+        AddDirectoryError, DeleteWorktreeError, OpenDirectoryError, PickProjectError,
+        PickSessionError, RemoveProjectError, validate_add_directory, validate_delete_worktree,
+        validate_open_directory, validate_pick_project, validate_pick_session,
+        validate_remove_project,
     };
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
-    use crate::feat::sessions::state::{ProjectId, ProjectKind, Sessions, ThreadId};
+    use crate::feat::sessions::state::{
+        Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+    };
     use crate::{AppState, Focus};
 
     const HOME: &str = "/home/me";
@@ -393,6 +450,127 @@ mod tests {
             result,
             Err(PickSessionError::Deleted),
             "a deleted thread can't be jumped into"
+        );
+    }
+
+    const WORKTREE: &str = "/home/me/.orb/worktrees/alpha/orb-ffff";
+
+    /// The worktree picker over `WORKTREE`, where thread 1, `status`, runs.
+    fn deleting(status: ThreadStatus) -> AppState {
+        let thread = Thread {
+            id: ThreadId(1),
+            title: None,
+            cwd: WORKTREE.into(),
+            transcript: None,
+            status,
+            turn_started_at: None,
+            attach_argv: vec![],
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            last_activity_at: SystemTime::UNIX_EPOCH,
+            unseen: false,
+            group: None,
+            model: None,
+            permission: None,
+        };
+        let row = PickerItem::Worktree {
+            path: WORKTREE.into(),
+            label: "alpha/orb-ffff".into(),
+            split: 6,
+            extra: String::new(),
+        };
+        AppState {
+            picker: Some(PickerState::worktrees(vec![row], Focus::Sidebar)),
+            sessions: Sessions {
+                projects: vec![Project {
+                    id: ProjectId(1),
+                    title: "alpha".into(),
+                    root: "/alpha".into(),
+                    created_at: SystemTime::UNIX_EPOCH,
+                    removed: false,
+                    draft: None,
+                    threads: vec![thread],
+                    groups: vec![],
+                    kind: ProjectKind::Normal,
+                }],
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        }
+    }
+
+    #[rstest::rstest]
+    fn delete_worktree_rejected_without_selection() {
+        // Given the worktree picker with `x` typed, which matches nothing.
+        let state = {
+            let mut state = deleting(ThreadStatus::Idle);
+            if let Some(picker) = &mut state.picker {
+                picker.insert('x');
+            }
+            state
+        };
+
+        // When validating a delete.
+        let result = validate_delete_worktree(&state);
+
+        // Then validation fails with NoSelection.
+        assert_eq!(
+            result,
+            Err(DeleteWorktreeError::NoSelection),
+            "nothing highlighted can't be deleted"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_worktree_rejected_while_a_thread_in_it_is_attached() {
+        // Given a worktree whose thread is attached.
+        let state = AppState {
+            attached: [ThreadId(1)].into(),
+            ..deleting(ThreadStatus::Idle)
+        };
+
+        // When validating a delete.
+        let result = validate_delete_worktree(&state);
+
+        // Then validation fails with Attached.
+        assert_eq!(
+            result,
+            Err(DeleteWorktreeError::Attached),
+            "an attached thread's worktree can't be deleted"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_worktree_rejected_while_a_thread_in_it_is_mid_turn() {
+        // Given a worktree whose thread is working.
+        let state = deleting(ThreadStatus::Working);
+
+        // When validating a delete.
+        let result = validate_delete_worktree(&state);
+
+        // Then validation fails with MidTurn.
+        assert_eq!(
+            result,
+            Err(DeleteWorktreeError::MidTurn),
+            "a mid-turn thread's worktree can't be deleted"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_worktree_allowed_on_an_active_idle_row() {
+        // Given a worktree whose active thread is idle and detached.
+        let state = deleting(ThreadStatus::Idle);
+
+        // When validating a delete.
+        let result = validate_delete_worktree(&state);
+
+        // Then it is allowed.
+        assert_eq!(
+            result,
+            Ok(()),
+            "an active idle thread's worktree can be deleted"
         );
     }
 }

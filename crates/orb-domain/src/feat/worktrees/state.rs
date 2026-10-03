@@ -19,7 +19,8 @@ pub const PRUNE_AFTER: Duration = Duration::from_hours(7 * 24);
 pub struct Worktrees {
     /// Sorted by path.
     pub list: Vec<Worktree>,
-    /// `pruned N worktrees`, or why a delete failed.
+    /// `pruned N worktrees`, or why a delete failed. Besides the worktrees
+    /// actor, the intent handler writes it: it clears it on the next intent.
     pub notice: Option<String>,
 }
 

@@ -13,5 +13,6 @@ mod run;
 mod session_picker;
 mod sidebar;
 mod which_key;
+mod worktree_picker;
 
 pub use run::{Frontend, TuiRunError};

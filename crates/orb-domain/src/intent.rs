@@ -73,6 +73,9 @@ pub enum Intent {
     /// Open the session picker over the threads inside the project filter,
     /// newest chat first, to jump into one.
     OpenSessionPicker,
+    /// Open the worktree picker over every directory under
+    /// `~/.orb/worktrees/<repo>/`, most recently used first.
+    OpenWorktreePicker,
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
     FilterProjects,
@@ -191,6 +194,7 @@ impl fmt::Display for Intent {
             Self::NewSession => "new session",
             Self::NewIncognito => "incognito",
             Self::OpenSessionPicker => "sessions",
+            Self::OpenWorktreePicker => "worktrees",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",
             Self::PickerHalfPageUp | Self::SelectHalfPageUp => "half page up",
@@ -254,6 +258,16 @@ mod tests {
     fn session_picker_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the session picker's intents.
         assert_eq!(intent.to_string(), expected, "which-key label");
+    }
+
+    #[rstest::rstest]
+    fn open_worktree_picker_displays_as_worktrees() {
+        // Given / When / Then: which-key labels OpenWorktreePicker "worktrees".
+        assert_eq!(
+            Intent::OpenWorktreePicker.to_string(),
+            "worktrees",
+            "which-key label"
+        );
     }
 
     #[rstest::rstest]

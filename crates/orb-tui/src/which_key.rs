@@ -17,6 +17,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui_which_key::{Key as _, NodeResult};
 
 use crate::keymap::Keys;
+use crate::picker::WORKTREE;
 use crate::sidebar::{
     BG_DARK, BLUE, BLUE1, BORDER, COMMENT, CYAN, DARK5, FOLDER, FOLDER_OPEN, GREEN, MAGENTA,
     ORANGE, RED, YELLOW, kind_look,
@@ -149,6 +150,7 @@ fn look(intent: &Intent) -> (&'static str, Color) {
         Intent::SelectFirst => ("\u{f062}", BLUE),
         Intent::NewGroup(kind) => kind_look(*kind),
         Intent::CloseGroup => (FOLDER, BLUE),
+        Intent::OpenWorktreePicker => (WORKTREE, ORANGE),
         _ => ("\u{f111}", DARK5),
     }
 }
@@ -431,6 +433,24 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.contains("│ g ➜ \u{f07b} +group")),
+            "the screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_popup_lists_the_search_group() {
+        // Given Space pressed on a thread.
+        let keys = leader_on_thread();
+
+        // When drawing the popup.
+        let buffer = draw(&keys, SCREEN);
+
+        // Then the `s` row reads `s ➜ <folder> +search`.
+        let lines = lines(&buffer);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("│ s ➜ \u{f07b} +search")),
             "the screen was {lines:#?}"
         );
     }

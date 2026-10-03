@@ -275,6 +275,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     let mut keymap = Keymap::new();
     keymap.describe_group("<leader>", "leader");
     keymap.describe_group("<leader>g", "group");
+    keymap.describe_group("<leader>s", "search");
     for scope in SIDEBAR {
         keymap
             .bind("j", Intent::SelectNext, KeyCategory::Navigation, scope)
@@ -457,6 +458,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             .bind(
                 "<leader><leader>",
                 Intent::OpenSessionPicker,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>sw",
+                Intent::OpenWorktreePicker,
                 KeyCategory::Navigation,
                 scope,
             )
@@ -1169,6 +1176,34 @@ mod tests {
             intent,
             Some(Intent::OpenSessionPicker),
             "␣␣ should open the session picker in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_s_w_opens_the_worktree_picker(
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarEmpty,
+            Scope::SidebarGroup,
+            Scope::Dashboard,
+            Scope::DashboardEmpty,
+            Scope::DashboardGroup
+        )]
+        scope: Scope,
+    ) {
+        // Given Space and `s` already pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+        press(&mut keys, key(KeyCode::Char('s')));
+
+        // When pressing `w`.
+        let intent = press(&mut keys, key(KeyCode::Char('w')));
+
+        // Then it opens the worktree picker.
+        assert_eq!(
+            intent,
+            Some(Intent::OpenWorktreePicker),
+            "␣sw should open the worktree picker in {scope:?}"
         );
     }
 
@@ -1927,24 +1962,24 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, " befginptvw")]
-    #[case(Scope::SidebarDraft, " abefgimnptvw")]
-    #[case(Scope::SidebarEmpty, " efginp")]
-    #[case(Scope::SidebarGroup, " aefgimnptv")]
-    #[case(Scope::SidebarWorktreeGroup, " abefgimnptv")]
-    #[case(Scope::SidebarGroupThread, " efginptv")]
-    #[case(Scope::SidebarGroupDraft, " aefgimnptv")]
-    #[case(Scope::Dashboard, " beginptvw")]
-    #[case(Scope::DashboardDraft, " abegimnptvw")]
-    #[case(Scope::DashboardEmpty, " eginp")]
-    #[case(Scope::DashboardGroup, " aegimnptv")]
-    #[case(Scope::DashboardWorktreeGroup, " abegimnptv")]
-    #[case(Scope::DashboardGroupThread, " eginptv")]
-    #[case(Scope::DashboardGroupDraft, " aegimnptv")]
-    #[case(Scope::SidebarIncognito, " efginptv")]
-    #[case(Scope::SidebarIncognitoDraft, " aefgimnptv")]
-    #[case(Scope::DashboardIncognito, " eginptv")]
-    #[case(Scope::DashboardIncognitoDraft, " aegimnptv")]
+    #[case(Scope::Sidebar, " befginpstvw")]
+    #[case(Scope::SidebarDraft, " abefgimnpstvw")]
+    #[case(Scope::SidebarEmpty, " efginps")]
+    #[case(Scope::SidebarGroup, " aefgimnpstv")]
+    #[case(Scope::SidebarWorktreeGroup, " abefgimnpstv")]
+    #[case(Scope::SidebarGroupThread, " efginpstv")]
+    #[case(Scope::SidebarGroupDraft, " aefgimnpstv")]
+    #[case(Scope::Dashboard, " beginpstvw")]
+    #[case(Scope::DashboardDraft, " abegimnpstvw")]
+    #[case(Scope::DashboardEmpty, " eginps")]
+    #[case(Scope::DashboardGroup, " aegimnpstv")]
+    #[case(Scope::DashboardWorktreeGroup, " abegimnpstv")]
+    #[case(Scope::DashboardGroupThread, " eginpstv")]
+    #[case(Scope::DashboardGroupDraft, " aegimnpstv")]
+    #[case(Scope::SidebarIncognito, " efginpstv")]
+    #[case(Scope::SidebarIncognitoDraft, " aefgimnpstv")]
+    #[case(Scope::DashboardIncognito, " eginpstv")]
+    #[case(Scope::DashboardIncognitoDraft, " aegimnpstv")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
         let popup = leader_popup(scope);

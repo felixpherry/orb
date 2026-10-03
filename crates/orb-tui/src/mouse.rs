@@ -44,7 +44,7 @@ pub(crate) struct HitMap {
     /// The open picker's or rename box's popup.
     overlay: Option<Rect>,
     /// Where the wheel moves the open picker's selection: its popup, or the
-    /// session picker's list box.
+    /// session or worktree picker's list box.
     selector: Option<Rect>,
     /// Each selectable picker row's line and its index into the picker's
     /// shown rows.

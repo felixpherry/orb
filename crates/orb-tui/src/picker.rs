@@ -2,24 +2,25 @@
 //! a small rounded float with the picker's name centred in its top border, a
 //! `>` prompt over an orange rule, numbered one-line rows with the selected
 //! one filled, and the picker's keys dim in its bottom border. The float is
-//! only as tall as its rows need, and its top stays put while the filter
-//! narrows them. The session picker has its own snacks layout in
-//! `session_picker`.
+//! only as tall as its rows need, at least as wide as its name, and its top
+//! stays put while the filter narrows them. The session picker has its own
+//! snacks layout in `session_picker`.
 //!
 //! The project picker shows each project as a folder in its badge colour and
 //! its path, the parent dimmed and the name bright, with the name on the
 //! right when the folder is named differently; so does the project filter,
 //! under an `All projects` row. Confirming a project's removal offers `No`
 //! and `Yes`; a session start waiting on trust asks `Trust ~/path?` the same
-//! way. The directory picker shows one folder per row; the workspace
-//! picker shows where a thread's session could run, each with its glyph; the
-//! branch picker shows each branch with its badge on the right, dimming the
-//! ones checked out where the thread can't follow and saying where; the model
-//! picker shows each model's name after Claude's mark, with its legacy models
-//! under their own heading, and the permission picker each mode after a
-//! shield; a draft whose project isn't a git repository gets one row,
-//! `Initialize Git`. Where the filter matched is blue and bold, and the rows
-//! scroll to keep the selection in view.
+//! way, and so does deleting a worktree. The worktree picker has its own
+//! snacks layout in `worktree_picker`. The directory picker shows one folder
+//! per row; the workspace picker shows where a thread's session could run,
+//! each with its glyph; the branch picker shows each branch with its badge
+//! on the right, dimming the ones checked out where the thread can't follow
+//! and saying where; the model picker shows each model's name after Claude's
+//! mark, with its legacy models under their own heading, and the permission
+//! picker each mode after a shield; a draft whose project isn't a git
+//! repository gets one row, `Initialize Git`. Where the filter matched is
+//! blue and bold, and the rows scroll to keep the selection in view.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -44,8 +45,9 @@ use crate::sidebar::{
     FG_DARK, FOLDER, FOLDER_OPEN, GREEN, MAGENTA, ORANGE, VISUAL, YELLOW, badge, render_split,
 };
 
-/// Nerd Font's code-fork glyph, before the worktree workspace rows.
-const WORKTREE: &str = "\u{f126}";
+/// Nerd Font's code-fork glyph, before the worktree workspace rows and the
+/// worktree picker's entry in which-key.
+pub(crate) const WORKTREE: &str = "\u{f126}";
 /// Nerd Font's history glyph, before the previous worktree's workspace row.
 const HISTORY: &str = "\u{f1da}";
 /// Before a permission mode (`nf-fa-shield`).
@@ -85,9 +87,16 @@ pub(crate) fn render(
     scroll: &mut PickerScroll,
     hits: &mut HitMap,
 ) -> (usize, Position) {
+    let title = Line::from(span(format!(" {} ", title(picker.kind(), home)), BLUE));
     let popup = {
         let lines = |count: usize| u16::try_from(count).unwrap_or(u16::MAX);
-        popup_rect(area, lines(picker.shown().count()), lines(picker.total()))
+        let title = u16::try_from(title.width()).unwrap_or(u16::MAX);
+        popup_rect(
+            area,
+            title,
+            lines(picker.shown().count()),
+            lines(picker.total()),
+        )
     };
     Clear.render(popup, buf);
     hits.record_overlay(popup);
@@ -96,7 +105,7 @@ pub(crate) fn render(
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BORDER).bg(BG_DARK))
         .style(Style::new().bg(BG_DARK))
-        .title(Line::from(span(format!(" {} ", title(picker.kind(), home)), BLUE)).centered())
+        .title(title.centered())
         .title_bottom(hints(picker.kind()));
     let inner = block.inner(popup);
     block.render(popup, buf);
@@ -112,12 +121,16 @@ pub(crate) fn render(
     (page, cursor)
 }
 
-/// The popup: half the width, kept to 44–72 columns, and as tall as `shown`
-/// rows plus its border, input and rule, at most 60% of the height. It's
-/// centred across, and its top stays where the popup for all `total` rows
-/// would be centred, so filtering doesn't move the input.
-fn popup_rect(area: Rect, shown: u16, total: u16) -> Rect {
-    let width = (area.width / 2).clamp(44, 72).min(area.width);
+/// The popup: half the width, kept to 44–72 columns but wide enough for its
+/// `title` cells between the corners, never wider than `area`; and as tall
+/// as `shown` rows plus its border, input and rule, at most 60% of the
+/// height. It's centred across, and its top stays where the popup for all
+/// `total` rows would be centred, so filtering doesn't move the input.
+fn popup_rect(area: Rect, title: u16, shown: u16, total: u16) -> Rect {
+    let width = (area.width / 2)
+        .clamp(44, 72)
+        .max(title.saturating_add(2))
+        .min(area.width);
     let tallest = (area.height.saturating_mul(3) / 5).max(8).min(area.height);
     let full = total.max(1).saturating_add(4).min(tallest);
     Rect::new(
@@ -136,6 +149,7 @@ fn title(kind: &PickerKind, home: &Path) -> Cow<'static, str> {
         }
         PickerKind::Projects | PickerKind::GroupProject => "Projects",
         PickerKind::Sessions { .. } => "Sessions",
+        PickerKind::Worktrees => "Worktrees",
         PickerKind::ProjectFilter => "Filter projects",
         PickerKind::Directories { .. } => "Add project",
         PickerKind::Workspace { .. } => "Workspace",
@@ -154,6 +168,10 @@ fn title(kind: &PickerKind, home: &Path) -> Cow<'static, str> {
             ..
         } => "Delete group and its worktree?",
         PickerKind::DeleteGroup { dir: Some(_), .. } => "Delete group and its folder?",
+        PickerKind::DeleteWorktree { dirty: false, .. } => "Delete worktree?",
+        PickerKind::DeleteWorktree { dirty: true, .. } => {
+            "Delete worktree and its uncommitted changes?"
+        }
     };
     Cow::Borrowed(name)
 }
@@ -171,6 +189,7 @@ fn hints(kind: &PickerKind) -> Line<'static> {
         | PickerKind::SettleGroup { .. }
         | PickerKind::DeleteGroup { .. }
         | PickerKind::TrustWorkspace { .. }
+        | PickerKind::DeleteWorktree { .. }
         | PickerKind::InitGit { .. } => &[("⏎", "confirm"), ("Esc", "cancel")],
         _ => &[("⏎", "select"), ("Esc", "close")],
     };
@@ -389,7 +408,9 @@ fn row_content(
             None,
         ),
         PickerItem::Confirm(yes) => (highlight(confirm_label(*yes), &matches.name, |_| FG), None),
-        PickerItem::Thread { label, .. } => (highlight(label, &matches.name, |_| FG), None),
+        PickerItem::Thread { label, .. } | PickerItem::Worktree { label, .. } => {
+            (highlight(label, &matches.name, |_| FG), None)
+        }
     }
 }
 
@@ -796,16 +817,31 @@ mod tests {
         PickerState::trust_workspace(PathBuf::from("/Users/me/dev/orb"), Focus::Sidebar),
         "Trust ~/dev/orb?"
     )]
+    #[case::clean_worktree(delete_worktree(false), "Delete worktree?")]
+    #[case::dirty_worktree(delete_worktree(true), "Delete worktree and its uncommitted changes?")]
     fn picker_is_titled_by_its_kind(#[case] picker: PickerState, #[case] title: &str) {
         // Given a picker of some kind.
 
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
+        // When drawing it on a screen wide enough for the longest title.
+        let buf = draw(&picker, 100, 40);
 
         // Then its top border holds its title.
         let top = border_rows(&buf).map(|(top, _)| top);
         let at = find(&buf, &format!(" {title} ")).map(|(_, y)| y);
         assert_eq!(at, top, "the row of the title {title:?}");
+    }
+
+    #[rstest::rstest]
+    fn popup_widens_to_show_a_long_title_in_full() {
+        // Given the dirty worktree confirm, whose title outgrows 44 columns.
+        let picker = delete_worktree(true);
+
+        // When drawing it on an 80-column screen.
+        let buf = draw(&picker, 80, 40);
+
+        // Then the whole title shows in the top border.
+        let title = " Delete worktree and its uncommitted changes? ";
+        assert!(find(&buf, title).is_some(), "the title should show in full");
     }
 
     #[rstest::rstest]
@@ -992,6 +1028,7 @@ mod tests {
         PickerState::trust_workspace(PathBuf::from("/Users/me/dev/orb"), Focus::Sidebar),
         "⏎ confirm · Esc cancel"
     )]
+    #[case::delete_worktree(delete_worktree(false), "⏎ confirm · Esc cancel")]
     #[case(workspace(), "⏎ select · Esc close")]
     fn hints(#[case] picker: PickerState, #[case] expected: &str) {
         // Given a picker of some kind.
@@ -1127,6 +1164,15 @@ mod tests {
             lines.iter().any(|line| line.contains("/tmp/5")),
             "screen was {lines:#?}"
         );
+    }
+
+    /// The confirm for deleting a worktree, `dirty` or not.
+    fn delete_worktree(dirty: bool) -> PickerState {
+        PickerState::delete_worktree(
+            PickerState::worktrees(vec![], Focus::Sidebar),
+            PathBuf::from("/Users/me/.orb/worktrees/orb/orb-ffff"),
+            dirty,
+        )
     }
 
     fn workspace() -> PickerState {
