@@ -15,9 +15,9 @@ use crate::feat::picker::list::{
     model,
 };
 use crate::feat::sessions::state::{
-    GroupId, GroupKind, NEW_THREAD, ProjectId, Sessions, ThreadId, ThreadStatus,
+    GroupId, GroupKind, NEW_THREAD, Project, ProjectId, Sessions, Thread, ThreadId, ThreadStatus,
 };
-use crate::feat::sessions::transcript::Exchange;
+use crate::feat::sessions::transcript::{Exchange, Role};
 use crate::feat::worktrees::state::{User, order, users};
 use crate::{AppState, Focus};
 
@@ -97,6 +97,9 @@ pub enum PickerKind {
     /// `<C-x>` in the worktree picker: confirm force-removing the worktree at
     /// `path`. `dirty` is whether it has uncommitted changes.
     DeleteWorktree { path: PathBuf, dirty: bool },
+    /// `␣sg`: messages across every thread's transcripts that match the typed
+    /// text. `overflow` is whether more matched than are listed.
+    Search { overflow: bool },
 }
 
 /// What the session picker's preview shows for a thread: its transcript's
@@ -106,6 +109,14 @@ pub struct SessionPreview {
     pub thread: ThreadId,
     pub len: u64,
     pub exchanges: Vec<Exchange>,
+}
+
+/// What the search picker's preview shows for a hit: every indexed message of
+/// the exchange it's in, as `(id, role, text)` in transcript order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchPreview {
+    pub hit: i64,
+    pub messages: Vec<(i64, Role, String)>,
 }
 
 /// The open picker.
@@ -123,6 +134,8 @@ pub struct PickerState {
     wanted: Option<String>,
     /// The session picker's preview, as last read.
     preview: Option<SessionPreview>,
+    /// The search picker's preview, as last loaded.
+    search_preview: Option<SearchPreview>,
     /// The worktree list a delete confirm was opened over; the confirm
     /// returns to it.
     under: Option<Box<PickerState>>,
@@ -139,6 +152,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            search_preview: None,
             under: None,
         }
     }
@@ -154,6 +168,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            search_preview: None,
             under: None,
         }
     }
@@ -163,6 +178,14 @@ impl PickerState {
         Self {
             kind: PickerKind::Worktrees,
             ..Self::projects(items, return_to)
+        }
+    }
+
+    /// The search picker, with nothing typed and no rows yet.
+    pub fn search(return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::Search { overflow: false },
+            ..Self::projects(Vec::new(), return_to)
         }
     }
 
@@ -201,6 +224,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            search_preview: None,
             under: None,
         }
     }
@@ -272,6 +296,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            search_preview: None,
             under: None,
         }
     }
@@ -286,6 +311,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            search_preview: None,
             under: None,
         }
     }
@@ -311,6 +337,7 @@ impl PickerState {
             page: 0,
             wanted,
             preview: None,
+            search_preview: None,
             under: None,
         }
     }
@@ -325,6 +352,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            search_preview: None,
             under: None,
         }
     }
@@ -385,6 +413,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            search_preview: None,
             under: None,
         }
     }
@@ -406,6 +435,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            search_preview: None,
             under: None,
         };
         (picker, home)
@@ -551,9 +581,60 @@ impl PickerState {
             .filter(|preview| Some(preview.thread) == self.selected_thread())
     }
 
-    /// Forgets the preview.
+    /// Forgets both the session and the search picker's preview.
     pub fn clear_preview(&mut self) {
         self.preview = None;
+        self.search_preview = None;
+    }
+
+    /// The selected hit's message id, transcript and prompt offset; `None`
+    /// unless a hit row is selected.
+    pub fn selected_hit(&self) -> Option<(i64, &Path, u64)> {
+        match self.list.selected() {
+            Some(PickerItem::Hit {
+                id,
+                path,
+                prompt_offset,
+                ..
+            }) => Some((*id, path, *prompt_offset)),
+            _ => None,
+        }
+    }
+
+    /// Keeps `messages` as hit `hit`'s preview. Dropped unless `hit` is still
+    /// the selected row, so a late load for an old selection never shows.
+    pub fn show_search_preview(&mut self, hit: i64, messages: Vec<(i64, Role, String)>) {
+        if self.selected_hit().map(|(id, ..)| id) == Some(hit) {
+            self.search_preview = Some(SearchPreview { hit, messages });
+        }
+    }
+
+    /// The selected hit's preview; `None` until it's loaded, or with no hit
+    /// selected.
+    pub fn search_preview(&self) -> Option<&SearchPreview> {
+        self.search_preview
+            .as_ref()
+            .filter(|preview| self.selected_hit().map(|(id, ..)| id) == Some(preview.hit))
+    }
+
+    /// The typed text while this is the search picker; `None` otherwise.
+    pub fn search_query(&self) -> Option<&str> {
+        matches!(self.kind, PickerKind::Search { .. }).then(|| self.list.input())
+    }
+
+    /// Lists `items`, the rows `query` found, in the order given, selecting
+    /// the first. Ignored unless this is the search picker and `query` is
+    /// still its typed text, so a late result never replaces newer ones.
+    /// `overflow` is whether more matched than `items` holds.
+    pub fn show_hits(&mut self, query: &str, items: Vec<PickerItem>, overflow: bool) {
+        let PickerKind::Search { overflow: shown } = &mut self.kind else {
+            return;
+        };
+        if self.list.input() != query {
+            return;
+        }
+        *shown = overflow;
+        self.list.set_items(items, "");
     }
 
     /// Whether the selected thread's transcript, now `len` bytes long, needs
@@ -599,7 +680,8 @@ impl PickerState {
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
                 | PickerItem::Thread { .. }
-                | PickerItem::Worktree { .. },
+                | PickerItem::Worktree { .. }
+                | PickerItem::Hit { .. },
             ) => None,
             None => leaf.is_empty().then_some(dir),
         }
@@ -774,15 +856,14 @@ pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
             if left_out {
                 return None;
             }
-            let prefix = group.map_or(project.title.as_str(), |group| group.name.as_str());
-            let title = thread.title.as_deref().unwrap_or(NEW_THREAD);
+            let (label, split) = thread_label(project, thread);
             Some((
                 thread.last_chat(),
                 thread.id.0,
                 PickerItem::Thread {
                     id: thread.id,
-                    label: format!("{prefix}/{title}"),
-                    split: prefix.len() + 1,
+                    label,
+                    split,
                     settled: is_settled,
                 },
             ))
@@ -790,6 +871,17 @@ pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
         .collect();
     rows.sort_by_key(|(last_chat, id, _)| Reverse((*last_chat, *id)));
     rows.into_iter().map(|(_, _, item)| item).collect()
+}
+
+/// A thread's picker label, `<project>/title` or `<group>/title` for a
+/// group's thread, and the byte offset where the title starts.
+pub fn thread_label(project: &Project, thread: &Thread) -> (String, usize) {
+    let group = thread
+        .group
+        .and_then(|id| project.groups.iter().find(|group| group.id == id));
+    let prefix = group.map_or(project.title.as_str(), |group| group.name.as_str());
+    let title = thread.title.as_deref().unwrap_or(NEW_THREAD);
+    (format!("{prefix}/{title}"), prefix.len() + 1)
 }
 
 /// The worktree picker's rows: `app`'s worktrees in [`order`], each labelled

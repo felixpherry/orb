@@ -3244,7 +3244,7 @@ fn now_ms() -> i64 {
 }
 
 /// Milliseconds since the Unix epoch at `time`; before the epoch clamps to 0.
-fn to_ms(time: SystemTime) -> i64 {
+pub(crate) fn to_ms(time: SystemTime) -> i64 {
     time.duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)

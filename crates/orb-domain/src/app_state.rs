@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::feat::dashboard::state::DashboardCursor;
 use crate::feat::jumps::state::JumpList;
 use crate::feat::picker::state::PickerState;
+use crate::feat::search::state::SearchProgress;
 use crate::feat::sessions::state::{Sessions, ThreadId};
 use crate::feat::sidebar::state::{Rename, SidebarView};
 use crate::feat::worktrees::state::Worktrees;
@@ -64,4 +65,7 @@ pub struct AppState {
     /// orb's worktrees and the sweep's notice. Written by the worktrees actor,
     /// its owner; the intent handler also clears `notice` on the next intent.
     pub worktrees: Worktrees,
+    /// The search index's startup progress and failure. Written by the search
+    /// actor, its owner.
+    pub search: SearchProgress,
 }

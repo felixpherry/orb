@@ -1,6 +1,7 @@
 //! Binary entry point for orb. This is the only place that reads process state
 //! (the environment).
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use orb_domain::feat::git::git_cli::GitCli;
 use orb_domain::feat::git::git_service::GitService;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::terminal_notifier::{ClickTarget, Kitty, ZellijTarget, on_path};
+use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::child_env::child_env;
 use orb_domain::feat::sessions::claude_supervisor::ClaudeSupervisor;
 use orb_domain::feat::sessions::session_host::SessionHostService;
@@ -45,37 +47,7 @@ fn main() -> Result<(), Report<OrbError>> {
     let pane = std::env::var("ZELLIJ_PANE_ID")
         .ok()
         .and_then(|id| id.parse().ok());
-    let notifier = {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let kitty = {
-            let kitten = std::env::var_os("KITTY_INSTALLATION_DIR")
-                .map(|dir| PathBuf::from(dir).join("../../MacOS/kitten"))
-                .filter(|kitten| kitten.is_file())
-                .or_else(|| on_path("kitten", &path));
-            let socket = std::env::var("KITTY_LISTEN_ON").ok();
-            let window = std::env::var("KITTY_WINDOW_ID")
-                .ok()
-                .and_then(|id| id.parse().ok());
-            kitten.zip(socket).map(|(kitten, socket)| Kitty {
-                kitten,
-                socket,
-                window,
-            })
-        };
-        let zellij = {
-            let session = session.clone().and_then(|name| name.into_string().ok());
-            let zellij = on_path("zellij", &path);
-            match (zellij, session, pane) {
-                (Some(zellij), Some(session), Some(pane)) => Some(ZellijTarget {
-                    zellij,
-                    session,
-                    pane,
-                }),
-                _ => None,
-            }
-        };
-        NotifierService::desktop(&path, ClickTarget { kitty, zellij })
-    };
+    let notifier = desktop_notifier(session.clone(), pane);
     let zellij = session.map(|_| {
         let shell = std::env::var_os("SHELL").unwrap_or_else(|| "sh".into());
         let cli = ZellijCli::new(std::env::var_os("NO_COLOR"));
@@ -83,6 +55,7 @@ fn main() -> Result<(), Report<OrbError>> {
     });
     let store = Store::open(&home.join(".orb/userdata/state.sqlite")).change_context(OrbError)?;
     let orb_root = home.join(".orb");
+    let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
     let _context = runtime.enter();
@@ -117,16 +90,56 @@ fn main() -> Result<(), Report<OrbError>> {
         wake: frontend.waker(),
         sweep_every: SWEEP_EVERY,
     });
+    let search = spawn_search_actor(SearchActorDeps {
+        state: state.clone(),
+        index_path: search_index,
+        wake: frontend.waker(),
+    });
     frontend
         .run(
             state,
             sessions,
             worktrees,
             worktrees_root,
+            search,
             git,
             claude_env,
             zellij,
             notifier,
         )
         .change_context(OrbError)
+}
+
+/// Desktop notices, clicked back to orb's kitty window and zellij pane when
+/// orb runs in them.
+fn desktop_notifier(session: Option<OsString>, pane: Option<u32>) -> NotifierService {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let kitty = {
+        let kitten = std::env::var_os("KITTY_INSTALLATION_DIR")
+            .map(|dir| PathBuf::from(dir).join("../../MacOS/kitten"))
+            .filter(|kitten| kitten.is_file())
+            .or_else(|| on_path("kitten", &path));
+        let socket = std::env::var("KITTY_LISTEN_ON").ok();
+        let window = std::env::var("KITTY_WINDOW_ID")
+            .ok()
+            .and_then(|id| id.parse().ok());
+        kitten.zip(socket).map(|(kitten, socket)| Kitty {
+            kitten,
+            socket,
+            window,
+        })
+    };
+    let zellij = {
+        let session = session.and_then(|name| name.into_string().ok());
+        let zellij = on_path("zellij", &path);
+        match (zellij, session, pane) {
+            (Some(zellij), Some(session), Some(pane)) => Some(ZellijTarget {
+                zellij,
+                session,
+                pane,
+            }),
+            _ => None,
+        }
+    };
+    NotifierService::desktop(&path, ClickTarget { kitty, zellij })
 }

@@ -58,6 +58,23 @@ pub enum PickerItem {
         split: usize,
         extra: String,
     },
+    /// A message the search picker's query matched, in thread `thread`,
+    /// labelled `<project|group>/title` (`split` is where the title starts).
+    /// `snippet` is the one-line cut of the message with `lit` its matched
+    /// graphemes; `text_lit` are the matched graphemes in the whole message,
+    /// for the preview. `path` and `prompt_offset` name its exchange. Matches
+    /// every filter and lights nothing: the search index chose it.
+    Hit {
+        id: i64,
+        thread: ThreadId,
+        label: String,
+        split: usize,
+        snippet: String,
+        lit: Vec<usize>,
+        text_lit: Vec<usize>,
+        path: PathBuf,
+        prompt_offset: u64,
+    },
 }
 
 /// The text of the [`PickerItem::InitGit`] row, as in T3 Code.
@@ -506,7 +523,8 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         | PickerItem::AllProjects
         | PickerItem::Confirm(_)
         | PickerItem::Thread { .. }
-        | PickerItem::Worktree { .. } => false,
+        | PickerItem::Worktree { .. }
+        | PickerItem::Hit { .. } => false,
     }
 }
 
@@ -546,6 +564,10 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
             None => fuzzy_match(matcher, extra, terms).map(|_| (i64::MIN, Matches::default())),
         };
     }
+    // The search index already chose a hit.
+    if let PickerItem::Hit { .. } = item {
+        return Some((0, Matches::default()));
+    }
     // A project is matched on "title\nroot". Typed text never holds a line
     // break, so every offset falls on one side of it.
     let (label, title_len) = match item {
@@ -565,9 +587,9 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::InitGit => (INIT_GIT.to_owned(), None),
         PickerItem::AllProjects => (ALL_PROJECTS.to_owned(), None),
         PickerItem::Confirm(yes) => (confirm_label(*yes).to_owned(), None),
-        PickerItem::Thread { label, .. } | PickerItem::Worktree { label, .. } => {
-            (label.clone(), None)
-        }
+        PickerItem::Thread { label, .. }
+        | PickerItem::Worktree { label, .. }
+        | PickerItem::Hit { label, .. } => (label.clone(), None),
     };
     let (total, offsets) = fuzzy_match(matcher, &label, terms)?;
     let found = match title_len {
@@ -628,9 +650,9 @@ mod tests {
                 PickerItem::InitGit => super::INIT_GIT.to_owned(),
                 PickerItem::AllProjects => super::ALL_PROJECTS.to_owned(),
                 PickerItem::Confirm(yes) => super::confirm_label(*yes).to_owned(),
-                PickerItem::Thread { label, .. } | PickerItem::Worktree { label, .. } => {
-                    label.clone()
-                }
+                PickerItem::Thread { label, .. }
+                | PickerItem::Worktree { label, .. }
+                | PickerItem::Hit { label, .. } => label.clone(),
             })
             .collect()
     }
@@ -716,7 +738,8 @@ mod tests {
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
                 | PickerItem::Thread { .. }
-                | PickerItem::Worktree { .. } => None,
+                | PickerItem::Worktree { .. }
+                | PickerItem::Hit { .. } => None,
             })
             .collect();
         assert_eq!(

@@ -150,6 +150,7 @@ fn title(kind: &PickerKind, home: &Path) -> Cow<'static, str> {
         PickerKind::Projects | PickerKind::GroupProject => "Projects",
         PickerKind::Sessions { .. } => "Sessions",
         PickerKind::Worktrees => "Worktrees",
+        PickerKind::Search { .. } => "Search",
         PickerKind::ProjectFilter => "Filter projects",
         PickerKind::Directories { .. } => "Add project",
         PickerKind::Workspace { .. } => "Workspace",
@@ -408,9 +409,9 @@ fn row_content(
             None,
         ),
         PickerItem::Confirm(yes) => (highlight(confirm_label(*yes), &matches.name, |_| FG), None),
-        PickerItem::Thread { label, .. } | PickerItem::Worktree { label, .. } => {
-            (highlight(label, &matches.name, |_| FG), None)
-        }
+        PickerItem::Thread { label, .. }
+        | PickerItem::Worktree { label, .. }
+        | PickerItem::Hit { label, .. } => (highlight(label, &matches.name, |_| FG), None),
     }
 }
 

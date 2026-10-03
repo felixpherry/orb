@@ -5,7 +5,8 @@
 //! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle, delete,
 //! visit, save the sidebar's width and filter, save the jump list, create and start groups, start a
 //! group's sibling, pin, settle and delete groups, save a group draft, answer a trust confirm) go
-//! to the sessions actor; worktree commands (refresh, delete) go to the worktrees actor.
+//! to the sessions actor; worktree commands (refresh, delete) go to the worktrees actor; search
+//! commands (query, preview) go to the search actor.
 
 use std::path::PathBuf;
 
@@ -141,6 +142,17 @@ pub enum Command {
     RefreshWorktrees,
     /// Force-remove the worktree at `path`, keeping its branch.
     DeleteWorktree { path: PathBuf },
+    /// Bring the search index up to date and run `query` in it, listing the
+    /// rows in the open search picker while `query` is still its typed text.
+    SearchTranscripts { query: String },
+    /// Load the exchange of search hit `hit`, the prompt at `prompt_offset` in
+    /// the transcript at `path` and its replies, into the search picker's
+    /// preview.
+    LoadSearchPreview {
+        hit: i64,
+        path: PathBuf,
+        prompt_offset: u64,
+    },
 }
 
 /// Where a thread's session runs.

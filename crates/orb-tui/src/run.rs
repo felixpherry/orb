@@ -67,6 +67,7 @@ use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::PickerState;
+use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
 use orb_domain::feat::sessions::transcript::read_exchanges;
@@ -117,13 +118,13 @@ impl Frontend {
     }
 
     /// Runs orb's TUI until the user quits. Session commands go to
-    /// `sessions`; worktree commands go to `worktrees`; a thread whose
-    /// worktree under `worktrees_root` is gone has it recreated before
-    /// attaching; the branch picker's refs come from `git`; attached sessions
-    /// run with `claude_env`; tools open through `zellij`, `None` outside
-    /// zellij; notices are announced through `notifier` while orb's pane isn't
-    /// focused, or while zellij says no client is on it. The terminal is
-    /// restored on exit and on panic.
+    /// `sessions`; worktree commands go to `worktrees`; search commands go
+    /// to `search`; a thread whose worktree under `worktrees_root` is gone has
+    /// it recreated before attaching; the branch picker's refs come from
+    /// `git`; attached sessions run with `claude_env`; tools open through
+    /// `zellij`, `None` outside zellij; notices are announced through
+    /// `notifier` while orb's pane isn't focused, or while zellij says no
+    /// client is on it. The terminal is restored on exit and on panic.
     ///
     /// # Errors
     ///
@@ -135,6 +136,7 @@ impl Frontend {
         sessions: ActorRef<SessionsActor>,
         worktrees: ActorRef<WorktreesActor>,
         worktrees_root: PathBuf,
+        search: ActorRef<SearchActor>,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
@@ -149,6 +151,7 @@ impl Frontend {
                 sessions,
                 worktrees,
                 worktrees_root,
+                search,
                 git,
                 claude_env,
                 zellij,
@@ -314,6 +317,8 @@ struct App {
     /// Where orb makes worktrees; a thread's missing worktree there is
     /// recreated on attach.
     worktrees_root: PathBuf,
+    /// Runs transcript searches and loads their previews.
+    search: ActorRef<SearchActor>,
     git: GitService,
     keys: Keys,
     /// Each attached thread's `claude attach`, kept while other threads are
@@ -358,6 +363,7 @@ impl App {
         sessions: ActorRef<SessionsActor>,
         worktrees: ActorRef<WorktreesActor>,
         worktrees_root: PathBuf,
+        search: ActorRef<SearchActor>,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
@@ -374,6 +380,7 @@ impl App {
             sessions,
             worktrees,
             worktrees_root,
+            search,
             git,
             keys: Keys::new(keymap::keymap(), scope),
             panes: HashMap::new(),
@@ -816,6 +823,26 @@ impl App {
                 let _ = self
                     .worktrees
                     .tell(worktrees_actor::DeleteWorktree(path.clone()))
+                    .try_send();
+            }
+            Command::SearchTranscripts { query } => {
+                let _ = self
+                    .search
+                    .tell(search_actor::SearchTranscripts(query.clone()))
+                    .try_send();
+            }
+            Command::LoadSearchPreview {
+                hit,
+                path,
+                prompt_offset,
+            } => {
+                let _ = self
+                    .search
+                    .tell(search_actor::LoadSearchPreview {
+                        hit: *hit,
+                        path: path.clone(),
+                        prompt_offset: *prompt_offset,
+                    })
                     .try_send();
             }
             Command::RefreshSessions => {
