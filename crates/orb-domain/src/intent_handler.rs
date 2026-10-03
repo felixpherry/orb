@@ -7678,21 +7678,19 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn session_picker_leaves_out_the_selected_thread() {
-        // Given threads 1 and 2, with thread 2 selected.
-        let state = state_with(
-            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
-            2,
-        );
+    fn session_picker_lists_the_selected_thread() {
+        // Given thread 1 last ending at 20s and thread 2 at 10s, with thread 2
+        // selected.
+        let state = state_with(vec![ended_at(1, 20), ended_at(2, 10)], 2);
 
         // When opening the session picker.
         let state = open_sessions(state);
 
-        // Then only thread 1 is listed.
+        // Then both are listed, newest chat first.
         assert_eq!(
             session_ids(&state),
-            [ThreadId(1)],
-            "the selected thread shouldn't be listed"
+            [ThreadId(1), ThreadId(2)],
+            "the selected thread should be listed in its place"
         );
     }
 
@@ -7808,17 +7806,13 @@ mod tests {
 
     #[rstest::rstest]
     fn grouped_thread_row_is_labelled_slug_and_title() {
-        // Given thread 1, titled `api`, in group GT-514-login, with thread 2
-        // selected.
-        let mut state = grouped_state(false, on_thread(2));
-        if let Some(thread) = state
-            .sessions
-            .projects
-            .iter_mut()
-            .flat_map(|project| &mut project.threads)
-            .find(|thread| thread.id == ThreadId(1))
-        {
-            thread.title = Some("api".into());
+        // Given thread 1, titled `api`, alone in group GT-514-login.
+        let mut state = grouped_state(false, SidebarItem::SettledShelf);
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.threads.retain(|thread| thread.id == ThreadId(1));
+            if let Some(thread) = project.threads.first_mut() {
+                thread.title = Some("api".into());
+            }
         }
 
         // When opening the session picker.
@@ -7963,10 +7957,18 @@ mod tests {
         );
     }
 
+    /// The session picker opened on thread 2 of [`jumping`], listing 2, 1,
+    /// with thread 1 highlighted.
+    fn picking_thread_1() -> AppState {
+        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+        state
+    }
+
     #[rstest::rstest]
     fn picking_a_session_moves_the_cursor_to_it() {
-        // Given the session picker over thread 1, opened on thread 2.
-        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        // Given the session picker on thread 1, opened on thread 2.
+        let mut state = picking_thread_1();
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -7981,8 +7983,8 @@ mod tests {
 
     #[rstest::rstest]
     fn picking_a_session_returns_attach_for_it() {
-        // Given the session picker over thread 1, opened on thread 2.
-        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        // Given the session picker on thread 1, opened on thread 2.
+        let mut state = picking_thread_1();
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -8000,8 +8002,8 @@ mod tests {
 
     #[rstest::rstest]
     fn picking_a_session_focuses_the_pane() {
-        // Given the session picker over thread 1, opened on thread 2.
-        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        // Given the session picker on thread 1, opened on thread 2.
+        let mut state = picking_thread_1();
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -8016,11 +8018,12 @@ mod tests {
 
     #[rstest::rstest]
     fn picking_a_session_in_a_folded_group_opens_the_group() {
-        // Given the session picker over thread 1 of folded group 9, opened on
+        // Given the session picker on thread 1 of folded group 9, opened on
         // thread 2.
         let mut state = grouped_state(false, on_thread(2));
         state.sessions.folded.insert(GroupId(9));
         let mut state = open_sessions(state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -8034,10 +8037,11 @@ mod tests {
 
     #[rstest::rstest]
     fn picking_a_session_in_a_settled_group_opens_the_shelf() {
-        // Given the session picker showing settled threads over thread 1 of
+        // Given the session picker showing settled threads, on thread 1 of
         // settled group 9, opened on thread 2.
         let mut state = open_sessions(grouped_state(true, on_thread(2)));
         IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -8051,8 +8055,8 @@ mod tests {
 
     #[rstest::rstest]
     fn picking_a_session_records_the_row_left_then_the_thread() {
-        // Given the session picker over thread 1, opened on thread 2.
-        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        // Given the session picker on thread 1, opened on thread 2.
+        let mut state = picking_thread_1();
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -8065,10 +8069,25 @@ mod tests {
         );
     }
 
-    /// The session picker over thread 1, opened on thread 2, after thread 1
+    #[rstest::rstest]
+    fn picking_the_selected_thread_records_no_jump() {
+        // Given the session picker on thread 2, opened on thread 2.
+        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the jump list is still empty.
+        assert!(
+            state.jumps.entries().is_empty(),
+            "picking the thread you're on isn't a jump"
+        );
+    }
+
+    /// The session picker on thread 1, opened on thread 2, after thread 1
     /// was deleted.
     fn picking_deleted() -> AppState {
-        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        let mut state = picking_thread_1();
         if let Some(project) = state.sessions.projects.first_mut() {
             project.threads.retain(|thread| thread.id != ThreadId(1));
         }
@@ -8102,7 +8121,7 @@ mod tests {
     #[rstest::rstest]
     fn picking_a_session_that_turned_gone_leaves_the_cursor() {
         // Given thread 1 highlighted, but gone since the picker opened.
-        let state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        let state = picking_thread_1();
         let mut state = with_status(state, 1, ThreadStatus::Gone);
 
         // When confirming.
