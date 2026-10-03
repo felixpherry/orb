@@ -759,7 +759,7 @@ Written in the session picker's Verification step (not a milestone).
 - ``(picker) The session picker is drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions, with a lit `s` while settled threads show and `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.``
 - ``(picker) The session picker's preview shows the selected thread's status, branch and model, then its latest exchanges from the transcript (the prompt, the tools Claude ran, and the end of Claude's last reply as Markdown), or `No transcript yet` when there is none, and refreshes while the transcript grows.``
 
-### Mouse click
+### Mouse click (written)
 
 Written in mouse click's Verification step (not a milestone).
 
