@@ -257,6 +257,11 @@ impl PickerState {
         self.under.map(|list| *list)
     }
 
+    /// The picker this confirm is drawn over, if any.
+    pub fn under(&self) -> Option<&PickerState> {
+        self.under.as_deref()
+    }
+
     /// A `No`/`Yes` confirm of `kind`, with `No` selected.
     fn confirm(kind: PickerKind, return_to: Focus) -> Self {
         Self {
