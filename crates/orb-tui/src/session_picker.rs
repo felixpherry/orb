@@ -661,6 +661,7 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: UNIX_EPOCH,
+            created_at: UNIX_EPOCH,
             last_activity_at: now() - Duration::from_mins(5),
             unseen: false,
             group: None,

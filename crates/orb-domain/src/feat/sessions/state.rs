@@ -143,6 +143,8 @@ pub struct Thread {
     pub settled_at: Option<SystemTime>,
     /// Sorts Active: the later of its creation and its latest un-settle.
     pub active_since: SystemTime,
+    /// When the thread was created (its store row's `created_at`).
+    pub created_at: SystemTime,
     /// When orb last saw a turn end, else when the thread was created.
     pub last_activity_at: SystemTime,
     /// A turn ended after the user last selected the thread.
@@ -1230,6 +1232,7 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
+            created_at: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
             group: None,

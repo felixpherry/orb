@@ -9,6 +9,9 @@
 //! For the session picker's preview it also reads a transcript's tail into
 //! its last few exchanges: a prompt, the tools Claude ran, and Claude's last
 //! text.
+//!
+//! For transcript search it also reads the prompts and Claude's text replies,
+//! each with where it sits in the file and which prompt it answers.
 
 use std::{
     fs::{self, File},
@@ -311,6 +314,117 @@ fn next_exchange(mut exchanges: Vec<Exchange>, line: &Value) -> Vec<Exchange> {
     exchanges
 }
 
+/// Who wrote a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// A prompt the user typed.
+    User,
+    /// A text block of Claude's reply.
+    Assistant,
+}
+
+/// A prompt the user typed, or one text block of Claude's reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    /// Who wrote it.
+    pub role: Role,
+    /// The text, trimmed.
+    pub text: String,
+    /// Byte offset of its line in the transcript.
+    pub offset: u64,
+    /// Byte offset of the prompt that opened its exchange; 0 before any prompt.
+    pub prompt_offset: u64,
+    /// Unix ms from the line's `timestamp`, 0 when missing or unparsable.
+    pub at: i64,
+}
+
+/// The messages in a transcript's new lines, and where to read from next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRead {
+    /// The prompts and reply text blocks, in file order.
+    pub messages: Vec<Message>,
+    /// Bytes read so far; pass it to the next read.
+    pub offset: u64,
+    /// The file was shorter than the offset, so it was read from the start.
+    pub restarted: bool,
+    /// The prompt offset the last message ran under; pass it to the next read.
+    pub prompt_offset: u64,
+}
+
+/// Reads the prompts and Claude's text blocks added to the transcript since
+/// `offset`, each with where its line sits and which prompt it answers.
+///
+/// `prompt_offset` is the prompt the previous read ended under. A replaced
+/// transcript is read from the start, and its prompt offset starts at 0.
+///
+/// # Errors
+///
+/// Returns an error if the transcript can't be opened or read.
+pub fn read_messages(path: &Path, offset: u64, prompt_offset: u64) -> io::Result<MessageRead> {
+    let new = read_new_lines(path, offset)?;
+    let (mut line_offset, mut prompt_offset) = if new.restarted {
+        (0, 0)
+    } else {
+        (offset, prompt_offset)
+    };
+    let mut messages = Vec::new();
+    for line in new.text.split_inclusive('\n') {
+        let start = line_offset;
+        line_offset += line.len() as u64;
+        if !line.contains(r#""type":"user""#) && !line.contains(r#""type":"assistant""#) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let flag = |key| value.get(key).and_then(Value::as_bool) == Some(true);
+        if flag("isMeta") || flag("isSidechain") {
+            continue;
+        }
+        let time = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|text| text.parse::<jiff::Timestamp>().ok())
+            .map_or(0, jiff::Timestamp::as_millisecond);
+        let message = move |role, text| Message {
+            role,
+            text,
+            offset: start,
+            prompt_offset,
+            at: time,
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("user") => {
+                if let Some(text) = prompt_text(&value) {
+                    prompt_offset = start;
+                    messages.push(Message {
+                        prompt_offset,
+                        ..message(Role::User, text.to_owned())
+                    });
+                }
+            }
+            Some("assistant") => {
+                let blocks = value.pointer("/message/content").and_then(Value::as_array);
+                messages.extend(
+                    blocks
+                        .into_iter()
+                        .flatten()
+                        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                        .filter_map(|block| text_field(block, "text"))
+                        .map(|text| message(Role::Assistant, text)),
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(MessageRead {
+        messages,
+        offset: new.offset,
+        restarted: new.restarted,
+        prompt_offset,
+    })
+}
+
 #[cfg(test)]
 #[expect(
     clippy::panic_in_result_fn,
@@ -329,8 +443,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        Exchange, NewLines, TitleScan, locate, read_exchanges, read_new_lines, scan_title,
-        transcript_path,
+        Exchange, NewLines, TitleScan, locate, read_exchanges, read_messages, read_new_lines,
+        scan_title, transcript_path,
     };
 
     const PROMPT: &str = r#"{"type":"user","message":{"role":"user","content":"Fix the parser\nIt drops the last line"}}"#;
@@ -925,6 +1039,99 @@ mod tests {
             len,
             fs::metadata(&path)?.len(),
             "the length should be the file's"
+        );
+        Ok(())
+    }
+
+    /// The offsets of the messages `read_messages` finds in `lines` from the start.
+    fn message_offsets(lines: &[&str]) -> io::Result<Vec<(u64, u64)>> {
+        let dir = tempdir()?;
+        let path = write_transcript(dir.path(), lines)?;
+        Ok(read_messages(&path, 0, 0)?
+            .messages
+            .into_iter()
+            .map(|message| (message.offset, message.prompt_offset))
+            .collect())
+    }
+
+    #[rstest::rstest]
+    fn read_messages_gives_each_message_its_line_offset() -> io::Result<()> {
+        // Given a prompt and Claude's reply on the next line.
+        let first = user("Fix the parser");
+
+        // When reading the messages.
+        let offsets = message_offsets(&[&first, &text("Done")])?;
+
+        // Then the reply sits right after the prompt's line and its newline.
+        assert_eq!(
+            offsets.get(1).map(|(offset, _)| *offset),
+            Some(first.len() as u64 + 1),
+            "the second message should start after the first line"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn read_messages_gives_a_reply_the_offset_of_its_prompt() -> io::Result<()> {
+        // Given a reply, a prompt, then a reply to it.
+        let opener = text("Hello");
+
+        // When reading the messages.
+        let offsets = message_offsets(&[&opener, &user("Fix the parser"), &text("Done")])?;
+
+        // Then the last reply carries the prompt's offset.
+        assert_eq!(
+            offsets.last().map(|(_, prompt)| *prompt),
+            Some(opener.len() as u64 + 1),
+            "the reply should point at the prompt it answers"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn read_messages_carries_the_prompt_offset_into_the_next_read() -> io::Result<()> {
+        // Given a transcript read once after a reply and a prompt.
+        let dir = tempdir()?;
+        let opener = text("Hello");
+        let path = write_transcript(dir.path(), &[&opener, &user("Fix the parser")])?;
+        let first = read_messages(&path, 0, 0)?;
+        let mut file = OpenOptions::new().append(true).open(&path)?;
+        writeln!(file, "{}", text("Done"))?;
+
+        // When reading the appended reply from where the first read stopped.
+        let second = read_messages(&path, first.offset, first.prompt_offset)?;
+
+        // Then the reply carries the first read's prompt offset.
+        assert_eq!(
+            second
+                .messages
+                .iter()
+                .map(|message| message.prompt_offset)
+                .collect::<Vec<_>>(),
+            [opener.len() as u64 + 1],
+            "the reply should answer the prompt from the earlier read"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn read_messages_of_a_replaced_transcript_starts_the_prompt_offset_at_zero() -> io::Result<()> {
+        // Given a transcript replaced by a shorter one holding only a reply.
+        let dir = tempdir()?;
+        let path = write_transcript(dir.path(), &[&text("Done")])?;
+        let past_the_end = fs::metadata(&path)?.len() + 100;
+
+        // When reading it from a saved offset past its end.
+        let read = read_messages(&path, past_the_end, 50)?;
+
+        // Then the reply answers no prompt.
+        assert_eq!(
+            read.messages
+                .iter()
+                .map(|message| message.prompt_offset)
+                .collect::<Vec<_>>(),
+            [0],
+            "a replaced transcript's old prompt offset should be dropped"
         );
         Ok(())
     }

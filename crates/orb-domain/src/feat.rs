@@ -6,6 +6,7 @@ pub mod jumps;
 pub mod notify;
 pub mod pane;
 pub mod picker;
+pub mod search;
 pub mod sessions;
 pub mod sidebar;
 pub mod worktrees;

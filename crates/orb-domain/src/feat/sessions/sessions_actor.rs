@@ -3031,6 +3031,7 @@ fn thread(row: &ThreadRow, status: ThreadStatus, attach_argv: Vec<OsString>) -> 
             .filter(|_| row.settled_override == Some(SettledOverride::Settled))
             .map(from_ms),
         active_since: from_ms(row.created_at.max(row.unsettled_at.unwrap_or(0))),
+        created_at: from_ms(row.created_at),
         last_activity_at: from_ms(row.last_activity_at),
         unseen: row.last_activity_at > row.last_visited_at,
         group: row.group_id,
@@ -6856,6 +6857,44 @@ mod tests {
             added,
             vec![SystemTime::UNIX_EPOCH + Duration::from_millis(1_500)],
             "a restored project should keep when it was added"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_keeps_when_each_thread_was_created() -> Result<(), Report<StoreError>> {
+        // Given a thread created at 1.5 s.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1)?;
+        store.insert_thread(&NewThread {
+            project_id,
+            short_id: "t1".to_owned(),
+            cwd: PathBuf::from(PROJECT_ROOT),
+            created_at: 1_500,
+            model: None,
+            permission_mode: None,
+            group_id: None,
+        })?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the thread shows it was created at 1.5 s.
+        let created: Vec<SystemTime> = state
+            .read()
+            .sessions
+            .threads()
+            .map(|thread| thread.created_at)
+            .collect();
+        assert_eq!(
+            created,
+            vec![SystemTime::UNIX_EPOCH + Duration::from_millis(1_500)],
+            "a restored thread should keep when it was created"
         );
         Ok(())
     }
