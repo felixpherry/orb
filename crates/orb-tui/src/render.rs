@@ -3,7 +3,8 @@
 //! popup on top while a key sequence is pending.
 //! While the sidebar is hidden, the right side takes the full width.
 //! An open picker is drawn over everything but the mode line, without the
-//! popup, and so is the rename box while it has the keys.
+//! popup (the session picker in its own snacks layout), and so is the
+//! rename box while it has the keys.
 //! The terminal's cursor is shown only where the keys are: on the sidebar's
 //! selected row, at the text cursor of the picker, the rename box or the
 //! sidebar search, on the dashboard's highlighted item, or in the attached
@@ -14,6 +15,7 @@
 use std::time::SystemTime;
 
 use jiff::tz::TimeZone;
+use orb_domain::feat::picker::state::PickerKind;
 use orb_domain::feat::sidebar::state::{SidebarLayout, SidebarView};
 use orb_domain::{AppState, Focus};
 use orb_term::Pane;
@@ -26,6 +28,7 @@ use crate::keymap::Keys;
 use crate::mode_line;
 use crate::picker::{self, PickerScroll};
 use crate::rename;
+use crate::session_picker;
 use crate::sidebar::{self, SidebarScroll};
 use crate::which_key;
 
@@ -102,13 +105,19 @@ pub(crate) fn render(
         .filter(|_| state.focus == Focus::Rename);
     let picker_page = match (&state.picker, renaming) {
         (Some(picker), _) => {
-            let (rows, cursor) = picker::render(
-                picker,
-                &state.home,
-                sidebar_area.union(right),
-                frame.buffer_mut(),
-                picker_scroll,
-            );
+            let area = sidebar_area.union(right);
+            let (rows, cursor) = match picker.kind() {
+                PickerKind::Sessions { .. } => session_picker::render(
+                    picker,
+                    &state.sessions,
+                    &state.attached,
+                    now,
+                    area,
+                    frame.buffer_mut(),
+                    picker_scroll,
+                ),
+                _ => picker::render(picker, &state.home, area, frame.buffer_mut(), picker_scroll),
+            };
             frame.set_cursor_position(cursor);
             Some(rows)
         }
@@ -359,6 +368,23 @@ mod tests {
     fn mode_line(buffer: &Buffer) -> String {
         let [_, _, mode_line] = layout(buffer.area, &SidebarView::default());
         text(buffer, mode_line)
+    }
+
+    #[rstest::rstest]
+    fn session_picker_is_drawn_by_its_own_renderer() {
+        // Given an open session picker with no threads.
+        let state = AppState {
+            focus: Focus::Picker,
+            picker: Some(PickerState::sessions(vec![], Focus::Sidebar)),
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the input row shows the session picker's `0/0` count.
+        let screen = text(&buffer, buffer.area);
+        assert!(screen.contains("0/0"), "screen was\n{screen}");
     }
 
     #[rstest::rstest]

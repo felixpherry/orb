@@ -9,6 +9,7 @@ mod picker;
 mod rename;
 mod render;
 mod run;
+mod session_picker;
 mod sidebar;
 mod which_key;
 
