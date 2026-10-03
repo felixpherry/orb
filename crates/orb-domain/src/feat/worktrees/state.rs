@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::AppState;
 use crate::feat::git::git_service::WorktreeFacts;
@@ -215,15 +215,24 @@ pub fn last_used(users: &[User<'_>], facts: Option<&WorktreeFacts>) -> Option<Sy
     }
 }
 
-/// orb's worktrees as the picker lists them: newest use first, worktrees
-/// with no users last, then by path.
+/// orb's worktrees as the picker lists them: active ones first, worktrees
+/// with no users last, newest use first within each, then by path.
 #[must_use]
 pub fn order(app: &AppState) -> Vec<&Worktree> {
     let mut list: Vec<&Worktree> = app.worktrees.list.iter().collect();
     list.sort_by_cached_key(|worktree| {
         let users = users(app, &worktree.path);
-        let used = last_used(&users, worktree.facts.as_ref());
-        (users.is_empty(), Reverse(used), worktree.path.clone())
+        let facts = worktree.facts.as_ref();
+        // Whether a row is active never depends on the clock.
+        let active = row_state(&users, verdict(&users, facts, &app.attached, UNIX_EPOCH))
+            == RowState::Active;
+        let used = last_used(&users, facts);
+        (
+            !active,
+            users.is_empty(),
+            Reverse(used),
+            worktree.path.clone(),
+        )
     });
     list
 }
@@ -606,6 +615,41 @@ mod tests {
                 Path::new("/w/orb/orb-a"),
             ],
             "newest use first, orphans last"
+        );
+    }
+
+    #[rstest::rstest]
+    fn order_puts_active_worktrees_before_newer_settled_ones() {
+        // Given a settled worktree last chatted at 20 s and an active one last
+        // chatted at 10 s.
+        let worktree = |path: &str| Worktree {
+            path: PathBuf::from(path),
+            repo: None,
+            facts: Some(facts(0)),
+            size_kb: None,
+        };
+        let app = AppState {
+            worktrees: Worktrees {
+                list: vec![worktree("/w/orb/orb-a"), worktree("/w/orb/orb-b")],
+                notice: None,
+            },
+            ..app(vec![project(
+                vec![
+                    settled(chatted(thread(1, "/w/orb/orb-a"), 20), 1),
+                    chatted(thread(2, "/w/orb/orb-b"), 10),
+                ],
+                vec![],
+            )])
+        };
+
+        // When ordering the worktrees.
+        let paths: Vec<&Path> = order(&app).iter().map(|w| w.path.as_path()).collect();
+
+        // Then the active one leads despite its older use.
+        assert_eq!(
+            paths,
+            [Path::new("/w/orb/orb-b"), Path::new("/w/orb/orb-a")],
+            "active first, then newest use"
         );
     }
 
