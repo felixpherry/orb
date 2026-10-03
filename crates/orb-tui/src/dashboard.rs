@@ -25,6 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::mouse::HitMap;
 use crate::sidebar::{
     self, BLUE, BLUE1, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK,
     FOLDER, MAGENTA, ORANGE, YELLOW,
@@ -76,14 +77,15 @@ const SKY: [(i16, i16, &str, Color); 10] = [
 /// above it; a blank, the footer and a blank below it.
 const CHROME_HEIGHT: u16 = 12;
 
-/// Draws the dashboard into `area` with `pane_error` under the footer.
-/// Returns where the cursor goes: the first cell of the highlighted item's
+/// Draws the dashboard into `area` with `pane_error` under the footer, and
+/// records each menu item's line in `hits`. Returns where the cursor goes: the first cell of the highlighted item's
 /// label.
 pub(crate) fn render(
     state: &AppState,
     pane_error: Option<&str>,
     area: Rect,
     buf: &mut Buffer,
+    hits: &mut HitMap,
 ) -> Position {
     let items = items(&state.sessions);
     let cursor = state.dashboard.index(&state.sessions, items.len());
@@ -112,6 +114,10 @@ pub(crate) fn render(
             area,
             buf,
         );
+        let row = Rect::new(menu_x, y, menu_width, 1).intersection(area);
+        if !row.is_empty() {
+            hits.record_menu_item(row, index);
+        }
         if index == cursor {
             at.y = y;
         }
@@ -432,6 +438,7 @@ mod tests {
     use ratatui::layout::{Position, Rect};
 
     use super::{ORANGE, SHADOW, render};
+    use crate::mouse::HitMap;
 
     fn thread(id: i64) -> Thread {
         Thread {
@@ -528,7 +535,13 @@ mod tests {
         height: u16,
     ) -> (Buffer, Position) {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
-        let at = render(state, pane_error, buf.area, &mut buf);
+        let at = render(
+            state,
+            pane_error,
+            buf.area,
+            &mut buf,
+            &mut HitMap::default(),
+        );
         (buf, at)
     }
 
@@ -899,7 +912,13 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
 
         // When drawing the dashboard into the area.
-        render(&state, Some("claude attach failed"), area, &mut buf);
+        render(
+            &state,
+            Some("claude attach failed"),
+            area,
+            &mut buf,
+            &mut HitMap::default(),
+        );
 
         // Then every cell outside the area is still blank.
         let drawn: Vec<Position> = buf
@@ -909,5 +928,28 @@ mod tests {
             .filter(|at| buf.cell(*at).is_some_and(|cell| cell.symbol() != " "))
             .collect();
         assert_eq!(drawn, [], "cells drawn outside the area");
+    }
+
+    #[rstest::rstest]
+    #[case::first(0)]
+    #[case::third(2)]
+    fn hit_map_maps_each_menu_item_to_its_index(#[case] moves: usize) {
+        // Given a selected thread with the menu cursor moved `moves` items down.
+        let mut state = selected_thread();
+        for _ in 0..moves {
+            state.dashboard.next(&state.sessions);
+        }
+
+        // When drawing the dashboard 80×40.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 40));
+        let mut hits = HitMap::default();
+        let at = render(&state, None, buf.area, &mut buf, &mut hits);
+
+        // Then the highlighted item's line maps back to its index.
+        assert_eq!(
+            hits.menu_item_at(at),
+            Some(moves),
+            "the item under the cursor's cell"
+        );
     }
 }
