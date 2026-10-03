@@ -12,9 +12,10 @@ use crate::feat::git::worktree::previous_worktree;
 use crate::feat::jumps::validator::{validate_jump_back, validate_jump_forward};
 use crate::feat::pane::validator::{validate_attach, validate_detach};
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
-use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
+use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState, session_items};
 use crate::feat::picker::validator::{
-    validate_add_directory, validate_open_directory, validate_pick_project, validate_remove_project,
+    validate_add_directory, validate_open_directory, validate_pick_project, validate_pick_session,
+    validate_remove_project,
 };
 use crate::feat::sessions::state::{
     AttachTarget, Draft, DraftWorkspace, Group, GroupId, GroupKind, Project, ProjectId,
@@ -229,6 +230,11 @@ impl IntentHandler {
                 (Ok(()), Some(project)) => open_draft(state, project),
                 _ => vec![],
             },
+            Intent::OpenSessionPicker => {
+                let items = session_items(&state.sessions, false);
+                open_picker(state, PickerState::sessions(items, state.focus));
+                vec![]
+            }
             Intent::FilterProjects => {
                 let items = std::iter::once(PickerItem::AllProjects)
                     .chain(
@@ -620,6 +626,15 @@ impl IntentHandler {
                 }) => close_picker(state)
                     .map(|picker| pick_group_branch(&picker))
                     .unwrap_or_default(),
+                Some(PickerKind::Sessions { .. }) => match (
+                    validate_pick_session(state),
+                    close_picker(state)
+                        .as_ref()
+                        .and_then(PickerState::selected_thread),
+                ) {
+                    (Ok(()), Some(thread)) => pick_session(state, thread),
+                    _ => vec![],
+                },
                 _ => match (validate_pick_project(state), validate_add_directory(state)) {
                     (Ok(()), _) => {
                         match close_picker(state).as_ref().and_then(PickerState::selected) {
@@ -653,6 +668,12 @@ impl IntentHandler {
                 }
                 _ => vec![],
             },
+            Intent::PickerToggleSettled => {
+                if let Some(picker) = &mut state.picker {
+                    picker.toggle_settled(&state.sessions);
+                }
+                vec![]
+            }
             Intent::OpenShelf => match validate_open_shelf(state) {
                 Ok(()) => {
                     state.sessions.open_shelf();
@@ -1164,6 +1185,19 @@ fn open_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
         .chain(outside.then_some(Command::SaveUi))
         .chain(record_jump(state, from))
         .collect()
+}
+
+/// Jumps to `thread`, picked in the session picker: puts the cursor on it,
+/// opens what hides its row, and attaches like `⏎` on the row, recording the
+/// move as a jump.
+fn pick_session(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
+    let from = state.sessions.cursor;
+    let item = SidebarItem::Thread(thread);
+    state.sessions.cursor = Some(item);
+    state.sessions.reveal(item);
+    let mut commands = record_jump(state, from);
+    commands.extend(show_pane(state));
+    with_visit(state, commands)
 }
 
 /// Applies `edit` to `project`'s draft and asks the sessions actor to save it;
@@ -7291,6 +7325,569 @@ mod tests {
         assert!(
             state.jumps.entries().is_empty(),
             "discarding should drop the draft from the jump list"
+        );
+    }
+
+    /// `state` with the session picker opened from its focus.
+    fn open_sessions(mut state: AppState) -> AppState {
+        IntentHandler::handle(&Intent::OpenSessionPicker, &mut state);
+        state
+    }
+
+    /// The thread ids the open picker shows, in order.
+    fn session_ids(state: &AppState) -> Vec<ThreadId> {
+        state
+            .picker
+            .iter()
+            .flat_map(PickerState::shown)
+            .filter_map(|(item, _)| match item {
+                PickerItem::Thread { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The labels the open picker shows, in order.
+    fn session_labels(state: &AppState) -> Vec<String> {
+        state
+            .picker
+            .iter()
+            .flat_map(PickerState::shown)
+            .filter_map(|(item, _)| match item {
+                PickerItem::Thread { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `thread` titled `title`.
+    fn named(thread: Thread, title: &str) -> Thread {
+        Thread {
+            title: Some(title.into()),
+            ..thread
+        }
+    }
+
+    /// Thread `id`, idle, whose last turn ended at second `secs`.
+    fn ended_at(id: i64, secs: u64) -> Thread {
+        Thread {
+            last_activity_at: at(secs),
+            ..thread(id, ThreadStatus::Idle)
+        }
+    }
+
+    /// One project per title, holding idle thread 11, 21, … in turn, with no
+    /// row selected.
+    fn with_project_threads(titles: &[&str]) -> AppState {
+        let mut state = with_projects(titles);
+        for (project, id) in state.sessions.projects.iter_mut().zip((11..).step_by(10)) {
+            project.threads = vec![thread(id, ThreadStatus::Idle)];
+        }
+        state
+    }
+
+    /// `state` after typing `keys` into the open picker.
+    fn typed(mut state: AppState, keys: &[char]) -> AppState {
+        for &ch in keys {
+            IntentHandler::handle(&Intent::PickerInput(ch), &mut state);
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn session_picker_lists_the_latest_turn_end_first() {
+        // Given thread 1 last ending at 20s and thread 2 at 10s.
+        let state = state_at(
+            vec![ended_at(1, 20), ended_at(2, 10)],
+            SidebarItem::SettledShelf,
+        );
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then thread 1 is listed first.
+        assert_eq!(
+            session_ids(&state),
+            [ThreadId(1), ThreadId(2)],
+            "the latest turn end should come first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_picker_lists_a_working_thread_by_its_turn_start() {
+        // Given working thread 1, last ending at 10s with a turn started at
+        // 30s, and thread 2 last ending at 20s.
+        let working = Thread {
+            status: ThreadStatus::Working,
+            turn_started_at: Some(at(30)),
+            ..ended_at(1, 10)
+        };
+        let state = state_at(vec![working, ended_at(2, 20)], SidebarItem::SettledShelf);
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then the working thread is listed first.
+        assert_eq!(
+            session_ids(&state),
+            [ThreadId(1), ThreadId(2)],
+            "a turn started after another's end should rank first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_picker_lists_only_the_filtered_projects_threads() {
+        // Given alpha (thread 11) and beta (thread 21), filtered to alpha.
+        let mut state = with_project_threads(&["alpha", "beta"]);
+        state.sessions.filter = Some(ProjectId(1));
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then only alpha's thread is listed.
+        assert_eq!(
+            session_ids(&state),
+            [ThreadId(11)],
+            "the project filter should apply"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_picker_leaves_out_the_selected_thread() {
+        // Given threads 1 and 2, with thread 2 selected.
+        let state = state_with(
+            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+            2,
+        );
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then only thread 1 is listed.
+        assert_eq!(
+            session_ids(&state),
+            [ThreadId(1)],
+            "the selected thread shouldn't be listed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_picker_leaves_out_a_gone_thread() {
+        // Given gone thread 1 and idle thread 2.
+        let state = state_at(
+            vec![thread(1, ThreadStatus::Gone), thread(2, ThreadStatus::Idle)],
+            SidebarItem::SettledShelf,
+        );
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then only thread 2 is listed.
+        assert_eq!(
+            session_ids(&state),
+            [ThreadId(2)],
+            "a gone thread shouldn't be listed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_picker_leaves_out_a_thread_being_deleted() {
+        // Given threads 1 and 2, with thread 1 being deleted.
+        let mut state = state_at(
+            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+            SidebarItem::SettledShelf,
+        );
+        state.sessions.deleting.insert(ThreadId(1));
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then only thread 2 is listed.
+        assert_eq!(
+            session_ids(&state),
+            [ThreadId(2)],
+            "a thread being deleted shouldn't be listed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_picker_hides_a_settled_thread() {
+        // Given settled thread 1 and idle thread 2.
+        let state = state_at(
+            vec![settled(1), thread(2, ThreadStatus::Idle)],
+            SidebarItem::SettledShelf,
+        );
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then only thread 2 is listed.
+        assert_eq!(
+            session_ids(&state),
+            [ThreadId(2)],
+            "settled threads should start hidden"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggling_settled_lists_a_settled_thread() {
+        // Given the session picker over settled thread 1 and idle thread 2.
+        let mut state = open_sessions(state_at(
+            vec![settled(1), thread(2, ThreadStatus::Idle)],
+            SidebarItem::SettledShelf,
+        ));
+
+        // When handling PickerToggleSettled.
+        IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+
+        // Then thread 1 is listed.
+        assert!(
+            session_ids(&state).contains(&ThreadId(1)),
+            "toggling settled should list settled threads"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_picker_hides_a_thread_in_a_settled_group() {
+        // Given threads 1 and 2 in settled group 9, with no row selected.
+        let state = grouped_state(true, SidebarItem::SettledShelf);
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then nothing is listed.
+        assert!(
+            session_ids(&state).is_empty(),
+            "a settled group's threads should start hidden"
+        );
+    }
+
+    #[rstest::rstest]
+    fn lone_thread_row_is_labelled_project_and_title() {
+        // Given thread 1, titled `fix login`, in project `work`.
+        let state = state_at(
+            vec![named(thread(1, ThreadStatus::Idle), "fix login")],
+            SidebarItem::SettledShelf,
+        );
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then its row reads `work/fix login`.
+        assert_eq!(
+            session_labels(&state),
+            ["work/fix login"],
+            "a lone thread is labelled by its project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grouped_thread_row_is_labelled_slug_and_title() {
+        // Given thread 1, titled `api`, in group GT-514-login, with thread 2
+        // selected.
+        let mut state = grouped_state(false, on_thread(2));
+        if let Some(thread) = state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| &mut project.threads)
+            .find(|thread| thread.id == ThreadId(1))
+        {
+            thread.title = Some("api".into());
+        }
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then its row reads `GT-514-login/api`.
+        assert_eq!(
+            session_labels(&state),
+            ["GT-514-login/api"],
+            "a grouped thread is labelled by its group's slug"
+        );
+    }
+
+    #[rstest::rstest]
+    fn incognito_thread_row_is_labelled_incognito_and_title() {
+        // Given thread 1, titled `scratch`, in orb's Incognito project.
+        let mut state = with_projects(&["Incognito"]);
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.kind = ProjectKind::Incognito;
+            project.threads = vec![named(thread(1, ThreadStatus::Idle), "scratch")];
+        }
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then its row reads `Incognito/scratch`.
+        assert_eq!(
+            session_labels(&state),
+            ["Incognito/scratch"],
+            "an Incognito thread is labelled Incognito"
+        );
+    }
+
+    #[rstest::rstest]
+    fn untitled_thread_row_ends_in_new_thread() {
+        // Given untitled thread 1 in project `work`.
+        let state = state_at(
+            vec![thread(1, ThreadStatus::Idle)],
+            SidebarItem::SettledShelf,
+        );
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then its row reads `work/New thread`.
+        assert_eq!(
+            session_labels(&state),
+            ["work/New thread"],
+            "an untitled thread is labelled New thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn typed_project_name_narrows_to_its_threads() {
+        // Given the session picker over itemku (thread 11) and orb (thread
+        // 21), with no project filter.
+        let state = open_sessions(with_project_threads(&["itemku", "orb"]));
+
+        // When typing `itemku`.
+        let state = typed(state, &['i', 't', 'e', 'm', 'k', 'u']);
+
+        // Then only itemku's thread is shown.
+        assert_eq!(
+            session_ids(&state),
+            [ThreadId(11)],
+            "typed text should match the project part of the label"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_session_picker_from_the_pane_returns_to_the_pane() {
+        // Given the keys in the attached pane.
+        let state = jumping(Focus::Attached, &[2], &[]);
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then closing it would return to the pane.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::return_to),
+            Some(Focus::Attached),
+            "the session picker should return to the pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_session_picker_focuses_the_picker() {
+        // Given the keys in the sidebar.
+        let state = jumping(Focus::Sidebar, &[], &[]);
+
+        // When opening the session picker.
+        let state = open_sessions(state);
+
+        // Then the picker takes the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Picker,
+            "the picker should take the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_settled_with_text_typed_lists_the_settled_match() {
+        // Given the session picker over settled `alpha` (1) and `beta` (2),
+        // with `alpha` typed, which shows nothing.
+        let state = state_at(
+            vec![
+                named(settled(1), "alpha"),
+                named(thread(2, ThreadStatus::Idle), "beta"),
+            ],
+            SidebarItem::SettledShelf,
+        );
+        let mut state = typed(open_sessions(state), &['a', 'l', 'p', 'h', 'a']);
+
+        // When handling PickerToggleSettled.
+        IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+
+        // Then only `alpha` is shown, still filtered by the typed text.
+        assert_eq!(
+            session_ids(&state),
+            [ThreadId(1)],
+            "toggling should keep the typed text"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_settled_in_another_picker_changes_nothing() {
+        // Given the project picker over alpha and beta.
+        let mut state = picking(Focus::Sidebar);
+
+        // When handling PickerToggleSettled.
+        IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+
+        // Then it's still the project picker over both projects.
+        assert_eq!(
+            state
+                .picker
+                .as_ref()
+                .map(|picker| (picker.kind().clone(), picker.total())),
+            Some((PickerKind::Projects, 2)),
+            "other pickers should ignore the settled toggle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_session_moves_the_cursor_to_it() {
+        // Given the session picker over thread 1, opened on thread 2.
+        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the cursor is on thread 1.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(1)),
+            "picking should select the thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_session_returns_attach_for_it() {
+        // Given the session picker over thread 1, opened on thread 2.
+        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the loop attaches to thread 1.
+        assert!(
+            commands.contains(&Command::Attach(AttachTarget {
+                thread: ThreadId(1),
+                argv: vec!["claude".into(), "attach".into(), "t1".into()],
+                cwd: "/work/1".into(),
+            })),
+            "picking should attach to the thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_session_focuses_the_pane() {
+        // Given the session picker over thread 1, opened on thread 2.
+        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the pane takes the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Attached,
+            "picking should focus the pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_session_in_a_folded_group_opens_the_group() {
+        // Given the session picker over thread 1 of folded group 9, opened on
+        // thread 2.
+        let mut state = grouped_state(false, on_thread(2));
+        state.sessions.folded.insert(GroupId(9));
+        let mut state = open_sessions(state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then group 9 is open.
+        assert!(
+            !state.sessions.folded.contains(&GroupId(9)),
+            "picking should open the thread's group"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_session_in_a_settled_group_opens_the_shelf() {
+        // Given the session picker showing settled threads over thread 1 of
+        // settled group 9, opened on thread 2.
+        let mut state = open_sessions(grouped_state(true, on_thread(2)));
+        IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the Settled shelf is open.
+        assert!(
+            state.sessions.shelf_open,
+            "picking a settled group's thread should open the shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_session_records_the_row_left_then_the_thread() {
+        // Given the session picker over thread 1, opened on thread 2.
+        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then thread 2, then thread 1, are recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(2), on_thread(1)],
+            "picking should record where it left and where it landed"
+        );
+    }
+
+    /// The session picker over thread 1, opened on thread 2, after thread 1
+    /// was deleted.
+    fn picking_deleted() -> AppState {
+        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.threads.retain(|thread| thread.id != ThreadId(1));
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn picking_a_session_deleted_since_opening_closes_the_picker() {
+        // Given thread 1 highlighted, but deleted since the picker opened.
+        let mut state = picking_deleted();
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the picker is closed.
+        assert!(state.picker.is_none(), "the picker should close");
+    }
+
+    #[rstest::rstest]
+    fn picking_a_session_deleted_since_opening_returns_no_commands() {
+        // Given thread 1 highlighted, but deleted since the picker opened.
+        let mut state = picking_deleted();
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing happens.
+        assert!(commands.is_empty(), "a deleted thread can't be jumped into");
+    }
+
+    #[rstest::rstest]
+    fn picking_a_session_that_turned_gone_leaves_the_cursor() {
+        // Given thread 1 highlighted, but gone since the picker opened.
+        let state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        let mut state = with_status(state, 1, ThreadStatus::Gone);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the cursor stays on thread 2.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(2)),
+            "a gone thread can't be jumped into"
         );
     }
 }

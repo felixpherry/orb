@@ -115,6 +115,7 @@ fn title(kind: &PickerKind, home: &Path) -> Cow<'static, str> {
             return Cow::Owned(format!("Trust {}?", tilde(dir, home)));
         }
         PickerKind::Projects | PickerKind::GroupProject => "Projects",
+        PickerKind::Sessions { .. } => "Sessions",
         PickerKind::ProjectFilter => "Filter projects",
         PickerKind::Directories { .. } => "Add project",
         PickerKind::Workspace { .. } => "Workspace",
@@ -370,6 +371,7 @@ fn row_content(
             None,
         ),
         PickerItem::Confirm(yes) => (highlight(confirm_label(*yes), &matches.name, |_| FG), None),
+        PickerItem::Thread { label, .. } => (highlight(label, &matches.name, |_| FG), None),
     }
 }
 

@@ -8,7 +8,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
-use crate::feat::sessions::state::{ProjectId, ProjectKind};
+use crate::feat::sessions::state::{ProjectId, ProjectKind, ThreadId};
 
 /// One row a picker can show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +39,15 @@ pub enum PickerItem {
     AllProjects,
     /// A confirm picker's answer: `Yes` or `No`. Matched on its label.
     Confirm(bool),
+    /// A thread in the session picker, labelled `<project|group>/title` and
+    /// matched on the whole label. `split` is the byte offset where the title
+    /// starts. `settled` is whether it, or its group, is settled.
+    Thread {
+        id: ThreadId,
+        label: String,
+        split: usize,
+        settled: bool,
+    },
 }
 
 /// The text of the [`PickerItem::InitGit`] row, as in T3 Code.
@@ -446,7 +455,8 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         | PickerItem::Setting(_)
         | PickerItem::InitGit
         | PickerItem::AllProjects
-        | PickerItem::Confirm(_) => false,
+        | PickerItem::Confirm(_)
+        | PickerItem::Thread { .. } => false,
     }
 }
 
@@ -491,6 +501,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::InitGit => (INIT_GIT.to_owned(), None),
         PickerItem::AllProjects => (ALL_PROJECTS.to_owned(), None),
         PickerItem::Confirm(yes) => (confirm_label(*yes).to_owned(), None),
+        PickerItem::Thread { label, .. } => (label.clone(), None),
     };
     let (total, offsets) = fuzzy_match(matcher, &label, terms)?;
     let found = match title_len {
@@ -551,6 +562,7 @@ mod tests {
                 PickerItem::InitGit => super::INIT_GIT.to_owned(),
                 PickerItem::AllProjects => super::ALL_PROJECTS.to_owned(),
                 PickerItem::Confirm(yes) => super::confirm_label(*yes).to_owned(),
+                PickerItem::Thread { label, .. } => label.clone(),
             })
             .collect()
     }
@@ -634,7 +646,8 @@ mod tests {
                 | PickerItem::Heading(_)
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
-                | PickerItem::Confirm(_) => None,
+                | PickerItem::Confirm(_)
+                | PickerItem::Thread { .. } => None,
             })
             .collect();
         assert_eq!(

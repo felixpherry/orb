@@ -1,5 +1,6 @@
 //! Checks whether the open picker's keys can proceed: `⏎` picking a project
-//! or adding a directory, `Tab` opening one, and `<C-x>` removing a project.
+//! or adding a directory, `Tab` opening one, `<C-x>` removing a project, and
+//! `⏎` picking a thread in the session picker.
 
 use crate::feat::picker::list::PickerItem;
 
@@ -7,6 +8,7 @@ use wherror::Error;
 
 use crate::AppState;
 use crate::feat::picker::state::PickerKind;
+use crate::feat::sessions::state::ThreadStatus;
 
 /// Why picking a project can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -119,18 +121,57 @@ pub fn validate_remove_project(state: &AppState) -> Result<(), RemoveProjectErro
     }
 }
 
+/// Why picking a thread in the session picker can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum PickSessionError {
+    /// No session picker is open.
+    NoPicker,
+    /// No thread is highlighted.
+    NoThread,
+    /// The thread was deleted, or is being deleted, since the picker opened.
+    Deleted,
+    /// Claude no longer knows the thread's session.
+    Gone,
+}
+
+/// Allow jumping into the thread highlighted in the session picker.
+///
+/// # Errors
+///
+/// Returns [`PickSessionError::NoPicker`] unless the session picker is open,
+/// [`PickSessionError::NoThread`] when nothing is highlighted,
+/// [`PickSessionError::Deleted`] when the thread is gone from the sidebar or
+/// being deleted, and [`PickSessionError::Gone`] when its session is `Gone`.
+pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
+    let id = match &state.picker {
+        Some(picker) if matches!(picker.kind(), PickerKind::Sessions { .. }) => {
+            picker.selected_thread().ok_or(PickSessionError::NoThread)?
+        }
+        _ => return Err(PickSessionError::NoPicker),
+    };
+    if state.sessions.deleting.contains(&id) {
+        return Err(PickSessionError::Deleted);
+    }
+    match state.sessions.threads().find(|thread| thread.id == id) {
+        None => Err(PickSessionError::Deleted),
+        Some(thread) if thread.status == ThreadStatus::Gone => Err(PickSessionError::Gone),
+        Some(_) => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AddDirectoryError, OpenDirectoryError, PickProjectError, RemoveProjectError,
-        validate_add_directory, validate_open_directory, validate_pick_project,
-        validate_remove_project,
+        AddDirectoryError, OpenDirectoryError, PickProjectError, PickSessionError,
+        RemoveProjectError, validate_add_directory, validate_open_directory, validate_pick_project,
+        validate_pick_session, validate_remove_project,
     };
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
-    use crate::feat::sessions::state::{ProjectId, ProjectKind, Sessions};
+    use crate::feat::sessions::state::{ProjectId, ProjectKind, Sessions, ThreadId};
     use crate::{AppState, Focus};
 
     const HOME: &str = "/home/me";
@@ -142,6 +183,19 @@ mod tests {
             root: "/alpha".into(),
             kind: ProjectKind::Normal,
         }
+    }
+
+    /// The session picker over one row, thread 1.
+    fn picking_thread_1() -> PickerState {
+        PickerState::sessions(
+            vec![PickerItem::Thread {
+                id: ThreadId(1),
+                label: "work/New thread".into(),
+                split: 5,
+                settled: false,
+            }],
+            Focus::Sidebar,
+        )
     }
 
     /// The directory picker at `~/`, which lists `names`.
@@ -296,5 +350,49 @@ mod tests {
 
         // Then it is allowed.
         assert_eq!(result, Ok(()), "a project row can be removed");
+    }
+
+    #[rstest::rstest]
+    fn pick_session_is_refused_for_a_thread_being_deleted() {
+        // Given thread 1 highlighted in the session picker while it's being
+        // deleted.
+        let state = AppState {
+            picker: Some(picking_thread_1()),
+            sessions: Sessions {
+                deleting: [ThreadId(1)].into(),
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        };
+
+        // When validating a pick.
+        let result = validate_pick_session(&state);
+
+        // Then validation fails with Deleted.
+        assert_eq!(
+            result,
+            Err(PickSessionError::Deleted),
+            "a thread being deleted can't be jumped into"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pick_session_is_refused_for_a_thread_no_longer_listed() {
+        // Given thread 1 highlighted in the session picker, but no longer in
+        // the sidebar.
+        let state = AppState {
+            picker: Some(picking_thread_1()),
+            ..AppState::default()
+        };
+
+        // When validating a pick.
+        let result = validate_pick_session(&state);
+
+        // Then validation fails with Deleted.
+        assert_eq!(
+            result,
+            Err(PickSessionError::Deleted),
+            "a deleted thread can't be jumped into"
+        );
     }
 }

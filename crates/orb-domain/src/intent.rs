@@ -58,6 +58,9 @@ pub enum Intent {
     /// Open orb's Incognito project's draft, creating it when it has none,
     /// like picking a project in the project picker; `⏎` then starts it.
     NewIncognito,
+    /// Open the session picker over the threads inside the project filter,
+    /// newest chat first, to jump into one.
+    OpenSessionPicker,
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
     FilterProjects,
@@ -136,6 +139,9 @@ pub enum Intent {
     PickerCancel,
     /// Ask to remove the project highlighted in the project filter.
     PickerRemove,
+    /// Show or hide settled threads in the session picker, keeping the typed
+    /// text.
+    PickerToggleSettled,
 }
 
 /// The label the which-key popup shows for the intent.
@@ -160,6 +166,7 @@ impl fmt::Display for Intent {
             Self::JumpForward => "jump forward",
             Self::NewSession => "new session",
             Self::NewIncognito => "incognito",
+            Self::OpenSessionPicker => "sessions",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",
             Self::PickerHalfPageUp | Self::SelectHalfPageUp => "half page up",
@@ -192,6 +199,7 @@ impl fmt::Display for Intent {
             Self::PickerOpen => "open directory",
             Self::PickerCancel => "cancel",
             Self::PickerRemove => "remove",
+            Self::PickerToggleSettled => "toggle settled",
         })
     }
 }
@@ -213,6 +221,14 @@ mod tests {
             expected,
             "which-key label"
         );
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::OpenSessionPicker, "sessions")]
+    #[case(Intent::PickerToggleSettled, "toggle settled")]
+    fn session_picker_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
+        // Given / When / Then: which-key labels the session picker's intents.
+        assert_eq!(intent.to_string(), expected, "which-key label");
     }
 
     #[rstest::rstest]

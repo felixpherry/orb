@@ -5,7 +5,9 @@
 //! subdirectories. Editing the directory part asks the frontend to list the
 //! new directory.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::Focus;
 use crate::feat::git::git_service::GitRef;
@@ -13,7 +15,9 @@ use crate::feat::picker::list::{
     BranchRow, LEGACY_MODELS, MODELS, Matches, Model, PERMISSION_MODES, PickerItem, PickerList,
     model,
 };
-use crate::feat::sessions::state::{GroupId, GroupKind, ProjectId, ThreadId};
+use crate::feat::sessions::state::{
+    GroupId, GroupKind, NEW_THREAD, ProjectId, Sessions, ThreadId, ThreadStatus,
+};
 
 /// What a workspace or branch picker sets up: a thread, a project's draft,
 /// or (branch only) a Feature group's worktree.
@@ -83,6 +87,9 @@ pub enum PickerKind {
     /// (the git root, the main repository for a worktree, else the folder):
     /// confirm trusting it.
     TrustWorkspace { dir: PathBuf },
+    /// `␣␣`/`<C-Space>`: pick a thread to jump into. `settled` is whether
+    /// settled threads are listed; `<C-s>` flips it.
+    Sessions { settled: bool },
 }
 
 /// The open picker.
@@ -105,6 +112,19 @@ impl PickerState {
     pub fn projects(items: Vec<PickerItem>, return_to: Focus) -> Self {
         Self {
             kind: PickerKind::Projects,
+            list: PickerList::new(items),
+            return_to,
+            home: PathBuf::new(),
+            page: 0,
+            wanted: None,
+        }
+    }
+
+    /// The session picker over `items`, in the order given, with settled
+    /// threads hidden.
+    pub fn sessions(items: Vec<PickerItem>, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::Sessions { settled: false },
             list: PickerList::new(items),
             return_to,
             home: PathBuf::new(),
@@ -408,6 +428,27 @@ impl PickerState {
         }
     }
 
+    /// Shows or hides settled threads in the session picker, re-listing
+    /// `sessions`' threads under the typed text and selecting the best match.
+    /// Other pickers ignore it.
+    pub fn toggle_settled(&mut self, sessions: &Sessions) {
+        let PickerKind::Sessions { settled } = &mut self.kind else {
+            return;
+        };
+        *settled = !*settled;
+        let items = session_items(sessions, *settled);
+        let pattern = self.list.input().to_owned();
+        self.list.set_items(items, &pattern);
+    }
+
+    /// The selected row's thread; `None` unless a thread row is selected.
+    pub fn selected_thread(&self) -> Option<ThreadId> {
+        match self.list.selected() {
+            Some(&PickerItem::Thread { id, .. }) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Selects the shown row holding `item`; stays put when none does.
     pub fn select(&mut self, item: &PickerItem) {
         self.list.select(item);
@@ -442,7 +483,8 @@ impl PickerState {
                 | PickerItem::Heading(_)
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
-                | PickerItem::Confirm(_),
+                | PickerItem::Confirm(_)
+                | PickerItem::Thread { .. },
             ) => None,
             None => leaf.is_empty().then_some(dir),
         }
@@ -570,6 +612,53 @@ pub fn expand(dir_text: &str, home: &Path) -> PathBuf {
         None => PathBuf::from(dir_text),
     };
     path.components().collect()
+}
+
+/// The session picker's rows: the threads of every project inside the
+/// project filter (removed projects too), newest chat first by the later of
+/// the current turn's start and the last turn's end, ties to the higher id.
+/// The selected thread, threads being deleted, `Gone` threads, and settled
+/// threads (or threads of a settled group) unless `settled`, are left out.
+pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
+    let selected = sessions.selected_id();
+    let mut rows: Vec<(SystemTime, i64, PickerItem)> = sessions
+        .projects
+        .iter()
+        .filter(|project| sessions.filter.is_none_or(|filter| filter == project.id))
+        .flat_map(|project| project.threads.iter().map(move |thread| (project, thread)))
+        .filter_map(|(project, thread)| {
+            let group = thread
+                .group
+                .and_then(|id| project.groups.iter().find(|group| group.id == id));
+            let is_settled = thread.settled_at.is_some()
+                || group.is_some_and(|group| group.settled_at.is_some());
+            let left_out = Some(thread.id) == selected
+                || sessions.deleting.contains(&thread.id)
+                || thread.status == ThreadStatus::Gone
+                || (is_settled && !settled);
+            if left_out {
+                return None;
+            }
+            let prefix = group.map_or(project.title.as_str(), |group| group.name.as_str());
+            let title = thread.title.as_deref().unwrap_or(NEW_THREAD);
+            let last_chat = thread
+                .turn_started_at
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+                .max(thread.last_activity_at);
+            Some((
+                last_chat,
+                thread.id.0,
+                PickerItem::Thread {
+                    id: thread.id,
+                    label: format!("{prefix}/{title}"),
+                    split: prefix.len() + 1,
+                    settled: is_settled,
+                },
+            ))
+        })
+        .collect();
+    rows.sort_by_key(|(last_chat, id, _)| Reverse((*last_chat, *id)));
+    rows.into_iter().map(|(_, _, item)| item).collect()
 }
 
 #[cfg(test)]
