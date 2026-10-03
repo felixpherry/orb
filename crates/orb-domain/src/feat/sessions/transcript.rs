@@ -5,11 +5,16 @@
 //! each line is parsed once, and titles a thread by the latest title the user
 //! gave with `/rename`, else Claude's latest generated title, else the first
 //! real prompt. The same pass notes the git branch the latest prompt ran on.
+//!
+//! For the session picker's preview it also reads a transcript's tail into
+//! its last few exchanges: a prompt, the tools Claude ran, and Claude's last
+//! text.
 
 use std::{
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use serde_json::Value;
@@ -179,9 +184,18 @@ fn text_field(line: &Value, key: &str) -> Option<String> {
 }
 
 /// The first line of a prompt the user typed, or `None` for anything else
+/// Claude records as a user line.
+fn prompt(line: &Value) -> Option<String> {
+    prompt_text(line)?
+        .lines()
+        .next()
+        .map(|first| first.trim().to_owned())
+}
+
+/// The whole prompt the user typed, trimmed, or `None` for anything else
 /// Claude records as a user line (skill bodies, commands, tool results,
 /// interruptions).
-fn prompt(line: &Value) -> Option<String> {
+fn prompt_text(line: &Value) -> Option<&str> {
     if line.get("isMeta").and_then(Value::as_bool) == Some(true) {
         return None;
     }
@@ -198,8 +212,103 @@ fn prompt(line: &Value) -> Option<String> {
     match text {
         "" => None,
         _ if text.starts_with('<') || text.starts_with("[Request interrupted") => None,
-        _ => text.lines().next().map(|first| first.trim().to_owned()),
+        _ => Some(text),
     }
+}
+
+/// How much of a transcript's end the preview reads.
+const PREVIEW_TAIL: u64 = 512 * 1024;
+
+/// How many exchanges the preview keeps: two briefs and the newest.
+const PREVIEW_EXCHANGES: usize = 3;
+
+/// A prompt and what Claude did after it, oldest first in a tail.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Exchange {
+    /// What the user typed and when; `None` when the tail starts after it.
+    pub prompt: Option<(String, Option<SystemTime>)>,
+    /// Tool names in order, a run of the same tool counted once.
+    pub tools: Vec<(String, usize)>,
+    /// Claude's last text block in the exchange and when it was written.
+    pub reply: Option<(String, Option<SystemTime>)>,
+}
+
+/// The transcript's length and its last exchanges, read from its last
+/// 512 KB. A tail that starts mid-file drops its first line, which may be
+/// cut.
+///
+/// # Errors
+///
+/// Returns an error if the transcript can't be opened or read.
+pub fn read_exchanges(path: &Path) -> io::Result<(u64, Vec<Exchange>)> {
+    let len = fs::metadata(path)?.len();
+    let start = len.saturating_sub(PREVIEW_TAIL);
+    let text = read_new_lines(path, start)?.text;
+    let mut exchanges = text
+        .lines()
+        .skip(usize::from(start > 0))
+        .filter(|line| line.contains(r#""type":"user""#) || line.contains(r#""type":"assistant""#))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .fold(Vec::new(), |exchanges, line| {
+            next_exchange(exchanges, &line)
+        });
+    let excess = exchanges.len().saturating_sub(PREVIEW_EXCHANGES);
+    exchanges.drain(..excess);
+    Ok((len, exchanges))
+}
+
+/// The exchanges after one transcript line: a prompt opens one, an assistant
+/// line adds its text or tool to the latest. Meta and sidechain lines change
+/// nothing.
+fn next_exchange(mut exchanges: Vec<Exchange>, line: &Value) -> Vec<Exchange> {
+    let flag = |key| line.get(key).and_then(Value::as_bool) == Some(true);
+    if flag("isMeta") || flag("isSidechain") {
+        return exchanges;
+    }
+    let time = line
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|text| text.parse::<jiff::Timestamp>().ok())
+        .map(SystemTime::from);
+    match line.get("type").and_then(Value::as_str) {
+        Some("user") => {
+            if let Some(text) = prompt_text(line) {
+                exchanges.push(Exchange {
+                    prompt: Some((text.to_owned(), time)),
+                    ..Exchange::default()
+                });
+            }
+        }
+        Some("assistant") => {
+            if exchanges.is_empty() {
+                exchanges.push(Exchange::default());
+            }
+            let Some(exchange) = exchanges.last_mut() else {
+                return exchanges;
+            };
+            let blocks = line.pointer("/message/content").and_then(Value::as_array);
+            for block in blocks.into_iter().flatten() {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(text) = text_field(block, "text") {
+                            exchange.reply = Some((text, time));
+                        }
+                    }
+                    Some("tool_use") => {
+                        if let Some(name) = block.get("name").and_then(Value::as_str) {
+                            match exchange.tools.last_mut() {
+                                Some((last, count)) if last == name => *count += 1,
+                                _ => exchange.tools.push((name.to_owned(), 1)),
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    exchanges
 }
 
 #[cfg(test)]
@@ -214,9 +323,15 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use std::time::{Duration, SystemTime};
+
+    use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{NewLines, TitleScan, locate, read_new_lines, scan_title, transcript_path};
+    use super::{
+        Exchange, NewLines, TitleScan, locate, read_exchanges, read_new_lines, scan_title,
+        transcript_path,
+    };
 
     const PROMPT: &str = r#"{"type":"user","message":{"role":"user","content":"Fix the parser\nIt drops the last line"}}"#;
 
@@ -577,6 +692,239 @@ mod tests {
                 restarted: true,
             },
             "a replaced file should be read from the start"
+        );
+        Ok(())
+    }
+
+    fn exchanges_of(lines: &[&str]) -> io::Result<Vec<Exchange>> {
+        let dir = tempdir()?;
+        let path = write_transcript(dir.path(), lines)?;
+        Ok(read_exchanges(&path)?.1)
+    }
+
+    /// A prompt line typing `text`.
+    fn user(text: &str) -> String {
+        json!({"type": "user", "message": {"content": text}}).to_string()
+    }
+
+    /// An assistant line writing `reply`.
+    fn text(reply: &str) -> String {
+        json!({"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}})
+            .to_string()
+    }
+
+    /// An assistant line running tool `name`.
+    fn tool(name: &str) -> String {
+        json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name}]}})
+            .to_string()
+    }
+
+    fn prompts(exchanges: Vec<Exchange>) -> Vec<Option<String>> {
+        exchanges
+            .into_iter()
+            .map(|exchange| exchange.prompt.map(|(text, _)| text))
+            .collect()
+    }
+
+    fn replies(exchanges: Vec<Exchange>) -> Vec<Option<String>> {
+        exchanges
+            .into_iter()
+            .map(|exchange| exchange.reply.map(|(text, _)| text))
+            .collect()
+    }
+
+    #[rstest::rstest]
+    #[case::meta(
+        r#"{"type":"user","isMeta":true,"message":{"content":"Base directory for this skill"}}"#
+    )]
+    #[case::sidechain(
+        r#"{"type":"user","isSidechain":true,"message":{"content":"Explore the parser"}}"#
+    )]
+    #[case::command_name(
+        r#"{"type":"user","message":{"content":"<command-name>/plan</command-name>"}}"#
+    )]
+    #[case::tool_result(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#)]
+    #[case::interrupted(r#"{"type":"user","message":{"content":"[Request interrupted by user]"}}"#)]
+    fn non_prompt_user_lines_open_no_exchange(#[case] line: &str) -> io::Result<()> {
+        // Given a transcript holding only a user line that isn't a typed prompt.
+        // When reading its exchanges.
+        let exchanges = exchanges_of(&[line])?;
+
+        // Then there are none.
+        assert_eq!(exchanges, [], "non-prompt lines shouldn't open an exchange");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn sidechain_reply_is_skipped() -> io::Result<()> {
+        // Given a prompt followed by a subagent's text.
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[
+            PROMPT,
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"Found it"}]}}"#,
+        ])?;
+
+        // Then the exchange has no reply.
+        assert_eq!(
+            replies(exchanges),
+            [None],
+            "a subagent's text isn't Claude's reply"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn last_text_block_of_an_exchange_is_its_reply() -> io::Result<()> {
+        // Given a prompt followed by two texts.
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[PROMPT, &text("First"), &text("Second")])?;
+
+        // Then the reply is the second text.
+        assert_eq!(
+            replies(exchanges),
+            [Some("Second".to_owned())],
+            "the last text should be the reply"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn same_tool_run_is_counted_once() -> io::Result<()> {
+        // Given a prompt followed by Grep, Edit, Edit.
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[PROMPT, &tool("Grep"), &tool("Edit"), &tool("Edit")])?;
+
+        // Then the two Edits are one run counted twice.
+        assert_eq!(
+            exchanges
+                .into_iter()
+                .map(|exchange| exchange.tools)
+                .collect::<Vec<_>>(),
+            [vec![("Grep".to_owned(), 1), ("Edit".to_owned(), 2)]],
+            "a run of one tool should collapse"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn reply_before_any_prompt_opens_an_exchange_without_one() -> io::Result<()> {
+        // Given a transcript tail that starts with Claude's text.
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[&text("Done")])?;
+
+        // Then one exchange holds the reply and no prompt.
+        assert_eq!(
+            exchanges,
+            [Exchange {
+                reply: Some(("Done".to_owned(), None)),
+                ..Exchange::default()
+            }],
+            "a reply with no prompt before it should still show"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn only_the_last_three_exchanges_are_kept() -> io::Result<()> {
+        // Given five prompts.
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[
+            &user("p1"),
+            &user("p2"),
+            &user("p3"),
+            &user("p4"),
+            &user("p5"),
+        ])?;
+
+        // Then only the last three remain, oldest first.
+        assert_eq!(
+            prompts(exchanges),
+            [
+                Some("p3".to_owned()),
+                Some("p4".to_owned()),
+                Some("p5".to_owned())
+            ],
+            "older exchanges should be dropped"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn tail_read_skips_the_line_it_starts_inside() -> io::Result<()> {
+        // Given a 600 KB first line that still parses when cut, then a prompt.
+        let first = format!(
+            "{}{}",
+            " ".repeat(600 * 1024),
+            r#"{"type":"user","message":{"content":"Old"}}"#
+        );
+
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[&first, PROMPT])?;
+
+        // Then only the prompt after the cut line is read.
+        assert_eq!(
+            prompts(exchanges),
+            [Some("Fix the parser\nIt drops the last line".to_owned())],
+            "the line the tail starts inside should be skipped"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn bad_timestamp_keeps_the_exchange_without_a_time() -> io::Result<()> {
+        // Given a prompt whose timestamp doesn't parse.
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[
+            r#"{"type":"user","timestamp":"yesterday","message":{"content":"Fix it"}}"#,
+        ])?;
+
+        // Then the exchange is kept, its prompt without a time.
+        assert_eq!(
+            exchanges
+                .into_iter()
+                .map(|exchange| exchange.prompt)
+                .collect::<Vec<_>>(),
+            [Some(("Fix it".to_owned(), None))],
+            "a bad timestamp should only drop the time"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn prompt_time_comes_from_its_timestamp() -> io::Result<()> {
+        // Given a prompt stamped one second after the epoch.
+        // When reading the exchanges.
+        let exchanges = exchanges_of(&[
+            r#"{"type":"user","timestamp":"1970-01-01T00:00:01Z","message":{"content":"Fix it"}}"#,
+        ])?;
+
+        // Then the prompt's time is that second.
+        assert_eq!(
+            exchanges
+                .into_iter()
+                .filter_map(|exchange| exchange.prompt)
+                .map(|(_, time)| time)
+                .collect::<Vec<_>>(),
+            [Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1))],
+            "the time should come from the timestamp"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn read_exchanges_returns_the_transcript_length() -> io::Result<()> {
+        // Given a one-prompt transcript.
+        let dir = tempdir()?;
+        let path = write_transcript(dir.path(), &[PROMPT])?;
+
+        // When reading its exchanges.
+        let (len, _) = read_exchanges(&path)?;
+
+        // Then the length is the file's.
+        assert_eq!(
+            len,
+            fs::metadata(&path)?.len(),
+            "the length should be the file's"
         );
         Ok(())
     }

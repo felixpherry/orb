@@ -1,7 +1,7 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
 //! has updated [`AppState`](crate::AppState). Pane commands,
-//! `ListDirectories`, `ListBranches` and `OpenTool` are carried out by the
-//! frontend loop; session commands (drafts, add or remove a project, move to
+//! `ListDirectories`, `ListBranches`, `LoadPreview` and `OpenTool` are carried
+//! out by the frontend loop; session commands (drafts, add or remove a project, move to
 //! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle, delete,
 //! visit, save the sidebar's width and filter, save the jump list, create and start groups, start a
 //! group's sibling, pin, settle and delete groups, save a group draft, answer a trust confirm) go
@@ -63,6 +63,11 @@ pub enum Command {
     AddProject(PathBuf),
     /// List the directory's subdirectories into the open directory picker.
     ListDirectories(PathBuf),
+    /// Read the thread's transcript into the open session picker's preview.
+    LoadPreview {
+        thread: ThreadId,
+        transcript: PathBuf,
+    },
     /// Poll the sessions' statuses now instead of waiting for the next tick.
     RefreshSessions,
     /// Pin the thread to the top of the sidebar.
