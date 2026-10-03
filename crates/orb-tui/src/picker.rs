@@ -38,6 +38,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::mouse::HitMap;
 use crate::sidebar::{
     BG_DARK, BLUE, BLUE1, BORDER, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, CYAN, DARK3, DARK5, FG,
     FG_DARK, FOLDER, FOLDER_OPEN, GREEN, MAGENTA, ORANGE, VISUAL, YELLOW, badge, render_split,
@@ -73,19 +74,22 @@ impl PickerScroll {
 }
 
 /// Draws `picker` in a popup over `area`; paths under `home` show as `~/`.
-/// Returns how many rows fit, and where the terminal cursor goes in the input.
+/// Records the popup and each selectable row in `hits`. Returns how many
+/// rows fit, and where the terminal cursor goes in the input.
 pub(crate) fn render(
     picker: &PickerState,
     home: &Path,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
+    hits: &mut HitMap,
 ) -> (usize, Position) {
     let popup = {
         let lines = |count: usize| u16::try_from(count).unwrap_or(u16::MAX);
         popup_rect(area, lines(picker.shown().count()), lines(picker.total()))
     };
     Clear.render(popup, buf);
+    hits.record_overlay(popup);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BORDER).bg(BG_DARK))
@@ -102,7 +106,7 @@ pub(crate) fn render(
     .areas(inner);
     let cursor = render_input(picker, input, buf);
     Line::from(span("─".repeat(usize::from(rule.width)), ORANGE)).render(rule, buf);
-    let page = render_rows(picker, home, rows, buf, scroll);
+    let page = render_rows(picker, home, rows, buf, scroll, hits);
     (page, cursor)
 }
 
@@ -205,6 +209,7 @@ fn render_rows(
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
+    hits: &mut HitMap,
 ) -> usize {
     let page = usize::from(area.height).max(1);
     let shown: Vec<(&PickerItem, &Matches)> = picker.shown().collect();
@@ -226,6 +231,9 @@ fn render_rows(
         .zip(area.top()..area.bottom())
     {
         let row = Rect::new(area.x, y, area.width, 1);
+        if !item.disabled() {
+            hits.record_picker_row(row, index);
+        }
         if index == selection && picker.selected().is_some() {
             buf.set_style(row, Style::new().bg(VISUAL));
         }
@@ -498,11 +506,12 @@ mod tests {
     use orb_domain::feat::picker::state::{DraftTarget, PickTarget, PickerState};
     use orb_domain::feat::sessions::state::{GroupId, GroupKind, ProjectId, ProjectKind, ThreadId};
     use ratatui::buffer::{Buffer, Cell};
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
     use ratatui::style::Modifier;
     use unicode_segmentation::UnicodeSegmentation;
 
     use super::{FOLDER, GIT, HISTORY, PickerScroll, SHIELD, render};
+    use crate::mouse::HitMap;
     use crate::sidebar::{BLUE1, CLAUDE_LOGO, DARK3, DARK5, FG, ORANGE, VISUAL, badge};
 
     /// The home directory the pickers are drawn with.
@@ -526,8 +535,25 @@ mod tests {
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
+            &mut HitMap::default(),
         );
         buf
+    }
+
+    /// Draws `picker` over a `width`×`height` screen. Returns what it
+    /// recorded and the input's cursor, two lines above the first row.
+    fn hits_of(picker: &PickerState, width: u16, height: u16) -> (HitMap, Position) {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        let mut hits = HitMap::default();
+        let (_, cursor) = render(
+            picker,
+            Path::new(HOME),
+            buf.area,
+            &mut buf,
+            &mut PickerScroll::default(),
+            &mut hits,
+        );
+        (hits, cursor)
     }
 
     /// The screen's lines, top to bottom.
@@ -1459,6 +1485,7 @@ mod tests {
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
+            &mut HitMap::default(),
         );
 
         // Then the cell before the cursor holds the `q`, inside the right border.
@@ -1470,6 +1497,73 @@ mod tests {
             ),
             (Some("q"), Some(true)),
             "the filter's end before the cursor at {cursor:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::first_line(0, 3)]
+    #[case::last_line(7, 10)]
+    fn hit_map_maps_a_scrolled_rows_line_to_its_shown_index(
+        #[case] line: u16,
+        #[case] index: usize,
+    ) {
+        // Given thirty projects scrolled down three rows, the eleventh selected.
+        let picker = {
+            let projects = (0..30)
+                .map(|i| project(i, &format!("proj{i}"), &format!("/tmp/{i}")))
+                .collect();
+            let mut picker = PickerState::projects(projects, Focus::Sidebar);
+            for _ in 0..10 {
+                picker.next();
+            }
+            picker
+        };
+
+        // When drawing it on a 100×20 screen.
+        let (hits, cursor) = hits_of(&picker, 100, 20);
+
+        // Then the row `line` lines below the first maps to shown row `index`.
+        assert_eq!(
+            hits.picker_row_at(Position::new(cursor.x, cursor.y + 2 + line)),
+            Some(index),
+            "line {line} of the rows should be shown row {index}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_leaves_a_heading_out() {
+        // Given a picker whose first row is a heading.
+        let picker = PickerState::projects(
+            vec![
+                PickerItem::Heading("Legacy models"),
+                project(1, "alpha", "/alpha"),
+            ],
+            Focus::Sidebar,
+        );
+
+        // When drawing it.
+        let (hits, cursor) = hits_of(&picker, 100, 20);
+
+        // Then the heading's line maps to no row.
+        assert_eq!(
+            hits.picker_row_at(Position::new(cursor.x, cursor.y + 2)),
+            None,
+            "a heading should not be clickable"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_records_the_popup() {
+        // Given a project picker.
+        let picker = orb();
+
+        // When drawing it.
+        let (hits, cursor) = hits_of(&picker, 100, 20);
+
+        // Then its input is on the recorded popup.
+        assert!(
+            hits.on_overlay(cursor),
+            "the popup should be recorded around its input at {cursor:?}"
         );
     }
 }

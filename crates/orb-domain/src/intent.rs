@@ -139,6 +139,13 @@ pub enum Intent {
     PickerHalfPageDown,
     /// Move the picker's selection half a page up.
     PickerHalfPageUp,
+    /// Select the picker's shown row at this index (a click). A heading, a
+    /// disabled row or an index past the end changes nothing.
+    PickerSelectRow(usize),
+    /// Select the picker's next item, stopping on the last (the wheel).
+    PickerWheelNext,
+    /// Select the picker's previous item, stopping on the first (the wheel).
+    PickerWheelPrev,
     /// Pick the selected item: open the project's draft, add the directory,
     /// or apply the workspace, branch, model or permission mode. In the
     /// rename box, save the name. In the sidebar search, end it and keep the
@@ -163,12 +170,12 @@ impl fmt::Display for Intent {
             Self::Quit => "quit",
             Self::SelectNext | Self::SelectWheelNext => "next thread",
             Self::SelectPrev | Self::SelectWheelPrev => "previous thread",
-            Self::SelectRow(_) => "select",
+            Self::SelectRow(_) | Self::PickerSelectRow(_) => "select",
             Self::DashboardHighlight(_) => "highlight item",
             Self::FocusRight => "focus right",
             Self::FocusSidebar => "focus sidebar",
-            Self::DashboardNext | Self::PickerNext => "next item",
-            Self::DashboardPrev | Self::PickerPrev => "previous item",
+            Self::DashboardNext | Self::PickerNext | Self::PickerWheelNext => "next item",
+            Self::DashboardPrev | Self::PickerPrev | Self::PickerWheelPrev => "previous item",
             Self::DashboardRun => "run item",
             Self::ToggleSidebar | Self::LeavePane => "sidebar",
             Self::WidenFocused => "widen",

@@ -29,6 +29,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::mouse::HitMap;
 use crate::picker::{PickerScroll, cut_left, highlight, span, visible};
 use crate::sidebar::{
     BG_DARK, BLACK, BLUE, BORDER, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, COMPLETED_ICON, CYAN,
@@ -39,7 +40,12 @@ use crate::sidebar::{
 /// Draws the session picker over `area`: the list of `picker`'s rows with
 /// live status from `sessions` (`attached` threads fill the idle circle),
 /// and the selected thread's preview. Returns how many rows the list fits,
-/// and where the terminal cursor goes in the input.
+/// and where the terminal cursor goes in the input. Records the popup and
+/// the list's rows in `hits`; the preview maps to no row.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the picker's inputs plus the scroll and hit map it updates"
+)]
 pub(crate) fn render(
     picker: &PickerState,
     sessions: &Sessions,
@@ -48,12 +54,14 @@ pub(crate) fn render(
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
+    hits: &mut HitMap,
 ) -> (usize, Position) {
     let popup = big(area);
     Clear.render(popup, buf);
     buf.set_style(popup, Style::new().bg(BG_DARK));
+    hits.record_overlay(popup);
     let [list_box, preview_box] = boxes(popup, area.width >= 120);
-    let drawn = render_list(picker, sessions, attached, now, list_box, buf, scroll);
+    let drawn = render_list(picker, sessions, attached, now, list_box, buf, scroll, hits);
     render_preview(picker, sessions, attached, now, preview_box, buf);
     drawn
 }
@@ -118,7 +126,11 @@ fn title(settled: bool) -> Line<'static> {
 }
 
 /// The list box: title, input row with the count, orange rule, rows.
-/// Returns the rows' height and the cursor.
+/// Records each row in `hits`. Returns the rows' height and the cursor.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the list's inputs plus the scroll and hit map it updates"
+)]
 fn render_list(
     picker: &PickerState,
     sessions: &Sessions,
@@ -127,6 +139,7 @@ fn render_list(
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
+    hits: &mut HitMap,
 ) -> (usize, Position) {
     let settled = matches!(picker.kind(), PickerKind::Sessions { settled: true });
     let block = boxed(Some(title(settled)));
@@ -151,6 +164,7 @@ fn render_list(
         .zip(rows.top()..rows.bottom())
     {
         let row = Rect::new(rows.x, y, rows.width, 1);
+        hits.record_picker_row(row, index);
         if index == picker.selection() {
             buf.set_style(row, Style::new().bg(VISUAL));
         }
@@ -619,11 +633,12 @@ mod tests {
     };
     use orb_domain::feat::sessions::transcript::Exchange;
     use ratatui::buffer::{Buffer, Cell};
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
     use ratatui::style::Modifier;
     use unicode_segmentation::UnicodeSegmentation;
 
     use super::render;
+    use crate::mouse::HitMap;
     use crate::picker::PickerScroll;
     use crate::sidebar::{BLACK, BRANCH, CLAUDE_LOGO, COMPLETED_ICON, DARK3, DARK5, VISUAL};
 
@@ -724,8 +739,42 @@ mod tests {
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
+            &mut HitMap::default(),
         );
         (buf, page)
+    }
+
+    /// Draws `picker` over a `width`×`height` screen with live data from
+    /// `sessions`, nothing attached. Returns what it recorded and the input's
+    /// cursor, two lines above the first row.
+    fn hits_of(
+        picker: &PickerState,
+        sessions: &Sessions,
+        width: u16,
+        height: u16,
+    ) -> (HitMap, Position) {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        let mut hits = HitMap::default();
+        let (_, cursor) = render(
+            picker,
+            sessions,
+            &HashSet::new(),
+            now(),
+            buf.area,
+            &mut buf,
+            &mut PickerScroll::default(),
+            &mut hits,
+        );
+        (hits, cursor)
+    }
+
+    /// Three idle threads in `orb`.
+    fn three_threads() -> Sessions {
+        sessions(vec![
+            thread(1, "one", ThreadStatus::Idle),
+            thread(2, "two", ThreadStatus::Idle),
+            thread(3, "three", ThreadStatus::Idle),
+        ])
     }
 
     /// The screen's lines, top to bottom.
@@ -1176,5 +1225,42 @@ mod tests {
 
         // Then the page is the 24-row float less its borders, input and rule.
         assert_eq!(page, 20, "page size");
+    }
+
+    #[rstest::rstest]
+    #[case::wide(160, 40)]
+    #[case::stacked(100, 40)]
+    fn hit_map_maps_a_list_row_to_its_index(#[case] width: u16, #[case] height: u16) {
+        // Given the session picker over three threads.
+        let sessions = three_threads();
+        let picker = picker(&sessions);
+
+        // When drawing it on a `width`×`height` screen.
+        let (hits, cursor) = hits_of(&picker, &sessions, width, height);
+
+        // Then the list's second row maps to shown row 1.
+        assert_eq!(
+            hits.picker_row_at(Position::new(cursor.x, cursor.y + 3)),
+            Some(1),
+            "the second list row should be shown row 1 at {width}×{height}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_maps_the_preview_to_nothing() {
+        // Given the session picker over three threads.
+        let sessions = three_threads();
+        let picker = picker(&sessions);
+
+        // When drawing it wide, the preview beside the list.
+        let (hits, _) = hits_of(&picker, &sessions, 160, 40);
+
+        // Then a point in the preview is on the popup but on no row.
+        let at = Position::new(140, 20);
+        assert_eq!(
+            (hits.on_overlay(at), hits.picker_row_at(at)),
+            (true, None),
+            "the preview should be inside the popup and on no row"
+        );
     }
 }

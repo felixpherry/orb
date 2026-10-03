@@ -339,6 +339,26 @@ impl PickerList {
         self.move_up((page / 2).max(1));
     }
 
+    /// Selects shown row `index` when it's there and can be selected;
+    /// otherwise stays.
+    pub fn select_row(&mut self, index: usize) {
+        if self.enabled(index) {
+            self.selection = index;
+        }
+    }
+
+    /// Selects the nearest enabled item below the selection, staying on
+    /// the last one.
+    pub fn select_below(&mut self) {
+        self.move_down(1);
+    }
+
+    /// Selects the nearest enabled item above the selection, staying on
+    /// the first one.
+    pub fn select_above(&mut self) {
+        self.move_up(1);
+    }
+
     /// The typed filter text.
     pub fn input(&self) -> &str {
         self.input.text()

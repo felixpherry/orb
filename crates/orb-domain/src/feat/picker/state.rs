@@ -569,6 +569,21 @@ impl PickerState {
         self.list.half_page_up(self.page);
     }
 
+    /// Selects shown row `index` unless it's a heading, disabled or past the end.
+    pub fn select_row(&mut self, index: usize) {
+        self.list.select_row(index);
+    }
+
+    /// Selects the next item, stopping on the last.
+    pub fn select_below(&mut self) {
+        self.list.select_below();
+    }
+
+    /// Selects the previous item, stopping on the first.
+    pub fn select_above(&mut self) {
+        self.list.select_above();
+    }
+
     /// Moves the cursor one grapheme left.
     pub fn cursor_left(&mut self) {
         self.list.cursor_left();

@@ -345,6 +345,9 @@ impl IntentHandler {
             | Intent::PickerOpen
             | Intent::PickerCancel
             | Intent::PickerRemove
+            | Intent::PickerSelectRow(_)
+            | Intent::PickerWheelNext
+            | Intent::PickerWheelPrev
                 if state.focus == Focus::Rename =>
             {
                 rename_key(intent, state)
@@ -362,6 +365,9 @@ impl IntentHandler {
             | Intent::PickerOpen
             | Intent::PickerCancel
             | Intent::PickerRemove
+            | Intent::PickerSelectRow(_)
+            | Intent::PickerWheelNext
+            | Intent::PickerWheelPrev
                 if state.focus == Focus::Search =>
             {
                 search_key(intent, state)
@@ -418,6 +424,27 @@ impl IntentHandler {
                 let before = picked_thread(state);
                 if let Some(picker) = &mut state.picker {
                     picker.half_page_up();
+                }
+                with_preview(state, before, vec![])
+            }
+            Intent::PickerSelectRow(index) => {
+                let before = picked_thread(state);
+                if let Some(picker) = &mut state.picker {
+                    picker.select_row(*index);
+                }
+                with_preview(state, before, vec![])
+            }
+            Intent::PickerWheelNext => {
+                let before = picked_thread(state);
+                if let Some(picker) = &mut state.picker {
+                    picker.select_below();
+                }
+                with_preview(state, before, vec![])
+            }
+            Intent::PickerWheelPrev => {
+                let before = picked_thread(state);
+                if let Some(picker) = &mut state.picker {
+                    picker.select_above();
                 }
                 with_preview(state, before, vec![])
             }
@@ -8052,10 +8079,109 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn picker_select_row_selects_that_row() {
+        // Given the project picker over alpha and beta, alpha selected.
+        let mut state = picking(Focus::Sidebar);
+
+        // When handling PickerSelectRow(1).
+        IntentHandler::handle(&Intent::PickerSelectRow(1), &mut state);
+
+        // Then beta's row is selected.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::selection),
+            Some(1),
+            "a clicked row should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_select_row_on_a_heading_changes_nothing() {
+        // Given a picker whose first row is a heading, alpha below it selected.
+        let mut state = AppState {
+            focus: Focus::Picker,
+            picker: Some(PickerState::projects(
+                vec![
+                    PickerItem::Heading("Legacy models"),
+                    PickerItem::Project {
+                        id: ProjectId(1),
+                        title: "alpha".to_owned(),
+                        root: "/alpha".into(),
+                        kind: ProjectKind::Normal,
+                    },
+                ],
+                Focus::Sidebar,
+            )),
+            ..AppState::default()
+        };
+
+        // When handling PickerSelectRow(0), the heading.
+        IntentHandler::handle(&Intent::PickerSelectRow(0), &mut state);
+
+        // Then alpha stays selected.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::selection),
+            Some(1),
+            "a heading should not be selectable"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_select_row_past_the_end_changes_nothing() {
+        // Given the project picker over alpha and beta, alpha selected.
+        let mut state = picking(Focus::Sidebar);
+
+        // When handling PickerSelectRow(9), past the last row.
+        IntentHandler::handle(&Intent::PickerSelectRow(9), &mut state);
+
+        // Then alpha stays selected.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::selection),
+            Some(0),
+            "an index past the end should change nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_wheel_next_on_the_last_row_stays_there() {
+        // Given the project picker over alpha and beta, beta selected.
+        let mut state = picking(Focus::Sidebar);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // When handling PickerWheelNext.
+        IntentHandler::handle(&Intent::PickerWheelNext, &mut state);
+
+        // Then beta stays selected instead of wrapping to alpha.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::selection),
+            Some(1),
+            "the wheel should stop on the last row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_wheel_prev_on_the_first_row_stays_there() {
+        // Given the project picker over alpha and beta, alpha selected.
+        let mut state = picking(Focus::Sidebar);
+
+        // When handling PickerWheelPrev.
+        IntentHandler::handle(&Intent::PickerWheelPrev, &mut state);
+
+        // Then alpha stays selected instead of wrapping to beta.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::selection),
+            Some(0),
+            "the wheel should stop on the first row"
+        );
+    }
+
+    #[rstest::rstest]
     #[case::next(Intent::PickerNext, 3)]
     #[case::prev(Intent::PickerPrev, 1)]
     #[case::half_page_down(Intent::PickerHalfPageDown, 3)]
     #[case::half_page_up(Intent::PickerHalfPageUp, 1)]
+    #[case::select_row(Intent::PickerSelectRow(2), 3)]
+    #[case::wheel_next(Intent::PickerWheelNext, 3)]
+    #[case::wheel_prev(Intent::PickerWheelPrev, 1)]
     fn moving_in_the_session_picker_loads_the_new_selections_preview(
         #[case] intent: Intent,
         #[case] expected: i64,
