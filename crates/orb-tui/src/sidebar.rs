@@ -709,7 +709,7 @@ fn render_settled(
 
 /// A thread's status as its icon, its short word (none while idle), and
 /// their colour; `attached` fills the idle circle.
-fn status(
+pub(crate) fn status(
     thread: &Thread,
     attached: bool,
     now: SystemTime,
@@ -981,7 +981,7 @@ pub(crate) const FAILED_ICON: &str = "\u{f057}";
 const GONE_ICON: &str = "\u{f05e}";
 /// A completed turn, and a settled thread that didn't fail
 /// (`nf-fa-check_circle`).
-const COMPLETED_ICON: &str = "\u{f058}";
+pub(crate) const COMPLETED_ICON: &str = "\u{f058}";
 /// Stopped (`nf-fa-stop`).
 const STOPPED_ICON: &str = "\u{f04d}";
 /// Idle, or a status orb doesn't know (`nf-fa-circle_o`).

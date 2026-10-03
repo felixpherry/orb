@@ -3,7 +3,8 @@
 //! `>` prompt over an orange rule, numbered one-line rows with the selected
 //! one filled, and the picker's keys dim in its bottom border. The float is
 //! only as tall as its rows need, and its top stays put while the filter
-//! narrows them.
+//! narrows them. The session picker has its own snacks layout in
+//! `session_picker`.
 //!
 //! The project picker shows each project as a folder in its badge colour and
 //! its path, the parent dimmed and the name bright, with the name on the
@@ -56,6 +57,19 @@ const GIT: &str = "\u{f1d3}";
 pub(crate) struct PickerScroll {
     /// The row drawn at the top.
     offset: usize,
+}
+
+impl PickerScroll {
+    /// Scrolls just enough to show `selection` among `len` rows with `page`
+    /// of them on screen. Returns the first row to draw.
+    pub(crate) fn follow(&mut self, selection: usize, len: usize, page: usize) -> usize {
+        self.offset = self
+            .offset
+            .min(selection)
+            .max((selection + 1).saturating_sub(page))
+            .min(len.saturating_sub(page));
+        self.offset
+    }
 }
 
 /// Draws `picker` in a popup over `area`; paths under `home` show as `~/`.
@@ -199,20 +213,16 @@ fn render_rows(
         return page;
     }
     let selection = picker.selection();
-    scroll.offset = scroll
-        .offset
-        .min(selection)
-        .max((selection + 1).saturating_sub(page))
-        .min(shown.len().saturating_sub(page));
+    let offset = scroll.follow(selection, shown.len(), page);
     let mut number = shown
         .iter()
-        .take(scroll.offset)
+        .take(offset)
         .filter(|(item, _)| !matches!(item, PickerItem::Heading(_)))
         .count();
     for ((index, (item, matches)), y) in shown
         .into_iter()
         .enumerate()
-        .skip(scroll.offset)
+        .skip(offset)
         .zip(area.top()..area.bottom())
     {
         let row = Rect::new(area.x, y, area.width, 1);
@@ -460,7 +470,7 @@ where
 }
 
 /// `text` in `fg`.
-fn span<'a, T>(text: T, fg: Color) -> Span<'a>
+pub(crate) fn span<'a, T>(text: T, fg: Color) -> Span<'a>
 where
     T: Into<Cow<'a, str>>,
 {

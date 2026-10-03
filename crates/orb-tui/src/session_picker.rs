@@ -1,0 +1,1180 @@
+//! The session picker, drawn like LazyVim's snacks picker in tokyonight-moon:
+//! a float over the sidebar and the right side holding a list box and a
+//! preview box, side by side from 120 columns and stacked below that.
+//!
+//! The list box is titled `Sessions`, with a lit `s` while settled threads
+//! show. Its input row holds the typed text and how many threads are shown
+//! out of those listed, over an orange rule. Each row is a thread's status
+//! icon, its dim `<project|group>/` and bright title, and how long it has
+//! worked or since its last chat; status and time are drawn live. Settled
+//! rows are dimmed behind a check. Nothing matched leaves the list empty.
+//!
+//! The preview box is titled with the selected row's label and shows the
+//! thread's status, branch and model, then its latest exchanges from the
+//! transcript: up to two earlier ones in brief while there is room, and the
+//! newest with the prompt, the tools Claude ran, and the end of Claude's
+//! last reply as a small Markdown subset.
+
+use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use orb_domain::feat::picker::list::{Matches, PickerItem};
+use orb_domain::feat::picker::state::{PickerKind, PickerState};
+use orb_domain::feat::sessions::state::{Sessions, Thread, ThreadId, ThreadStatus};
+use orb_domain::feat::sessions::transcript::Exchange;
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Widget};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::picker::{PickerScroll, cut_left, highlight, span, visible};
+use crate::sidebar::{
+    BG_DARK, BLACK, BLUE, BORDER, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, COMPLETED_ICON, CYAN,
+    DARK3, DARK5, FG, FG_DARK, GREEN1, GUTTER, ORANGE, VISUAL, ago_label, render_split, status,
+    working_label,
+};
+
+/// Draws the session picker over `area`: the list of `picker`'s rows with
+/// live status from `sessions` (`attached` threads fill the idle circle),
+/// and the selected thread's preview. Returns how many rows the list fits,
+/// and where the terminal cursor goes in the input.
+pub(crate) fn render(
+    picker: &PickerState,
+    sessions: &Sessions,
+    attached: &HashSet<ThreadId>,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll: &mut PickerScroll,
+) -> (usize, Position) {
+    let popup = big(area);
+    Clear.render(popup, buf);
+    buf.set_style(popup, Style::new().bg(BG_DARK));
+    let [list_box, preview_box] = boxes(popup, area.width >= 120);
+    let drawn = render_list(picker, sessions, attached, now, list_box, buf, scroll);
+    render_preview(picker, sessions, attached, now, preview_box, buf);
+    drawn
+}
+
+/// The list box and the preview box: side by side (45/55, one column
+/// apart) when `wide`, else the list over the preview (60/40).
+fn boxes(popup: Rect, wide: bool) -> [Rect; 2] {
+    if wide {
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .spacing(1)
+            .areas(popup)
+    } else {
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(popup)
+    }
+}
+
+/// 80% of `area` (at least 120 columns when it has them), centred.
+fn big(area: Rect) -> Rect {
+    let width = (area.width * 4 / 5).max(area.width.min(120));
+    centred(area, width, area.height * 4 / 5)
+}
+
+/// A `width`×`height` rect centred in `area`, cut to fit it.
+fn centred(area: Rect, width: u16, height: u16) -> Rect {
+    let (width, height) = (width.min(area.width), height.min(area.height));
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
+}
+
+/// A rounded `BORDER` box on `BG_DARK`, with `title` centred in its top
+/// border when there is one.
+fn boxed(title: Option<Line<'static>>) -> Block<'static> {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(BORDER).bg(BG_DARK))
+        .style(Style::new().bg(BG_DARK));
+    match title {
+        Some(title) => block.title(title.centered()),
+        None => block,
+    }
+}
+
+/// ` Sessions `, then a lit ` s ` and a space while settled threads show,
+/// the way snacks lights its toggles.
+fn title(settled: bool) -> Line<'static> {
+    let mut spans = vec![span(" Sessions ", BLUE)];
+    if settled {
+        spans.push(Span::styled(
+            " s ",
+            Style::new()
+                .fg(BLUE)
+                .bg(VISUAL)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
+}
+
+/// The list box: title, input row with the count, orange rule, rows.
+/// Returns the rows' height and the cursor.
+fn render_list(
+    picker: &PickerState,
+    sessions: &Sessions,
+    attached: &HashSet<ThreadId>,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll: &mut PickerScroll,
+) -> (usize, Position) {
+    let settled = matches!(picker.kind(), PickerKind::Sessions { settled: true });
+    let block = boxed(Some(title(settled)));
+    let inner = block.inner(area);
+    block.render(area, buf);
+    let [input, rule, rows] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(inner);
+    let shown: Vec<(&PickerItem, &Matches)> = picker.shown().collect();
+    let count = format!("{}/{}", shown.len(), picker.total());
+    let cursor = render_input(picker, &count, input, buf);
+    Line::from(span("─".repeat(usize::from(rule.width)), ORANGE)).render(rule, buf);
+    let page = usize::from(rows.height).max(1);
+    let offset = scroll.follow(picker.selection(), shown.len(), page);
+    for ((index, (item, matches)), y) in shown
+        .into_iter()
+        .enumerate()
+        .skip(offset)
+        .zip(rows.top()..rows.bottom())
+    {
+        let row = Rect::new(rows.x, y, rows.width, 1);
+        if index == picker.selection() {
+            buf.set_style(row, Style::new().bg(VISUAL));
+        }
+        render_row(item, matches, sessions, attached, now, row, buf);
+    }
+    (page, cursor)
+}
+
+/// The ` > ` prompt and the typed text (its end while too long, as in the
+/// select picker), with `count` dim against the right edge. Returns the
+/// cursor's position.
+fn render_input(picker: &PickerState, count: &str, area: Rect, buf: &mut Buffer) -> Position {
+    let prompt = span(" > ", CYAN);
+    let prompt_width = prompt.width();
+    let count = span(count.to_owned(), DARK3);
+    // The count, the cell before it, the right margin and the cursor's cell.
+    let room = usize::from(area.width).saturating_sub(prompt_width + count.width() + 3);
+    let (shown, before) = visible(picker.input(), picker.cursor(), room);
+    render_split(
+        Line::from(vec![prompt, span(shown, FG)]),
+        Line::from(count),
+        Rect {
+            width: area.width.saturating_sub(1),
+            ..area
+        },
+        buf,
+    );
+    let x = u16::try_from(prompt_width + before)
+        .unwrap_or(u16::MAX)
+        .min(area.width.saturating_sub(1));
+    Position::new(area.x + x, area.y)
+}
+
+/// One thread row: its status icon (a dim check when settled), its label
+/// with the prefix dim and the matches lit, and its time on the right. A
+/// thread gone from `sessions` shows only its label, dim.
+fn render_row(
+    item: &PickerItem,
+    matches: &Matches,
+    sessions: &Sessions,
+    attached: &HashSet<ThreadId>,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let PickerItem::Thread {
+        id,
+        label,
+        split,
+        settled,
+    } = item
+    else {
+        return;
+    };
+    let thread = sessions.threads().find(|thread| thread.id == *id);
+    let (icon, (dim, bright), time) = match (thread, settled) {
+        (None, _) => (Span::raw("  "), (DARK3, DARK3), String::new()),
+        (Some(thread), true) => (
+            span(format!("{COMPLETED_ICON} "), DARK3),
+            (DARK3, COMMENT),
+            when(thread, now),
+        ),
+        (Some(thread), false) => {
+            let (glyph, _, fg) = status(thread, attached.contains(id), now);
+            (
+                span(format!("{glyph} "), fg),
+                (DARK5, FG),
+                when(thread, now),
+            )
+        }
+    };
+    let left = Line::from_iter([Span::raw(" "), icon].into_iter().chain(highlight(
+        label,
+        &matches.name,
+        |at| if at < *split { dim } else { bright },
+    )));
+    render_split(
+        left,
+        Line::from(span(time, DARK3)),
+        Rect {
+            width: area.width.saturating_sub(1),
+            ..area
+        },
+        buf,
+    );
+}
+
+/// How long the turn has run while working, else how long since the last
+/// chat.
+fn when(thread: &Thread, now: SystemTime) -> String {
+    match (thread.status, thread.turn_started_at) {
+        (ThreadStatus::Working, Some(at)) => {
+            working_label(now.duration_since(at).unwrap_or_default())
+        }
+        _ => ago_label(now.duration_since(last_chat(thread)).unwrap_or_default()),
+    }
+}
+
+/// The later of the turn's start and the last turn's end: when the user last
+/// chatted in the thread.
+fn last_chat(thread: &Thread) -> SystemTime {
+    thread
+        .turn_started_at
+        .unwrap_or(UNIX_EPOCH)
+        .max(thread.last_activity_at)
+}
+
+/// The preview box: untitled and empty with no thread selected, else
+/// titled with the row's label and holding the thread's chat card.
+fn render_preview(
+    picker: &PickerState,
+    sessions: &Sessions,
+    attached: &HashSet<ThreadId>,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let Some(PickerItem::Thread { id, label, .. }) = picker.selected() else {
+        boxed(None).render(area, buf);
+        return;
+    };
+    let block = boxed(Some(Line::from(span(format!(" {label} "), BLUE))));
+    let inner = block.inner(area);
+    block.render(area, buf);
+    let meta = sessions
+        .threads()
+        .find(|thread| thread.id == *id)
+        .map_or_else(Line::default, |thread| {
+            meta(thread, attached.contains(id), now)
+        });
+    let exchanges = picker
+        .preview()
+        .map_or(&[][..], |preview| preview.exchanges.as_slice());
+    for (line, y) in card(meta, exchanges, inner, now)
+        .into_iter()
+        .zip(inner.top()..inner.bottom())
+    {
+        line.render(Rect::new(inner.x, y, inner.width, 1), buf);
+    }
+}
+
+/// The selected thread's status (`idle` while idle), branch and model, dim.
+fn meta(thread: &Thread, attached: bool, now: SystemTime) -> Line<'static> {
+    let (glyph, word, fg) = status(thread, attached, now);
+    let mut spans = vec![
+        span(format!(" {glyph} "), fg),
+        span(word.unwrap_or("idle"), fg),
+    ];
+    if let Some(branch) = &thread.branch {
+        spans.push(span(" · ", DARK3));
+        spans.push(span(format!("{BRANCH} {branch}"), DARK5));
+    }
+    if let Some(model) = &thread.model {
+        spans.push(span(" · ", DARK3));
+        spans.push(span(format!("{CLAUDE_LOGO} {model}"), DARK5));
+    }
+    Line::from(spans)
+}
+
+/// The chat card's lines for `area`: `meta` over a rule, then ` No
+/// transcript yet` without exchanges, else up to two earlier exchanges in
+/// brief while the newest keeps twelve lines, and the newest with the rest.
+fn card(
+    meta: Line<'static>,
+    exchanges: &[Exchange],
+    area: Rect,
+    now: SystemTime,
+) -> Vec<Line<'static>> {
+    let width = usize::from(area.width).saturating_sub(1);
+    let mut lines = vec![
+        meta,
+        Line::from(span("─".repeat(usize::from(area.width)), DARK3)),
+    ];
+    let height = usize::from(area.height).saturating_sub(lines.len());
+    let Some((newest, earlier)) = exchanges.split_last() else {
+        lines.push(Line::from(span(" No transcript yet", COMMENT)));
+        return lines;
+    };
+    let mut briefs: Vec<Vec<Line<'static>>> = Vec::new();
+    let mut used = 0;
+    for exchange in earlier.iter().rev().take(2) {
+        let brief = exchange_lines(exchange, width, usize::MAX, 2, 3, now);
+        if used + brief.len() + 1 + 12 > height {
+            break;
+        }
+        used += brief.len() + 1;
+        briefs.push(brief);
+    }
+    for brief in briefs.into_iter().rev() {
+        lines.extend(brief);
+        lines.push(Line::from(span(
+            format!(" {}", "┄".repeat(width.saturating_sub(1))),
+            GUTTER,
+        )));
+    }
+    lines.extend(exchange_lines(
+        newest,
+        width,
+        height.saturating_sub(used),
+        4,
+        usize::MAX,
+        now,
+    ));
+    lines
+}
+
+/// `exchange` as lines `width` wide, at most `room` of them: the prompt
+/// (`prompt_cap` lines at most) on a cyan bar, the tools Claude ran on one
+/// dim line, then the end of Claude's last words (`reply_cap` lines at most).
+fn exchange_lines(
+    exchange: &Exchange,
+    width: usize,
+    room: usize,
+    prompt_cap: usize,
+    reply_cap: usize,
+    now: SystemTime,
+) -> Vec<Line<'static>> {
+    let mut head: Vec<Line<'static>> = Vec::new();
+    if let Some((prompt, at)) = &exchange.prompt {
+        head.push(speaker("", "You", CYAN, *at, now, width));
+        let bar = || span(" ▎ ", CYAN);
+        let mut lines = wrap_words(
+            inline(&prompt.replace('\n', " "), Style::new().fg(FG)),
+            width,
+            &[bar()],
+            &[bar()],
+        );
+        if lines.len() > prompt_cap {
+            lines.truncate(prompt_cap);
+            if let Some(last) = lines.last_mut() {
+                last.spans.push(span(" …", DARK5));
+            }
+        }
+        head.extend(lines);
+        head.push(Line::default());
+    }
+    let reply_at = exchange.reply.as_ref().and_then(|(_, at)| *at);
+    head.push(speaker(CLAUDE_LOGO, "Claude", CLAUDE, reply_at, now, width));
+    if !exchange.tools.is_empty() {
+        let tools: Vec<String> = exchange
+            .tools
+            .iter()
+            .map(|(name, count)| match count {
+                1 => name.clone(),
+                _ => format!("{name} ×{count}"),
+            })
+            .collect();
+        let text = cut_left(&tools.join(" · "), width.saturating_sub(6));
+        head.push(Line::from(vec![span("   ⎿  ", DARK3), span(text, DARK5)]));
+    }
+    let body = match &exchange.reply {
+        Some((reply, _)) => markdown(reply, width, "   ", Style::new().fg(FG)),
+        None => vec![Line::from(span("   …", DARK5))],
+    };
+    // The reply's end says where the thread stands, so a long one keeps
+    // its last lines under a `⋮`.
+    let left = room.saturating_sub(head.len()).min(reply_cap);
+    let body = if body.len() > left {
+        let skip = body.len() - left.saturating_sub(1);
+        std::iter::once(Line::from(span("   ⋮", DARK5)))
+            .chain(body.into_iter().skip(skip))
+            .collect()
+    } else {
+        body
+    };
+    head.extend(body);
+    head.truncate(room);
+    head
+}
+
+/// A speaker's header: `mark name` in bold `fg`, how long ago on the right.
+fn speaker(
+    mark: &str,
+    name: &str,
+    fg: Color,
+    at: Option<SystemTime>,
+    now: SystemTime,
+    width: usize,
+) -> Line<'static> {
+    let left = format!(" {mark} {name}");
+    let when = at
+        .map(|at| ago_label(now.duration_since(at).unwrap_or_default()))
+        .unwrap_or_default();
+    let gap = width.saturating_sub(Line::raw(left.as_str()).width() + when.len() + 1);
+    Line::from(vec![
+        Span::styled(left, Style::new().fg(fg).add_modifier(Modifier::BOLD)),
+        Span::raw(" ".repeat(gap)),
+        span(when, DARK3),
+    ])
+}
+
+/// Markdown `text` as lines `width` wide behind `indent`: headings blue,
+/// bullets as `•`, fenced code dim on black, `code` and **bold** inline.
+/// Blank lines collapse to one and trailing ones are dropped.
+fn markdown(text: &str, width: usize, indent: &str, base: Style) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut fenced = false;
+    let pad = || Span::raw(indent.to_owned());
+    for raw in text.lines() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            let room = width.saturating_sub(indent.len() + 2);
+            let code = cut_right(raw, room);
+            let fill = " ".repeat(room.saturating_sub(Line::raw(code.as_str()).width()));
+            out.push(Line::from(vec![
+                pad(),
+                Span::styled(
+                    format!(" {code}{fill} "),
+                    Style::new().fg(FG_DARK).bg(BLACK),
+                ),
+            ]));
+            continue;
+        }
+        if trimmed.is_empty() {
+            if out.last().is_some_and(|line| line.width() > indent.len()) {
+                out.push(Line::default());
+            }
+            continue;
+        }
+        let (first, next, body, style) = if let Some(heading) = trimmed.strip_prefix('#') {
+            let body = heading.trim_start_matches('#').trim_start();
+            let style = Style::new().fg(BLUE).add_modifier(Modifier::BOLD);
+            (vec![pad()], vec![pad()], body, style)
+        } else if let Some(body) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            (
+                vec![pad(), span("• ", ORANGE)],
+                vec![pad(), Span::raw("  ")],
+                body,
+                base,
+            )
+        } else {
+            (vec![pad()], vec![pad()], trimmed, base)
+        };
+        out.extend(wrap_words(inline(body, style), width, &first, &next));
+    }
+    while out.last().is_some_and(|line| line.width() == 0) {
+        out.pop();
+    }
+    out
+}
+
+/// `text`'s words with Markdown's `code` and **bold** styled, each word one
+/// or more spans.
+fn inline(text: &str, base: Style) -> Vec<Vec<Span<'static>>> {
+    let mut words: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut word: Vec<Span<'static>> = Vec::new();
+    let mut piece = String::new();
+    let (mut in_code, mut bold) = (false, false);
+    let style = |in_code: bool, bold: bool| match (in_code, bold) {
+        (true, _) => Style::new().fg(GREEN1),
+        (false, true) => base.add_modifier(Modifier::BOLD),
+        (false, false) => base,
+    };
+    let mut graphemes = text.graphemes(true).peekable();
+    while let Some(grapheme) = graphemes.next() {
+        let toggle = match grapheme {
+            "`" => Some(true),
+            "*" if !in_code && graphemes.peek() == Some(&"*") => {
+                graphemes.next();
+                Some(false)
+            }
+            " " if !in_code => {
+                if !piece.is_empty() {
+                    word.push(Span::styled(
+                        std::mem::take(&mut piece),
+                        style(in_code, bold),
+                    ));
+                }
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+                continue;
+            }
+            _ => None,
+        };
+        match toggle {
+            Some(flip_code) => {
+                if !piece.is_empty() {
+                    word.push(Span::styled(
+                        std::mem::take(&mut piece),
+                        style(in_code, bold),
+                    ));
+                }
+                if flip_code {
+                    in_code = !in_code;
+                } else {
+                    bold = !bold;
+                }
+            }
+            None => piece.push_str(grapheme),
+        }
+    }
+    if !piece.is_empty() {
+        word.push(Span::styled(piece, style(in_code, bold)));
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// `words` wrapped to `width`, `first` before the first line and `next`
+/// before the rest.
+fn wrap_words(
+    words: Vec<Vec<Span<'static>>>,
+    width: usize,
+    first: &[Span<'static>],
+    next: &[Span<'static>],
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut line: Vec<Span<'static>> = first.to_vec();
+    let mut used = Line::from(first.to_vec()).width();
+    let mut empty = true;
+    for word in words {
+        let size = Line::from(word.clone()).width();
+        if !empty && used + 1 + size > width {
+            lines.push(Line::from(std::mem::replace(&mut line, next.to_vec())));
+            used = Line::from(next.to_vec()).width();
+            empty = true;
+        }
+        if !empty {
+            line.push(Span::raw(" "));
+            used += 1;
+        }
+        used += size;
+        line.extend(word);
+        empty = false;
+    }
+    lines.push(Line::from(line));
+    lines
+}
+
+/// `text` if it fits in `width` columns, else as much of its start as fits
+/// and `…`.
+fn cut_right(text: &str, width: usize) -> String {
+    if Line::raw(text).width() <= width {
+        return text.to_owned();
+    }
+    let mut used = 1;
+    let head: String = text
+        .graphemes(true)
+        .take_while(|grapheme| {
+            used += Line::raw(*grapheme).width();
+            used <= width
+        })
+        .collect();
+    format!("{head}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use orb_domain::Focus;
+    use orb_domain::feat::picker::state::{PickerState, session_items};
+    use orb_domain::feat::sessions::state::{
+        Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+    };
+    use orb_domain::feat::sessions::transcript::Exchange;
+    use ratatui::buffer::{Buffer, Cell};
+    use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    use super::render;
+    use crate::picker::PickerScroll;
+    use crate::sidebar::{BLACK, BRANCH, CLAUDE_LOGO, COMPLETED_ICON, DARK3, DARK5, VISUAL};
+
+    /// The clock every picker is drawn at.
+    fn now() -> SystemTime {
+        UNIX_EPOCH + Duration::from_hours(240)
+    }
+
+    /// Thread `id` titled `title`, last active five minutes before [`now`].
+    fn thread(id: i64, title: &str, status: ThreadStatus) -> Thread {
+        Thread {
+            id: ThreadId(id),
+            title: Some(title.to_owned()),
+            cwd: "/Users/me/dev/orb".into(),
+            transcript: None,
+            status,
+            turn_started_at: None,
+            attach_argv: vec![],
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: UNIX_EPOCH,
+            last_activity_at: now() - Duration::from_mins(5),
+            unseen: false,
+            group: None,
+            model: None,
+            permission: None,
+        }
+    }
+
+    /// `threads`, settled at [`now`].
+    fn settled(threads: Thread) -> Thread {
+        Thread {
+            settled_at: Some(now()),
+            ..threads
+        }
+    }
+
+    /// `threads` in one project, `orb`.
+    fn sessions(threads: Vec<Thread>) -> Sessions {
+        Sessions {
+            projects: vec![Project {
+                id: ProjectId(1),
+                title: "orb".to_owned(),
+                root: "/Users/me/dev/orb".into(),
+                created_at: UNIX_EPOCH,
+                removed: false,
+                draft: None,
+                threads,
+                groups: vec![],
+                kind: ProjectKind::Normal,
+            }],
+            ..Sessions::default()
+        }
+    }
+
+    /// The session picker over `sessions`, settled threads hidden.
+    fn picker(sessions: &Sessions) -> PickerState {
+        PickerState::sessions(session_items(sessions, false), Focus::Sidebar)
+    }
+
+    /// Types `text` into `picker`.
+    fn typed(picker: &mut PickerState, text: &[char]) {
+        for ch in text {
+            picker.insert(*ch);
+        }
+    }
+
+    /// An exchange with no times: `prompt`, then `tools`, then `reply`.
+    fn exchange(prompt: Option<&str>, tools: &[(&str, usize)], reply: Option<&str>) -> Exchange {
+        Exchange {
+            prompt: prompt.map(|prompt| (prompt.to_owned(), None)),
+            tools: tools
+                .iter()
+                .map(|&(name, count)| (name.to_owned(), count))
+                .collect(),
+            reply: reply.map(|reply| (reply.to_owned(), None)),
+        }
+    }
+
+    /// The picker over one thread, `orb/Fix the bug`, previewing `exchanges`.
+    fn previewing(exchanges: Vec<Exchange>) -> (PickerState, Sessions) {
+        let sessions = sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]);
+        let mut picker = picker(&sessions);
+        picker.show_preview(ThreadId(1), 1, exchanges);
+        (picker, sessions)
+    }
+
+    /// Draws `picker` over a `width`×`height` screen with live data from
+    /// `sessions`, nothing attached. Returns the screen and the page size.
+    fn draw(picker: &PickerState, sessions: &Sessions, width: u16, height: u16) -> (Buffer, usize) {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        let (page, _) = render(
+            picker,
+            sessions,
+            &HashSet::new(),
+            now(),
+            buf.area,
+            &mut buf,
+            &mut PickerScroll::default(),
+        );
+        (buf, page)
+    }
+
+    /// The screen's lines, top to bottom.
+    fn lines(buf: &Buffer) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(Cell::symbol))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The cell where `text` first starts, row by row.
+    fn find(buf: &Buffer, text: &str) -> Option<(u16, u16)> {
+        let len = text.graphemes(true).count();
+        (0..buf.area.height).find_map(|y| {
+            let row: Vec<&str> = (0..buf.area.width)
+                .filter_map(|x| buf.cell((x, y)).map(Cell::symbol))
+                .collect();
+            (0..row.len())
+                .find(|&x| {
+                    row.get(x..x + len)
+                        .is_some_and(|cells| cells.concat() == text)
+                })
+                .map(|x| (x as u16, y))
+        })
+    }
+
+    /// The line `text` first shows on.
+    fn line_of(buf: &Buffer, text: &str) -> String {
+        find(buf, text)
+            .and_then(|(_, y)| lines(buf).into_iter().nth(usize::from(y)))
+            .unwrap_or_default()
+    }
+
+    /// Two threads, `orb/Fix the bug` and `orb/Write docs`.
+    fn two() -> Sessions {
+        sessions(vec![
+            thread(1, "Fix the bug", ThreadStatus::Idle),
+            thread(2, "Write docs", ThreadStatus::Idle),
+        ])
+    }
+
+    #[rstest::rstest]
+    fn wide_area_puts_the_boxes_side_by_side() {
+        // Given two threads on a 140-column screen.
+        let sessions = two();
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
+
+        // Then the top border row holds two box corners.
+        let top = line_of(&buf, "╭");
+        assert_eq!(top.matches('╭').count(), 2, "top row was {top}");
+    }
+
+    #[rstest::rstest]
+    fn narrow_area_stacks_the_list_over_the_preview() {
+        // Given two threads on a 100-column screen.
+        let sessions = two();
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 100, 30);
+
+        // Then two box corners sit in the same column on different rows.
+        let corners: Vec<(usize, usize)> = lines(&buf)
+            .iter()
+            .enumerate()
+            .filter_map(|(y, line)| {
+                line.graphemes(true)
+                    .position(|grapheme| grapheme == "╭")
+                    .map(|x| (x, y))
+            })
+            .collect();
+        let stacked = matches!(corners.as_slice(), [(x1, _), (x2, _)] if x1 == x2);
+        assert!(stacked, "corners were {corners:?}");
+    }
+
+    #[rstest::rstest]
+    fn showing_settled_lights_an_s_after_the_title() {
+        // Given a settled thread, with settled threads shown.
+        let sessions = sessions(vec![settled(thread(1, "Fix the bug", ThreadStatus::Idle))]);
+        let mut picker = picker(&sessions);
+        picker.toggle_settled(&sessions);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker, &sessions, 140, 30);
+
+        // Then the `s` after ` Sessions ` is lit.
+        let lit = find(&buf, "Sessions")
+            .and_then(|(x, y)| buf.cell((x + 10, y)))
+            .map(|cell| (cell.symbol().to_owned(), cell.bg));
+        assert_eq!(lit, Some(("s".to_owned(), VISUAL)), "the s should be lit");
+    }
+
+    #[rstest::rstest]
+    fn hiding_settled_lights_no_s() {
+        // Given a settled and an active thread, with settled threads hidden.
+        let sessions = sessions(vec![
+            settled(thread(1, "Fix the bug", ThreadStatus::Idle)),
+            thread(2, "Write docs", ThreadStatus::Idle),
+        ]);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
+
+        // Then the title row holds no ` s `.
+        let title = line_of(&buf, "Sessions");
+        assert!(!title.contains(" s "), "title row was {title}");
+    }
+
+    #[rstest::rstest]
+    fn count_sits_at_the_input_rows_right_end() {
+        // Given two threads, with `docs` typed.
+        let sessions = two();
+        let mut picker = picker(&sessions);
+        typed(&mut picker, &['d', 'o', 'c', 's']);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker, &sessions, 140, 30);
+
+        // Then the input row ends in the count, one cell from the border.
+        let input = line_of(&buf, " > ");
+        assert!(input.contains("1/2 │"), "input row was {input}");
+    }
+
+    #[rstest::rstest]
+    fn nothing_matched_draws_no_rows() {
+        // Given two threads, with `zzz` typed.
+        let sessions = two();
+        let mut picker = picker(&sessions);
+        typed(&mut picker, &['z', 'z', 'z']);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker, &sessions, 140, 30);
+
+        // Then neither title shows.
+        let screen = lines(&buf).join("\n");
+        assert!(
+            !screen.contains("Fix the bug") && !screen.contains("Write docs"),
+            "screen was\n{screen}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selected_row_is_filled_with_visual() {
+        // Given two threads.
+        let sessions = two();
+
+        // When drawing the stacked picker, the list above the preview.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 100, 30);
+
+        // Then the first row is filled.
+        let bg = find(&buf, "orb/")
+            .and_then(|at| buf.cell(at))
+            .map(|cell| cell.bg);
+        assert_eq!(bg, Some(VISUAL), "the selected row should be filled");
+    }
+
+    #[rstest::rstest]
+    fn row_prefix_is_dark5() {
+        // Given one thread.
+        let sessions = sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]);
+
+        // When drawing the stacked picker, the list above the preview.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 100, 30);
+
+        // Then the row's `orb/` is dim.
+        let fg = find(&buf, "orb/")
+            .and_then(|at| buf.cell(at))
+            .map(|cell| cell.fg);
+        assert_eq!(fg, Some(DARK5), "the prefix should be dark5");
+    }
+
+    #[rstest::rstest]
+    fn settled_row_shows_the_check_in_dark3() {
+        // Given a settled thread, with settled threads shown.
+        let sessions = sessions(vec![settled(thread(1, "Fix the bug", ThreadStatus::Idle))]);
+        let mut picker = picker(&sessions);
+        picker.toggle_settled(&sessions);
+
+        // When drawing the stacked picker, the list above the preview.
+        let (buf, _) = draw(&picker, &sessions, 100, 30);
+
+        // Then the row's check is dim.
+        let fg = find(&buf, COMPLETED_ICON)
+            .and_then(|at| buf.cell(at))
+            .map(|cell| cell.fg);
+        assert_eq!(fg, Some(DARK3), "the check should be dark3");
+    }
+
+    #[rstest::rstest]
+    fn working_row_shows_the_spinner_and_its_turn_time() {
+        // Given a thread two minutes into its turn.
+        let sessions = sessions(vec![Thread {
+            turn_started_at: Some(now() - Duration::from_mins(2)),
+            ..thread(1, "Fix the bug", ThreadStatus::Working)
+        }]);
+
+        // When drawing the stacked picker, the list above the preview.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 100, 30);
+
+        // Then its row holds the spinner and ends in the turn's time.
+        let row = line_of(&buf, "⠋");
+        assert!(
+            row.contains("Fix the bug") && row.contains("2m │"),
+            "row was {row}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn deleted_thread_row_is_dark3_without_a_time() {
+        // Given a picker over two threads, one since gone from the sessions.
+        let picker = picker(&two());
+        let sessions = sessions(vec![thread(2, "Write docs", ThreadStatus::Idle)]);
+
+        // When drawing the stacked picker, the list above the preview.
+        let (buf, _) = draw(&picker, &sessions, 100, 30);
+
+        // Then the gone thread's title is dim and its row has no time.
+        let fg = find(&buf, "Fix the bug")
+            .and_then(|at| buf.cell(at))
+            .map(|cell| cell.fg);
+        let row = line_of(&buf, "Fix the bug");
+        assert!(
+            fg == Some(DARK3) && !row.contains("5m"),
+            "fg was {fg:?}, row was {row}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn nothing_matched_leaves_the_preview_untitled() {
+        // Given two threads, with `zzz` typed.
+        let sessions = two();
+        let mut picker = picker(&sessions);
+        typed(&mut picker, &['z', 'z', 'z']);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker, &sessions, 140, 30);
+
+        // Then the preview box's top border is only `─` between its corners.
+        let top = line_of(&buf, "╭");
+        let border = top
+            .rsplit_once('╭')
+            .and_then(|(_, rest)| rest.split_once('╮'))
+            .map_or("", |(border, _)| border);
+        assert!(
+            !border.is_empty() && border.graphemes(true).all(|grapheme| grapheme == "─"),
+            "top row was {top}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn preview_is_titled_with_the_selected_label() {
+        // Given one thread.
+        let sessions = sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
+
+        // Then the top border row holds the thread's label.
+        let top = line_of(&buf, "╭");
+        assert!(top.contains("orb/Fix the bug"), "top row was {top}");
+    }
+
+    #[rstest::rstest]
+    fn meta_line_shows_the_branch_and_model() {
+        // Given a thread on `main` running `opus`.
+        let sessions = sessions(vec![Thread {
+            branch: Some("main".to_owned()),
+            model: Some("opus".to_owned()),
+            ..thread(1, "Fix the bug", ThreadStatus::Idle)
+        }]);
+
+        // When drawing the stacked picker, the preview below the list.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 100, 30);
+
+        // Then the line under the preview's top border holds the status, the
+        // branch and the model.
+        let lines = lines(&buf);
+        let meta = lines
+            .iter()
+            .rposition(|line| line.contains('╭'))
+            .and_then(|y| lines.get(y + 1))
+            .map_or("", String::as_str);
+        assert!(
+            meta.contains(&format!("idle · {BRANCH} main · {CLAUDE_LOGO} opus")),
+            "meta row was {meta}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn preview_without_exchanges_says_no_transcript_yet() {
+        // Given one thread with no preview loaded.
+        let sessions = sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
+
+        // Then the preview says there is no transcript yet.
+        let screen = lines(&buf).join("\n");
+        assert!(
+            screen.contains(" No transcript yet"),
+            "screen was\n{screen}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn newest_exchange_starts_with_you_over_a_prompt_bar() {
+        // Given a preview of one exchange prompted `hello`.
+        let (picker, sessions) = previewing(vec![exchange(Some("hello"), &[], None)]);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker, &sessions, 140, 30);
+
+        // Then the line under `You` holds the prompt on its bar.
+        let prompt = find(&buf, " You")
+            .and_then(|(_, y)| lines(&buf).into_iter().nth(usize::from(y) + 1))
+            .unwrap_or_default();
+        assert!(prompt.contains("▎ hello"), "prompt row was {prompt}");
+    }
+
+    #[rstest::rstest]
+    fn tools_line_joins_runs_with_a_count() {
+        // Given a preview of an exchange that ran Grep once and Edit twice.
+        let (picker, sessions) = previewing(vec![exchange(
+            Some("hello"),
+            &[("Grep", 1), ("Edit", 2)],
+            Some("done"),
+        )]);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker, &sessions, 140, 30);
+
+        // Then one line lists the tools with the run counted.
+        let screen = lines(&buf).join("\n");
+        assert!(screen.contains("⎿  Grep · Edit ×2"), "screen was\n{screen}");
+    }
+
+    #[rstest::rstest]
+    fn long_reply_keeps_its_tail_under_a_vertical_ellipsis() {
+        // Given a preview of a sixty-line reply.
+        let reply = (1..=60)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (picker, sessions) = previewing(vec![exchange(Some("hello"), &[], Some(&reply))]);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker, &sessions, 140, 30);
+
+        // Then a `⋮` stands over the reply's tail, which ends at its last line.
+        let lines = lines(&buf);
+        let last = lines.iter().rfind(|line| line.contains("line "));
+        assert!(
+            lines.iter().any(|line| line.contains('⋮'))
+                && last.is_some_and(|line| line.contains("line 60"))
+                && !lines.iter().any(|line| line.contains("line 1 ")),
+            "screen was\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[rstest::rstest]
+    fn tall_preview_shows_an_earlier_exchange_in_brief() {
+        // Given a preview of three exchanges.
+        let (picker, sessions) = previewing(vec![
+            exchange(Some("first"), &[], Some("one")),
+            exchange(Some("second"), &[], Some("two")),
+            exchange(Some("third"), &[], Some("three")),
+        ]);
+
+        // When drawing the picker on a tall screen.
+        let (buf, _) = draw(&picker, &sessions, 140, 60);
+
+        // Then `second` shows in brief, with a dotted rule after it.
+        let lines = lines(&buf);
+        let ruled = lines
+            .iter()
+            .skip_while(|line| !line.contains("second"))
+            .any(|line| line.contains('┄'));
+        assert!(ruled, "screen was\n{}", lines.join("\n"));
+    }
+
+    #[rstest::rstest]
+    fn short_preview_drops_the_briefs_and_keeps_the_newest() {
+        // Given a preview of three exchanges.
+        let (picker, sessions) = previewing(vec![
+            exchange(Some("first"), &[], Some("one")),
+            exchange(Some("second"), &[], Some("two")),
+            exchange(Some("third"), &[], Some("three")),
+        ]);
+
+        // When drawing the picker on a short screen.
+        let (buf, _) = draw(&picker, &sessions, 140, 20);
+
+        // Then only the newest exchange shows.
+        let screen = lines(&buf).join("\n");
+        assert!(
+            !screen.contains("second") && screen.contains("third"),
+            "screen was\n{screen}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fenced_code_sits_on_black() {
+        // Given a preview whose reply is a fenced code block.
+        let (picker, sessions) = previewing(vec![exchange(
+            Some("hello"),
+            &[],
+            Some("```\nlet x = 1;\n```"),
+        )]);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker, &sessions, 140, 30);
+
+        // Then the code sits on black.
+        let bg = find(&buf, "let x")
+            .and_then(|at| buf.cell(at))
+            .map(|cell| cell.bg);
+        assert_eq!(bg, Some(BLACK), "fenced code should be on black");
+    }
+
+    #[rstest::rstest]
+    fn bold_markdown_is_bold_without_asterisks() {
+        // Given a preview whose reply is `**done**`.
+        let (picker, sessions) = previewing(vec![exchange(Some("hello"), &[], Some("**done**"))]);
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker, &sessions, 140, 30);
+
+        // Then `done` is bold and no asterisks show.
+        let bold = find(&buf, "done")
+            .and_then(|at| buf.cell(at))
+            .is_some_and(|cell| cell.modifier.contains(Modifier::BOLD));
+        let screen = lines(&buf).join("\n");
+        assert!(bold && !screen.contains("**"), "screen was\n{screen}");
+    }
+
+    #[rstest::rstest]
+    fn page_is_the_list_boxs_row_count() {
+        // Given two threads on a 140×30 screen.
+        let sessions = two();
+
+        // When drawing the picker.
+        let (_, page) = draw(&picker(&sessions), &sessions, 140, 30);
+
+        // Then the page is the 24-row float less its borders, input and rule.
+        assert_eq!(page, 20, "page size");
+    }
+}
