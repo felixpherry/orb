@@ -3193,7 +3193,7 @@ mod tests {
     use crate::TextInput;
     use crate::command::Workspace;
     use crate::common::{Services, State, Wake};
-    use crate::feat::git::git_service::{Git, GitError, GitRef, GitService};
+    use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
     use crate::feat::git::validator::BUSY_DIRECTORY;
     use crate::feat::git::worktree::hex_branch;
     use crate::feat::jumps::state::JumpList;
@@ -3661,6 +3661,28 @@ mod tests {
                 force,
             });
             Ok(())
+        }
+
+        fn add_worktree_on(
+            &self,
+            _repo: &Path,
+            _path: &Path,
+            _branch: &str,
+        ) -> Result<(), Report<GitError>> {
+            Ok(())
+        }
+
+        fn prune_worktrees(&self, _repo: &Path) -> Result<(), Report<GitError>> {
+            Ok(())
+        }
+
+        fn worktree_facts(&self, _path: &Path) -> Result<WorktreeFacts, Report<GitError>> {
+            Err(Report::new(GitError)
+                .attach("the sessions actor never reads worktree facts".to_owned()))
+        }
+
+        fn disk_usage(&self, _path: &Path) -> Option<u64> {
+            None
         }
 
         fn delete_branch(

@@ -1,11 +1,13 @@
 //! What orb asks of git: the branches a thread could switch to, a project's
-//! default branch, making, checking out, renaming and removing worktrees and
-//! branches, whether a branch is merged, making a directory a repository, and
-//! the repository Claude takes a directory to belong to.
+//! default branch, making, checking out, renaming, removing and pruning
+//! worktrees and branches, whether a branch is merged, a worktree's state and
+//! its size on disk, making a directory a repository, and the repository
+//! Claude takes a directory to belong to.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use error_stack::Report;
 use wherror::Error;
@@ -28,6 +30,17 @@ pub struct GitRef {
     pub default: bool,
     /// Where a local branch is checked out, the root checkout included.
     pub worktree: Option<PathBuf>,
+}
+
+/// What git says about one worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeFacts {
+    /// The checked-out branch; `None` on a detached HEAD.
+    pub branch: Option<String>,
+    /// Lines of `git status --porcelain`, untracked files included.
+    pub changes: usize,
+    /// The last commit's time and subject; `None` when there is none.
+    pub last_commit: Option<(SystemTime, String)>,
 }
 
 /// Runs git against repositories on disk.
@@ -88,6 +101,37 @@ pub trait Git: Send + Sync {
         path: &Path,
         force: bool,
     ) -> Result<(), Report<GitError>>;
+
+    /// Adds a worktree at `path` on the existing `branch`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git refuses, e.g. when `branch` is checked out
+    /// elsewhere or `path` is still registered.
+    fn add_worktree_on(
+        &self,
+        repo: &Path,
+        path: &Path,
+        branch: &str,
+    ) -> Result<(), Report<GitError>>;
+
+    /// Forgets worktrees whose directories are gone (`git worktree prune`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git refuses.
+    fn prune_worktrees(&self, repo: &Path) -> Result<(), Report<GitError>>;
+
+    /// The branch, uncommitted changes and last commit of the worktree at
+    /// `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` isn't in a git repository.
+    fn worktree_facts(&self, path: &Path) -> Result<WorktreeFacts, Report<GitError>>;
+
+    /// Kilobytes `path` takes on disk; `None` when it can't be measured.
+    fn disk_usage(&self, path: &Path) -> Option<u64>;
 
     /// Deletes a local branch. Without `force`, git refuses an unmerged one.
     ///
@@ -215,6 +259,44 @@ impl GitService {
         force: bool,
     ) -> Result<(), Report<GitError>> {
         self.git.remove_worktree(repo, path, force)
+    }
+
+    /// Adds a worktree at `path` on the existing `branch`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git refuses.
+    pub fn add_worktree_on(
+        &self,
+        repo: &Path,
+        path: &Path,
+        branch: &str,
+    ) -> Result<(), Report<GitError>> {
+        self.git.add_worktree_on(repo, path, branch)
+    }
+
+    /// Forgets worktrees whose directories are gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git refuses.
+    pub fn prune_worktrees(&self, repo: &Path) -> Result<(), Report<GitError>> {
+        self.git.prune_worktrees(repo)
+    }
+
+    /// The branch, uncommitted changes and last commit of the worktree at
+    /// `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` isn't in a git repository.
+    pub fn worktree_facts(&self, path: &Path) -> Result<WorktreeFacts, Report<GitError>> {
+        self.git.worktree_facts(path)
+    }
+
+    /// Kilobytes `path` takes on disk; `None` when it can't be measured.
+    pub fn disk_usage(&self, path: &Path) -> Option<u64> {
+        self.git.disk_usage(path)
     }
 
     /// Deletes a local branch.
