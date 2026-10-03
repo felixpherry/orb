@@ -16,12 +16,14 @@
 //! and forward through the jump list, also outside which-key. In the
 //! sidebar, `<C-\>` detaches the selected attached thread, outside which-key
 //! too. While attached, every key goes to Claude except `<C-\>`, `<C-h>`,
-//! the jump keys, and the resize keys, which resize the pane as they do the
-//! dashboard. An open picker takes
-//! typed characters as filter text and has its own fixed keys, `<C-x>` among
-//! them for removing a project from the project filter. The rename box (`r`)
-//! and the sidebar search (`/` or `i`) use the picker's keys. `␣i` opens orb's
-//! Incognito draft in every scope; on the dashboard, `i` does too. On a
+//! `<C-b>`, `<C-Space>`, which opens the session picker, the jump keys, and
+//! the resize keys, which resize the pane as they do the dashboard. An open
+//! picker takes typed characters as filter text and has its own fixed keys,
+//! `<C-x>` among them for removing a project from the project filter and
+//! `<C-s>` for showing or hiding settled threads in the session picker. The
+//! rename box (`r`) and the sidebar search (`/` or `i`) use the picker's keys.
+//! `␣␣` opens the session picker in every scope. `␣i` opens orb's Incognito
+//! draft in every scope; on the dashboard, `i` does too. On a
 //! group's card, draft or threads, `l`/`h` open and close the group. `␣w` isn't bound
 //! on them, and `␣b` (the dashboard's `b` too) only on the card of a Feature
 //! group whose worktree exists, where it switches that worktree's branch.
@@ -453,6 +455,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     for scope in SIDEBAR.into_iter().chain(DASHBOARD) {
         keymap
             .bind(
+                "<leader><leader>",
+                Intent::OpenSessionPicker,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
                 "<leader>e",
                 Intent::ToggleSidebar,
                 KeyCategory::Navigation,
@@ -601,6 +609,9 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
         (KeyCode::Char('h'), KeyModifiers::CONTROL) => Route::Intent(Intent::LeavePane),
         // Claude still backgrounds a task with `Ctrl+X Ctrl+B`.
         (KeyCode::Char('b'), KeyModifiers::CONTROL) => Route::Intent(Intent::ToggleSidebar),
+        // `<C-Space>` as the kitty protocol reports it, and as crossterm
+        // parses its legacy NUL byte.
+        (KeyCode::Char(' '), KeyModifiers::CONTROL) => Route::Intent(Intent::OpenSessionPicker),
         _ => jump_route(key)
             .or_else(|| layout_route(key))
             .map_or(Route::Forward, Route::Intent),
@@ -662,6 +673,7 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
         (KeyCode::Tab, KeyModifiers::NONE) => Some(Intent::PickerOpen),
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Intent::PickerCancel),
         (KeyCode::Char('x'), KeyModifiers::CONTROL) => Some(Intent::PickerRemove),
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Intent::PickerToggleSettled),
         _ => None,
     }
 }
@@ -830,6 +842,7 @@ mod tests {
     #[case(key(KeyCode::Enter), Intent::PickerConfirm)]
     #[case(key(KeyCode::Tab), Intent::PickerOpen)]
     #[case(key(KeyCode::Esc), Intent::PickerCancel)]
+    #[case(ctrl('s'), Intent::PickerToggleSettled)]
     fn picker_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
         // Given / When routing the key in an open picker.
         let intent = picker_route(pressed);
@@ -1117,6 +1130,45 @@ mod tests {
             intent,
             Some(Intent::NewIncognito),
             "␣i should open incognito in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_leader_opens_the_session_picker_in_every_scope(
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarDraft,
+            Scope::SidebarEmpty,
+            Scope::SidebarGroup,
+            Scope::SidebarWorktreeGroup,
+            Scope::SidebarGroupThread,
+            Scope::SidebarGroupDraft,
+            Scope::SidebarIncognito,
+            Scope::SidebarIncognitoDraft,
+            Scope::Dashboard,
+            Scope::DashboardDraft,
+            Scope::DashboardEmpty,
+            Scope::DashboardGroup,
+            Scope::DashboardWorktreeGroup,
+            Scope::DashboardGroupThread,
+            Scope::DashboardGroupDraft,
+            Scope::DashboardIncognito,
+            Scope::DashboardIncognitoDraft
+        )]
+        scope: Scope,
+    ) {
+        // Given Space already pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing Space again.
+        let intent = press(&mut keys, key(KeyCode::Char(' ')));
+
+        // Then it opens the session picker.
+        assert_eq!(
+            intent,
+            Some(Intent::OpenSessionPicker),
+            "␣␣ should open the session picker in {scope:?}"
         );
     }
 
@@ -1875,24 +1927,24 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, "befginptvw")]
-    #[case(Scope::SidebarDraft, "abefgimnptvw")]
-    #[case(Scope::SidebarEmpty, "efginp")]
-    #[case(Scope::SidebarGroup, "aefgimnptv")]
-    #[case(Scope::SidebarWorktreeGroup, "abefgimnptv")]
-    #[case(Scope::SidebarGroupThread, "efginptv")]
-    #[case(Scope::SidebarGroupDraft, "aefgimnptv")]
-    #[case(Scope::Dashboard, "beginptvw")]
-    #[case(Scope::DashboardDraft, "abegimnptvw")]
-    #[case(Scope::DashboardEmpty, "eginp")]
-    #[case(Scope::DashboardGroup, "aegimnptv")]
-    #[case(Scope::DashboardWorktreeGroup, "abegimnptv")]
-    #[case(Scope::DashboardGroupThread, "eginptv")]
-    #[case(Scope::DashboardGroupDraft, "aegimnptv")]
-    #[case(Scope::SidebarIncognito, "efginptv")]
-    #[case(Scope::SidebarIncognitoDraft, "aefgimnptv")]
-    #[case(Scope::DashboardIncognito, "eginptv")]
-    #[case(Scope::DashboardIncognitoDraft, "aegimnptv")]
+    #[case(Scope::Sidebar, " befginptvw")]
+    #[case(Scope::SidebarDraft, " abefgimnptvw")]
+    #[case(Scope::SidebarEmpty, " efginp")]
+    #[case(Scope::SidebarGroup, " aefgimnptv")]
+    #[case(Scope::SidebarWorktreeGroup, " abefgimnptv")]
+    #[case(Scope::SidebarGroupThread, " efginptv")]
+    #[case(Scope::SidebarGroupDraft, " aefgimnptv")]
+    #[case(Scope::Dashboard, " beginptvw")]
+    #[case(Scope::DashboardDraft, " abegimnptvw")]
+    #[case(Scope::DashboardEmpty, " eginp")]
+    #[case(Scope::DashboardGroup, " aegimnptv")]
+    #[case(Scope::DashboardWorktreeGroup, " abegimnptv")]
+    #[case(Scope::DashboardGroupThread, " eginptv")]
+    #[case(Scope::DashboardGroupDraft, " aegimnptv")]
+    #[case(Scope::SidebarIncognito, " efginptv")]
+    #[case(Scope::SidebarIncognitoDraft, " aefgimnptv")]
+    #[case(Scope::DashboardIncognito, " eginptv")]
+    #[case(Scope::DashboardIncognitoDraft, " aegimnptv")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
         let popup = leader_popup(scope);
@@ -2096,6 +2148,23 @@ mod tests {
             routed,
             Route::Intent(Intent::ToggleSidebar),
             "<C-b> should toggle the sidebar while attached"
+        );
+    }
+
+    #[rstest::rstest]
+    fn ctrl_space_opens_the_session_picker_while_attached() {
+        // Given `<C-Space>`, the form both kitty's `CSI 32;5u` and the legacy
+        // NUL byte parse to.
+        let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+
+        // When routing it while attached.
+        let routed = attached_route(key);
+
+        // Then it opens the session picker instead of reaching Claude.
+        assert_eq!(
+            routed,
+            Route::Intent(Intent::OpenSessionPicker),
+            "<C-Space> should open the session picker while attached"
         );
     }
 
