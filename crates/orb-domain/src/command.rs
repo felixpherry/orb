@@ -5,7 +5,7 @@
 //! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle, delete,
 //! visit, save the sidebar's width and filter, save the jump list, create and start groups, start a
 //! group's sibling, pin, settle and delete groups, save a group draft, answer a trust confirm) go
-//! to the sessions actor.
+//! to the sessions actor; worktree commands (refresh, delete) go to the worktrees actor.
 
 use std::path::PathBuf;
 
@@ -135,6 +135,10 @@ pub enum Command {
     /// End the waiting session start as a failed one: the user didn't trust
     /// its folder.
     DeclineTrust,
+    /// Rescan orb's worktrees and re-read their facts, then their sizes.
+    RefreshWorktrees,
+    /// Force-remove the worktree at `path`, keeping its branch.
+    DeleteWorktree { path: PathBuf },
 }
 
 /// Where a thread's session runs.

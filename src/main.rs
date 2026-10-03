@@ -18,6 +18,9 @@ use orb_domain::feat::sessions::store::Store;
 use orb_domain::feat::sessions::workspace_trust::{
     ClaudeConfigTrust, WorkspaceTrustService, claude_config_file,
 };
+use orb_domain::feat::worktrees::worktrees_actor::{
+    SWEEP_EVERY, WorktreesActorDeps, spawn_worktrees_actor,
+};
 use orb_domain::feat::zellij::zellij_cli::ZellijCli;
 use orb_domain::feat::zellij::zellij_service::ZellijService;
 use orb_domain::{AppState, Services, State};
@@ -101,12 +104,22 @@ fn main() -> Result<(), Report<OrbError>> {
         state: state.clone(),
         store,
         claude_dir,
-        worktrees_root,
+        worktrees_root: worktrees_root.clone(),
         orb_root,
         incognito_root: PathBuf::from("/tmp/orb-incognito"),
         wake: frontend.waker(),
     });
+    runtime.block_on(sessions.wait_for_startup());
+    let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
+        git: git.clone(),
+        state: state.clone(),
+        worktrees_root,
+        wake: frontend.waker(),
+        sweep_every: SWEEP_EVERY,
+    });
     frontend
-        .run(state, sessions, git, claude_env, zellij, notifier)
+        .run(
+            state, sessions, worktrees, git, claude_env, zellij, notifier,
+        )
         .change_context(OrbError)
 }
