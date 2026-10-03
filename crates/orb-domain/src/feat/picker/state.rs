@@ -594,6 +594,12 @@ impl PickerState {
         self.list.cursor_right();
     }
 
+    /// Moves the cursor to grapheme `index`, or to the end when the input is
+    /// shorter.
+    pub fn cursor_to(&mut self, index: usize) {
+        self.list.cursor_to(index);
+    }
+
     /// What the picker picks.
     pub fn kind(&self) -> &PickerKind {
         &self.kind

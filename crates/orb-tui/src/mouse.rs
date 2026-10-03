@@ -5,7 +5,9 @@
 //! while it has the keys, and otherwise scrolls its view. While attached, the
 //! pane gets its own mouse events, as Claude expects. In a picker a click
 //! selects a row, a double-click picks it and the wheel moves the selection;
-//! a click outside a picker or the rename box closes it like `Esc`.
+//! a click outside a picker or the rename box closes it like `Esc`. A click
+//! in the text of the sidebar search, a picker's input or the rename box
+//! moves its cursor there.
 //!
 //! Each frame records where it drew what a click can land on, and a mouse
 //! event is mapped back through that record.
@@ -16,6 +18,8 @@ use orb_domain::feat::sessions::state::SidebarItem;
 use orb_domain::{Focus, Intent};
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
+
+use crate::picker::grapheme_at;
 
 /// Two clicks on the same target closer than this are a double-click
 /// (neovim's `mousetime`).
@@ -41,6 +45,25 @@ pub(crate) struct HitMap {
     /// Each selectable picker row's line and its index into the picker's
     /// shown rows.
     picker_rows: Vec<(Rect, usize)>,
+    /// The text line of the input that has the keys: the sidebar search, a
+    /// picker's input or the rename box.
+    text: Option<TextHit>,
+}
+
+/// The text line of the input that has the keys, and what `visible` drew
+/// its text from.
+#[derive(Debug)]
+struct TextHit {
+    /// The input's line, its prompt included.
+    line: Rect,
+    /// How many columns the prompt takes before the text.
+    prompt: usize,
+    /// The typed text.
+    text: String,
+    /// The cursor, as a grapheme index into `text`.
+    cursor: usize,
+    /// The columns `visible` was given for the text.
+    room: usize,
 }
 
 impl HitMap {
@@ -111,6 +134,34 @@ impl HitMap {
             .iter()
             .find(|(area, _)| area.contains(at))
             .map(|&(_, index)| index)
+    }
+
+    /// Records the input line `line`, whose text follows `prompt` columns
+    /// and was drawn by `visible(text, cursor, room)`.
+    pub(crate) fn record_text(
+        &mut self,
+        line: Rect,
+        prompt: usize,
+        text: &str,
+        cursor: usize,
+        room: usize,
+    ) {
+        self.text = Some(TextHit {
+            line,
+            prompt,
+            text: text.to_owned(),
+            cursor,
+            room,
+        });
+    }
+
+    /// The grapheme of the input's text drawn at `at`: the first shown one
+    /// when `at` is on the prompt, the text's length past its end. `None` off
+    /// the input's line.
+    pub(crate) fn text_at(&self, at: Position) -> Option<usize> {
+        let hit = self.text.as_ref().filter(|hit| hit.line.contains(at))?;
+        let column = usize::from(at.x - hit.line.x).saturating_sub(hit.prompt);
+        Some(grapheme_at(&hit.text, hit.cursor, hit.room, column))
     }
 }
 
@@ -216,8 +267,9 @@ pub(crate) fn route(
 
 /// Where a click or wheel notch at `at` goes while a picker or the rename
 /// box has the keys: a click outside the popup cancels it, a click on a
-/// picker row selects it and a double-click picks it, and the wheel over a
-/// picker moves its selection. Before the popup is drawn, nothing.
+/// picker row selects it and a double-click picks it, a click in the
+/// input's text moves its cursor there, and the wheel over a picker moves
+/// its selection. Before the popup is drawn, nothing.
 fn route_overlay(
     at: Position,
     hits: &HitMap,
@@ -244,12 +296,15 @@ fn route_overlay(
         (Action::Click, true, _) => {
             let row = hits.picker_row_at(at);
             let click = clicks.click(row.map(ClickTarget::PickerRow), now);
-            match row {
-                Some(index) => intents([
+            match (row, hits.text_at(at)) {
+                (Some(index), _) => intents([
                     Some(Intent::PickerSelectRow(index)),
                     (click == Click::Double).then_some(Intent::PickerConfirm),
                 ]),
-                None => MouseRoute::Nothing,
+                (None, Some(grapheme)) => {
+                    MouseRoute::Intents(vec![Intent::PickerCursorTo(grapheme)])
+                }
+                (None, None) => MouseRoute::Nothing,
             }
         }
     }
@@ -268,12 +323,15 @@ fn route_click(
     let attach = (click == Click::Double).then_some(Intent::Attach);
     let lead = match focus {
         Focus::Search => {
-            return match (row, hits.right.contains(at)) {
-                (Some(item), _) => intents([Some(Intent::SelectRow(item)), attach]),
-                (None, true) => {
+            return match (row, hits.text_at(at), hits.right.contains(at)) {
+                (Some(item), ..) => intents([Some(Intent::SelectRow(item)), attach]),
+                (None, Some(grapheme), _) => {
+                    MouseRoute::Intents(vec![Intent::PickerCursorTo(grapheme)])
+                }
+                (None, None, true) => {
                     MouseRoute::Intents(vec![Intent::PickerConfirm, Intent::FocusRight])
                 }
-                (None, false) => MouseRoute::Nothing,
+                (None, None, false) => MouseRoute::Nothing,
             };
         }
         Focus::Attached => Some(Intent::LeavePane),
@@ -711,6 +769,80 @@ mod tests {
             routed,
             MouseRoute::Nothing,
             "a double-click inside a picker off its rows should pick nothing"
+        );
+    }
+
+    /// `hits()` while searching for "thread": the box's inner line is
+    /// columns 1 to 27 of line 1, the text after the two-column `> `.
+    fn search_hits() -> HitMap {
+        let mut hits = hits();
+        hits.record_text(Rect::new(1, 1, 27, 1), 2, "thread", 6, 24);
+        hits
+    }
+
+    /// `picker_hits()` with "alpha" typed on the input line (line 5), after
+    /// the three-column ` > `.
+    fn input_hits() -> HitMap {
+        let mut hits = picker_hits();
+        hits.record_text(Rect::new(21, 5, 38, 1), 3, "alpha", 5, 34);
+        hits
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_search_text_moves_its_cursor() {
+        // Given the sidebar search has the keys, "thread" typed.
+        // When clicking the "r" of "thread".
+        let routed = route_over(left_click(5, 1), &search_hits(), Focus::Search);
+
+        // Then the search cursor moves before the "r".
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::PickerCursorTo(2)]),
+            "a click on the search text should move its cursor there"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_search_prompt_moves_the_cursor_to_the_start() {
+        // Given the sidebar search has the keys, "thread" typed.
+        // When clicking the `>` of the prompt.
+        let routed = route_over(left_click(1, 1), &search_hits(), Focus::Search);
+
+        // Then the search cursor moves to the first shown grapheme.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::PickerCursorTo(0)]),
+            "a click on the prompt should move the cursor to the start"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_search_box_border_does_nothing() {
+        // Given the sidebar search has the keys, "thread" typed.
+        // When clicking the box's top border, off the text line.
+        let routed = route_over(left_click(5, 0), &search_hits(), Focus::Search);
+
+        // Then nothing happens.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "a click on the search box's border should do nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::picker(Focus::Picker)]
+    #[case::rename(Focus::Rename)]
+    fn click_on_an_inputs_text_moves_its_cursor(#[case] focus: Focus) {
+        // Given a picker or the rename box has the keys, "alpha" typed.
+        // When clicking the "p" of "alpha".
+        let routed = route_over(left_click(26, 5), &input_hits(), focus);
+
+        // Then its cursor moves before the "p".
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::PickerCursorTo(2)]),
+            "a click on the input's text should move its cursor there with {focus:?}"
         );
     }
 

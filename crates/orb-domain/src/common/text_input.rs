@@ -72,6 +72,12 @@ impl TextInput {
         self.cursor = (self.cursor + 1).min(self.text.graphemes(true).count());
     }
 
+    /// Moves the cursor to grapheme `index`, or to the end when the text is
+    /// shorter.
+    pub fn cursor_to(&mut self, index: usize) {
+        self.cursor = index.min(self.text.graphemes(true).count());
+    }
+
     /// The typed text.
     pub fn text(&self) -> &str {
         &self.text

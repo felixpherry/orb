@@ -20,8 +20,9 @@ const EDIT: &str = "\u{f044}";
 
 /// Draws the rename box over the top of `area` (the screen above the mode
 /// line). A name too long for the box shows its part up to the cursor.
-/// Records the box in `hits`, so a click outside it can close it. Returns
-/// where the terminal cursor goes.
+/// Records the box and its text line in `hits`, so a click outside it can
+/// close it and a click in the name can move its cursor. Returns where the
+/// terminal cursor goes.
 pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer, hits: &mut HitMap) -> Position {
     let popup = {
         let width = area.width.min(WIDTH);
@@ -48,10 +49,14 @@ pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer, hits: &mut H
         Span::raw("  "),
     ];
     let prefix_width: usize = prefix.iter().map(Span::width).sum();
-    let (shown, before) = visible(
+    let room = usize::from(inner.width).saturating_sub(prefix_width + 1);
+    let (shown, before) = visible(rename.input.text(), rename.input.cursor(), room);
+    hits.record_text(
+        inner,
+        prefix_width,
         rename.input.text(),
         rename.input.cursor(),
-        usize::from(inner.width).saturating_sub(prefix_width + 1),
+        room,
     );
     let mut spans = prefix;
     spans.push(Span::styled(shown, Style::new().fg(FG)));
@@ -220,6 +225,28 @@ mod tests {
         assert!(
             hits.on_overlay(Position::new(20, 2)),
             "the box should be recorded from its top-left corner"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_maps_the_name_to_its_graphemes() {
+        // Given the rename box holding "Fix the sidebar" on a 100x10 screen.
+        let area = Rect::new(0, 0, 100, 10);
+        let rename = Rename {
+            target: RenameTarget::Thread(ThreadId(1)),
+            input: TextInput::new("Fix the sidebar"),
+            creating: false,
+        };
+        let mut hits = HitMap::default();
+
+        // When drawing it.
+        let cursor = render(&rename, area, &mut Buffer::empty(area), &mut hits);
+
+        // Then the column before the terminal cursor maps to the final "r".
+        assert_eq!(
+            hits.text_at(Position::new(cursor.x - 1, cursor.y)),
+            Some(14),
+            "the column before the cursor should be the last grapheme"
         );
     }
 }

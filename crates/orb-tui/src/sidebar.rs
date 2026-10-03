@@ -98,7 +98,7 @@ pub(crate) fn render(
     let [input, list] = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
     hits.record_sidebar_input(input);
     let rows = sessions.sidebar();
-    let search_cursor = render_input(sessions, &rows, input, buf);
+    let search_cursor = render_input(sessions, &rows, input, buf, hits);
     let layout = SidebarLayout {
         rows: list.height,
         heights: rows.iter().map(height).collect(),
@@ -109,12 +109,14 @@ pub(crate) fn render(
 
 /// The rounded box at the top: its title and search badge, the prompt, and the
 /// count against its right edge. Returns the search text's cursor while
-/// there is a search.
+/// there is a search. Records the search text's line in `hits` while there
+/// is a search.
 fn render_input(
     sessions: &Sessions,
     rows: &[SidebarRow<'_>],
     area: Rect,
     buf: &mut Buffer,
+    hits: &mut HitMap,
 ) -> Option<Position> {
     let badge = if sessions.search.is_some() {
         Style::new().fg(BLUE).bg(GUTTER)
@@ -135,6 +137,8 @@ fn render_input(
     let (prompt, cursor) = prompt(
         sessions,
         usize::from(inner.width).saturating_sub(usize::from(width(&count)) + 1),
+        inner,
+        hits,
     );
     render_split(prompt, count, inner, buf);
     cursor.map(|column| {
@@ -151,8 +155,14 @@ fn render_input(
 /// `>`, followed by the filtered project's folder and name while there is
 /// one, then the search text while there is a search, where snacks shows the
 /// query. A search text too long for the `room` columns shows its end. Also
-/// returns the column of the search text's cursor.
-fn prompt(sessions: &Sessions, room: usize) -> (Line<'_>, Option<u16>) {
+/// returns the column of the search text's cursor. Records the search text's
+/// line `line` in `hits`.
+fn prompt<'a>(
+    sessions: &'a Sessions,
+    room: usize,
+    line: Rect,
+    hits: &mut HitMap,
+) -> (Line<'a>, Option<u16>) {
     let filtered = sessions
         .filter
         .and_then(|id| sessions.projects.iter().find(|project| project.id == id));
@@ -169,10 +179,14 @@ fn prompt(sessions: &Sessions, room: usize) -> (Line<'_>, Option<u16>) {
     };
     spans.push(Span::raw(" "));
     let prefix_width: usize = spans.iter().map(Span::width).sum();
-    let (shown, before) = visible(
+    let room = room.saturating_sub(prefix_width + 1);
+    let (shown, before) = visible(search.input.text(), search.input.cursor(), room);
+    hits.record_text(
+        line,
+        prefix_width,
         search.input.text(),
         search.input.cursor(),
-        room.saturating_sub(prefix_width + 1),
+        room,
     );
     spans.push(span(shown, FG));
     (
@@ -1521,6 +1535,33 @@ mod tests {
         // Then the cursor is after `> `, the folder and space, `orb`, a space
         // and `thr`: 11 columns into the box.
         assert_eq!(cursor, Some(Position::new(12, 1)), "the search cursor");
+    }
+
+    #[rstest::rstest]
+    fn hit_map_maps_the_search_text_to_its_graphemes() {
+        // Given a filtered sidebar searching for "thr".
+        let sessions = searching(filtered(), "thr");
+
+        // When rendering the sidebar.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
+        let mut hits = HitMap::default();
+        let (_, _, cursor) = render(
+            &sessions,
+            &HashSet::new(),
+            at(1000),
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+            &mut hits,
+        );
+
+        // Then the column before the search cursor maps to "r".
+        let at = cursor.map(|cursor| Position::new(cursor.x - 1, cursor.y));
+        assert_eq!(
+            at.and_then(|at| hits.text_at(at)),
+            Some(2),
+            "the column before the cursor should be the last typed grapheme"
+        );
     }
 
     /// The search text wider than a 32-column sidebar's input box: 40 `x`s

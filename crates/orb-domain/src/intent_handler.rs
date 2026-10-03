@@ -337,6 +337,7 @@ impl IntentHandler {
             | Intent::PickerDeleteWord
             | Intent::PickerCursorLeft
             | Intent::PickerCursorRight
+            | Intent::PickerCursorTo(_)
             | Intent::PickerNext
             | Intent::PickerPrev
             | Intent::PickerHalfPageDown
@@ -357,6 +358,7 @@ impl IntentHandler {
             | Intent::PickerDeleteWord
             | Intent::PickerCursorLeft
             | Intent::PickerCursorRight
+            | Intent::PickerCursorTo(_)
             | Intent::PickerNext
             | Intent::PickerPrev
             | Intent::PickerHalfPageDown
@@ -396,6 +398,12 @@ impl IntentHandler {
             Intent::PickerCursorRight => {
                 if let Some(picker) = &mut state.picker {
                     picker.cursor_right();
+                }
+                vec![]
+            }
+            Intent::PickerCursorTo(index) => {
+                if let Some(picker) = &mut state.picker {
+                    picker.cursor_to(*index);
                 }
                 vec![]
             }
@@ -1457,6 +1465,7 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         (Intent::PickerDeleteWord, Some(rename)) => rename.input.delete_word(),
         (Intent::PickerCursorLeft, Some(rename)) => rename.input.cursor_left(),
         (Intent::PickerCursorRight, Some(rename)) => rename.input.cursor_right(),
+        (Intent::PickerCursorTo(index), Some(rename)) => rename.input.cursor_to(*index),
         (
             Intent::PickerConfirm,
             Some(Rename {
@@ -1552,6 +1561,10 @@ fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         }
         (Intent::PickerCursorRight, Some(search)) => {
             search.input.cursor_right();
+            return vec![];
+        }
+        (Intent::PickerCursorTo(index), Some(search)) => {
+            search.input.cursor_to(*index);
             return vec![];
         }
         (Intent::PickerNext, _) => sessions.select_next_match(),
@@ -8435,5 +8448,75 @@ mod tests {
 
         // Then nothing runs.
         assert_eq!(commands, vec![], "highlighting shouldn't run the item");
+    }
+
+    #[rstest::rstest]
+    fn picker_cursor_to_moves_the_pickers_cursor() {
+        // Given the project picker with "al" typed.
+        let mut state = picking(Focus::Sidebar);
+        IntentHandler::handle(&Intent::PickerInput('a'), &mut state);
+        IntentHandler::handle(&Intent::PickerInput('l'), &mut state);
+
+        // When handling PickerCursorTo(1).
+        IntentHandler::handle(&Intent::PickerCursorTo(1), &mut state);
+
+        // Then the picker's cursor is between "a" and "l".
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::cursor),
+            Some(1),
+            "a click should move the picker's cursor"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_cursor_to_moves_the_rename_boxs_cursor() {
+        // Given the rename box holding "abc".
+        let mut state = renaming("abc");
+
+        // When handling PickerCursorTo(1).
+        IntentHandler::handle(&Intent::PickerCursorTo(1), &mut state);
+
+        // Then the box's cursor is between "a" and "b".
+        assert_eq!(
+            state.rename.as_ref().map(|rename| rename.input.cursor()),
+            Some(1),
+            "a click should move the rename box's cursor"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_cursor_to_moves_the_search_cursor() {
+        // Given a search for "thr".
+        let mut state = searching("thr", Some(2));
+
+        // When handling PickerCursorTo(1).
+        IntentHandler::handle(&Intent::PickerCursorTo(1), &mut state);
+
+        // Then the search's cursor is between "t" and "h".
+        assert_eq!(
+            state
+                .sessions
+                .search
+                .as_ref()
+                .map(|search| search.input.cursor()),
+            Some(1),
+            "a click should move the search's cursor"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_cursor_to_past_the_end_stops_at_the_end() {
+        // Given the rename box holding "abc".
+        let mut state = renaming("abc");
+
+        // When handling PickerCursorTo(9), past the text.
+        IntentHandler::handle(&Intent::PickerCursorTo(9), &mut state);
+
+        // Then the cursor is at the end of "abc".
+        assert_eq!(
+            state.rename.as_ref().map(|rename| rename.input.cursor()),
+            Some(3),
+            "a click past the text should put the cursor at its end"
+        );
     }
 }
