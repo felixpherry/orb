@@ -36,7 +36,10 @@
 //! attaches to it. If the user is typing in a picker, the rename box or the
 //! sidebar search, or is in a pane, it waits, and attaches once the keys are
 //! back in the sidebar or the dashboard, leaving them there with the pane
-//! drawn, as long as the thread is still selected.
+//! drawn, as long as the thread is still selected. Attaching to a thread whose
+//! orb worktree is gone asks the sessions actor to recreate it instead,
+//! leaving the keys on the dashboard, and attaches the same way once it's
+//! back.
 //!
 //! orb captures the mouse throughout. Mouse events over the attached pane go
 //! to Claude; the rest are mapped through the last frame's hit map to intents
@@ -61,6 +64,7 @@ use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
 use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
+use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::PickerState;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
@@ -113,11 +117,13 @@ impl Frontend {
     }
 
     /// Runs orb's TUI until the user quits. Session commands go to
-    /// `sessions`; worktree commands go to `worktrees`; the branch picker's refs
-    /// come from `git`; attached sessions run with `claude_env`; tools open
-    /// through `zellij`, `None` outside zellij; notices are announced through
-    /// `notifier` while orb's pane isn't focused, or while zellij says no
-    /// client is on it. The terminal is restored on exit and on panic.
+    /// `sessions`; worktree commands go to `worktrees`; a thread whose
+    /// worktree under `worktrees_root` is gone has it recreated before
+    /// attaching; the branch picker's refs come from `git`; attached sessions
+    /// run with `claude_env`; tools open through `zellij`, `None` outside
+    /// zellij; notices are announced through `notifier` while orb's pane isn't
+    /// focused, or while zellij says no client is on it. The terminal is
+    /// restored on exit and on panic.
     ///
     /// # Errors
     ///
@@ -128,6 +134,7 @@ impl Frontend {
         state: State,
         sessions: ActorRef<SessionsActor>,
         worktrees: ActorRef<WorktreesActor>,
+        worktrees_root: PathBuf,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
@@ -138,7 +145,16 @@ impl Frontend {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook();
             let result = App::new(
-                state, sessions, worktrees, git, claude_env, zellij, notifier, tx, tz,
+                state,
+                sessions,
+                worktrees,
+                worktrees_root,
+                git,
+                claude_env,
+                zellij,
+                notifier,
+                tx,
+                tz,
             )
             .run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
@@ -203,6 +219,26 @@ fn started_attach(
         _ if started.is_none() || started != selected => StartedAttach::Drop,
         Focus::Picker | Focus::Rename | Focus::Search | Focus::Attached => StartedAttach::Wait,
         Focus::Sidebar | Focus::Dashboard => StartedAttach::Attach { keep_keys: waited },
+    }
+}
+
+/// What `Command::Attach` does for a thread without a live pane.
+#[derive(Debug, PartialEq, Eq)]
+enum AttachPlan {
+    /// Start `claude attach` in the thread's directory.
+    Spawn,
+    /// The thread's orb worktree is gone: have the sessions actor recreate it.
+    Restore,
+}
+
+/// Restore when `cwd` is missing and is one of orb's worktrees under
+/// `worktrees_root`; otherwise spawn, so a missing directory elsewhere
+/// behaves as it always has.
+fn attach_or_restore(cwd: &Path, worktrees_root: &Path) -> AttachPlan {
+    if cwd.is_dir() || !is_orb_worktree(worktrees_root, cwd) {
+        AttachPlan::Spawn
+    } else {
+        AttachPlan::Restore
     }
 }
 
@@ -275,6 +311,9 @@ struct App {
     sessions: ActorRef<SessionsActor>,
     /// Refreshes and deletes orb's worktrees.
     worktrees: ActorRef<WorktreesActor>,
+    /// Where orb makes worktrees; a thread's missing worktree there is
+    /// recreated on attach.
+    worktrees_root: PathBuf,
     git: GitService,
     keys: Keys,
     /// Each attached thread's `claude attach`, kept while other threads are
@@ -318,6 +357,7 @@ impl App {
         state: State,
         sessions: ActorRef<SessionsActor>,
         worktrees: ActorRef<WorktreesActor>,
+        worktrees_root: PathBuf,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
@@ -333,6 +373,7 @@ impl App {
             state,
             sessions,
             worktrees,
+            worktrees_root,
             git,
             keys: Keys::new(keymap::keymap(), scope),
             panes: HashMap::new(),
@@ -595,6 +636,17 @@ impl App {
                     pane.focus(false);
                 }
                 if self.panes.get(&target.thread).is_none_or(Pane::has_exited) {
+                    if attach_or_restore(&target.cwd, &self.worktrees_root) == AttachPlan::Restore {
+                        let _ = self
+                            .sessions
+                            .tell(sessions_actor::RestoreWorktree(target.thread))
+                            .try_send();
+                        let mut app = self.state.write();
+                        app.focus = Focus::Dashboard;
+                        app.attached.remove(&target.thread);
+                        app.sessions.starting = true;
+                        return;
+                    }
                     match self.spawn_pane(target.argv.clone(), target.cwd.clone()) {
                         Some(pane) => {
                             self.panes.insert(target.thread, pane);
@@ -1139,8 +1191,8 @@ mod tests {
     use ratatui::crossterm::cursor::SetCursorStyle;
 
     use super::{
-        StartedAttach, after_pane, announces, cursor_style, list_directories, shown_pane,
-        started_attach, to_drop, trust_return_to, trust_to_open,
+        AttachPlan, StartedAttach, after_pane, announces, attach_or_restore, cursor_style,
+        list_directories, shown_pane, started_attach, to_drop, trust_return_to, trust_to_open,
     };
 
     #[rstest::rstest]
@@ -1451,5 +1503,53 @@ mod tests {
 
         // Then no pane is shown.
         assert_eq!(shown, None, "the dashboard hides every pane");
+    }
+
+    #[rstest::rstest]
+    fn attach_spawns_in_an_existing_worktree() -> io::Result<()> {
+        // Given an orb worktree that is on disk.
+        let root = tempfile::tempdir()?;
+        let cwd = root.path().join("orb/orb-1a2b3c4d");
+        fs::create_dir_all(&cwd)?;
+
+        // When deciding how to attach to it.
+        let plan = attach_or_restore(&cwd, root.path());
+
+        // Then claude attach starts in it.
+        assert_eq!(plan, AttachPlan::Spawn, "an existing worktree spawns");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn attach_restores_a_missing_orb_worktree() -> io::Result<()> {
+        // Given an orb worktree whose directory is gone.
+        let root = tempfile::tempdir()?;
+        let cwd = root.path().join("orb/orb-1a2b3c4d");
+
+        // When deciding how to attach to it.
+        let plan = attach_or_restore(&cwd, root.path());
+
+        // Then the sessions actor recreates it.
+        assert_eq!(plan, AttachPlan::Restore, "a missing orb worktree restores");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn attach_spawns_for_a_missing_directory_outside_orbs_worktrees() -> io::Result<()> {
+        // Given a missing directory outside orb's worktrees root.
+        let root = tempfile::tempdir()?;
+        let other = tempfile::tempdir()?;
+        let cwd = other.path().join("gone");
+
+        // When deciding how to attach to it.
+        let plan = attach_or_restore(&cwd, root.path());
+
+        // Then claude attach starts as it always has.
+        assert_eq!(
+            plan,
+            AttachPlan::Spawn,
+            "a directory orb didn't make spawns"
+        );
+        Ok(())
     }
 }
