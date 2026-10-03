@@ -6,15 +6,17 @@
 //! after 15 s, so an origin that can't be reached fails the fetch instead of
 //! hanging it. When git fails, the first line it printed to stderr becomes the
 //! reason.
+//!
+//! A worktree's size comes from `du`, run with the same environment.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use error_stack::Report;
 
-use super::git_service::{Git, GitError, GitRef};
+use super::git_service::{Git, GitError, GitRef, WorktreeFacts};
 use crate::common::{Finished, run_within};
 
 /// What `git fetch` prints when the remote lacks the branch.
@@ -202,6 +204,62 @@ impl Git for GitCli {
         Ok(())
     }
 
+    fn add_worktree_on(
+        &self,
+        repo: &Path,
+        path: &Path,
+        branch: &str,
+    ) -> Result<(), Report<GitError>> {
+        let args = [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            path.as_os_str(),
+            OsStr::new(branch),
+        ];
+        self.run(repo, args)?;
+        Ok(())
+    }
+
+    fn prune_worktrees(&self, repo: &Path) -> Result<(), Report<GitError>> {
+        self.run(repo, ["worktree", "prune"])?;
+        Ok(())
+    }
+
+    fn worktree_facts(&self, path: &Path) -> Result<WorktreeFacts, Report<GitError>> {
+        // `status` goes first: it is the call that fails outside a repository.
+        let changes = self.run(path, ["status", "--porcelain"])?.lines().count();
+        let branch = self
+            .run(path, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .ok()
+            .and_then(|out| non_empty(out.trim()));
+        let last_commit = self
+            .run(path, ["log", "-1", "--format=%ct%x00%s"])
+            .ok()
+            .and_then(|out| last_commit(&out));
+        Ok(WorktreeFacts {
+            branch,
+            changes,
+            last_commit,
+        })
+    }
+
+    fn disk_usage(&self, path: &Path) -> Option<u64> {
+        let output = Command::new("du")
+            .arg("-sk")
+            .arg(path)
+            .env_clear()
+            .envs(self.env.iter().map(|(key, value)| (key, value)))
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        // `du` exits 1 when it can't read some files but still prints the total.
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    }
+
     fn delete_branch(
         &self,
         repo: &Path,
@@ -290,6 +348,13 @@ fn couldnt_run(error: std::io::Error) -> Report<GitError> {
 
 fn non_empty(text: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// The time and subject in `git log -1 --format=%ct%x00%s` output.
+fn last_commit(log: &str) -> Option<(SystemTime, String)> {
+    let (seconds, subject) = log.split_once('\0')?;
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(seconds.parse().ok()?);
+    Some((at, subject.strip_suffix('\n').unwrap_or(subject).to_owned()))
 }
 
 /// One entry of `git worktree list --porcelain`.
@@ -432,7 +497,7 @@ mod tests {
     use std::fs;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
@@ -1041,6 +1106,175 @@ mod tests {
         assert!(
             removed.is_err(),
             "a dirty worktree shouldn't be removed without force"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn add_worktree_on_checks_out_an_existing_branch() -> Result<(), Report<GitError>> {
+        // Given a repo with an existing branch `side`.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.repo("repo", "main")?;
+        sandbox.run(&repo, ["branch", "side"])?;
+        let worktree = sandbox.path("worktree");
+
+        // When adding a worktree on `side`.
+        sandbox.git().add_worktree_on(&repo, &worktree, "side")?;
+
+        // Then the worktree has `side` checked out.
+        let current = sandbox.git().run(&worktree, ["branch", "--show-current"])?;
+        assert_eq!(current.trim(), "side", "the worktree should be on side");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn prune_worktrees_drops_a_deleted_worktree() -> Result<(), Report<GitError>> {
+        // Given a worktree whose directory was deleted without git knowing.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.repo("repo", "main")?;
+        let worktree = sandbox.path("worktree");
+        sandbox
+            .git()
+            .add_worktree(&repo, &worktree, "side", "main")?;
+        fs::remove_dir_all(&worktree).change_context(GitError)?;
+
+        // When pruning worktrees.
+        sandbox.git().prune_worktrees(&repo)?;
+
+        // Then git lists only the main checkout.
+        let listed = sandbox
+            .git()
+            .run(&repo, ["worktree", "list", "--porcelain"])?;
+        assert_eq!(
+            listed
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count(),
+            1,
+            "only the main checkout should remain after pruning"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn worktree_facts_names_the_checked_out_branch() -> Result<(), Report<GitError>> {
+        // Given a worktree on `side`.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.repo("repo", "main")?;
+        let worktree = sandbox.path("worktree");
+        sandbox
+            .git()
+            .add_worktree(&repo, &worktree, "side", "main")?;
+
+        // When reading its facts.
+        let facts = sandbox.git().worktree_facts(&worktree)?;
+
+        // Then the branch is `side`.
+        assert_eq!(
+            facts.branch.as_deref(),
+            Some("side"),
+            "the facts should name side"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn worktree_facts_reports_detached_head() -> Result<(), Report<GitError>> {
+        // Given a worktree whose HEAD is detached.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.repo("repo", "main")?;
+        let worktree = sandbox.path("worktree");
+        sandbox
+            .git()
+            .add_worktree(&repo, &worktree, "side", "main")?;
+        sandbox.run(&worktree, ["checkout", "-q", "--detach"])?;
+
+        // When reading its facts.
+        let facts = sandbox.git().worktree_facts(&worktree)?;
+
+        // Then there is no branch.
+        assert_eq!(facts.branch, None, "a detached HEAD should have no branch");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn worktree_facts_counts_uncommitted_files() -> Result<(), Report<GitError>> {
+        // Given a worktree with two untracked files.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.repo("repo", "main")?;
+        let worktree = sandbox.path("worktree");
+        sandbox
+            .git()
+            .add_worktree(&repo, &worktree, "side", "main")?;
+        fs::write(worktree.join("a.txt"), "a").change_context(GitError)?;
+        fs::write(worktree.join("b.txt"), "b").change_context(GitError)?;
+
+        // When reading its facts.
+        let facts = sandbox.git().worktree_facts(&worktree)?;
+
+        // Then it counts two changes.
+        assert_eq!(facts.changes, 2, "both untracked files should count");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn worktree_facts_reads_the_last_commit() -> Result<(), Report<GitError>> {
+        // Given a worktree on `side`, branched from `main`'s one commit.
+        let sandbox = Sandbox::new()?;
+        let repo = sandbox.repo("repo", "main")?;
+        let worktree = sandbox.path("worktree");
+        sandbox
+            .git()
+            .add_worktree(&repo, &worktree, "side", "main")?;
+
+        // When reading its facts.
+        let facts = sandbox.git().worktree_facts(&worktree)?;
+
+        // Then the last commit is that commit's time and subject.
+        assert_eq!(
+            facts.last_commit,
+            Some((
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+                "commit".to_owned()
+            )),
+            "the facts should carry the last commit"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn worktree_facts_fail_outside_a_repository() -> Result<(), Report<GitError>> {
+        // Given a plain directory.
+        let sandbox = Sandbox::new()?;
+        let dir = sandbox.path("plain");
+        fs::create_dir_all(&dir).change_context(GitError)?;
+
+        // When reading its facts.
+        let facts = sandbox.git().worktree_facts(&dir);
+
+        // Then git fails.
+        assert!(
+            facts.is_err(),
+            "a directory outside a repository has no facts"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn disk_usage_reports_kilobytes() -> Result<(), Report<GitError>> {
+        // Given a directory with one non-empty file.
+        let sandbox = Sandbox::new()?;
+        let dir = sandbox.path("sized");
+        fs::create_dir_all(&dir).change_context(GitError)?;
+        fs::write(dir.join("data.bin"), vec![0_u8; 8192]).change_context(GitError)?;
+
+        // When measuring it.
+        let size = sandbox.git().disk_usage(&dir);
+
+        // Then it takes some kilobytes.
+        assert!(
+            size.is_some_and(|kb| kb > 0),
+            "a non-empty directory should take space, got {size:?}"
         );
         Ok(())
     }
