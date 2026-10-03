@@ -46,7 +46,7 @@ The demo shows, in order:
 
 - **One list for every session.** The sidebar shows each thread's status (working, needs approval, needs input, done), its project, branch and elapsed time, across all projects. Pinned threads sit on top, and quiet ones settle onto a collapsible shelf.
 - **The real Claude, attached.** `⏎` runs `claude attach` in a terminal pane inside orb, so every slash command, permission prompt and picker works. Each attached thread keeps its own pane.
-- **Worktrees built in.** A new session can get its own worktree under `~/.orb/worktrees/`. Once Claude names the thread, its `orb/<hex>` branch is renamed to match the title.
+- **Worktrees built in.** A new session can get its own worktree under `~/.orb/worktrees/`. Once Claude names the thread, its `orb/<hex>` branch is renamed to match the title. Every hour, and at start, orb prunes worktrees that nothing uses, or whose threads were all settled at least 7 days ago, keeping their branches and skipping any with uncommitted changes; `⏎` on a pruned thread recreates its worktree on its branch and resumes the chat.
 - **Drafts.** Set up the project, workspace, base branch, model and permission before starting a session. A draft in a folder that isn't a git repository starts in that folder, and `␣w`/`␣b` there offer to initialize git.
 - **Trust handled for you.** When Claude refuses a folder it hasn't been trusted in, orb asks `Trust <path>?` (`No` selected). `Yes` marks it trusted in Claude's `.claude.json` and retries the start.
 - **Groups.** Threads that belong together share one directory and sit under one card: a **Feature** group's worktree (on a branch named after the group, like `GT-514-login`), or a **Research** or **Learn** folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/` (orb writes a default there first: for Research, a research kit with an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions, a report template and `SOURCES.md`; for Learn, an `AGENTS.md`). Each group has a default model and permission, set with `␣m`/`␣a` on its card or draft. `n` starts another thread in an active group at once with those defaults (on a group that has only its draft, `⏎` on the draft starts it first); threads already running keep theirs. `␣b` on a started Feature group's card switches its worktree's branch, which moves every thread in it. A name another group has, or whose branch or folder already exists, is refused with the name box still open. Groups are pinned, settled and deleted as a whole. Deleting one also removes its folder, or its worktree (even with changes) and the branch orb made for it, which frees the name. A Feature group whose branch has unmerged commits (as `git branch -d` sees it) isn't deleted at all, and the mode line says `branch <name> has unmerged commits`.
@@ -54,7 +54,7 @@ The demo shows, in order:
 - **Find and jump.** `/` searches thread titles and group names, `␣f` narrows the sidebar to one project, and `<C-o>`/`<C-i>` move back and forward through a jump list, as in neovim. `␣␣` (or `<C-Space>` in the Claude pane) opens a session picker over your other threads, newest chat first, with a preview of each chat; `⏎` jumps into the thread's pane.
 - **Tools where the code is.** `␣t` opens a shell, `␣gg` lazygit and `␣v` `nvim .` in the thread's directory, as a full-screen zellij floating pane.
 - **Notifications.** When orb isn't focused, you get a macOS notification when a thread finishes, needs approval or needs input.
-- **LazyVim look.** A snacks-style explorer, a dashboard start screen, a lualine mode line, a helix which-key popup, vim.ui.select pickers and a snacks session picker, all in tokyonight-moon.
+- **LazyVim look.** A snacks-style explorer, a dashboard start screen, a lualine mode line, a helix which-key popup, vim.ui.select pickers and snacks session and worktree pickers, all in tokyonight-moon.
 
 ## Keys
 
@@ -69,6 +69,8 @@ The demo shows, in order:
 | `<C-h>` / `<C-l>` | Focus the sidebar / the right-hand side |
 | `<C-o>` / `<C-i>` | Jump back / forward through the jump list (sidebar, dashboard and the Claude pane) |
 | `␣␣` / `<C-Space>` | Session picker: threads newest chat first, with a preview of the selected chat (`<C-Space>` in the Claude pane; `<C-s>` shows or hides settled threads) |
+| `␣sw` | Worktree picker: every worktree under `~/.orb/worktrees/`, with its size, changes, users and when the sweep will prune it |
+| `<C-x>` | In the worktree picker, delete the worktree, changes included, after a `No`/`Yes` confirm; the branch stays, and a worktree whose thread is attached or mid-turn can't be deleted |
 | `/` or `i` | Search thread titles and group names |
 | `r` | Rename the thread |
 | `l` / `h` | Open / close the group (or the Settled shelf) |
@@ -112,7 +114,7 @@ orb captures the mouse from the moment it starts.
 
 - A click selects a sidebar row or a picker row. A double-click, two clicks on the same row within 500 ms, acts as `⏎`: it attaches, starts the draft, opens or closes the group or the Settled shelf, or picks the picker row.
 - A click on a sidebar row moves the keys to the sidebar, and a click on the right-hand side moves them to the dashboard or into the Claude pane. The click that moves them into the pane isn't sent to Claude; later clicks and the wheel over the pane are.
-- With the keys in the sidebar, the wheel moves the selection one row. Otherwise, with no picker or rename box open, the wheel over the sidebar scrolls only its view, 3 lines a notch. Over a picker's list it moves the picker's selection, and over the session picker's preview it does nothing. Neither wraps.
+- With the keys in the sidebar, the wheel moves the selection one row. Otherwise, with no picker or rename box open, the wheel over the sidebar scrolls only its view, 3 lines a notch. Over a picker's list it moves the picker's selection, and over the session or worktree picker's preview it does nothing. Neither wraps.
 - A click on a dashboard item highlights it and doesn't run it.
 - A click outside a picker or the rename box closes it, as `Esc` does.
 - A click on the sidebar's search box starts a search, and a click in any input's text moves the cursor there.
