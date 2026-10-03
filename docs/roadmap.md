@@ -776,6 +776,6 @@ Written in mouse click's Verification step (not a milestone).
 - ``(mouse) The wheel over the sidebar moves the selection one row without wrapping while the sidebar has the keys, and otherwise, with no picker or rename box open, scrolls only its view, 3 lines a notch; the view goes back to the selection once the selection moves or the sidebar takes the keys.``
 - ``(mouse) Clicking the sidebar's input box starts a search; during a search, clicking a row ends it as `⏎` does on that row, and clicking the right-hand area ends it as `⏎` does and moves the keys there.``
 - ``(mouse) A click on a dashboard menu item moves the menu cursor to it without running it.``
-- ``(mouse) In a picker, a click selects a row, a double-click picks it, the wheel anywhere over the picker moves the selection one row without wrapping, a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.``
+- ``(mouse) In a picker, a click selects a row, a double-click picks it, the wheel over its list moves the selection one row without wrapping (over the session picker's preview it does nothing), a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.``
 - ``(mouse) A click outside the rename box cancels it like `Esc`.``
 - ``(mouse) A click on the input line of the sidebar search, a picker or the rename box moves its text cursor to the grapheme under it, to the first shown grapheme on the prompt, or to the end past the text.``

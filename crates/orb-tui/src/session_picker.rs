@@ -40,8 +40,9 @@ use crate::sidebar::{
 /// Draws the session picker over `area`: the list of `picker`'s rows with
 /// live status from `sessions` (`attached` threads fill the idle circle),
 /// and the selected thread's preview. Returns how many rows the list fits,
-/// and where the terminal cursor goes in the input. Records the popup and
-/// the list's rows in `hits`; the preview maps to no row.
+/// and where the terminal cursor goes in the input. Records the popup, the
+/// list box as the wheel's area and the list's rows in `hits`; the preview
+/// maps to no row and takes no wheel.
 #[expect(
     clippy::too_many_arguments,
     reason = "the picker's inputs plus the scroll and hit map it updates"
@@ -61,6 +62,7 @@ pub(crate) fn render(
     buf.set_style(popup, Style::new().bg(BG_DARK));
     hits.record_overlay(popup);
     let [list_box, preview_box] = boxes(popup, area.width >= 120);
+    hits.record_selector(list_box);
     let drawn = render_list(picker, sessions, attached, now, list_box, buf, scroll, hits);
     render_preview(picker, sessions, attached, now, preview_box, buf);
     drawn
@@ -1268,6 +1270,29 @@ mod tests {
             (hits.on_overlay(at), hits.picker_row_at(at)),
             (true, None),
             "the preview should be inside the popup and on no row"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::wide(160, 40, Position::new(140, 20))]
+    #[case::stacked(100, 40, Position::new(50, 33))]
+    fn hit_map_leaves_the_preview_out_of_the_wheels_area(
+        #[case] width: u16,
+        #[case] height: u16,
+        #[case] preview: Position,
+    ) {
+        // Given the session picker over three threads.
+        let sessions = three_threads();
+        let picker = picker(&sessions);
+
+        // When drawing it on a `width`×`height` screen.
+        let (hits, cursor) = hits_of(&picker, &sessions, width, height);
+
+        // Then the wheel's area holds the list's input but not the preview.
+        assert_eq!(
+            (hits.on_selector(cursor), hits.on_selector(preview)),
+            (true, false),
+            "the wheel should cover the list and not the preview at {width}×{height}"
         );
     }
 
