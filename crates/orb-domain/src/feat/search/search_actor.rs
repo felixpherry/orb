@@ -189,7 +189,8 @@ impl SearchActor {
     /// Brings the index up to date and lists what `query` finds in the open
     /// search picker. Skipped when `query` is no longer the picker's typed
     /// text, which also collapses keystrokes queued behind a slow query. A
-    /// failed query writes no rows.
+    /// failed query writes no rows. Then shows the first row's preview, since
+    /// no keystroke selects it.
     fn search(&mut self, query: &str) {
         let Some(index) = &mut self.index else {
             return;
@@ -209,8 +210,22 @@ impl SearchActor {
             return;
         };
         let items = rows(&self.state.read(), found.hits);
-        if let Some(picker) = &mut self.state.write().picker {
+        let first = {
+            let mut app = self.state.write();
+            let Some(picker) = &mut app.picker else {
+                return;
+            };
             picker.show_hits(query, items, found.overflow);
+            picker
+                .selected_hit()
+                .map(|(hit, path, prompt_offset)| LoadSearchPreview {
+                    hit,
+                    path: path.to_owned(),
+                    prompt_offset,
+                })
+        };
+        if let Some(request) = first {
+            self.preview(request);
         }
         (self.wake)();
     }
@@ -784,6 +799,38 @@ mod tests {
         assert!(
             done && messages.is_none(),
             "a preview for a hit no longer selected should not be written, saw {messages:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn query_shows_the_first_hits_preview() -> io::Result<()> {
+        // Given a prompt and its reply, and the search picker open on
+        // `question`.
+        let dir = tempfile::tempdir()?;
+        let a = transcript(
+            dir.path(),
+            "a.jsonl",
+            &[prompt("question words"), reply("answer text")],
+        )?;
+        let state = State::new(app(vec![thread(1, 1_000, Some(a), 20)]));
+        let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
+        let done = backfilled(&state).await;
+        searching(&state, "question");
+
+        // When the query runs.
+        search(&actor, "question").await?;
+
+        // Then the first row's exchange is already in the preview.
+        let messages = preview_messages(&state);
+        assert!(
+            done && messages
+                == Some(vec![
+                    (Role::User, "question words".to_owned()),
+                    (Role::Assistant, "answer text".to_owned()),
+                ]),
+            "a query should load the first hit's preview, saw {messages:?}"
         );
         Ok(())
     }

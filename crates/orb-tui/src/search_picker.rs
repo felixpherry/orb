@@ -8,31 +8,47 @@
 //! over an orange rule. Each row is one matching message: its thread's dim
 //! `<project|group>/` and bright title, then a dim one-line snippet of the
 //! message with the matches lit. When the search index can't be opened, the
-//! list says why instead. There are no key hints.
+//! list says why instead.
+//!
+//! The preview box is titled with the selected row's label and shows its
+//! thread's status, branch and model, then the exchange the message is in:
+//! the prompt and every Claude text block after it, each speaker named once.
+//! The matching message is plain text with its matches lit, scrolled so the
+//! first match sits about a third down; the rest render as Markdown. Until
+//! the exchange is loaded it says `No transcript yet`. There are no key
+//! hints.
+
+use std::time::SystemTime;
 
 use orb_domain::AppState;
 use orb_domain::feat::picker::list::PickerItem;
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::state::SearchProgress;
+use orb_domain::feat::sessions::transcript::Role;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::mouse::HitMap;
 use crate::picker::{PickerScroll, highlight, span};
-use crate::session_picker::{big, boxed, boxes, render_input};
-use crate::sidebar::{BG_DARK, BLUE, COMMENT, DARK3, DARK5, FG, ORANGE, RED, VISUAL};
+use crate::session_picker::{big, boxed, boxes, markdown, meta, render_input, speaker, wrap_words};
+use crate::sidebar::{
+    BG_DARK, BLUE, BLUE1, CLAUDE, CLAUDE_LOGO, COMMENT, CYAN, DARK3, DARK5, FG, ORANGE, RED, VISUAL,
+};
 
 /// Draws the search picker over `area`: `picker`'s hit rows, with the
-/// indexing progress and any index error from `state`, beside an empty
-/// preview box. Returns how many rows the list fits and where the terminal
-/// cursor goes in the input. Records the popup, the list box as the wheel's
-/// area and the list's rows in `hits`.
+/// indexing progress and any index error from `state`, beside the selected
+/// hit's preview (`state`'s threads give its status line, drawn at `now`).
+/// Returns how many rows the list fits and where the terminal cursor goes in
+/// the input. Records the popup, the list box as the wheel's area and the
+/// list's rows in `hits`.
 pub(crate) fn render(
     picker: &PickerState,
     state: &AppState,
+    now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
@@ -45,7 +61,7 @@ pub(crate) fn render(
     let [list_box, preview_box] = boxes(popup, area.width >= 120);
     hits.record_selector(list_box);
     let drawn = render_list(picker, &state.search, list_box, buf, scroll, hits);
-    boxed(None).render(preview_box, buf);
+    render_preview(picker, state, now, preview_box, buf);
     drawn
 }
 
@@ -144,14 +160,159 @@ fn render_row(item: &PickerItem, area: Rect, buf: &mut Buffer) {
     );
 }
 
+/// The preview box: untitled and empty with no hit selected, else titled
+/// with the hit's label, holding its thread's status line, a blank line, then
+/// the hit's exchange scrolled so its first match sits about a third down,
+/// or ` No transcript yet` until the exchange is loaded.
+fn render_preview(
+    picker: &PickerState,
+    state: &AppState,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let Some(PickerItem::Hit {
+        id,
+        thread,
+        label,
+        text_lit,
+        ..
+    }) = picker.selected()
+    else {
+        boxed(None).render(area, buf);
+        return;
+    };
+    let block = boxed(Some(Line::from(span(format!(" {label} "), BLUE))));
+    let inner = block.inner(area);
+    block.render(area, buf);
+    let status = state
+        .sessions
+        .threads()
+        .find(|found| found.id == *thread)
+        .map_or_else(Line::default, |found| {
+            meta(found, state.attached.contains(thread), now)
+        });
+    let width = usize::from(inner.width).saturating_sub(1);
+    let (body, focus) = match picker.search_preview() {
+        Some(preview) => exchange_lines(&preview.messages, *id, text_lit, width, now),
+        None => (vec![Line::from(span(" No transcript yet", COMMENT))], 0),
+    };
+    let skip = {
+        let room = usize::from(inner.height).saturating_sub(2);
+        focus
+            .saturating_sub(room / 3)
+            .min(body.len().saturating_sub(room))
+    };
+    let lines = [status, Line::default()]
+        .into_iter()
+        .chain(body.into_iter().skip(skip));
+    for (line, y) in lines.zip(inner.top()..inner.bottom()) {
+        line.render(Rect::new(inner.x, y, inner.width, 1), buf);
+    }
+}
+
+/// `messages` as lines `width` wide, a speaker header (`You` / `✳ Claude`)
+/// wherever the speaker changes, with a blank line before each header but
+/// the first. Message `hit` is plain text with the graphemes at byte offsets
+/// `lit` lit; the rest are Markdown. Returns the lines and the index of the
+/// first lit line, or of the hit's first line when nothing is lit.
+fn exchange_lines(
+    messages: &[(i64, Role, String)],
+    hit: i64,
+    lit: &[usize],
+    width: usize,
+    now: SystemTime,
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut focus = 0;
+    let mut last: Option<Role> = None;
+    for (id, role, text) in messages {
+        if last != Some(*role) {
+            if last.is_some() {
+                lines.push(Line::default());
+            }
+            lines.push(match role {
+                Role::User => speaker("", "You", CYAN, None, now, width),
+                Role::Assistant => speaker(CLAUDE_LOGO, "Claude", CLAUDE, None, now, width),
+            });
+            last = Some(*role);
+        }
+        if *id != hit {
+            lines.extend(markdown(text, width, "   ", Style::new().fg(FG)));
+            continue;
+        }
+        let body = lit_text(text, lit, width);
+        focus = lines.len()
+            + body
+                .iter()
+                .position(|line| line.spans.iter().any(|span| span.style.fg == Some(BLUE1)))
+                .unwrap_or(0);
+        lines.extend(body);
+    }
+    (lines, focus)
+}
+
+/// `text` as plain `FG` lines `width` wide behind three spaces, each of its
+/// lines wrapped on its own and blank lines collapsed to one, with the
+/// graphemes at byte offsets `lit` lit.
+fn lit_text(text: &str, lit: &[usize], width: usize) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut words: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut word = (0, String::new());
+    let pad = || [Span::raw("   ")];
+    let end_word = |words: &mut Vec<Vec<Span<'static>>>, (start, text): &mut (usize, String)| {
+        if text.is_empty() {
+            return;
+        }
+        let offsets: Vec<usize> = lit
+            .iter()
+            .filter(|&&at| (*start..*start + text.len()).contains(&at))
+            .map(|at| at - *start)
+            .collect();
+        words.push(highlight(text, &offsets, |_| FG));
+        text.clear();
+    };
+    let end_line = |out: &mut Vec<Line<'static>>, words: &mut Vec<Vec<Span<'static>>>| match (
+        words.is_empty(),
+        out.last(),
+    ) {
+        (false, _) => out.extend(wrap_words(std::mem::take(words), width, &pad(), &pad())),
+        (true, Some(line)) if line.width() > 0 => out.push(Line::default()),
+        (true, _) => {}
+    };
+    for (at, grapheme) in text.grapheme_indices(true) {
+        if !grapheme.trim().is_empty() {
+            if word.1.is_empty() {
+                word.0 = at;
+            }
+            word.1.push_str(grapheme);
+            continue;
+        }
+        end_word(&mut words, &mut word);
+        if grapheme.contains('\n') {
+            end_line(&mut out, &mut words);
+        }
+    }
+    end_word(&mut words, &mut word);
+    end_line(&mut out, &mut words);
+    while out.last().is_some_and(|line| line.width() == 0) {
+        out.pop();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::search::state::SearchProgress;
-    use orb_domain::feat::sessions::state::ThreadId;
+    use orb_domain::feat::sessions::state::{
+        Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+    };
+    use orb_domain::feat::sessions::transcript::Role;
     use orb_domain::{AppState, Focus};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
@@ -190,6 +351,60 @@ mod tests {
         )
     }
 
+    /// A fixed clock.
+    fn now() -> SystemTime {
+        UNIX_EPOCH + Duration::from_hours(240)
+    }
+
+    /// Hit `id` in thread 1, labelled `orb/fix the bug`, with `snippet` and
+    /// `text_lit` its lit byte offsets into the whole message.
+    fn hit_with(id: i64, text_lit: Vec<usize>, snippet: &str) -> PickerItem {
+        PickerItem::Hit {
+            id,
+            thread: ThreadId(1),
+            label: "orb/fix the bug".to_owned(),
+            split: 4,
+            snippet: snippet.to_owned(),
+            lit: vec![],
+            text_lit,
+            path: PathBuf::from("/t/1.jsonl"),
+            prompt_offset: 0,
+        }
+    }
+
+    /// A search picker over hit `id` (lighting `text_lit`) alone, its
+    /// exchange loaded as `messages`.
+    fn previewing(
+        id: i64,
+        text_lit: Vec<usize>,
+        messages: Vec<(i64, Role, String)>,
+    ) -> PickerState {
+        let mut picker = searching(vec![hit_with(id, text_lit, "x")], false);
+        picker.show_search_preview(id, messages);
+        picker
+    }
+
+    /// The `where does it break` / `the parser drops lines` exchange.
+    fn reply_exchange() -> Vec<(i64, Role, String)> {
+        vec![
+            (1, Role::User, "where does it break".to_owned()),
+            (2, Role::Assistant, "the parser drops lines".to_owned()),
+        ]
+    }
+
+    /// The `where is the parser` / `in the lexer` exchange.
+    fn prompt_exchange() -> Vec<(i64, Role, String)> {
+        vec![
+            (1, Role::User, "where is the parser".to_owned()),
+            (2, Role::Assistant, "in the lexer".to_owned()),
+        ]
+    }
+
+    /// The screen row where `text` first shows.
+    fn row_of(buf: &Buffer, text: &str) -> Option<usize> {
+        screen(buf).lines().position(|line| line.contains(text))
+    }
+
     /// A search picker listing `items`, as the actor writes them.
     fn searching(items: Vec<PickerItem>, overflow: bool) -> PickerState {
         let mut picker = PickerState::search(Focus::Sidebar);
@@ -211,6 +426,7 @@ mod tests {
         render(
             picker,
             app,
+            now(),
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
@@ -363,6 +579,191 @@ mod tests {
         let screen = screen(&buf);
         assert!(
             screen.contains("search unavailable: no fts5"),
+            "screen was\n{screen}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reply_hit_preview_shows_the_prompt_above_the_reply() {
+        // Given a hit in a reply, its exchange loaded.
+        let picker = previewing(2, vec![], reply_exchange());
+
+        // When drawing it.
+        let buf = draw(&picker, &AppState::default());
+
+        // Then the prompt sits above the reply.
+        let rows = (
+            row_of(&buf, "where does it break"),
+            row_of(&buf, "the parser drops lines"),
+        );
+        assert!(
+            matches!(rows, (Some(prompt), Some(reply)) if prompt < reply),
+            "prompt and reply rows were {rows:?}, screen\n{}",
+            screen(&buf)
+        );
+    }
+
+    #[rstest::rstest]
+    fn reply_hit_preview_lights_the_hit_in_the_reply() {
+        // Given a hit on `parser` in a reply, its exchange loaded.
+        let picker = previewing(2, (4..10).collect(), reply_exchange());
+
+        // When drawing it.
+        let buf = draw(&picker, &AppState::default());
+
+        // Then `parser` is lit blue and bold.
+        let lit =
+            find(&buf, "parser").map(|cell| (cell.fg, cell.modifier.contains(Modifier::BOLD)));
+        assert_eq!(lit, Some((BLUE1, true)), "lit reply grapheme");
+    }
+
+    #[rstest::rstest]
+    fn long_reply_hit_preview_scrolls_the_first_match_into_view() {
+        // Given a hit on `needle` on line 50 of a 60-line reply.
+        let reply = (1..=60)
+            .map(|n| match n {
+                50 => "line 50 needle".to_owned(),
+                _ => format!("line {n}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = reply.find("needle").unwrap_or(usize::MAX);
+        let picker = previewing(
+            2,
+            (at..at + 6).collect(),
+            vec![
+                (1, Role::User, "where does it break".to_owned()),
+                (2, Role::Assistant, reply),
+            ],
+        );
+
+        // When drawing it at 100×40.
+        let buf = draw(&picker, &AppState::default());
+
+        // Then `needle` shows, lit.
+        assert_eq!(
+            find(&buf, "needle").map(|cell| cell.fg),
+            Some(BLUE1),
+            "screen was\n{}",
+            screen(&buf)
+        );
+    }
+
+    #[rstest::rstest]
+    fn prompt_hit_preview_lights_the_hit_in_the_prompt() {
+        // Given a hit on `parser` in a prompt, its exchange loaded.
+        let picker = previewing(1, (13..19).collect(), prompt_exchange());
+
+        // When drawing it.
+        let buf = draw(&picker, &AppState::default());
+
+        // Then `parser` is lit blue and bold.
+        let lit =
+            find(&buf, "parser").map(|cell| (cell.fg, cell.modifier.contains(Modifier::BOLD)));
+        assert_eq!(lit, Some((BLUE1, true)), "lit prompt grapheme");
+    }
+
+    #[rstest::rstest]
+    fn prompt_hit_preview_shows_the_replies_after_the_prompt() {
+        // Given a hit in a prompt, its exchange loaded.
+        let picker = previewing(1, vec![], prompt_exchange());
+
+        // When drawing it.
+        let buf = draw(&picker, &AppState::default());
+
+        // Then the reply sits below the prompt.
+        let rows = (row_of(&buf, "where is the"), row_of(&buf, "in the lexer"));
+        assert!(
+            matches!(rows, (Some(prompt), Some(reply)) if prompt < reply),
+            "prompt and reply rows were {rows:?}, screen\n{}",
+            screen(&buf)
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_without_a_loaded_preview_says_no_transcript_yet() {
+        // Given a hit whose exchange isn't loaded.
+        let picker = searching(vec![parser_hit()], false);
+
+        // When drawing it.
+        let buf = draw(&picker, &AppState::default());
+
+        // Then the preview says there's no transcript yet.
+        let screen = screen(&buf);
+        assert!(screen.contains("No transcript yet"), "screen was\n{screen}");
+    }
+
+    #[rstest::rstest]
+    fn preview_starts_with_the_threads_branch_and_model() {
+        // Given thread 1 on `fix-parser` with `opus`, and its hit's exchange
+        // loaded.
+        let picker = previewing(1, vec![], prompt_exchange());
+        let app = AppState {
+            sessions: Sessions {
+                projects: vec![Project {
+                    id: ProjectId(1),
+                    title: "orb".to_owned(),
+                    root: "/Users/me/dev/orb".into(),
+                    created_at: UNIX_EPOCH,
+                    removed: false,
+                    draft: None,
+                    threads: vec![Thread {
+                        id: ThreadId(1),
+                        title: Some("fix the bug".to_owned()),
+                        cwd: "/Users/me/dev/orb".into(),
+                        transcript: None,
+                        status: ThreadStatus::Idle,
+                        turn_started_at: None,
+                        attach_argv: vec![],
+                        branch: Some("fix-parser".to_owned()),
+                        pinned_at: None,
+                        settled_at: None,
+                        active_since: UNIX_EPOCH,
+                        created_at: UNIX_EPOCH,
+                        last_activity_at: UNIX_EPOCH,
+                        unseen: false,
+                        group: None,
+                        model: Some("opus".to_owned()),
+                        permission: None,
+                    }],
+                    groups: vec![],
+                    kind: ProjectKind::Normal,
+                }],
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        };
+
+        // When drawing it.
+        let buf = draw(&picker, &app);
+
+        // Then the preview shows the thread's branch and model.
+        let screen = screen(&buf);
+        assert!(
+            screen.contains("fix-parser") && screen.contains("opus"),
+            "screen was\n{screen}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn non_hit_messages_render_markdown() {
+        // Given a hit in the prompt and a reply in Markdown bold.
+        let picker = previewing(
+            1,
+            vec![],
+            vec![
+                (1, Role::User, "where is it".to_owned()),
+                (2, Role::Assistant, "**bold** words".to_owned()),
+            ],
+        );
+
+        // When drawing it.
+        let buf = draw(&picker, &AppState::default());
+
+        // Then the reply reads without its Markdown markers.
+        let screen = screen(&buf);
+        assert!(
+            screen.contains("bold words") && !screen.contains("**"),
             "screen was\n{screen}"
         );
     }

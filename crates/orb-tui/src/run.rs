@@ -66,7 +66,7 @@ use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::notify::notifier::NotifierService;
-use orb_domain::feat::picker::state::PickerState;
+use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
@@ -1162,9 +1162,13 @@ fn list_directories(dir: &Path) -> Vec<String> {
 
 /// The session picker's selected thread and its transcript, when the
 /// transcript's length isn't the one its preview was read at. A transcript
-/// that can't be measured is left alone.
+/// that can't be measured is left alone, and so is every other picker: the
+/// search picker's previews come from the search index.
 fn stale_preview(state: &AppState) -> Option<(ThreadId, PathBuf)> {
-    let picker = state.picker.as_ref()?;
+    let picker = state
+        .picker
+        .as_ref()
+        .filter(|picker| matches!(picker.kind(), PickerKind::Sessions { .. }))?;
     let id = picker.selected_thread()?;
     let transcript = state
         .sessions
@@ -1210,16 +1214,22 @@ mod tests {
     use std::io;
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
+    use std::time::UNIX_EPOCH;
 
     use error_stack::Report;
-    use orb_domain::Focus;
-    use orb_domain::feat::sessions::state::ThreadId;
+    use orb_domain::feat::picker::list::PickerItem;
+    use orb_domain::feat::picker::state::PickerState;
+    use orb_domain::feat::sessions::state::{
+        Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+    };
     use orb_domain::feat::zellij::zellij_service::ZellijError;
+    use orb_domain::{AppState, Focus};
     use ratatui::crossterm::cursor::SetCursorStyle;
 
     use super::{
         AttachPlan, StartedAttach, after_pane, announces, attach_or_restore, cursor_style,
-        list_directories, shown_pane, started_attach, to_drop, trust_return_to, trust_to_open,
+        list_directories, shown_pane, stale_preview, started_attach, to_drop, trust_return_to,
+        trust_to_open,
     };
 
     #[rstest::rstest]
@@ -1282,6 +1292,76 @@ mod tests {
 
         // Then zellij was never asked.
         assert_eq!(asked.get(), 0, "focus-out alone decides");
+    }
+
+    #[rstest::rstest]
+    fn stale_preview_leaves_the_search_picker_alone() -> io::Result<()> {
+        // Given thread 1 with a transcript on disk, and the search picker
+        // showing a hit in it.
+        let dir = tempfile::tempdir()?;
+        let transcript = dir.path().join("1.jsonl");
+        fs::write(&transcript, "{}\n")?;
+        let state = AppState {
+            sessions: Sessions {
+                projects: vec![Project {
+                    id: ProjectId(1),
+                    title: "orb".to_owned(),
+                    root: PathBuf::from("/repo"),
+                    created_at: UNIX_EPOCH,
+                    threads: vec![Thread {
+                        id: ThreadId(1),
+                        title: None,
+                        cwd: "/tmp".into(),
+                        transcript: Some(transcript.clone()),
+                        status: ThreadStatus::Idle,
+                        turn_started_at: None,
+                        attach_argv: vec![],
+                        branch: None,
+                        pinned_at: None,
+                        settled_at: None,
+                        active_since: UNIX_EPOCH,
+                        created_at: UNIX_EPOCH,
+                        last_activity_at: UNIX_EPOCH,
+                        unseen: false,
+                        group: None,
+                        model: None,
+                        permission: None,
+                    }],
+                    draft: None,
+                    removed: false,
+                    kind: ProjectKind::Normal,
+                    groups: Vec::new(),
+                }],
+                ..Sessions::default()
+            },
+            picker: Some({
+                let mut picker = PickerState::search(Focus::Sidebar);
+                picker.show_hits(
+                    "",
+                    vec![PickerItem::Hit {
+                        id: 1,
+                        thread: ThreadId(1),
+                        label: "orb/fix".to_owned(),
+                        split: 4,
+                        snippet: "the parser".to_owned(),
+                        lit: vec![],
+                        text_lit: vec![],
+                        path: transcript,
+                        prompt_offset: 0,
+                    }],
+                    false,
+                );
+                picker
+            }),
+            ..AppState::default()
+        };
+
+        // When checking for a stale session preview.
+        let stale = stale_preview(&state);
+
+        // Then there is none to read.
+        assert!(stale.is_none(), "search previews come from the index");
+        Ok(())
     }
 
     #[rstest::rstest]

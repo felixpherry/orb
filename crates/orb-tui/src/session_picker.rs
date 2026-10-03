@@ -307,7 +307,7 @@ fn render_preview(
 }
 
 /// The selected thread's status (`idle` while idle), branch and model, dim.
-fn meta(thread: &Thread, attached: bool, now: SystemTime) -> Line<'static> {
+pub(crate) fn meta(thread: &Thread, attached: bool, now: SystemTime) -> Line<'static> {
     let (glyph, word, fg) = status(thread, attached, now);
     let mut spans = vec![
         span(format!(" {glyph} "), fg),
@@ -436,7 +436,7 @@ fn exchange_lines(
 }
 
 /// A speaker's header: `mark name` in bold `fg`, how long ago on the right.
-fn speaker(
+pub(crate) fn speaker(
     mark: &str,
     name: &str,
     fg: Color,
@@ -459,7 +459,7 @@ fn speaker(
 /// Markdown `text` as lines `width` wide behind `indent`: headings blue,
 /// bullets as `•`, fenced code dim on black, `code` and **bold** inline.
 /// Blank lines collapse to one and trailing ones are dropped.
-fn markdown(text: &str, width: usize, indent: &str, base: Style) -> Vec<Line<'static>> {
+pub(crate) fn markdown(text: &str, width: usize, indent: &str, base: Style) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut fenced = false;
     let pad = || Span::raw(indent.to_owned());
@@ -575,7 +575,7 @@ fn inline(text: &str, base: Style) -> Vec<Vec<Span<'static>>> {
 
 /// `words` wrapped to `width`, `first` before the first line and `next`
 /// before the rest.
-fn wrap_words(
+pub(crate) fn wrap_words(
     words: Vec<Vec<Span<'static>>>,
     width: usize,
     first: &[Span<'static>],

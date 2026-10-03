@@ -390,19 +390,19 @@ impl IntentHandler {
                 search_key(intent, state)
             }
             Intent::PickerInput(ch) => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 let commands = list(state.picker.as_mut().and_then(|p| p.insert(*ch)));
                 let commands = with_preview(state, before, commands);
                 with_search(state, commands)
             }
             Intent::PickerBackspace => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 let commands = list(state.picker.as_mut().and_then(PickerState::backspace));
                 let commands = with_preview(state, before, commands);
                 with_search(state, commands)
             }
             Intent::PickerDeleteWord => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 let commands = list(state.picker.as_mut().and_then(PickerState::delete_word));
                 let commands = with_preview(state, before, commands);
                 with_search(state, commands)
@@ -426,49 +426,49 @@ impl IntentHandler {
                 vec![]
             }
             Intent::PickerNext => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 if let Some(picker) = &mut state.picker {
                     picker.next();
                 }
                 with_preview(state, before, vec![])
             }
             Intent::PickerPrev => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 if let Some(picker) = &mut state.picker {
                     picker.prev();
                 }
                 with_preview(state, before, vec![])
             }
             Intent::PickerHalfPageDown => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 if let Some(picker) = &mut state.picker {
                     picker.half_page_down();
                 }
                 with_preview(state, before, vec![])
             }
             Intent::PickerHalfPageUp => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 if let Some(picker) = &mut state.picker {
                     picker.half_page_up();
                 }
                 with_preview(state, before, vec![])
             }
             Intent::PickerSelectRow(index) => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 if let Some(picker) = &mut state.picker {
                     picker.select_row(*index);
                 }
                 with_preview(state, before, vec![])
             }
             Intent::PickerWheelNext => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 if let Some(picker) = &mut state.picker {
                     picker.select_below();
                 }
                 with_preview(state, before, vec![])
             }
             Intent::PickerWheelPrev => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 if let Some(picker) = &mut state.picker {
                     picker.select_above();
                 }
@@ -767,7 +767,7 @@ impl IntentHandler {
                 },
             },
             Intent::PickerToggleSettled => {
-                let before = picked_thread(state);
+                let before = picked(state);
                 if let Some(picker) = &mut state.picker {
                     picker.toggle_settled(&state.sessions);
                 }
@@ -1371,19 +1371,26 @@ fn open_picker(state: &mut AppState, picker: PickerState) {
     state.focus = Focus::Picker;
 }
 
-/// The open session picker's selected thread, if any.
-fn picked_thread(state: &AppState) -> Option<ThreadId> {
-    state.picker.as_ref().and_then(PickerState::selected_thread)
+/// The open picker's selected thread, and the selected hit's id when the row
+/// is a search hit.
+fn picked(state: &AppState) -> (Option<ThreadId>, Option<i64>) {
+    let picker = state.picker.as_ref();
+    (
+        picker.and_then(PickerState::selected_thread),
+        picker
+            .and_then(PickerState::selected_hit)
+            .map(|(id, ..)| id),
+    )
 }
 
-/// `commands`, then [`preview_command`] when the picker's selected thread is
-/// no longer `before`.
+/// `commands`, then [`preview_command`] when the picker's selected thread or
+/// hit is no longer `before`.
 fn with_preview(
     state: &mut AppState,
-    before: Option<ThreadId>,
+    before: (Option<ThreadId>, Option<i64>),
     commands: Vec<Command>,
 ) -> Vec<Command> {
-    if picked_thread(state) == before {
+    if picked(state) == before {
         return commands;
     }
     commands.into_iter().chain(preview_command(state)).collect()
@@ -1401,13 +1408,21 @@ fn with_search(state: &AppState, commands: Vec<Command>) -> Vec<Command> {
         .collect()
 }
 
-/// Asks for the session picker's selected thread's transcript to be read
-/// into its preview. With no thread selected, or a thread with no
-/// transcript yet, it clears the preview instead and asks for nothing.
+/// Asks for the picker's selected row to be read into its preview: a search
+/// hit's exchange from the search index, or a thread's transcript. With
+/// nothing selected, or a thread with no transcript yet, it clears the
+/// preview instead and asks for nothing.
 fn preview_command(state: &mut AppState) -> Vec<Command> {
     let Some(picker) = &mut state.picker else {
         return vec![];
     };
+    if let Some((hit, path, prompt_offset)) = picker.selected_hit() {
+        return vec![Command::LoadSearchPreview {
+            hit,
+            path: path.to_owned(),
+            prompt_offset,
+        }];
+    }
     let load = picker.selected_thread().and_then(|id| {
         let thread = state.sessions.threads().find(|thread| thread.id == id)?;
         Some((id, thread.transcript.clone()?))
@@ -9040,10 +9055,10 @@ mod tests {
         assert!(state.picker.is_none(), "Esc on the list should close it");
     }
 
-    /// A search hit in `thread`, on `/t/<thread>.jsonl`.
-    fn search_hit(thread: i64) -> PickerItem {
+    /// Search hit `id` in `thread`, on `/t/<thread>.jsonl`.
+    fn search_hit(id: i64, thread: i64) -> PickerItem {
         PickerItem::Hit {
-            id: thread,
+            id,
             thread: ThreadId(thread),
             label: format!("work/thread {thread}"),
             split: 5,
@@ -9056,15 +9071,42 @@ mod tests {
     }
 
     /// The search picker opened over threads 1 and 2 (cursor on 2), `fix`
-    /// typed, and the actor's one hit, in `thread`, listed.
-    fn searching_a_hit_in(thread: i64) -> AppState {
+    /// typed, and the actor's `hits` listed, the first one selected.
+    fn searching_hits(hits: Vec<PickerItem>) -> AppState {
         let mut state = jumping(Focus::Sidebar, &[], &[]);
         IntentHandler::handle(&Intent::OpenSearch, &mut state);
         let mut state = typed(state, &['f', 'i', 'x']);
         if let Some(picker) = &mut state.picker {
-            picker.show_hits("fix", vec![search_hit(thread)], false);
+            picker.show_hits("fix", hits, false);
         }
         state
+    }
+
+    /// [`searching_hits`] with one hit, in `thread`.
+    fn searching_a_hit_in(thread: i64) -> AppState {
+        searching_hits(vec![search_hit(thread, thread)])
+    }
+
+    #[rstest::rstest]
+    #[case::same_thread(1)]
+    #[case::another_thread(2)]
+    fn moving_to_another_hit_returns_its_search_preview(#[case] thread: i64) {
+        // Given the search picker on hit 1 in thread 1, above hit 2 in `thread`.
+        let mut state = searching_hits(vec![search_hit(1, 1), search_hit(2, thread)]);
+
+        // When moving down.
+        let commands = IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // Then hit 2's exchange is asked for.
+        assert_eq!(
+            commands,
+            [Command::LoadSearchPreview {
+                hit: 2,
+                path: format!("/t/{thread}.jsonl").into(),
+                prompt_offset: 0,
+            }],
+            "moving onto a hit should load its search preview"
+        );
     }
 
     #[rstest::rstest]

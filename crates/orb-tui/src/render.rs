@@ -194,7 +194,9 @@ fn render_picker(
         PickerKind::Worktrees => {
             worktree_picker::render(picker, state, now, area, buf, scroll, hits)
         }
-        PickerKind::Search { .. } => search_picker::render(picker, state, area, buf, scroll, hits),
+        PickerKind::Search { .. } => {
+            search_picker::render(picker, state, now, area, buf, scroll, hits)
+        }
         _ => picker::render(picker, &state.home, area, buf, scroll, hits),
     }
 }
