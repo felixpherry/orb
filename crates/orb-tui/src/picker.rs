@@ -74,7 +74,8 @@ impl PickerScroll {
 }
 
 /// Draws `picker` in a popup over `area`; paths under `home` show as `~/`.
-/// Records the popup and each selectable row in `hits`. Returns how many
+/// Records the popup, as the wheel's area too, and each selectable row in
+/// `hits`. Returns how many
 /// rows fit, and where the terminal cursor goes in the input.
 pub(crate) fn render(
     picker: &PickerState,
@@ -90,6 +91,7 @@ pub(crate) fn render(
     };
     Clear.render(popup, buf);
     hits.record_overlay(popup);
+    hits.record_selector(popup);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BORDER).bg(BG_DARK))
@@ -1587,6 +1589,21 @@ mod tests {
         assert!(
             hits.on_overlay(cursor),
             "the popup should be recorded around its input at {cursor:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_map_records_the_popup_as_the_wheels_area() {
+        // Given a project picker.
+        let picker = orb();
+
+        // When drawing it.
+        let (hits, cursor) = hits_of(&picker, 100, 20);
+
+        // Then the wheel moves its selection over its input too.
+        assert!(
+            hits.on_selector(cursor),
+            "the wheel's area should cover the popup at {cursor:?}"
         );
     }
 

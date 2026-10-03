@@ -4,7 +4,8 @@
 //! dashboard item highlights it. The wheel moves the sidebar's selection
 //! while it has the keys, and otherwise scrolls its view. While attached, the
 //! pane gets its own mouse events, as Claude expects. In a picker a click
-//! selects a row, a double-click picks it and the wheel moves the selection;
+//! selects a row, a double-click picks it and the wheel over its list moves
+//! the selection;
 //! a click outside a picker or the rename box closes it like `Esc`. A click
 //! in the text of the sidebar search, a picker's input or the rename box
 //! moves its cursor there.
@@ -42,6 +43,9 @@ pub(crate) struct HitMap {
     dashboard_items: Vec<(Rect, usize)>,
     /// The open picker's or rename box's popup.
     overlay: Option<Rect>,
+    /// Where the wheel moves the open picker's selection: its popup, or the
+    /// session picker's list box.
+    selector: Option<Rect>,
     /// Each selectable picker row's line and its index into the picker's
     /// shown rows.
     picker_rows: Vec<(Rect, usize)>,
@@ -118,6 +122,11 @@ impl HitMap {
         self.overlay = Some(area);
     }
 
+    /// Records where the wheel moves the open picker's selection.
+    pub(crate) fn record_selector(&mut self, area: Rect) {
+        self.selector = Some(area);
+    }
+
     /// Records the line of the picker row shown at `index`.
     pub(crate) fn record_picker_row(&mut self, area: Rect, index: usize) {
         self.picker_rows.push((area, index));
@@ -126,6 +135,11 @@ impl HitMap {
     /// Whether `at` is on the open picker or rename box.
     pub(crate) fn on_overlay(&self, at: Position) -> bool {
         self.overlay.is_some_and(|area| area.contains(at))
+    }
+
+    /// Whether the wheel at `at` moves the open picker's selection.
+    pub(crate) fn on_selector(&self, at: Position) -> bool {
+        self.selector.is_some_and(|area| area.contains(at))
     }
 
     /// The shown index of the picker row drawn at `at`, if any.
@@ -268,8 +282,8 @@ pub(crate) fn route(
 /// Where a click or wheel notch at `at` goes while a picker or the rename
 /// box has the keys: a click outside the popup cancels it, a click on a
 /// picker row selects it and a double-click picks it, a click in the
-/// input's text moves its cursor there, and the wheel over a picker moves
-/// its selection. Before the popup is drawn, nothing.
+/// input's text moves its cursor there, and the wheel over a picker's list
+/// moves its selection. Before the popup is drawn, nothing.
 fn route_overlay(
     at: Position,
     hits: &HitMap,
@@ -282,12 +296,10 @@ fn route_overlay(
         return MouseRoute::Nothing;
     }
     match (action, hits.on_overlay(at), focus) {
-        (Action::Wheel(1), true, Focus::Picker) => {
-            MouseRoute::Intents(vec![Intent::PickerWheelNext])
-        }
-        (Action::Wheel(_), true, Focus::Picker) => {
-            MouseRoute::Intents(vec![Intent::PickerWheelPrev])
-        }
+        (Action::Wheel(notch), _, Focus::Picker) if hits.on_selector(at) => match notch {
+            1 => MouseRoute::Intents(vec![Intent::PickerWheelNext]),
+            _ => MouseRoute::Intents(vec![Intent::PickerWheelPrev]),
+        },
         (Action::Wheel(_), ..) => MouseRoute::Nothing,
         (Action::Click, false, _) => {
             clicks.click(None, now);
@@ -614,7 +626,17 @@ mod tests {
     fn picker_hits() -> HitMap {
         let mut hits = hits();
         hits.record_overlay(Rect::new(20, 4, 40, 10));
+        hits.record_selector(Rect::new(20, 4, 40, 10));
         hits.record_picker_row(Rect::new(21, 8, 38, 1), 1);
+        hits
+    }
+
+    /// `hits()` under a session picker popup over columns 20 to 59, lines 4
+    /// to 13: the list box on columns 20 to 37, the preview on 39 to 59.
+    fn session_picker_hits() -> HitMap {
+        let mut hits = hits();
+        hits.record_overlay(Rect::new(20, 4, 40, 10));
+        hits.record_selector(Rect::new(20, 4, 18, 10));
         hits
     }
 
@@ -724,6 +746,42 @@ mod tests {
             routed,
             MouseRoute::Nothing,
             "the wheel outside a picker should do nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn wheel_over_the_session_pickers_list_moves_its_selection() {
+        // Given the session picker has the keys.
+        // When wheeling down over its list box.
+        let routed = route_over(
+            mouse(MouseEventKind::ScrollDown, 25, 8),
+            &session_picker_hits(),
+            Focus::Picker,
+        );
+
+        // Then the picker's selection moves down.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::PickerWheelNext]),
+            "the wheel over the session picker's list should move its selection"
+        );
+    }
+
+    #[rstest::rstest]
+    fn wheel_over_the_session_pickers_preview_does_nothing() {
+        // Given the session picker has the keys.
+        // When wheeling down over its preview.
+        let routed = route_over(
+            mouse(MouseEventKind::ScrollDown, 50, 8),
+            &session_picker_hits(),
+            Focus::Picker,
+        );
+
+        // Then nothing happens.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "the wheel over the session picker's preview should do nothing"
         );
     }
 
