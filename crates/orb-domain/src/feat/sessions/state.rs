@@ -387,7 +387,7 @@ pub struct Sessions {
     /// Settled groups the user opened. Written only by the intent handler;
     /// never saved.
     pub opened: HashSet<GroupId>,
-    /// A new session is being created.
+    /// A new session is being created, or a thread's worktree recreated.
     pub starting: bool,
     /// The origin ref a start is fetching, like `origin/main`; none when no
     /// fetch is running. Written only by the sessions actor.
@@ -398,7 +398,8 @@ pub struct Sessions {
     /// project path for the start; the sessions actor clears it when the user
     /// answers.
     pub trust: Option<PathBuf>,
-    /// A started draft's thread for the frontend to attach to.
+    /// A started draft's thread, or a thread whose worktree was recreated, for
+    /// the frontend to attach to.
     pub attach: Option<ThreadId>,
     /// Threads hidden while their `claude rm` runs. The intent handler
     /// inserts a lone thread, the sessions actor a deleted group's threads;

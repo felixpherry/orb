@@ -113,13 +113,20 @@ fn main() -> Result<(), Report<OrbError>> {
     let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
         git: git.clone(),
         state: state.clone(),
-        worktrees_root,
+        worktrees_root: worktrees_root.clone(),
         wake: frontend.waker(),
         sweep_every: SWEEP_EVERY,
     });
     frontend
         .run(
-            state, sessions, worktrees, git, claude_env, zellij, notifier,
+            state,
+            sessions,
+            worktrees,
+            worktrees_root,
+            git,
+            claude_env,
+            zellij,
+            notifier,
         )
         .change_context(OrbError)
 }

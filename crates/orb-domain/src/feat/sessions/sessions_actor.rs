@@ -23,6 +23,15 @@
 //! ends in a worktree still on orb's `orb/<hex>` branch, and Claude or the
 //! user has titled the thread, the branch is renamed after that title.
 //!
+//! When the frontend finds a thread's orb worktree gone as it attaches, the
+//! actor recreates it at the same path, so Claude resumes the conversation
+//! there. It prunes git's record of the old worktree, then checks out the
+//! branch the worktree was on: the Feature group's branch for a grouped
+//! thread, else the thread's own, else orb's `orb/<hex>` for the directory.
+//! When that branch is gone it makes it again from the project's default
+//! branch, fetched first from origin. Then it asks the frontend to attach, or
+//! shows git's reason.
+//!
 //! It checks branches out in a thread's directory or in a draft's (the
 //! project's root, or the draft's existing worktree), unless a turn is
 //! underway there. Before the first prompt, picking the default branch from a
@@ -60,11 +69,11 @@
 //! defaults. A group is pinned, settled and deleted as a whole: pinning a
 //! settled group un-settles it, settling it stops its idle sessions, and
 //! deleting it deletes each thread, then the group and its directory: a
-//! Research or Learn folder, or a Feature worktree (forced) and its branch.
-//! A Feature group whose branch orb would delete isn't merged is kept whole,
-//! with the reason. A group
-//! auto-settles when no thread has had turn activity for three days, unless
-//! it is pinned, was just un-settled, or orb is attached to one of its
+//! Research or Learn folder, or a Feature worktree (forced, or only pruned
+//! from git's records when it's already gone) and its branch. A Feature group
+//! whose branch orb would delete isn't merged is kept whole, with the reason.
+//! A group auto-settles when no thread has had turn activity for three days,
+//! unless it is pinned, was just un-settled, or orb is attached to one of its
 //! threads; a turn in any of its threads un-settles it.
 //!
 //! It adds projects and removes them: a removed project leaves `␣n` and the
@@ -164,8 +173,8 @@ pub struct SessionsActorDeps {
 /// Owns [`Sessions`](super::state::Sessions): the projects, their drafts and
 /// groups, the threads' statuses, titles, pins and settles, the latest `claude` error,
 /// the origin ref a start is fetching, Claude's project path a start waits to
-/// be trusted in, and the started thread the frontend should attach to. It
-/// adds orb's Incognito project at start. It also restores the sidebar's width
+/// be trusted in, and the started or restored thread the frontend should
+/// attach to. It adds orb's Incognito project at start. It also restores the sidebar's width
 /// and project filter, selects a new group's draft, and moves the cursor to a
 /// sibling it started. The intent handler also moves the cursor, opens and
 /// closes the shelf, marks a start as starting, edits a draft's fields before
@@ -362,6 +371,10 @@ pub struct UnsettleGroup(pub GroupId);
 /// Delete every thread of group `.0` and its session, then the group.
 #[derive(Debug)]
 pub struct DeleteGroup(pub GroupId);
+
+/// Recreate thread `.0`'s orb worktree, gone from disk, then attach to it.
+#[derive(Debug)]
+pub struct RestoreWorktree(pub ThreadId);
 
 /// A session start in flight: what it is for, where it runs, the branch
 /// checked out there when known, the worktree orb made for it, if any, and
@@ -838,6 +851,18 @@ impl Message<DeleteGroup> for SessionsActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.delete_group(id).await;
+    }
+}
+
+impl Message<RestoreWorktree> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        RestoreWorktree(id): RestoreWorktree,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.restore_worktree(id);
     }
 }
 
@@ -1649,14 +1674,15 @@ impl SessionsActor {
         self.end_start(result);
     }
 
-    /// Ends a session start: stops showing it as starting and shows `result`'s
-    /// error, or clears the error and polls the new session now.
+    /// Ends a session start: stops showing it as starting, unless another
+    /// start still waits for trust, and shows `result`'s error, or clears the
+    /// error and polls the new session now.
     fn end_start(&self, result: Result<(), String>) {
         let succeeded = result.is_ok();
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
-            sessions.starting = false;
+            sessions.starting = self.pending.is_some();
             sessions.error = result.err();
         }
         (self.wake)();
@@ -1780,6 +1806,57 @@ impl SessionsActor {
         if git.remove_worktree(&made.repo, &made.path, true).is_ok() {
             let _ = git.delete_branch(&made.repo, &made.branch, true);
         }
+    }
+
+    /// Recreates thread `id`'s worktree at its path and asks the frontend to
+    /// attach to the thread, ending the start the frontend marked. On failure,
+    /// git's reason shows and nothing attaches.
+    fn restore_worktree(&mut self, id: ThreadId) {
+        let result = self.recreate_worktree(id).map(|()| {
+            self.state.write().sessions.attach = Some(id);
+        });
+        self.end_start(result);
+    }
+
+    /// Prunes git's record of thread `id`'s missing worktree, then adds it back
+    /// on its branch, or on that branch made anew from the default branch (as
+    /// origin has it) when it's gone. A directory that is back already needs
+    /// nothing.
+    fn recreate_worktree(&self, id: ThreadId) -> Result<(), String> {
+        let (root, cwd, branch) = self
+            .restore_target(id)
+            .ok_or_else(|| "the thread is gone".to_owned())?;
+        if cwd.is_dir() {
+            return Ok(());
+        }
+        let branch = branch.ok_or_else(|| "couldn't tell the worktree's branch".to_owned())?;
+        let git = &self.services.git;
+        git.prune_worktrees(&root)
+            .and_then(|()| {
+                if git.branch_exists(&root, &branch) {
+                    return git.add_worktree_on(&root, &cwd, &branch);
+                }
+                let base = git.default_branch(&root)?;
+                let base = start_point(git, &root, &base, |b| self.fetch(&root, b))?;
+                git.add_worktree(&root, &cwd, &branch, &base)
+            })
+            .map_err(|report| git_reason(&report))
+    }
+
+    /// Thread `id`'s project root, its directory, and the branch its worktree
+    /// was on: its Feature group's branch, else its own, else orb's `orb/<hex>`
+    /// for the directory.
+    fn restore_target(&self, id: ThreadId) -> Option<(PathBuf, PathBuf, Option<String>)> {
+        let row = self.rows.iter().find(|row| row.id == id)?;
+        let group_branch = row
+            .group_id
+            .and_then(|group| self.groups.iter().find(|g| g.id == group))
+            .filter(|group| group.kind == GroupKind::Feature)
+            .and_then(|group| group.branch.clone());
+        let branch = group_branch
+            .or_else(|| row.branch.clone())
+            .or_else(|| hex_branch(&self.worktrees_root, &row.cwd));
+        Some((self.project_root(row.project_id)?, row.cwd.clone(), branch))
     }
 
     /// Finishes a move once the new session runs: removes the old session,
@@ -2464,7 +2541,8 @@ impl SessionsActor {
         }
     }
 
-    /// Force-removes Feature group `row`'s orb worktree at `dir`, then
+    /// Force-removes Feature group `row`'s orb worktree at `dir` (or, when
+    /// the directory is already gone, prunes git's record of it), then
     /// safe-deletes the branch orb made for it, named after the group (one
     /// git still refuses, which `delete_group` checked for first, stays with
     /// git's reason). A branch the group was
@@ -2478,8 +2556,12 @@ impl SessionsActor {
             return Err(WORKTREE_IN_USE.to_owned());
         }
         let git = &self.services.git;
-        git.remove_worktree(&root, dir, true)
-            .map_err(|report| git_reason(&report))?;
+        let cleared = if dir.is_dir() {
+            git.remove_worktree(&root, dir, true)
+        } else {
+            git.prune_worktrees(&root)
+        };
+        cleared.map_err(|report| git_reason(&report))?;
         let branch = row.name.as_str();
         if git.branch_exists(&root, branch) {
             git.delete_branch(&root, branch, false)
@@ -3427,6 +3509,11 @@ mod tests {
             path: PathBuf,
             force: bool,
         },
+        AddWorktreeOn {
+            path: PathBuf,
+            branch: String,
+        },
+        PruneWorktrees(PathBuf),
         DeleteBranch {
             branch: String,
             force: bool,
@@ -3666,13 +3753,18 @@ mod tests {
         fn add_worktree_on(
             &self,
             _repo: &Path,
-            _path: &Path,
-            _branch: &str,
+            path: &Path,
+            branch: &str,
         ) -> Result<(), Report<GitError>> {
+            self.record(GitCall::AddWorktreeOn {
+                path: path.to_owned(),
+                branch: branch.to_owned(),
+            });
             Ok(())
         }
 
-        fn prune_worktrees(&self, _repo: &Path) -> Result<(), Report<GitError>> {
+        fn prune_worktrees(&self, repo: &Path) -> Result<(), Report<GitError>> {
+            self.record(GitCall::PruneWorktrees(repo.to_owned()));
             Ok(())
         }
 
@@ -10129,6 +10221,22 @@ mod tests {
         Ok((group, actor, state))
     }
 
+    /// A started Feature group in idle thread aa, polled once, whose worktree
+    /// `<worktrees_root>/orb/orb-1a2b3c4d` is on disk, on `git`.
+    async fn feature_group_on_disk(
+        git: &Arc<FakeGit>,
+        worktrees_root: &Path,
+    ) -> Result<(GroupId, SessionsActor, State, PathBuf), Report<StoreError>> {
+        let dir = worktrees_root.join("orb").join("orb-1a2b3c4d");
+        fs::create_dir_all(&dir).change_context(StoreError)?;
+        let (store, group, _) = store_with_group(GroupKind::Feature, Some(&dir), &["aa"])?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start_with(store, &host, git, Path::new(NO_CLAUDE_DIR));
+        worktrees_root.clone_into(&mut actor.worktrees_root);
+        actor.poll().await;
+        Ok((group, actor, state, dir))
+    }
+
     /// Makes Research group `GT-514-login`'s own folder under `orb_root`.
     fn research_folder(orb_root: &Path) -> Result<PathBuf, Report<StoreError>> {
         let dir = orb_root.join("research").join(SLUG_BRANCH);
@@ -10777,9 +10885,11 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_feature_group_force_removes_its_worktree() -> Result<(), Report<StoreError>>
     {
-        // Given a started Feature group in an orb worktree.
+        // Given a started Feature group in an orb worktree on disk.
         let git = FakeGit::having(SLUG_BRANCH);
-        let (group, mut actor, _state) = started_feature_group(&git).await?;
+        let worktrees_root = tempfile::tempdir().change_context(StoreError)?;
+        let (group, mut actor, _state, dir) =
+            feature_group_on_disk(&git, worktrees_root.path()).await?;
 
         // When deleting it.
         actor.delete_group(group).await;
@@ -10787,10 +10897,90 @@ mod tests {
         // Then its worktree is removed with force.
         assert!(
             git.calls().contains(&GitCall::RemoveWorktree {
-                path: HEX_WORKTREE.into(),
-                force: true,
+                path: dir,
+                force: true
             }),
             "the worktree should go even with changes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_a_pruned_worktree_deletes_the_group()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose orb worktree is gone from disk.
+        let (group, mut actor, state) =
+            started_feature_group(&FakeGit::having(SLUG_BRANCH)).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then the group is gone.
+        assert!(
+            groups_of(&state).is_empty(),
+            "a group whose worktree is gone should still delete"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_a_pruned_worktree_deletes_the_slug_branch()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose orb worktree is gone from disk.
+        let git = FakeGit::having(SLUG_BRANCH);
+        let (group, mut actor, _state) = started_feature_group(&git).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then its slug branch is safe-deleted.
+        assert!(
+            git.calls().contains(&GitCall::DeleteBranch {
+                branch: SLUG_BRANCH.into(),
+                force: false,
+            }),
+            "the slug branch should go with the group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_a_pruned_worktree_prunes_stale_metadata()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose orb worktree is gone from disk.
+        let git = FakeGit::having(SLUG_BRANCH);
+        let (group, mut actor, _state) = started_feature_group(&git).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then git prunes its record of the gone worktree.
+        assert!(
+            git.calls()
+                .contains(&GitCall::PruneWorktrees(PROJECT_ROOT.into())),
+            "git's stale worktree record should be pruned"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_feature_group_with_a_pruned_worktree_skips_the_removal()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose orb worktree is gone from disk.
+        let git = FakeGit::having(SLUG_BRANCH);
+        let (group, mut actor, _state) = started_feature_group(&git).await?;
+
+        // When deleting it.
+        actor.delete_group(group).await;
+
+        // Then git is asked to remove no worktree.
+        assert!(
+            !removed_a_worktree(&git),
+            "a worktree already gone has nothing to remove"
         );
         Ok(())
     }
@@ -10986,11 +11176,13 @@ mod tests {
         // When deleting it.
         actor.delete_group(group).await;
 
-        // Then git removes no worktree and deletes no branch.
+        // Then git removes or prunes no worktree and deletes no branch.
         let touched = git.calls().iter().any(|call| {
             matches!(
                 call,
-                GitCall::RemoveWorktree { .. } | GitCall::DeleteBranch { .. }
+                GitCall::RemoveWorktree { .. }
+                    | GitCall::PruneWorktrees(_)
+                    | GitCall::DeleteBranch { .. }
             )
         });
         assert!(!touched, "the worktree and branch stay as they are");
@@ -11225,15 +11417,17 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_feature_group_keeps_a_worktree_a_lone_thread_uses()
     -> Result<(), Report<StoreError>> {
-        // Given a started Feature group in an orb worktree where lone thread
-        // cc also works.
+        // Given a started Feature group in an orb worktree on disk where lone
+        // thread cc also works.
         let git = FakeGit::having(SLUG_BRANCH);
-        let (store, group, _) =
-            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
+        let worktrees_root = tempfile::tempdir().change_context(StoreError)?;
+        let dir = worktrees_root.path().join("orb").join("orb-1a2b3c4d");
+        fs::create_dir_all(&dir).change_context(StoreError)?;
+        let (store, group, _) = store_with_group(GroupKind::Feature, Some(&dir), &["aa"])?;
         store.insert_thread(&NewThread {
             project_id: saved_group(&store, group)?.project_id,
             short_id: "cc".to_owned(),
-            cwd: HEX_WORKTREE.into(),
+            cwd: dir.clone(),
             created_at: now_ms() - HOUR_MS,
             model: None,
             permission_mode: None,
@@ -11244,6 +11438,7 @@ mod tests {
             record("cc", ThreadStatus::Idle),
         ]);
         let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        worktrees_root.path().clone_into(&mut actor.worktrees_root);
         actor.poll().await;
 
         // When deleting the group.
@@ -11286,6 +11481,299 @@ mod tests {
         assert!(
             !removed_a_worktree(&git),
             "deleting one thread of a group never touches its directory"
+        );
+        Ok(())
+    }
+
+    /// A store whose thread `aa` was in [`HEX_WORKTREE`], now gone, on
+    /// `branch`.
+    fn pruned_thread(branch: Option<&str>) -> Result<(Store, ThreadId), Report<StoreError>> {
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            cwd: PathBuf::from(HEX_WORKTREE),
+            branch: branch.map(str::to_owned),
+            ..row
+        })?;
+        Ok((store, id))
+    }
+
+    /// The git calls an actor on `store` and `git` makes restoring `id`.
+    fn restore_calls(store: Store, git: &Arc<FakeGit>, id: ThreadId) -> Vec<GitCall> {
+        let (mut actor, _state) = start_with(
+            store,
+            &FakeHost::listing(vec![]),
+            git,
+            Path::new(NO_CLAUDE_DIR),
+        );
+        actor.restore_worktree(id);
+        git.calls()
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_on_an_existing_branch_adds_the_worktree_on_it()
+    -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree, whose branch still exists.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        let git = FakeGit::having("fix-parser");
+
+        // When restoring its worktree.
+        let calls = restore_calls(store, &git, id);
+
+        // Then the worktree is added back on that branch.
+        assert!(
+            calls.contains(&GitCall::AddWorktreeOn {
+                path: PathBuf::from(HEX_WORKTREE),
+                branch: "fix-parser".to_owned(),
+            }),
+            "an existing branch should be checked out in the restored worktree"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_on_a_missing_branch_creates_it_from_the_default_branch()
+    -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree, whose branch is gone.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        let git = FakeGit::local();
+
+        // When restoring its worktree.
+        let calls = restore_calls(store, &git, id);
+
+        // Then the branch is made again from the default branch.
+        assert!(
+            calls.contains(&GitCall::AddWorktree {
+                path: PathBuf::from(HEX_WORKTREE),
+                branch: "fix-parser".to_owned(),
+                base: "main".to_owned(),
+            }),
+            "a gone branch should be made again from main"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_on_a_missing_branch_starts_from_origin() -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree, whose branch is gone, in a
+        // project with an origin.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        let git = FakeGit::with_origin(Ok(true));
+
+        // When restoring its worktree.
+        let calls = restore_calls(store, &git, id);
+
+        // Then the branch is made again from origin's default branch.
+        assert!(
+            calls.contains(&GitCall::AddWorktree {
+                path: PathBuf::from(HEX_WORKTREE),
+                branch: "fix-parser".to_owned(),
+                base: "origin/main".to_owned(),
+            }),
+            "a gone branch should start from the fetched origin/main"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_without_a_recorded_branch_uses_the_hex_branch()
+    -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree, with no branch recorded.
+        let (store, id) = pruned_thread(None)?;
+        let git = FakeGit::local();
+
+        // When restoring its worktree.
+        let calls = restore_calls(store, &git, id);
+
+        // Then the worktree comes back on orb's branch for its directory.
+        assert!(
+            calls.contains(&GitCall::AddWorktree {
+                path: PathBuf::from(HEX_WORKTREE),
+                branch: HEX_BRANCH.to_owned(),
+                base: "main".to_owned(),
+            }),
+            "a thread with no branch should get orb/<hex> back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_prunes_stale_worktree_metadata_first() -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        let git = FakeGit::local();
+
+        // When restoring its worktree.
+        let calls = restore_calls(store, &git, id);
+
+        // Then git's record of the old worktree is pruned before anything
+        // else.
+        assert_eq!(
+            calls.first(),
+            Some(&GitCall::PruneWorktrees(PathBuf::from(PROJECT_ROOT))),
+            "stale worktree metadata should be pruned first"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_success_sets_attach() -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        let (mut actor, state) = start_with(
+            store,
+            &FakeHost::listing(vec![]),
+            &FakeGit::local(),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When restoring its worktree.
+        actor.restore_worktree(id);
+
+        // Then the frontend is asked to attach to the thread.
+        assert_eq!(
+            state.read().sessions.attach,
+            Some(id),
+            "a restored thread should be attached"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_failure_sets_the_error_and_no_attach() -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree, in a project git can't read.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        let (mut actor, state) = start_with(
+            store,
+            &FakeHost::listing(vec![]),
+            &FakeGit::plain(Ok(())),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When restoring its worktree.
+        actor.restore_worktree(id);
+
+        // Then git's reason shows and nothing attaches.
+        let sessions = &state.read().sessions;
+        assert_eq!(
+            (sessions.error.as_deref(), sessions.attach),
+            (Some(NOT_A_REPO), None),
+            "a failed restore should show why and not attach"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_ends_the_start() -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree, its restore marked as starting.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        let (mut actor, state) = start_with(
+            store,
+            &FakeHost::listing(vec![]),
+            &FakeGit::local(),
+            Path::new(NO_CLAUDE_DIR),
+        );
+        state.write().sessions.starting = true;
+
+        // When restoring its worktree.
+        actor.restore_worktree(id);
+
+        // Then nothing is starting any more.
+        assert!(
+            !state.read().sessions.starting,
+            "a finished restore should stop showing as starting"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_keeps_starting_while_another_start_waits_for_trust()
+    -> Result<(), Report<StoreError>> {
+        // Given a draft start waiting for its folder to be trusted, and thread
+        // aa's pruned worktree.
+        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let id = add_thread(&store, "aa", now_ms() - HOUR_MS)?;
+        resave(&store, "aa", |row| ThreadRow {
+            cwd: PathBuf::from(HEX_WORKTREE),
+            branch: Some("fix-parser".to_owned()),
+            ..row
+        })?;
+        let host = FakeHost::untrusted(1, Ok("bb"));
+        let (mut actor, state) =
+            start_with(store, &host, &FakeGit::local(), Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.starting = true;
+        actor.start_draft(project).await;
+
+        // When restoring aa's worktree.
+        actor.restore_worktree(id);
+
+        // Then the waiting start still shows as starting.
+        assert!(
+            state.read().sessions.starting,
+            "a restore should not end a start that still waits for trust"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_in_a_feature_group_uses_the_group_branch() -> Result<(), Report<StoreError>> {
+        // Given thread aa of a Feature group whose worktree is gone, aa saved
+        // on another branch, and the group's branch still there.
+        let (store, _, threads) =
+            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
+        resave(&store, "aa", |row| ThreadRow {
+            branch: Some(HEX_BRANCH.to_owned()),
+            ..row
+        })?;
+        let id = threads
+            .first()
+            .copied()
+            .ok_or_else(|| Report::new(StoreError).attach("aa wasn't saved"))?;
+        let git = FakeGit::having(SLUG_BRANCH);
+
+        // When restoring its worktree.
+        let calls = restore_calls(store, &git, id);
+
+        // Then the worktree comes back on the group's branch.
+        assert!(
+            calls.contains(&GitCall::AddWorktreeOn {
+                path: PathBuf::from(HEX_WORKTREE),
+                branch: SLUG_BRANCH.to_owned(),
+            }),
+            "a Feature group's thread should get the group's branch back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_of_a_directory_that_exists_runs_no_git() -> Result<(), Report<StoreError>> {
+        // Given thread aa in a directory that is on disk.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            cwd: dir.path().to_owned(),
+            branch: Some("fix-parser".to_owned()),
+            ..row
+        })?;
+        let git = FakeGit::local();
+
+        // When restoring its worktree.
+        let calls = restore_calls(store, &git, id);
+
+        // Then git is never asked to do anything.
+        assert!(
+            calls.is_empty(),
+            "a worktree already back should need no git"
         );
         Ok(())
     }

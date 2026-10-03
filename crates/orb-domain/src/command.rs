@@ -18,7 +18,9 @@ use crate::feat::zellij::zellij_service::Tool;
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Show the target's session in the terminal pane and send it input.
+    /// Show the target's session in the terminal pane and send it input. If
+    /// its orb worktree is gone, the sessions actor recreates it first and the
+    /// frontend attaches once it's back.
     Attach(AttachTarget),
     /// Stop sending input to the terminal pane.
     Detach,
