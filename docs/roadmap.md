@@ -232,7 +232,7 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | T3 import | Projects only | Threads too — T3 threads carry T3's injected system prompt; ~5 unsettled threads not worth it. |
 | Terminal identity under `claude attach` | Child env strips outer-terminal vars and sets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1` → Claude pushes kitty keys and syncs every frame | Legacy keys + `ESC CR` Shift+Enter — loses Esc/Alt disambiguation. Inherited env — caps depend on how orb was launched. `kitty`/`ghostty`/`iTerm.app`/`tmux` names — notification/graphics/wrapping side effects. |
 | XTVERSION | Not answered | Raw-byte scanner — no observed effect under attach. |
-| Mouse | Forward all child-requested mouse events (SGR) while attached; capture only while attached; forward OSC 52 | Wheel only — capture without clicks. None — no scrolling. |
+| Mouse | Capture from startup until orb exits. While attached, events over the pane go to Claude in SGR, in the mouse modes Claude turned on; every other event goes to orb's own UI: a click selects a sidebar or picker row, a double-click (the same row twice within 500 ms) acts as `⏎`, the wheel moves the selection or scrolls the sidebar, and a click on a row or the right-hand side moves the keys there. OSC 52 is forwarded too | Capture only while attached: a fresh orb ignored the mouse. A toggle key: a new bind and a mode to remember. Wheel only: capture without clicks. None: no scrolling. |
 | Key encoder | `terminput` + `terminput-crossterm`, with orb fixes (flag mapping, legacy Enter/Tab/Backspace under kitty, DECCKM arrows) | Porting alacritty's encoder (~420 lines); own encoder. |
 | Event loop | std threads + one mpsc channel; drain-then-draw, no tick or throttle; attached input written straight to the PTY | tokio/kameo pane actor — per-key hop (a jinn lag source). |
 | Actor plumbing | tokio + kameo 0.22, std-`RwLock` `State`, one `SessionsActor`; the frontend `tell`s commands straight to it (unbounded mailbox, `try_send`); the pane stays in the loop | Full jinn port (MessageBus + kanal Bridge + tcaps + `ActorDeps` + root supervisor) — hundreds of lines for one actor. No actors — conflicts with AGENTS.md §3. Add the bus when a second actor needs broadcast events. |
@@ -393,7 +393,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Resolved in M9's research and walk (research §14): zellij 0.45 drops OSC 99, OSC 9 and OSC 777, and sends no focus-out to the tab the user leaves, so orb asks `zellij action list-clients` before dropping a notice while it seems focused. An `osascript` notification opens Script Editor on click, so orb posts through `terminal-notifier` when it's installed, with an `-execute` line back to orb's kitty window, zellij tab and pane, and through `osascript` when it isn't or when it fails. The user's kitty → zellij walk passed AC1–AC9. Three pre-check UI points were kept as they are: the `Remove project?` confirm doesn't name the project (UI pass); `<C-h>` in a trust pane left untrusted retries once and shows `Workspace not trusted`; `Yes` on the filtered project, with its draft selected, moves the cursor within the full list.
 
 ### Backlog
-**To plan** (scope decided in the planning session): worktree pruning, automatic or manual · `␣sg` global search · mouse support in orb's own UI (today orb captures the mouse only while attached and forwards it to Claude): click a sidebar row to select it, wheel to scroll the sidebar, click the sidebar or the right side to focus it, click dashboard and picker items. Open: capturing the mouse outside an attach takes away the terminal's own drag-to-select and copy in kitty/zellij · what a click on an attached thread does (select vs attach) · whether the Settled header opens on click.
+**To plan** (scope decided in the planning session): worktree pruning, automatic or manual · `␣sg` global search.
 
 **Dropped in M9:**
 - Codex behind `SessionHost` — orb supports Claude Code as its only provider (RECORD `(identity)`), and another provider is a milestone of its own.
@@ -402,7 +402,7 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Claude hooks for instant state — the poll already runs every second while a thread is busy, hooks reach only sessions launched with `--settings`, and whether a `claude attach` resume keeps them is unverified.
 - Copy mode over the attached pane — the pane keeps no scrollback and Claude redraws full-screen; the preview's `y` already yanked any block (the preview has since been removed).
 - Quick-reply box — `claude` has no send command, so it would be a hidden `claude attach` plus a timed paste that Claude's vim mode could eat.
-- Drag reorder of pinned/active threads — orb captures the mouse only while attached, and a keyboard reorder would reopen "Sidebar ordering".
+- Drag reorder of pinned/active threads — any manual order, by drag or by key, would reopen "Sidebar ordering", and orb's mouse support leaves dragging out.
 
 **Dropped 2026-09-27:**
 - Subagent transcript expansion — it would expand inside the preview, which the dashboard replaced.
@@ -758,3 +758,24 @@ Written in the session picker's Verification step (not a milestone).
 - ``(picker) `⏎` in the session picker reveals the thread in the sidebar and attaches to it like `⏎` on its row.``
 - ``(picker) The session picker is drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions, with a lit `s` while settled threads show and `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.``
 - ``(picker) The session picker's preview shows the selected thread's status, branch and model, then its latest exchanges from the transcript (the prompt, the tools Claude ran, and the end of Claude's last reply as Markdown), or `No transcript yet` when there is none, and refreshes while the transcript grows.``
+
+### Mouse click
+
+Written in mouse click's Verification step (not a milestone).
+
+**Amend**
+- ``(pane) While attached, keys, paste, mouse, and focus events are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.`` → ``(pane) While attached, keys, paste, focus events, and mouse events over the pane are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.``
+- ``(pane) orb captures the mouse only while attached and forwards the child's OSC 52 clipboard writes to its outer terminal.`` → ``(pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.``
+- ``(jumps) A jump is entering a thread's pane (`⏎`, `<C-l>`, or a draft or `n` sibling starting), `gg`/`G`, a search `⏎`, a `␣n` pick, or a session picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.`` → ``(jumps) A jump is entering a thread's pane (`⏎`, `<C-l>`, a double-click on its row, a click into its pane, or a draft or `n` sibling starting), `gg`/`G`, a search ended by `⏎` or a click, a `␣n` pick, or a session picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.``
+
+**Add**
+- ``(mouse) orb captures the mouse from startup until it exits.``
+- ``(mouse) A click on a sidebar row or the sidebar's input box moves the keys to the sidebar, and a click on the right-hand area moves them to the dashboard or into the Claude pane shown there; the click that moves them into the pane isn't forwarded to Claude.``
+- ``(mouse) A double-click is two clicks on the same sidebar or picker row within 500 ms.``
+- ``(mouse) In the sidebar, a click selects a row and a double-click acts as `⏎` on it.``
+- ``(mouse) The wheel over the sidebar moves the selection one row without wrapping while the sidebar has the keys, and otherwise, with no picker or rename box open, scrolls only its view, 3 lines a notch; the view goes back to the selection once the selection moves or the sidebar takes the keys.``
+- ``(mouse) Clicking the sidebar's input box starts a search; during a search, clicking a row ends it as `⏎` does on that row, and clicking the right-hand area ends it as `⏎` does and moves the keys there.``
+- ``(mouse) A click on a dashboard menu item moves the menu cursor to it without running it.``
+- ``(mouse) In a picker, a click selects a row, a double-click picks it, the wheel anywhere over the picker moves the selection one row without wrapping, a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.``
+- ``(mouse) A click outside the rename box cancels it like `Esc`.``
+- ``(mouse) A click on the input line of the sidebar search, a picker or the rename box moves its text cursor to the grapheme under it, to the first shown grapheme on the prompt, or to the end past the text.``

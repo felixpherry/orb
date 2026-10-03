@@ -106,6 +106,19 @@ Inside the Claude pane orb takes `<C-o>`, which is Claude's transcript key. To k
 
 kitty maps `ctrl+shift+o` to `pass_selection_to_program` by default and swallows it, so also add `map ctrl+shift+o no_op` to `kitty.conf` and reload kitty (`ctrl+shift+F5`).
 
+## Mouse
+
+orb captures the mouse from the moment it starts.
+
+- A click selects a sidebar row or a picker row. A double-click, two clicks on the same row within 500 ms, acts as `⏎`: it attaches, starts the draft, opens or closes the group or the Settled shelf, or picks the picker row.
+- A click on a sidebar row moves the keys to the sidebar, and a click on the right-hand side moves them to the dashboard or into the Claude pane. The click that moves them into the pane isn't sent to Claude; later clicks and the wheel over the pane are.
+- With the keys in the sidebar, the wheel moves the selection one row. Otherwise, with no picker or rename box open, the wheel over the sidebar scrolls only its view, 3 lines a notch. Over a picker it moves the picker's selection. Neither wraps.
+- A click on a dashboard item highlights it and doesn't run it.
+- A click outside a picker or the rename box closes it, as `Esc` does.
+- A click on the sidebar's search box starts a search, and a click in any input's text moves the cursor there.
+
+To select text with the mouse, hold Shift while you drag. That's kitty's default; other terminals have their own key.
+
 ## Development
 
 ```sh
