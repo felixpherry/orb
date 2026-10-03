@@ -2,6 +2,7 @@
 //! where the user types orb's own name for a thread (`Rename Session`), or
 //! the name of a new group (`New Feature group` and so on).
 
+use crate::mouse::HitMap;
 use crate::picker::visible;
 use crate::sidebar::{BLUE1, FG, YELLOW};
 use orb_domain::feat::sessions::state::GroupKind;
@@ -19,8 +20,9 @@ const EDIT: &str = "\u{f044}";
 
 /// Draws the rename box over the top of `area` (the screen above the mode
 /// line). A name too long for the box shows its part up to the cursor.
-/// Returns where the terminal cursor goes.
-pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer) -> Position {
+/// Records the box in `hits`, so a click outside it can close it. Returns
+/// where the terminal cursor goes.
+pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer, hits: &mut HitMap) -> Position {
     let popup = {
         let width = area.width.min(WIDTH);
         Rect {
@@ -31,6 +33,7 @@ pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer) -> Position 
         }
     };
     Clear.render(popup, buf);
+    hits.record_overlay(popup);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(YELLOW))
@@ -87,6 +90,7 @@ mod tests {
     use ratatui::layout::{Position, Rect};
 
     use super::render;
+    use crate::mouse::HitMap;
     use crate::sidebar::YELLOW;
 
     /// The rename box holding `text` drawn on a 100x10 screen.
@@ -103,7 +107,7 @@ mod tests {
             input: TextInput::new(text),
             creating: false,
         };
-        let cursor = render(&rename, area, &mut buf);
+        let cursor = render(&rename, area, &mut buf, &mut HitMap::default());
         (buf, cursor)
     }
 
@@ -196,5 +200,26 @@ mod tests {
 
         // Then the cursor stays inside the right border.
         assert_eq!(cursor, Position::new(78, 3), "the cursor at the box's end");
+    }
+
+    #[rstest::rstest]
+    fn hit_map_records_the_box() {
+        // Given the rename box on a 100x10 screen.
+        let area = Rect::new(0, 0, 100, 10);
+        let rename = Rename {
+            target: RenameTarget::Thread(ThreadId(1)),
+            input: TextInput::new("Fix the sidebar"),
+            creating: false,
+        };
+        let mut hits = HitMap::default();
+
+        // When drawing it.
+        render(&rename, area, &mut Buffer::empty(area), &mut hits);
+
+        // Then its top-left corner is on the recorded box.
+        assert!(
+            hits.on_overlay(Position::new(20, 2)),
+            "the box should be recorded from its top-left corner"
+        );
     }
 }

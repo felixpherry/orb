@@ -3,7 +3,9 @@
 //! a click on the sidebar's input box starts a search, and a click on a
 //! dashboard item highlights it. The wheel moves the sidebar's selection
 //! while it has the keys, and otherwise scrolls its view. While attached, the
-//! pane gets its own mouse events, as Claude expects.
+//! pane gets its own mouse events, as Claude expects. In a picker a click
+//! selects a row, a double-click picks it and the wheel moves the selection;
+//! a click outside a picker or the rename box closes it like `Esc`.
 //!
 //! Each frame records where it drew what a click can land on, and a mouse
 //! event is mapped back through that record.
@@ -34,6 +36,11 @@ pub(crate) struct HitMap {
     sidebar_rows: Vec<(Rect, SidebarItem)>,
     /// Each dashboard menu item's line and index; empty while a pane is shown.
     dashboard_items: Vec<(Rect, usize)>,
+    /// The open picker's or rename box's popup.
+    overlay: Option<Rect>,
+    /// Each selectable picker row's line and its index into the picker's
+    /// shown rows.
+    picker_rows: Vec<(Rect, usize)>,
 }
 
 impl HitMap {
@@ -82,6 +89,29 @@ impl HitMap {
             .find(|(area, _)| area.contains(at))
             .map(|&(_, index)| index)
     }
+
+    /// Records where the open picker or rename box was drawn.
+    pub(crate) fn record_overlay(&mut self, area: Rect) {
+        self.overlay = Some(area);
+    }
+
+    /// Records the line of the picker row shown at `index`.
+    pub(crate) fn record_picker_row(&mut self, area: Rect, index: usize) {
+        self.picker_rows.push((area, index));
+    }
+
+    /// Whether `at` is on the open picker or rename box.
+    pub(crate) fn on_overlay(&self, at: Position) -> bool {
+        self.overlay.is_some_and(|area| area.contains(at))
+    }
+
+    /// The shown index of the picker row drawn at `at`, if any.
+    pub(crate) fn picker_row_at(&self, at: Position) -> Option<usize> {
+        self.picker_rows
+            .iter()
+            .find(|(area, _)| area.contains(at))
+            .map(|&(_, index)| index)
+    }
 }
 
 /// What a click can double on.
@@ -89,6 +119,8 @@ impl HitMap {
 pub(crate) enum ClickTarget {
     /// A sidebar row.
     Row(SidebarItem),
+    /// A picker row, by its index into the picker's shown rows.
+    PickerRow(usize),
 }
 
 /// Whether a click is the first or the second of a double-click.
@@ -167,7 +199,9 @@ pub(crate) fn route(
         _ => return MouseRoute::Nothing,
     };
     match (focus, action) {
-        (Focus::Picker | Focus::Rename, _) => MouseRoute::Nothing,
+        (Focus::Picker | Focus::Rename, action) => {
+            route_overlay(at, hits, focus, action, clicks, now)
+        }
         (_, Action::Wheel(_)) if !hits.sidebar.contains(at) => MouseRoute::Nothing,
         (Focus::Sidebar, Action::Wheel(1)) => MouseRoute::Intents(vec![Intent::SelectWheelNext]),
         (Focus::Sidebar, Action::Wheel(_)) => MouseRoute::Intents(vec![Intent::SelectWheelPrev]),
@@ -176,6 +210,47 @@ pub(crate) fn route(
             let row = hits.row_at(at);
             let click = clicks.click(row.map(ClickTarget::Row), now);
             route_click(at, hits, focus, pane_shown, row, click)
+        }
+    }
+}
+
+/// Where a click or wheel notch at `at` goes while a picker or the rename
+/// box has the keys: a click outside the popup cancels it, a click on a
+/// picker row selects it and a double-click picks it, and the wheel over a
+/// picker moves its selection. Before the popup is drawn, nothing.
+fn route_overlay(
+    at: Position,
+    hits: &HitMap,
+    focus: Focus,
+    action: Action,
+    clicks: &mut Clicks,
+    now: Instant,
+) -> MouseRoute {
+    if hits.overlay.is_none() {
+        return MouseRoute::Nothing;
+    }
+    match (action, hits.on_overlay(at), focus) {
+        (Action::Wheel(1), true, Focus::Picker) => {
+            MouseRoute::Intents(vec![Intent::PickerWheelNext])
+        }
+        (Action::Wheel(_), true, Focus::Picker) => {
+            MouseRoute::Intents(vec![Intent::PickerWheelPrev])
+        }
+        (Action::Wheel(_), ..) => MouseRoute::Nothing,
+        (Action::Click, false, _) => {
+            clicks.click(None, now);
+            MouseRoute::Intents(vec![Intent::PickerCancel])
+        }
+        (Action::Click, true, _) => {
+            let row = hits.picker_row_at(at);
+            let click = clicks.click(row.map(ClickTarget::PickerRow), now);
+            match row {
+                Some(index) => intents([
+                    Some(Intent::PickerSelectRow(index)),
+                    (click == Click::Double).then_some(Intent::PickerConfirm),
+                ]),
+                None => MouseRoute::Nothing,
+            }
         }
     }
 }
@@ -473,6 +548,204 @@ mod tests {
             routed,
             MouseRoute::Nothing,
             "a click on the mode line should do nothing"
+        );
+    }
+
+    /// `hits()` under a picker popup over columns 20 to 59, lines 4 to 13
+    /// (it covers part of thread 1's row), with shown row 1 on line 8.
+    fn picker_hits() -> HitMap {
+        let mut hits = hits();
+        hits.record_overlay(Rect::new(20, 4, 40, 10));
+        hits.record_picker_row(Rect::new(21, 8, 38, 1), 1);
+        hits
+    }
+
+    /// Routes `event` over `hits` with `focus`, no pane shown and no earlier
+    /// click.
+    fn route_over(event: MouseEvent, hits: &HitMap, focus: Focus) -> MouseRoute {
+        route(
+            event,
+            hits,
+            focus,
+            false,
+            &mut Clicks::default(),
+            Instant::now(),
+        )
+    }
+
+    #[rstest::rstest]
+    fn click_outside_a_picker_cancels_it() {
+        // Given a picker has the keys.
+        // When clicking thread 1's row, outside the popup.
+        let routed = route_over(left_click(5, 4), &picker_hits(), Focus::Picker);
+
+        // Then the picker is cancelled and the row isn't selected.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::PickerCancel]),
+            "a click outside a picker should only cancel it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_picker_row_selects_it() {
+        // Given a picker has the keys.
+        // When clicking its shown row 1.
+        let routed = route_over(left_click(30, 8), &picker_hits(), Focus::Picker);
+
+        // Then that row is selected.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::PickerSelectRow(1)]),
+            "a click on a picker row should select it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn double_click_on_a_picker_row_picks_it() {
+        // Given a picker has the keys and its row 1 was just clicked.
+        let (hits, mut clicks, now) = (picker_hits(), Clicks::default(), Instant::now());
+        route(
+            left_click(30, 8),
+            &hits,
+            Focus::Picker,
+            false,
+            &mut clicks,
+            now,
+        );
+
+        // When clicking it again 100 ms later.
+        let routed = route(
+            left_click(30, 8),
+            &hits,
+            Focus::Picker,
+            false,
+            &mut clicks,
+            now + Duration::from_millis(100),
+        );
+
+        // Then the row is selected and picked.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::PickerSelectRow(1), Intent::PickerConfirm]),
+            "a double-click on a picker row should pick it"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::down(MouseEventKind::ScrollDown, Intent::PickerWheelNext)]
+    #[case::up(MouseEventKind::ScrollUp, Intent::PickerWheelPrev)]
+    fn wheel_over_a_picker_moves_its_selection(
+        #[case] kind: MouseEventKind,
+        #[case] expected: Intent,
+    ) {
+        // Given a picker has the keys.
+        // When wheeling over its popup.
+        let routed = route_over(mouse(kind, 30, 6), &picker_hits(), Focus::Picker);
+
+        // Then the picker's selection moves.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![expected]),
+            "the wheel over a picker should move its selection"
+        );
+    }
+
+    #[rstest::rstest]
+    fn wheel_outside_a_picker_does_nothing() {
+        // Given a picker has the keys.
+        // When wheeling down over the sidebar, outside the popup.
+        let routed = route_over(
+            mouse(MouseEventKind::ScrollDown, 5, 15),
+            &picker_hits(),
+            Focus::Picker,
+        );
+
+        // Then nothing happens.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "the wheel outside a picker should do nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_inside_a_picker_off_its_rows_does_nothing() {
+        // Given a picker has the keys.
+        // When clicking inside the popup on no row.
+        let routed = route_over(left_click(30, 5), &picker_hits(), Focus::Picker);
+
+        // Then nothing happens: the picker stays open.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "a click inside a picker off its rows should do nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn double_click_inside_a_picker_off_its_rows_does_nothing() {
+        // Given a picker has the keys and a spot on no row was just clicked.
+        let (hits, mut clicks, now) = (picker_hits(), Clicks::default(), Instant::now());
+        route(
+            left_click(30, 5),
+            &hits,
+            Focus::Picker,
+            false,
+            &mut clicks,
+            now,
+        );
+
+        // When clicking it again 100 ms later.
+        let routed = route(
+            left_click(30, 5),
+            &hits,
+            Focus::Picker,
+            false,
+            &mut clicks,
+            now + Duration::from_millis(100),
+        );
+
+        // Then nothing happens: the selected row isn't picked.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "a double-click inside a picker off its rows should pick nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_before_the_picker_is_drawn_does_nothing() {
+        // Given a picker has the keys but no frame has drawn it yet.
+        // When clicking thread 1's row.
+        let routed = route_over(left_click(5, 4), &hits(), Focus::Picker);
+
+        // Then nothing happens.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "a click before the picker is drawn should do nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_outside_the_rename_box_cancels_it() {
+        // Given the rename box has the keys, drawn over columns 20 to 59,
+        // lines 2 to 4.
+        let hits = {
+            let mut hits = hits();
+            hits.record_overlay(Rect::new(20, 2, 40, 3));
+            hits
+        };
+
+        // When clicking outside it.
+        let routed = route_over(left_click(5, 10), &hits, Focus::Rename);
+
+        // Then the rename box is cancelled.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::PickerCancel]),
+            "a click outside the rename box should cancel it"
         );
     }
 

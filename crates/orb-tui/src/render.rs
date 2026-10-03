@@ -9,8 +9,9 @@
 //! selected row, at the text cursor of the picker, the rename box or the
 //! sidebar search, on the dashboard's highlighted item, or in the attached
 //! pane.
-//! Each frame records where it drew the sidebar's rows and input box and the
-//! dashboard's menu items, so a click maps back to them.
+//! Each frame records where it drew the sidebar's rows and input box, the
+//! dashboard's menu items, the pickers' rows and the rename box, so a click
+//! maps back to them.
 //! Whatever is left on the terminal's default background gets orb's navy, so
 //! a transparent terminal doesn't show through.
 
@@ -121,14 +122,23 @@ pub(crate) fn render(
                     area,
                     frame.buffer_mut(),
                     picker_scroll,
+                    hits,
                 ),
-                _ => picker::render(picker, &state.home, area, frame.buffer_mut(), picker_scroll),
+                _ => picker::render(
+                    picker,
+                    &state.home,
+                    area,
+                    frame.buffer_mut(),
+                    picker_scroll,
+                    hits,
+                ),
             };
             frame.set_cursor_position(cursor);
             Some(rows)
         }
         (None, Some(rename)) => {
-            let cursor = rename::render(rename, sidebar_area.union(right), frame.buffer_mut());
+            let cursor =
+                rename::render(rename, sidebar_area.union(right), frame.buffer_mut(), hits);
             frame.set_cursor_position(cursor);
             None
         }
