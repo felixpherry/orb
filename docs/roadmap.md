@@ -396,7 +396,11 @@ Each milestone is planned in a fresh session. Open questions listed per mileston
 - Resolved in M9's research and walk (research §14): zellij 0.45 drops OSC 99, OSC 9 and OSC 777, and sends no focus-out to the tab the user leaves, so orb asks `zellij action list-clients` before dropping a notice while it seems focused. An `osascript` notification opens Script Editor on click, so orb posts through `terminal-notifier` when it's installed, with an `-execute` line back to orb's kitty window, zellij tab and pane, and through `osascript` when it isn't or when it fails. The user's kitty → zellij walk passed AC1–AC9. Three pre-check UI points were kept as they are: the `Remove project?` confirm doesn't name the project (UI pass); `<C-h>` in a trust pane left untrusted retries once and shows `Workspace not trusted`; `Yes` on the filtered project, with its draft selected, moves the cursor within the full list.
 
 ### Backlog
-**To plan** (scope decided in the planning session): `␣sg` global search.
+**To plan** (scope decided in the planning session):
+- `␣sg` global search.
+- pi as a second harness, a milestone of its own. It reverses the "Claude Code only" Providers decision and RECORD `(identity)`. pi has no background supervisor, so a pi thread would run under dtach (`dtach -n <socket> pi --session-id <uuid>`) and outlive orb like a Claude thread does, with `dtach -a <socket> -E -r winch` as the attach command (`-E` keeps `<C-\>` orb's) and status read from the tail of the thread's session JSONL in `~/.pi/agent/sessions/`. Most of the work is the code that assumes Claude: the trust confirm, the child env, templates, the model picker and the transcript parser. Untested: dtach isn't installed yet, and pi's redraw on reattach is unchecked.
+- Arena: one prompt run across several models and harnesses (Claude Code, pi), each in its own worktree, with the runs compared side by side. Needs pi for the second harness. Dashboard round 3's `arena` variant (branch `dashboard-rework-opus-cc`) is a stub of the comparison view.
+- Workflow tooling. First candidate: the selected thread's task list, like jinn's todo list, read from the transcript; Claude Code already writes one, and pi has no todo tool. Other tools undecided.
 
 **Dropped in M9:**
 - Codex behind `SessionHost` — orb supports Claude Code as its only provider (RECORD `(identity)`), and another provider is a milestone of its own.
