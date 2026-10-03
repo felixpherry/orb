@@ -3,8 +3,8 @@
 //! popup on top while a key sequence is pending.
 //! While the sidebar is hidden, the right side takes the full width.
 //! An open picker is drawn over everything but the mode line, without the
-//! popup (the session picker in its own snacks layout), and so is the
-//! rename box while it has the keys.
+//! popup (the session and worktree pickers in their own snacks layout), and
+//! so is the rename box while it has the keys.
 //! The terminal's cursor is shown only where the keys are: on the sidebar's
 //! selected row, at the text cursor of the picker, the rename box or the
 //! sidebar search, on the dashboard's highlighted item, or in the attached
@@ -35,6 +35,7 @@ use crate::rename;
 use crate::session_picker;
 use crate::sidebar::{self, SidebarScroll};
 use crate::which_key;
+use crate::worktree_picker;
 
 /// Behind everything that doesn't set its own background (tokyonight-moon's
 /// `bg`).
@@ -118,6 +119,15 @@ pub(crate) fn render(
                     picker,
                     &state.sessions,
                     &state.attached,
+                    now,
+                    area,
+                    frame.buffer_mut(),
+                    picker_scroll,
+                    hits,
+                ),
+                PickerKind::Worktrees => worktree_picker::render(
+                    picker,
+                    state,
                     now,
                     area,
                     frame.buffer_mut(),
@@ -404,6 +414,26 @@ mod tests {
         // Then the input row shows the session picker's `0/0` count.
         let screen = text(&buffer, buffer.area);
         assert!(screen.contains("0/0"), "screen was\n{screen}");
+    }
+
+    #[rstest::rstest]
+    fn worktree_picker_is_drawn_by_its_own_renderer() {
+        // Given an open worktree picker with no worktrees.
+        let state = AppState {
+            focus: Focus::Picker,
+            picker: Some(PickerState::worktrees(vec![], Focus::Sidebar)),
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the list box is titled ` Worktrees ` over a `0/0` count.
+        let screen = text(&buffer, buffer.area);
+        assert!(
+            screen.contains(" Worktrees ") && screen.contains("0/0"),
+            "screen was\n{screen}"
+        );
     }
 
     #[rstest::rstest]

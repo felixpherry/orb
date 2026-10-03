@@ -48,6 +48,16 @@ pub enum PickerItem {
         split: usize,
         settled: bool,
     },
+    /// A worktree in the worktree picker, labelled `<repo>/orb-<hex>`.
+    /// `split` is the byte offset of the name. The filter lights matches in
+    /// the label only; `extra` (its branch and its users' titles) still
+    /// matches, below every label match.
+    Worktree {
+        path: PathBuf,
+        label: String,
+        split: usize,
+        extra: String,
+    },
 }
 
 /// The text of the [`PickerItem::InitGit`] row, as in T3 Code.
@@ -395,6 +405,19 @@ impl PickerList {
         }
     }
 
+    /// Drops the selected item, keeping the filter, and selects the row that
+    /// took its place, else the one before it.
+    pub fn remove_selected(&mut self) {
+        let Some(&(index, _)) = self.shown.get(self.selection) else {
+            return;
+        };
+        let old = self.selection;
+        self.items.remove(index);
+        let pattern = self.input().to_owned();
+        self.refilter(&pattern);
+        self.selection = old.min(self.shown.len().saturating_sub(1));
+    }
+
     /// The shown items and where they matched, in display order.
     pub fn shown(&self) -> impl Iterator<Item = (&PickerItem, &Matches)> {
         self.shown
@@ -482,7 +505,8 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         | PickerItem::InitGit
         | PickerItem::AllProjects
         | PickerItem::Confirm(_)
-        | PickerItem::Thread { .. } => false,
+        | PickerItem::Thread { .. }
+        | PickerItem::Worktree { .. } => false,
     }
 }
 
@@ -508,6 +532,20 @@ pub fn fuzzy_match(
 
 /// The summed score and match offsets of `item` when every term matches.
 fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(i64, Matches)> {
+    // A worktree matched only on `extra` ranks below every label match and
+    // lights nothing.
+    if let PickerItem::Worktree { label, extra, .. } = item {
+        return match fuzzy_match(matcher, label, terms) {
+            Some((total, name)) => Some((
+                total,
+                Matches {
+                    name,
+                    path: Vec::new(),
+                },
+            )),
+            None => fuzzy_match(matcher, extra, terms).map(|_| (i64::MIN, Matches::default())),
+        };
+    }
     // A project is matched on "title\nroot". Typed text never holds a line
     // break, so every offset falls on one side of it.
     let (label, title_len) = match item {
@@ -527,7 +565,9 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::InitGit => (INIT_GIT.to_owned(), None),
         PickerItem::AllProjects => (ALL_PROJECTS.to_owned(), None),
         PickerItem::Confirm(yes) => (confirm_label(*yes).to_owned(), None),
-        PickerItem::Thread { label, .. } => (label.clone(), None),
+        PickerItem::Thread { label, .. } | PickerItem::Worktree { label, .. } => {
+            (label.clone(), None)
+        }
     };
     let (total, offsets) = fuzzy_match(matcher, &label, terms)?;
     let found = match title_len {
@@ -588,7 +628,9 @@ mod tests {
                 PickerItem::InitGit => super::INIT_GIT.to_owned(),
                 PickerItem::AllProjects => super::ALL_PROJECTS.to_owned(),
                 PickerItem::Confirm(yes) => super::confirm_label(*yes).to_owned(),
-                PickerItem::Thread { label, .. } => label.clone(),
+                PickerItem::Thread { label, .. } | PickerItem::Worktree { label, .. } => {
+                    label.clone()
+                }
             })
             .collect()
     }
@@ -673,7 +715,8 @@ mod tests {
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
-                | PickerItem::Thread { .. } => None,
+                | PickerItem::Thread { .. }
+                | PickerItem::Worktree { .. } => None,
             })
             .collect();
         assert_eq!(
@@ -736,6 +779,71 @@ mod tests {
                 path: vec![5, 6, 7],
             }],
             "a path match should be offset into the path"
+        );
+    }
+
+    fn worktree(label: &str, extra: &str) -> PickerItem {
+        PickerItem::Worktree {
+            path: PathBuf::from(format!("/wt/{label}")),
+            label: label.to_owned(),
+            split: label.find('/').map_or(0, |at| at + 1),
+            extra: extra.to_owned(),
+        }
+    }
+
+    #[rstest::rstest]
+    fn worktree_filter_lights_the_label_match() {
+        // Given a worktree labelled "orb/orb-1a2b".
+        let mut list = PickerList::new(vec![worktree("orb/orb-1a2b", "main")]);
+
+        // When filtering with "1a2b".
+        list.refilter("1a2b");
+
+        // Then the label's "1a2b" bytes are lit.
+        let matches: Vec<&Matches> = list.shown().map(|(_, matches)| matches).collect();
+        assert_eq!(
+            matches,
+            [&Matches {
+                name: vec![8, 9, 10, 11],
+                path: Vec::new(),
+            }],
+            "a label match should be lit"
+        );
+    }
+
+    #[rstest::rstest]
+    fn worktree_filter_matches_the_branch_without_lighting() {
+        // Given a worktree whose branch, not label, holds "settings".
+        let mut list = PickerList::new(vec![worktree("orb/orb-1a2b", "fix-settings")]);
+
+        // When filtering with "settings".
+        list.refilter("settings");
+
+        // Then the row shows with nothing lit.
+        let matches: Vec<&Matches> = list.shown().map(|(_, matches)| matches).collect();
+        assert_eq!(
+            matches,
+            [&Matches::default()],
+            "an extra-only match should show unlit"
+        );
+    }
+
+    #[rstest::rstest]
+    fn worktree_label_match_ranks_above_a_branch_match() {
+        // Given a branch-only match listed before a label match.
+        let mut list = PickerList::new(vec![
+            worktree("orb/orb-1a2b", "fix-c3d4"),
+            worktree("orb/orb-c3d4", "main"),
+        ]);
+
+        // When filtering with "c3d4".
+        list.refilter("c3d4");
+
+        // Then the label match comes first.
+        assert_eq!(
+            shown_names(&list),
+            ["orb/orb-c3d4", "orb/orb-1a2b"],
+            "a label match should outrank an extra-only match"
         );
     }
 
@@ -927,5 +1035,57 @@ mod tests {
         // Given / When / Then a model, by ID or alias, shows its name, and
         // anything else shows as is.
         assert_eq!(setting_label(value), label, "the setting's label");
+    }
+
+    #[rstest::rstest]
+    fn remove_selected_selects_the_next_row() {
+        // Given three rows with the middle one selected.
+        let mut list = PickerList::new(directories(&["alpha", "beta", "gamma"]));
+        list.select_row(1);
+
+        // When removing the selected row.
+        list.remove_selected();
+
+        // Then the row after it is selected.
+        assert_eq!(
+            shown_names(&list).get(list.selection()).map(String::as_str),
+            Some("gamma"),
+            "the next row should take the removed row's place"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_selected_on_the_last_row_selects_the_previous_row() {
+        // Given three rows with the last one selected.
+        let mut list = PickerList::new(directories(&["alpha", "beta", "gamma"]));
+        list.select_row(2);
+
+        // When removing the selected row.
+        list.remove_selected();
+
+        // Then the row before it is selected.
+        assert_eq!(
+            shown_names(&list).get(list.selection()).map(String::as_str),
+            Some("beta"),
+            "the previous row should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_selected_keeps_the_filter() {
+        // Given rows filtered by "a" with the first match selected.
+        let mut list = PickerList::new(directories(&["alpha", "zed", "gamma"]));
+        list.replace_input("a");
+        list.refilter("a");
+
+        // When removing the selected row.
+        list.remove_selected();
+
+        // Then the rest are still filtered by "a".
+        assert_eq!(
+            (list.input(), shown_names(&list).len()),
+            ("a", 1),
+            "the typed text and its filter should stay"
+        );
     }
 }

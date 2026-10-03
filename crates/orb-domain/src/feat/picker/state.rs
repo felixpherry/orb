@@ -9,7 +9,6 @@ use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::Focus;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::picker::list::{
     BranchRow, LEGACY_MODELS, MODELS, Matches, Model, PERMISSION_MODES, PickerItem, PickerList,
@@ -19,6 +18,8 @@ use crate::feat::sessions::state::{
     GroupId, GroupKind, NEW_THREAD, ProjectId, Sessions, ThreadId, ThreadStatus,
 };
 use crate::feat::sessions::transcript::Exchange;
+use crate::feat::worktrees::state::{User, order, users};
+use crate::{AppState, Focus};
 
 /// What a workspace or branch picker sets up: a thread, a project's draft,
 /// or (branch only) a Feature group's worktree.
@@ -91,6 +92,11 @@ pub enum PickerKind {
     /// `␣␣`/`<C-Space>`: pick a thread to jump into. `settled` is whether
     /// settled threads are listed; `<C-s>` flips it.
     Sessions { settled: bool },
+    /// `␣sw`: orb's worktrees, to look over and delete.
+    Worktrees,
+    /// `<C-x>` in the worktree picker: confirm force-removing the worktree at
+    /// `path`. `dirty` is whether it has uncommitted changes.
+    DeleteWorktree { path: PathBuf, dirty: bool },
 }
 
 /// What the session picker's preview shows for a thread: its transcript's
@@ -117,6 +123,9 @@ pub struct PickerState {
     wanted: Option<String>,
     /// The session picker's preview, as last read.
     preview: Option<SessionPreview>,
+    /// The worktree list a delete confirm was opened over; the confirm
+    /// returns to it.
+    under: Option<Box<PickerState>>,
 }
 
 impl PickerState {
@@ -130,6 +139,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            under: None,
         }
     }
 
@@ -144,6 +154,15 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            under: None,
+        }
+    }
+
+    /// The worktree picker over `items`, in the order given.
+    pub fn worktrees(items: Vec<PickerItem>, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::Worktrees,
+            ..Self::projects(items, return_to)
         }
     }
 
@@ -182,6 +201,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            under: None,
         }
     }
 
@@ -222,6 +242,21 @@ impl PickerState {
         Self::confirm(PickerKind::TrustWorkspace { dir }, return_to)
     }
 
+    /// The `No`/`Yes` confirm for deleting the worktree at `path`, with `No`
+    /// selected, over `list`, which it returns to.
+    pub fn delete_worktree(list: PickerState, path: PathBuf, dirty: bool) -> Self {
+        let return_to = list.return_to;
+        Self {
+            under: Some(Box::new(list)),
+            ..Self::confirm(PickerKind::DeleteWorktree { path, dirty }, return_to)
+        }
+    }
+
+    /// The picker this confirm was opened over, if any.
+    pub fn back(self) -> Option<PickerState> {
+        self.under.map(|list| *list)
+    }
+
     /// A `No`/`Yes` confirm of `kind`, with `No` selected.
     fn confirm(kind: PickerKind, return_to: Focus) -> Self {
         Self {
@@ -232,6 +267,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            under: None,
         }
     }
 
@@ -245,6 +281,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            under: None,
         }
     }
 
@@ -269,6 +306,7 @@ impl PickerState {
             page: 0,
             wanted,
             preview: None,
+            under: None,
         }
     }
 
@@ -282,6 +320,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            under: None,
         }
     }
 
@@ -341,6 +380,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            under: None,
         }
     }
 
@@ -361,6 +401,7 @@ impl PickerState {
             page: 0,
             wanted: None,
             preview: None,
+            under: None,
         };
         (picker, home)
     }
@@ -470,6 +511,20 @@ impl PickerState {
         }
     }
 
+    /// The selected worktree row's path; `None` unless one is selected.
+    pub fn selected_worktree(&self) -> Option<&Path> {
+        match self.list.selected() {
+            Some(PickerItem::Worktree { path, .. }) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Drops the selected worktree row, keeping the typed text, and selects
+    /// the next row, else the previous one.
+    pub fn remove_worktree_row(&mut self) {
+        self.list.remove_selected();
+    }
+
     /// Keeps `exchanges`, read from `thread`'s transcript at `len` bytes, as
     /// the preview. Dropped unless `thread` is still the selected row, so a
     /// late read for an old selection never shows.
@@ -538,7 +593,8 @@ impl PickerState {
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
-                | PickerItem::Thread { .. },
+                | PickerItem::Thread { .. }
+                | PickerItem::Worktree { .. },
             ) => None,
             None => leaf.is_empty().then_some(dir),
         }
@@ -730,6 +786,43 @@ pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
         .collect();
     rows.sort_by_key(|(last_chat, id, _)| Reverse((*last_chat, *id)));
     rows.into_iter().map(|(_, _, item)| item).collect()
+}
+
+/// The worktree picker's rows: `app`'s worktrees in [`order`], each labelled
+/// `<repo>/<name>` and matched also on its branch and its users' titles.
+pub fn worktree_items(app: &AppState) -> Vec<PickerItem> {
+    order(app)
+        .into_iter()
+        .map(|worktree| {
+            let file_name = |path: Option<&Path>| {
+                path.and_then(Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
+            let repo = file_name(worktree.path.parent());
+            let name = file_name(Some(&worktree.path));
+            let branch = worktree
+                .facts
+                .as_ref()
+                .and_then(|facts| facts.branch.as_deref());
+            let users = users(app, &worktree.path);
+            let titles = users.iter().filter_map(|user| match user {
+                User::Thread(_, thread) => thread.title.as_deref(),
+                User::Group(_, group, _) => Some(group.name.as_str()),
+                User::Draft(_) => None,
+            });
+            PickerItem::Worktree {
+                path: worktree.path.clone(),
+                label: format!("{repo}/{name}"),
+                split: repo.len() + 1,
+                extra: branch
+                    .into_iter()
+                    .chain(titles)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

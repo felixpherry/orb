@@ -70,7 +70,7 @@ pub(crate) fn render(
 
 /// The list box and the preview box: side by side (45/55, one column
 /// apart) when `wide`, else the list over the preview (60/40).
-fn boxes(popup: Rect, wide: bool) -> [Rect; 2] {
+pub(crate) fn boxes(popup: Rect, wide: bool) -> [Rect; 2] {
     if wide {
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
             .spacing(1)
@@ -81,7 +81,7 @@ fn boxes(popup: Rect, wide: bool) -> [Rect; 2] {
 }
 
 /// 80% of `area` (at least 120 columns when it has them), centred.
-fn big(area: Rect) -> Rect {
+pub(crate) fn big(area: Rect) -> Rect {
     let width = (area.width * 4 / 5).max(area.width.min(120));
     centred(area, width, area.height * 4 / 5)
 }
@@ -99,7 +99,7 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
 
 /// A rounded `BORDER` box on `BG_DARK`, with `title` centred in its top
 /// border when there is one.
-fn boxed(title: Option<Line<'static>>) -> Block<'static> {
+pub(crate) fn boxed(title: Option<Line<'static>>) -> Block<'static> {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BORDER).bg(BG_DARK))
@@ -178,7 +178,7 @@ fn render_list(
 /// The ` > ` prompt and the typed text (its end while too long, as in the
 /// select picker), with `count` dim against the right edge. Returns the
 /// cursor's position. Records its line in `hits`.
-fn render_input(
+pub(crate) fn render_input(
     picker: &PickerState,
     count: &str,
     area: Rect,
@@ -606,7 +606,7 @@ fn wrap_words(
 
 /// `text` if it fits in `width` columns, else as much of its start as fits
 /// and `…`.
-fn cut_right(text: &str, width: usize) -> String {
+pub(crate) fn cut_right(text: &str, width: usize) -> String {
     if Line::raw(text).width() <= width {
         return text.to_owned();
     }

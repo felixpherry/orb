@@ -2,9 +2,9 @@
 //! tokyonight-moon.
 //!
 //! On the left, the mode in a block of its colour, an arrow into the
-//! selected thread's or draft's branch, then its project and the latest
-//! error in red. On a group's rows, the branch is the group's and the
-//! project reads `<project>/<slug>`. On the right, `N running`,
+//! selected thread's or draft's branch, then its project, the latest error
+//! in red and the worktree notice. On a group's rows, the branch is the
+//! group's and the project reads `<project>/<slug>`. On the right, `N running`,
 //! `fetching origin/<base>…` while Start fetches, or `starting session…`
 //! with a spinner, how many threads need an approval or
 //! an answer, the selected row's place among the listed rows, and the local
@@ -24,6 +24,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::picker::WORKTREE;
 use crate::sidebar::{
     APPROVAL_ICON, BG_DARK, BLACK, BLUE, BRANCH, CYAN, FAILED_ICON, FG_DARK, FOLDER, GREEN, GREEN1,
     GUTTER, INPUT_ICON, MAGENTA, ORANGE, RED, SPINNER, SPINNER_FRAME, YELLOW,
@@ -37,9 +38,10 @@ const ARROW_LEFT: &str = "\u{e0b2}";
 const CLOCK: &str = "\u{f017}";
 
 /// Draws the mode line into `area`: the mode, the selected row's branch and
-/// project, and the latest error on the left; the activity, the approval and
-/// input counts, the selected row's position and the time `now` in `tz` on
-/// the right. The right side keeps its width, and the left is cut at its end.
+/// project, then the latest error in red and the worktree notice on the
+/// left; the activity, the approval and input counts, the selected row's
+/// position and the time `now` in `tz` on the right. The right side keeps
+/// its width, and the left is cut at its end.
 pub(crate) fn render(
     state: &AppState,
     now: SystemTime,
@@ -55,7 +57,13 @@ pub(crate) fn render(
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_width)]).areas(area);
     buf.set_style(area, Style::new().bg(BG_DARK));
-    left(&state.sessions, mode, colour).render(left_area, buf);
+    left(
+        &state.sessions,
+        state.worktrees.notice.as_deref(),
+        mode,
+        colour,
+    )
+    .render(left_area, buf);
     right.render(right_area, buf);
 }
 
@@ -73,9 +81,9 @@ fn mode(state: &AppState) -> (&'static str, Color) {
 }
 
 /// a · b · c: the mode block, the branch block when there's a branch, then the
-/// project and the error. On a group's rows, the project reads
-/// `<project>/<slug>` and the branch is the group's.
-fn left(sessions: &Sessions, mode: &str, colour: Color) -> Line<'static> {
+/// project, the error and the worktree notice. On a group's rows, the project
+/// reads `<project>/<slug>` and the branch is the group's.
+fn left(sessions: &Sessions, notice: Option<&str>, mode: &str, colour: Color) -> Line<'static> {
     let (branch, project): (Option<&str>, Option<String>) = match (
         sessions.selected_group(),
         sessions.selected_thread(),
@@ -113,6 +121,7 @@ fn left(sessions: &Sessions, mode: &str, colour: Color) -> Line<'static> {
             .as_ref()
             .map(|error| on(format!("{FAILED_ICON} {error} "), RED, BG_DARK)),
     );
+    spans.extend(notice.map(|notice| on(format!("{WORKTREE} {notice} "), FG_DARK, BG_DARK)));
     Line::from(spans)
 }
 
@@ -228,6 +237,7 @@ mod tests {
         Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
         ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
+    use orb_domain::feat::worktrees::state::Worktrees;
     use orb_domain::{AppState, Focus};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
@@ -542,6 +552,29 @@ mod tests {
             cell_at(&buffer, "Workspace not trusted").map(|cell| cell.fg),
             Some(RED),
             "error foreground in '{}'",
+            text(&buffer)
+        );
+    }
+
+    #[rstest::rstest]
+    fn notice_shows_on_the_mode_line() {
+        // Given a sweep that pruned two worktrees.
+        let state = AppState {
+            worktrees: Worktrees {
+                notice: Some("pruned 2 worktrees".to_owned()),
+                ..Worktrees::default()
+            },
+            ..AppState::default()
+        };
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the notice shows in the dim foreground.
+        assert_eq!(
+            cell_at(&buffer, "pruned 2 worktrees").map(|cell| cell.fg),
+            Some(FG_DARK),
+            "notice foreground in '{}'",
             text(&buffer)
         );
     }

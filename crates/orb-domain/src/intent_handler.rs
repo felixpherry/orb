@@ -12,10 +12,12 @@ use crate::feat::git::worktree::previous_worktree;
 use crate::feat::jumps::validator::{validate_jump_back, validate_jump_forward};
 use crate::feat::pane::validator::{validate_attach, validate_detach};
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
-use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState, session_items};
+use crate::feat::picker::state::{
+    DraftTarget, PickTarget, PickerKind, PickerState, session_items, worktree_items,
+};
 use crate::feat::picker::validator::{
-    validate_add_directory, validate_open_directory, validate_pick_project, validate_pick_session,
-    validate_remove_project,
+    DeleteWorktreeError, validate_add_directory, validate_delete_worktree, validate_open_directory,
+    validate_pick_project, validate_pick_session, validate_remove_project,
 };
 use crate::feat::sessions::state::{
     AttachTarget, Draft, DraftWorkspace, Group, GroupId, GroupKind, Project, ProjectId,
@@ -38,14 +40,16 @@ pub struct IntentHandler;
 
 impl IntentHandler {
     /// Apply `intent` to `state` and return the commands that must follow.
-    /// Every intent first clears the mode line's error, which the user has now
-    /// seen; otherwise an intent that fails validation changes nothing.
+    /// Every intent first clears the mode line's error and worktree notice,
+    /// which the user has now seen; otherwise an intent that fails validation
+    /// changes nothing.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per intent keeps every input decision in one match"
     )]
     pub fn handle(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         state.sessions.error = None;
+        state.worktrees.notice = None;
         match intent {
             Intent::Quit => {
                 state.should_quit = true;
@@ -254,6 +258,11 @@ impl IntentHandler {
                 let items = session_items(&state.sessions, false);
                 open_picker(state, PickerState::sessions(items, state.focus));
                 preview_command(state)
+            }
+            Intent::OpenWorktreePicker => {
+                let items = worktree_items(state);
+                open_picker(state, PickerState::worktrees(items, state.focus));
+                vec![Command::RefreshWorktrees]
             }
             Intent::FilterProjects => {
                 let items = std::iter::once(PickerItem::AllProjects)
@@ -704,6 +713,8 @@ impl IntentHandler {
                     (Ok(()), Some(thread)) => pick_session(state, thread),
                     _ => vec![],
                 },
+                Some(PickerKind::Worktrees) => vec![],
+                Some(PickerKind::DeleteWorktree { .. }) => leave_delete_worktree(state),
                 _ => match (validate_pick_project(state), validate_add_directory(state)) {
                     (Ok(()), _) => {
                         match close_picker(state).as_ref().and_then(PickerState::selected) {
@@ -719,23 +730,32 @@ impl IntentHandler {
                     _ => vec![],
                 },
             },
-            Intent::PickerCancel => match close_picker(state).as_ref().map(PickerState::kind) {
-                Some(PickerKind::TrustWorkspace { .. }) => vec![Command::DeclineTrust],
-                _ => vec![],
-            },
-            Intent::PickerRemove => match (
-                validate_remove_project(state),
-                state.picker.as_ref().and_then(PickerState::selected),
-            ) {
-                (Ok(()), Some(&PickerItem::Project { id, .. })) => {
-                    let return_to = state
-                        .picker
-                        .as_ref()
-                        .map_or(Focus::Sidebar, PickerState::return_to);
-                    state.picker = Some(PickerState::remove_project(id, return_to));
+            Intent::PickerCancel => match state.picker.as_ref().map(PickerState::kind) {
+                Some(PickerKind::DeleteWorktree { .. }) => {
+                    back_to_worktrees(state, false);
                     vec![]
                 }
-                _ => vec![],
+                _ => match close_picker(state).as_ref().map(PickerState::kind) {
+                    Some(PickerKind::TrustWorkspace { .. }) => vec![Command::DeclineTrust],
+                    _ => vec![],
+                },
+            },
+            Intent::PickerRemove => match state.picker.as_ref().map(PickerState::kind) {
+                Some(PickerKind::Worktrees) => ask_delete_worktree(state),
+                _ => match (
+                    validate_remove_project(state),
+                    state.picker.as_ref().and_then(PickerState::selected),
+                ) {
+                    (Ok(()), Some(&PickerItem::Project { id, .. })) => {
+                        let return_to = state
+                            .picker
+                            .as_ref()
+                            .map_or(Focus::Sidebar, PickerState::return_to);
+                        state.picker = Some(PickerState::remove_project(id, return_to));
+                        vec![]
+                    }
+                    _ => vec![],
+                },
             },
             Intent::PickerToggleSettled => {
                 let before = picked_thread(state);
@@ -1402,6 +1422,81 @@ fn close_picker(state: &mut AppState) -> Option<PickerState> {
     Some(picker)
 }
 
+/// `<C-x>` in the worktree picker: the `No`/`Yes` confirm over the list, or
+/// on an attached or mid-turn row, why it can't be deleted on the mode line.
+fn ask_delete_worktree(state: &mut AppState) -> Vec<Command> {
+    let why = match validate_delete_worktree(state) {
+        Ok(()) => None,
+        Err(DeleteWorktreeError::Attached) => Some("a thread in it is attached"),
+        Err(DeleteWorktreeError::MidTurn) => Some("a thread in it is mid-turn"),
+        Err(DeleteWorktreeError::NoPicker | DeleteWorktreeError::NoSelection) => return vec![],
+    };
+    let Some(path) = state
+        .picker
+        .as_ref()
+        .and_then(PickerState::selected_worktree)
+        .map(Path::to_path_buf)
+    else {
+        return vec![];
+    };
+    match why {
+        Some(why) => {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            state.sessions.error = Some(format!("can't delete {name}: {why}"));
+        }
+        None => {
+            let dirty = state
+                .worktrees
+                .list
+                .iter()
+                .find(|worktree| worktree.path == path)
+                .and_then(|worktree| worktree.facts.as_ref())
+                .is_some_and(|facts| facts.changes > 0);
+            if let Some(list) = state.picker.take() {
+                state.picker = Some(PickerState::delete_worktree(list, path, dirty));
+            }
+        }
+    }
+    vec![]
+}
+
+/// Ends the delete-worktree confirm: `Yes` returns `DeleteWorktree` for its
+/// path, and either answer goes back to the list, without the row on `Yes`.
+fn leave_delete_worktree(state: &mut AppState) -> Vec<Command> {
+    let Some(picker) = &state.picker else {
+        return vec![];
+    };
+    let delete = match (picker.kind(), picker.selected()) {
+        (PickerKind::DeleteWorktree { path, .. }, Some(PickerItem::Confirm(true))) => {
+            Some(path.clone())
+        }
+        _ => None,
+    };
+    back_to_worktrees(state, delete.is_some());
+    delete
+        .map(|path| Command::DeleteWorktree { path })
+        .into_iter()
+        .collect()
+}
+
+/// Swaps the delete-worktree confirm for the list under it, dropping the
+/// selected row when `deleted`. The keys stay in the picker.
+fn back_to_worktrees(state: &mut AppState, deleted: bool) {
+    let Some(confirm) = state.picker.take() else {
+        return;
+    };
+    let return_to = confirm.return_to();
+    match confirm.back() {
+        Some(mut list) => {
+            if deleted {
+                list.remove_worktree_row();
+            }
+            state.picker = Some(list);
+        }
+        None => state.focus = return_to,
+    }
+}
+
 /// The id of the group under the cursor: its card's, its draft's, or its
 /// thread's.
 fn selected_group_id(state: &AppState) -> Option<GroupId> {
@@ -1637,7 +1732,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use crate::command::Workspace;
-    use crate::feat::git::git_service::GitRef;
+    use crate::feat::git::git_service::{GitRef, WorktreeFacts};
     use crate::feat::jumps::state::JumpList;
     use crate::feat::picker::list::{BranchRow, PERMISSION_MODES, PickerItem, WorkspaceChoice};
     use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
@@ -1648,6 +1743,7 @@ mod tests {
     };
     use crate::feat::sessions::validator::{LAST_IN_GROUP, SETTLE_IN_PROGRESS, STARTS_FROM_DRAFT};
     use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
+    use crate::feat::worktrees::state::{Worktree, Worktrees};
     use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
 
@@ -2947,6 +3043,22 @@ mod tests {
         assert_eq!(
             state.sessions.error, None,
             "the user has seen the error once they press a key"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_intent_clears_the_notice() {
+        // Given a worktree notice on the mode line.
+        let mut state = state_with(vec![in_root(1)], 1);
+        state.worktrees.notice = Some("pruned 2 worktrees".to_owned());
+
+        // When handling the next intent.
+        IntentHandler::handle(&Intent::SelectNext, &mut state);
+
+        // Then the notice is gone.
+        assert_eq!(
+            state.worktrees.notice, None,
+            "the user has seen the notice once they press a key"
         );
     }
 
@@ -8518,5 +8630,372 @@ mod tests {
             Some(3),
             "a click past the text should put the cursor at its end"
         );
+    }
+
+    const USED: &str = "/home/u/.orb/worktrees/work/orb-ffff";
+    const ORPHAN: &str = "/home/u/.orb/worktrees/work/orb-0000";
+
+    /// Thread 1 running in worktree `USED`, and a clean orphan worktree
+    /// `ORPHAN` that sorts before it by path.
+    fn worktree_state() -> AppState {
+        let worktree = |path: &str| Worktree {
+            path: path.into(),
+            repo: Some("/work".into()),
+            facts: None,
+            size_kb: None,
+        };
+        AppState {
+            worktrees: Worktrees {
+                list: vec![worktree(ORPHAN), worktree(USED)],
+                notice: None,
+            },
+            ..state_at(
+                vec![Thread {
+                    cwd: USED.into(),
+                    ..thread(1, ThreadStatus::Idle)
+                }],
+                SidebarItem::Thread(ThreadId(1)),
+            )
+        }
+    }
+
+    /// The paths of the open picker's shown worktree rows.
+    fn worktree_rows(state: &AppState) -> Vec<PathBuf> {
+        state
+            .picker
+            .iter()
+            .flat_map(PickerState::shown)
+            .filter_map(|(item, _)| match item {
+                PickerItem::Worktree { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn open_worktree_picker_opens_a_worktrees_picker() {
+        // Given orb's worktrees.
+        let mut state = worktree_state();
+
+        // When handling OpenWorktreePicker.
+        IntentHandler::handle(&Intent::OpenWorktreePicker, &mut state);
+
+        // Then the worktree picker is open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Worktrees),
+            "␣sw should open the worktree picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_worktree_picker_returns_refresh_worktrees() {
+        // Given orb's worktrees.
+        let mut state = worktree_state();
+
+        // When handling OpenWorktreePicker.
+        let commands = IntentHandler::handle(&Intent::OpenWorktreePicker, &mut state);
+
+        // Then the worktrees are re-read.
+        assert_eq!(
+            commands,
+            [Command::RefreshWorktrees],
+            "opening should refresh the worktrees"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_worktree_picker_lists_rows_in_order() {
+        // Given a used worktree and an orphan that sorts first by path.
+        let mut state = worktree_state();
+
+        // When handling OpenWorktreePicker.
+        IntentHandler::handle(&Intent::OpenWorktreePicker, &mut state);
+
+        // Then the used worktree comes first and the orphan last.
+        assert_eq!(
+            worktree_rows(&state),
+            [PathBuf::from(USED), PathBuf::from(ORPHAN)],
+            "rows should follow the worktree order"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirm_on_a_worktree_row_returns_no_commands() {
+        // Given the worktree picker open.
+        let mut state = worktree_state();
+        IntentHandler::handle(&Intent::OpenWorktreePicker, &mut state);
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing follows.
+        assert!(commands.is_empty(), "⏎ on a worktree row does nothing");
+    }
+
+    #[rstest::rstest]
+    fn confirm_on_a_worktree_row_keeps_the_picker_open() {
+        // Given the worktree picker open with its second row clicked.
+        let mut state = worktree_state();
+        IntentHandler::handle(&Intent::OpenWorktreePicker, &mut state);
+        IntentHandler::handle(&Intent::PickerSelectRow(1), &mut state);
+
+        // When handling PickerConfirm, as a double-click does.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the worktree picker stays open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Worktrees),
+            "⏎ should leave the worktree picker open"
+        );
+    }
+
+    /// The worktree picker open over `state`, with row `row` selected and
+    /// `<C-x>` pressed on it.
+    fn delete_row(state: &mut AppState, row: usize) {
+        IntentHandler::handle(&Intent::OpenWorktreePicker, state);
+        IntentHandler::handle(&Intent::PickerSelectRow(row), state);
+        IntentHandler::handle(&Intent::PickerRemove, state);
+    }
+
+    /// The open picker's selected worktree row.
+    fn picked_worktree(state: &AppState) -> Option<PathBuf> {
+        state
+            .picker
+            .as_ref()
+            .and_then(PickerState::selected_worktree)
+            .map(Path::to_path_buf)
+    }
+
+    #[rstest::rstest]
+    fn remove_on_an_attached_row_sets_the_refusal() {
+        // Given thread 1, in `USED`, attached.
+        let mut state = AppState {
+            attached: [ThreadId(1)].into(),
+            ..worktree_state()
+        };
+
+        // When pressing <C-x> on `USED`'s row.
+        delete_row(&mut state, 0);
+
+        // Then the mode line says why it can't be deleted.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some("can't delete orb-ffff: a thread in it is attached"),
+            "an attached row should be refused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_on_a_mid_turn_row_sets_the_refusal() {
+        // Given thread 1, in `USED`, working.
+        let mut state = worktree_state();
+        for thread in state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|p| &mut p.threads)
+        {
+            thread.status = ThreadStatus::Working;
+        }
+
+        // When pressing <C-x> on `USED`'s row.
+        delete_row(&mut state, 0);
+
+        // Then the mode line says why it can't be deleted.
+        assert_eq!(
+            state.sessions.error.as_deref(),
+            Some("can't delete orb-ffff: a thread in it is mid-turn"),
+            "a mid-turn row should be refused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_on_a_clean_row_opens_delete_worktree_confirm() {
+        // Given orb's worktrees, none with changes.
+        let mut state = worktree_state();
+
+        // When pressing <C-x> on the orphan's row.
+        delete_row(&mut state, 1);
+
+        // Then the clean delete confirm is open for it.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::DeleteWorktree {
+                path: ORPHAN.into(),
+                dirty: false,
+            }),
+            "<C-x> should ask to confirm the delete"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remove_on_a_dirty_row_marks_the_confirm_dirty() {
+        // Given the orphan with two uncommitted changes.
+        let mut state = worktree_state();
+        for worktree in &mut state.worktrees.list {
+            if worktree.path == Path::new(ORPHAN) {
+                worktree.facts = Some(WorktreeFacts {
+                    branch: None,
+                    changes: 2,
+                    last_commit: None,
+                });
+            }
+        }
+
+        // When pressing <C-x> on the orphan's row.
+        delete_row(&mut state, 1);
+
+        // Then the confirm says it's dirty.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::DeleteWorktree {
+                path: ORPHAN.into(),
+                dirty: true,
+            }),
+            "a worktree with changes should get the dirty confirm"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_returns_delete_worktree_command() {
+        // Given the delete confirm for `USED` with Yes highlighted.
+        let mut state = worktree_state();
+        delete_row(&mut state, 0);
+        highlight(&mut state, &PickerItem::Confirm(true));
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the worktree is deleted.
+        assert_eq!(
+            commands,
+            [Command::DeleteWorktree { path: USED.into() }],
+            "Yes should delete the worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_returns_to_the_list_without_the_row() {
+        // Given the delete confirm for `USED` with Yes highlighted.
+        let mut state = worktree_state();
+        delete_row(&mut state, 0);
+        highlight(&mut state, &PickerItem::Confirm(true));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the list is back with only the orphan.
+        assert_eq!(
+            worktree_rows(&state),
+            [PathBuf::from(ORPHAN)],
+            "the deleted row should be gone from the list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_puts_the_cursor_on_the_neighbour() {
+        // Given the delete confirm for the first row, `USED`, with Yes
+        // highlighted.
+        let mut state = worktree_state();
+        delete_row(&mut state, 0);
+        highlight(&mut state, &PickerItem::Confirm(true));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the row after it is selected.
+        assert_eq!(
+            picked_worktree(&state),
+            Some(PathBuf::from(ORPHAN)),
+            "the next row should take the deleted row's place"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_on_the_last_row_puts_the_cursor_on_the_previous_row() {
+        // Given the delete confirm for the last row, the orphan, with Yes
+        // highlighted.
+        let mut state = worktree_state();
+        delete_row(&mut state, 1);
+        highlight(&mut state, &PickerItem::Confirm(true));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the row before it is selected.
+        assert_eq!(
+            picked_worktree(&state),
+            Some(PathBuf::from(USED)),
+            "the previous row should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn no_returns_to_the_list_as_it_was() {
+        // Given `orb` typed in the worktree picker and the delete confirm for
+        // its second row, with No highlighted.
+        let mut state = worktree_state();
+        IntentHandler::handle(&Intent::OpenWorktreePicker, &mut state);
+        for ch in "orb".chars() {
+            IntentHandler::handle(&Intent::PickerInput(ch), &mut state);
+        }
+        IntentHandler::handle(&Intent::PickerSelectRow(1), &mut state);
+        IntentHandler::handle(&Intent::PickerRemove, &mut state);
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the worktree list is back with its text, rows and selection.
+        let picker = state.picker.as_ref();
+        assert_eq!(
+            (
+                picker.map(PickerState::kind),
+                picker.map(PickerState::input),
+                worktree_rows(&state).len(),
+                picked_worktree(&state),
+            ),
+            (
+                Some(&PickerKind::Worktrees),
+                Some("orb"),
+                2,
+                Some(PathBuf::from(ORPHAN)),
+            ),
+            "No should put the list back as it was"
+        );
+    }
+
+    #[rstest::rstest]
+    fn esc_on_the_confirm_returns_to_the_list() {
+        // Given the delete confirm for `USED`.
+        let mut state = worktree_state();
+        delete_row(&mut state, 0);
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the worktree list is back, every row still there.
+        assert_eq!(
+            (
+                state.picker.as_ref().map(PickerState::kind),
+                worktree_rows(&state).len(),
+            ),
+            (Some(&PickerKind::Worktrees), 2),
+            "Esc on the confirm should go back to the list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn esc_on_the_worktree_list_closes_it() {
+        // Given the worktree picker open.
+        let mut state = worktree_state();
+        IntentHandler::handle(&Intent::OpenWorktreePicker, &mut state);
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then no picker is open.
+        assert!(state.picker.is_none(), "Esc on the list should close it");
     }
 }
