@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 
@@ -154,6 +154,16 @@ pub struct Thread {
     /// The `--permission-mode` its session started with; `None` = Claude's
     /// default.
     pub permission: Option<String>,
+}
+
+impl Thread {
+    /// When the user last chatted in the thread: the later of the current
+    /// turn's start and the last turn's end.
+    pub fn last_chat(&self) -> SystemTime {
+        self.turn_started_at
+            .unwrap_or(UNIX_EPOCH)
+            .max(self.last_activity_at)
+    }
 }
 
 /// Where a draft's session will run.

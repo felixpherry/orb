@@ -9,6 +9,7 @@ use crate::feat::jumps::state::JumpList;
 use crate::feat::picker::state::PickerState;
 use crate::feat::sessions::state::{Sessions, ThreadId};
 use crate::feat::sidebar::state::{Rename, SidebarView};
+use crate::feat::worktrees::state::Worktrees;
 
 /// Which part of orb receives the user's keys. Ordered so it can key the
 /// which-key scopes.
@@ -60,4 +61,7 @@ pub struct AppState {
     /// or discarded draft) and by the sessions actor, its owner (restoring the
     /// saved list, and dropping a deleted group's rows).
     pub jumps: JumpList,
+    /// orb's worktrees and the sweep's notice. Written by the worktrees actor,
+    /// its owner; the intent handler also clears `notice` on the next intent.
+    pub worktrees: Worktrees,
 }

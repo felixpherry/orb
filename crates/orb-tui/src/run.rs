@@ -66,6 +66,7 @@ use orb_domain::feat::picker::state::PickerState;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
 use orb_domain::feat::sessions::transcript::read_exchanges;
+use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
 use orb_domain::feat::zellij::zellij_service::{
     NOT_IN_ZELLIJ, ZellijError, ZellijService, zellij_reason,
 };
@@ -112,7 +113,7 @@ impl Frontend {
     }
 
     /// Runs orb's TUI until the user quits. Session commands go to
-    /// `sessions`; the branch picker's refs
+    /// `sessions`; worktree commands go to `worktrees`; the branch picker's refs
     /// come from `git`; attached sessions run with `claude_env`; tools open
     /// through `zellij`, `None` outside zellij; notices are announced through
     /// `notifier` while orb's pane isn't focused, or while zellij says no
@@ -126,6 +127,7 @@ impl Frontend {
         self,
         state: State,
         sessions: ActorRef<SessionsActor>,
+        worktrees: ActorRef<WorktreesActor>,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
@@ -135,8 +137,10 @@ impl Frontend {
         ratatui::run(|terminal| -> io::Result<()> {
             outer_terminal::enable(terminal.backend_mut())?;
             outer_terminal::install_panic_hook();
-            let result = App::new(state, sessions, git, claude_env, zellij, notifier, tx, tz)
-                .run(terminal, &rx);
+            let result = App::new(
+                state, sessions, worktrees, git, claude_env, zellij, notifier, tx, tz,
+            )
+            .run(terminal, &rx);
             let restored = outer_terminal::disable(terminal.backend_mut());
             result.and(restored)
         })
@@ -269,6 +273,8 @@ where
 struct App {
     state: State,
     sessions: ActorRef<SessionsActor>,
+    /// Refreshes and deletes orb's worktrees.
+    worktrees: ActorRef<WorktreesActor>,
     git: GitService,
     keys: Keys,
     /// Each attached thread's `claude attach`, kept while other threads are
@@ -311,6 +317,7 @@ impl App {
     fn new(
         state: State,
         sessions: ActorRef<SessionsActor>,
+        worktrees: ActorRef<WorktreesActor>,
         git: GitService,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
@@ -325,6 +332,7 @@ impl App {
         Self {
             state,
             sessions,
+            worktrees,
             git,
             keys: Keys::new(keymap::keymap(), scope),
             panes: HashMap::new(),
@@ -745,6 +753,18 @@ impl App {
             }
             Command::LoadPreview { thread, transcript } => {
                 self.load_preview(*thread, transcript);
+            }
+            Command::RefreshWorktrees => {
+                let _ = self
+                    .worktrees
+                    .tell(worktrees_actor::RefreshWorktrees)
+                    .try_send();
+            }
+            Command::DeleteWorktree { path } => {
+                let _ = self
+                    .worktrees
+                    .tell(worktrees_actor::DeleteWorktree(path.clone()))
+                    .try_send();
             }
             Command::RefreshSessions => {
                 let _ = self

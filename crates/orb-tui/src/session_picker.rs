@@ -16,7 +16,7 @@
 //! last reply as a small Markdown subset.
 
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use orb_domain::feat::picker::list::{Matches, PickerItem};
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
@@ -268,17 +268,8 @@ fn when(thread: &Thread, now: SystemTime) -> String {
         (ThreadStatus::Working, Some(at)) => {
             working_label(now.duration_since(at).unwrap_or_default())
         }
-        _ => ago_label(now.duration_since(last_chat(thread)).unwrap_or_default()),
+        _ => ago_label(now.duration_since(thread.last_chat()).unwrap_or_default()),
     }
-}
-
-/// The later of the turn's start and the last turn's end: when the user last
-/// chatted in the thread.
-fn last_chat(thread: &Thread) -> SystemTime {
-    thread
-        .turn_started_at
-        .unwrap_or(UNIX_EPOCH)
-        .max(thread.last_activity_at)
 }
 
 /// The preview box: untitled and empty with no thread selected, else

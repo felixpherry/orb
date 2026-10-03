@@ -716,12 +716,8 @@ pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
             }
             let prefix = group.map_or(project.title.as_str(), |group| group.name.as_str());
             let title = thread.title.as_deref().unwrap_or(NEW_THREAD);
-            let last_chat = thread
-                .turn_started_at
-                .unwrap_or(SystemTime::UNIX_EPOCH)
-                .max(thread.last_activity_at);
             Some((
-                last_chat,
+                thread.last_chat(),
                 thread.id.0,
                 PickerItem::Thread {
                     id: thread.id,

@@ -8,4 +8,5 @@ pub mod pane;
 pub mod picker;
 pub mod sessions;
 pub mod sidebar;
+pub mod worktrees;
 pub mod zellij;
