@@ -739,9 +739,9 @@ Written in incognito's Verification step (not a milestone).
 - ``(incognito) `␣n` doesn't list orb's `Incognito` project.``
 - ``(incognito) Incognito threads settle, delete, rename and resume like any other thread.``
 
-### Session picker
+### Session picker (written)
 
-Written in the session picker's Verification step (not a milestone).
+Written in the session picker's Verification step (not a milestone), except the (jumps) Amend, held back: a pick records the row it leaves and the thread even when that thread is the row the last `<C-o>`/`<C-i>` landed on, so the entry's exception doesn't hold for it.
 
 **Amend**
 - ``(keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the dashboard, `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden, `<C-b>`, which hides or shows the sidebar and keeps the keys in the pane, `<C-Right>`/`<C-Left>`, which resize the pane as on the dashboard, and `<C-o>`/`<C-i>`, which move through the jump list.`` → ``(keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the dashboard, `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden, `<C-b>`, which hides or shows the sidebar and keeps the keys in the pane, `<C-Right>`/`<C-Left>`, which resize the pane as on the dashboard, `<C-o>`/`<C-i>`, which move through the jump list, and `<C-Space>`, which opens the session picker.``
