@@ -420,6 +420,7 @@ impl PickerState {
             .map(|info| PickerItem::Harness {
                 id: info.id.clone(),
                 label: info.label.clone(),
+                icon: info.icon.clone(),
                 unavailable: info.unavailable.clone(),
             })
             .collect();
@@ -1605,6 +1606,7 @@ mod tests {
                 PickerItem::Harness {
                     id: HarnessId::new("pi"),
                     label: "pi".to_owned(),
+                    icon: None,
                     unavailable: Some("dtach not found".to_owned()),
                 },
                 true

@@ -137,7 +137,7 @@ impl Harness for Pi {
             id: self.id(),
             label: LABEL.to_owned(),
             tag: Some(LABEL.to_owned()),
-            icon: None,
+            icon: Some("π".to_owned()),
             unavailable: self.missing.map(|program| format!("{program} not found")),
             models,
             permission_modes: Vec::new(),

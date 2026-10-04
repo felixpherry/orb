@@ -248,5 +248,5 @@ Entries are added or amended **only with human approval**.
 - (trust) orb's trust confirm applies only to Claude threads; it never asks for a pi thread.
 - (sidebar) A lone pi thread's node shows a dim `pi` before its status word on its second line, or the tag alone while it's idle; a thread inside a group shows no tag.
 - (sidebar) A lone thread's node ends its third line with its harness's icon: `✳` for Claude, nothing for pi.
-- (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and a chip and `pi` for pi.
+- (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
 - (search) `␣sg` indexes pi threads' session files alongside Claude transcripts.

@@ -44,7 +44,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::mouse::HitMap;
 use crate::sidebar::{
     BG_DARK, BLUE, BLUE1, BORDER, BRANCH, CHIP, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK, FOLDER,
-    FOLDER_OPEN, GREEN, MAGENTA, ORANGE, PLUG, VISUAL, YELLOW, badge, mark, render_split,
+    FOLDER_OPEN, GREEN, LOGO, MAGENTA, ORANGE, PLUG, VISUAL, YELLOW, badge, mark, render_split,
 };
 
 /// Nerd Font's code-fork glyph, before the worktree workspace rows and the
@@ -388,8 +388,14 @@ fn row_content(
             (labelled(mark, label, &matches.name), None)
         }
         PickerItem::Harness {
-            label, unavailable, ..
-        } => (harness_row(label, unavailable.as_deref(), matches), None),
+            label,
+            icon,
+            unavailable,
+            ..
+        } => (
+            harness_row(label, icon.as_deref(), unavailable.as_deref(), matches),
+            None,
+        ),
         PickerItem::Heading(text) => (vec![span(format!("── {text} ──"), COMMENT)], None),
         PickerItem::InitGit => (labelled(icon(GIT, ORANGE), INIT_GIT, &matches.name), None),
         PickerItem::AllProjects => (
@@ -437,14 +443,23 @@ fn branch_row(
     (left, right)
 }
 
-/// A harness row: a plug and its label, dimmed with the reason after it
-/// when it can't be picked.
-fn harness_row(label: &str, unavailable: Option<&str>, matches: &Matches) -> Vec<Span<'static>> {
+/// A harness row: its mark (a plug when it has none) and its label, dimmed
+/// with the reason after it when it can't be picked.
+fn harness_row(
+    label: &str,
+    own: Option<&str>,
+    unavailable: Option<&str>,
+    matches: &Matches,
+) -> Vec<Span<'static>> {
     let fg = match unavailable {
         Some(_) => DARK3,
         None => FG,
     };
-    std::iter::once(icon(PLUG, BLUE1))
+    let (glyph, glyph_fg) = match own {
+        Some(own) => (own, LOGO),
+        None => (PLUG, BLUE1),
+    };
+    std::iter::once(icon(glyph, glyph_fg))
         .chain(highlight(label, &matches.name, |_| fg))
         .chain(unavailable.map(|reason| span(format!("  {reason}"), DARK3)))
         .collect()
@@ -594,7 +609,7 @@ mod tests {
     use ratatui::style::Modifier;
     use unicode_segmentation::UnicodeSegmentation;
 
-    use super::{FOLDER, GIT, HISTORY, PickerScroll, SHIELD, grapheme_at, render};
+    use super::{FOLDER, GIT, HISTORY, PLUG, PickerScroll, SHIELD, grapheme_at, render};
     use crate::mouse::HitMap;
     use crate::sidebar::{BLUE1, DARK3, DARK5, FG, ORANGE, VISUAL, badge};
 
@@ -1192,6 +1207,59 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.contains("pi  dtach not found")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn harness_row_shows_its_own_mark() {
+        // Given a harness picker where pi has the mark `π`.
+        let pi = HarnessInfo {
+            icon: Some("π".to_owned()),
+            unavailable: None,
+            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
+        };
+        let picker = PickerState::harnesses(
+            DraftTarget::Project(ProjectId(1)),
+            &[info(), pi],
+            &HarnessId::new("claude"),
+            Focus::Dashboard,
+        );
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 40);
+
+        // Then pi's row starts with its mark.
+        let lines = lines(&buf);
+        assert!(
+            lines.iter().any(|line| line.contains("π pi")),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn harness_row_without_a_mark_shows_a_plug() {
+        // Given a harness picker where pi has no mark.
+        let pi = HarnessInfo {
+            unavailable: None,
+            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
+        };
+        let picker = PickerState::harnesses(
+            DraftTarget::Project(ProjectId(1)),
+            &[info(), pi],
+            &HarnessId::new("claude"),
+            Focus::Dashboard,
+        );
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 40);
+
+        // Then pi's row starts with the plug.
+        let lines = lines(&buf);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("{PLUG} pi"))),
             "screen was {lines:#?}"
         );
     }

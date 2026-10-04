@@ -34,11 +34,12 @@ pub enum PickerItem {
         value: Option<String>,
         label: String,
     },
-    /// A harness to start a draft's session in, matched on its label;
-    /// disabled with the reason it can't be picked.
+    /// A harness to start a draft's session in, with its mark if it has one,
+    /// matched on its label; disabled with the reason it can't be picked.
     Harness {
         id: HarnessId,
         label: String,
+        icon: Option<String>,
         unavailable: Option<String>,
     },
     /// A section label between rows. It can't be selected, and it's hidden

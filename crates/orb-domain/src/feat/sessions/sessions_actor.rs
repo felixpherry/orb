@@ -1377,7 +1377,8 @@ impl SessionsActor {
     /// permission: in the project's root, in its existing worktree, or in a
     /// new worktree made now from the draft's base branch. A draft of a
     /// project that isn't a git repository always starts in the root. An
-    /// Incognito draft's folder is made first when missing.
+    /// Incognito draft's folder is made first when missing; any other missing
+    /// folder fails the start with its path.
     async fn start_draft(&mut self, id: ProjectId) {
         let Some((root, kind, draft)) = self.draft(id) else {
             return self.end_start(Err("the draft is gone".to_owned()));
@@ -1396,7 +1397,13 @@ impl SessionsActor {
             DraftWorkspace::Local
         };
         let (workspace, cwd, made) = match workspace {
-            DraftWorkspace::Local => (LastWorkspace::Local, root, None),
+            DraftWorkspace::Local if root.is_dir() => (LastWorkspace::Local, root, None),
+            DraftWorkspace::Local => {
+                return self.end_start(Err(format!(
+                    "project folder no longer exists: {}",
+                    root.display()
+                )));
+            }
             DraftWorkspace::Existing(path) if path.is_dir() => {
                 (LastWorkspace::Previous, path, None)
             }
@@ -3422,7 +3429,10 @@ mod tests {
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
 
-    const PROJECT_ROOT: &str = "/tmp/orb";
+    /// The orb project's root, a folder that exists so its drafts can start.
+    const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
+    /// The web project's root, another folder that exists.
+    const WEB_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
     /// The branch checked out wherever the fake git lists refs.
     const CURRENT_BRANCH: &str = "dev";
     const NO_CLAUDE_DIR: &str = "/nonexistent/claude";
@@ -3431,8 +3441,11 @@ mod tests {
     const INCOGNITO_ROOT: &str = "/nonexistent/orb-incognito";
     /// Why git refuses outside a repository.
     const NOT_A_REPO: &str = "fatal: not a git repository";
-    const UNTRUSTED: &str =
-        "Workspace not trusted. Run `claude` in /tmp/orb once and accept the trust prompt";
+    const UNTRUSTED: &str = concat!(
+        "Workspace not trusted. Run `claude` in ",
+        env!("CARGO_MANIFEST_DIR"),
+        " once and accept the trust prompt"
+    );
     const HOUR_MS: i64 = 60 * 60 * 1000;
     const DAY_MS: i64 = 24 * HOUR_MS;
 
@@ -4909,7 +4922,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let orb = orb_project(&store)?;
         store.record_last_used(orb, &used(LastWorkspace::NewWorktree), 10)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
+        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
         let (mut actor, state) = start(
             store,
             &FakeHost::listing(Vec::new()),
@@ -4957,7 +4970,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let orb = orb_project(&store)?;
         store.record_last_used(orb, &used_in(OTHER), 10)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
+        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
         store.record_last_used(web, &used_in("claude"), 20)?;
         let host = FakeHost::listing(Vec::new());
         let (mut actor, state) = start_beside(store, &host, &host);
@@ -4980,7 +4993,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let orb = orb_project(&store)?;
         store.record_last_used(orb, &used_in(OTHER), 10)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
+        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
         let host = FakeHost::listing(Vec::new());
         let (mut actor, state) = start_beside(store, &host, &host);
 
@@ -6005,7 +6018,7 @@ mod tests {
         // Given saved orb and web projects, web with a local draft.
         let store = Store::open_in_memory()?;
         orb_project(&store)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
+        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
         store.save_draft(&draft_row(web, DraftWorkspace::Local))?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -6016,8 +6029,38 @@ mod tests {
         // Then the host starts it in web's root.
         assert_eq!(
             host.created_in(),
-            vec![PathBuf::from("/tmp/web")],
+            vec![PathBuf::from(WEB_ROOT)],
             "a local draft should start in its project's root"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn local_start_in_a_missing_project_folder_shows_why() -> Result<(), Report<StoreError>> {
+        // Given a local draft of a project whose folder no longer exists.
+        let (store, id) = {
+            let store = Store::open_in_memory()?;
+            let id = store.add_project(
+                Path::new("/nonexistent/gone"),
+                "gone",
+                ProjectKind::Normal,
+                0,
+            )?;
+            store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
+            (store, id)
+        };
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then the mode line says the project folder is gone.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("project folder no longer exists: /nonexistent/gone"),
+            "a missing project folder should fail the start with its path"
         );
         Ok(())
     }
@@ -6250,7 +6293,7 @@ mod tests {
         // Given saved orb and web projects, web with a local draft.
         let store = Store::open_in_memory()?;
         orb_project(&store)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
+        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
         store.save_draft(&draft_row(web, DraftWorkspace::Local))?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -7286,12 +7329,12 @@ mod tests {
     fn store_filtered_to_web() -> Result<(Store, ProjectId, ThreadId), Report<StoreError>> {
         let store = Store::open_in_memory()?;
         add_thread(&store, "aa", 1_000)?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
+        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
         let thread = store.insert_thread(&NewThread {
             harness: HarnessId::new("claude"),
             project_id: web,
             short_id: "bb".to_owned(),
-            cwd: PathBuf::from("/tmp/web"),
+            cwd: PathBuf::from(WEB_ROOT),
             created_at: 500,
             model: None,
             permission_mode: None,
@@ -8357,8 +8400,10 @@ mod tests {
 
         // Then the new session starts in an orb-<hex> worktree of orb.
         let created = host.created_in();
+        let orb_worktrees =
+            Path::new(WORKTREES_ROOT).join(Path::new(PROJECT_ROOT).file_name().unwrap_or_default());
         let in_worktree = created.first().is_some_and(|cwd| {
-            cwd.parent() == Some(Path::new("/nonexistent/worktrees/orb"))
+            cwd.parent() == Some(orb_worktrees.as_path())
                 && hex_branch(Path::new(WORKTREES_ROOT), cwd).is_some()
         });
         assert!(
@@ -9636,7 +9681,7 @@ mod tests {
     -> Result<(), Report<StoreError>> {
         // Given orb's thread, with the sidebar filtered to another project.
         let (store, id) = store_with_thread("aa")?;
-        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
+        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
         let host = FakeHost::listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state.write().sessions.filter = Some(web);
