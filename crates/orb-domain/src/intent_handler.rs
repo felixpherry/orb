@@ -1673,18 +1673,10 @@ fn attach_thread(state: &mut AppState) -> Vec<Command> {
 fn show_pane(state: &mut AppState) -> Vec<Command> {
     match (validate_attach(state), state.sessions.selected_thread()) {
         (Ok(()), Some(thread)) => {
-            let target = {
-                let info = state
-                    .harnesses
-                    .iter()
-                    .find(|info| info.id == thread.harness);
-                AttachTarget {
-                    thread: thread.id,
-                    argv: thread.attach_argv.clone(),
-                    cwd: thread.cwd.clone(),
-                    nudge: info.is_some_and(|info| info.nudge_on_attach),
-                    modes: info.map_or(&[], |info| info.attach_modes),
-                }
+            let target = AttachTarget {
+                thread: thread.id,
+                argv: thread.attach_argv.clone(),
+                cwd: thread.cwd.clone(),
             };
             state.focus = Focus::Attached;
             state.attached.insert(target.thread);
@@ -2385,67 +2377,11 @@ mod tests {
                     thread: ThreadId(1),
                     argv: vec!["claude".into(), "attach".into(), "t1".into()],
                     cwd: "/work/1".into(),
-                    nudge: false,
-                    modes: &[],
                 }),
                 Command::RefreshSessions,
                 Command::SaveJumps,
             ],
             "Attach should target the selected thread, then refresh"
-        );
-    }
-
-    #[rstest::rstest]
-    fn attach_nudges_a_thread_whose_harness_asks_for_it() {
-        // Given a selected idle thread whose harness asks for a nudge on attach.
-        let mut state = state_with(
-            vec![Thread {
-                harness: HarnessId::new("pi"),
-                ..thread(1, ThreadStatus::Idle)
-            }],
-            1,
-        );
-        state.harnesses = vec![crate::feat::harness::HarnessInfo {
-            nudge_on_attach: true,
-            ..crate::feat::harness::HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
-        }];
-
-        // When handling Attach.
-        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
-
-        // Then the attach asks the pane to nudge its size.
-        assert!(
-            matches!(commands.first(), Some(Command::Attach(target)) if target.nudge),
-            "the attach should nudge, got {commands:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn attach_carries_the_modes_its_harness_turns_on_at_start() {
-        // Given a selected idle thread whose harness turns on focus reports
-        // when it starts.
-        let mut state = state_with(
-            vec![Thread {
-                harness: HarnessId::new("pi"),
-                ..thread(1, ThreadStatus::Idle)
-            }],
-            1,
-        );
-        state.harnesses = vec![crate::feat::harness::HarnessInfo {
-            attach_modes: b"\x1b[?1004h",
-            ..crate::feat::harness::HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
-        }];
-
-        // When handling Attach.
-        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
-
-        // Then the attach hands those modes to the pane.
-        assert!(
-            matches!(
-                commands.first(),
-                Some(Command::Attach(target)) if target.modes == b"\x1b[?1004h"
-            ),
-            "the attach should carry the harness's modes, got {commands:?}"
         );
     }
 
@@ -2743,8 +2679,6 @@ mod tests {
                     thread: ThreadId(2),
                     argv: vec!["claude".into(), "attach".into(), "t2".into()],
                     cwd: "/work/2".into(),
-                    nudge: false,
-                    modes: &[],
                 }),
                 Command::RefreshSessions,
                 Command::SaveJumps,
@@ -7874,8 +7808,6 @@ mod tests {
                 thread: ThreadId(1),
                 argv: vec!["claude".into(), "attach".into(), "t1".into()],
                 cwd: "/work/1".into(),
-                nudge: false,
-                modes: &[],
             })),
             "<C-o> onto a live pane should show it"
         );
@@ -8601,8 +8533,6 @@ mod tests {
                 thread: ThreadId(1),
                 argv: vec!["claude".into(), "attach".into(), "t1".into()],
                 cwd: "/work/1".into(),
-                nudge: false,
-                modes: &[],
             })),
             "picking should attach to the thread"
         );
@@ -9787,8 +9717,6 @@ mod tests {
                 thread: ThreadId(1),
                 argv: vec!["claude".into(), "attach".into(), "t1".into()],
                 cwd: "/work/1".into(),
-                nudge: false,
-                modes: &[],
             })),
             "picking a hit should attach to its thread"
         );

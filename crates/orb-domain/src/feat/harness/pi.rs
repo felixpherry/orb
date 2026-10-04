@@ -30,14 +30,6 @@ pub const ID: &str = "pi";
 /// The name the user sees for pi, also its sidebar tag.
 const LABEL: &str = "pi";
 
-/// The terminal modes pi's fullscreen TUI turns on when it starts, which an
-/// attach to an already running pi never sees: alternate screen, no autowrap,
-/// mouse reports in SGR form, focus reports and bracketed paste. Kitty keys
-/// are left out because pi started under `dtach -n` got no answer to its
-/// keyboard query and reads legacy keys.
-const ATTACH_MODES: &[u8] =
-    b"\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h\x1b[?2004h";
-
 /// pi: sessions under zmx, session files under `sessions_dir`, models from
 /// `pi --list-models`.
 pub struct Pi {
@@ -150,8 +142,6 @@ impl Harness for Pi {
             unavailable: self.missing.map(|program| format!("{program} not found")),
             models,
             permission_modes: Vec::new(),
-            nudge_on_attach: true,
-            attach_modes: ATTACH_MODES,
             notice,
         }
     }

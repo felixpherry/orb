@@ -19,7 +19,8 @@
 //! `<C-h>` moves the keys from the pane to the sidebar and leaves it drawn,
 //! so `<C-l>` goes back into it; `<C-\>`, in the pane or on the thread in the
 //! sidebar, detaches it, and settling or deleting the thread or its
-//! attached program exiting ends the pane too.
+//! attached program exiting ends the pane too, with `session exited at start`
+//! on the dashboard when that happens within a second of attaching.
 //!
 //! When a thread finishes a turn or starts needing an approval or an answer
 //! while orb's pane isn't focused, the loop announces it as a desktop
@@ -89,9 +90,13 @@ use crate::picker::PickerScroll;
 use crate::sidebar::{SPINNER_FRAME, SidebarScroll};
 use crate::{outer_terminal, render};
 
-/// How long after a pane starts that orb nudges its size, giving the attach
-/// command time to connect and send its own size first.
-const ATTACH_NUDGE: Duration = Duration::from_millis(500);
+/// How soon after its pane starts an attached program's exit counts as a
+/// failed start.
+const EARLY_EXIT: Duration = Duration::from_secs(1);
+
+/// What the dashboard says after an attached program exits within
+/// [`EARLY_EXIT`] of starting.
+const EXITED_AT_START: &str = "session exited at start";
 
 /// The frontend loop failed to draw a frame or read a terminal event.
 #[derive(Debug, Error)]
@@ -277,6 +282,20 @@ where
         .filter(|&(id, exited)| exited || !attached.contains(&id))
         .map(|(id, _)| id)
         .collect()
+}
+
+/// The dashboard's pane error once panes are dropped, given whether each
+/// dropped pane's program exited within [`EARLY_EXIT`] of starting:
+/// `session exited at start` when one did, else `error` as it was.
+fn pane_error_after<I>(error: Option<String>, early_exits: I) -> Option<String>
+where
+    I: IntoIterator<Item = bool>,
+{
+    if early_exits.into_iter().any(|early| early) {
+        Some(EXITED_AT_START.to_owned())
+    } else {
+        error
+    }
 }
 
 /// Where the keys go once the pane is gone: from the pane to the dashboard;
@@ -489,17 +508,15 @@ impl App {
             self.ask_trust();
             self.open_started();
             let now = Instant::now();
-            for pane in self.panes.values_mut() {
+            for pane in self.panes.values() {
                 pane.flush_expired_sync(now);
-                pane.run_nudge(now);
             }
         }
     }
 
     /// When the loop must wake without an event: a pane's synchronized
-    /// update times out, a pane's size nudge is due, or a spinner frame
-    /// passes while a thread is working or a session is starting, so the
-    /// spinners and elapsed time tick.
+    /// update times out, or a spinner frame passes while a thread is working
+    /// or a session is starting, so the spinners and elapsed time tick.
     fn deadline(&self) -> Option<Instant> {
         let tick = self
             .state
@@ -508,8 +525,7 @@ impl App {
             .spinning()
             .then(|| Instant::now() + SPINNER_FRAME);
         let sync = self.panes.values().filter_map(Pane::sync_deadline);
-        let nudges = self.panes.values().filter_map(Pane::nudge_deadline);
-        tick.into_iter().chain(sync).chain(nudges).min()
+        tick.into_iter().chain(sync).min()
     }
 
     /// The pane that receives input: the shown one, while the user is
@@ -667,10 +683,7 @@ impl App {
                         return;
                     }
                     match self.spawn_pane(target) {
-                        Some(mut pane) => {
-                            if target.nudge {
-                                pane.nudge_after(ATTACH_NUDGE);
-                            }
+                        Some(pane) => {
                             self.panes.insert(target.thread, pane);
                             self.pane_error = None;
                         }
@@ -966,12 +979,19 @@ impl App {
 
     /// Drops the panes whose attached program exited or whose thread is no
     /// longer attached, which kills their attach command, and takes them out of
-    /// `attached`. If the keys were in a pane that's no longer shown, orb
-    /// leaves it.
+    /// `attached`. A pane whose program exited within [`EARLY_EXIT`] of
+    /// starting leaves `session exited at start` on the dashboard. If the keys
+    /// were in a pane that's no longer shown, orb leaves it.
     fn reconcile(&mut self) {
         let gone = to_drop(
             self.panes.iter().map(|(id, pane)| (*id, pane.has_exited())),
             &self.state.read().attached,
+        );
+        self.pane_error = pane_error_after(
+            self.pane_error.take(),
+            gone.iter()
+                .filter_map(|id| self.panes.get(id))
+                .map(|pane| pane.exited_early(EARLY_EXIT)),
         );
         for id in &gone {
             self.panes.remove(id);
@@ -1131,7 +1151,6 @@ impl App {
             argv: target.argv.clone(),
             cwd: target.cwd.clone(),
             env: self.env.clone(),
-            modes: target.modes.to_vec(),
         };
         Pane::spawn(&command, PaneSize::from(self.pane_area), move |event| {
             let _ = tx.send(LoopEvent::Pane(event));
@@ -1238,8 +1257,8 @@ mod tests {
 
     use super::{
         AttachPlan, StartedAttach, after_pane, announces, attach_or_restore, cursor_style,
-        list_directories, shown_pane, stale_preview, started_attach, to_drop, trust_return_to,
-        trust_to_open,
+        list_directories, pane_error_after, shown_pane, stale_preview, started_attach, to_drop,
+        trust_return_to, trust_to_open,
     };
 
     #[rstest::rstest]
@@ -1592,6 +1611,38 @@ mod tests {
         assert!(
             dropped.is_empty(),
             "a live attached pane stays, got {dropped:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn early_exit_sets_session_exited_at_start() {
+        // Given no pane error.
+        let error = None;
+
+        // When one of the dropped panes exited early.
+        let error = pane_error_after(error, [false, true]);
+
+        // Then the dashboard says the session exited at start.
+        assert_eq!(
+            error.as_deref(),
+            Some("session exited at start"),
+            "an early exit sets the pane error"
+        );
+    }
+
+    #[rstest::rstest]
+    fn later_exit_keeps_the_pane_error() {
+        // Given an existing pane error.
+        let error = Some("couldn't start the attach command".to_owned());
+
+        // When the only dropped pane exited later.
+        let error = pane_error_after(error, [false]);
+
+        // Then the pane error is unchanged.
+        assert_eq!(
+            error.as_deref(),
+            Some("couldn't start the attach command"),
+            "a later exit leaves the pane error as is"
         );
     }
 

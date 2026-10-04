@@ -60,13 +60,6 @@ pub struct HarnessInfo {
     pub models: Vec<ModelGroup>,
     /// The permission modes on offer; empty when the harness has none.
     pub permission_modes: Vec<String>,
-    /// The attached program redraws only when its screen size changes, so
-    /// orb nudges the size once the attach has connected.
-    pub nudge_on_attach: bool,
-    /// The escape sequences for the terminal modes the program turns on when
-    /// it starts, which an attach to it already running never sees; the pane
-    /// takes them in before the attach's output.
-    pub attach_modes: &'static [u8],
     /// Something the probe ran into, shown once on the mode line.
     pub notice: Option<String>,
 }
@@ -86,8 +79,6 @@ impl HarnessInfo {
             unavailable: Some(CHECKING.to_owned()),
             models: Vec::new(),
             permission_modes: Vec::new(),
-            nudge_on_attach: false,
-            attach_modes: &[],
             notice: None,
         }
     }

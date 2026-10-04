@@ -65,11 +65,6 @@ pub struct PaneCommand {
     pub cwd: PathBuf,
     /// The child's complete environment; nothing is inherited from orb.
     pub env: Vec<(OsString, OsString)>,
-    /// The escape sequences for the terminal modes the child turned on before
-    /// this pane connected to it. The screen takes them in ahead of the
-    /// child's output, so keys, pastes, mouse and focus reach a program that
-    /// started detached and is being reattached.
-    pub modes: Vec<u8>,
 }
 
 /// Something the pane reports to its owner.
@@ -81,16 +76,6 @@ pub enum PaneEvent {
     Clipboard(String),
     /// The child exited.
     Exited,
-}
-
-/// How long a size nudge holds the smaller size before restoring it.
-const NUDGE_HOLD: Duration = Duration::from_millis(50);
-
-/// A pending size nudge: shrink at the first instant, restore at the second.
-#[derive(Debug, Clone, Copy)]
-enum Nudge {
-    Shrink(Instant),
-    Restore(Instant),
 }
 
 /// The pane's child could not be started.
@@ -109,8 +94,8 @@ pub struct Pane {
     killer: Box<dyn ChildKiller + Send + Sync>,
     exited: Arc<AtomicBool>,
     size: PaneSize,
-    /// A size nudge in progress, if one was asked for.
-    nudge: Option<Nudge>,
+    /// When the child was started.
+    started: Instant,
 }
 
 impl Pane {
@@ -151,18 +136,13 @@ impl Pane {
         // Our copy of the slave would keep the PTY open after the child exits.
         drop(pair.slave);
         let notify: Notify = Arc::new(notify);
-        let emulator = {
-            let mut emulator = Emulator::new(size, writer, notify.clone());
-            emulator.feed(&command.modes);
-            emulator
-        };
         let pane = Self {
-            emulator: Arc::new(Mutex::new(emulator)),
+            emulator: Arc::new(Mutex::new(Emulator::new(size, writer, notify.clone()))),
             master: pair.master,
             killer: child.clone_killer(),
             exited: Arc::new(AtomicBool::new(false)),
             size,
-            nudge: None,
+            started: Instant::now(),
         };
         // From here on, an early return drops `pane`, which kills the child.
         spawn_reader(reader, pane.emulator.clone(), notify.clone())?;
@@ -184,6 +164,13 @@ impl Pane {
     /// Whether the child has exited.
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
+    }
+
+    /// Whether the child has exited and the pane started less than `within`
+    /// ago. Asked when the exit wakes the owner, that is whether the child
+    /// exited within `within` of starting.
+    pub fn exited_early(&self, within: Duration) -> bool {
+        self.has_exited() && self.started.elapsed() < within
     }
 
     /// Sends `key` to the child, encoded for its current keyboard modes.
@@ -218,38 +205,6 @@ impl Pane {
     /// `now`.
     pub fn flush_expired_sync(&self, now: Instant) {
         lock(&self.emulator).flush_expired_sync(now);
-    }
-
-    /// Asks the pane to shrink the child's screen by one row after `delay`,
-    /// then restore it, so a child that redraws only on a real size change
-    /// draws its screen again. Only the child sees the smaller size; the
-    /// pane keeps drawing at its own.
-    pub fn nudge_after(&mut self, delay: Duration) {
-        self.nudge = Some(Nudge::Shrink(Instant::now() + delay));
-    }
-
-    /// When the pending nudge's next step is due; `None` when there's none.
-    /// The owner should call [`Pane::run_nudge`] once this passes.
-    pub fn nudge_deadline(&self) -> Option<Instant> {
-        match self.nudge? {
-            Nudge::Shrink(at) | Nudge::Restore(at) => Some(at),
-        }
-    }
-
-    /// Takes the nudge step due at or before `now`.
-    pub fn run_nudge(&mut self, now: Instant) {
-        match self.nudge {
-            Some(Nudge::Shrink(at)) if at <= now => {
-                let rows = self.size.rows.saturating_sub(1).max(1);
-                let _ = self.master.resize(pty_size(PaneSize { rows, ..self.size }));
-                self.nudge = Some(Nudge::Restore(now + NUDGE_HOLD));
-            }
-            Some(Nudge::Restore(at)) if at <= now => {
-                let _ = self.master.resize(pty_size(self.size));
-                self.nudge = None;
-            }
-            _ => {}
-        }
     }
 
     /// Draws the child's screen into `area` of `buf`; returns where the cursor
@@ -400,7 +355,6 @@ mod tests {
                 .iter()
                 .map(|(key, value)| (key.into(), value.into()))
                 .collect(),
-            modes: Vec::new(),
         }
     }
 
@@ -525,91 +479,6 @@ mod tests {
         Ok(())
     }
 
-    /// A child that prints its size after each of two lines of input.
-    fn size_printer() -> PaneCommand {
-        command(
-            &[
-                "/bin/sh",
-                "-c",
-                "read x; /bin/stty size; read y; /bin/stty size",
-            ],
-            &[],
-        )
-    }
-
-    #[rstest::rstest]
-    fn nudge_shrinks_the_childs_screen_by_a_row() -> Result<(), Report<PaneError>> {
-        // Given an 80×24 pane whose child prints its size after a line of input.
-        let mut pane = Pane::spawn(&size_printer(), SIZE, |_| {})?;
-
-        // When a nudge's first step runs and the user presses Enter.
-        pane.nudge_after(Duration::ZERO);
-        pane.run_nudge(Instant::now());
-        pane.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        // Then the child sees one row fewer.
-        assert!(
-            wait_until(|| screen(&pane).contains("23 80")),
-            "stty should report one row fewer, got {:?}",
-            screen(&pane)
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn nudge_then_restores_the_childs_size() -> Result<(), Report<PaneError>> {
-        // Given an 80×24 pane whose child has seen the nudge's smaller size.
-        let mut pane = Pane::spawn(&size_printer(), SIZE, |_| {})?;
-        pane.nudge_after(Duration::ZERO);
-        let shrunk_at = Instant::now();
-        pane.run_nudge(shrunk_at);
-        pane.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let shrunk = wait_until(|| screen(&pane).contains("23 80"));
-
-        // When the nudge's second step runs 50 ms later and the user presses
-        // Enter again.
-        pane.run_nudge(shrunk_at + Duration::from_millis(50));
-        pane.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        // Then the child sees the pane's own size again.
-        assert!(
-            shrunk && wait_until(|| screen(&pane).contains("24 80")),
-            "stty should report 23 80, then 24 80, got {:?}",
-            screen(&pane)
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn focus_reaches_a_child_whose_focus_mode_was_given() -> Result<(), Report<PaneError>> {
-        // Given a pane told its child already turned on focus reports, whose
-        // child prints the first three bytes it reads.
-        let command = PaneCommand {
-            modes: b"\x1b[?1004h".to_vec(),
-            ..command(
-                &[
-                    "/bin/sh",
-                    "-c",
-                    "/bin/stty raw -echo; printf ready; /usr/bin/head -c 3 | /usr/bin/od -c",
-                ],
-                &[],
-            )
-        };
-        let pane = Pane::spawn(&command, SIZE, |_| {})?;
-        let ready = wait_until(|| screen(&pane).starts_with("ready"));
-
-        // When the pane gains focus.
-        pane.focus(true);
-
-        // Then the child reads the focus-in report.
-        assert!(
-            ready && wait_until(|| screen(&pane).contains("033   [   I")),
-            "the child should read ESC [ I, got {:?}",
-            screen(&pane)
-        );
-        Ok(())
-    }
-
     #[rstest::rstest]
     fn child_exit_is_reported() -> Result<(), Report<PaneError>> {
         // Given a child that exits immediately.
@@ -641,6 +510,54 @@ mod tests {
             wait_until(|| pane.has_exited()),
             "has_exited should turn true"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pane_whose_child_exits_at_once_exited_early() -> Result<(), Report<PaneError>> {
+        // Given a pane whose child exits immediately.
+        let command = command(&["/usr/bin/true"], &[]);
+        let pane = Pane::spawn(&command, SIZE, |_| {})?;
+
+        // When its child has exited.
+        let exited = wait_until(|| pane.has_exited());
+
+        // Then it exited within a second of starting.
+        assert!(
+            exited && pane.exited_early(Duration::from_secs(1)),
+            "a child that exits at once should count as an early exit"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pane_whose_child_exits_later_did_not_exit_early() -> Result<(), Report<PaneError>> {
+        // Given a pane whose child exits after 200 ms.
+        let command = command(&["/bin/sleep", "0.2"], &[]);
+        let pane = Pane::spawn(&command, SIZE, |_| {})?;
+
+        // When its child has exited.
+        let exited = wait_until(|| pane.has_exited());
+
+        // Then it did not exit within 100 ms of starting.
+        assert!(
+            exited && !pane.exited_early(Duration::from_millis(100)),
+            "a child that exits after the window should not count as an early exit"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn running_pane_did_not_exit_early() -> Result<(), Report<PaneError>> {
+        // Given a pane whose child keeps running.
+        let command = command(&["/bin/cat"], &[]);
+        let pane = Pane::spawn(&command, SIZE, |_| {})?;
+
+        // When asking right after it starts.
+        let early = pane.exited_early(Duration::from_secs(1));
+
+        // Then it has not exited early.
+        assert!(!early, "a running child should not count as an early exit");
         Ok(())
     }
 

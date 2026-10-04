@@ -333,7 +333,6 @@ mod tests {
             ],
             cwd: "/".into(),
             env: vec![("PATH".into(), "/bin:/usr/bin".into())],
-            modes: Vec::new(),
         };
         let pane = Pane::spawn(&command, PaneSize { cols: 48, rows: 7 }, |_| {}).ok()?;
         let area = Rect::new(0, 0, 48, 7);
