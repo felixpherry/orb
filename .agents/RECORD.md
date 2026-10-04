@@ -176,7 +176,9 @@ Entries are added or amended **only with human approval**.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one; it never attaches, starts a draft, or clears the project filter.
 - (jumps) Deleted rows, rows hidden by the project filter, and the Settled header are skipped, and a folded group opens on arrival.
 - (jumps) orb persists the newest 20 jump-list rows to its store (store migration v9 added the `jumps` table); a row already in the list moves to the newest slot.
-- (groups) orb's built-in Research template is a research kit: an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions its agents follow, a report template and an empty `SOURCES.md`.
+- (groups) orb's built-in Research template is a research kit: an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents for Claude Code and for pi, conventions its agents follow, a report template and an empty `SOURCES.md`.
+- (groups) The Research kit's pi subagents run through pi's `subagent` tool, from pi's example extension, which the user installs (filtering out pi-amplike's own `subagent` tool) and orb doesn't.
+- (groups) The Research kit's pi subagents run on the thread's model and thinking level.
 - (groups) A Research folder shares no files with other Research folders.
 - (trust) `Yes` on the trust confirm marks that path trusted in Claude's `.claude.json`, keeping every other key, and retries the start once; if that write fails, the start fails with `couldn't trust the folder`.
 - (trust) `No` or `Esc` on the trust confirm, or `⏎` while its filter hides both rows, ends the start as a failed one, keeping the draft and showing `Workspace not trusted`.

@@ -903,7 +903,7 @@ Written in pi support's Verification step (not a milestone), after the Global se
 - ``(picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.``
 - ``(search) `␣sg` indexes pi threads' session files alongside Claude transcripts.``
 
-### pi Research kit
+### pi Research kit (written)
 
 Written in the pi Research kit's Verification step (not a milestone), after the pi harness group.
 
