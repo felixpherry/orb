@@ -841,9 +841,9 @@ Written in global search's Verification step (not a milestone). Write it after t
 - ``(picker) The search picker loads the first row's preview along with the results.``
 - ``(picker) `⏎` in the search picker reveals the thread in the sidebar and attaches to its current session, and on a thread deleted since, or one Claude no longer knows, it only closes the picker.``
 
-### pi harness
+### pi harness (written)
 
-Write it in pi support's Verification step (not a milestone), after the Global search group: its jumps amend starts from that group's text.
+Written in pi support's Verification step (not a milestone), after the Global search group: its jumps amend starts from that group's text.
 
 **Amend**
 - ``(identity) orb supports Claude Code as its only provider.`` → ``(identity) orb runs each thread in one of two harnesses, Claude Code or pi, fixed when its draft starts.``
@@ -882,7 +882,7 @@ Write it in pi support's Verification step (not a milestone), after the Global s
 - ``(sessions) A pi thread's title is the name given with `r`, else its latest `/name`, else its first prompt, else "New thread".``
 - ``(sessions) A pi thread's branch is read from git in its directory after each turn.``
 - ``(sessions) Deleting a pi thread ends its dtach process and removes its socket; its session file stays in pi's sessions directory.``
-- ``(settle) Settling a pi thread whose dtach socket still answers 2 s after the stop fails with `pi is still running`, and the thread stays unsettled.``
+- ~~``(settle) Settling a pi thread whose dtach socket still answers 2 s after the stop fails with `pi is still running`, and the thread stays unsettled.``~~ Not written: orb marks the thread settled before it stops the session, so a failed stop leaves the thread settled with `pi is still running` on the mode line.
 - ``(pane) 500 ms after a pi thread's pane starts, orb shrinks its PTY by one row and restores it 50 ms later, so pi redraws on reattach.``
 - ``(drafts) On a pi draft, the model picker lists `Default`, then the models `pi --list-models` printed at orb's start under a heading per provider, labelled `provider/model`, which orb passes to `--model`.``
 - ``(drafts) When `pi --list-models` fails at orb's start, the mode line shows its reason once and pi's model picker lists only `Default`.``
