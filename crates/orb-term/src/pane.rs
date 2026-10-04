@@ -65,6 +65,11 @@ pub struct PaneCommand {
     pub cwd: PathBuf,
     /// The child's complete environment; nothing is inherited from orb.
     pub env: Vec<(OsString, OsString)>,
+    /// The escape sequences for the terminal modes the child turned on before
+    /// this pane connected to it. The screen takes them in ahead of the
+    /// child's output, so keys, pastes, mouse and focus reach a program that
+    /// started detached and is being reattached.
+    pub modes: Vec<u8>,
 }
 
 /// Something the pane reports to its owner.
@@ -146,8 +151,13 @@ impl Pane {
         // Our copy of the slave would keep the PTY open after the child exits.
         drop(pair.slave);
         let notify: Notify = Arc::new(notify);
+        let emulator = {
+            let mut emulator = Emulator::new(size, writer, notify.clone());
+            emulator.feed(&command.modes);
+            emulator
+        };
         let pane = Self {
-            emulator: Arc::new(Mutex::new(Emulator::new(size, writer, notify.clone()))),
+            emulator: Arc::new(Mutex::new(emulator)),
             master: pair.master,
             killer: child.clone_killer(),
             exited: Arc::new(AtomicBool::new(false)),
@@ -390,6 +400,7 @@ mod tests {
                 .iter()
                 .map(|(key, value)| (key.into(), value.into()))
                 .collect(),
+            modes: Vec::new(),
         }
     }
 
@@ -564,6 +575,36 @@ mod tests {
         assert!(
             shrunk && wait_until(|| screen(&pane).contains("24 80")),
             "stty should report 23 80, then 24 80, got {:?}",
+            screen(&pane)
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn focus_reaches_a_child_whose_focus_mode_was_given() -> Result<(), Report<PaneError>> {
+        // Given a pane told its child already turned on focus reports, whose
+        // child prints the first three bytes it reads.
+        let command = PaneCommand {
+            modes: b"\x1b[?1004h".to_vec(),
+            ..command(
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "/bin/stty raw -echo; printf ready; /usr/bin/head -c 3 | /usr/bin/od -c",
+                ],
+                &[],
+            )
+        };
+        let pane = Pane::spawn(&command, SIZE, |_| {})?;
+        let ready = wait_until(|| screen(&pane).starts_with("ready"));
+
+        // When the pane gains focus.
+        pane.focus(true);
+
+        // Then the child reads the focus-in report.
+        assert!(
+            ready && wait_until(|| screen(&pane).contains("033   [   I")),
+            "the child should read ESC [ I, got {:?}",
             screen(&pane)
         );
         Ok(())

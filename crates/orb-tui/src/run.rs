@@ -70,7 +70,7 @@ use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
-use orb_domain::feat::sessions::state::ThreadId;
+use orb_domain::feat::sessions::state::{AttachTarget, ThreadId};
 use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
 use orb_domain::feat::zellij::zellij_service::{
     NOT_IN_ZELLIJ, ZellijError, ZellijService, zellij_reason,
@@ -666,7 +666,7 @@ impl App {
                         app.sessions.starting = true;
                         return;
                     }
-                    match self.spawn_pane(target.argv.clone(), target.cwd.clone()) {
+                    match self.spawn_pane(target) {
                         Some(mut pane) => {
                             if target.nudge {
                                 pane.nudge_after(ATTACH_NUDGE);
@@ -1123,14 +1123,15 @@ impl App {
             });
     }
 
-    /// Runs `argv` in `cwd` in a pane the size of the pane area, with
-    /// orb's child environment; `None` if it can't start.
-    fn spawn_pane(&self, argv: Vec<OsString>, cwd: PathBuf) -> Option<Pane> {
+    /// Runs `target`'s attach command in a pane the size of the pane area,
+    /// with orb's child environment; `None` if it can't start.
+    fn spawn_pane(&self, target: &AttachTarget) -> Option<Pane> {
         let tx = self.tx.clone();
         let command = PaneCommand {
-            argv,
-            cwd,
+            argv: target.argv.clone(),
+            cwd: target.cwd.clone(),
             env: self.env.clone(),
+            modes: target.modes.to_vec(),
         };
         Pane::spawn(&command, PaneSize::from(self.pane_area), move |event| {
             let _ = tx.send(LoopEvent::Pane(event));
