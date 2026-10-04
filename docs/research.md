@@ -679,3 +679,48 @@ Probed on this machine with pi 1.0.0 (`~/.local/bin/pi`, which links to `@earend
 - 438 lines: a header, then 437 models. The header is `provider       model       …       context  max-out  thinking  images`, and each row has six whitespace-separated columns, for example `anthropic      claude-haiku-4-5      200K     64K      yes       yes`. Columns are padded with spaces, and rows end with trailing spaces.
 - Rows are grouped by provider: `anthropic` 16, `claude-bridge` 13, `openai-codex` 9, `openrouter` 399.
 - No value contains a space, so splitting on whitespace works. Model ids can contain `/` and `:` (`openrouter     z-ai/glm-5.3:batch`, up to 50 characters). `--model openrouter/z-ai/glm-5.3:batch` resolved to the model `glm-5.3:batch` with the default thinking level, not to `glm-5.3` with a `batch` thinking suffix.
+
+## 18. pi & zmx (verified 2026-10-04, pi 1.0.0, zmx 0.8.1)
+
+Probed on this machine with zmx 0.8.1 (`brew install neurosnap/tap/zmx`; `zmx version` reports ghostty_vt `ghostty-1.3.2-dev`) and pi 1.0.0. zmx keeps each session's screen and terminal modes in a libghostty-vt emulator, which dtach (§17) doesn't. `ZMX_DIR` and `PI_CODING_AGENT_SESSION_DIR` pointed at a scratch directory, Python `pty.fork()` clients at 120×40 stood in for orb's pane, and `FORCE_COLOR` was removed from pi's environment. Evidence (probe.py, the raw client captures a1.bin and b2.bin, zmx logs) is in `/Users/felixpherry/.claude/jobs/437d9322/tmp/zp/`, and the zmx source read is tag v0.8.1, checked out at `/Users/felixpherry/.claude/jobs/437d9322/tmp/zmx-src`. Tags as in §6.
+
+### zmx hosting **[verified]**
+- `zmx attach <name> [cmd…]` creates the session if it's missing and runs `cmd` in its PTY, in the caller's cwd. On a session that already exists, the command is ignored.
+- `zmx run <name> -d cmd` types `cmd` into a bash whose stdin is `/dev/null`, so it can't host pi.
+- `zmx attach` with stdin `/dev/null` and no terminal creates the session, prints `session "<name>" created` and exits 0 at once. pi keeps running with `clients=0`.
+- A client killed with SIGKILL leaves the session running.
+- `zmx ls` prints one line per session: `name=<n>\tpid=<pi pid>\tclients=<n>\tcreated=<unix>\tcwd=file://…\tcmd=…`. `zmx ls --short` prints only the names.
+- The daemon's process title is `zmx attach <name> …`; pi retitles itself `pi`.
+
+### First client and snapshot **[verified + source: zmx `src/loop.zig`]**
+- zmx sends no snapshot to a session's first client, by design: "Only serialize on re-attach (has_had_client), not first attach, to avoid interfering with shell initialization (DA1 queries, etc.)".
+- A no-terminal create client disconnects before its Init is handled, so the next attach still counts as first. It got only `\e[2J\e[H` and pi's resize redraw, with none of pi's modes. This is the dtach problem again.
+- With a client attached from the start, pi sent `?1049h ?7l ?1000h ?1002h ?1003h ?1004h ?1006h ?25l ?2004h \e[>7u \e[?u \e[c`, OSC 10, 11 and 4 colour queries, and a second `\e[c`.
+- A later attach at the same size got `?7l ?1000h ?1002h ?1003h ?1004h ?1006h ?1049h ?2004h \e[=7;1u`, the window title and the full screen (footer drawn) at once, with no size change. On reattach zmx also sends SIGWINCH to the foreground process group.
+- Holding the create client's stdin open for 1 s makes it the first client (`init resize`, `has_had_client` set), and the first real attach after it got every mode and the screen. orb doesn't use this, since it relies on a zmx internal.
+
+### Kitty keys **[verified + source: pi-tui `dist/terminal.js`]**
+- pi parses kitty-encoded keys even when its kitty query went unanswered. After typing `abc xyz`, sending `\e[119;5u\e[119;5:3u` (ctrl+w press and release) deleted `xyz`, with no stray bytes.
+- pi-tui turns on kitty keys only when the terminal replies `\e[?<flags>u`, and uses `modifyOtherKeys` otherwise.
+
+### Failed start **[verified]**
+- A pi that fails at start (`--model nosuch/model-xyz`) ends its session within 1 s: the socket is gone and `zmx ls` doesn't list it. `zmx attach` still exited 0.
+
+### Stopping and resuming **[verified + source: zmx `handleKill`, pi `interactive-mode.js`]**
+- `zmx kill <name>` exits 0 in 0.01 s, prints `killed session <name>` and removes the socket.
+- The daemon sends SIGHUP to the child's process group, then SIGKILL after 500 ms. pi handles SIGHUP as a graceful shutdown (`shutdown({fromSignal})`: dispose extensions, then `drainInput(1000)`), so it was still alive until the SIGKILL and died at 0.53 s.
+- The session file's hash was unchanged after the kill.
+- A second `zmx kill` exits 1 with `error: failed to kill session=<name>: SessionNotFound`.
+- `zmx attach <id> pi --session-id <id>` after a kill started pi on the same file: the earlier `pong` turn was on screen, the modes were live, and there was still only one `*_<id>.jsonl`.
+
+### Socket liveness **[verified]**
+- The socket is `$ZMX_DIR/<name>`, with no extension. Connecting to it succeeds while the session runs.
+- After `kill -9` of the daemon, the socket file stays and refuses connections (`ECONNREFUSED`), pi dies, and `zmx ls` shows `err=ConnectionRefused status=cleaning up`. `zmx attach` on that name starts the session again.
+
+### Detach key, exit reset and logs **[verified]**
+- A raw `0x1c` didn't detach a zmx client attached to pi, with or without `ZMX_NO_DETACH_KEY`, most likely because pi had turned on kitty keys. orb catches `<C-\>` before the pane anyway.
+- On exit, a zmx client writes `\ec\e]110\e\\\e]111\e\\\e]112\e\\` (a reset) to its terminal.
+- zmx writes a log per session to `$ZMX_DIR/logs/<name>.log` and keeps it after the session ends.
+
+### Not handled **[source: zmx `src/socket.zig`, `src/main.zig`]**
+- zmx adds `ZMX_SESSION_PREFIX`, when set, to every session name. If the user's environment sets it, orb's socket path `~/.orb/pi/<id>` won't match the session zmx made. orb doesn't handle this.
