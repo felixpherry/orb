@@ -41,6 +41,18 @@ const RESEARCH: &[(&str, &str)] = &[
         include_str!("../../../templates/research/.claude/agents/simulator.md"),
     ),
     (
+        ".pi/agents/investigator.md",
+        include_str!("../../../templates/research/.pi/agents/investigator.md"),
+    ),
+    (
+        ".pi/agents/falsifier.md",
+        include_str!("../../../templates/research/.pi/agents/falsifier.md"),
+    ),
+    (
+        ".pi/agents/simulator.md",
+        include_str!("../../../templates/research/.pi/agents/simulator.md"),
+    ),
+    (
         ".claude/research/CONVENTIONS.md",
         include_str!("../../../templates/research/.claude/research/CONVENTIONS.md"),
     ),
@@ -312,6 +324,87 @@ mod tests {
             (copied.is_err(), text.as_str()),
             (true, "mine"),
             "an existing destination should be refused and left alone"
+        );
+        Ok(())
+    }
+
+    /// A temp folder seeded with the Research template.
+    fn seeded_research() -> Result<tempfile::TempDir, Report<TemplateError>> {
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+        seed(root.path(), GroupKind::Research)?;
+        Ok(root)
+    }
+
+    /// The frontmatter and body of the seeded agent file at `path`: the text
+    /// between the opening `---` line and the next one, and everything after it.
+    fn agent_parts(dir: &Path, path: &str) -> Result<(String, String), Report<TemplateError>> {
+        let text = fs::read_to_string(dir.join(path)).change_context(TemplateError)?;
+        let (front, body) = text
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .ok_or_else(|| {
+                Report::new(TemplateError).attach(format!("{path} has no frontmatter"))
+            })?;
+        Ok((front.to_owned(), body.to_owned()))
+    }
+
+    #[rstest::rstest]
+    #[case("investigator")]
+    #[case("falsifier")]
+    #[case("simulator")]
+    fn pi_agent_bodies_match_claude_agents(
+        #[case] agent: &str,
+    ) -> Result<(), Report<TemplateError>> {
+        // Given a seeded Research folder.
+        let root = seeded_research()?;
+
+        // When reading the agent's pi and Claude files.
+        let (_, pi) = agent_parts(root.path(), &format!(".pi/agents/{agent}.md"))?;
+        let (_, claude) = agent_parts(root.path(), &format!(".claude/agents/{agent}.md"))?;
+
+        // Then the bodies are identical.
+        assert_eq!(
+            pi, claude,
+            "the pi {agent} body should match its Claude twin"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pi_falsifier_tools_leave_out_edit() -> Result<(), Report<TemplateError>> {
+        // Given a seeded Research folder.
+        let root = seeded_research()?;
+
+        // When reading the pi falsifier's `tools` line.
+        let (front, _) = agent_parts(root.path(), ".pi/agents/falsifier.md")?;
+        let tools: Option<Vec<&str>> = front
+            .lines()
+            .find_map(|line| line.strip_prefix("tools:"))
+            .map(|list| list.split(',').map(str::trim).collect());
+
+        // Then it lists tools, and `edit` isn't one of them.
+        assert!(
+            tools.is_some_and(|tools| !tools.contains(&"edit")),
+            "the pi falsifier should have a tools line without edit"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case("investigator")]
+    #[case("falsifier")]
+    #[case("simulator")]
+    fn pi_agents_set_no_model(#[case] agent: &str) -> Result<(), Report<TemplateError>> {
+        // Given a seeded Research folder.
+        let root = seeded_research()?;
+
+        // When reading the pi agent's frontmatter.
+        let (front, _) = agent_parts(root.path(), &format!(".pi/agents/{agent}.md"))?;
+
+        // Then no line sets a model.
+        assert!(
+            !front.lines().any(|line| line.starts_with("model:")),
+            "the pi {agent} should set no model"
         );
         Ok(())
     }

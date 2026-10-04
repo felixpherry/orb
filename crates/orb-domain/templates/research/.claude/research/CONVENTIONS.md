@@ -12,6 +12,7 @@ Read by the orchestrator and every subagent. Subagents: read this first, every t
   .env                      tokens, sourced by scripts only, gitignored
   .claude/settings.json     denies Read(./.env)
   .claude/agents/           investigator, falsifier, simulator (frozen copy)
+  .pi/agents/               investigator, falsifier, simulator for pi (frozen copy)
   .claude/research/         CONVENTIONS.md, REPORT_TEMPLATE.md (frozen copy)
   STATE.md                  orchestrator only (the falsifier never reads it)
   PROBLEM.md                question, decision, premise ledger, target metric
@@ -24,7 +25,7 @@ Read by the orchestrator and every subagent. Subagents: read this first, every t
   REPORT.md
 ```
 
-No agent ever edits `AGENTS.md`/`CLAUDE.md` or `.claude/` during an investigation.
+No agent ever edits `AGENTS.md`/`CLAUDE.md`, `.claude/` or `.pi/` during an investigation.
 
 **Who writes what:**
 
