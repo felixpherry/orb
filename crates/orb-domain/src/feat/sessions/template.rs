@@ -76,6 +76,10 @@ const LEARN: &[(&str, &str)] = &[
         include_str!("../../../templates/learn/.claude/agents/saboteur.md"),
     ),
     (
+        ".pi/agents/saboteur.md",
+        include_str!("../../../templates/learn/.pi/agents/saboteur.md"),
+    ),
+    (
         ".claude/learn/STORYTELLER.md",
         include_str!("../../../templates/learn/.claude/learn/STORYTELLER.md"),
     ),
@@ -434,6 +438,46 @@ mod tests {
         assert!(
             !front.lines().any(|line| line.starts_with("model:")),
             "the pi {agent} should set no model"
+        );
+        Ok(())
+    }
+
+    /// A temp folder seeded with the Learn template.
+    fn seeded_learn() -> Result<tempfile::TempDir, Report<TemplateError>> {
+        let root = tempfile::tempdir().change_context(TemplateError)?;
+        seed(root.path(), GroupKind::Learn)?;
+        Ok(root)
+    }
+
+    #[rstest::rstest]
+    fn pi_saboteur_body_matches_claude_saboteur() -> Result<(), Report<TemplateError>> {
+        // Given a seeded Learn folder.
+        let root = seeded_learn()?;
+
+        // When reading the saboteur's pi and Claude files.
+        let (_, pi) = agent_parts(root.path(), ".pi/agents/saboteur.md")?;
+        let (_, claude) = agent_parts(root.path(), ".claude/agents/saboteur.md")?;
+
+        // Then the bodies are identical.
+        assert_eq!(
+            pi, claude,
+            "the pi saboteur body should match its Claude twin"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pi_saboteur_sets_no_model() -> Result<(), Report<TemplateError>> {
+        // Given a seeded Learn folder.
+        let root = seeded_learn()?;
+
+        // When reading the pi saboteur's frontmatter.
+        let (front, _) = agent_parts(root.path(), ".pi/agents/saboteur.md")?;
+
+        // Then no line sets a model.
+        assert!(
+            !front.lines().any(|line| line.starts_with("model:")),
+            "the pi saboteur should set no model"
         );
         Ok(())
     }
