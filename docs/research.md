@@ -777,3 +777,86 @@ Probed on this machine (EndeavourOS rolling, niri 26.04 build 8ed0da4) where Dan
 
 ### Raising a window **[verified]**
 - With an empty workspace 2 active and kitty (window 6) on workspace 1, `niri msg action focus-window --id 6` exited 0. `niri msg --json focused-window` then reported window 6, and workspace 1 was active again.
+
+## 20. pi subagents (verified 2026-10-04, pi 1.0.0)
+
+Probed on this machine with pi 1.0.0 and its example `subagent` extension, `examples/extensions/subagent/{index.ts,agents.ts}` in the pi package. pi isn't under `npm root -g` here: that prints `~/.local/share/nvm/v22.23.2/lib/node_modules`, which holds only corepack, npm and yarn. `~/.local/bin/pi` links to `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js`, so the package root is three `dirname`s up from `readlink -f "$(command -v pi)"`. The probe folder held only `.pi/agents/echo.md` (no `model`, no `tools`), `.pi/agents/narrow.md` and an `AGENTS.md` with the line `PROBE-MARKER: kiwi-7`; a control folder held `.pi/settings.json`. A small `-e` extension (`tools-probe.ts`) dumped `pi.getActiveTools()`, `pi.getAllTools()`, `ctx.model`, `ctx.thinkingLevel` and every `project_trust` event without calling a model, and a Node RPC driver (`drive.mjs`) answered confirm requests with `false`. Model runs gave the parent `-ne -e <index.ts> --no-session --model openai-codex/gpt-5.5 --thinking low`. `-ne` keeps pi-amplike's own `subagent` tool out of the parent (see the collision below), and children still load the user's packages because they don't get `-ne`. `anthropic/claude-haiku-4-5` was the planned model, but the `anthropic` provider rejected the request with `400 … "Third-party apps now draw from extra usage, not plan limits. Ask your workspace admin to add more and keep going."` and spent nothing. Six model runs were made, the failed Haiku one included, and two of them spawned a child. Child argv was captured with a `NODE_OPTIONS=--require` hook, because pi retitles itself `pi` (§17) and `ps` shows nothing useful. Nothing was written under `~/.pi`: `find ~/.pi -newer <stamp> -type f` printed nothing, though `~/.pi/agent`'s own mtime moved, so pi created and removed some entry there. Install checks used scratch `PI_CODING_AGENT_DIR`s. Evidence (the probe kit, `*.jsonl` dumps, `run*.log`, `argv.jsonl`, the scratch agent dirs) is in `/Users/felixpherry/.claude/jobs/8748052f/tmp/pirk/`. Tags as in §6.
+
+### Install at user level **[verified]**
+- These two lines install the extension for the npm-global pi on this machine. They work unchanged in bash, zsh and fish 4.8.1:
+  ```sh
+  mkdir -p ~/.pi/agent/extensions/subagent
+  ln -sf "$(dirname "$(dirname "$(dirname "$(readlink -f "$(command -v pi)")")")")"/examples/extensions/subagent/{index,agents}.ts ~/.pi/agent/extensions/subagent/
+  ```
+- Run against a scratch agent dir with no packages, pi started cleanly and registered a `subagent` tool whose parameters are `agent`, `task`, `tasks`, `chain`, `agentScope`, `confirmProjectAgents` and `cwd`. It was active by default.
+- On this machine the same install breaks pi's startup while `npm:pi-amplike` is in the user's packages (see the collision below). A scratch agent dir with a copy of `~/.pi/agent/npm` and `{"packages":["npm:pi-amplike"]}` exited 1 with the conflict error.
+- The same scratch dir with `{"packages":[{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}]}` started cleanly. `subagent` was the example's (with `agentScope` and `confirmProjectAgents`), and amplike's `handoff` and `session_query` were still active. `"-extensions/subagent.ts"` gave the same result. The object form and its `!pattern`/`-path` filters are in `docs/packages.md`, "Select package resources". **[verified + reported/docs]**
+- The kit's install step is therefore the two lines above plus changing the `"npm:pi-amplike"` entry in `~/.pi/agent/settings.json` to `{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}` (the user's choice, see the collision below).
+
+### Agent discovery and scope **[verified + source: examples/extensions/subagent/agents.ts]**
+- With no `agentScope`, the call `{"agent":"echo","task":"report"}` returned `Agent failed: Unknown agent: "echo". Available agents: none.` with `isError: true`, `agentScope: "user"` in the details, and no child. The details still named the project dir it skipped.
+- With `agentScope: "project"`, a parent started in `probe/sub` (an empty subfolder) found `echo` in `probe/.pi/agents` and ran it with `agentSource: "project"`.
+- `findNearestProjectAgentsDir` walks up from `ctx.cwd` and stops at the first `.pi/agents` directory. `"project"` loads only that directory, `"user"` only `~/.pi/agent/agents`, and `"both"` loads both, with project agents winning on a name clash.
+
+### Project-agent confirm **[verified + source: examples/extensions/subagent/index.ts]**
+- The confirm shows only when `agentScope` is `"project"` or `"both"`, `confirmProjectAgents` isn't `false`, `ctx.hasUI` is true, `ctx.isProjectTrusted()` is false, and a requested agent comes from the project dir. It's checked before any mode runs.
+- `ctx.isProjectTrusted()` is true in a folder with no trust-protected resources. pi sets `projectTrusted` to `!hasTrustRequiringResources || trustStore.get(cwd) === true` when there's no `--approve`/`--no-approve`. **[source: dist/main.js `createRuntime`]**
+- So in the probe folder (only `.pi/agents/`), an RPC parent called with `agentScope: "project"` and no `confirmProjectAgents` got no `extension_ui_request` and ran the child at once.
+- With `--no-approve` on the parent, the same call raised `{"method":"confirm","title":"Run project-local agents?","message":"Agents: echo\nSource: <dir>/.pi/agents\n\nProject agents are repo-controlled. Only continue for trusted repositories."}`. Answering `false` returned `Canceled: project-local agents not approved.` and spawned nothing.
+- With `--no-approve` and `confirmProjectAgents: false`, no confirm request came and the child ran (`exitCode` 0).
+- `-p` runs have `ctx.hasUI` false, so they never confirm.
+
+### Project trust **[verified + reported/docs: docs/security.md]**
+- In the probe folder (only `.pi/agents/` and `AGENTS.md`), `tools-probe.ts` saw no `project_trust` event. In the control folder (`.pi/settings.json`), it saw `{"tag":"project_trust","cwd":"…/ctl"}` before `session_start`.
+- `docs/security.md` lists the resources that need a trust decision: `.pi/settings.json`, `.pi/mcp.json`, `.pi/extensions`, `.pi/skills`, `.pi/prompts`, `.pi/themes`, `.pi/SYSTEM.md`, `.pi/APPEND_SYSTEM.md`, and project `.agents/skills` in the cwd or an ancestor. It says "A bare `.pi` directory does not require project trust."
+- Context files (`AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`) "load regardless of project trust unless you disable context loading."
+- User-level and command-line extensions see `project_trust` before pi's saved decisions and `defaultProjectTrust`, so no event means no decision was asked for.
+
+### Child process **[verified + source: index.ts `runSingleAgent`]**
+- Captured child argv for an agent with no `model` and no `tools`, from a parent on `openai-codex/gpt-5.5` with `--thinking low`: `node ~/.local/bin/pi --mode json -p --no-session --model openai-codex/gpt-5.5 --thinking low --append-system-prompt /var/folders/…/T/pi-subagent-CxmlJk/prompt-echo.md "Task: report"`.
+- The child gets no `-e`, `-ne` or trust flag from the parent. It's started as `process.execPath` plus the parent's `process.argv[1]` (`getPiInvocation`).
+- `--model` comes from `ctx.model` as `<provider>/<id>`, and `--thinking` from `ctx.thinkingLevel`. `--thinking` is passed only when the agent file sets no `model`; `--tools` only when it sets `tools`.
+- With no `--model`, a parent's `ctx.model` is `openai-codex/gpt-6-astra` and `ctx.thinkingLevel` is `medium`, the user's `defaultProvider`/`defaultModel`/`defaultThinkingLevel`. A child of a Default-model thread therefore gets `--model openai-codex/gpt-6-astra --thinking medium`. (Zero-spend dump; no gpt-6-astra child was run.)
+- The child's cwd was the parent's (`probe/sub`). `-p` calls have no `cwd` parameter of their own, so `ctx.cwd` applies.
+- The child replied `PROBE-MARKER: kiwi-7`, so it loaded `AGENTS.md` from the parent folder `probe/`, an ancestor of its cwd.
+- It listed `read, bash, edit, write, handoff, session_query, subagent, context_checkpoint, context_timeline, context_compact` and 31 `atlassian_*` tools, so the user's packages and MCP tools load in children. Its `subagent` is pi-amplike's, since children get no `-e`.
+- The child run reported `cost: 0.1017` (18,132 input and 368 output tokens, one turn) for `openai-codex/gpt-5.5`.
+
+### Tool selection **[verified + reported/docs: pi --help]**
+- `pi --help`: `--tools, -t <tools>  Comma-separated allowlist of tool names to enable. Applies to built-in, extension, and custom tools`. `--exclude-tools, -xt` is the denylist with the same scope.
+- With `--tools read,ls`, both `getActiveTools()` and `getAllTools()` were `["read","ls"]`, at `session_start` and 6 s later, with and without `--offline`. `probe_tool`, the package tools and the late MCP `atlassian_*` tools were all gone. An agent with a `tools` line loses every MCP and package tool it doesn't name.
+- The example extension maps an agent's `tools` to `--tools` only. It has no way to pass `--exclude-tools`.
+- Built-in tool names from `pi --help`: `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`. `grep`, `find` and `ls` are "off by default".
+- With no `--tools`, `getAllTools()` also had `codemode` and `tool_search` (pi's built-in extensions), and the active set was `read, bash, edit, write` plus extension and package tools. `powershell`, `grep`, `find`, `ls`, `codemode` and `tool_search` were registered but inactive.
+- `--tools read,grep,codemode,tool_search` activated exactly those four.
+
+### Parallel mode **[verified + source: index.ts]**
+- One call with nine `{agent:"echo",task:"report"}` tasks returned `Too many parallel tasks (9). Max is 8.` with `isError: false` and spawned nothing.
+- `MAX_PARALLEL_TASKS = 8` and `MAX_CONCURRENCY = 4`. Tasks run through `mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, …)`.
+
+### Read deny **[reported/docs]**
+- pi's docs have no per-path read deny or permission rules. `docs/security.md` opens: "Pi can read, change, and execute files with the permissions of the account that started it, and it does not ask for approval before every tool call."
+- "Project trust does not limit what tool calls can access or affect." Permission gates exist only as extensions (`docs/mcp.md`, "Permissions": extension `tool_call` handlers).
+- The user's pi-amplike has its own `permissions` setting (`~/.pi/agent/amplike.json`, `"mode": "yolo"`). That's a user package, not pi.
+
+### Tool name collision with pi-amplike **[verified]**
+- pi-amplike 1.4.0 ships `extensions/subagent.ts`, which registers a tool named `subagent` with `tasks: string[]`, `mode` and `model`. It has no `agent`, `task` or `agentScope`, and its `tasks` items are strings where the example's are `{agent, task, cwd?}`.
+- Loading the example next to it, with `-e` or from `~/.pi/agent/extensions/subagent/`, stops pi before `session_start` with exit 1, in RPC, print and interactive modes alike:
+  ```
+  Error: Failed to load extension "<agent dir>/npm/node_modules/pi-amplike/extensions/subagent.ts": Tool "subagent" conflicts with <path>/subagent/index.ts
+  Hint: Start without extensions using "pi -ne".
+  ```
+- A child spawned under such an install loads the same user extensions, so it would hit the same error. (Inferred from the startup failure; no child was run under it.)
+- Without the example installed, every pi thread on this machine still has a `subagent` tool: amplike's. Only the parameters tell the two apart (`agentScope`/`confirmProjectAgents` exist only on the example's).
+- Remedies considered:
+  - (a) Narrow the amplike package entry in `~/.pi/agent/settings.json` to `{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}`. pi then starts with the example's `subagent` and keeps amplike's other tools, but amplike's subagent is gone. Verified in a scratch agent dir only.
+  - (b) As (a), and the orchestrator note also tells the two tools apart by schema: no `agentScope` parameter means the example isn't installed, so stop and name the install step.
+  - (c) Something else the user picks.
+- The user chose (a), with no schema check in the orchestrator note. The kit's install step is the two symlink lines above plus that settings change, and the user makes all three. orb still writes nothing under `~/.pi`. With amplike's subagent filtered out and the example not installed, a pi thread has no `subagent` tool at all.
+
+### Contradictions with the pi Research kit spec
+- Phase 1 fact 1 and Navigation Anchors say the package lives at `$(npm root -g)/@earendil-works/pi-coding-agent`. Here it's `~/.local/lib/node_modules/@earendil-works/pi-coding-agent`, outside `npm root -g`. The install commands above find it from the `pi` binary.
+- The Solution says the user installs the example extension once at user level. On this machine that alone makes every pi start (orb's pi threads and subagent children included) exit 1 with the `subagent` conflict, until amplike's `extensions/subagent.ts` is filtered out. The user chose remedy (a), so the install step includes the amplike filter.
+- AC5 and the spawn note's "pi without a `subagent` tool" assume a missing tool. With pi-amplike loaded unfiltered there's always a `subagent` tool, amplike's, with a different schema. Under remedy (a), AC5 means: amplike's subagent filtered out and the example not installed, so no `subagent` tool exists.
+- Edge Cases, "Confirm prompt", says Research folders are untrusted by default. A folder whose `.pi/` holds only `agents/` counts as trusted (`isProjectTrusted()` true), so the confirm doesn't show there even without `confirmProjectAgents: false`. The flag still matters under `--no-approve` or once the folder gains a protected resource, so passing it stays right.
+- Phase 1 fact 8 lists `read, bash, edit, write, grep, find, ls` (and `codemode`, `tool_search`). `powershell` is a built-in name too. Only `read, bash, edit, write` are active by default; `codemode` and `tool_search` are registered but inactive.
