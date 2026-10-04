@@ -1,4 +1,4 @@
-//! Where Claude sessions run: starting one, listing what each is doing,
+//! Where a harness's sessions run: starting one, listing what each is doing,
 //! stopping or deleting one, and the command that attaches to one.
 
 use std::ffi::OsString;
@@ -16,8 +16,8 @@ use super::state::ThreadStatus;
 #[error(debug)]
 pub struct SessionHostError;
 
-/// Marks a [`SessionHostError`] as Claude refusing a directory it hasn't been
-/// trusted in yet.
+/// Marks a [`SessionHostError`] as the harness refusing a directory it hasn't
+/// been trusted in yet.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkspaceUntrusted;
 
@@ -28,7 +28,7 @@ pub struct CreatedSession {
     pub short_id: String,
 }
 
-/// How to start a session; `None` leaves the setting to Claude's own.
+/// How to start a session; `None` leaves the setting to the harness's own.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionOptions {
     /// The model alias or name.
@@ -41,7 +41,7 @@ pub struct SessionOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub short_id: String,
-    /// The Claude session id, which names the transcript file.
+    /// The harness's session id, which names the transcript file.
     pub session_id: Option<String>,
     pub status: ThreadStatus,
 }

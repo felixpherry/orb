@@ -1,6 +1,6 @@
 //! The transcript search index, kept in `search.sqlite`.
 //!
-//! It holds every thread's prompts and Claude's text replies, read from the
+//! It holds every thread's prompts and the text replies, read from the
 //! transcripts, and finds the ones containing case-insensitive substrings of 3
 //! or more characters. It is a disposable copy of the transcripts: when the
 //! file is missing, can't be opened, or was written by another schema, it is

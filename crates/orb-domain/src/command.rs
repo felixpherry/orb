@@ -39,7 +39,7 @@ pub enum Command {
     },
     /// Make the project's root a git repository (`git init`) for its draft.
     InitGit(ProjectId),
-    /// Start a Claude session from the project's draft, which becomes a
+    /// Start a session from the project's draft, which becomes a
     /// thread.
     StartDraft(ProjectId),
     /// Throw the project's draft away.
@@ -77,8 +77,8 @@ pub enum Command {
     Pin(ThreadId),
     /// Unpin the thread.
     Unpin(ThreadId),
-    /// Give the thread orb's own name, or with `None` go back to Claude's
-    /// title.
+    /// Give the thread orb's own name, or with `None` go back to the
+    /// harness's title.
     RenameThread {
         thread: ThreadId,
         title: Option<String>,
@@ -87,7 +87,7 @@ pub enum Command {
     Settle(ThreadId),
     /// Bring the thread back from the Settled shelf and keep it active.
     Unsettle(ThreadId),
-    /// Delete the thread and its Claude session.
+    /// Delete the thread and its session.
     Delete(ThreadId),
     /// The user is looking at the thread now.
     Visit(ThreadId),
@@ -128,12 +128,12 @@ pub enum Command {
     SettleGroup(GroupId),
     /// Bring the group back from the Settled shelf and keep it active.
     UnsettleGroup(GroupId),
-    /// Delete every thread of the group and its Claude session, then the
+    /// Delete every thread of the group and its session, then the
     /// group and its folder or worktree; a Feature group whose slug branch
     /// isn't merged is kept whole.
     DeleteGroup(GroupId),
     /// Mark the folder the waiting session start asks about trusted in
-    /// Claude's config, and try the start again.
+    /// its harness's config, and try the start again.
     TrustWorkspace,
     /// End the waiting session start as a failed one: the user didn't trust
     /// its folder.

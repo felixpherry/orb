@@ -100,13 +100,14 @@ pub fn validate_new_group(state: &AppState) -> Result<(), NewGroupError> {
 pub enum ToggleSettleError {
     /// The cursor isn't on a lone thread or a group's card.
     NoThread,
-    /// Claude is running a turn or waiting on the user, in the thread or in
-    /// one of the group's threads.
+    /// A session is running a turn or waiting on the user, in the thread or
+    /// in one of the group's threads.
     InProgress,
 }
 
-/// What the mode line says when settling is refused because Claude is working.
-pub const SETTLE_IN_PROGRESS: &str = "Can't settle while Claude is working";
+/// What the mode line says when settling is refused because a session is
+/// working.
+pub const SETTLE_IN_PROGRESS: &str = "Can't settle while a session is working";
 
 /// Allow settling the selected lone thread or group only between turns;
 /// un-settling is always allowed.
@@ -335,8 +336,8 @@ pub enum PickSettingError {
     Starting,
 }
 
-/// Allow picking the selected draft's model or permission mode, or the
-/// group's default one on a group's draft or card, between session starts.
+/// Allow picking the selected draft's harness, model or permission mode, or
+/// the group's default one on a group's draft or card, between session starts.
 ///
 /// # Errors
 ///

@@ -234,7 +234,7 @@ mod tests {
 
     /// orb's keymap on a thread with Space pressed.
     fn leader_on_thread() -> Keys {
-        leader(Keys::new(keymap(), Scope::Sidebar))
+        leader(Keys::new(keymap(), Scope::Sidebar.into()))
     }
 
     /// A buffer the size of `SCREEN` with the popup drawn inside `area`.
@@ -267,10 +267,10 @@ mod tests {
                     &format!("<leader>{key}"),
                     Intent::NewSession,
                     KeyCategory::Sessions,
-                    Scope::Sidebar,
+                    Scope::Sidebar.into(),
                 );
             }
-            leader(Keys::new(km, Scope::Sidebar))
+            leader(Keys::new(km, Scope::Sidebar.into()))
         };
 
         // When drawing the popup.
@@ -330,9 +330,9 @@ mod tests {
                 "<leader>xa",
                 Intent::NewSession,
                 KeyCategory::Sessions,
-                Scope::Sidebar,
+                Scope::Sidebar.into(),
             );
-            leader(Keys::new(km, Scope::Sidebar))
+            leader(Keys::new(km, Scope::Sidebar.into()))
         };
 
         // When drawing the popup.
@@ -406,7 +406,7 @@ mod tests {
     #[rstest::rstest]
     fn no_popup_without_a_pending_sequence() {
         // Given orb's keymap with nothing pressed.
-        let keys = Keys::new(keymap(), Scope::Sidebar);
+        let keys = Keys::new(keymap(), Scope::Sidebar.into());
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
@@ -509,8 +509,13 @@ mod tests {
         // Given a keymap with `␣x` bound to the intent, and Space pressed.
         let keys = {
             let mut km = Keymap::new();
-            km.bind("<leader>x", intent, KeyCategory::Navigation, Scope::Sidebar);
-            leader(Keys::new(km, Scope::Sidebar))
+            km.bind(
+                "<leader>x",
+                intent,
+                KeyCategory::Navigation,
+                Scope::Sidebar.into(),
+            );
+            leader(Keys::new(km, Scope::Sidebar.into()))
         };
 
         // When drawing the popup.
@@ -534,9 +539,9 @@ mod tests {
                 "<leader>x",
                 Intent::NewSibling,
                 KeyCategory::Sessions,
-                Scope::Sidebar,
+                Scope::Sidebar.into(),
             );
-            leader(Keys::new(km, Scope::Sidebar))
+            leader(Keys::new(km, Scope::Sidebar.into()))
         };
 
         // When drawing the popup.

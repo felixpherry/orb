@@ -1,5 +1,5 @@
 //! The domain layer: application state, intents, commands, the intent handler,
-//! and the features behind them (the terminal pane and Claude sessions).
+//! and the features behind them (the terminal pane and the harnesses' sessions).
 //!
 //! The frontend maps a key to an [`Intent`]; [`IntentHandler::handle`] applies
 //! it to [`AppState`] and returns the [`Command`]s that follow. The frontend

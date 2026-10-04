@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::feat::git::git_service::GitRef;
-use crate::feat::harness::HarnessInfo;
+use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList, setting_label};
 use crate::feat::sessions::state::{
     GroupId, GroupKind, NEW_THREAD, Project, ProjectId, Sessions, Thread, ThreadId, ThreadStatus,
@@ -28,7 +28,8 @@ pub enum PickTarget {
     Group(GroupId),
 }
 
-/// What a model or permission picker sets: a project's draft, or a group's.
+/// What a harness, model or permission picker sets: a project's draft, or a
+/// group's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftTarget {
     Project(ProjectId),
@@ -56,8 +57,13 @@ pub enum PickerKind {
         cwd: PathBuf,
         unstarted: bool,
     },
-    /// `␣m`: pick the model of `target`'s draft.
-    Model { target: DraftTarget },
+    /// `␣h`: pick the harness of `target`'s draft.
+    Harness { target: DraftTarget },
+    /// `␣m`: pick the model of `target`'s draft; `icon` is its harness's mark.
+    Model {
+        target: DraftTarget,
+        icon: Option<String>,
+    },
     /// `␣w` or `␣b` on a draft whose project isn't a git repository: make it
     /// one.
     InitGit { project: ProjectId },
@@ -83,9 +89,8 @@ pub enum PickerKind {
         group: GroupId,
         dir: Option<GroupKind>,
     },
-    /// Claude refused a session start in `dir`, Claude's project path for it
-    /// (the git root, the main repository for a worktree, else the folder):
-    /// confirm trusting it.
+    /// A harness refused a session start in `dir`, the folder it names for
+    /// it: confirm trusting it.
     TrustWorkspace { dir: PathBuf },
     /// `␣␣`/`<C-Space>`: pick a thread to jump into. `settled` is whether
     /// settled threads are listed; `<C-s>` flips it.
@@ -382,7 +387,40 @@ impl PickerState {
             info.and_then(|info| info.model(value))
                 .map_or(value, |model| model.id.as_str())
         });
-        Self::settings(PickerKind::Model { target }, items, current, return_to)
+        let icon = info.and_then(|info| info.icon.clone());
+        Self::settings(
+            PickerKind::Model { target, icon },
+            items,
+            current,
+            return_to,
+        )
+    }
+
+    /// A harness picker for `target`'s draft over `infos`, in registration
+    /// order, with `current` selected unless it can't be picked.
+    pub fn harnesses(
+        target: DraftTarget,
+        infos: &[HarnessInfo],
+        current: &HarnessId,
+        return_to: Focus,
+    ) -> Self {
+        let items: Vec<PickerItem> = infos
+            .iter()
+            .map(|info| PickerItem::Harness {
+                id: info.id.clone(),
+                label: info.label.clone(),
+                unavailable: info.unavailable.clone(),
+            })
+            .collect();
+        let selected = items
+            .iter()
+            .find(|item| matches!(item, PickerItem::Harness { id, .. } if id == current))
+            .cloned();
+        let mut picker = Self::settings(PickerKind::Harness { target }, items, None, return_to);
+        if let Some(selected) = selected {
+            picker.list.select(&selected);
+        }
+        picker
     }
 
     /// A permission-mode picker for `target`'s draft: `Default`, then the
@@ -695,6 +733,7 @@ impl PickerState {
                 | PickerItem::Workspace(_)
                 | PickerItem::Branch(_)
                 | PickerItem::Setting { .. }
+                | PickerItem::Harness { .. }
                 | PickerItem::Heading(_)
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
@@ -962,7 +1001,9 @@ mod tests {
     use super::{DraftTarget, PickTarget, PickerState, expand, split_path, thread_label};
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
+    use crate::feat::harness::HarnessInfo;
     use crate::feat::harness::claude::models::{LEGACY_MODELS, info};
+    use crate::feat::harness::fake::pi_like;
     use crate::feat::picker::list::{PickerItem, setting_label};
     use crate::feat::sessions::state::{
         Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId, ProjectKind, Thread,
@@ -1519,6 +1560,98 @@ mod tests {
             picker.selected(),
             Some(&setting(Some("plan"))),
             "the draft's current mode should be selected"
+        );
+    }
+
+    /// Claude, and a pi-like harness that can't run because dtach is missing.
+    fn claude_and_unavailable_pi() -> Vec<HarnessInfo> {
+        vec![
+            info(),
+            HarnessInfo {
+                unavailable: Some("dtach not found".to_owned()),
+                ..pi_like()
+            },
+        ]
+    }
+
+    #[rstest::rstest]
+    fn harness_picker_disables_an_unavailable_harness() {
+        // Given / When opening a harness picker where pi lacks dtach.
+        let picker = PickerState::harnesses(
+            DraftTarget::Project(ProjectId(1)),
+            &claude_and_unavailable_pi(),
+            &HarnessId::new("claude"),
+            Focus::Dashboard,
+        );
+
+        // Then pi's row is shown with its reason, and disabled.
+        let pi = picker.shown().map(|(item, _)| item).find(
+            |item| matches!(item, PickerItem::Harness { id, .. } if *id == HarnessId::new("pi")),
+        );
+        assert_eq!(
+            pi.map(|item| (item.clone(), item.disabled())),
+            Some((
+                PickerItem::Harness {
+                    id: HarnessId::new("pi"),
+                    label: "pi".to_owned(),
+                    unavailable: Some("dtach not found".to_owned()),
+                },
+                true
+            )),
+            "an unavailable harness should be listed with its reason and disabled"
+        );
+    }
+
+    #[rstest::rstest]
+    fn harness_picker_selects_the_current_harness() {
+        // Given / When opening a harness picker for a draft on pi.
+        let picker = PickerState::harnesses(
+            DraftTarget::Project(ProjectId(1)),
+            &[info(), pi_like()],
+            &HarnessId::new("pi"),
+            Focus::Dashboard,
+        );
+
+        // Then pi is selected.
+        assert!(
+            matches!(
+                picker.selected(),
+                Some(PickerItem::Harness { id, .. }) if *id == HarnessId::new("pi")
+            ),
+            "the draft's harness should be selected"
+        );
+    }
+
+    #[rstest::rstest]
+    fn model_picker_lists_provider_headings_and_their_models() {
+        // Given / When opening a model picker for a pi draft.
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some(&pi_like()),
+            None,
+            Focus::Dashboard,
+        );
+
+        // Then Default comes first, then each provider's heading and models.
+        let model = |id: &str| PickerItem::Setting {
+            value: Some(id.to_owned()),
+            label: id.to_owned(),
+        };
+        let rows: Vec<PickerItem> = picker.shown().map(|(item, _)| item.clone()).collect();
+        assert_eq!(
+            rows,
+            [
+                PickerItem::Setting {
+                    value: None,
+                    label: "Default".to_owned(),
+                },
+                PickerItem::Heading("anthropic".to_owned()),
+                model("anthropic/claude-x"),
+                model("anthropic/claude-y"),
+                PickerItem::Heading("openai".to_owned()),
+                model("openai/gpt-z"),
+            ],
+            "the model picker should list Default, then each provider's models under its name"
         );
     }
 

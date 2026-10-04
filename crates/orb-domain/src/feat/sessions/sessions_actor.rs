@@ -20,11 +20,11 @@
 //! session starts first, and only then is the old one removed; a worktree orb
 //! made for a start that failed is removed again, and an orb worktree no
 //! thread uses after a move is removed unless it has changes. When a turn
-//! ends in a worktree still on orb's `orb/<hex>` branch, and Claude or the
-//! user has titled the thread, the branch is renamed after that title.
+//! ends in a worktree still on orb's `orb/<hex>` branch, and the harness or
+//! the user has titled the thread, the branch is renamed after that title.
 //!
 //! When the frontend finds a thread's orb worktree gone as it attaches, the
-//! actor recreates it at the same path, so Claude resumes the conversation
+//! actor recreates it at the same path, so the session resumes the conversation
 //! there. It prunes git's record of the old worktree, then checks out the
 //! branch the worktree was on: the Feature group's branch for a grouped
 //! thread, else the thread's own, else orb's `orb/<hex>` for the directory.
@@ -47,8 +47,8 @@
 //!
 //! When a harness refuses to start in a directory it hasn't been trusted in,
 //! the start waits while the actor asks the frontend to have the user trust
-//! the folder the harness names for it (for Claude: the git root, the main
-//! repository for a worktree, or the directory itself outside git). On yes it
+//! the folder the harness names for it (the git root, the main repository
+//! for a worktree, or the directory itself outside git). On yes it
 //! marks the folder trusted in the harness's config and tries the start once
 //! more; a refusal then fails the start. On no, the start fails as
 //! `Workspace not trusted`. Either way a worktree made for a failed start is
@@ -176,9 +176,9 @@ pub struct SessionsActorDeps {
 
 /// Owns [`Sessions`](super::state::Sessions) and the harnesses the frontend
 /// shows (`AppState::harnesses`): the projects, their drafts and
-/// groups, the threads' statuses, titles, pins and settles, the latest `claude` error,
-/// the origin ref a start is fetching, Claude's project path a start waits to
-/// be trusted in, and the started or restored thread the frontend should
+/// groups, the threads' statuses, titles, pins and settles, the latest host error,
+/// the origin ref a start is fetching, the folder a harness asks to trust
+/// before a start, and the started or restored thread the frontend should
 /// attach to. It adds orb's Incognito project at start. It also restores the sidebar's width
 /// and project filter, selects a new group's draft, and moves the cursor to a
 /// sibling it started. The intent handler also moves the cursor, opens and
@@ -198,7 +198,7 @@ pub struct SessionsActor {
     rows: Vec<ThreadRow>,
     /// The saved groups, as last written to the store.
     groups: Vec<GroupRow>,
-    /// The start waiting for the user to trust Claude's project path for it,
+    /// The start waiting for the user to trust the folder its harness names,
     /// and that path.
     pending: Option<(PendingStart, PathBuf)>,
 }
@@ -292,7 +292,7 @@ pub struct Pin(pub ThreadId);
 #[derive(Debug)]
 pub struct Unpin(pub ThreadId);
 
-/// Give a thread orb's own name, or with `None` go back to Claude's title.
+/// Give a thread orb's own name, or with `None` go back to the harness's title.
 #[derive(Debug)]
 pub struct RenameThread {
     pub thread: ThreadId,
@@ -1210,9 +1210,12 @@ impl SessionsActor {
     }
 
     /// Gives project `id` a draft unless it has one: the project's last-used
-    /// workspace, model and permission, else the latest used project's model
-    /// and permission in a local checkout. A remembered previous worktree the
-    /// project no longer has falls back to a local checkout. The branch is the
+    /// workspace, harness, model and permission, else the latest used
+    /// project's harness, model and permission in a local checkout, else the
+    /// first registered harness. A last-used harness orb no longer knows gives
+    /// the first registered one with its default model and permission. A
+    /// remembered previous worktree the project no longer has falls back to a
+    /// local checkout. The branch is the
     /// one checked out in the draft's directory, or for a new worktree the
     /// default branch; see [`with_git`].
     fn create_draft(&mut self, id: ProjectId) {
@@ -1238,19 +1241,32 @@ impl SessionsActor {
             }
             _ => (DraftWorkspace::Local, None),
         };
-        let settings = last.or_else(|| self.store.latest_last_used().ok().flatten());
+        let (harness, model, permission) = {
+            let default = self.services.harnesses.default_id();
+            match last.or_else(|| self.store.latest_last_used().ok().flatten()) {
+                Some(LastUsed {
+                    harness: Some(id), ..
+                }) if self.services.harnesses.get(&id).is_none() => (default, None, None),
+                Some(used) => (
+                    used.harness.unwrap_or(default),
+                    used.model,
+                    used.permission_mode,
+                ),
+                None => (default, None, None),
+            }
+        };
         let draft = with_git(
             &self.services.git,
             &root,
             Draft {
                 branch,
                 workspace,
-                model: settings.as_ref().and_then(|used| used.model.clone()),
-                permission: settings.and_then(|used| used.permission_mode),
+                model,
+                permission,
                 created_at: from_ms(now_ms()),
                 repo: true,
                 from: None,
-                harness: self.services.harnesses.default_id(),
+                harness,
             },
         );
         let saved = self.store.save_draft(&draft_row(id, &draft));
@@ -1306,6 +1322,7 @@ impl SessionsActor {
             return;
         };
         self.edit_group(id, |row, _now| {
+            row.harness = defaults.harness;
             row.draft_model = defaults.model;
             row.draft_permission_mode = defaults.permission;
         });
@@ -2483,7 +2500,7 @@ impl SessionsActor {
         self.edit_group(id, |row, _| row.pinned_at = None);
     }
 
-    /// Gives a thread orb's own name; `None` goes back to Claude's title.
+    /// Gives a thread orb's own name; `None` goes back to the harness's title.
     fn rename(&mut self, id: ThreadId, title: Option<String>) {
         self.edit(id, |row, _| row.renamed_title = title);
     }
@@ -2839,7 +2856,7 @@ impl SessionsActor {
             .ok_or_else(|| format!("unknown harness {id}"))
     }
 
-    /// Shows a `claude` failure in the mode line.
+    /// Shows a host failure in the mode line.
     fn fail(&self, report: &Report<SessionHostError>) {
         self.state.write().sessions.error = Some(reason(report));
         (self.wake)();
@@ -3052,7 +3069,7 @@ fn update_row(
     if let Some(session_id) = record.and_then(|record| record.session_id.as_ref())
         && row.session_id.as_ref() != Some(session_id)
     {
-        // A new session (e.g. after Claude's `/clear`) writes a new transcript.
+        // A new session (e.g. after `/clear`) writes a new transcript.
         if row.session_id.is_some() {
             row.transcript_path = None;
             row.transcript_offset = 0;
@@ -3101,7 +3118,7 @@ fn update_row(
 }
 
 /// Renames the `orb/<hex>` branch of the orb worktree `row` is in to
-/// `orb/<slug>` of its title, once Claude or the user titled it. The old name
+/// `orb/<slug>` of its title, once the harness or the user titled it. The old name
 /// stays when that branch already exists or git refuses.
 fn rename_hex_branch(git: &GitService, worktrees_root: &Path, row: &mut ThreadRow) {
     if let Some(old) = hex_branch(worktrees_root, &row.cwd)
@@ -3128,7 +3145,7 @@ fn show(thread: &mut Thread, row: &ThreadRow, status: ThreadStatus) -> bool {
 }
 
 /// Why a thread that was `old` and is now `new` needs the user, if it does:
-/// a turn ended, or Claude started waiting for an approval or an answer. A
+/// a turn ended, or the session started waiting for an approval or an answer. A
 /// thread not polled since orb started never does, so states that existed at
 /// launch don't notify.
 fn notice_kind(old: ThreadStatus, new: ThreadStatus) -> Option<NoticeKind> {
@@ -4303,6 +4320,48 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[tokio::test]
+    async fn other_harness_thread_shows_the_status_its_host_lists() -> Result<(), Report<StoreError>>
+    {
+        // Given a thread of the other harness, whose host lists it working.
+        let store = Store::open_in_memory()?;
+        let id = add_thread_in(&store, OTHER, "bb")?;
+        let claude = FakeHost::listing(Vec::new());
+        let other = FakeHost::listing(vec![record("bb", ThreadStatus::Working)]);
+        let (mut actor, state) = start_beside(store, &claude, &other);
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the thread shows working.
+        assert_eq!(
+            status_of(&state, id),
+            Some(ThreadStatus::Working),
+            "a thread should show the status its own harness lists"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn other_harness_thread_attaches_with_its_harness_command() -> Result<(), Report<StoreError>> {
+        // Given a saved thread `bb` of the other harness.
+        let store = Store::open_in_memory()?;
+        let id = add_thread_in(&store, OTHER, "bb")?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start_beside(store, &host, &host);
+
+        // Then it attaches with the command its harness builds.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.attach_argv),
+            Some(vec![OsString::from(OTHER), OsString::from("bb")]),
+            "a thread should attach through its own harness"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn thread_of_an_unknown_harness_shows_gone_with_no_attach_command()
     -> Result<(), Report<StoreError>> {
         // Given a saved thread of a harness orb doesn't know.
@@ -4672,7 +4731,7 @@ mod tests {
         let (store, _) = store_with_thread("aa")?;
         let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.error = Some("Claude is working in this directory".to_owned());
+        state.write().sessions.error = Some("A session is working in this directory".to_owned());
 
         // When a poll succeeds.
         actor.poll().await;
@@ -4680,7 +4739,7 @@ mod tests {
         // Then the failure still shows.
         assert_eq!(
             error_of(&state).as_deref(),
-            Some("Claude is working in this directory"),
+            Some("A session is working in this directory"),
             "a poll shouldn't hide an error the user hasn't seen"
         );
         Ok(())
@@ -4952,6 +5011,120 @@ mod tests {
                 Some("plan".to_owned())
             )),
             "a new project should take the latest model and permission, locally"
+        );
+        Ok(())
+    }
+
+    /// Settings used last in the local checkout with `harness`'s default
+    /// model and permission.
+    fn used_in(harness: &str) -> LastUsed {
+        LastUsed {
+            harness: Some(HarnessId::new(harness)),
+            workspace: LastWorkspace::Local,
+            model: None,
+            permission_mode: None,
+        }
+    }
+
+    /// The harness of project `id`'s draft as the sidebar shows it.
+    fn draft_harness(state: &State, id: ProjectId) -> Option<HarnessId> {
+        shown_draft(state, id).map(|draft| draft.harness)
+    }
+
+    #[rstest::rstest]
+    fn new_draft_takes_the_projects_last_used_harness() -> Result<(), Report<StoreError>> {
+        // Given orb last started in the other harness, and web started in
+        // Claude after that.
+        let store = Store::open_in_memory()?;
+        let orb = orb_project(&store)?;
+        store.record_last_used(orb, &used_in(OTHER), 10)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
+        store.record_last_used(web, &used_in("claude"), 20)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start_beside(store, &host, &host);
+
+        // When creating orb's draft.
+        actor.create_draft(orb);
+
+        // Then it runs the other harness.
+        assert_eq!(
+            draft_harness(&state, orb),
+            Some(HarnessId::new(OTHER)),
+            "a draft should take its project's last-used harness"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_draft_takes_the_latest_used_harness_without_its_own() -> Result<(), Report<StoreError>> {
+        // Given orb last started in the other harness, and web never started.
+        let store = Store::open_in_memory()?;
+        let orb = orb_project(&store)?;
+        store.record_last_used(orb, &used_in(OTHER), 10)?;
+        let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start_beside(store, &host, &host);
+
+        // When creating web's draft.
+        actor.create_draft(web);
+
+        // Then it runs the other harness too.
+        assert_eq!(
+            draft_harness(&state, web),
+            Some(HarnessId::new(OTHER)),
+            "a project never started should take the latest used harness"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_draft_takes_the_default_harness_when_nothing_was_used() -> Result<(), Report<StoreError>>
+    {
+        // Given a project nothing was ever started in, with the other
+        // harness registered after Claude.
+        let store = Store::open_in_memory()?;
+        let orb = orb_project(&store)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start_beside(store, &host, &host);
+
+        // When creating its draft.
+        actor.create_draft(orb);
+
+        // Then it runs the first registered harness.
+        assert_eq!(
+            draft_harness(&state, orb),
+            Some(HarnessId::new("claude")),
+            "with nothing used, a draft should take the default harness"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn unregistered_last_used_harness_gives_the_default_harness_and_model()
+    -> Result<(), Report<StoreError>> {
+        // Given a project last started on sonnet in a harness orb no longer
+        // has.
+        let store = Store::open_in_memory()?;
+        let orb = orb_project(&store)?;
+        store.record_last_used(
+            orb,
+            &LastUsed {
+                model: Some("sonnet".to_owned()),
+                ..used_in("gone-harness")
+            },
+            10,
+        )?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start_beside(store, &host, &host);
+
+        // When creating its draft.
+        actor.create_draft(orb);
+
+        // Then it runs the default harness on its default model.
+        assert_eq!(
+            shown_draft(&state, orb).map(|draft| (draft.harness, draft.model)),
+            Some((HarnessId::new("claude"), None)),
+            "a gone harness's draft should fall back to the default harness and model"
         );
         Ok(())
     }
@@ -9210,7 +9383,7 @@ mod tests {
         // Then the mode line says Claude is working there.
         assert_eq!(
             error_of(&state).as_deref(),
-            Some("Claude is working in this directory"),
+            Some("A session is working in this directory"),
             "a checkout under a running turn should be refused"
         );
         Ok(())
@@ -10359,6 +10532,35 @@ mod tests {
             saved(&actor.store, "aa")?.model,
             None,
             "a running thread keeps its model"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn group_default_harness_is_saved() -> Result<(), Report<StoreError>> {
+        // Given a group draft whose default harness was changed to the other
+        // harness.
+        let (host, git) = (FakeHost::listing(Vec::new()), FakeGit::local());
+        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+        if let Some(defaults) = state.write().sessions.group_defaults_mut(id) {
+            defaults.harness = HarnessId::new(OTHER);
+        }
+
+        // When saving it.
+        actor.save_group_defaults(id);
+
+        // Then the group's stored row reads back with the other harness.
+        let saved: Vec<HarnessId> = actor
+            .store
+            .load()?
+            .3
+            .into_iter()
+            .map(|row| row.harness)
+            .collect();
+        assert_eq!(
+            saved,
+            vec![HarnessId::new(OTHER)],
+            "the group's default harness should be saved"
         );
         Ok(())
     }

@@ -16,18 +16,20 @@
 //! per row; the workspace picker shows where a thread's session could run,
 //! each with its glyph; the branch picker shows each branch with its badge
 //! on the right, dimming the ones checked out where the thread can't follow
-//! and saying where; the model picker shows each model's name after Claude's
-//! mark, with its legacy models under their own heading, and the permission
-//! picker each mode after a shield; a draft whose project isn't a git
-//! repository gets one row, `Initialize Git`. Where the filter matched is
-//! blue and bold, and the rows scroll to keep the selection in view.
+//! and saying where; the model picker shows each model's name after its
+//! harness's mark, with its legacy models under their own heading, the
+//! permission picker each mode after a shield, and the harness picker each
+//! harness after a plug, dimmed with the reason when it can't be picked; a
+//! draft whose project isn't a git repository gets one row, `Initialize Git`.
+//! Where the filter matched is blue and bold, and the rows scroll to keep the
+//! selection in view.
 
 use std::borrow::Cow;
 use std::path::Path;
 
 use orb_domain::feat::git::git_service::GitRef;
 use orb_domain::feat::picker::list::{
-    ALL_PROJECTS, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
+    ALL_PROJECTS, BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
 use orb_domain::feat::sessions::state::{GroupKind, ProjectKind};
@@ -41,8 +43,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::mouse::HitMap;
 use crate::sidebar::{
-    BG_DARK, BLUE, BLUE1, BORDER, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, CYAN, DARK3, DARK5, FG,
-    FG_DARK, FOLDER, FOLDER_OPEN, GREEN, MAGENTA, ORANGE, VISUAL, YELLOW, badge, render_split,
+    BG_DARK, BLUE, BLUE1, BORDER, BRANCH, CHIP, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK, FOLDER,
+    FOLDER_OPEN, GREEN, MAGENTA, ORANGE, PLUG, VISUAL, YELLOW, badge, mark, render_split,
 };
 
 /// Nerd Font's code-fork glyph, before the worktree workspace rows and the
@@ -155,6 +157,7 @@ fn title(kind: &PickerKind, home: &Path) -> Cow<'static, str> {
         PickerKind::Directories { .. } => "Add project",
         PickerKind::Workspace { .. } => "Workspace",
         PickerKind::Branches { .. } => "Branches",
+        PickerKind::Harness { .. } => "Harness",
         PickerKind::Model { .. } => "Model",
         PickerKind::Permission { .. } => "Permission mode",
         PickerKind::InitGit { .. } => "Not a git repository",
@@ -369,39 +372,23 @@ fn row_content(
                 None,
             )
         }
-        PickerItem::Branch(row) => {
-            let cwd = match kind {
-                PickerKind::Branches { cwd, .. } => cwd.as_path(),
-                _ => Path::new(""),
-            };
-            let git_ref = &row.git_ref;
-            let (icon_fg, name_fg) = match (row.disabled, git_ref) {
-                (true, _) => (DARK3, DARK3),
-                (_, GitRef { current: true, .. }) => (GREEN, FG),
-                (_, GitRef { remote: true, .. }) => (MAGENTA, FG),
-                _ => (BLUE, FG),
-            };
-            let left = std::iter::once(icon(BRANCH, icon_fg))
-                .chain(highlight(&git_ref.name, &matches.name, |_| name_fg))
-                .collect();
-            let right = match (row.disabled, &git_ref.worktree) {
-                (true, Some(path)) => Some(RightColumn {
-                    prefix: "in ",
-                    text: tilde(path, home),
-                    fg: DARK3,
-                }),
-                _ => branch_badge(git_ref, cwd)
-                    .map(|(badge, fg)| RightColumn::new(badge.to_owned(), fg)),
-            };
-            (left, right)
-        }
+        PickerItem::Branch(row) => branch_row(row, matches, kind, home),
         PickerItem::Setting { label, .. } => {
             let mark = match kind {
                 PickerKind::Permission { .. } => icon(SHIELD, YELLOW),
-                _ => icon(CLAUDE_LOGO, CLAUDE),
+                PickerKind::Model {
+                    icon: mark_icon, ..
+                } => {
+                    let (glyph, fg) = mark(mark_icon.as_deref());
+                    icon(glyph, fg)
+                }
+                _ => icon(CHIP, BLUE1),
             };
             (labelled(mark, label, &matches.name), None)
         }
+        PickerItem::Harness {
+            label, unavailable, ..
+        } => (harness_row(label, unavailable.as_deref(), matches), None),
         PickerItem::Heading(text) => (vec![span(format!("── {text} ──"), COMMENT)], None),
         PickerItem::InitGit => (labelled(icon(GIT, ORANGE), INIT_GIT, &matches.name), None),
         PickerItem::AllProjects => (
@@ -413,6 +400,53 @@ fn row_content(
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (highlight(label, &matches.name, |_| FG), None),
     }
+}
+
+/// A branch row: its name after a branch glyph coloured by where it lives,
+/// and on the right its badge, or where it's checked out when the thread
+/// can't follow it.
+fn branch_row(
+    row: &BranchRow,
+    matches: &Matches,
+    kind: &PickerKind,
+    home: &Path,
+) -> (Vec<Span<'static>>, Option<RightColumn>) {
+    let cwd = match kind {
+        PickerKind::Branches { cwd, .. } => cwd.as_path(),
+        _ => Path::new(""),
+    };
+    let git_ref = &row.git_ref;
+    let (icon_fg, name_fg) = match (row.disabled, git_ref) {
+        (true, _) => (DARK3, DARK3),
+        (_, GitRef { current: true, .. }) => (GREEN, FG),
+        (_, GitRef { remote: true, .. }) => (MAGENTA, FG),
+        _ => (BLUE, FG),
+    };
+    let left = std::iter::once(icon(BRANCH, icon_fg))
+        .chain(highlight(&git_ref.name, &matches.name, |_| name_fg))
+        .collect();
+    let right = match (row.disabled, &git_ref.worktree) {
+        (true, Some(path)) => Some(RightColumn {
+            prefix: "in ",
+            text: tilde(path, home),
+            fg: DARK3,
+        }),
+        _ => branch_badge(git_ref, cwd).map(|(badge, fg)| RightColumn::new(badge.to_owned(), fg)),
+    };
+    (left, right)
+}
+
+/// A harness row: a plug and its label, dimmed with the reason after it
+/// when it can't be picked.
+fn harness_row(label: &str, unavailable: Option<&str>, matches: &Matches) -> Vec<Span<'static>> {
+    let fg = match unavailable {
+        Some(_) => DARK3,
+        None => FG,
+    };
+    std::iter::once(icon(PLUG, BLUE1))
+        .chain(highlight(label, &matches.name, |_| fg))
+        .chain(unavailable.map(|reason| span(format!("  {reason}"), DARK3)))
+        .collect()
 }
 
 /// `glyph` and a space, in `fg`: the icon before a row's text.
@@ -550,6 +584,7 @@ mod tests {
     use orb_domain::Focus;
     use orb_domain::feat::git::git_service::GitRef;
     use orb_domain::feat::harness::claude::models::info;
+    use orb_domain::feat::harness::{HarnessId, HarnessInfo};
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::{DraftTarget, PickTarget, PickerState};
     use orb_domain::feat::sessions::state::{GroupId, GroupKind, ProjectId, ProjectKind, ThreadId};
@@ -560,7 +595,7 @@ mod tests {
 
     use super::{FOLDER, GIT, HISTORY, PickerScroll, SHIELD, grapheme_at, render};
     use crate::mouse::HitMap;
-    use crate::sidebar::{BLUE1, CLAUDE_LOGO, DARK3, DARK5, FG, ORANGE, VISUAL, badge};
+    use crate::sidebar::{BLUE1, DARK3, DARK5, FG, ORANGE, VISUAL, badge};
 
     /// The home directory the pickers are drawn with.
     const HOME: &str = "/Users/me";
@@ -1105,9 +1140,7 @@ mod tests {
         // Then Default follows the ✳ mark.
         let lines = lines(&buf);
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains(&format!("{CLAUDE_LOGO} Default"))),
+            lines.iter().any(|line| line.contains("✳ Default")),
             "screen was {lines:#?}"
         );
     }
@@ -1131,6 +1164,33 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.contains(&format!("{SHIELD} Default"))),
+            "screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn unavailable_harness_row_shows_its_reason() {
+        // Given a harness picker where pi lacks dtach.
+        let pi = HarnessInfo {
+            unavailable: Some("dtach not found".to_owned()),
+            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
+        };
+        let picker = PickerState::harnesses(
+            DraftTarget::Project(ProjectId(1)),
+            &[info(), pi],
+            &HarnessId::new("claude"),
+            Focus::Dashboard,
+        );
+
+        // When drawing it.
+        let buf = draw(&picker, 60, 40);
+
+        // Then pi's row names why it can't be picked.
+        let lines = lines(&buf);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("pi  dtach not found")),
             "screen was {lines:#?}"
         );
     }
@@ -1404,7 +1464,7 @@ mod tests {
         // Then the first row, under the rule, is Default.
         assert_eq!(
             inner_line(&buf, 3),
-            Some(format!("1. {CLAUDE_LOGO} Default")),
+            Some("1. ✳ Default".to_owned()),
             "the first row"
         );
     }
@@ -1425,7 +1485,7 @@ mod tests {
         // Then the row after Default is Claude Opus 5.5, not its ID.
         assert_eq!(
             inner_line(&buf, 4),
-            Some(format!("2. {CLAUDE_LOGO} Claude Opus 5.5")),
+            Some("2. ✳ Claude Opus 5.5".to_owned()),
             "the second row"
         );
     }

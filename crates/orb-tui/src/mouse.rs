@@ -3,7 +3,7 @@
 //! a click on the sidebar's input box starts a search, and a click on a
 //! dashboard item highlights it. The wheel moves the sidebar's selection
 //! while it has the keys, and otherwise scrolls its view. While attached, the
-//! pane gets its own mouse events, as Claude expects. In a picker a click
+//! pane gets its own mouse events, as the attached program expects. In a picker a click
 //! selects a row, a double-click picks it and the wheel over its list moves
 //! the selection;
 //! a click outside a picker or the rename box closes it like `Esc`. A click

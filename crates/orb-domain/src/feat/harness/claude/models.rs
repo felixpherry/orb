@@ -107,6 +107,7 @@ pub fn info() -> HarnessInfo {
         id: HarnessId::new(super::ID),
         label: super::LABEL.to_owned(),
         tag: None,
+        icon: Some("✳".to_owned()),
         unavailable: None,
         models: vec![
             ModelGroup {

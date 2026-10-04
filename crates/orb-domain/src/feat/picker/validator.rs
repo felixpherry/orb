@@ -135,7 +135,7 @@ pub enum PickSessionError {
     NoThread,
     /// The thread was deleted, or is being deleted, since the picker opened.
     Deleted,
-    /// Claude no longer knows the thread's session.
+    /// Its harness no longer knows the thread's session.
     Gone,
 }
 

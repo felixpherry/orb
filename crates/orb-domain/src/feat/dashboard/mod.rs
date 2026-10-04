@@ -1,15 +1,15 @@
-//! Dashboard — the start screen on the right while no Claude pane is shown.
+//! Dashboard — the start screen on the right while no session pane is shown.
 //!
 //! Its menu lists what the sidebar's selection can do: open a thread or start
-//! a draft, change its workspace, branch and (for a draft) model and
-//! permission, open a tool in its directory, and the always-available new
-//! session, incognito, add project, filter projects and quit. On a group's rows, the
-//! menu has no workspace or branch: the group owns its directory. Nor on
-//! orb's Incognito draft or its threads. A group's
-//! card and draft pick the group's default model and permission. Each item
-//! has a single key that runs it; a cursor moves over the items and `⏎` runs
-//! the highlighted one. The cursor goes back to the first item whenever the
-//! selection changes.
+//! a draft, change its workspace, branch and (for a draft) harness, model and
+//! permission (only when the harness has permission modes), open a tool in
+//! its directory, and the always-available new session, incognito, add
+//! project, filter projects and quit. On a group's rows, the menu has no
+//! workspace or branch: the group owns its directory. Nor on orb's Incognito
+//! draft or its threads. A group's card and draft pick the group's default
+//! harness, model and permission. Each item has a single key that runs it;
+//! a cursor moves over the items and `⏎` runs the highlighted one. The cursor
+//! goes back to the first item whenever the selection changes.
 
 pub mod state;
 
@@ -26,6 +26,8 @@ pub enum DashboardItem {
     Start,
     Workspace,
     Branch,
+    /// Pick the selected draft's harness.
+    Harness,
     Model,
     Permission,
     NewSession,
@@ -46,6 +48,7 @@ impl DashboardItem {
             Self::Open | Self::Start => 'o',
             Self::Workspace => 'w',
             Self::Branch => 'b',
+            Self::Harness => 'h',
             Self::Model => 'm',
             Self::Permission => 'a',
             Self::NewSession => 'n',
@@ -65,6 +68,7 @@ impl DashboardItem {
             Self::Open | Self::Start => Intent::Attach,
             Self::Workspace => Intent::ChangeWorkspace,
             Self::Branch => Intent::SwitchBranch,
+            Self::Harness => Intent::PickHarness,
             Self::Model => Intent::PickModel,
             Self::Permission => Intent::PickPermission,
             Self::NewSession => Intent::NewSession,
@@ -80,21 +84,23 @@ impl DashboardItem {
 }
 
 /// The items the selection supports, in menu order. Never empty: Quit is
-/// always there.
-pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
+/// always there. `permissions` is whether the selection's harness lists
+/// permission modes; without them there is no Permission item.
+pub fn items(sessions: &Sessions, permissions: bool) -> Vec<DashboardItem> {
     use DashboardItem::{
-        AddProject, Branch, FilterProjects, Incognito, Lazygit, Model, Neovim, NewSession, Open,
-        Permission, Quit, Shell, Start, Workspace,
+        AddProject, Branch, FilterProjects, Harness, Incognito, Lazygit, Model, Neovim, NewSession,
+        Open, Permission, Quit, Shell, Start, Workspace,
     };
     let (own, tools): (&[DashboardItem], bool) = match (
         sessions.selected_draft(),
         sessions.selected_thread(),
         sessions.selected_group(),
     ) {
-        (Some((project, draft)), _, _) if draft.repo && project.kind != ProjectKind::Incognito => {
-            (&[Start, Workspace, Branch, Model, Permission], true)
-        }
-        (Some(_), _, _) => (&[Start, Model, Permission], true),
+        (Some((project, draft)), _, _) if draft.repo && project.kind != ProjectKind::Incognito => (
+            &[Start, Workspace, Branch, Harness, Model, Permission],
+            true,
+        ),
+        (Some(_), _, _) => (&[Start, Harness, Model, Permission], true),
         (None, Some(_), Some(_)) => (&[Open], true),
         (None, Some(_), None)
             if sessions
@@ -105,14 +111,14 @@ pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
         }
         (None, Some(_), None) => (&[Open, Workspace, Branch], true),
         (None, None, Some(_)) if sessions.selected_group_draft().is_some() => {
-            (&[Start, Model, Permission], true)
+            (&[Start, Harness, Model, Permission], true)
         }
         (None, None, Some((_, group)))
             if group.kind == GroupKind::Feature && group.dir.is_some() =>
         {
-            (&[Branch, Model, Permission], true)
+            (&[Branch, Harness, Model, Permission], true)
         }
-        (None, None, Some(_)) => (&[Model, Permission], true),
+        (None, None, Some(_)) => (&[Harness, Model, Permission], true),
         (None, None, None) => (&[], false),
     };
     let tools: &[DashboardItem] = if tools {
@@ -121,6 +127,7 @@ pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
         &[]
     };
     own.iter()
+        .filter(|item| permissions || **item != Permission)
         .chain(&[NewSession, Incognito, AddProject, FilterProjects])
         .chain(tools)
         .chain(&[Quit])
@@ -134,8 +141,8 @@ pub(crate) mod tests {
     use std::time::SystemTime;
 
     use super::DashboardItem::{
-        AddProject, Branch, FilterProjects, Incognito, Lazygit, Model, Neovim, NewSession, Open,
-        Permission, Quit, Shell, Start, Workspace,
+        AddProject, Branch, FilterProjects, Harness, Incognito, Lazygit, Model, Neovim, NewSession,
+        Open, Permission, Quit, Shell, Start, Workspace,
     };
     use super::items;
     use crate::Intent;
@@ -240,7 +247,7 @@ pub(crate) mod tests {
         let sessions = incognito(None, SidebarItem::Thread(ThreadId(1)));
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
         // Then Open leads, with no Workspace or Branch.
         assert_eq!(
@@ -266,13 +273,14 @@ pub(crate) mod tests {
         let sessions = incognito(Some(true), SidebarItem::Draft(ProjectId(1)));
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
-        // Then Start, Model and Permission lead, with no Workspace or Branch.
+        // Then Start, Harness, Model and Permission lead, with no Workspace or Branch.
         assert_eq!(
             items,
             [
                 Start,
+                Harness,
                 Model,
                 Permission,
                 NewSession,
@@ -294,7 +302,7 @@ pub(crate) mod tests {
         let sessions = grouped(SidebarItem::Thread(ThreadId(1)), false);
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
         // Then Open leads, with no Workspace or Branch.
         assert_eq!(
@@ -320,13 +328,14 @@ pub(crate) mod tests {
         let sessions = grouped(SidebarItem::GroupDraft(GroupId(9)), true);
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
-        // Then Start, Model and Permission lead.
+        // Then Start, Harness, Model and Permission lead.
         assert_eq!(
             items,
             [
                 Start,
+                Harness,
                 Model,
                 Permission,
                 NewSession,
@@ -358,14 +367,15 @@ pub(crate) mod tests {
         };
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
-        // Then Branch, Model and Permission lead the general items and the
+        // Then Branch, Harness, Model and Permission lead the general items and the
         // tools.
         assert_eq!(
             items,
             [
                 Branch,
+                Harness,
                 Model,
                 Permission,
                 NewSession,
@@ -387,13 +397,14 @@ pub(crate) mod tests {
         let sessions = grouped(SidebarItem::Group(GroupId(9)), false);
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
-        // Then Model and Permission, the general items, the tools and Quit
+        // Then Harness, Model and Permission, the general items, the tools and Quit
         // are listed.
         assert_eq!(
             items,
             [
+                Harness,
                 Model,
                 Permission,
                 NewSession,
@@ -415,7 +426,7 @@ pub(crate) mod tests {
         let sessions = sessions(None, Some(SidebarItem::Thread(ThreadId(1))));
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
         // Then they are the thread's, the general ones, the tools and Quit.
         assert_eq!(
@@ -443,15 +454,16 @@ pub(crate) mod tests {
         let sessions = sessions(Some(true), Some(SidebarItem::Draft(ProjectId(1))));
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
-        // Then they start with Start, Workspace, Branch, Model and Permission.
+        // Then they start with Start, Workspace, Branch, Harness, Model and Permission.
         assert_eq!(
             items,
             [
                 Start,
                 Workspace,
                 Branch,
+                Harness,
                 Model,
                 Permission,
                 NewSession,
@@ -473,13 +485,14 @@ pub(crate) mod tests {
         let sessions = sessions(Some(false), Some(SidebarItem::Draft(ProjectId(1))));
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
         // Then Workspace and Branch are missing.
         assert_eq!(
             items,
             [
                 Start,
+                Harness,
                 Model,
                 Permission,
                 NewSession,
@@ -496,6 +509,55 @@ pub(crate) mod tests {
     }
 
     #[rstest::rstest]
+    fn harness_comes_right_before_model_on_a_draft() {
+        // Given a selected draft in a git repository.
+        let sessions = sessions(Some(true), Some(SidebarItem::Draft(ProjectId(1))));
+
+        // When listing the dashboard's items.
+        let items = items(&sessions, true);
+
+        // Then Harness is the item just before Model.
+        let model = items.iter().position(|item| *item == Model);
+        assert_eq!(
+            model
+                .and_then(|at| at.checked_sub(1))
+                .and_then(|at| items.get(at)),
+            Some(&Harness),
+            "Harness should come right before Model"
+        );
+    }
+
+    #[rstest::rstest]
+    fn draft_of_a_harness_without_permission_modes_lists_no_permission() {
+        // Given a selected draft whose harness lists no permission modes.
+        let sessions = sessions(Some(true), Some(SidebarItem::Draft(ProjectId(1))));
+
+        // When listing the dashboard's items without permission modes.
+        let items = items(&sessions, false);
+
+        // Then the settings stop at Model, with no Permission.
+        assert_eq!(
+            items,
+            [
+                Start,
+                Workspace,
+                Branch,
+                Harness,
+                Model,
+                NewSession,
+                Incognito,
+                AddProject,
+                FilterProjects,
+                Shell,
+                Lazygit,
+                Neovim,
+                Quit
+            ],
+            "a draft without permission modes should have no Permission item"
+        );
+    }
+
+    #[rstest::rstest]
     #[case::nothing(None)]
     #[case::shelf_header(Some(SidebarItem::SettledShelf))]
     fn no_thread_or_draft_lists_only_the_general_items(#[case] cursor: Option<SidebarItem>) {
@@ -503,7 +565,7 @@ pub(crate) mod tests {
         let sessions = sessions(None, cursor);
 
         // When listing the dashboard's items.
-        let items = items(&sessions);
+        let items = items(&sessions, true);
 
         // Then only the general items and Quit are listed.
         assert_eq!(

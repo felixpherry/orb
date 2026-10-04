@@ -12,7 +12,7 @@ use crate::feat::sessions::state::ThreadStatus;
 pub enum AttachError {
     /// No thread is selected.
     NoSelection,
-    /// Claude no longer knows the selected thread's session.
+    /// Its harness no longer knows the selected thread's session.
     Gone,
 }
 

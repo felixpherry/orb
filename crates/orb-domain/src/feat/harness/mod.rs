@@ -51,6 +51,9 @@ pub struct HarnessInfo {
     pub label: String,
     /// The tag a thread of this harness shows in the sidebar, if any.
     pub tag: Option<String>,
+    /// The mark drawn before the harness's models and replies and at the end
+    /// of its threads' nodes, if it has one.
+    pub icon: Option<String>,
     /// Why the harness can't start sessions right now, if it can't.
     pub unavailable: Option<String>,
     /// The models on offer; the harness's own default is implied.
@@ -64,15 +67,19 @@ pub struct HarnessInfo {
     pub notice: Option<String>,
 }
 
+/// Why a harness whose probe hasn't answered can't be picked yet.
+pub const CHECKING: &str = "checking";
+
 impl HarnessInfo {
-    /// What a harness shows before its probe answers: its id and label,
-    /// available, nothing to pick.
+    /// What a harness shows before its probe answers: its id and label, not
+    /// yet usable, nothing to pick.
     pub fn placeholder(id: HarnessId, label: &str) -> Self {
         Self {
             id,
             label: label.to_owned(),
             tag: None,
-            unavailable: None,
+            icon: None,
+            unavailable: Some(CHECKING.to_owned()),
             models: Vec::new(),
             permission_modes: Vec::new(),
             nudge_on_attach: false,
@@ -241,6 +248,22 @@ pub(crate) mod fake {
     };
     use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
+    /// A pi-like harness's info: tagged `pi`, no mark, available, two
+    /// provider groups of models and no permission modes.
+    pub(crate) fn pi_like() -> HarnessInfo {
+        HarnessInfo {
+            tag: Some("pi".to_owned()),
+            unavailable: None,
+            models: super::pi::models::parse(
+                "provider   model\n\
+                 anthropic  claude-x\n\
+                 anthropic  claude-y\n\
+                 openai     gpt-z\n",
+            ),
+            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
+        }
+    }
+
     /// A harness named `id` that hosts through `host` and has no transcripts.
     pub(crate) struct FakeHarness {
         id: &'static str,
@@ -282,8 +305,9 @@ pub(crate) mod fake {
             self.host.remove(short_id).await
         }
 
+        /// `[<id>, <short id>]`, so tests can tell which harness built it.
         fn attach_argv(&self, short_id: &str) -> Vec<OsString> {
-            self.host.attach_argv(short_id)
+            vec![OsString::from(self.id), OsString::from(short_id)]
         }
     }
 
@@ -326,7 +350,10 @@ pub(crate) mod fake {
         }
 
         async fn probe(&self) -> HarnessInfo {
-            HarnessInfo::placeholder(self.id(), self.id)
+            HarnessInfo {
+                unavailable: None,
+                ..HarnessInfo::placeholder(self.id(), self.id)
+            }
         }
     }
 }
@@ -337,7 +364,7 @@ mod tests {
 
     use super::claude::supervisor::ClaudeSupervisor;
     use super::fake::FakeHarness;
-    use super::{HarnessId, Harnesses};
+    use super::{CHECKING, HarnessId, HarnessInfo, Harnesses};
 
     #[rstest::rstest]
     fn default_id_is_the_first_registered_harness() {
@@ -356,6 +383,22 @@ mod tests {
             default,
             HarnessId::new("first"),
             "the first registered harness should be the default"
+        );
+    }
+
+    #[rstest::rstest]
+    fn placeholder_is_checking_until_its_probe_answers() {
+        // Given nothing but a harness's id and label.
+        let id = HarnessId::new("pi");
+
+        // When building its placeholder.
+        let info = HarnessInfo::placeholder(id, "pi");
+
+        // Then it can't be picked yet, because it is still being checked.
+        assert_eq!(
+            info.unavailable.as_deref(),
+            Some(CHECKING),
+            "an unprobed harness should be unavailable while checking"
         );
     }
 }

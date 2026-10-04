@@ -4,10 +4,11 @@
 //! In the sidebar and the dashboard, keys go through a which-key keymap whose
 //! scope is the focus and what the sidebar cursor is on; `<Space>` is the
 //! leader and shows a popup. A key that does nothing for the selection isn't
-//! bound there (`␣m`/`␣a` on a thread, `p`/`s` off a lone thread or a
+//! bound there (`␣h`/`␣m`/`␣a` on a thread, `␣a` and the dashboard's `a`
+//! where the selection's harness has no permission modes, `p`/`s` off a lone thread or a
 //! group's card, `r` off a thread, `␣w`/`␣b`
 //! and the tool keys `␣t`/`␣gg`/`␣v` with nothing selected, and the
-//! dashboard's `m`/`a` off a draft or a group's card and
+//! dashboard's `h`/`m`/`a` off a draft or a group's card and
 //! `o`/`w`/`b`/`t`/`g`/`v` with nothing selected), so the popups don't offer
 //! it. On the dashboard each menu item's
 //! letter runs it, `j`/`k` or `↓`/`↑` move the menu cursor, and `⏎` runs the
@@ -15,7 +16,7 @@
 //! outside which-key, which can't name them, and `<C-o>`/`<C-i>` move back
 //! and forward through the jump list, also outside which-key. In the
 //! sidebar, `<C-\>` detaches the selected attached thread, outside which-key
-//! too. While attached, every key goes to Claude except `<C-\>`, `<C-h>`,
+//! too. While attached, every key goes to the attached program except `<C-\>`, `<C-h>`,
 //! `<C-b>`, `<C-Space>`, which opens the session picker, the jump keys, and
 //! the resize keys, which resize the pane as they do the dashboard. An open
 //! picker takes typed characters as filter text and has its own fixed keys,
@@ -27,7 +28,8 @@
 //! group's card, draft or threads, `l`/`h` open and close the group. `␣w` isn't bound
 //! on them, and `␣b` (the dashboard's `b` too) only on the card of a Feature
 //! group whose worktree exists, where it switches that worktree's branch.
-//! `␣m`/`␣a` on a card pick the group's default model and permission (its
+//! `␣h`/`␣m`/`␣a` on a card pick the group's default harness, model and
+//! permission (its
 //! draft's and each sibling's). `n` on a group's card or thread starts a
 //! sibling; `d` on a card deletes the group.
 //! `␣gf`/`␣gr`/`␣gl` add a Feature, Research or Learn group in every scope.
@@ -38,12 +40,12 @@
 use std::fmt;
 
 use orb_domain::feat::dashboard::DashboardItem::{
-    AddProject, Branch, FilterProjects, Incognito, Lazygit, Model, Neovim, NewSession, Open,
-    Permission, Quit, Shell, Start, Workspace,
+    AddProject, Branch, FilterProjects, Harness, Incognito, Lazygit, Model, Neovim, NewSession,
+    Open, Permission, Quit, Shell, Start, Workspace,
 };
 use orb_domain::feat::sessions::state::{GroupKind, ProjectKind, Sessions};
 use orb_domain::feat::zellij::zellij_service::Tool;
-use orb_domain::{Focus, Intent};
+use orb_domain::{AppState, Focus, Intent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_which_key::{Keymap, WhichKeyState};
 
@@ -229,15 +231,75 @@ impl Scope {
     }
 }
 
+/// Which bindings apply: [`Scope`]'s, with `␣a` and the dashboard's `a`
+/// only while the selection's harness lists permission modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct KeyScope {
+    scope: Scope,
+    permissions: bool,
+}
+
+impl KeyScope {
+    /// The scope for keys in `focus` over `state`'s selection.
+    pub(crate) fn new(focus: Focus, state: &AppState) -> Self {
+        Self {
+            scope: Scope::new(focus, Selection::of(&state.sessions)),
+            permissions: state.offers_permissions(),
+        }
+    }
+}
+
+/// `scope` where the selection's harness lists permission modes.
+impl From<Scope> for KeyScope {
+    fn from(scope: Scope) -> Self {
+        Self {
+            scope,
+            permissions: true,
+        }
+    }
+}
+
+/// The keymap under construction: `bind` registers a key for both values
+/// of the permissions flag, `bind_permissions` only where it is set.
+struct Binder(Keymap<KeyEvent, KeyScope, Intent, KeyCategory>);
+
+impl Binder {
+    fn bind(
+        &mut self,
+        sequence: &str,
+        intent: Intent,
+        category: KeyCategory,
+        scope: Scope,
+    ) -> &mut Self {
+        let without = KeyScope {
+            scope,
+            permissions: false,
+        };
+        self.0.bind(sequence, intent.clone(), category, without);
+        self.bind_permissions(sequence, intent, category, scope)
+    }
+
+    fn bind_permissions(
+        &mut self,
+        sequence: &str,
+        intent: Intent,
+        category: KeyCategory,
+        scope: Scope,
+    ) -> &mut Self {
+        self.0.bind(sequence, intent, category, scope.into());
+        self
+    }
+}
+
 /// The keymap with its current scope and pending key sequence.
-pub(crate) type Keys = WhichKeyState<KeyEvent, Scope, Intent, KeyCategory>;
+pub(crate) type Keys = WhichKeyState<KeyEvent, KeyScope, Intent, KeyCategory>;
 
 /// The sidebar and dashboard bindings, scoped by focus and selection.
 #[expect(
     clippy::too_many_lines,
     reason = "one binding per key keeps the whole keymap in one place"
 )]
-pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
+pub(crate) fn keymap() -> Keymap<KeyEvent, KeyScope, Intent, KeyCategory> {
     const SIDEBAR_GROUPS: [Scope; 4] = [
         Scope::SidebarGroup,
         Scope::SidebarWorktreeGroup,
@@ -272,10 +334,10 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         Scope::DashboardIncognito,
         Scope::DashboardIncognitoDraft,
     ];
-    let mut keymap = Keymap::new();
-    keymap.describe_group("<leader>", "leader");
-    keymap.describe_group("<leader>g", "group");
-    keymap.describe_group("<leader>s", "search");
+    let mut keymap = Binder(Keymap::new());
+    keymap.0.describe_group("<leader>", "leader");
+    keymap.0.describe_group("<leader>g", "group");
+    keymap.0.describe_group("<leader>s", "search");
     for scope in SIDEBAR {
         keymap
             .bind("j", Intent::SelectNext, KeyCategory::Navigation, scope)
@@ -418,27 +480,27 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         (
             Scope::DashboardDraft,
             &[
-                Start, Workspace, Branch, Model, Permission, Shell, Lazygit, Neovim,
+                Start, Workspace, Branch, Harness, Model, Permission, Shell, Lazygit, Neovim,
             ],
         ),
         (Scope::DashboardEmpty, &[]),
         (
             Scope::DashboardGroup,
-            &[Model, Permission, Shell, Lazygit, Neovim],
+            &[Harness, Model, Permission, Shell, Lazygit, Neovim],
         ),
         (
             Scope::DashboardWorktreeGroup,
-            &[Branch, Model, Permission, Shell, Lazygit, Neovim],
+            &[Branch, Harness, Model, Permission, Shell, Lazygit, Neovim],
         ),
         (Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim]),
         (
             Scope::DashboardGroupDraft,
-            &[Start, Model, Permission, Shell, Lazygit, Neovim],
+            &[Start, Harness, Model, Permission, Shell, Lazygit, Neovim],
         ),
         (Scope::DashboardIncognito, &[Open, Shell, Lazygit, Neovim]),
         (
             Scope::DashboardIncognitoDraft,
-            &[Start, Model, Permission, Shell, Lazygit, Neovim],
+            &[Start, Harness, Model, Permission, Shell, Lazygit, Neovim],
         ),
     ] {
         for item in items
@@ -450,7 +512,11 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 Quit => KeyCategory::General,
                 _ => KeyCategory::Sessions,
             };
-            keymap.bind(&item.key().to_string(), item.intent(), category, scope);
+            let key = item.key().to_string();
+            match item {
+                Permission => keymap.bind_permissions(&key, item.intent(), category, scope),
+                _ => keymap.bind(&key, item.intent(), category, scope),
+            };
         }
     }
     for scope in SIDEBAR.into_iter().chain(DASHBOARD) {
@@ -579,15 +645,21 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         Scope::DashboardIncognitoDraft,
     ] {
         keymap
-            .bind("<leader>m", Intent::PickModel, KeyCategory::Sessions, scope)
             .bind(
+                "<leader>h",
+                Intent::PickHarness,
+                KeyCategory::Sessions,
+                scope,
+            )
+            .bind("<leader>m", Intent::PickModel, KeyCategory::Sessions, scope)
+            .bind_permissions(
                 "<leader>a",
                 Intent::PickPermission,
                 KeyCategory::Sessions,
                 scope,
             );
     }
-    keymap
+    keymap.0
 }
 
 /// Feeds `key` to the keymap; returns the intent once a binding completes.
@@ -608,7 +680,7 @@ pub(crate) fn press(keys: &mut Keys, key: KeyEvent) -> Option<Intent> {
 pub(crate) enum Route {
     /// The key is bound to an intent.
     Intent(Intent),
-    /// The key goes to Claude.
+    /// The key goes to the attached program.
     Forward,
 }
 
@@ -618,9 +690,9 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
         // `<C-\>` as the kitty protocol reports it, and as crossterm parses
         // its legacy byte 0x1C.
         (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Route::Intent(Intent::Detach),
-        // Claude can't bind `<C-h>`: it's Backspace in a legacy terminal.
+        // The attached program can't bind `<C-h>`: it's Backspace in a legacy terminal.
         (KeyCode::Char('h'), KeyModifiers::CONTROL) => Route::Intent(Intent::LeavePane),
-        // Claude still backgrounds a task with `Ctrl+X Ctrl+B`.
+        // The attached program backgrounds a task with `Ctrl+X Ctrl+B`, not `<C-b>`.
         (KeyCode::Char('b'), KeyModifiers::CONTROL) => Route::Intent(Intent::ToggleSidebar),
         // `<C-Space>` as the kitty protocol reports it, and as crossterm
         // parses its legacy NUL byte.
@@ -633,7 +705,7 @@ pub(crate) fn attached_route(key: KeyEvent) -> Route {
 
 /// The jump `key` asks for in the sidebar, the dashboard or the attached
 /// pane: `<C-o>` goes back through the jump list and `<C-i>` forward. Only
-/// bare Ctrl matches, so `ctrl+shift+o` and Tab still reach Claude. `None`
+/// bare Ctrl matches, so `ctrl+shift+o` and Tab still reach the attached program. `None`
 /// for any other key.
 pub(crate) fn jump_route(key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
@@ -694,8 +766,8 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
 #[cfg(test)]
 mod tests {
     use orb_domain::feat::dashboard::DashboardItem::{
-        self, AddProject, Branch, FilterProjects, Incognito, Lazygit, Model, Neovim, NewSession,
-        Open, Permission, Quit, Shell, Start, Workspace,
+        self, AddProject, Branch, FilterProjects, Harness, Incognito, Lazygit, Model, Neovim,
+        NewSession, Open, Permission, Quit, Shell, Start, Workspace,
     };
     use orb_domain::feat::harness::HarnessId;
     use std::time::SystemTime;
@@ -710,7 +782,7 @@ mod tests {
     use ratatui_which_key::NodeResult;
 
     use super::{
-        Keys, Route, Scope, Selection, attached_route, jump_route, keymap, layout_route,
+        KeyScope, Keys, Route, Scope, Selection, attached_route, jump_route, keymap, layout_route,
         picker_route, press, sidebar_route,
     };
 
@@ -725,7 +797,7 @@ mod tests {
     #[rstest::rstest]
     fn space_opens_the_leader_popup_in_the_sidebar() {
         // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
 
         // When pressing Space.
         press(&mut keys, key(KeyCode::Char(' ')));
@@ -737,7 +809,7 @@ mod tests {
     #[rstest::rstest]
     fn space_then_n_starts_a_session_in_the_sidebar() {
         // Given Space already pressed in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `n`.
@@ -756,7 +828,7 @@ mod tests {
     #[case(Scope::Dashboard)]
     fn space_then_p_adds_a_project(#[case] scope: Scope) {
         // Given Space already pressed.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `p`.
@@ -773,7 +845,7 @@ mod tests {
     #[rstest::rstest]
     fn leader_w_on_the_dashboard_changes_workspace() {
         // Given Space already pressed on a thread's dashboard.
-        let mut keys = Keys::new(keymap(), Scope::Dashboard);
+        let mut keys = Keys::new(keymap(), Scope::Dashboard.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `w`.
@@ -790,7 +862,7 @@ mod tests {
     #[rstest::rstest]
     fn leader_b_on_the_dashboard_switches_branch() {
         // Given Space already pressed on a thread's dashboard.
-        let mut keys = Keys::new(keymap(), Scope::Dashboard);
+        let mut keys = Keys::new(keymap(), Scope::Dashboard.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `b`.
@@ -821,7 +893,7 @@ mod tests {
         #[case] expected: Intent,
     ) {
         // Given Space already pressed.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing the key.
@@ -887,7 +959,7 @@ mod tests {
         #[values(Scope::Sidebar, Scope::SidebarDraft, Scope::SidebarEmpty)] scope: Scope,
     ) {
         // Given Space already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `f`.
@@ -920,7 +992,7 @@ mod tests {
         #[values(Scope::Dashboard, Scope::DashboardDraft, Scope::DashboardEmpty)] scope: Scope,
     ) {
         // Given the keymap in a dashboard scope.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing `q`.
         let intent = press(&mut keys, key(KeyCode::Char('q')));
@@ -943,7 +1015,7 @@ mod tests {
     ) {
         // Given the keymap in a dashboard scope.
         let (pressed, expected) = binding;
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing the key.
         let intent = press(&mut keys, pressed);
@@ -959,27 +1031,27 @@ mod tests {
     #[case::thread(Scope::Dashboard, &[Open, Workspace, Branch, Shell, Lazygit, Neovim])]
     #[case::draft(
         Scope::DashboardDraft,
-        &[Start, Workspace, Branch, Model, Permission, Shell, Lazygit, Neovim]
+        &[Start, Workspace, Branch, Harness, Model, Permission, Shell, Lazygit, Neovim]
     )]
-    #[case::group(Scope::DashboardGroup, &[Model, Permission, Shell, Lazygit, Neovim])]
+    #[case::group(Scope::DashboardGroup, &[Harness, Model, Permission, Shell, Lazygit, Neovim])]
     #[case::worktree_group(
         Scope::DashboardWorktreeGroup,
-        &[Branch, Model, Permission, Shell, Lazygit, Neovim]
+        &[Branch, Harness, Model, Permission, Shell, Lazygit, Neovim]
     )]
     #[case::group_thread(Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim])]
     #[case::group_draft(
         Scope::DashboardGroupDraft,
-        &[Start, Model, Permission, Shell, Lazygit, Neovim]
+        &[Start, Harness, Model, Permission, Shell, Lazygit, Neovim]
     )]
     #[case::incognito_thread(Scope::DashboardIncognito, &[Open, Shell, Lazygit, Neovim])]
     #[case::incognito_draft(
         Scope::DashboardIncognitoDraft,
-        &[Start, Model, Permission, Shell, Lazygit, Neovim]
+        &[Start, Harness, Model, Permission, Shell, Lazygit, Neovim]
     )]
     #[case::general_on_an_incognito_thread(Scope::DashboardIncognito, &[NewSession, Incognito, AddProject, FilterProjects, Quit])]
     fn dashboard_item_keys_run_their_items(#[case] scope: Scope, #[case] items: &[DashboardItem]) {
         // Given the keymap in a dashboard scope.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing each item's key.
         let intents: Vec<Option<Intent>> = items
@@ -1002,7 +1074,7 @@ mod tests {
         #[case] expected: Option<Intent>,
     ) {
         // Given the keymap in a dashboard scope.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing `m`.
         let intent = press(&mut keys, key(KeyCode::Char('m')));
@@ -1014,7 +1086,7 @@ mod tests {
     #[rstest::rstest]
     fn o_is_unbound_on_the_dashboard_with_nothing_selected() {
         // Given the keymap on the dashboard with no thread or draft selected.
-        let mut keys = Keys::new(keymap(), Scope::DashboardEmpty);
+        let mut keys = Keys::new(keymap(), Scope::DashboardEmpty.into());
 
         // When pressing `o`.
         let intent = press(&mut keys, key(KeyCode::Char('o')));
@@ -1035,7 +1107,7 @@ mod tests {
     #[case(key(KeyCode::Char('h')), Intent::CloseShelf)]
     fn sidebar_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
 
         // When pressing the key.
         let intent = press(&mut keys, pressed);
@@ -1065,7 +1137,7 @@ mod tests {
         #[values('/', 'i')] pressed: char,
     ) {
         // Given the keymap in a sidebar scope.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing the key.
         let intent = press(&mut keys, key(KeyCode::Char(pressed)));
@@ -1091,7 +1163,7 @@ mod tests {
     ) {
         // Given the keymap in a sidebar scope.
         let (pressed, expected) = binding;
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing the keys in order (Shift+G as kitty reports it).
         let intent = pressed
@@ -1133,7 +1205,7 @@ mod tests {
         scope: Scope,
     ) {
         // Given Space already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `i`.
@@ -1172,7 +1244,7 @@ mod tests {
         scope: Scope,
     ) {
         // Given Space already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing Space again.
@@ -1199,7 +1271,7 @@ mod tests {
         scope: Scope,
     ) {
         // Given Space and `s` already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
         press(&mut keys, key(KeyCode::Char('s')));
 
@@ -1227,7 +1299,7 @@ mod tests {
         scope: Scope,
     ) {
         // Given Space and `s` already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
         press(&mut keys, key(KeyCode::Char('s')));
 
@@ -1274,7 +1346,7 @@ mod tests {
         scope: Scope,
     ) {
         // Given the keymap in a dashboard scope.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing `i`.
         let intent = press(&mut keys, key(KeyCode::Char('i')));
@@ -1300,7 +1372,7 @@ mod tests {
         scope: Scope,
     ) {
         // Given Space already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `e`.
@@ -1385,7 +1457,7 @@ mod tests {
         #[case] expected: Intent,
     ) {
         // Given the keymap on a thread's dashboard.
-        let mut keys = Keys::new(keymap(), Scope::Dashboard);
+        let mut keys = Keys::new(keymap(), Scope::Dashboard.into());
 
         // When pressing the keys in order.
         let intent = pressed
@@ -1631,7 +1703,7 @@ mod tests {
         #[case] expected: Intent,
     ) {
         // Given the keymap on a group's row in the sidebar.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing the key.
         let intent = press(&mut keys, key(code));
@@ -1645,7 +1717,7 @@ mod tests {
     #[case('s')]
     fn pin_and_settle_are_unbound_on_a_grouped_thread(#[case] pressed: char) {
         // Given the keymap on a thread in a group.
-        let mut keys = Keys::new(keymap(), Scope::SidebarGroupThread);
+        let mut keys = Keys::new(keymap(), Scope::SidebarGroupThread.into());
 
         // When pressing `p` or `s`.
         let intent = press(&mut keys, key(KeyCode::Char(pressed)));
@@ -1665,7 +1737,7 @@ mod tests {
         scope: Scope,
     ) {
         // Given the keymap off a group's card or thread.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing `n`.
         let intent = press(&mut keys, key(KeyCode::Char('n')));
@@ -1726,7 +1798,7 @@ mod tests {
         #[values(Scope::SidebarWorktreeGroup, Scope::DashboardWorktreeGroup)] scope: Scope,
     ) {
         // Given Space already pressed on a started Feature group's card.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing `b`.
@@ -1739,7 +1811,7 @@ mod tests {
     /// The keys the leader popup lists in `scope`.
     fn leader_popup(scope: Scope) -> Vec<KeyEvent> {
         keymap()
-            .get_children_at_path(&[key(KeyCode::Char(' '))], &scope)
+            .get_children_at_path(&[key(KeyCode::Char(' '))], &scope.into())
             .unwrap_or_default()
             .into_iter()
             .map(|(key, _)| key)
@@ -1750,14 +1822,14 @@ mod tests {
     fn bindings(scope: Scope) -> Vec<(Vec<KeyEvent>, Intent)> {
         let keymap = keymap();
         let mut paths: Vec<Vec<KeyEvent>> = keymap
-            .get_children_at_path(&[], &scope)
+            .get_children_at_path(&[], &scope.into())
             .unwrap_or_default()
             .into_iter()
             .map(|(key, _)| vec![key])
             .collect();
         let mut found = vec![];
         while let Some(path) = paths.pop() {
-            match keymap.navigate(&path, &scope) {
+            match keymap.navigate(&path, &scope.into()) {
                 Some(NodeResult::Leaf { action }) => found.push((path, action)),
                 Some(NodeResult::Branch { children }) => paths.extend(
                     children
@@ -1798,7 +1870,7 @@ mod tests {
         #[values('w', 'b')] pressed: char,
     ) {
         // Given the keymap on the dashboard of an Incognito row.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
 
         // When pressing the key.
         let intent = press(&mut keys, key(KeyCode::Char(pressed)));
@@ -1861,6 +1933,91 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn leader_h_picks_the_harness(
+        #[values(
+            Scope::SidebarDraft,
+            Scope::DashboardDraft,
+            Scope::SidebarGroupDraft,
+            Scope::DashboardGroupDraft,
+            Scope::SidebarGroup,
+            Scope::SidebarWorktreeGroup,
+            Scope::DashboardGroup,
+            Scope::DashboardWorktreeGroup,
+            Scope::SidebarIncognitoDraft,
+            Scope::DashboardIncognitoDraft
+        )]
+        scope: Scope,
+    ) {
+        // Given Space already pressed where ␣m is bound.
+        let mut keys = Keys::new(keymap(), scope.into());
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `h`.
+        let intent = press(&mut keys, key(KeyCode::Char('h')));
+
+        // Then it opens the harness picker.
+        assert_eq!(intent, Some(Intent::PickHarness), "Space h in {scope:?}");
+    }
+
+    /// `scope` where the selection's harness lists no permission modes.
+    fn without_permissions(scope: Scope) -> KeyScope {
+        KeyScope {
+            scope,
+            permissions: false,
+        }
+    }
+
+    #[rstest::rstest]
+    fn leader_a_isnt_bound_without_permission_modes() {
+        // Given the leader popup on a draft whose harness has no permission
+        // modes.
+        let keys = keymap()
+            .get_children_at_path(
+                &[key(KeyCode::Char(' '))],
+                &without_permissions(Scope::SidebarDraft),
+            )
+            .unwrap_or_default();
+
+        // When looking for `a`.
+        let found = keys
+            .iter()
+            .any(|(key_event, _)| *key_event == key(KeyCode::Char('a')));
+
+        // Then it isn't listed.
+        assert!(!found, "␣a should be unbound without permission modes");
+    }
+
+    #[rstest::rstest]
+    fn dashboard_a_isnt_bound_without_permission_modes() {
+        // Given a draft's dashboard whose harness has no permission modes.
+        let mut keys = Keys::new(keymap(), without_permissions(Scope::DashboardDraft));
+
+        // When pressing `a`.
+        let intent = press(&mut keys, key(KeyCode::Char('a')));
+
+        // Then nothing happens.
+        assert_eq!(intent, None, "a should be unbound without permission modes");
+    }
+
+    #[rstest::rstest]
+    fn leader_h_stays_bound_without_permission_modes() {
+        // Given Space already pressed on a draft whose harness has no
+        // permission modes.
+        let mut keys = Keys::new(keymap(), without_permissions(Scope::SidebarDraft));
+        press(&mut keys, key(KeyCode::Char(' ')));
+
+        // When pressing `h`.
+        let intent = press(&mut keys, key(KeyCode::Char('h')));
+
+        // Then it still opens the harness picker.
+        assert_eq!(
+            intent,
+            Some(Intent::PickHarness),
+            "␣h should stay bound without permission modes"
+        );
+    }
+
+    #[rstest::rstest]
     #[case(Scope::SidebarEmpty, false)]
     #[case(Scope::DashboardEmpty, false)]
     #[case(Scope::Sidebar, true)]
@@ -1897,7 +2054,7 @@ mod tests {
     ) {
         // Given Space already pressed.
         let (pressed, tool) = binding;
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
 
         // When pressing the tool's key.
@@ -1948,7 +2105,7 @@ mod tests {
         scope: Scope,
     ) {
         // Given Space and `g` already pressed.
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
         press(&mut keys, key(KeyCode::Char('g')));
 
@@ -1975,7 +2132,7 @@ mod tests {
     ) {
         // Given Space and `g` already pressed.
         let (pressed, kind) = binding;
-        let mut keys = Keys::new(keymap(), scope);
+        let mut keys = Keys::new(keymap(), scope.into());
         press(&mut keys, key(KeyCode::Char(' ')));
         press(&mut keys, key(KeyCode::Char('g')));
 
@@ -2002,7 +2159,10 @@ mod tests {
 
         // When listing the keys under Space g.
         let mut found: Vec<char> = keymap
-            .get_children_at_path(&[key(KeyCode::Char(' ')), key(KeyCode::Char('g'))], &scope)
+            .get_children_at_path(
+                &[key(KeyCode::Char(' ')), key(KeyCode::Char('g'))],
+                &scope.into(),
+            )
             .unwrap_or_default()
             .into_iter()
             .filter_map(|(key, _)| match key.code {
@@ -2018,23 +2178,23 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Scope::Sidebar, " befginpstvw")]
-    #[case(Scope::SidebarDraft, " abefgimnpstvw")]
+    #[case(Scope::SidebarDraft, " abefghimnpstvw")]
     #[case(Scope::SidebarEmpty, " efginps")]
-    #[case(Scope::SidebarGroup, " aefgimnpstv")]
-    #[case(Scope::SidebarWorktreeGroup, " abefgimnpstv")]
+    #[case(Scope::SidebarGroup, " aefghimnpstv")]
+    #[case(Scope::SidebarWorktreeGroup, " abefghimnpstv")]
     #[case(Scope::SidebarGroupThread, " efginpstv")]
-    #[case(Scope::SidebarGroupDraft, " aefgimnpstv")]
+    #[case(Scope::SidebarGroupDraft, " aefghimnpstv")]
     #[case(Scope::Dashboard, " beginpstvw")]
-    #[case(Scope::DashboardDraft, " abegimnpstvw")]
+    #[case(Scope::DashboardDraft, " abeghimnpstvw")]
     #[case(Scope::DashboardEmpty, " eginps")]
-    #[case(Scope::DashboardGroup, " aegimnpstv")]
-    #[case(Scope::DashboardWorktreeGroup, " abegimnpstv")]
+    #[case(Scope::DashboardGroup, " aeghimnpstv")]
+    #[case(Scope::DashboardWorktreeGroup, " abeghimnpstv")]
     #[case(Scope::DashboardGroupThread, " eginpstv")]
-    #[case(Scope::DashboardGroupDraft, " aegimnpstv")]
+    #[case(Scope::DashboardGroupDraft, " aeghimnpstv")]
     #[case(Scope::SidebarIncognito, " efginpstv")]
-    #[case(Scope::SidebarIncognitoDraft, " aefgimnpstv")]
+    #[case(Scope::SidebarIncognitoDraft, " aefghimnpstv")]
     #[case(Scope::DashboardIncognito, " eginpstv")]
-    #[case(Scope::DashboardIncognitoDraft, " aegimnpstv")]
+    #[case(Scope::DashboardIncognitoDraft, " aeghimnpstv")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
         let popup = leader_popup(scope);
@@ -2062,7 +2222,7 @@ mod tests {
     #[case(vec![key(KeyCode::Char('r'))])]
     fn thread_keys_are_unbound_on_a_draft_in_the_sidebar(#[case] pressed: Vec<KeyEvent>) {
         // Given the keymap in the sidebar on a draft.
-        let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
+        let mut keys = Keys::new(keymap(), Scope::SidebarDraft.into());
 
         // When pressing `p`, `s` or `r`.
         let intents: Vec<Option<Intent>> = pressed
@@ -2080,7 +2240,7 @@ mod tests {
     #[rstest::rstest]
     fn r_is_unbound_on_the_settled_header_or_no_row() {
         // Given the keymap in the sidebar with no thread or draft selected.
-        let mut keys = Keys::new(keymap(), Scope::SidebarEmpty);
+        let mut keys = Keys::new(keymap(), Scope::SidebarEmpty.into());
 
         // When pressing `r`.
         let intent = press(&mut keys, key(KeyCode::Char('r')));
@@ -2092,7 +2252,7 @@ mod tests {
     #[rstest::rstest]
     fn enter_on_a_draft_in_the_sidebar_attaches() {
         // Given the keymap in the sidebar on a draft.
-        let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
+        let mut keys = Keys::new(keymap(), Scope::SidebarDraft.into());
 
         // When pressing Enter.
         let intent = press(&mut keys, key(KeyCode::Enter));
@@ -2119,7 +2279,7 @@ mod tests {
         #[case] expected: Intent,
     ) {
         // Given the keymap on a draft's dashboard.
-        let mut keys = Keys::new(keymap(), Scope::DashboardDraft);
+        let mut keys = Keys::new(keymap(), Scope::DashboardDraft.into());
 
         // When pressing the keys in order.
         let intent = pressed
@@ -2141,7 +2301,7 @@ mod tests {
     #[case('d', Intent::DeleteThread)]
     fn sidebar_thread_key_yields_its_intent(#[case] c: char, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
 
         // When pressing the key once.
         let intent = press(&mut keys, key(KeyCode::Char(c)));
@@ -2153,7 +2313,7 @@ mod tests {
     #[rstest::rstest]
     fn d_on_a_draft_in_the_sidebar_deletes() {
         // Given the keymap in the sidebar on a draft.
-        let mut keys = Keys::new(keymap(), Scope::SidebarDraft);
+        let mut keys = Keys::new(keymap(), Scope::SidebarDraft.into());
 
         // When pressing `d`.
         let intent = press(&mut keys, key(KeyCode::Char('d')));
@@ -2169,7 +2329,7 @@ mod tests {
     #[rstest::rstest]
     fn held_j_selects_the_next_thread() {
         // Given a held `j` as the kitty protocol reports it.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
         let held = KeyEvent::new_with_kind_and_state(
             KeyCode::Char('j'),
             KeyModifiers::NONE,

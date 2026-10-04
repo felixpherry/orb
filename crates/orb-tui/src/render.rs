@@ -87,6 +87,7 @@ pub(crate) fn render(
         let (selected_y, sidebar_layout, search_cursor) = sidebar::render(
             &state.sessions,
             &state.attached,
+            &state.harnesses,
             now,
             sidebar_area,
             frame.buffer_mut(),
@@ -185,6 +186,7 @@ fn render_picker(
             picker,
             &state.sessions,
             &state.attached,
+            &state.harnesses,
             now,
             area,
             buf,
@@ -278,7 +280,7 @@ mod tests {
 
     /// Draws `state` on an 80x8 screen.
     fn draw(state: &AppState) -> Buffer {
-        draw_with(state, &Keys::new(keymap(), Scope::Sidebar))
+        draw_with(state, &Keys::new(keymap(), Scope::Sidebar.into()))
     }
 
     /// Draws `state` on an 80x8 screen with `keys` pending.
@@ -288,7 +290,7 @@ mod tests {
 
     /// Draws `state` on an 80x40 screen, tall enough for the whole dashboard.
     fn draw_tall(state: &AppState, pane_error: Option<&str>) -> Buffer {
-        let keys = Keys::new(keymap(), Scope::Dashboard);
+        let keys = Keys::new(keymap(), Scope::Dashboard.into());
         frame(state, pane_error, &keys, 40)
             .backend()
             .buffer()
@@ -358,7 +360,7 @@ mod tests {
     /// thread.
     fn draw_with_pane(state: &AppState, pane: &Pane) -> Buffer {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-        let keys = Keys::new(keymap(), Scope::Sidebar);
+        let keys = Keys::new(keymap(), Scope::Sidebar.into());
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
@@ -533,10 +535,15 @@ mod tests {
         let state = delete_worktree_confirm();
 
         // When drawing a frame.
-        let buffer = frame(&state, None, &Keys::new(keymap(), Scope::Sidebar), 20)
-            .backend()
-            .buffer()
-            .clone();
+        let buffer = frame(
+            &state,
+            None,
+            &Keys::new(keymap(), Scope::Sidebar.into()),
+            20,
+        )
+        .backend()
+        .buffer()
+        .clone();
 
         // Then the list's row and the confirm's title are both on screen.
         let screen = text(&buffer, buffer.area);
@@ -553,7 +560,7 @@ mod tests {
         let mut hits = HitMap::default();
         let buffer = {
             let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
-            let keys = Keys::new(keymap(), Scope::Sidebar);
+            let keys = Keys::new(keymap(), Scope::Sidebar.into());
             let Ok(_) = terminal.draw(|frame| {
                 render(
                     frame,
@@ -716,7 +723,7 @@ mod tests {
     fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
         // Given Space pressed on a two-row screen, too short for the popup.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 2));
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
         press(
             &mut keys,
             KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
@@ -751,7 +758,7 @@ mod tests {
     fn leader_popup_sits_above_the_mode_line() {
         // Given Space pressed on a 20-row screen.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
         press(
             &mut keys,
             KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
@@ -858,7 +865,7 @@ mod tests {
     /// `pane` running for the selected thread; `None` while it's hidden.
     fn cursor_of(state: &AppState, pane: Option<&Pane>) -> Option<Position> {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-        let keys = Keys::new(keymap(), Scope::Sidebar);
+        let keys = Keys::new(keymap(), Scope::Sidebar.into());
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
@@ -957,7 +964,12 @@ mod tests {
         let state = selected(Focus::Dashboard);
 
         // When drawing a frame tall enough for the dashboard.
-        let mut terminal = frame(&state, None, &Keys::new(keymap(), Scope::Dashboard), 40);
+        let mut terminal = frame(
+            &state,
+            None,
+            &Keys::new(keymap(), Scope::Dashboard.into()),
+            40,
+        );
 
         // Then the cursor is shown on the first cell of Open session's label.
         let cursor = terminal
@@ -1099,7 +1111,7 @@ mod tests {
                 &state,
                 None,
                 None,
-                &Keys::new(keymap(), Scope::Dashboard),
+                &Keys::new(keymap(), Scope::Dashboard.into()),
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
                 &mut SidebarScroll::default(),

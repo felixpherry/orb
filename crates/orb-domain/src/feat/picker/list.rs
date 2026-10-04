@@ -8,7 +8,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
-use crate::feat::harness::HarnessInfo;
+use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::sessions::state::{ProjectId, ProjectKind, ThreadId};
 
 /// One row a picker can show.
@@ -33,6 +33,13 @@ pub enum PickerItem {
     Setting {
         value: Option<String>,
         label: String,
+    },
+    /// A harness to start a draft's session in, matched on its label;
+    /// disabled with the reason it can't be picked.
+    Harness {
+        id: HarnessId,
+        label: String,
+        unavailable: Option<String>,
     },
     /// A section label between rows. It can't be selected, and it's hidden
     /// while a filter is typed.
@@ -109,7 +116,12 @@ impl PickerItem {
     pub fn disabled(&self) -> bool {
         matches!(
             self,
-            Self::Branch(BranchRow { disabled: true, .. }) | Self::Heading(_)
+            Self::Branch(BranchRow { disabled: true, .. })
+                | Self::Heading(_)
+                | Self::Harness {
+                    unavailable: Some(_),
+                    ..
+                }
         )
     }
 }
@@ -420,6 +432,7 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         | PickerItem::Workspace(_)
         | PickerItem::Branch(_)
         | PickerItem::Setting { .. }
+        | PickerItem::Harness { .. }
         | PickerItem::InitGit
         | PickerItem::AllProjects
         | PickerItem::Confirm(_)
@@ -487,6 +500,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::AllProjects => (ALL_PROJECTS.to_owned(), None),
         PickerItem::Confirm(yes) => (confirm_label(*yes).to_owned(), None),
         PickerItem::Setting { label, .. }
+        | PickerItem::Harness { label, .. }
         | PickerItem::Heading(label)
         | PickerItem::Thread { label, .. }
         | PickerItem::Worktree { label, .. }
@@ -551,6 +565,7 @@ mod tests {
                 PickerItem::AllProjects => super::ALL_PROJECTS.to_owned(),
                 PickerItem::Confirm(yes) => super::confirm_label(*yes).to_owned(),
                 PickerItem::Setting { label, .. }
+                | PickerItem::Harness { label, .. }
                 | PickerItem::Heading(label)
                 | PickerItem::Thread { label, .. }
                 | PickerItem::Worktree { label, .. }
@@ -635,6 +650,7 @@ mod tests {
                 | PickerItem::Workspace(_)
                 | PickerItem::Branch(_)
                 | PickerItem::Setting { .. }
+                | PickerItem::Harness { .. }
                 | PickerItem::Heading(_)
                 | PickerItem::InitGit
                 | PickerItem::AllProjects

@@ -53,14 +53,14 @@ pub fn read_new_lines(path: &Path, offset: u64) -> io::Result<NewLines> {
     })
 }
 
-/// A prompt and what Claude did after it, oldest first in a tail.
+/// A prompt and what the session did after it, oldest first in a tail.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Exchange {
     /// What the user typed and when; `None` when the tail starts after it.
     pub prompt: Option<(String, Option<SystemTime>)>,
     /// Tool names in order, a run of the same tool counted once.
     pub tools: Vec<(String, usize)>,
-    /// Claude's last text block in the exchange and when it was written.
+    /// The reply's last text block in the exchange and when it was written.
     pub reply: Option<(String, Option<SystemTime>)>,
 }
 
@@ -69,11 +69,11 @@ pub struct Exchange {
 pub enum Role {
     /// A prompt the user typed.
     User,
-    /// A text block of Claude's reply.
+    /// A text block of the reply.
     Assistant,
 }
 
-/// A prompt the user typed, or one text block of Claude's reply.
+/// A prompt the user typed, or one text block of the reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     /// Who wrote it.

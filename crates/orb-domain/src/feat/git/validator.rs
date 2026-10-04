@@ -57,7 +57,7 @@ pub fn validate_change_workspace(state: &AppState) -> Result<(), ChangeWorkspace
 
 /// What the mode line says when a branch switch is refused as
 /// [`SwitchBranchError::Busy`].
-pub const BUSY_DIRECTORY: &str = "Claude is working in this directory";
+pub const BUSY_DIRECTORY: &str = "A session is working in this directory";
 
 /// Why switching the selected thread's, draft's or group's branch can't
 /// proceed.

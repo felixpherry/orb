@@ -1,11 +1,12 @@
 //! The environment every process orb starts runs with: the terminal pane's
-//! child and every `claude` call.
+//! child and every harness command.
 //!
 //! The child inherits orb's environment minus two groups of variables: the ones
-//! that would make it think it runs inside a Claude session, and the ones that
-//! name the terminal orb itself runs in. In their place it gets one fixed
-//! terminal identity, so Claude picks the same capabilities (kitty keys,
-//! synchronized output) no matter how orb was launched.
+//! that would make it think it runs inside another agent's session, and the
+//! ones that name the terminal orb itself runs in. In their place it gets one
+//! fixed terminal identity, so the attached program picks the same
+//! capabilities (kitty keys, synchronized output) no matter how orb was
+//! launched.
 
 use std::ffi::OsString;
 
@@ -17,8 +18,8 @@ const IDENTITY: [(&str, &str); 4] = [
     ("CLAUDE_CODE_FORCE_SYNC_OUTPUT", "1"),
 ];
 
-/// Variables a Claude session sets for the processes it spawns.
-const CLAUDE_SESSION_VARS: [&str; 12] = [
+/// Variables an agent session sets for the processes it spawns.
+const SESSION_VARS: [&str; 12] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",
@@ -62,7 +63,7 @@ const TERMINAL_PREFIXES: [&str; 10] = [
     "KONSOLE_",
 ];
 
-/// The child's environment: `parent` without Claude session and outer-terminal
+/// The child's environment: `parent` without agent session and outer-terminal
 /// variables, plus orb's terminal identity.
 pub fn child_env<I>(parent: I) -> Vec<(OsString, OsString)>
 where
@@ -76,7 +77,7 @@ where
 }
 
 fn is_scrubbed(key: &str) -> bool {
-    CLAUDE_SESSION_VARS.contains(&key)
+    SESSION_VARS.contains(&key)
         || TERMINAL_VARS.contains(&key)
         || IDENTITY.iter().any(|(name, _)| *name == key)
         || TERMINAL_PREFIXES

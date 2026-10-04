@@ -60,16 +60,16 @@ pub enum ProjectKind {
     Incognito,
 }
 
-/// What a thread's Claude session is doing.
+/// What a thread's session is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThreadStatus {
     /// Not polled yet since orb started.
     Unknown,
-    /// Claude is running a turn.
+    /// The session is running a turn.
     Working,
-    /// Claude waits for the user to approve something.
+    /// The session waits for the user to approve something.
     NeedsApproval,
-    /// Claude waits for the user to answer.
+    /// The session waits for the user to answer.
     NeedsInput,
     /// The session is idle, ready for a prompt.
     Idle,
@@ -77,7 +77,7 @@ pub enum ThreadStatus {
     Failed,
     /// The session stopped.
     Stopped,
-    /// Claude no longer knows the session.
+    /// Its harness no longer knows the session.
     Gone,
 }
 
@@ -93,9 +93,9 @@ impl ThreadStatus {
 pub enum NoticeKind {
     /// A turn ended.
     Finished,
-    /// Claude started waiting for an approval.
+    /// The session started waiting for an approval.
     NeedsApproval,
-    /// Claude started waiting for an answer.
+    /// The session started waiting for an answer.
     NeedsInput,
 }
 
@@ -121,7 +121,7 @@ pub struct Notice {
     pub title: String,
 }
 
-/// One Claude session orb started.
+/// One session orb started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thread {
     pub id: ThreadId,
@@ -129,7 +129,7 @@ pub struct Thread {
     pub title: Option<String>,
     /// Where the session runs.
     pub cwd: PathBuf,
-    /// The session's Claude transcript, once located.
+    /// The session's transcript, once located.
     pub transcript: Option<PathBuf>,
     pub status: ThreadStatus,
     /// When orb first saw the current turn running; `None` between turns.
@@ -152,10 +152,10 @@ pub struct Thread {
     pub unseen: bool,
     /// The group the thread belongs to; `None` = a top-level thread.
     pub group: Option<GroupId>,
-    /// The `--model` its session started with; `None` = Claude's default.
+    /// The `--model` its session started with; `None` = the harness's default.
     pub model: Option<String>,
-    /// The `--permission-mode` its session started with; `None` = Claude's
-    /// default.
+    /// The `--permission-mode` its session started with; `None` = the
+    /// harness's default.
     pub permission: Option<String>,
     /// The harness its session runs in.
     pub harness: HarnessId,
@@ -190,9 +190,9 @@ pub struct Draft {
     /// base it starts from (a ref name like `main` or `origin/x`). Existing:
     /// that worktree's branch.
     pub branch: Option<String>,
-    /// The `--model`; `None` = Claude's default.
+    /// The `--model`; `None` = the harness's default.
     pub model: Option<String>,
-    /// The `--permission-mode`; `None` = Claude's default.
+    /// The `--permission-mode`; `None` = the harness's default.
     pub permission: Option<String>,
     pub created_at: SystemTime,
     /// Whether the project's root is in a git repository, as the sessions
@@ -211,9 +211,9 @@ pub struct Draft {
 pub struct GroupDefaults {
     /// The harness its threads start in.
     pub harness: HarnessId,
-    /// The `--model`; `None` = Claude's default.
+    /// The `--model`; `None` = the harness's default.
     pub model: Option<String>,
-    /// The `--permission-mode`; `None` = Claude's default.
+    /// The `--permission-mode`; `None` = the harness's default.
     pub permission: Option<String>,
 }
 
@@ -403,14 +403,14 @@ pub struct Sessions {
     pub fetching: Option<String>,
     /// The latest failure; shown until the next intent or a later success.
     pub error: Option<String>,
-    /// A session start waits for the user to trust this folder, Claude's
-    /// project path for the start; the sessions actor clears it when the user
+    /// A session start waits for the user to trust this folder, the one its
+    /// harness names for the start; the sessions actor clears it when the user
     /// answers.
     pub trust: Option<PathBuf>,
     /// A started draft's thread, or a thread whose worktree was recreated, for
     /// the frontend to attach to.
     pub attach: Option<ThreadId>,
-    /// Threads hidden while their `claude rm` runs. The intent handler
+    /// Threads hidden while their session is removed. The intent handler
     /// inserts a lone thread, the sessions actor a deleted group's threads;
     /// the sessions actor removes.
     pub deleting: HashSet<ThreadId>,
@@ -639,6 +639,18 @@ impl Sessions {
             SidebarItem::Group(id) | SidebarItem::GroupDraft(id) => self.group(id),
             SidebarItem::Thread(_) => self.group(self.selected_thread()?.group?),
             SidebarItem::Draft(_) | SidebarItem::SettledShelf => None,
+        }
+    }
+
+    /// The harness `␣h`/`␣m`/`␣a` set up at the cursor: the selected draft's,
+    /// or on a group's card or draft the group's default.
+    pub fn setting_harness(&self) -> Option<&HarnessId> {
+        match (self.cursor?, self.selected_draft(), self.selected_group()) {
+            (SidebarItem::Draft(_), Some((_, draft)), _) => Some(&draft.harness),
+            (SidebarItem::Group(_) | SidebarItem::GroupDraft(_), _, Some((_, group))) => {
+                Some(&group.defaults.harness)
+            }
+            _ => None,
         }
     }
 

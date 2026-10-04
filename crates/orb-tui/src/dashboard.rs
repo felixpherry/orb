@@ -1,4 +1,4 @@
-//! Dashboard — what the right-hand area shows while no Claude pane is up.
+//! Dashboard — what the right-hand area shows while no session pane is up.
 //!
 //! LazyVim's start screen, for orb: the word ORB in shadowed block letters
 //! fading from blue to violet, with a trail of moons and a few stars; a line
@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use orb_domain::feat::dashboard::{DashboardItem, items};
+use orb_domain::feat::harness::HarnessId;
 use orb_domain::feat::picker::list::setting_label;
 use orb_domain::feat::sessions::state::{
     Draft, DraftWorkspace, GroupKind, NEW_THREAD, SidebarItem, SidebarRow,
@@ -27,8 +28,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::mouse::HitMap;
 use crate::sidebar::{
-    self, BLUE, BLUE1, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK,
-    FOLDER, MAGENTA, ORANGE, YELLOW,
+    self, BLUE, BLUE1, BRANCH, CHIP, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK, FOLDER, LOGO,
+    MAGENTA, ORANGE, PLUG, YELLOW, mark,
 };
 
 /// tokyonight-moon's `red`.
@@ -41,7 +42,6 @@ const FORK: &str = "\u{f126}";
 const TERMINAL: &str = "\u{f120}";
 const GIT: &str = "\u{f1d3}";
 const VIM: &str = "\u{e62b}";
-const CHIP: &str = "\u{f2db}";
 const SHIELD: &str = "\u{f132}";
 const EXIT: &str = "\u{f08b}";
 const ROCKET: &str = "\u{f135}";
@@ -87,7 +87,7 @@ pub(crate) fn render(
     buf: &mut Buffer,
     hits: &mut HitMap,
 ) -> Position {
-    let items = items(&state.sessions);
+    let items = items(&state.sessions, state.offers_permissions());
     let cursor = state.dashboard.index(&state.sessions, items.len());
     let count = u16::try_from(items.len()).unwrap_or(u16::MAX);
     let menu_height = |gap: u16| (count * (gap + 1)).saturating_sub(gap);
@@ -260,13 +260,24 @@ fn entry(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let (icon, label) = look(item);
-    let icon_fg = match item {
-        DashboardItem::Open | DashboardItem::Start => CLAUDE,
-        _ => BLUE1,
+    let (glyph, label) = look(item);
+    let (icon, icon_fg) = match item {
+        DashboardItem::Open => mark(
+            state
+                .sessions
+                .selected_thread()
+                .and_then(|thread| state.harness_info(&thread.harness))
+                .and_then(|info| info.icon.as_deref()),
+        ),
+        DashboardItem::Start => (glyph, LOGO),
+        _ => (glyph, BLUE1),
     };
     let room = usize::from(width).saturating_sub(label.len() + 9);
-    let mut spans = vec![span(icon, icon_fg), span("  ", FG), span(label, CYAN)];
+    let mut spans = vec![
+        span(icon.to_owned(), icon_fg),
+        span("  ", FG),
+        span(label, CYAN),
+    ];
     if let Some(value) = value(state, item).filter(|_| room > 4) {
         spans.extend([span("  ", FG), span(fit(&value, room), COMMENT)]);
     }
@@ -280,13 +291,14 @@ fn entry(
     );
 }
 
-/// An item's icon and label.
+/// An item's icon and label; Open's icon is its harness's mark instead.
 fn look(item: DashboardItem) -> (&'static str, &'static str) {
     match item {
-        DashboardItem::Open => (CLAUDE_LOGO, "Open session"),
+        DashboardItem::Open => (CHIP, "Open session"),
         DashboardItem::Start => (ROCKET, "Start session"),
         DashboardItem::Workspace => (FORK, "Workspace"),
         DashboardItem::Branch => (BRANCH, "Branch"),
+        DashboardItem::Harness => (PLUG, "Harness"),
         DashboardItem::Model => (CHIP, "Model"),
         DashboardItem::Permission => (SHIELD, "Permission"),
         DashboardItem::NewSession => (PLUS, "New session"),
@@ -301,8 +313,8 @@ fn look(item: DashboardItem) -> (&'static str, &'static str) {
 }
 
 /// An item's current value: the selected thread's directory and branch, the
-/// selected draft's workspace, branch, model and permission, or a group
-/// draft's model and permission.
+/// selected draft's workspace, branch, harness, model and permission, or a
+/// group's harness, model and permission.
 fn value(state: &AppState, item: DashboardItem) -> Option<String> {
     let sessions = &state.sessions;
     let home = &state.home;
@@ -314,6 +326,10 @@ fn value(state: &AppState, item: DashboardItem) -> Option<String> {
         (DashboardItem::Branch, Some((_, draft)), _) => Some(branch_label(draft)),
         (DashboardItem::Branch, None, Some(thread)) => thread.branch.clone(),
         (DashboardItem::Branch, None, None) => sessions.selected_group()?.1.branch.clone(),
+        (DashboardItem::Harness, Some((_, draft)), _) => Some(harness_label(state, &draft.harness)),
+        (DashboardItem::Harness, None, None) => sessions
+            .selected_group()
+            .map(|(_, group)| harness_label(state, &group.defaults.harness)),
         (DashboardItem::Model, Some((_, draft)), _) => Some(
             setting_label(draft.model.as_deref(), state.harness_info(&draft.harness)).to_owned(),
         ),
@@ -329,6 +345,13 @@ fn value(state: &AppState, item: DashboardItem) -> Option<String> {
             .map(|(_, group)| setting_label(group.defaults.permission.as_deref(), None).to_owned()),
         _ => None,
     }
+}
+
+/// The harness's name, or its id when orb has no info for it.
+fn harness_label(state: &AppState, id: &HarnessId) -> String {
+    state
+        .harness_info(id)
+        .map_or_else(|| id.to_string(), |info| info.label.clone())
 }
 
 /// Where a draft's session will run: a word or two, or an existing
@@ -353,8 +376,15 @@ fn branch_label(draft: &Draft) -> String {
     }
 }
 
-/// `✳ 2 working · 14 threads · 4 projects`, numbers in magenta.
+/// `✳ 2 working · 14 threads · 4 projects`, numbers in magenta, after the
+/// first registered harness's mark.
 fn stats(state: &AppState) -> Line<'static> {
+    let (glyph, fg) = mark(
+        state
+            .harnesses
+            .first()
+            .and_then(|info| info.icon.as_deref()),
+    );
     let sessions = &state.sessions;
     let threads = sessions.threads().count();
     let projects = sessions
@@ -363,7 +393,7 @@ fn stats(state: &AppState) -> Line<'static> {
         .filter(|project| !project.removed)
         .count();
     Line::from(vec![
-        span(format!("{CLAUDE_LOGO} "), CLAUDE),
+        span(format!("{glyph} "), fg),
         span(sessions.working_count().to_string(), MAGENTA),
         span(" working · ", BLUE),
         span(threads.to_string(), MAGENTA),
@@ -514,10 +544,13 @@ mod tests {
             repo: true,
             from: Some("origin/main".to_owned()),
         };
-        state(
-            vec![project(1, "orb", vec![], Some(draft))],
-            Some(SidebarItem::Draft(ProjectId(1))),
-        )
+        AppState {
+            harnesses: vec![info()],
+            ..state(
+                vec![project(1, "orb", vec![], Some(draft))],
+                Some(SidebarItem::Draft(ProjectId(1))),
+            )
+        }
     }
 
     /// orb with one settled thread, the Settled header selected.
@@ -617,10 +650,13 @@ mod tests {
     #[rstest::rstest]
     fn wide_area_draws_the_footer_counts() {
         // Given orb with two threads, the first selected.
-        let state = state(
-            vec![project(1, "orb", vec![thread(1), thread(2)], None)],
-            Some(SidebarItem::Thread(ThreadId(1))),
-        );
+        let state = AppState {
+            harnesses: vec![info()],
+            ..state(
+                vec![project(1, "orb", vec![thread(1), thread(2)], None)],
+                Some(SidebarItem::Thread(ThreadId(1))),
+            )
+        };
 
         // When drawing the dashboard 80×40.
         let (buf, _) = draw(&state, None, 80, 40);
@@ -895,10 +931,26 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn harness_item_shows_the_drafts_harness() {
+        // Given a Claude draft.
+        let state = new_worktree_draft();
+
+        // When drawing the dashboard 80×40.
+        let (buf, _) = draw(&state, None, 80, 40);
+
+        // Then the Harness item's value is Claude's name.
+        let row = line_with(&buf, "Harness");
+        assert!(
+            row.contains("Harness  Claude Code"),
+            "harness row was '{row}'"
+        );
+    }
+
+    #[rstest::rstest]
     fn cursor_goes_on_the_highlighted_labels_first_cell() {
         // Given a selected thread with the menu cursor moved to Workspace.
         let mut state = selected_thread();
-        state.dashboard.next(&state.sessions);
+        state.dashboard.next(&state.sessions, true);
 
         // When drawing the dashboard 80×40.
         let (buf, at) = draw(&state, None, 80, 40);
@@ -946,7 +998,7 @@ mod tests {
         // Given a selected thread with the menu cursor moved `moves` items down.
         let mut state = selected_thread();
         for _ in 0..moves {
-            state.dashboard.next(&state.sessions);
+            state.dashboard.next(&state.sessions, true);
         }
 
         // When drawing the dashboard 80×40.

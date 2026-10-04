@@ -12,7 +12,7 @@
 //!
 //! The preview box is titled with the selected row's label and shows its
 //! thread's status, branch and model, then the exchange the message is in:
-//! the prompt and every Claude text block after it, each speaker named once.
+//! the prompt and every reply text block after it, each speaker named once.
 //! The matching message is plain text with its matches lit, scrolled so the
 //! first match sits about a third down; the rest render as Markdown. Until
 //! the exchange is loaded it says `No transcript yet`. There are no key
@@ -21,6 +21,7 @@
 use std::time::SystemTime;
 
 use orb_domain::AppState;
+use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::picker::list::PickerItem;
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::state::SearchProgress;
@@ -34,10 +35,10 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::mouse::HitMap;
 use crate::picker::{PickerScroll, highlight, span};
-use crate::session_picker::{big, boxed, boxes, markdown, meta, render_input, speaker, wrap_words};
-use crate::sidebar::{
-    BG_DARK, BLUE, BLUE1, CLAUDE, CLAUDE_LOGO, COMMENT, CYAN, DARK3, DARK5, FG, ORANGE, RED, VISUAL,
+use crate::session_picker::{
+    big, boxed, boxes, markdown, meta, render_input, reply_speaker, speaker, wrap_words,
 };
+use crate::sidebar::{BG_DARK, BLUE, BLUE1, COMMENT, CYAN, DARK3, DARK5, FG, ORANGE, RED, VISUAL};
 
 /// Draws the search picker over `area`: `picker`'s hit rows, with the
 /// indexing progress and any index error from `state`, beside the selected
@@ -185,16 +186,14 @@ fn render_preview(
     let block = boxed(Some(Line::from(span(format!(" {label} "), BLUE))));
     let inner = block.inner(area);
     block.render(area, buf);
-    let status = state
-        .sessions
-        .threads()
-        .find(|found| found.id == *thread)
-        .map_or_else(Line::default, |found| {
-            meta(found, state.attached.contains(thread), now)
-        });
+    let found = state.sessions.threads().find(|found| found.id == *thread);
+    let info = found.and_then(|found| state.harness_info(&found.harness));
+    let status = found.map_or_else(Line::default, |found| {
+        meta(found, info, state.attached.contains(thread), now)
+    });
     let width = usize::from(inner.width).saturating_sub(1);
     let (body, focus) = match picker.search_preview() {
-        Some(preview) => exchange_lines(&preview.messages, *id, text_lit, width, now),
+        Some(preview) => exchange_lines(&preview.messages, info, *id, text_lit, width, now),
         None => (vec![Line::from(span(" No transcript yet", COMMENT))], 0),
     };
     let skip = {
@@ -211,13 +210,15 @@ fn render_preview(
     }
 }
 
-/// `messages` as lines `width` wide, a speaker header (`You` / `✳ Claude`)
-/// wherever the speaker changes, with a blank line before each header but
-/// the first. Message `hit` is plain text with the graphemes at byte offsets
-/// `lit` lit; the rest are Markdown. Returns the lines and the index of the
-/// first lit line, or of the hit's first line when nothing is lit.
+/// `messages` as lines `width` wide, a speaker header (`You`, or the
+/// harness's (`info`'s) mark and name) wherever the speaker changes, with a
+/// blank line before each header but the first. Message `hit` is plain text
+/// with the graphemes at byte offsets `lit` lit; the rest are Markdown.
+/// Returns the lines and the index of the first lit line, or of the hit's
+/// first line when nothing is lit.
 fn exchange_lines(
     messages: &[(i64, Role, String)],
+    info: Option<&HarnessInfo>,
     hit: i64,
     lit: &[usize],
     width: usize,
@@ -233,7 +234,7 @@ fn exchange_lines(
             }
             lines.push(match role {
                 Role::User => speaker("", "You", CYAN, None, now, width),
-                Role::Assistant => speaker(CLAUDE_LOGO, "Claude", CLAUDE, None, now, width),
+                Role::Assistant => reply_speaker(info, None, now, width),
             });
             last = Some(*role);
         }

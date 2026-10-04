@@ -102,19 +102,25 @@ impl IntentHandler {
             }
             Intent::FocusRight => focus_right(state),
             Intent::DashboardHighlight(index) => {
-                state.dashboard.highlight(&state.sessions, *index);
+                state
+                    .dashboard
+                    .highlight(&state.sessions, state.offers_permissions(), *index);
                 vec![]
             }
             Intent::DashboardNext => {
-                state.dashboard.next(&state.sessions);
+                state
+                    .dashboard
+                    .next(&state.sessions, state.offers_permissions());
                 vec![]
             }
             Intent::DashboardPrev => {
-                state.dashboard.prev(&state.sessions);
+                state
+                    .dashboard
+                    .prev(&state.sessions, state.offers_permissions());
                 vec![]
             }
             Intent::DashboardRun => {
-                let items = items(&state.sessions);
+                let items = items(&state.sessions, state.offers_permissions());
                 match items.get(state.dashboard.index(&state.sessions, items.len())) {
                     Some(item) => Self::handle(&item.intent(), state),
                     None => vec![],
@@ -128,7 +134,7 @@ impl IntentHandler {
                 Err(_) => vec![],
             },
             Intent::ToggleSidebar => match (state.sidebar.hidden, state.focus) {
-                // `<C-b>` in the Claude pane: the keys stay in the pane.
+                // `<C-b>` in the attached pane: the keys stay in the pane.
                 (hidden, Focus::Attached) => {
                     state.sidebar.hidden = !hidden;
                     vec![]
@@ -572,6 +578,18 @@ impl IntentHandler {
                 }
                 vec![]
             }
+            Intent::PickHarness => {
+                let picker = validate_pick_setting(state)
+                    .ok()
+                    .and_then(|()| setting_target(&state.sessions))
+                    .map(|(target, harness, ..)| {
+                        PickerState::harnesses(target, &state.harnesses, harness, state.focus)
+                    });
+                if let Some(picker) = picker {
+                    open_picker(state, picker);
+                }
+                vec![]
+            }
             Intent::PickerOpen => match validate_open_directory(state) {
                 Ok(()) => list(state.picker.as_mut().and_then(PickerState::open_directory)),
                 Err(_) => vec![],
@@ -611,14 +629,14 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
-                Some(&PickerKind::Model { target }) => {
+                Some(&PickerKind::Model { target, .. }) => {
                     match close_picker(state)
                         .as_ref()
                         .and_then(PickerState::selected)
                         .cloned()
                     {
                         Some(PickerItem::Setting { value, .. }) => {
-                            edit_setting(state, target, |model, _| *model = value)
+                            edit_setting(state, target, |_, model, _| *model = value)
                         }
                         _ => vec![],
                     }
@@ -630,7 +648,25 @@ impl IntentHandler {
                         .cloned()
                     {
                         Some(PickerItem::Setting { value, .. }) => {
-                            edit_setting(state, target, |_, permission| *permission = value)
+                            edit_setting(state, target, |_, _, permission| *permission = value)
+                        }
+                        _ => vec![],
+                    }
+                }
+                Some(&PickerKind::Harness { target }) => {
+                    match close_picker(state)
+                        .as_ref()
+                        .and_then(PickerState::selected)
+                        .cloned()
+                    {
+                        Some(PickerItem::Harness { id, .. }) => {
+                            edit_setting(state, target, |harness, model, permission| {
+                                if *harness != id {
+                                    *harness = id;
+                                    *model = None;
+                                    *permission = None;
+                                }
+                            })
                         }
                         _ => vec![],
                     }
@@ -1326,19 +1362,23 @@ where
     }
 }
 
-/// Applies `edit` to `target`'s model and permission and asks the sessions
-/// actor to save them; nothing when the draft is gone.
+/// Applies `edit` to `target`'s harness, model and permission and asks the
+/// sessions actor to save them; nothing when the draft is gone.
 fn edit_setting<F>(state: &mut AppState, target: DraftTarget, edit: F) -> Vec<Command>
 where
-    F: FnOnce(&mut Option<String>, &mut Option<String>),
+    F: FnOnce(&mut HarnessId, &mut Option<String>, &mut Option<String>),
 {
     match target {
         DraftTarget::Project(project) => edit_draft(state, project, |draft| {
-            edit(&mut draft.model, &mut draft.permission);
+            edit(&mut draft.harness, &mut draft.model, &mut draft.permission);
         }),
         DraftTarget::Group(group) => match state.sessions.group_defaults_mut(group) {
             Some(defaults) => {
-                edit(&mut defaults.model, &mut defaults.permission);
+                edit(
+                    &mut defaults.harness,
+                    &mut defaults.model,
+                    &mut defaults.permission,
+                );
                 vec![Command::SaveGroupDraft(group)]
             }
             None => vec![],
@@ -1346,8 +1386,8 @@ where
     }
 }
 
-/// What `␣m`/`␣a` set for the cursor, with its current model and
-/// permission: a project's draft, or on a group's draft or card the group's
+/// What `␣h`/`␣m`/`␣a` set for the cursor, with its current harness, model
+/// and permission: a project's draft, or on a group's draft or card the group's
 /// defaults.
 fn setting_target(
     sessions: &Sessions,
@@ -1591,7 +1631,7 @@ fn show_pane(state: &mut AppState) -> Vec<Command> {
     }
 }
 
-/// Moves the keys to the right-hand area: into the Claude pane while the
+/// Moves the keys to the right-hand area: into the session pane while the
 /// selected thread is attached and can still be attached to, else to the
 /// dashboard.
 fn focus_right(state: &mut AppState) -> Vec<Command> {
@@ -1607,7 +1647,7 @@ fn focus_right(state: &mut AppState) -> Vec<Command> {
 }
 
 /// What a picker key does in the rename box: edit the name, save it (a blank
-/// name goes back to Claude's title) or cancel, both giving the sidebar back
+/// name goes back to the harness's title) or cancel, both giving the sidebar back
 /// the keys. The picker's other keys do nothing.
 fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
     match (intent, &mut state.rename) {
@@ -1783,9 +1823,12 @@ fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
 
 #[cfg(test)]
 mod tests {
-    use crate::feat::harness::HarnessId;
+    use crate::feat::harness::claude::supervisor::ClaudeSupervisor;
+    use crate::feat::harness::fake::{FakeHarness, pi_like};
+    use crate::feat::harness::{Harness, HarnessId};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
     use crate::command::Workspace;
@@ -3130,7 +3173,7 @@ mod tests {
     fn next_intent_clears_the_error() {
         // Given a failure on the mode line.
         let mut state = state_with(vec![in_root(1)], 1);
-        state.sessions.error = Some("Claude is working in this directory".to_owned());
+        state.sessions.error = Some("A session is working in this directory".to_owned());
 
         // When handling the next intent.
         IntentHandler::handle(&Intent::SelectNext, &mut state);
@@ -3178,7 +3221,7 @@ mod tests {
         // Then the mode line says Claude is working there.
         assert_eq!(
             state.sessions.error.as_deref(),
-            Some("Claude is working in this directory"),
+            Some("A session is working in this directory"),
             "a busy directory should refuse the switch"
         );
     }
@@ -4060,14 +4103,15 @@ mod tests {
         assert_eq!(
             state.picker.as_ref().map(PickerState::kind),
             Some(&PickerKind::Model {
-                target: DraftTarget::Group(GroupId(9))
+                target: DraftTarget::Group(GroupId(9)),
+                icon: info().icon,
             }),
             "␣m on a group draft should open its model picker"
         );
     }
 
     #[rstest::rstest]
-    #[case::model(Intent::PickModel, PickerKind::Model { target: DraftTarget::Group(GroupId(9)) })]
+    #[case::model(Intent::PickModel, PickerKind::Model { target: DraftTarget::Group(GroupId(9)), icon: info().icon })]
     #[case::permission(
         Intent::PickPermission,
         PickerKind::Permission { target: DraftTarget::Group(GroupId(9)) }
@@ -5001,7 +5045,7 @@ mod tests {
         // Then the mode line says Claude is working there.
         assert_eq!(
             state.sessions.error.as_deref(),
-            Some("Claude is working in this directory"),
+            Some("A session is working in this directory"),
             "a busy root should refuse a local draft's checkout"
         );
     }
@@ -5311,7 +5355,8 @@ mod tests {
             )),
             Some((
                 PickerKind::Model {
-                    target: DraftTarget::Project(ProjectId(1))
+                    target: DraftTarget::Project(ProjectId(1)),
+                    icon: info().icon,
                 },
                 Some(setting(None))
             )),
@@ -5402,6 +5447,171 @@ mod tests {
             the_draft(&state).map(|draft| draft.permission.as_deref()),
             Some(None),
             "Default should clear the draft's permission mode"
+        );
+    }
+
+    /// A selected draft on claude-opus-5-5 in plan mode, with Claude and a
+    /// pi-like harness registered.
+    fn drafting_with_pi() -> AppState {
+        let mut state = drafting(
+            Draft {
+                model: Some("claude-opus-5-5".into()),
+                permission: Some("plan".into()),
+                ..draft(DraftWorkspace::Local)
+            },
+            vec![],
+        );
+        state.harnesses = vec![info(), pi_like()];
+        state
+    }
+
+    /// `state` with its harness picker open and pi, after Claude, highlighted.
+    fn picking_pi(mut state: AppState) -> AppState {
+        IntentHandler::handle(&Intent::PickHarness, &mut state);
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+        state
+    }
+
+    #[rstest::rstest]
+    fn pick_harness_opens_the_harness_picker_on_a_draft() {
+        // Given a selected draft.
+        let mut state = drafting_with_pi();
+
+        // When handling PickHarness.
+        IntentHandler::handle(&Intent::PickHarness, &mut state);
+
+        // Then the draft's harness picker is open.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::kind),
+            Some(&PickerKind::Harness {
+                target: DraftTarget::Project(ProjectId(1)),
+            }),
+            "␣h on a draft should open its harness picker"
+        );
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn harness_picker_lists_a_test_only_harness() {
+        // Given Claude, a pi-like harness and a test-only harness `other`
+        // whose info comes from its own probe.
+        let other = FakeHarness::new("other", Arc::new(ClaudeSupervisor::new(Vec::new())))
+            .probe()
+            .await;
+        let mut state = drafting_with_pi();
+        state.harnesses.push(other);
+
+        // When handling PickHarness.
+        IntentHandler::handle(&Intent::PickHarness, &mut state);
+
+        // Then the three harnesses are the rows, in registration order.
+        let ids: Vec<String> = state
+            .picker
+            .iter()
+            .flat_map(PickerState::shown)
+            .filter_map(|(item, _)| match item {
+                PickerItem::Harness { id, .. } => Some(id.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            ["claude", "pi", "other"],
+            "every registered harness should be offered"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_harness_sets_the_drafts_harness() {
+        // Given a Claude draft's harness picker with pi highlighted.
+        let mut state = picking_pi(drafting_with_pi());
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft runs pi.
+        assert_eq!(
+            the_draft(&state).map(|draft| draft.harness.clone()),
+            Some(HarnessId::new("pi")),
+            "the picked harness should be the draft's"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_harness_resets_the_drafts_model_and_permission() {
+        // Given a draft on claude-opus-5-5 in plan mode, and its harness
+        // picker with pi highlighted.
+        let mut state = picking_pi(drafting_with_pi());
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft is back on the default model and permission.
+        assert_eq!(
+            the_draft(&state).map(|draft| (draft.model.as_deref(), draft.permission.as_deref())),
+            Some((None, None)),
+            "another harness should start from its defaults"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_harness_saves_the_draft() {
+        // Given a draft's harness picker with pi highlighted.
+        let mut state = picking_pi(drafting_with_pi());
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to save the draft.
+        assert_eq!(
+            commands,
+            vec![Command::SaveDraft(ProjectId(1))],
+            "a harness pick should be saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_the_current_harness_keeps_the_drafts_model() {
+        // Given a Claude draft on claude-opus-5-5 whose harness picker has
+        // Claude, its current harness, highlighted.
+        let mut state = drafting_with_pi();
+        IntentHandler::handle(&Intent::PickHarness, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the draft keeps its model.
+        assert_eq!(
+            the_draft(&state).and_then(|draft| draft.model.as_deref()),
+            Some("claude-opus-5-5"),
+            "picking the same harness should change nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_harness_on_a_group_card_resets_its_default_model_and_permission() {
+        // Given a started group's card with defaults on opus in auto mode,
+        // and its harness picker with pi highlighted.
+        let mut state = with_defaults(
+            grouped_state(false, SidebarItem::Group(GroupId(9))),
+            "opus",
+            "auto",
+        );
+        state.harnesses = vec![info(), pi_like()];
+        let mut state = picking_pi(state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the group's defaults are pi on the default model and permission.
+        assert_eq!(
+            state.sessions.selected_group().map(|(_, group)| (
+                group.defaults.harness.clone(),
+                group.defaults.model.clone(),
+                group.defaults.permission.clone()
+            )),
+            Some((HarnessId::new("pi"), None, None)),
+            "a card's harness pick should reset its default model and permission"
         );
     }
 
@@ -6759,7 +6969,7 @@ mod tests {
 
     /// The dashboard cursor's index on `state`'s selection.
     fn dashboard_index(state: &AppState) -> usize {
-        let len = crate::feat::dashboard::items(&state.sessions).len();
+        let len = crate::feat::dashboard::items(&state.sessions, state.offers_permissions()).len();
         state.dashboard.index(&state.sessions, len)
     }
 
@@ -6800,10 +7010,10 @@ mod tests {
 
     #[rstest::rstest]
     fn dashboard_run_on_model_opens_the_drafts_model_picker() {
-        // Given a git draft's dashboard with the cursor on Model, its fourth
+        // Given a git draft's dashboard with the cursor on Model, its fifth
         // item.
         let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
-        for _ in 0..3 {
+        for _ in 0..4 {
             IntentHandler::handle(&Intent::DashboardNext, &mut state);
         }
 
@@ -6814,7 +7024,8 @@ mod tests {
         assert_eq!(
             state.picker.as_ref().map(PickerState::kind),
             Some(&PickerKind::Model {
-                target: DraftTarget::Project(ProjectId(1))
+                target: DraftTarget::Project(ProjectId(1)),
+                icon: info().icon,
             }),
             "⏎ on Model should open the model picker"
         );

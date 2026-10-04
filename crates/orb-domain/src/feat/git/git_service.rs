@@ -2,7 +2,7 @@
 //! default branch, making, checking out, renaming, removing and pruning
 //! worktrees and branches, whether a branch is merged, a worktree's state and
 //! its size on disk, making a directory a repository, and the repository
-//! Claude takes a directory to belong to.
+//! harnesses take a directory to belong to.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -173,7 +173,7 @@ pub trait Git: Send + Sync {
     /// Returns an error if git refuses, e.g. when `new` exists.
     fn rename_branch(&self, cwd: &Path, old: &str, new: &str) -> Result<(), Report<GitError>>;
 
-    /// Claude's project path for `cwd`: the root of its repository, or the
+    /// The project path harnesses trust for `cwd`: the root of its repository, or the
     /// main repository's root for a worktree, as a real path. `None` outside
     /// git.
     fn project_path(&self, cwd: &Path) -> Option<PathBuf>;
@@ -355,7 +355,7 @@ impl GitService {
         self.git.rename_branch(cwd, old, new)
     }
 
-    /// Claude's project path for `cwd`; `None` outside git.
+    /// The project path harnesses trust for `cwd`; `None` outside git.
     pub fn project_path(&self, cwd: &Path) -> Option<PathBuf> {
         self.git.project_path(cwd)
     }

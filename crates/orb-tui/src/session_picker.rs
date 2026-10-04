@@ -12,12 +12,13 @@
 //! The preview box is titled with the selected row's label and shows the
 //! thread's status, branch and model, then its latest exchanges from the
 //! transcript: up to two earlier ones in brief while there is room, and the
-//! newest with the prompt, the tools Claude ran, and the end of Claude's
-//! last reply as a small Markdown subset.
+//! newest with the prompt, the tools it ran, and the end of its last reply
+//! as a small Markdown subset.
 
 use std::collections::HashSet;
 use std::time::SystemTime;
 
+use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::picker::list::{Matches, PickerItem};
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::sessions::state::{Sessions, Thread, ThreadId, ThreadStatus};
@@ -32,17 +33,17 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::mouse::HitMap;
 use crate::picker::{PickerScroll, cut_left, highlight, span, visible};
 use crate::sidebar::{
-    BG_DARK, BLACK, BLUE, BORDER, BRANCH, CLAUDE, CLAUDE_LOGO, COMMENT, COMPLETED_ICON, CYAN,
-    DARK3, DARK5, FG, FG_DARK, GREEN1, GUTTER, ORANGE, VISUAL, ago_label, render_split, status,
-    working_label,
+    BG_DARK, BLACK, BLUE, BORDER, BRANCH, COMMENT, COMPLETED_ICON, CYAN, DARK3, DARK5, FG, FG_DARK,
+    GREEN1, GUTTER, ORANGE, VISUAL, ago_label, mark, render_split, status, working_label,
 };
 
 /// Draws the session picker over `area`: the list of `picker`'s rows with
 /// live status from `sessions` (`attached` threads fill the idle circle),
-/// and the selected thread's preview. Returns how many rows the list fits,
-/// and where the terminal cursor goes in the input. Records the popup, the
-/// list box as the wheel's area and the list's rows in `hits`; the preview
-/// maps to no row and takes no wheel.
+/// and the selected thread's preview with its harness's mark and name from
+/// `harnesses`. Returns how many rows the list fits, and where the terminal
+/// cursor goes in the input. Records the popup, the list box as the wheel's
+/// area and the list's rows in `hits`; the preview maps to no row and takes
+/// no wheel.
 #[expect(
     clippy::too_many_arguments,
     reason = "the picker's inputs plus the scroll and hit map it updates"
@@ -51,6 +52,7 @@ pub(crate) fn render(
     picker: &PickerState,
     sessions: &Sessions,
     attached: &HashSet<ThreadId>,
+    harnesses: &[HarnessInfo],
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -64,7 +66,7 @@ pub(crate) fn render(
     let [list_box, preview_box] = boxes(popup, area.width >= 120);
     hits.record_selector(list_box);
     let drawn = render_list(picker, sessions, attached, now, list_box, buf, scroll, hits);
-    render_preview(picker, sessions, attached, now, preview_box, buf);
+    render_preview(picker, sessions, attached, harnesses, now, preview_box, buf);
     drawn
 }
 
@@ -278,6 +280,7 @@ fn render_preview(
     picker: &PickerState,
     sessions: &Sessions,
     attached: &HashSet<ThreadId>,
+    harnesses: &[HarnessInfo],
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -289,16 +292,15 @@ fn render_preview(
     let block = boxed(Some(Line::from(span(format!(" {label} "), BLUE))));
     let inner = block.inner(area);
     block.render(area, buf);
-    let meta = sessions
-        .threads()
-        .find(|thread| thread.id == *id)
-        .map_or_else(Line::default, |thread| {
-            meta(thread, attached.contains(id), now)
-        });
+    let thread = sessions.threads().find(|thread| thread.id == *id);
+    let info = thread.and_then(|thread| harnesses.iter().find(|info| info.id == thread.harness));
+    let meta = thread.map_or_else(Line::default, |thread| {
+        meta(thread, info, attached.contains(id), now)
+    });
     let exchanges = picker
         .preview()
         .map_or(&[][..], |preview| preview.exchanges.as_slice());
-    for (line, y) in card(meta, exchanges, inner, now)
+    for (line, y) in card(meta, exchanges, info, inner, now)
         .into_iter()
         .zip(inner.top()..inner.bottom())
     {
@@ -306,8 +308,14 @@ fn render_preview(
     }
 }
 
-/// The selected thread's status (`idle` while idle), branch and model, dim.
-pub(crate) fn meta(thread: &Thread, attached: bool, now: SystemTime) -> Line<'static> {
+/// The selected thread's status (`idle` while idle), branch and model after
+/// its harness's (`info`'s) mark, dim.
+pub(crate) fn meta(
+    thread: &Thread,
+    info: Option<&HarnessInfo>,
+    attached: bool,
+    now: SystemTime,
+) -> Line<'static> {
     let (glyph, word, fg) = status(thread, attached, now);
     let mut spans = vec![
         span(format!(" {glyph} "), fg),
@@ -319,7 +327,8 @@ pub(crate) fn meta(thread: &Thread, attached: bool, now: SystemTime) -> Line<'st
     }
     if let Some(model) = &thread.model {
         spans.push(span(" · ", DARK3));
-        spans.push(span(format!("{CLAUDE_LOGO} {model}"), DARK5));
+        let (glyph, _) = mark(info.and_then(|info| info.icon.as_deref()));
+        spans.push(span(format!("{glyph} {model}"), DARK5));
     }
     Line::from(spans)
 }
@@ -327,9 +336,11 @@ pub(crate) fn meta(thread: &Thread, attached: bool, now: SystemTime) -> Line<'st
 /// The chat card's lines for `area`: `meta` over a rule, then ` No
 /// transcript yet` without exchanges, else up to two earlier exchanges in
 /// brief while the newest keeps twelve lines, and the newest with the rest.
+/// Replies are headed with the harness's (`info`'s) mark and name.
 fn card(
     meta: Line<'static>,
     exchanges: &[Exchange],
+    info: Option<&HarnessInfo>,
     area: Rect,
     now: SystemTime,
 ) -> Vec<Line<'static>> {
@@ -346,7 +357,7 @@ fn card(
     let mut briefs: Vec<Vec<Line<'static>>> = Vec::new();
     let mut used = 0;
     for exchange in earlier.iter().rev().take(2) {
-        let brief = exchange_lines(exchange, width, usize::MAX, 2, 3, now);
+        let brief = exchange_lines(exchange, info, width, usize::MAX, 2, 3, now);
         if used + brief.len() + 1 + 12 > height {
             break;
         }
@@ -362,6 +373,7 @@ fn card(
     }
     lines.extend(exchange_lines(
         newest,
+        info,
         width,
         height.saturating_sub(used),
         4,
@@ -372,10 +384,12 @@ fn card(
 }
 
 /// `exchange` as lines `width` wide, at most `room` of them: the prompt
-/// (`prompt_cap` lines at most) on a cyan bar, the tools Claude ran on one
-/// dim line, then the end of Claude's last words (`reply_cap` lines at most).
+/// (`prompt_cap` lines at most) on a cyan bar, then under the harness's
+/// (`info`'s) header the tools it ran on one dim line and the end of its last
+/// words (`reply_cap` lines at most).
 fn exchange_lines(
     exchange: &Exchange,
+    info: Option<&HarnessInfo>,
     width: usize,
     room: usize,
     prompt_cap: usize,
@@ -402,7 +416,7 @@ fn exchange_lines(
         head.push(Line::default());
     }
     let reply_at = exchange.reply.as_ref().and_then(|(_, at)| *at);
-    head.push(speaker(CLAUDE_LOGO, "Claude", CLAUDE, reply_at, now, width));
+    head.push(reply_speaker(info, reply_at, now, width));
     if !exchange.tools.is_empty() {
         let tools: Vec<String> = exchange
             .tools
@@ -433,6 +447,18 @@ fn exchange_lines(
     head.extend(body);
     head.truncate(room);
     head
+}
+
+/// The header of a reply: the harness's (`info`'s) mark and name.
+pub(crate) fn reply_speaker(
+    info: Option<&HarnessInfo>,
+    at: Option<SystemTime>,
+    now: SystemTime,
+    width: usize,
+) -> Line<'static> {
+    let (glyph, fg) = mark(info.and_then(|info| info.icon.as_deref()));
+    let label = info.map_or("", |info| info.label.as_str());
+    speaker(glyph, label, fg, at, now, width)
 }
 
 /// A speaker's header: `mark name` in bold `fg`, how long ago on the right.
@@ -624,6 +650,7 @@ pub(crate) fn cut_right(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use orb_domain::feat::harness::HarnessId;
+    use orb_domain::feat::harness::claude::models::info;
     use std::collections::HashSet;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -641,7 +668,7 @@ mod tests {
     use super::render;
     use crate::mouse::HitMap;
     use crate::picker::PickerScroll;
-    use crate::sidebar::{BLACK, BRANCH, CLAUDE_LOGO, COMPLETED_ICON, DARK3, DARK5, VISUAL};
+    use crate::sidebar::{BLACK, BRANCH, COMPLETED_ICON, DARK3, DARK5, VISUAL};
 
     /// The clock every picker is drawn at.
     fn now() -> SystemTime {
@@ -738,6 +765,7 @@ mod tests {
             picker,
             sessions,
             &HashSet::new(),
+            &[info()],
             now(),
             buf.area,
             &mut buf,
@@ -762,6 +790,7 @@ mod tests {
             picker,
             sessions,
             &HashSet::new(),
+            &[info()],
             now(),
             buf.area,
             &mut buf,
@@ -1065,7 +1094,7 @@ mod tests {
             .and_then(|y| lines.get(y + 1))
             .map_or("", String::as_str);
         assert!(
-            meta.contains(&format!("idle · {BRANCH} main · {CLAUDE_LOGO} opus")),
+            meta.contains(&format!("idle · {BRANCH} main · ✳ opus")),
             "meta row was {meta}"
         );
     }

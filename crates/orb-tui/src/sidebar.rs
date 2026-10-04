@@ -23,6 +23,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
+use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::sessions::state::{
     Draft, DraftWorkspace, Group, GroupKind, NEW_THREAD, Project, Sessions, SidebarItem,
     SidebarRow, Thread, ThreadId, ThreadStatus,
@@ -37,6 +38,14 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::mouse::HitMap;
 use crate::picker::{highlight, visible};
+
+/// A harness's mark in orange, else the model chip in blue.
+pub(crate) fn mark(icon: Option<&str>) -> (&str, Color) {
+    match icon {
+        Some(icon) => (icon, LOGO),
+        None => (CHIP, BLUE1),
+    }
+}
 
 /// How far the sidebar is scrolled, kept between frames.
 #[derive(Debug, Default)]
@@ -80,10 +89,16 @@ impl SidebarScroll {
 /// input box, then the list, scrolled so the cursor's row is in view. Returns
 /// the y of the selected row's first line when it's on screen, the list's
 /// layout, and the search text's cursor while there is a search. An idle
-/// thread in `attached` shows a filled circle.
+/// thread in `attached` shows a filled circle; a thread's node shows its
+/// harness's tag from `harnesses`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sidebar's inputs plus the scroll and hit map it updates"
+)]
 pub(crate) fn render(
     sessions: &Sessions,
     attached: &HashSet<ThreadId>,
+    harnesses: &[HarnessInfo],
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -103,7 +118,9 @@ pub(crate) fn render(
         rows: list.height,
         heights: rows.iter().map(height).collect(),
     };
-    let selected_y = render_list(sessions, attached, rows, now, list, buf, scroll, hits);
+    let selected_y = render_list(
+        sessions, attached, harnesses, rows, now, list, buf, scroll, hits,
+    );
     (selected_y, layout, search_cursor)
 }
 
@@ -236,6 +253,7 @@ fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
 fn render_list(
     sessions: &Sessions,
     attached: &HashSet<ThreadId>,
+    harnesses: &[HarnessInfo],
     rows: Vec<SidebarRow<'_>>,
     now: SystemTime,
     area: Rect,
@@ -307,7 +325,7 @@ fn render_list(
                     )
                 });
             render_row(
-                sessions, attached, row, ends_shelf, now, row_area, &mut list,
+                sessions, attached, harnesses, row, ends_shelf, now, row_area, &mut list,
             );
         }
         list
@@ -405,9 +423,14 @@ fn height(row: &SidebarRow<'_>) -> u16 {
 
 /// One row; `ends_shelf` says no settled entry follows it. Titles show where
 /// the search matched them.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the row plus the frame inputs every node takes"
+)]
 fn render_row(
     sessions: &Sessions,
     attached: &HashSet<ThreadId>,
+    harnesses: &[HarnessInfo],
     row: &SidebarRow<'_>,
     ends_shelf: bool,
     now: SystemTime,
@@ -423,6 +446,7 @@ fn render_row(
             render_card(
                 project,
                 thread,
+                harnesses.iter().find(|info| info.id == thread.harness),
                 attached.contains(&thread.id),
                 &matched(title(thread)),
                 now,
@@ -522,10 +546,16 @@ fn render_group_thread(
 }
 
 /// A thread's node: its status icon, title (`matched` at those byte
-/// offsets), pin and time; the project and status word; the branch and ✳.
+/// offsets), pin and time; the project, its harness's tag (`info`) and
+/// status word; the branch and the harness's mark.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the node's parts plus the frame inputs every node takes"
+)]
 fn render_card(
     project: &Project,
     thread: &Thread,
+    info: Option<&HarnessInfo>,
     attached: bool,
     matched: &[usize],
     now: SystemTime,
@@ -549,10 +579,15 @@ fn render_card(
         heading,
         buf,
     );
+    let tag = info.and_then(|info| info.tag.as_deref());
     render_split(
         project_line(project),
-        word.map(|word| Line::from(span(word, colour)))
-            .unwrap_or_default(),
+        Line::from(match (tag, word) {
+            (Some(tag), Some(word)) => vec![span(format!("{tag} "), DARK3), span(word, colour)],
+            (Some(tag), None) => vec![span(tag, DARK3)],
+            (None, Some(word)) => vec![span(word, colour)],
+            (None, None) => vec![],
+        }),
         place,
         buf,
     );
@@ -564,7 +599,11 @@ fn render_card(
                 COMMENT,
             ),
         ]),
-        Line::from(span(CLAUDE_LOGO, CLAUDE)),
+        Line::from(
+            info.and_then(|info| info.icon.clone())
+                .map(|icon| span(icon, LOGO))
+                .unwrap_or_default(),
+        ),
         footer,
         buf,
     );
@@ -1058,8 +1097,8 @@ pub(crate) const DARK5: Color = Color::Rgb(0x73, 0x7a, 0xa2);
 pub(crate) const BLUE1: Color = Color::Rgb(0x65, 0xbc, 0xff);
 /// The picker's border (`border_highlight`).
 pub(crate) const BORDER: Color = Color::Rgb(0x58, 0x9e, 0xd7);
-/// The ✳ logo, here and before the picker's models (Claude orange).
-pub(crate) const CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
+/// A harness's mark, and the dashboard's Start item (orange).
+pub(crate) const LOGO: Color = Color::Rgb(0xd9, 0x77, 0x57);
 
 /// Needing approval, here and in the mode line's count (Nerd Font
 /// `nf-fa-warning`).
@@ -1094,6 +1133,8 @@ pub(crate) const FOLDER: &str = "\u{f07b}";
 /// The open Settled shelf, and the picker's `All projects` row
 /// (`nf-fa-folder_open`).
 pub(crate) const FOLDER_OPEN: &str = "\u{f07c}";
+/// Before a harness in the picker and the dashboard (`nf-fa-plug`).
+pub(crate) const PLUG: &str = "\u{f1e6}";
 /// A draft (`nf-fa-pencil`).
 const PENCIL: &str = "\u{f040}";
 /// An open group, at the end of its card (`nf-oct-chevron_down`).
@@ -1102,9 +1143,9 @@ const FOLD_OPEN: &str = "\u{f47c}";
 const FOLD_CLOSED: &str = "\u{f460}";
 /// How many of a group's children its card shows an icon for.
 const CHILD_ICONS: usize = 8;
-/// Claude's logo, at the end of a thread's node and before the picker's
-/// models.
-pub(crate) const CLAUDE_LOGO: &str = "✳";
+/// A model, before a harness's models when it has no mark
+/// (`nf-fa-microchip`).
+pub(crate) const CHIP: &str = "\u{f2db}";
 /// The tree guide before a node's middle line and a settled row.
 const GUIDE: &str = " ├╴";
 /// The tree guide before a node's last line and the last settled row.
@@ -1116,7 +1157,8 @@ const LAST_CHILD_GUIDE: &str = "    └╴";
 
 #[cfg(test)]
 mod tests {
-    use orb_domain::feat::harness::HarnessId;
+    use orb_domain::feat::harness::claude::models::info;
+    use orb_domain::feat::harness::{HarnessId, HarnessInfo};
     use std::collections::HashSet;
     use std::time::{Duration, SystemTime};
 
@@ -1131,11 +1173,11 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::{
-        APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, BRANCH, CHILD_GUIDE, CLAUDE,
-        CLAUDE_LOGO, COMMENT, COMPLETED_ICON, CYAN, DARK3, FAILED_ICON, FG, FOLD_CLOSED, FOLD_OPEN,
-        FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GREEN1, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON,
-        LAST_CHILD_GUIDE, LAST_GUIDE, MAGENTA, ORANGE, PENCIL, PIN, PURPLE, RED, STOPPED_ICON,
-        SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
+        APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, BRANCH, CHILD_GUIDE, COMMENT,
+        COMPLETED_ICON, CYAN, DARK3, FAILED_ICON, FG, FOLD_CLOSED, FOLD_OPEN, FOLDER, FOLDER_OPEN,
+        GONE_ICON, GREEN, GREEN1, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON, LAST_CHILD_GUIDE,
+        LAST_GUIDE, LOGO, MAGENTA, ORANGE, PENCIL, PIN, PURPLE, RED, STOPPED_ICON, SidebarScroll,
+        VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
     };
     use crate::mouse::HitMap;
 
@@ -1245,6 +1287,7 @@ mod tests {
         let (selected_y, layout, _) = render(
             sessions,
             &HashSet::new(),
+            &[info()],
             now,
             buf.area,
             &mut buf,
@@ -1276,6 +1319,7 @@ mod tests {
         render(
             sessions,
             &attached,
+            &[info()],
             now,
             buf.area,
             &mut buf,
@@ -1529,6 +1573,7 @@ mod tests {
         let (_, _, cursor) = render(
             &sessions,
             &HashSet::new(),
+            &[info()],
             at(1000),
             buf.area,
             &mut buf,
@@ -1552,6 +1597,7 @@ mod tests {
         let (_, _, cursor) = render(
             &sessions,
             &HashSet::new(),
+            &[info()],
             at(1000),
             buf.area,
             &mut buf,
@@ -1621,6 +1667,7 @@ mod tests {
         let (_, _, cursor) = render(
             &sessions,
             &HashSet::new(),
+            &[info()],
             at(1000),
             buf.area,
             &mut buf,
@@ -1924,6 +1971,76 @@ mod tests {
         );
     }
 
+    /// Draws a 32-column sidebar 8 lines tall at 1000 s with `harnesses`
+    /// registered.
+    fn draw_with(sessions: &Sessions, harnesses: &[HarnessInfo]) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 8));
+        render(
+            sessions,
+            &HashSet::new(),
+            harnesses,
+            at(1000),
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+            &mut HitMap::default(),
+        );
+        buf
+    }
+
+    /// A pi-like harness: tagged `pi`, with no mark.
+    fn pi_like() -> HarnessInfo {
+        HarnessInfo {
+            tag: Some("pi".to_owned()),
+            unavailable: None,
+            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
+        }
+    }
+
+    #[rstest::rstest]
+    fn tagged_harness_shows_its_tag_before_the_status_word() {
+        // Given a Working thread of the pi-like harness.
+        let sessions = sessions(vec![Thread {
+            harness: HarnessId::new("pi"),
+            ..thread(1, ThreadStatus::Working)
+        }]);
+
+        // When rendering the sidebar.
+        let buf = draw_with(&sessions, &[info(), pi_like()]);
+
+        // Then its second line ends `pi working`, with `pi` dim.
+        let place = line(&buf, 4);
+        let tag_colour = (0..buf.area.width)
+            .find(|&x| {
+                ["p", "i", " ", "w"]
+                    .iter()
+                    .zip(x..)
+                    .all(|(symbol, x)| buf.cell((x, 4)).map(Cell::symbol) == Some(*symbol))
+            })
+            .and_then(|x| buf.cell((x, 4)))
+            .map(|cell| cell.fg);
+        assert_eq!(
+            (place.trim_end().ends_with(" pi working"), tag_colour),
+            (true, Some(DARK3)),
+            "line was '{place}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn untagged_harness_shows_no_tag() {
+        // Given a Working Claude thread.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
+
+        // When rendering the sidebar.
+        let place = line(&draw_with(&sessions, &[info(), pi_like()]), 4);
+
+        // Then its second line ends `working` with only spaces before it.
+        assert!(
+            place.trim_end().ends_with("   working"),
+            "line was '{place}'"
+        );
+    }
+
     #[rstest::rstest]
     fn node_third_line_shows_the_branch() {
         // Given a thread on `main`.
@@ -1943,7 +2060,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn node_third_line_ends_with_the_claude_logo() {
+    fn node_third_line_ends_with_the_harness_mark() {
         // Given a thread.
         let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
 
@@ -1954,7 +2071,7 @@ mod tests {
         // column.
         assert_eq!(
             glyph(&buf, 30, 5),
-            Some((CLAUDE_LOGO.to_owned(), CLAUDE)),
+            Some(("✳".to_owned(), LOGO)),
             "line was '{}'",
             line(&buf, 5)
         );
@@ -2942,6 +3059,7 @@ mod tests {
         let (selected_y, _, _) = render(
             sessions,
             &HashSet::new(),
+            &[info()],
             at(1000),
             buf.area,
             &mut buf,

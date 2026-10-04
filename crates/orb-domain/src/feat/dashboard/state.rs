@@ -26,24 +26,26 @@ impl DashboardCursor {
     }
 
     /// Highlight the next item, wrapping from the last to the first.
-    pub fn next(&mut self, sessions: &Sessions) {
-        self.step(sessions, true);
+    /// `permissions` is as for [`items`].
+    pub fn next(&mut self, sessions: &Sessions, permissions: bool) {
+        self.step(sessions, permissions, true);
     }
 
     /// Highlight the previous item, wrapping from the first to the last.
-    pub fn prev(&mut self, sessions: &Sessions) {
-        self.step(sessions, false);
+    /// `permissions` is as for [`items`].
+    pub fn prev(&mut self, sessions: &Sessions, permissions: bool) {
+        self.step(sessions, permissions, false);
     }
 
     /// Highlight the item at `index` for the current selection, or the last
-    /// item when there are fewer.
-    pub fn highlight(&mut self, sessions: &Sessions, index: usize) {
-        self.index = index.min(items(sessions).len().saturating_sub(1));
+    /// item when there are fewer. `permissions` is as for [`items`].
+    pub fn highlight(&mut self, sessions: &Sessions, permissions: bool, index: usize) {
+        self.index = index.min(items(sessions, permissions).len().saturating_sub(1));
         self.on = sessions.cursor;
     }
 
-    fn step(&mut self, sessions: &Sessions, forward: bool) {
-        let len = items(sessions).len().max(1);
+    fn step(&mut self, sessions: &Sessions, permissions: bool, forward: bool) {
+        let len = items(sessions, permissions).len().max(1);
         let index = self.index(sessions, len);
         self.index = if forward {
             (index + 1) % len
@@ -66,14 +68,14 @@ mod tests {
         // Given the cursor moved down on thread 1.
         let mut sessions = sessions(Some(true), Some(SidebarItem::Thread(ThreadId(1))));
         let mut cursor = DashboardCursor::default();
-        cursor.next(&sessions);
+        cursor.next(&sessions, true);
 
         // When the selection moves to the draft without an intent.
         sessions.cursor = Some(SidebarItem::Draft(ProjectId(1)));
 
         // Then the cursor reads as the first item.
         assert_eq!(
-            cursor.index(&sessions, items(&sessions).len()),
+            cursor.index(&sessions, items(&sessions, true).len()),
             0,
             "a new selection should start on the first item"
         );
@@ -84,7 +86,7 @@ mod tests {
         // Given the cursor on the last of a git draft's thirteen items.
         let mut sessions = sessions(Some(true), Some(SidebarItem::Draft(ProjectId(1))));
         let mut cursor = DashboardCursor::default();
-        cursor.prev(&sessions);
+        cursor.prev(&sessions, true);
 
         // When the draft turns out not to be in a git repository.
         if let Some(draft) = sessions.draft_mut(ProjectId(1)) {
@@ -92,7 +94,7 @@ mod tests {
         }
 
         // Then the cursor reads as the new last item.
-        let len = items(&sessions).len();
+        let len = items(&sessions, true).len();
         assert_eq!(
             cursor.index(&sessions, len),
             len - 1,

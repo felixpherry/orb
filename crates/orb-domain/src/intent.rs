@@ -90,7 +90,7 @@ pub enum Intent {
     Search,
     /// Un-settle the selected lone thread or group, or ask to settle it.
     ToggleSettle,
-    /// Ask to delete the selected thread or group and its Claude sessions, or
+    /// Ask to delete the selected thread or group and its sessions, or
     /// to discard the selected draft.
     DeleteThread,
     /// Show the Settled shelf's threads.
@@ -121,6 +121,9 @@ pub enum Intent {
     PickModel,
     /// Open the permission-mode picker for the selected draft.
     PickPermission,
+    /// Open the harness picker for the selected draft, or for the group's
+    /// default on a group's card or draft.
+    PickHarness,
     /// Type a character into the picker's filter, the rename box, or the
     /// sidebar search.
     PickerInput(char),
@@ -223,6 +226,7 @@ impl fmt::Display for Intent {
             Self::OpenTool(tool) => tool.label(),
             Self::PickModel => "model",
             Self::PickPermission => "permission",
+            Self::PickHarness => "harness",
             Self::PickerInput(_) => "type",
             Self::PickerDeleteWord => "delete word",
             Self::PickerCursorLeft => "cursor left",

@@ -2,7 +2,7 @@
 //!
 //! For each project it keeps the directory its sessions start in and the
 //! workspace, model and permission mode its last draft started with. For each
-//! thread it keeps the Claude ids, the titles, the git branch, how far the
+//! thread it keeps the session ids, the titles, the git branch, how far the
 //! transcript has been read, when the running turn started, whether it is
 //! pinned or settled, when it last had activity and was last visited, and the
 //! model and permission mode its session started with. For each project's
@@ -48,11 +48,11 @@ pub struct ProjectRow {
 pub struct ThreadRow {
     pub id: ThreadId,
     pub project_id: ProjectId,
-    /// The id `claude --bg` printed; matches `agents --json` records.
+    /// The id the harness gave the session when it started it.
     pub short_id: String,
-    /// The Claude session id, once a poll has seen it.
+    /// The harness's session id, once a poll has seen it.
     pub session_id: Option<String>,
-    /// Claude's latest generated title, else the first prompt.
+    /// The harness's latest generated title, else the first prompt.
     pub title: Option<String>,
     /// The latest title the user gave with `/rename`.
     pub custom_title: Option<String>,
@@ -80,12 +80,12 @@ pub struct ThreadRow {
     pub last_activity_at: i64,
     /// When the user last selected the thread.
     pub last_visited_at: i64,
-    /// Whether Claude has generated a title for the thread.
+    /// Whether the harness has generated a title for the thread.
     pub ai_titled: bool,
-    /// The `--model` its session started with; `None` = Claude's default.
+    /// The `--model` its session started with; `None` = the harness's default.
     pub model: Option<String>,
-    /// The `--permission-mode` its session started with; `None` = Claude's
-    /// default.
+    /// The `--permission-mode` its session started with; `None` = the
+    /// harness's default.
     pub permission_mode: Option<String>,
     /// The group the thread belongs to; `None` = a top-level thread.
     pub group_id: Option<GroupId>,
@@ -155,9 +155,9 @@ pub struct GroupRow {
     pub settled_at: Option<i64>,
     /// When the group was last un-settled.
     pub unsettled_at: Option<i64>,
-    /// The `--model` for its draft; `None` = Claude's default.
+    /// The `--model` for its draft; `None` = the harness's default.
     pub draft_model: Option<String>,
-    /// The `--permission-mode` for its draft; `None` = Claude's default.
+    /// The `--permission-mode` for its draft; `None` = the harness's default.
     pub draft_permission_mode: Option<String>,
     /// The harness its threads start in by default.
     pub harness: HarnessId,
@@ -184,9 +184,9 @@ pub struct DraftRow {
     pub project_id: ProjectId,
     pub workspace: DraftWorkspace,
     pub branch: Option<String>,
-    /// `None` = Claude's default.
+    /// `None` = the harness's default.
     pub model: Option<String>,
-    /// `None` = Claude's default.
+    /// `None` = the harness's default.
     pub permission_mode: Option<String>,
     pub created_at: i64,
     /// The harness its session will run in.
@@ -229,9 +229,9 @@ pub struct LastUsed {
     /// `None` for a project last started before orb knew harnesses.
     pub harness: Option<HarnessId>,
     pub workspace: LastWorkspace,
-    /// `None` = Claude's default.
+    /// `None` = the harness's default.
     pub model: Option<String>,
-    /// `None` = Claude's default.
+    /// `None` = the harness's default.
     pub permission_mode: Option<String>,
 }
 
