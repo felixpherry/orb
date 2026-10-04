@@ -724,3 +724,56 @@ Probed on this machine with zmx 0.8.1 (`brew install neurosnap/tap/zmx`; `zmx ve
 
 ### Not handled **[source: zmx `src/socket.zig`, `src/main.zig`]**
 - zmx adds `ZMX_SESSION_PREFIX`, when set, to every session name. If the user's environment sets it, orb's socket path `~/.orb/pi/<id>` won't match the session zmx made. orb doesn't handle this.
+
+## 19. Linux notifications (verified 2026-10-04, EndeavourOS, niri 26.04, quickshell 1.2 notification server (DMS), notify-rust 4.18.1, kitty 0.49.2, zellij 0.45.1)
+
+Probed on this machine (EndeavourOS rolling, niri 26.04 build 8ed0da4) where DankMaterialShell, a quickshell 1.2 shell run by `dms.service`, owns `org.freedesktop.Notifications`. A scratch crate `notify-probe` built against notify-rust 4.18.1 (zbus 5.19.0, default features) showed, replaced, closed and waited on notifications, with `dbus-monitor --session "interface='org.freedesktop.Notifications'"` logging every call and signal. The server was queried with `busctl --user`, and niri with `niri msg`. The click, dismiss, replace and urgency steps were done by the user, and their D-Bus logs and the `PROBE` lines are the record. Evidence (the probe crate, `dbus-*.log`, `niri-windows.json`) is in `/home/felixp/.claude/jobs/af069f87/tmp/`, and the notify-rust source read is `~/.cargo/registry/src/*/notify-rust-4.18.1/src`. Tags as in §6.
+
+### Notification server **[verified]**
+- `GetServerInformation` returns `("quickshell", "quickshell", "", "1.2")`.
+- `GetCapabilities` returns `persistence`, `body`, `body-markup`, `body-hyperlinks`, `body-images`, `actions`, `action-icons`, `icon-static` and `inline-reply`. `actions` and `persistence` are both there.
+- The bus name's owner is `/usr/bin/quickshell` (comm `qs`), run as `qs -p /run/user/1000/danklinux-shell/…` under the user unit `dms.service`. So the shell is DMS (DankMaterialShell), not Noctalia.
+- notify-rust sends normal urgency as the hint `urgency: byte 1` and critical as `byte 2`, with `expire_timeout` -1 (server default).
+
+### notify-rust API **[source: notify-rust 4.18.1 `src/`] [docs: docs.rs/notify-rust/latest]**
+- 4.18.1 is the latest stable release on crates.io (2026-09-27). Default features are `z` (zbus, serde, async). It needs Rust 1.89.0.
+- `Notification` on unix but not macOS:
+  - `appname(&mut self, appname: &str) -> &mut Notification`
+  - `summary(&mut self, summary: &str) -> &mut Notification`
+  - `body(&mut self, body: &str) -> &mut Notification`
+  - `urgency(&mut self, urgency: Urgency) -> &mut Notification` (sets `Hint::Urgency`; `Urgency { Low, Normal, Critical }`)
+  - `action(&mut self, identifier: &str, label: &str) -> &mut Notification`
+  - `id(&mut self, id: u32) -> &mut Notification`
+  - `show(&self) -> Result<xdg::NotificationHandle>`
+- `NotificationHandle`:
+  - `id(&self) -> u32`
+  - `wait_for_action<F>(self, invocation_closure: F) where F: FnOnce(&str)`
+  - `close(self)`
+  - `wait_for_response(self, handler: impl ActionResponseHandler) -> Result<()>`, a typed form new in 4.18.
+- `wait_for_action` listens for `ActionInvoked` and `NotificationClosed` and ignores any signal whose id isn't its own. It calls the closure once and returns. An action passes its key (`"default"` for the default action). `NotificationClosed`, whatever the reason, passes `"__closed"`.
+
+### Replacing by id **[verified: user probe]**
+- Showing a second notification with `.id(6)`, where 6 was the first one's id, returned id 6 again. The user saw only the second notification, with nothing left of the first in the popups or the DMS notification centre.
+
+### Clicks and the `default` action **[verified: user probe]**
+- A DMS popup shows the `default` action as a button with its label (`Open`) next to a close button.
+- Clicking the popup's body sends `ActionInvoked(id, "default")`, followed by `NotificationClosed(id, 2)`, and `wait_for_action` reported `"default"` (ids 3 and 4). No probe isolated a click on the `Open` button itself.
+- A click on the notification in the DMS notification centre works the same way. A normal popup (id 9) timed out untouched, and about 29 s after it was shown the user clicked it in the centre (on the body or `Open`; the log doesn't tell which). That sent `ActionInvoked(9, "default")` and `NotificationClosed(9, 2)`, and `wait_for_action` reported `"default"`.
+
+### Close, dismiss and replace as seen by `wait_for_action` **[verified + user probe]**
+- `CloseNotification(2)` from another process sends `NotificationClosed(2, 3)`, and `wait_for_action` reported `"__closed"` at once.
+- The popup's close button sends no D-Bus signal. The notification moves into the DMS centre and `wait_for_action` keeps waiting.
+- When a normal popup times out, it sends no `NotificationClosed` either (no reason 1). It moves into the centre and its waiter stays alive.
+- Clearing a notification from the centre sends `NotificationClosed(id, 2)`, and `wait_for_action` reported `"__closed"`.
+- After a replace (`.id(6)`), one click on the new notification sent `ActionInvoked(6, "default")` and `NotificationClosed(6, 2)`. Both waiters, the one on the first `show` and the one on the second, reported `"default"`, because they share the id. So orb needs its own generation guard to keep a replaced notification's waiter from acting on the click.
+
+### Urgency **[verified: user probe]**
+- A normal (id 7) and a critical (id 8) notification were shown together with the server's default timeout. After about 30 s only the critical popup was still on screen. The normal one had timed out into the centre without a `NotificationClosed`.
+
+### niri windows **[verified]**
+- Each object in `niri msg --json windows` has `id`, `title`, `app_id`, `pid`, `workspace_id`, `is_focused`, `is_floating`, `is_urgent`, `focus_timestamp` and `layout`.
+- kitty running zellij has `app_id` `kitty` and a title of `<zellij session> | <pane title>`, e.g. `tremendous-panda | orb ~`. `tremendous-panda` was a running session in `zellij list-sessions --no-formatting`.
+- Other windows' titles contain ` | ` too (Firefox: `API Keys | Settings | OpenRouter — Mozilla Firefox`), so a match has to use the prefix `"<session> |"`, not ` | ` alone.
+
+### Raising a window **[verified]**
+- With an empty workspace 2 active and kitty (window 6) on workspace 1, `niri msg action focus-window --id 6` exited 0. `niri msg --json focused-window` then reported window 6, and workspace 1 was active again.
