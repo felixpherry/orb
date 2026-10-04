@@ -15,7 +15,7 @@ use orb_domain::feat::harness::claude::supervisor::ClaudeSupervisor;
 use orb_domain::feat::harness::claude::trust::{ClaudeConfigTrust, claude_config_file};
 use orb_domain::feat::harness::pi::Pi;
 use orb_domain::feat::harness::pi::runner::ProcessRunner;
-use orb_domain::feat::notify::click::{ClickTarget, Kitty, ZellijTarget, on_path};
+use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, ZellijTarget, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::child_env::child_env;
@@ -128,12 +128,13 @@ fn main() -> Result<(), Report<OrbError>> {
         .change_context(OrbError)
 }
 
-/// Desktop notices, clicked back to orb's kitty window and zellij pane when
-/// orb runs in them.
+/// Desktop notices, clicked back to orb's window (kitty on macOS, niri on
+/// Linux) and zellij pane when orb runs in them.
 fn desktop_notifier(session: Option<OsString>, pane: Option<u32>) -> NotifierService {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let kitty = {
         let kitten = std::env::var_os("KITTY_INSTALLATION_DIR")
+            .filter(|_| cfg!(target_os = "macos"))
             .map(|dir| PathBuf::from(dir).join("../../MacOS/kitten"))
             .filter(|kitten| kitten.is_file())
             .or_else(|| on_path("kitten", &path));
@@ -159,12 +160,15 @@ fn desktop_notifier(session: Option<OsString>, pane: Option<u32>) -> NotifierSer
             _ => None,
         }
     };
+    let niri = std::env::var_os("NIRI_SOCKET")
+        .and_then(|_| on_path("niri", &path))
+        .map(|niri| NiriTarget { niri });
     NotifierService::desktop(
         &path,
         ClickTarget {
             kitty,
             zellij,
-            niri: None,
+            niri,
         },
     )
 }

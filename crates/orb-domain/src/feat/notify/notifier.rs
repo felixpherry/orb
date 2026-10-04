@@ -62,18 +62,17 @@ impl NotifierService {
         Self { notifier }
     }
 
-    /// The desktop's notifier: `terminal-notifier` if `path` (a `PATH`
-    /// value) has it, whose click goes to `click` and which falls back to
-    /// `osascript` when it fails; else `osascript`.
+    /// The desktop's notifier, whose click goes to `click`. On macOS it is
+    /// `terminal-notifier` if `path` (a `PATH` value) has it, falling back to
+    /// `osascript` when it fails, else `osascript`. On Linux it is the
+    /// session bus's notification server. Anywhere else it shows nothing.
     pub fn desktop(path: &OsStr, click: ClickTarget) -> Self {
-        match on_path("terminal-notifier", path) {
-            Some(program) => Self::new(Arc::new(TerminalNotifierNotifier::new(
-                program,
-                click,
-                Arc::new(OsascriptNotifier),
-            ))),
-            None => Self::new(Arc::new(OsascriptNotifier)),
-        }
+        let notifier = if cfg!(target_os = "macos") {
+            macos_notifier(path, click)
+        } else {
+            linux_notifier(click)
+        };
+        Self::new(notifier)
     }
 
     /// Announces `notice`: titled `<project> · <thread title>`, saying why
@@ -102,6 +101,39 @@ fn urgency(kind: NoticeKind) -> Urgency {
         NoticeKind::Finished => Urgency::Normal,
         NoticeKind::NeedsApproval | NoticeKind::NeedsInput => Urgency::Critical,
     }
+}
+
+/// macOS's notifier: `terminal-notifier` if `path` has it, whose click goes
+/// to `click` and which falls back to `osascript`; else `osascript`.
+fn macos_notifier(path: &OsStr, click: ClickTarget) -> Arc<dyn Notifier> {
+    match on_path("terminal-notifier", path) {
+        Some(program) => Arc::new(TerminalNotifierNotifier::new(
+            program,
+            click,
+            Arc::new(OsascriptNotifier),
+        )),
+        None => Arc::new(OsascriptNotifier),
+    }
+}
+
+/// Linux's notifier: the session bus's notification server, whose click
+/// runs `click`'s steps.
+#[cfg(target_os = "linux")]
+fn linux_notifier(click: ClickTarget) -> Arc<dyn Notifier> {
+    use super::click::CommandClickRunner;
+    use super::xdg::{XdgNotifier, ZbusDesktop};
+
+    Arc::new(XdgNotifier::new(
+        Arc::new(ZbusDesktop),
+        click,
+        Arc::new(CommandClickRunner),
+    ))
+}
+
+/// Off Linux there is no notification server to use, so nothing is shown.
+#[cfg(not(target_os = "linux"))]
+fn linux_notifier(_click: ClickTarget) -> Arc<dyn Notifier> {
+    Arc::new(super::none::NoneNotifier)
 }
 
 /// Runs `program` with `args` and no stdin, stdout or stderr, so it never
@@ -310,6 +342,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     #[rstest::rstest]
     #[case::terminal_notifier_is_on_path(Some(0o755), "Notifier<terminal-notifier>")]
     #[case::terminal_notifier_isnt_executable(Some(0o644), "Notifier<osascript>")]
@@ -331,6 +364,27 @@ mod tests {
 
         // Then it is terminal-notifier only if it's there to run.
         assert_eq!(format!("{service:?}"), expected, "the notifier picked");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[rstest::rstest]
+    fn desktop_notifier_on_linux_is_xdg() -> std::io::Result<()> {
+        // Given a PATH directory holding an executable terminal-notifier.
+        let dir = TempDir::new()?;
+        let program = dir.path().join("terminal-notifier");
+        fs::write(&program, "#!/bin/sh\n")?;
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))?;
+
+        // When picking the desktop's notifier on Linux.
+        let service = NotifierService::desktop(&OsString::from(dir.path()), ClickTarget::default());
+
+        // Then it is the freedesktop notifier, not terminal-notifier.
+        assert_eq!(
+            format!("{service:?}"),
+            "Notifier<xdg>",
+            "the notifier picked on Linux"
+        );
         Ok(())
     }
 }
