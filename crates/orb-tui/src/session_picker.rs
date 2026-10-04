@@ -247,11 +247,12 @@ fn render_row(
             )
         }
     };
-    let left = Line::from_iter([Span::raw(" "), icon].into_iter().chain(highlight(
-        label,
-        &matches.name,
-        |at| if at < *split { dim } else { bright },
-    )));
+    let left: Line = [Span::raw(" "), icon]
+        .into_iter()
+        .chain(highlight(label, &matches.name, |at| {
+            if at < *split { dim } else { bright }
+        }))
+        .collect();
     render_split(
         left,
         Line::from(span(time, DARK3)),

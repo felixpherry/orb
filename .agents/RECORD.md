@@ -113,10 +113,14 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `<C-x>` in the project filter removes the highlighted project after a `No`/`Yes` confirm.
 - (projects) A removed project is hidden from `␣n` and the project filter and loses its draft; its threads stay, and adding it again with `␣p` restores it.
 - (sessions) Deleting a thread hides it at once; if `claude rm` fails, it reappears and the mode line shows the reason.
-- (notify) While orb's pane isn't focused, orb sends a macOS notification when a thread finishes a turn, needs approval, or needs input.
+- (notify) While orb's pane isn't focused, orb sends a desktop notification on macOS and Linux when a thread finishes a turn, needs approval, or needs input.
 - (notify) While its last focus event says it's focused, orb still notifies if `zellij action list-clients` shows no client on its pane, because zellij sends no focus-out on a tab switch.
-- (notify) Notifications are delivered through `terminal-notifier` when it's on `PATH` at startup, and through `osascript` otherwise, or when terminal-notifier fails.
+- (notify) On macOS, notifications are delivered through `terminal-notifier` when it's on `PATH` at startup, and through `osascript` otherwise, or when terminal-notifier fails.
 - (notify) Clicking a `terminal-notifier` notification focuses orb's zellij tab and pane, and brings orb's kitty window forward if kitty's remote control is on (`KITTY_LISTEN_ON`).
+- (notify) On Linux, notifications are delivered over D-Bus to the freedesktop notification server, and nothing is shown when there is none.
+- (notify) On Linux, approval and input notifications are sent at critical urgency and finished-turn notifications at normal urgency.
+- (notify) On Linux, a later notification about the same thread replaces the earlier one.
+- (notify) On Linux, clicking a notification focuses orb's niri window when niri is running, then orb's zellij tab and pane.
 - (sessions) An `r` name is kept only in orb's store; Claude's own session name doesn't change.
 - (sessions) A `/rename` to a name different from the thread's previous `custom-title` replaces its `r` name.
 - (keybinds) In the sidebar, `r` opens a Rename Session box filled in with the thread's title; `⏎` saves, an empty `⏎` clears the `r` name, and `Esc` cancels.

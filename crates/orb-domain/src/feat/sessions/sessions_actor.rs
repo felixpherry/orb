@@ -7714,7 +7714,7 @@ mod tests {
                 branch: Some("main".to_owned()),
                 model: Some("opus".to_owned()),
                 permission: None,
-                created_at: SystemTime::UNIX_EPOCH + Duration::from_millis(2_000),
+                created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(2),
                 repo: true,
                 from: Some("main".to_owned()),
             })],

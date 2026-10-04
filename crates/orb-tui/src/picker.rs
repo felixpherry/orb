@@ -269,7 +269,7 @@ fn render_rows(
             }
         };
         let (content, right) = row_content(item, matches, picker.kind(), home);
-        let left = Line::from_iter([Span::raw(" "), label].into_iter().chain(content));
+        let left: Line = [Span::raw(" "), label].into_iter().chain(content).collect();
         // The row's own text wins; the right column is cut from its left.
         let room = usize::from(row.width).saturating_sub(left.width() + 3);
         let right = right.map_or_else(Line::default, |right| right.cut(room));

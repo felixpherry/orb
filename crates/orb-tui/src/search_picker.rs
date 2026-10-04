@@ -142,16 +142,15 @@ fn render_row(item: &PickerItem, area: Rect, buf: &mut Buffer) {
     else {
         return;
     };
-    let line = Line::from_iter(
-        std::iter::once(Span::raw(" "))
-            .chain(highlight(
-                label,
-                &[],
-                |at| if at < *split { DARK5 } else { FG },
-            ))
-            .chain(std::iter::once(Span::raw(" ")))
-            .chain(highlight(snippet, lit, |_| COMMENT)),
-    );
+    let line: Line = std::iter::once(Span::raw(" "))
+        .chain(highlight(
+            label,
+            &[],
+            |at| if at < *split { DARK5 } else { FG },
+        ))
+        .chain(std::iter::once(Span::raw(" ")))
+        .chain(highlight(snippet, lit, |_| COMMENT))
+        .collect();
     line.render(
         Rect {
             width: area.width.saturating_sub(1),

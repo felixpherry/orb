@@ -269,7 +269,10 @@ fn render_row(
     };
     let Some(row) = Row::of(state, path, now) else {
         let gone = highlight(label, &matches.name, |_| DARK3);
-        Line::from_iter(std::iter::once(Span::raw("   ")).chain(gone)).render(area, buf);
+        std::iter::once(Span::raw("   "))
+            .chain(gone)
+            .collect::<Line>()
+            .render(area, buf);
         return;
     };
     let (dim, bright) = match row.state {
@@ -413,7 +416,9 @@ fn meta(row: &Row<'_>, app: &AppState, now: SystemTime, size: &str) -> Line<'sta
 
 /// A field table row: `name` dim in a 12-wide column, then `value`.
 fn field(name: &str, value: Vec<Span<'static>>) -> Line<'static> {
-    Line::from_iter(std::iter::once(span(format!("   {name:<12}"), COMMENT)).chain(value))
+    std::iter::once(span(format!("   {name:<12}"), COMMENT))
+        .chain(value)
+        .collect()
 }
 
 /// One `Used by` line `width` wide: the user's icon, its dim `<project>/`
