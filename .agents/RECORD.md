@@ -180,6 +180,9 @@ Entries are added or amended **only with human approval**.
 - (groups) The Research kit's pi subagents run through pi's `subagent` tool, from pi's example extension, which the user installs (filtering out pi-amplike's own `subagent` tool) and orb doesn't.
 - (groups) The Research kit's pi subagents run on the thread's model and thinking level.
 - (groups) A Research folder shares no files with other Research folders.
+- (groups) orb's built-in Learn template is a learning kit: an orchestrator `AGENTS.md`, a saboteur subagent, the storyteller, challenge, tutor and conventions files under `.claude/learn/`, an epub ingest script and a `.gitignore` that keeps `source/` out of any repository.
+- (groups) A Learn folder's threads share one campaign: each thread appends its event to `EVENTS.md`, writes learning records for every challenge attempted, and leaves syllabus status and notes for the next thread.
+- (groups) A Learn folder's raids are planted by the `saboteur` subagent on a fresh `raid/R<n>` branch of the proving ground and recorded in `raids/R<n>.md`, which the orchestrating thread reads only after the learner declares a fix.
 - (trust) `Yes` on the trust confirm marks that path trusted in Claude's `.claude.json`, keeping every other key, and retries the start once; if that write fails, the start fails with `couldn't trust the folder`.
 - (trust) `No` or `Esc` on the trust confirm, or `⏎` while its filter hides both rows, ends the start as a failed one, keeping the draft and showing `Workspace not trusted`.
 - (incognito) orb's `Incognito` project runs its threads in `/tmp/orb-incognito/`, which orb creates at start and before each incognito start.

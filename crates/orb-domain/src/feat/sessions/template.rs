@@ -62,10 +62,40 @@ const RESEARCH: &[(&str, &str)] = &[
     ),
 ];
 /// The built-in Learn template: each file's path in the folder and its text.
-const LEARN: &[(&str, &str)] = &[(
-    "AGENTS.md",
-    include_str!("../../../templates/learn/AGENTS.md"),
-)];
+const LEARN: &[(&str, &str)] = &[
+    (
+        "AGENTS.md",
+        include_str!("../../../templates/learn/AGENTS.md"),
+    ),
+    (
+        ".gitignore",
+        include_str!("../../../templates/learn/.gitignore"),
+    ),
+    (
+        ".claude/agents/saboteur.md",
+        include_str!("../../../templates/learn/.claude/agents/saboteur.md"),
+    ),
+    (
+        ".claude/learn/STORYTELLER.md",
+        include_str!("../../../templates/learn/.claude/learn/STORYTELLER.md"),
+    ),
+    (
+        ".claude/learn/CHALLENGES.md",
+        include_str!("../../../templates/learn/.claude/learn/CHALLENGES.md"),
+    ),
+    (
+        ".claude/learn/TUTOR.md",
+        include_str!("../../../templates/learn/.claude/learn/TUTOR.md"),
+    ),
+    (
+        ".claude/learn/CONVENTIONS.md",
+        include_str!("../../../templates/learn/.claude/learn/CONVENTIONS.md"),
+    ),
+    (
+        ".claude/learn/ingest_epub.py",
+        include_str!("../../../templates/learn/.claude/learn/ingest_epub.py"),
+    ),
+];
 
 /// A template couldn't be written or copied.
 #[derive(Debug, Error)]
@@ -151,7 +181,7 @@ mod tests {
 
     use error_stack::{Report, ResultExt};
 
-    use super::{RESEARCH, TemplateError, copy, seed};
+    use super::{LEARN, RESEARCH, TemplateError, copy, seed};
     use crate::feat::sessions::state::GroupKind;
 
     #[rstest::rstest]
@@ -216,27 +246,26 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn seed_writes_only_agents_md_for_learn() -> Result<(), Report<TemplateError>> {
+    fn seed_writes_every_learn_kit_file() -> Result<(), Report<TemplateError>> {
         // Given an empty temp folder.
         let root = tempfile::tempdir().change_context(TemplateError)?;
+        let dir = root.path().join("learn");
 
         // When seeding the Learn template.
-        seed(root.path(), GroupKind::Learn)?;
+        seed(&dir, GroupKind::Learn)?;
 
-        // Then the folder holds exactly AGENTS.md and CLAUDE.md.
-        let names = {
-            let mut names = fs::read_dir(root.path())
-                .change_context(TemplateError)?
-                .map(|entry| entry.map(|entry| entry.file_name()))
-                .collect::<Result<Vec<_>, _>>()
-                .change_context(TemplateError)?;
-            names.sort();
-            names
-        };
+        // Then every kit file holds its built-in text.
+        let wrong: Vec<&str> = LEARN
+            .iter()
+            .filter(|(path, text)| {
+                fs::read_to_string(dir.join(path)).ok().as_deref() != Some(*text)
+            })
+            .map(|(path, _)| *path)
+            .collect();
         assert_eq!(
-            names,
-            ["AGENTS.md", "CLAUDE.md"],
-            "Learn should seed only AGENTS.md and its link"
+            wrong,
+            Vec::<&str>::new(),
+            "every kit file should be the built-in text"
         );
         Ok(())
     }
