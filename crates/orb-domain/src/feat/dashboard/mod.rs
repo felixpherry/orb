@@ -130,6 +130,7 @@ pub fn items(sessions: &Sessions) -> Vec<DashboardItem> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::feat::harness::HarnessId;
     use std::time::SystemTime;
 
     use super::DashboardItem::{
@@ -147,6 +148,7 @@ pub(crate) mod tests {
     /// a git repository or not; the cursor on `cursor`.
     pub(crate) fn sessions(repo: Option<bool>, cursor: Option<SidebarItem>) -> Sessions {
         let thread = Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(1),
             title: None,
             cwd: "/work".into(),
@@ -166,6 +168,7 @@ pub(crate) mod tests {
             permission: None,
         };
         let draft = repo.map(|repo| Draft {
+            harness: HarnessId::new("claude"),
             workspace: DraftWorkspace::Local,
             branch: None,
             model: None,
@@ -212,6 +215,7 @@ pub(crate) mod tests {
                 active_since: SystemTime::UNIX_EPOCH,
                 draft,
                 defaults: GroupDefaults {
+                    harness: HarnessId::new("claude"),
                     model: None,
                     permission: None,
                 },

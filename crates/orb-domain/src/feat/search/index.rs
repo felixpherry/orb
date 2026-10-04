@@ -7,6 +7,7 @@
 //! deleted and built again.
 
 use std::collections::HashSet;
+use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -16,7 +17,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use wherror::Error;
 
 use crate::feat::sessions::state::ThreadId;
-use crate::feat::sessions::transcript::{Role, read_messages};
+use crate::feat::sessions::transcript::{MessageRead, Role};
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -142,9 +143,10 @@ impl SearchIndex {
     }
 
     /// Adds the messages written to the transcript at `path` since it was
-    /// last indexed, under the thread `key`. A transcript shorter than what
-    /// was read before was replaced, so its old messages are dropped and it is
-    /// read from the start.
+    /// last indexed, under the thread `key`, as `read` (the thread's
+    /// harness's reader) reads them from an offset and a prompt offset. A
+    /// transcript shorter than what was read before was replaced, so its old
+    /// messages are dropped and it is read from the start.
     ///
     /// Returns whether the index changed.
     ///
@@ -152,11 +154,15 @@ impl SearchIndex {
     ///
     /// Returns an error if the path isn't UTF-8, the transcript can't be read,
     /// or the index can't be read or written.
-    pub fn index_transcript(
+    pub fn index_transcript<F>(
         &mut self,
         key: ThreadKey,
         path: &Path,
-    ) -> Result<bool, Report<SearchIndexError>> {
+        read: F,
+    ) -> Result<bool, Report<SearchIndexError>>
+    where
+        F: FnOnce(&Path, u64, u64) -> io::Result<MessageRead>,
+    {
         let text_path = utf8(path)?;
         let (offset, prompt_offset): (u64, u64) = self
             .conn
@@ -169,7 +175,7 @@ impl SearchIndex {
             .change_context(SearchIndexError)
             .attach_with(|| format!("failed to read the offset of {text_path}"))?
             .unwrap_or((0, 0));
-        let read = read_messages(path, offset, prompt_offset)
+        let read = read(path, offset, prompt_offset)
             .change_context(SearchIndexError)
             .attach_with(|| format!("failed to read {text_path}"))?;
         if !read.restarted && read.offset == offset {
@@ -534,6 +540,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{SCHEMA, SearchIndex, SearchIndexError, ThreadKey, snippet};
+    use crate::feat::harness::claude::transcript::read_messages;
     use crate::feat::sessions::state::ThreadId;
     use crate::feat::sessions::transcript::Role;
 
@@ -577,7 +584,7 @@ mod tests {
         let dir = tempdir().change_context(SearchIndexError)?;
         let path = write(dir.path(), "transcript.jsonl", lines)?;
         let mut index = SearchIndex::open_in_memory()?;
-        index.index_transcript(KEY, &path)?;
+        index.index_transcript(KEY, &path, read_messages)?;
         Ok(index)
     }
 
@@ -616,8 +623,11 @@ mod tests {
         .change_context(SearchIndexError)?;
 
         // When opening the index there and indexing the transcript.
-        let indexed =
-            SearchIndex::open(&path)?.index_transcript((ThreadId(1), 1_000), &transcript)?;
+        let indexed = SearchIndex::open(&path)?.index_transcript(
+            (ThreadId(1), 1_000),
+            &transcript,
+            read_messages,
+        )?;
 
         // Then the recreated file is at this build's schema and takes the transcript.
         assert!(
@@ -746,7 +756,7 @@ mod tests {
         let mut index = SearchIndex::open_in_memory()?;
 
         // When indexing it.
-        index.index_transcript(KEY, &path)?;
+        index.index_transcript(KEY, &path, read_messages)?;
 
         // Then the unfinished line isn't found.
         assert!(
@@ -766,10 +776,10 @@ mod tests {
             &[prompt("Fix the parser", 1)],
         )?;
         let mut index = SearchIndex::open_in_memory()?;
-        index.index_transcript(KEY, &path)?;
+        index.index_transcript(KEY, &path, read_messages)?;
 
         // When indexing it again unchanged.
-        index.index_transcript(KEY, &path)?;
+        index.index_transcript(KEY, &path, read_messages)?;
 
         // Then its prompt is found once.
         assert_eq!(
@@ -793,9 +803,9 @@ mod tests {
             ],
         )?;
         let mut index = SearchIndex::open_in_memory()?;
-        index.index_transcript(KEY, &path)?;
+        index.index_transcript(KEY, &path, read_messages)?;
         write(dir.path(), "transcript.jsonl", &[prompt("Lint", 3)])?;
-        index.index_transcript(KEY, &path)?;
+        index.index_transcript(KEY, &path, read_messages)?;
         Ok(index)
     }
 
@@ -839,8 +849,8 @@ mod tests {
         let kept = write(dir.path(), "kept.jsonl", &[prompt("Fix the parser", 1)])?;
         let gone = write(dir.path(), "gone.jsonl", &[prompt("Fix the lexer", 2)])?;
         let mut index = SearchIndex::open_in_memory()?;
-        index.index_transcript(KEY, &kept)?;
-        index.index_transcript((ThreadId(2), 2_000), &gone)?;
+        index.index_transcript(KEY, &kept, read_messages)?;
+        index.index_transcript((ThreadId(2), 2_000), &gone, read_messages)?;
 
         // When retaining only the first thread.
         index.retain_threads(&HashSet::from([KEY]))?;
@@ -973,8 +983,8 @@ mod tests {
         let newer = write(dir.path(), "newer.jsonl", &[prompt("newer parser", 9)])?;
         let older = write(dir.path(), "older.jsonl", &[prompt("older parser", 1)])?;
         let mut index = SearchIndex::open_in_memory()?;
-        index.index_transcript(KEY, &newer)?;
-        index.index_transcript((ThreadId(2), 2_000), &older)?;
+        index.index_transcript(KEY, &newer, read_messages)?;
+        index.index_transcript((ThreadId(2), 2_000), &older, read_messages)?;
 
         // When querying both.
         let texts = found(&index, "parser")?;

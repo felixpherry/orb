@@ -9,6 +9,7 @@ use crate::feat::git::validator::{
     validate_switch_branch,
 };
 use crate::feat::git::worktree::previous_worktree;
+use crate::feat::harness::HarnessId;
 use crate::feat::jumps::validator::{validate_jump_back, validate_jump_forward};
 use crate::feat::pane::validator::{validate_attach, validate_detach};
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
@@ -546,7 +547,9 @@ impl IntentHandler {
                 let picker = validate_pick_setting(state)
                     .ok()
                     .and_then(|()| setting_target(&state.sessions))
-                    .map(|(target, model, _)| PickerState::models(target, model, state.focus));
+                    .map(|(target, harness, model, _)| {
+                        PickerState::models(target, state.harness_info(harness), model, state.focus)
+                    });
                 if let Some(picker) = picker {
                     open_picker(state, picker);
                 }
@@ -556,8 +559,13 @@ impl IntentHandler {
                 let picker = validate_pick_setting(state)
                     .ok()
                     .and_then(|()| setting_target(&state.sessions))
-                    .map(|(target, _, permission)| {
-                        PickerState::permissions(target, permission, state.focus)
+                    .map(|(target, harness, _, permission)| {
+                        PickerState::permissions(
+                            target,
+                            state.harness_info(harness),
+                            permission,
+                            state.focus,
+                        )
                     });
                 if let Some(picker) = picker {
                     open_picker(state, picker);
@@ -604,21 +612,25 @@ impl IntentHandler {
                     }
                 }
                 Some(&PickerKind::Model { target }) => {
-                    match close_picker(state).as_ref().and_then(PickerState::selected) {
-                        Some(&PickerItem::Setting(value)) => {
-                            edit_setting(state, target, |model, _| {
-                                *model = value.map(str::to_owned);
-                            })
+                    match close_picker(state)
+                        .as_ref()
+                        .and_then(PickerState::selected)
+                        .cloned()
+                    {
+                        Some(PickerItem::Setting { value, .. }) => {
+                            edit_setting(state, target, |model, _| *model = value)
                         }
                         _ => vec![],
                     }
                 }
                 Some(&PickerKind::Permission { target }) => {
-                    match close_picker(state).as_ref().and_then(PickerState::selected) {
-                        Some(&PickerItem::Setting(value)) => {
-                            edit_setting(state, target, |_, permission| {
-                                *permission = value.map(str::to_owned);
-                            })
+                    match close_picker(state)
+                        .as_ref()
+                        .and_then(PickerState::selected)
+                        .cloned()
+                    {
+                        Some(PickerItem::Setting { value, .. }) => {
+                            edit_setting(state, target, |_, permission| *permission = value)
                         }
                         _ => vec![],
                     }
@@ -1337,7 +1349,9 @@ where
 /// What `␣m`/`␣a` set for the cursor, with its current model and
 /// permission: a project's draft, or on a group's draft or card the group's
 /// defaults.
-fn setting_target(sessions: &Sessions) -> Option<(DraftTarget, Option<&str>, Option<&str>)> {
+fn setting_target(
+    sessions: &Sessions,
+) -> Option<(DraftTarget, &HarnessId, Option<&str>, Option<&str>)> {
     match (
         sessions.cursor?,
         sessions.selected_draft(),
@@ -1345,6 +1359,7 @@ fn setting_target(sessions: &Sessions) -> Option<(DraftTarget, Option<&str>, Opt
     ) {
         (SidebarItem::Draft(_), Some((project, draft)), _) => Some((
             DraftTarget::Project(project.id),
+            &draft.harness,
             draft.model.as_deref(),
             draft.permission.as_deref(),
         )),
@@ -1357,9 +1372,10 @@ fn setting_target(sessions: &Sessions) -> Option<(DraftTarget, Option<&str>, Opt
 }
 
 /// `group`'s defaults as a model or permission picker's target.
-fn group_setting(group: &Group) -> (DraftTarget, Option<&str>, Option<&str>) {
+fn group_setting(group: &Group) -> (DraftTarget, &HarnessId, Option<&str>, Option<&str>) {
     (
         DraftTarget::Group(group.id),
+        &group.defaults.harness,
         group.defaults.model.as_deref(),
         group.defaults.permission.as_deref(),
     )
@@ -1763,14 +1779,16 @@ fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
     use crate::command::Workspace;
     use crate::feat::git::git_service::{GitRef, WorktreeFacts};
+    use crate::feat::harness::claude::models::{PERMISSION_MODES, info};
     use crate::feat::jumps::state::JumpList;
-    use crate::feat::picker::list::{BranchRow, PERMISSION_MODES, PickerItem, WorkspaceChoice};
+    use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice, setting_label};
     use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
         AttachTarget, Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project,
@@ -1783,8 +1801,18 @@ mod tests {
     use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
 
+    /// Claude's setting row for `value`.
+    fn setting(value: Option<&str>) -> PickerItem {
+        let info = info();
+        PickerItem::Setting {
+            value: value.map(str::to_owned),
+            label: setting_label(value, Some(&info)).to_owned(),
+        }
+    }
+
     fn thread(id: i64, status: ThreadStatus) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
             cwd: format!("/work/{id}").into(),
@@ -3311,8 +3339,13 @@ mod tests {
             settled_at: settled.then(|| at(5)),
             active_since: SystemTime::UNIX_EPOCH,
             draft: false,
-            defaults: GroupDefaults::default(),
+            defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
+                model: None,
+                permission: None,
+            },
         };
+        state.harnesses = vec![info()];
         if let Some(project) = state.sessions.projects.first_mut() {
             project.groups = vec![group];
         }
@@ -3404,10 +3437,12 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             draft: true,
             defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
                 model: model.map(str::to_owned),
                 permission: None,
             },
         };
+        state.harnesses = vec![info()];
         if let Some(project) = state.sessions.projects.first_mut() {
             project.groups = vec![group];
         }
@@ -4110,7 +4145,7 @@ mod tests {
             .cloned();
         assert_eq!(
             highlighted,
-            Some(PickerItem::Setting(Some("claude-opus-5-5"))),
+            Some(setting(Some("claude-opus-5-5"))),
             "the card's picker should start on the group's default"
         );
     }
@@ -4559,6 +4594,7 @@ mod tests {
     /// A draft in `workspace` with no branch, model or permission.
     fn draft(workspace: DraftWorkspace) -> Draft {
         Draft {
+            harness: HarnessId::new("claude"),
             workspace,
             branch: None,
             model: None,
@@ -4576,6 +4612,7 @@ mod tests {
             focus: Focus::Dashboard,
             ..state_at(threads, SidebarItem::Draft(ProjectId(1)))
         };
+        state.harnesses = vec![info()];
         if let Some(project) = state.sessions.projects.first_mut() {
             project.draft = Some(draft);
         }
@@ -5245,7 +5282,7 @@ mod tests {
                 PickerKind::Model {
                     target: DraftTarget::Project(ProjectId(1))
                 },
-                Some(PickerItem::Setting(None))
+                Some(setting(None))
             )),
             "␣m on a draft should open its model picker, Default first"
         );
@@ -5268,7 +5305,7 @@ mod tests {
         // Then Claude Sonnet 5 is selected.
         assert_eq!(
             state.picker.as_ref().and_then(PickerState::selected),
-            Some(&PickerItem::Setting(Some("claude-sonnet-5"))),
+            Some(&setting(Some("claude-sonnet-5"))),
             "the draft's model should be selected"
         );
     }
@@ -6899,7 +6936,11 @@ mod tests {
                 settled_at: None,
                 active_since: SystemTime::UNIX_EPOCH,
                 draft: false,
-                defaults: GroupDefaults::default(),
+                defaults: GroupDefaults {
+                    harness: HarnessId::new("claude"),
+                    model: None,
+                    permission: None,
+                },
             }];
         }
         AppState {
@@ -8282,7 +8323,7 @@ mod tests {
             focus: Focus::Picker,
             picker: Some(PickerState::projects(
                 vec![
-                    PickerItem::Heading("Legacy models"),
+                    PickerItem::Heading("Legacy models".to_owned()),
                     PickerItem::Project {
                         id: ProjectId(1),
                         title: "alpha".to_owned(),

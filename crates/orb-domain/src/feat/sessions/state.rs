@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::TextInput;
+use crate::feat::harness::HarnessId;
 use crate::feat::picker::list::fuzzy_match;
 use crate::feat::sidebar::state::SidebarLayout;
 
@@ -156,6 +157,8 @@ pub struct Thread {
     /// The `--permission-mode` its session started with; `None` = Claude's
     /// default.
     pub permission: Option<String>,
+    /// The harness its session runs in.
+    pub harness: HarnessId,
 }
 
 impl Thread {
@@ -199,11 +202,15 @@ pub struct Draft {
     /// `origin/<base>` when origin has the base, else the base as is. `None`
     /// until the sessions actor has looked. Not saved.
     pub from: Option<String>,
+    /// The harness its session will run in.
+    pub harness: HarnessId,
 }
 
 /// A group's default session setup: its draft's, and each new sibling's.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupDefaults {
+    /// The harness its threads start in.
+    pub harness: HarnessId,
     /// The `--model`; `None` = Claude's default.
     pub model: Option<String>,
     /// The `--permission-mode`; `None` = Claude's default.
@@ -1205,6 +1212,7 @@ pub struct AttachTarget {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::collections::HashSet;
     use std::time::{Duration, SystemTime};
 
@@ -1221,6 +1229,7 @@ mod tests {
 
     fn thread(id: i64) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
             cwd: "/tmp".into(),
@@ -1300,6 +1309,7 @@ mod tests {
     fn drafted(id: i64, secs: u64) -> Project {
         Project {
             draft: Some(Draft {
+                harness: HarnessId::new("claude"),
                 workspace: DraftWorkspace::Local,
                 branch: None,
                 model: None,
@@ -2560,7 +2570,11 @@ mod tests {
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
             draft: false,
-            defaults: GroupDefaults::default(),
+            defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
+                model: None,
+                permission: None,
+            },
         }
     }
 
@@ -2641,6 +2655,7 @@ mod tests {
             vec![Group {
                 draft: true,
                 defaults: GroupDefaults {
+                    harness: HarnessId::new("claude"),
                     model: None,
                     permission: None,
                 },

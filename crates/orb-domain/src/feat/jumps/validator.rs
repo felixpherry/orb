@@ -40,6 +40,7 @@ pub fn validate_jump_forward(state: &AppState) -> Result<(), JumpError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::time::SystemTime;
 
     use super::{JumpError, validate_jump_back};
@@ -51,6 +52,7 @@ mod tests {
 
     fn thread(id: i64) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
             cwd: "/tmp".into(),

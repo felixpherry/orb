@@ -5,12 +5,10 @@
 //! config the way Claude's own prompt would, so the next start goes through
 //! and every worktree of the same repository is trusted with it.
 
-use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use error_stack::{Report, ResultExt};
@@ -36,33 +34,6 @@ pub trait WorkspaceTrust: Send + Sync {
     ///
     /// Returns an error if the trust couldn't be saved.
     fn trust(&self, dir: &Path) -> Result<(), Report<WorkspaceTrustError>>;
-}
-
-/// Shared handle to the [`WorkspaceTrust`] in use.
-#[derive(Clone)]
-pub struct WorkspaceTrustService {
-    trust: Arc<dyn WorkspaceTrust>,
-}
-
-impl WorkspaceTrustService {
-    pub fn new(trust: Arc<dyn WorkspaceTrust>) -> Self {
-        Self { trust }
-    }
-
-    /// Marks `dir` trusted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the trust couldn't be saved.
-    pub fn trust(&self, dir: &Path) -> Result<(), Report<WorkspaceTrustError>> {
-        self.trust.trust(dir)
-    }
-}
-
-impl fmt::Debug for WorkspaceTrustService {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "WorkspaceTrust<{}>", self.trust.name())
-    }
 }
 
 /// Claude's global config file, `.claude.json`, as the record of trust.

@@ -32,6 +32,7 @@ pub fn validate_open_tool(state: &AppState) -> Result<(), OpenToolError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::time::SystemTime;
 
     use super::{OpenToolError, validate_open_tool};
@@ -53,6 +54,7 @@ mod tests {
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
                     draft: Some(Draft {
+                        harness: HarnessId::new("claude"),
                         workspace: DraftWorkspace::Local,
                         branch: None,
                         model: None,
@@ -62,6 +64,7 @@ mod tests {
                         from: None,
                     }),
                     threads: vec![Thread {
+                        harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
                         cwd: "/work".into(),
@@ -92,6 +95,7 @@ mod tests {
                         active_since: SystemTime::UNIX_EPOCH,
                         draft: true,
                         defaults: GroupDefaults {
+                            harness: HarnessId::new("claude"),
                             model: None,
                             permission: None,
                         },

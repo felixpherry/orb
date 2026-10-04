@@ -1116,6 +1116,7 @@ const LAST_CHILD_GUIDE: &str = "    └╴";
 
 #[cfg(test)]
 mod tests {
+    use orb_domain::feat::harness::HarnessId;
     use std::collections::HashSet;
     use std::time::{Duration, SystemTime};
 
@@ -1145,6 +1146,7 @@ mod tests {
     /// A thread titled "Thread <id>" whose turn started at 866 s.
     fn thread(id: i64, status: ThreadStatus) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: Some(format!("Thread {id}")),
             cwd: "/Users/me/dev/orb".into(),
@@ -1198,6 +1200,7 @@ mod tests {
         let mut sessions = sessions(vec![]);
         if let Some(project) = sessions.projects.first_mut() {
             project.draft = Some(Draft {
+                harness: HarnessId::new("claude"),
                 workspace,
                 branch: branch.map(str::to_owned),
                 model: None,
@@ -2408,6 +2411,7 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             draft,
             defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
                 model: None,
                 permission: None,
             },
@@ -2469,6 +2473,7 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             draft,
             defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
                 model: None,
                 permission: None,
             },

@@ -448,6 +448,7 @@ pub fn validate_close_group(state: &AppState) -> Result<(), CloseGroupError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::time::SystemTime;
 
     use super::{
@@ -477,6 +478,7 @@ mod tests {
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
                     draft: Some(Draft {
+                        harness: HarnessId::new("claude"),
                         workspace: DraftWorkspace::Local,
                         branch: None,
                         model: None,
@@ -653,6 +655,7 @@ mod tests {
                     removed: false,
                     draft: None,
                     threads: vec![Thread {
+                        harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
                         cwd: "/work".into(),
@@ -703,6 +706,7 @@ mod tests {
                     removed: false,
                     draft: None,
                     threads: vec![Thread {
+                        harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
                         cwd: "/work".into(),
@@ -787,7 +791,11 @@ mod tests {
                     settled_at: Some(SystemTime::UNIX_EPOCH),
                     active_since: SystemTime::UNIX_EPOCH,
                     draft: false,
-                    defaults: GroupDefaults::default(),
+                    defaults: GroupDefaults {
+                        harness: HarnessId::new("claude"),
+                        model: None,
+                        permission: None,
+                    },
                 }],
                 kind: project_kind,
             };
@@ -922,6 +930,7 @@ mod tests {
                         active_since: SystemTime::UNIX_EPOCH,
                         draft: true,
                         defaults: GroupDefaults {
+                            harness: HarnessId::new("claude"),
                             model: None,
                             permission: None,
                         },
@@ -1036,6 +1045,7 @@ mod tests {
             .iter()
             .zip((1..=statuses.len()).rev())
             .map(|(status, id)| Thread {
+                harness: HarnessId::new("claude"),
                 id: ThreadId(i64::try_from(id).unwrap_or_default()),
                 title: None,
                 cwd: "/work/GT-514-login".into(),
@@ -1076,7 +1086,11 @@ mod tests {
                         settled_at: None,
                         active_since: SystemTime::UNIX_EPOCH,
                         draft: false,
-                        defaults: GroupDefaults::default(),
+                        defaults: GroupDefaults {
+                            harness: HarnessId::new("claude"),
+                            model: None,
+                            permission: None,
+                        },
                     }],
                     kind: ProjectKind::Normal,
                 }],

@@ -24,6 +24,7 @@ use wherror::Error;
 use super::state::{
     DraftWorkspace, GroupId, GroupKind, ProjectId, ProjectKind, SidebarItem, ThreadId,
 };
+use crate::feat::harness::HarnessId;
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -88,6 +89,8 @@ pub struct ThreadRow {
     pub permission_mode: Option<String>,
     /// The group the thread belongs to; `None` = a top-level thread.
     pub group_id: Option<GroupId>,
+    /// The harness its session runs in.
+    pub harness: HarnessId,
 }
 
 /// A thread's settle state as set by the user, auto-settle, or activity.
@@ -127,6 +130,8 @@ pub struct NewThread {
     pub permission_mode: Option<String>,
     /// The group the thread is born in; `None` = a top-level thread.
     pub group_id: Option<GroupId>,
+    /// The harness its session runs in.
+    pub harness: HarnessId,
 }
 
 /// A saved group.
@@ -154,6 +159,8 @@ pub struct GroupRow {
     pub draft_model: Option<String>,
     /// The `--permission-mode` for its draft; `None` = Claude's default.
     pub draft_permission_mode: Option<String>,
+    /// The harness its threads start in by default.
+    pub harness: HarnessId,
 }
 
 /// A group that was just created and isn't saved yet.
@@ -167,6 +174,7 @@ pub struct NewGroup {
     pub created_at: i64,
     pub draft_model: Option<String>,
     pub draft_permission_mode: Option<String>,
+    pub harness: HarnessId,
 }
 
 /// A saved draft: the session setup picked for a project's next thread.
@@ -181,6 +189,8 @@ pub struct DraftRow {
     /// `None` = Claude's default.
     pub permission_mode: Option<String>,
     pub created_at: i64,
+    /// The harness its session will run in.
+    pub harness: HarnessId,
 }
 
 /// Which kind of workspace a project's last draft started in.
@@ -216,6 +226,8 @@ impl LastWorkspace {
 /// The settings a project's last draft started with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastUsed {
+    /// `None` for a project last started before orb knew harnesses.
+    pub harness: Option<HarnessId>,
     pub workspace: LastWorkspace,
     /// `None` = Claude's default.
     pub model: Option<String>,
@@ -302,6 +314,20 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE threads ADD COLUMN group_id INTEGER REFERENCES groups(id);
 ",
     "CREATE TABLE jumps (position INTEGER PRIMARY KEY, kind TEXT NOT NULL, item_id INTEGER NOT NULL);",
+    "
+    ALTER TABLE threads ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';
+    ALTER TABLE drafts ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';
+    ALTER TABLE projects ADD COLUMN last_harness TEXT;
+    ALTER TABLE groups ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';
+    ALTER TABLE groups ADD COLUMN has_draft INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE groups ADD COLUMN own_harness TEXT;
+    ALTER TABLE groups ADD COLUMN own_model_set INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE groups ADD COLUMN own_model TEXT;
+    ALTER TABLE groups ADD COLUMN own_permission_set INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE groups ADD COLUMN own_permission TEXT;
+    UPDATE groups SET has_draft = 1
+     WHERE id NOT IN (SELECT group_id FROM threads WHERE group_id IS NOT NULL);
+",
 ];
 
 impl Store {
@@ -364,7 +390,7 @@ impl Store {
                         transcript_offset, created_at, turn_started_at, custom_title,
                         branch, pinned_at, settled_override, settled_at, unsettled_at,
                         last_activity_at, last_visited_at, ai_titled, model, permission_mode,
-                        renamed_title, group_id
+                        renamed_title, group_id, harness
                  FROM threads ORDER BY created_at DESC, id DESC",
                 thread_row,
             )
@@ -372,7 +398,7 @@ impl Store {
         let drafts = self
             .query(
                 "SELECT project_id, workspace, workspace_path, branch, model, permission_mode,
-                        created_at
+                        created_at, harness
                  FROM drafts ORDER BY project_id",
                 draft_row,
             )
@@ -381,7 +407,7 @@ impl Store {
             .query(
                 "SELECT id, project_id, kind, name, dir, branch, created_at, pinned_at,
                         settled_override, settled_at, unsettled_at, draft_model,
-                        draft_permission_mode
+                        draft_permission_mode, harness
                  FROM groups ORDER BY id",
                 group_row,
             )
@@ -429,8 +455,8 @@ impl Store {
             .query_row(
                 "INSERT INTO threads
                    (project_id, short_id, cwd, created_at, last_activity_at, last_visited_at,
-                    model, permission_mode, group_id)
-                 VALUES (?1, ?2, ?3, ?4, ?4, ?4, ?5, ?6, ?7) RETURNING id",
+                    model, permission_mode, group_id, harness)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?4, ?5, ?6, ?7, ?8) RETURNING id",
                 params![
                     row.project_id.0,
                     row.short_id,
@@ -439,6 +465,7 @@ impl Store {
                     row.model,
                     row.permission_mode,
                     row.group_id.map(|group| group.0),
+                    row.harness.as_str(),
                 ],
                 |row| row.get(0),
             )
@@ -519,8 +546,8 @@ impl Store {
             .query_row(
                 "INSERT INTO groups
                    (project_id, kind, name, dir, branch, created_at, draft_model,
-                    draft_permission_mode)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
+                    draft_permission_mode, harness)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
                 params![
                     row.project_id.0,
                     group_kind_text(row.kind),
@@ -530,6 +557,7 @@ impl Store {
                     row.created_at,
                     row.draft_model,
                     row.draft_permission_mode,
+                    row.harness.as_str(),
                 ],
                 |row| row.get(0),
             )
@@ -552,7 +580,7 @@ impl Store {
             .execute(
                 "UPDATE groups SET dir = ?2, pinned_at = ?3, settled_override = ?4,
                         settled_at = ?5, unsettled_at = ?6, draft_model = ?7,
-                        draft_permission_mode = ?8, branch = ?9
+                        draft_permission_mode = ?8, branch = ?9, harness = ?10
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -564,6 +592,7 @@ impl Store {
                     row.draft_model,
                     row.draft_permission_mode,
                     row.branch,
+                    row.harness.as_str(),
                 ],
             )
             .change_context(StoreError)
@@ -601,12 +630,13 @@ impl Store {
             .execute(
                 "INSERT INTO drafts
                    (project_id, workspace, workspace_path, branch, model, permission_mode,
-                    created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    created_at, harness)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT (project_id) DO UPDATE SET
                    workspace = excluded.workspace, workspace_path = excluded.workspace_path,
                    branch = excluded.branch, model = excluded.model,
-                   permission_mode = excluded.permission_mode, created_at = excluded.created_at",
+                   permission_mode = excluded.permission_mode, created_at = excluded.created_at,
+                   harness = excluded.harness",
                 params![
                     row.project_id.0,
                     workspace,
@@ -615,6 +645,7 @@ impl Store {
                     row.model,
                     row.permission_mode,
                     row.created_at,
+                    row.harness.as_str(),
                 ],
             )
             .change_context(StoreError)
@@ -679,7 +710,7 @@ impl Store {
     pub fn last_used(&self, project: ProjectId) -> Result<Option<LastUsed>, Report<StoreError>> {
         self.conn
             .query_row(
-                "SELECT last_workspace, last_model, last_permission_mode FROM projects
+                "SELECT last_workspace, last_model, last_permission_mode, last_harness FROM projects
                  WHERE id = ?1 AND last_used_at IS NOT NULL",
                 params![project.0],
                 last_used_row,
@@ -698,7 +729,7 @@ impl Store {
     pub fn latest_last_used(&self) -> Result<Option<LastUsed>, Report<StoreError>> {
         self.conn
             .query_row(
-                "SELECT last_workspace, last_model, last_permission_mode FROM projects
+                "SELECT last_workspace, last_model, last_permission_mode, last_harness FROM projects
                  WHERE last_used_at IS NOT NULL ORDER BY last_used_at DESC, id DESC LIMIT 1",
                 [],
                 last_used_row,
@@ -722,7 +753,7 @@ impl Store {
         self.conn
             .execute(
                 "UPDATE projects SET last_workspace = ?2, last_model = ?3,
-                        last_permission_mode = ?4, last_used_at = ?5
+                        last_permission_mode = ?4, last_used_at = ?5, last_harness = ?6
                  WHERE id = ?1",
                 params![
                     project.0,
@@ -730,6 +761,7 @@ impl Store {
                     used.model,
                     used.permission_mode,
                     at_ms,
+                    used.harness.as_ref().map(HarnessId::as_str),
                 ],
             )
             .change_context(StoreError)
@@ -932,6 +964,7 @@ fn group_row(row: &Row<'_>) -> rusqlite::Result<GroupRow> {
         unsettled_at: row.get(10)?,
         draft_model: row.get(11)?,
         draft_permission_mode: row.get(12)?,
+        harness: HarnessId::new(row.get::<_, String>(13)?),
     })
 }
 
@@ -963,6 +996,7 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         permission_mode: row.get(20)?,
         renamed_title: row.get(21)?,
         group_id: row.get::<_, Option<i64>>(22)?.map(GroupId),
+        harness: HarnessId::new(row.get::<_, String>(23)?),
     })
 }
 
@@ -984,6 +1018,7 @@ fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
         model: row.get(4)?,
         permission_mode: row.get(5)?,
         created_at: row.get(6)?,
+        harness: HarnessId::new(row.get::<_, String>(7)?),
     })
 }
 
@@ -1029,6 +1064,7 @@ fn last_used_row(row: &Row<'_>) -> rusqlite::Result<LastUsed> {
             .unwrap_or(LastWorkspace::Local),
         model: row.get(1)?,
         permission_mode: row.get(2)?,
+        harness: row.get::<_, Option<String>>(3)?.map(HarnessId::new),
     })
 }
 
@@ -1038,6 +1074,7 @@ fn last_used_row(row: &Row<'_>) -> rusqlite::Result<LastUsed> {
     reason = "tests propagate store failures with `?` and assert on the outcome"
 )]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::path::{Path, PathBuf};
 
     use error_stack::{Report, ResultExt};
@@ -1057,6 +1094,7 @@ mod tests {
 
     fn new_thread(project_id: ProjectId) -> NewThread {
         NewThread {
+            harness: HarnessId::new("claude"),
             project_id,
             short_id: "28bf38e2".to_owned(),
             cwd: PathBuf::from("/tmp/orb"),
@@ -1070,6 +1108,7 @@ mod tests {
     /// A Feature group `GT-514-login` on its branch, created at 2 s.
     fn new_group(project_id: ProjectId) -> NewGroup {
         NewGroup {
+            harness: HarnessId::new("claude"),
             project_id,
             kind: GroupKind::Feature,
             name: "GT-514-login".to_owned(),
@@ -1084,6 +1123,7 @@ mod tests {
     /// A local draft on `main` for the project, created at 2 s.
     fn draft(project_id: ProjectId) -> DraftRow {
         DraftRow {
+            harness: HarnessId::new("claude"),
             project_id,
             workspace: DraftWorkspace::Local,
             branch: Some("main".to_owned()),
@@ -1392,6 +1432,85 @@ mod tests {
         Ok(())
     }
 
+    /// A database at schema version 9 holding the orb project with a draft,
+    /// the groups `with-thread` (holding thread `28bf38e2`) and `empty`.
+    fn v9_database(path: &Path) -> Result<(), Report<StoreError>> {
+        let conn = Connection::open(path).change_context(StoreError)?;
+        for sql in MIGRATIONS
+            .get(..9)
+            .ok_or_else(|| Report::new(StoreError).attach("no v9 migrations"))?
+        {
+            conn.execute_batch(sql).change_context(StoreError)?;
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
+             INSERT INTO drafts (project_id, workspace, created_at) VALUES (1, 'local', 600);
+             INSERT INTO groups (id, project_id, kind, name, branch, created_at)
+             VALUES (1, 1, 'feature', 'with-thread', 'with-thread', 700),
+                    (2, 1, 'feature', 'empty', 'empty', 800);
+             INSERT INTO threads (project_id, short_id, cwd, created_at, group_id)
+             VALUES (1, '28bf38e2', '/tmp/orb', 1000, 1);
+             PRAGMA user_version = 9;",
+        )
+        .change_context(StoreError)
+    }
+
+    #[rstest::rstest]
+    fn migrating_a_v9_database_backfills_claude_as_every_harness() -> Result<(), Report<StoreError>>
+    {
+        // Given a v9 database with a thread, a draft and groups.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v9_database(&path)?;
+
+        // When opening the store and loading.
+        let (_, threads, drafts, groups) = Store::open(&path)?.load()?;
+
+        // Then every thread, draft and group runs in claude.
+        let harnesses: Vec<String> = threads
+            .iter()
+            .map(|row| row.harness.to_string())
+            .chain(drafts.iter().map(|row| row.harness.to_string()))
+            .chain(groups.iter().map(|row| row.harness.to_string()))
+            .collect();
+        assert_eq!(
+            harnesses,
+            vec!["claude"; 4],
+            "migration v10 should store claude as the harness of everything saved before it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_a_v9_database_gives_only_threadless_groups_a_draft()
+    -> Result<(), Report<StoreError>> {
+        // Given a v9 database with a group holding a thread and an empty one.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v9_database(&path)?;
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then only the empty group has a draft.
+        let has_draft: Vec<(i64, bool)> = {
+            let conn = Connection::open(&path).change_context(StoreError)?;
+            let mut statement = conn
+                .prepare("SELECT id, has_draft FROM groups ORDER BY id")
+                .change_context(StoreError)?;
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .and_then(Iterator::collect)
+                .change_context(StoreError)?
+        };
+        assert_eq!(
+            has_draft,
+            vec![(1, false), (2, true)],
+            "migration v10 should give a draft only to a group without threads"
+        );
+        Ok(())
+    }
+
     #[rstest::rstest]
     fn reopening_a_migrated_database_keeps_its_schema_version() -> Result<(), Report<StoreError>> {
         // Given a database that was already migrated.
@@ -1428,6 +1547,7 @@ mod tests {
 
         // Then the thread comes back with the fields it was saved with.
         let expected = ThreadRow {
+            harness: HarnessId::new("claude"),
             id: thread_id,
             project_id,
             short_id: "28bf38e2".to_owned(),
@@ -1602,6 +1722,7 @@ mod tests {
 
         // Then loading returns it with the fields it was saved with.
         let expected = GroupRow {
+            harness: HarnessId::new("claude"),
             id,
             project_id,
             kind: GroupKind::Feature,
@@ -1816,6 +1937,7 @@ mod tests {
 
         // When saving its session id, titles, transcript cursor, and turn start.
         let updated = ThreadRow {
+            harness: HarnessId::new("claude"),
             id: thread_id,
             project_id,
             short_id: "28bf38e2".to_owned(),
@@ -2066,6 +2188,7 @@ mod tests {
 
         // When recording a new-worktree start with Default model in plan mode.
         let used = LastUsed {
+            harness: Some(HarnessId::new("claude")),
             workspace: LastWorkspace::NewWorktree,
             model: None,
             permission_mode: Some("plan".to_owned()),
@@ -2104,6 +2227,7 @@ mod tests {
         let a = store.add_project(Path::new("/tmp/a"), "a", ProjectKind::Normal, 500)?;
         let b = store.add_project(Path::new("/tmp/b"), "b", ProjectKind::Normal, 500)?;
         let used = |model: &str| LastUsed {
+            harness: Some(HarnessId::new("claude")),
             workspace: LastWorkspace::Local,
             model: Some(model.to_owned()),
             permission_mode: None,

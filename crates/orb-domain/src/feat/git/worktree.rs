@@ -90,6 +90,7 @@ pub fn previous_worktree(
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
@@ -103,6 +104,7 @@ mod tests {
     /// A thread in `cwd` on `branch`, last active `activity` seconds in.
     fn thread(id: i64, cwd: &str, branch: &str, activity: u64) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
             cwd: PathBuf::from(cwd),

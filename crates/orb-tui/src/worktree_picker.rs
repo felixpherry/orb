@@ -458,6 +458,7 @@ fn user_line(user: &User<'_>, app: &AppState, now: SystemTime, width: usize) -> 
 
 #[cfg(test)]
 mod tests {
+    use orb_domain::feat::harness::HarnessId;
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -494,6 +495,7 @@ mod tests {
     /// five minutes before [`now`].
     fn thread(id: i64, title: &str, name: &str) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: Some(title.to_owned()),
             cwd: path(name),
@@ -876,6 +878,7 @@ mod tests {
     fn drafted(mut app: AppState) -> AppState {
         if let Some(project) = app.sessions.projects.first_mut() {
             project.draft = Some(Draft {
+                harness: HarnessId::new("claude"),
                 workspace: DraftWorkspace::Existing(path("orb-eeee")),
                 branch: None,
                 model: None,

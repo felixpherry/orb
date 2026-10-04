@@ -239,6 +239,7 @@ pub fn order(app: &AppState) -> Vec<&Worktree> {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -265,6 +266,7 @@ mod tests {
     /// An idle, unsettled thread outside any group, running in `cwd`.
     fn thread(id: i64, cwd: &str) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
             cwd: PathBuf::from(cwd),
@@ -321,7 +323,11 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: UNIX_EPOCH,
-            defaults: GroupDefaults::default(),
+            defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
+                model: None,
+                permission: None,
+            },
             draft: false,
         }
     }
@@ -474,6 +480,7 @@ mod tests {
         // Given a project draft pointed at the worktree.
         let app = app(vec![Project {
             draft: Some(Draft {
+                harness: HarnessId::new("claude"),
                 workspace: DraftWorkspace::Existing(PathBuf::from(WT)),
                 branch: None,
                 model: None,

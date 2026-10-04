@@ -27,7 +27,7 @@ use std::path::Path;
 
 use orb_domain::feat::git::git_service::GitRef;
 use orb_domain::feat::picker::list::{
-    ALL_PROJECTS, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label, setting_label,
+    ALL_PROJECTS, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
 use orb_domain::feat::sessions::state::{GroupKind, ProjectKind};
@@ -395,12 +395,12 @@ fn row_content(
             };
             (left, right)
         }
-        PickerItem::Setting(value) => {
+        PickerItem::Setting { label, .. } => {
             let mark = match kind {
                 PickerKind::Permission { .. } => icon(SHIELD, YELLOW),
                 _ => icon(CLAUDE_LOGO, CLAUDE),
             };
-            (labelled(mark, setting_label(*value), &matches.name), None)
+            (labelled(mark, label, &matches.name), None)
         }
         PickerItem::Heading(text) => (vec![span(format!("── {text} ──"), COMMENT)], None),
         PickerItem::InitGit => (labelled(icon(GIT, ORANGE), INIT_GIT, &matches.name), None),
@@ -549,6 +549,7 @@ mod tests {
 
     use orb_domain::Focus;
     use orb_domain::feat::git::git_service::GitRef;
+    use orb_domain::feat::harness::claude::models::info;
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::{DraftTarget, PickTarget, PickerState};
     use orb_domain::feat::sessions::state::{GroupId, GroupKind, ProjectId, ProjectKind, ThreadId};
@@ -774,11 +775,11 @@ mod tests {
     #[case(workspace(), "Workspace")]
     #[case(branches(vec![branch("main", None)]), "Branches")]
     #[case(
-        PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard),
+        PickerState::models(DraftTarget::Project(ProjectId(1)), Some(&info()), None, Focus::Dashboard),
         "Model"
     )]
     #[case(
-        PickerState::permissions(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard),
+        PickerState::permissions(DraftTarget::Project(ProjectId(1)), Some(&info()), None, Focus::Dashboard),
         "Permission mode"
     )]
     #[case(
@@ -903,8 +904,12 @@ mod tests {
     fn heading_is_not_numbered() {
         // Given a model picker, whose five current models come before the
         // Legacy models heading.
-        let picker =
-            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
+            None,
+            Focus::Dashboard,
+        );
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -1087,8 +1092,12 @@ mod tests {
     #[rstest::rstest]
     fn model_row_starts_with_the_claude_mark() {
         // Given a model picker.
-        let picker =
-            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
+            None,
+            Focus::Dashboard,
+        );
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -1106,8 +1115,12 @@ mod tests {
     #[rstest::rstest]
     fn permission_row_starts_with_a_shield() {
         // Given a permission picker.
-        let picker =
-            PickerState::permissions(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
+        let picker = PickerState::permissions(
+            DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
+            None,
+            Focus::Dashboard,
+        );
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -1380,6 +1393,7 @@ mod tests {
         // Given a model picker.
         let picker = PickerState::models(
             DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
             Some("sonnet"),
             Focus::Dashboard,
         );
@@ -1398,8 +1412,12 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_names_the_models() {
         // Given a model picker.
-        let picker =
-            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
+            None,
+            Focus::Dashboard,
+        );
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -1415,8 +1433,12 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_labels_the_legacy_models() {
         // Given a model picker.
-        let picker =
-            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
+            None,
+            Focus::Dashboard,
+        );
 
         // When drawing it.
         let buf = draw(&picker, 60, 40);
@@ -1607,7 +1629,7 @@ mod tests {
         // Given a picker whose first row is a heading.
         let picker = PickerState::projects(
             vec![
-                PickerItem::Heading("Legacy models"),
+                PickerItem::Heading("Legacy models".to_owned()),
                 project(1, "alpha", "/alpha"),
             ],
             Focus::Sidebar,

@@ -16,7 +16,6 @@
 //! user's trust in Claude's own config.
 
 pub mod child_env;
-pub mod claude_supervisor;
 pub mod session_host;
 pub mod sessions_actor;
 pub mod state;
@@ -24,4 +23,3 @@ pub mod store;
 pub mod template;
 pub mod transcript;
 pub mod validator;
-pub mod workspace_trust;

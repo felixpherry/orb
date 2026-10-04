@@ -65,12 +65,12 @@ use jiff::tz::TimeZone;
 use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::git::worktree::is_orb_worktree;
+use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::ThreadId;
-use orb_domain::feat::sessions::transcript::read_exchanges;
 use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
 use orb_domain::feat::zellij::zellij_service::{
     NOT_IN_ZELLIJ, ZellijError, ZellijService, zellij_reason,
@@ -138,6 +138,7 @@ impl Frontend {
         worktrees_root: PathBuf,
         search: ActorRef<SearchActor>,
         git: GitService,
+        harnesses: Harnesses,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
         notifier: NotifierService,
@@ -153,6 +154,7 @@ impl Frontend {
                 worktrees_root,
                 search,
                 git,
+                harnesses,
                 claude_env,
                 zellij,
                 notifier,
@@ -320,6 +322,8 @@ struct App {
     /// Runs transcript searches and loads their previews.
     search: ActorRef<SearchActor>,
     git: GitService,
+    /// Every harness, to read a thread's transcript in its own format.
+    harnesses: Harnesses,
     keys: Keys,
     /// Each attached thread's `claude attach`, kept while other threads are
     /// selected.
@@ -365,6 +369,7 @@ impl App {
         worktrees_root: PathBuf,
         search: ActorRef<SearchActor>,
         git: GitService,
+        harnesses: Harnesses,
         claude_env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
         notifier: NotifierService,
@@ -382,6 +387,7 @@ impl App {
             worktrees_root,
             search,
             git,
+            harnesses,
             keys: Keys::new(keymap::keymap(), scope),
             panes: HashMap::new(),
             focused_pane: None,
@@ -1065,11 +1071,20 @@ impl App {
         }
     }
 
-    /// Reads `thread`'s transcript into the open picker's preview. An
-    /// unreadable transcript gives an empty preview, which shows as no
-    /// transcript.
+    /// Reads `thread`'s transcript, in its harness's format, into the open
+    /// picker's preview. An unreadable transcript, or one whose harness orb
+    /// doesn't know, gives an empty preview, which shows as no transcript.
     fn load_preview(&self, thread: ThreadId, transcript: &Path) {
-        let (len, exchanges) = read_exchanges(transcript).unwrap_or_default();
+        let harness = self
+            .state
+            .read()
+            .sessions
+            .threads()
+            .find(|candidate| candidate.id == thread)
+            .and_then(|found| self.harnesses.get(&found.harness).cloned());
+        let (len, exchanges) = harness
+            .and_then(|harness| harness.exchanges(transcript).ok())
+            .unwrap_or_default();
         if let Some(picker) = &mut self.state.write().picker {
             picker.show_preview(thread, len, exchanges);
         }
@@ -1208,6 +1223,7 @@ fn spawn_input_thread(tx: Sender<LoopEvent>) -> io::Result<()> {
     reason = "tests propagate file failures with `?` and assert on the outcome"
 )]
 mod tests {
+    use orb_domain::feat::harness::HarnessId;
     use std::cell::Cell;
     use std::collections::{HashMap, HashSet};
     use std::fs;
@@ -1309,6 +1325,7 @@ mod tests {
                     root: PathBuf::from("/repo"),
                     created_at: UNIX_EPOCH,
                     threads: vec![Thread {
+                        harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
                         cwd: "/tmp".into(),

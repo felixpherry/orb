@@ -20,11 +20,11 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use super::session_host::{
+use crate::feat::sessions::session_host::{
     CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
     WorkspaceUntrusted,
 };
-use super::state::ThreadStatus;
+use crate::feat::sessions::state::ThreadStatus;
 
 const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -85,7 +85,11 @@ impl SessionHost for ClaudeSupervisor {
         Ok(CreatedSession { short_id })
     }
 
-    async fn list(&self) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
+    /// `claude agents --all` lists every session, so the ids aren't needed.
+    async fn list(
+        &self,
+        _short_ids: &[String],
+    ) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
         let command = self.claude(&["agents", "--json", "--all"]);
         let text = run(command, "claude agents", LIST_TIMEOUT).await?;
         parse_agents(&text)

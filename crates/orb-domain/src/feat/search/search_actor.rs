@@ -19,6 +19,7 @@ use super::index::{Hit, SearchIndex, SearchIndexError, ThreadKey, snippet};
 use super::state::SearchProgress;
 use crate::AppState;
 use crate::common::{State, Wake};
+use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::picker::list::PickerItem;
 use crate::feat::picker::state::{PickerState, thread_label};
 use crate::feat::sessions::sessions_actor::to_ms;
@@ -27,6 +28,8 @@ use crate::feat::sessions::state::{Project, Sessions, Thread};
 /// What the search actor needs to start.
 pub struct SearchActorDeps {
     pub state: State,
+    /// Every harness, to read each thread's transcript in its own format.
+    pub harnesses: Harnesses,
     /// `~/.orb/userdata/search.sqlite`.
     pub index_path: PathBuf,
     /// Tells the frontend to redraw.
@@ -37,11 +40,13 @@ pub struct SearchActorDeps {
 /// rows and preview through their guarded setters.
 pub struct SearchActor {
     state: State,
+    harnesses: Harnesses,
     /// `None` when the index couldn't be opened; then every message is a no-op.
     index: Option<SearchIndex>,
     wake: Wake,
-    /// Transcripts the startup indexing hasn't read yet, newest chat first.
-    queue: VecDeque<(ThreadKey, PathBuf)>,
+    /// Transcripts the startup indexing hasn't read yet, newest chat first,
+    /// with the harness each thread runs in.
+    queue: VecDeque<(ThreadKey, HarnessId, PathBuf)>,
 }
 
 /// Index the next queued transcript. The actor sends it to itself.
@@ -126,6 +131,7 @@ impl SearchActor {
     fn start(deps: SearchActorDeps) -> Self {
         let SearchActorDeps {
             state,
+            harnesses,
             index_path,
             wake,
         } = deps;
@@ -136,6 +142,7 @@ impl SearchActor {
                 wake();
                 return Self {
                     state,
+                    harnesses,
                     index: None,
                     wake,
                     queue: VecDeque::new(),
@@ -147,9 +154,15 @@ impl SearchActor {
             let mut threads: Vec<&Thread> = live(&app.sessions).map(|(_, thread)| thread).collect();
             threads.sort_by_key(|thread| Reverse((thread.last_chat(), thread.id.0)));
             let keys: HashSet<ThreadKey> = threads.iter().map(|thread| key(thread)).collect();
-            let queue: VecDeque<(ThreadKey, PathBuf)> = threads
+            let queue: VecDeque<(ThreadKey, HarnessId, PathBuf)> = threads
                 .iter()
-                .filter_map(|thread| Some((key(thread), thread.transcript.clone()?)))
+                .filter_map(|thread| {
+                    Some((
+                        key(thread),
+                        thread.harness.clone(),
+                        thread.transcript.clone()?,
+                    ))
+                })
                 .collect();
             (keys, queue)
         };
@@ -163,6 +176,7 @@ impl SearchActor {
         wake();
         Self {
             state,
+            harnesses,
             index: Some(index),
             wake,
             queue,
@@ -171,13 +185,18 @@ impl SearchActor {
 
     /// Indexes the next queued transcript and counts it, then asks for the
     /// one after while any are left. A failure leaves that transcript's saved
-    /// offset alone, so the next catch-up retries it.
+    /// offset alone, so the next catch-up retries it. A thread whose harness
+    /// orb doesn't know is counted but not read.
     fn index_next(&mut self, me: &ActorRef<Self>) {
-        let Some((key, path)) = self.queue.pop_front() else {
+        let Some((key, harness, path)) = self.queue.pop_front() else {
             return;
         };
-        if let Some(index) = &mut self.index {
-            let _ = index.index_transcript(key, &path);
+        if let Some(index) = &mut self.index
+            && let Some(harness) = self.harnesses.get(&harness)
+        {
+            let _ = index.index_transcript(key, &path, |path, offset, prompt_offset| {
+                harness.messages(path, offset, prompt_offset)
+            });
         }
         self.state.write().search.indexed += 1;
         (self.wake)();
@@ -205,7 +224,7 @@ impl SearchActor {
         {
             return;
         }
-        catch_up(index, &self.state, &self.queue);
+        catch_up(index, &self.state, &self.harnesses, &self.queue);
         let Ok(found) = index.query(query) else {
             return;
         };
@@ -253,27 +272,44 @@ impl SearchActor {
 
 /// Drops the rows of threads gone from `state`, then reads what each live
 /// thread's current transcript gained since the last read. Transcripts still
-/// in the startup `queue` are left to it, and a missing file is skipped.
-fn catch_up(index: &mut SearchIndex, state: &State, queue: &VecDeque<(ThreadKey, PathBuf)>) {
+/// in the startup `queue` are left to it, and a missing file, or one whose
+/// thread's harness orb doesn't know, is skipped.
+fn catch_up(
+    index: &mut SearchIndex,
+    state: &State,
+    harnesses: &Harnesses,
+    queue: &VecDeque<(ThreadKey, HarnessId, PathBuf)>,
+) {
     let (keys, current) = {
         let app = state.read();
         let keys: HashSet<ThreadKey> = live(&app.sessions).map(|(_, thread)| key(thread)).collect();
-        let current: Vec<(ThreadKey, PathBuf)> = live(&app.sessions)
-            .filter_map(|(_, thread)| Some((key(thread), thread.transcript.clone()?)))
+        let current: Vec<(ThreadKey, HarnessId, PathBuf)> = live(&app.sessions)
+            .filter_map(|(_, thread)| {
+                Some((
+                    key(thread),
+                    thread.harness.clone(),
+                    thread.transcript.clone()?,
+                ))
+            })
             .collect();
         (keys, current)
     };
     let _ = index.retain_threads(&keys);
-    for (key, path) in current {
-        if queue.iter().any(|(_, queued)| *queued == path) {
+    for (key, harness, path) in current {
+        if queue.iter().any(|(_, _, queued)| *queued == path) {
             continue;
         }
+        let Some(harness) = harnesses.get(&harness) else {
+            continue;
+        };
         let Ok(len) = fs::metadata(&path).map(|meta| meta.len()) else {
             continue;
         };
         // An unreadable saved offset counts as changed.
         if index.transcript_offset(&path).ok().flatten() != Some(len) {
-            let _ = index.index_transcript(key, &path);
+            let _ = index.index_transcript(key, &path, |path, offset, prompt_offset| {
+                harness.messages(path, offset, prompt_offset)
+            });
         }
     }
 }
@@ -333,6 +369,7 @@ fn reason(report: &Report<SearchIndexError>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -346,6 +383,13 @@ mod tests {
         LoadSearchPreview, SearchActor, SearchActorDeps, SearchTranscripts, spawn_search_actor,
     };
     use crate::common::State;
+    use crate::feat::git::git_cli::GitCli;
+    use crate::feat::git::git_service::GitService;
+    use crate::feat::harness::Harnesses;
+    use crate::feat::harness::claude::ClaudeCode;
+    use crate::feat::harness::claude::supervisor::ClaudeSupervisor;
+    use crate::feat::harness::claude::transcript::read_messages;
+    use crate::feat::harness::claude::trust::ClaudeConfigTrust;
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
     use crate::feat::search::index::SearchIndex;
@@ -382,6 +426,7 @@ mod tests {
     /// `last_chat_secs`.
     fn thread(id: i64, born_ms: u64, transcript: Option<PathBuf>, last_chat_secs: u64) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
             cwd: "/tmp".into(),
@@ -424,8 +469,15 @@ mod tests {
     }
 
     fn deps(state: &State, index_path: PathBuf) -> SearchActorDeps {
+        let claude = ClaudeCode::new(
+            Arc::new(ClaudeSupervisor::new(Vec::new())),
+            Arc::new(ClaudeConfigTrust::new(PathBuf::new())),
+            PathBuf::new(),
+            GitService::new(Arc::new(GitCli::new(Vec::new()))),
+        );
         SearchActorDeps {
             state: state.clone(),
+            harnesses: Harnesses::new(vec![Arc::new(claude)]),
             index_path,
             wake: Arc::new(|| {}),
         }
@@ -594,7 +646,7 @@ mod tests {
         let b = transcript(dir.path(), "b.jsonl", &[prompt("shared words")])?;
         let index_path = dir.path().join("search.sqlite");
         SearchIndex::open(&index_path)
-            .and_then(|mut index| index.index_transcript((ThreadId(1), 1_000), &a))
+            .and_then(|mut index| index.index_transcript((ThreadId(1), 1_000), &a, read_messages))
             .map_err(|report| io::Error::other(format!("{report:?}")))?;
         let state = State::new(app(vec![
             thread(1, 1_000, Some(a), 20),

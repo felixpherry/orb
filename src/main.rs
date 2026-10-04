@@ -9,17 +9,16 @@ use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
 use orb_domain::feat::git::git_cli::GitCli;
 use orb_domain::feat::git::git_service::GitService;
+use orb_domain::feat::harness::Harnesses;
+use orb_domain::feat::harness::claude::ClaudeCode;
+use orb_domain::feat::harness::claude::supervisor::ClaudeSupervisor;
+use orb_domain::feat::harness::claude::trust::{ClaudeConfigTrust, claude_config_file};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::terminal_notifier::{ClickTarget, Kitty, ZellijTarget, on_path};
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::child_env::child_env;
-use orb_domain::feat::sessions::claude_supervisor::ClaudeSupervisor;
-use orb_domain::feat::sessions::session_host::SessionHostService;
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
 use orb_domain::feat::sessions::store::Store;
-use orb_domain::feat::sessions::workspace_trust::{
-    ClaudeConfigTrust, WorkspaceTrustService, claude_config_file,
-};
 use orb_domain::feat::worktrees::worktrees_actor::{
     SWEEP_EVERY, WorktreesActorDeps, spawn_worktrees_actor,
 };
@@ -64,19 +63,25 @@ fn main() -> Result<(), Report<OrbError>> {
         ..AppState::default()
     });
     let frontend = Frontend::new(tz);
-    let services = Services {
-        session_host: SessionHostService::new(Arc::new(ClaudeSupervisor::new(claude_env.clone()))),
-        git: GitService::new(Arc::new(GitCli::new(claude_env.clone()))),
-        workspace_trust: WorkspaceTrustService::new(Arc::new(ClaudeConfigTrust::new(
-            claude_config,
-        ))),
+    let services = {
+        let git = GitService::new(Arc::new(GitCli::new(claude_env.clone())));
+        let claude = ClaudeCode::new(
+            Arc::new(ClaudeSupervisor::new(claude_env.clone())),
+            Arc::new(ClaudeConfigTrust::new(claude_config)),
+            claude_dir,
+            git.clone(),
+        );
+        Services {
+            harnesses: Harnesses::new(vec![Arc::new(claude)]),
+            git,
+        }
     };
     let git = services.git.clone();
+    let harnesses = services.harnesses.clone();
     let sessions = spawn_sessions_actor(SessionsActorDeps {
         services,
         state: state.clone(),
         store,
-        claude_dir,
         worktrees_root: worktrees_root.clone(),
         orb_root,
         incognito_root: PathBuf::from("/tmp/orb-incognito"),
@@ -92,6 +97,7 @@ fn main() -> Result<(), Report<OrbError>> {
     });
     let search = spawn_search_actor(SearchActorDeps {
         state: state.clone(),
+        harnesses: harnesses.clone(),
         index_path: search_index,
         wake: frontend.waker(),
     });
@@ -103,6 +109,7 @@ fn main() -> Result<(), Report<OrbError>> {
             worktrees_root,
             search,
             git,
+            harnesses,
             claude_env,
             zellij,
             notifier,

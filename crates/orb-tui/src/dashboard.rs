@@ -314,18 +314,19 @@ fn value(state: &AppState, item: DashboardItem) -> Option<String> {
         (DashboardItem::Branch, Some((_, draft)), _) => Some(branch_label(draft)),
         (DashboardItem::Branch, None, Some(thread)) => thread.branch.clone(),
         (DashboardItem::Branch, None, None) => sessions.selected_group()?.1.branch.clone(),
-        (DashboardItem::Model, Some((_, draft)), _) => {
-            Some(setting_label(draft.model.as_deref()).to_owned())
-        }
+        (DashboardItem::Model, Some((_, draft)), _) => Some(
+            setting_label(draft.model.as_deref(), state.harness_info(&draft.harness)).to_owned(),
+        ),
         (DashboardItem::Permission, Some((_, draft)), _) => {
-            Some(setting_label(draft.permission.as_deref()).to_owned())
+            Some(setting_label(draft.permission.as_deref(), None).to_owned())
         }
-        (DashboardItem::Model, None, None) => sessions
-            .selected_group()
-            .map(|(_, group)| setting_label(group.defaults.model.as_deref()).to_owned()),
+        (DashboardItem::Model, None, None) => sessions.selected_group().map(|(_, group)| {
+            let info = state.harness_info(&group.defaults.harness);
+            setting_label(group.defaults.model.as_deref(), info).to_owned()
+        }),
         (DashboardItem::Permission, None, None) => sessions
             .selected_group()
-            .map(|(_, group)| setting_label(group.defaults.permission.as_deref()).to_owned()),
+            .map(|(_, group)| setting_label(group.defaults.permission.as_deref(), None).to_owned()),
         _ => None,
     }
 }
@@ -426,9 +427,11 @@ fn lerp(from: Color, to: Color, t: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
+    use orb_domain::feat::harness::HarnessId;
     use std::time::SystemTime;
 
     use orb_domain::AppState;
+    use orb_domain::feat::harness::claude::models::info;
     use orb_domain::feat::picker::list::setting_label;
     use orb_domain::feat::sessions::state::{
         Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, NEW_THREAD, Project,
@@ -442,6 +445,7 @@ mod tests {
 
     fn thread(id: i64) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: Some("Fix the bug".to_owned()),
             cwd: "/Users/me/dev/orb".into(),
@@ -501,6 +505,7 @@ mod tests {
     /// plan mode, selected.
     fn new_worktree_draft() -> AppState {
         let draft = Draft {
+            harness: HarnessId::new("claude"),
             workspace: DraftWorkspace::NewWorktree,
             branch: Some("main".to_owned()),
             model: None,
@@ -679,6 +684,7 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             draft: true,
             defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
                 model: None,
                 permission: None,
             },
@@ -735,13 +741,14 @@ mod tests {
         if let Some(defaults) = state.sessions.group_defaults_mut(GroupId(9)) {
             defaults.model = Some("opus".to_owned());
         }
+        state.harnesses = vec![info()];
 
         // When drawing the dashboard 80×40.
         let (buf, _) = draw(&state, None, 80, 40);
 
         // Then the Model row shows opus's name.
         let row = line_with(&buf, "Model");
-        let expected = format!("Model  {}", setting_label(Some("opus")));
+        let expected = format!("Model  {}", setting_label(Some("opus"), Some(&info())));
         assert!(row.contains(&expected), "Model row was '{row}'");
     }
 
@@ -752,13 +759,14 @@ mod tests {
         if let Some(defaults) = state.sessions.group_defaults_mut(GroupId(9)) {
             defaults.model = Some("opus".to_owned());
         }
+        state.harnesses = vec![info()];
 
         // When drawing the dashboard 80×40.
         let (buf, _) = draw(&state, None, 80, 40);
 
         // Then the Model row shows opus's name.
         let row = line_with(&buf, "Model");
-        let expected = format!("Model  {}", setting_label(Some("opus")));
+        let expected = format!("Model  {}", setting_label(Some("opus"), Some(&info())));
         assert!(row.contains(&expected), "Model row was '{row}'");
     }
 

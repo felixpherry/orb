@@ -230,6 +230,7 @@ where
     reason = "tests propagate parse failures with `?` and assert on the outcome"
 )]
 mod tests {
+    use orb_domain::feat::harness::HarnessId;
     use std::time::{Duration, SystemTime};
 
     use jiff::tz::{self, TimeZone};
@@ -251,6 +252,7 @@ mod tests {
 
     fn thread(id: i64, status: ThreadStatus) -> Thread {
         Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: Some("Fix the bug".to_owned()),
             cwd: "/Users/me/dev/orb".into(),
@@ -319,6 +321,7 @@ mod tests {
         };
         if let Some(project) = sessions.projects.first_mut() {
             project.draft = Some(Draft {
+                harness: HarnessId::new("claude"),
                 workspace: DraftWorkspace::Local,
                 branch: Some("main".to_owned()),
                 model: None,
@@ -785,7 +788,11 @@ mod tests {
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
             draft: false,
-            defaults: GroupDefaults::default(),
+            defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
+                model: None,
+                permission: None,
+            },
         }
     }
 
@@ -842,6 +849,7 @@ mod tests {
                 groups: vec![Group {
                     draft: true,
                     defaults: GroupDefaults {
+                        harness: HarnessId::new("claude"),
                         model: None,
                         permission: None,
                     },

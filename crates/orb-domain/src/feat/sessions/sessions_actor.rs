@@ -38,13 +38,21 @@
 //! worktree checks it out in the project's root and moves the thread, or the
 //! draft, there. It makes a draft's project a git repository when asked.
 //!
-//! When Claude refuses to start in a directory it hasn't been trusted in, the
-//! start waits while the actor asks the frontend to have the user trust
-//! Claude's project path for it: the git root, the main repository for a
-//! worktree, or the directory itself outside git. On yes it marks the path
-//! trusted in Claude's config and tries the start once more; a refusal then
-//! fails the start. On no, the start fails as `Workspace not trusted`. Either
-//! way a worktree made for a failed start is removed.
+//! At start it shows every harness by its name alone, then asks each one, in
+//! parallel, for its models and permission modes and shows what it says.
+//!
+//! Every session start, list, stop and removal goes through the thread's (or
+//! draft's, or group's) harness. A thread whose harness orb doesn't know shows
+//! as Gone, with nothing to attach.
+//!
+//! When a harness refuses to start in a directory it hasn't been trusted in,
+//! the start waits while the actor asks the frontend to have the user trust
+//! the folder the harness names for it (for Claude: the git root, the main
+//! repository for a worktree, or the directory itself outside git). On yes it
+//! marks the folder trusted in the harness's config and tries the start once
+//! more; a refusal then fails the start. On no, the start fails as
+//! `Workspace not trusted`. Either way a worktree made for a failed start is
+//! removed.
 //!
 //! It keeps each thread's place in the sidebar: pinning, settling onto the
 //! Settled shelf (which stops the session), un-settling, and deleting. A turn
@@ -88,7 +96,7 @@
 //! polled since orb started finishes a turn, or starts needing an approval or
 //! an answer, in any project, unless the thread is being deleted.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
@@ -101,9 +109,7 @@ use kameo::mailbox;
 use kameo::prelude::{Actor, ActorRef, Context, Message, Reply, Spawn};
 use tokio::sync::Notify;
 
-use super::session_host::{
-    SessionHostError, SessionHostService, SessionOptions, SessionRecord, WorkspaceUntrusted,
-};
+use super::session_host::{SessionHostError, SessionOptions, SessionRecord, WorkspaceUntrusted};
 use super::state::{
     Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, NEW_THREAD, Notice,
     NoticeKind, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId,
@@ -114,7 +120,6 @@ use super::store::{
     ThreadRow, Ui,
 };
 use super::template;
-use super::transcript::{locate, scan_title};
 use super::validator::{group_exists, on_disk};
 use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
@@ -123,6 +128,7 @@ use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{
     hex, hex_branch, is_orb_worktree, new_worktree_path, previous_worktree, slug,
 };
+use crate::feat::harness::{Harness, HarnessId, HarnessInfo, Harnesses, Scan, TranscriptFormat};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
 use crate::{AppState, Focus};
@@ -145,7 +151,7 @@ const FOLDER_UNREMOVED: &str = "couldn't remove the folder";
 const WORKTREE_IN_USE: &str = "kept the worktree: another thread works in it";
 /// The error shown when a started session can't be saved or shown.
 const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
-/// The error shown when Claude's config can't be updated to trust a folder.
+/// The error shown when the harness's config can't be updated to trust a folder.
 const TRUST_UNSAVED: &str = "couldn't trust the folder";
 /// The error shown when the user declines to trust a start's folder.
 const TRUST_DECLINED: &str = "Workspace not trusted";
@@ -157,8 +163,6 @@ pub struct SessionsActorDeps {
     pub services: Services,
     pub state: State,
     pub store: Store,
-    /// Claude's config directory, where transcripts live.
-    pub claude_dir: PathBuf,
     /// Where orb makes new worktrees.
     pub worktrees_root: PathBuf,
     /// orb's own folder (`~/.orb`): the Research/Learn roots and templates.
@@ -170,7 +174,8 @@ pub struct SessionsActorDeps {
     pub wake: Wake,
 }
 
-/// Owns [`Sessions`](super::state::Sessions): the projects, their drafts and
+/// Owns [`Sessions`](super::state::Sessions) and the harnesses the frontend
+/// shows (`AppState::harnesses`): the projects, their drafts and
 /// groups, the threads' statuses, titles, pins and settles, the latest `claude` error,
 /// the origin ref a start is fetching, Claude's project path a start waits to
 /// be trusted in, and the started or restored thread the frontend should
@@ -184,7 +189,6 @@ pub struct SessionsActor {
     services: Services,
     state: State,
     store: Store,
-    claude_dir: PathBuf,
     worktrees_root: PathBuf,
     orb_root: PathBuf,
     wake: Wake,
@@ -262,7 +266,7 @@ pub struct CheckoutGroup {
     pub git_ref: GitRef,
 }
 
-/// Mark the waiting start's project path trusted in Claude's config, as the
+/// Mark the waiting start's project path trusted in the harness's config, as the
 /// user said yes, and try the start once more.
 #[derive(Debug)]
 pub struct TrustWorkspace;
@@ -376,6 +380,10 @@ pub struct DeleteGroup(pub GroupId);
 #[derive(Debug)]
 pub struct RestoreWorktree(pub ThreadId);
 
+/// What a harness's probe found: `.0` replaces the entry with its id.
+#[derive(Debug)]
+pub struct Probed(pub HarnessInfo);
+
 /// A session start in flight: what it is for, where it runs, the branch
 /// checked out there when known, the worktree orb made for it, if any, and
 /// the options the session starts with.
@@ -385,6 +393,8 @@ struct PendingStart {
     branch: Option<String>,
     made: Option<MadeWorktree>,
     options: SessionOptions,
+    /// The harness the session starts in.
+    harness: HarnessId,
 }
 
 /// What a session start is for.
@@ -432,6 +442,14 @@ impl Actor for SessionsActor {
         actor_ref: ActorRef<Self>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send {
         let actor = Self::restore(args);
+        for harness in actor.services.harnesses.all() {
+            let harness = Arc::clone(harness);
+            let actor_ref = actor_ref.clone();
+            tokio::spawn(async move {
+                let info = harness.probe().await;
+                let _ = actor_ref.tell(Probed(info)).await;
+            });
+        }
         let poke = actor.poke.clone();
         tokio::spawn(async move {
             while let Ok(NextPoll(next)) = actor_ref.ask(Poll).await {
@@ -442,6 +460,24 @@ impl Actor for SessionsActor {
             }
         });
         std::future::ready(Ok(actor))
+    }
+}
+
+impl Message<Probed> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        Probed(info): Probed,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        {
+            let mut app = self.state.write();
+            if let Some(entry) = app.harnesses.iter_mut().find(|entry| entry.id == info.id) {
+                *entry = info;
+            }
+        }
+        (self.wake)();
     }
 }
 
@@ -878,7 +914,6 @@ impl SessionsActor {
             services,
             state,
             store,
-            claude_dir,
             worktrees_root,
             orb_root,
             incognito_root,
@@ -913,7 +948,7 @@ impl SessionsActor {
                 threads: rows
                     .iter()
                     .filter(|row| row.project_id == project.id)
-                    .map(|row| unpolled(&services.session_host, row))
+                    .map(|row| unpolled(&services.harnesses, row))
                     .collect(),
                 draft: drafts
                     .iter()
@@ -951,6 +986,7 @@ impl SessionsActor {
             let mut app = state.write();
             app.sidebar.width = ui.sidebar_width.map_or(DEFAULT_WIDTH, clamp_width);
             app.jumps = jumps;
+            app.harnesses = services.harnesses.placeholders();
             let sessions = &mut app.sessions;
             sessions.projects = projects;
             sessions.cursor = None;
@@ -962,7 +998,6 @@ impl SessionsActor {
             services,
             state,
             store,
-            claude_dir,
             worktrees_root,
             orb_root,
             wake,
@@ -990,20 +1025,43 @@ impl SessionsActor {
 
     /// Asks the host what every session is doing, shows it, and stops the
     /// sessions that auto-settled.
+    /// A harness whose list fails leaves its threads as they were; the
+    /// others still update, and the failure is returned after.
     async fn sync(&mut self) -> Result<(), Report<SessionHostError>> {
-        let records = self.services.session_host.list().await?;
+        let mut listed: HashMap<HarnessId, Vec<SessionRecord>> = HashMap::new();
+        let mut failure = None;
+        for harness in self.services.harnesses.all() {
+            let id = harness.id();
+            let short_ids: Vec<String> = self
+                .rows
+                .iter()
+                .filter(|row| row.harness == id)
+                .map(|row| row.short_id.clone())
+                .collect();
+            match harness.list(&short_ids).await {
+                Ok(records) => {
+                    listed.insert(id, records);
+                }
+                Err(report) => failure = Some(report),
+            }
+        }
         // ponytail: stops run in order (~0.7 s each); only a first launch
         // that auto-settles many threads waits long.
-        for short_id in self.apply(&records) {
-            self.stop(&short_id).await;
+        for (harness, short_id) in self.apply(&listed) {
+            self.stop(&harness, &short_id).await;
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     /// Updates every saved thread from its record and transcript, follows its
     /// settle lifecycle, saves the ones that changed, then shows them all in
-    /// one write. Returns the sessions that auto-settled and should stop.
-    fn apply(&mut self, records: &[SessionRecord]) -> Vec<String> {
+    /// one write. A thread whose harness wasn't `listed` (its list failed)
+    /// is left as it was; one whose harness orb doesn't know is Gone. Returns
+    /// the sessions that auto-settled and should stop, with their harness.
+    fn apply(
+        &mut self,
+        listed: &HashMap<HarnessId, Vec<SessionRecord>>,
+    ) -> Vec<(HarnessId, String)> {
         let now = now_ms();
         let (cursor, attached) = {
             let app = self.state.read();
@@ -1013,6 +1071,14 @@ impl SessionsActor {
         let mut to_stop = Vec::new();
         let mut error = None;
         for row in &mut self.rows {
+            let harness = self.services.harnesses.get(&row.harness);
+            let records = match (harness, listed.get(&row.harness)) {
+                (Some(_), None) => {
+                    statuses.push(None);
+                    continue;
+                }
+                (_, records) => records.map_or(&[][..], Vec::as_slice),
+            };
             // `--all` can list a stale stopped record next to the live one.
             let record = records
                 .iter()
@@ -1023,8 +1089,12 @@ impl SessionsActor {
             let status = record.map_or(ThreadStatus::Gone, |record| record.status);
             let before = row.clone();
             let was_in_progress = row.turn_started_at.is_some();
-            update_row(row, record, status, now, &self.claude_dir);
+            let format = harness.map(|harness| harness.as_ref() as &dyn TranscriptFormat);
+            let asks_git = update_row(row, record, status, now, format);
             if was_in_progress && !status.in_progress() {
+                if asks_git && let Some(branch) = current_branch(&self.services.git, &row.cwd) {
+                    row.branch = Some(branch);
+                }
                 rename_hex_branch(&self.services.git, &self.worktrees_root, row);
             }
             let selected = cursor == Some(SidebarItem::Thread(row.id));
@@ -1036,12 +1106,12 @@ impl SessionsActor {
                 attached.contains(&row.id),
                 now,
             ) {
-                to_stop.push(row.short_id.clone());
+                to_stop.push((row.harness.clone(), row.short_id.clone()));
             }
             if *row != before && self.store.save_thread(row).is_err() {
                 error = Some(SAVE_FAILED.to_owned());
             }
-            statuses.push(status);
+            statuses.push(Some(status));
         }
         let changed_groups =
             self.follow_groups(&statuses, &attached, now, &mut to_stop, &mut error);
@@ -1053,7 +1123,12 @@ impl SessionsActor {
                 changed = sessions.error.as_ref() != Some(&error);
                 sessions.error = Some(error);
             }
-            for (row, status) in self.rows.iter().zip(statuses) {
+            for (row, status) in self
+                .rows
+                .iter()
+                .zip(statuses)
+                .filter_map(|(row, status)| Some((row, status?)))
+            {
                 if let Some(notice) = notice(sessions, row, status) {
                     sessions.notices.push(notice);
                     changed = true;
@@ -1081,27 +1156,31 @@ impl SessionsActor {
     }
 
     /// Follows each group's settle lifecycle from its threads' polled rows
-    /// and `statuses` (index-aligned with the rows), saving the groups that
-    /// changed. Adds the idle sessions of a group that auto-settled to
-    /// `to_stop`, and sets `error` when a save fails. Returns the groups that
-    /// changed.
+    /// and `statuses` (index-aligned with the rows; `None` where a thread
+    /// wasn't polled), saving the groups that changed. A group with a thread
+    /// that wasn't polled is left as it was. Adds the idle sessions of a
+    /// group that auto-settled to `to_stop`, and sets `error` when a save
+    /// fails. Returns the groups that changed.
     fn follow_groups(
         &mut self,
-        statuses: &[ThreadStatus],
+        statuses: &[Option<ThreadStatus>],
         attached: &HashSet<ThreadId>,
         now: i64,
-        to_stop: &mut Vec<String>,
+        to_stop: &mut Vec<(HarnessId, String)>,
         error: &mut Option<String>,
     ) -> Vec<GroupId> {
         let mut changed_groups = Vec::new();
         for group_row in &mut self.groups {
-            let children: Vec<(&ThreadRow, ThreadStatus)> = self
+            let Some(children) = self
                 .rows
                 .iter()
                 .zip(statuses)
                 .filter(|(row, _)| row.group_id == Some(group_row.id))
-                .map(|(row, status)| (row, *status))
-                .collect();
+                .map(|(row, status)| Some((row, (*status)?)))
+                .collect::<Option<Vec<(&ThreadRow, ThreadStatus)>>>()
+            else {
+                continue;
+            };
             let Some(latest) = children.iter().map(|(row, _)| row.last_activity_at).max() else {
                 continue;
             };
@@ -1113,7 +1192,7 @@ impl SessionsActor {
                     children
                         .iter()
                         .filter(|(_, status)| *status == ThreadStatus::Idle)
-                        .map(|(row, _)| row.short_id.clone()),
+                        .map(|(row, _)| (row.harness.clone(), row.short_id.clone())),
                 );
             }
             if *group_row != before {
@@ -1167,6 +1246,7 @@ impl SessionsActor {
                 created_at: from_ms(now_ms()),
                 repo: true,
                 from: None,
+                harness: self.services.harnesses.default_id(),
             },
         );
         let saved = self.store.save_draft(&draft_row(id, &draft));
@@ -1313,6 +1393,7 @@ impl SessionsActor {
             model: draft.model,
             permission_mode: draft.permission,
         };
+        let harness = draft.harness;
         let workspace = if draft.repo {
             draft.workspace
         } else {
@@ -1350,6 +1431,7 @@ impl SessionsActor {
             branch,
             made,
             options,
+            harness,
         };
         self.start(pending, true).await;
     }
@@ -1365,26 +1447,27 @@ impl SessionsActor {
             .and_then(|project| Some((project.root.clone(), project.kind, project.draft.clone()?)))
     }
 
-    /// Starts a session for `pending` and finishes what it was for. If Claude
-    /// hasn't been trusted in its directory and `allow_trust`, the start waits
-    /// for the user to trust Claude's project path for it (asking the
-    /// frontend once). If it fails, the reason shows and a worktree made for
-    /// it is removed.
+    /// Starts a session for `pending` in its harness and finishes what it was
+    /// for. If the harness hasn't been trusted in its directory and
+    /// `allow_trust`, the start waits for the user to trust the harness's
+    /// folder for it (asking the frontend once). If it fails, the reason
+    /// shows and a worktree made for it is removed.
     async fn start(&mut self, pending: PendingStart, allow_trust: bool) {
-        let created = self
-            .services
-            .session_host
-            .create(&pending.cwd, &pending.options)
-            .await;
+        let harness = match self.harness(&pending.harness) {
+            Ok(harness) => harness,
+            Err(error) => {
+                if let Some(made) = &pending.made {
+                    self.remove_made(made);
+                }
+                return self.end_start(Err(error));
+            }
+        };
+        let created = harness.create(&pending.cwd, &pending.options).await;
         if let Err(report) = &created
             && allow_trust
             && report.contains::<WorkspaceUntrusted>()
         {
-            let dir = self
-                .services
-                .git
-                .project_path(&pending.cwd)
-                .unwrap_or_else(|| pending.cwd.clone());
+            let dir = harness.trust_dir(&pending.cwd);
             let asked = {
                 let mut app = self.state.write();
                 app.sessions.trust.replace(dir.clone()).as_ref() == Some(&dir)
@@ -1401,12 +1484,21 @@ impl SessionsActor {
             branch,
             made,
             options,
+            harness,
         } = pending;
         match (created, kind) {
             (Ok(created), StartKind::Draft { project, workspace }) => {
-                let thread =
-                    self.save_new(project, &cwd, &created.short_id, branch, &options, None);
+                let thread = self.save_new(
+                    project,
+                    &cwd,
+                    &created.short_id,
+                    branch,
+                    &options,
+                    None,
+                    &harness,
+                );
                 let used = LastUsed {
+                    harness: Some(harness),
                     workspace,
                     model: options.model,
                     permission_mode: options.permission_mode,
@@ -1428,6 +1520,7 @@ impl SessionsActor {
                     branch,
                     &options,
                     Some(group),
+                    &harness,
                 );
                 self.finish_group_start(project, group, from, &cwd, thread);
             }
@@ -1445,7 +1538,8 @@ impl SessionsActor {
                     cwd,
                     branch,
                 };
-                self.finish_move(moved, &old_short_id, &old_cwd).await;
+                self.finish_move(moved, &harness, &old_short_id, &old_cwd)
+                    .await;
             }
             (Err(report), _) => {
                 if let Some(made) = made {
@@ -1456,7 +1550,7 @@ impl SessionsActor {
         }
     }
 
-    /// Marks the waiting start's project path trusted in Claude's config and
+    /// Marks the waiting start's project path trusted in the harness's config and
     /// tries the start once more; a second refusal fails it. If the path
     /// can't be marked, the start fails and a worktree made for it is removed.
     async fn trust_workspace(&mut self) {
@@ -1464,13 +1558,18 @@ impl SessionsActor {
             return;
         };
         self.state.write().sessions.trust = None;
-        match self.services.workspace_trust.trust(&dir) {
+        let trusted = self.harness(&pending.harness).and_then(|harness| {
+            harness
+                .trust(&dir)
+                .map_err(|_report| TRUST_UNSAVED.to_owned())
+        });
+        match trusted {
             Ok(()) => self.start(pending, false).await,
-            Err(_) => {
+            Err(error) => {
                 if let Some(made) = &pending.made {
                     self.remove_made(made);
                 }
-                self.end_start(Err(TRUST_UNSAVED.to_owned()));
+                self.end_start(Err(error));
             }
         }
     }
@@ -1552,6 +1651,7 @@ impl SessionsActor {
             model: group.defaults.model,
             permission_mode: group.defaults.permission,
         };
+        let harness = group.defaults.harness;
         let (cwd, branch, made) = match (group.kind, group.dir) {
             (GroupKind::Feature, _) => {
                 let branch = group.branch.unwrap_or(group.name);
@@ -1579,6 +1679,7 @@ impl SessionsActor {
             branch,
             made,
             options,
+            harness,
         };
         self.start(pending, true).await;
     }
@@ -1599,9 +1700,14 @@ impl SessionsActor {
             .iter()
             .find_map(|project| {
                 let group = project.groups.iter().find(|group| group.id == id)?;
-                Some((project.id, group.kind, group.dir.clone()))
+                Some((
+                    project.id,
+                    group.kind,
+                    group.dir.clone(),
+                    group.defaults.harness.clone(),
+                ))
             });
-        let Some((project, kind, dir)) = found else {
+        let Some((project, kind, dir, harness)) = found else {
             return self.end_start(Err("the group is gone".to_owned()));
         };
         let cwd = match dir {
@@ -1625,6 +1731,7 @@ impl SessionsActor {
             branch,
             made: None,
             options,
+            harness,
         };
         self.start(pending, true).await;
     }
@@ -1751,6 +1858,7 @@ impl SessionsActor {
             branch: made.as_ref().map(|made| made.branch.clone()),
             made,
             options,
+            harness: row.harness.clone(),
         })
     }
 
@@ -1862,8 +1970,17 @@ impl SessionsActor {
     /// Finishes a move once the new session runs: removes the old session,
     /// saves and shows the thread in its new workspace, and removes the orb
     /// worktree it left if no thread uses it and it has no changes.
-    async fn finish_move(&mut self, moved: Moved, old_short_id: &str, old_cwd: &Path) {
-        let removed = self.services.session_host.remove(old_short_id).await;
+    async fn finish_move(
+        &mut self,
+        moved: Moved,
+        harness: &HarnessId,
+        old_short_id: &str,
+        old_cwd: &Path,
+    ) {
+        let removed = match self.harness(harness) {
+            Ok(harness) => harness.remove(old_short_id).await.map_err(|r| reason(&r)),
+            Err(error) => Err(error),
+        };
         let branch = moved.branch.or_else(|| {
             self.rows
                 .iter()
@@ -1887,7 +2004,7 @@ impl SessionsActor {
             ..row.clone()
         };
         let saved = self.store.save_thread(row);
-        let shown = unpolled(&self.services.session_host, row);
+        let shown = unpolled(&self.services.harnesses, row);
         let project_id = row.project_id;
         if let Some(thread) = thread_mut(&mut self.state.write().sessions, moved.thread) {
             *thread = shown;
@@ -1905,7 +2022,7 @@ impl SessionsActor {
         }
         let result = match (saved, removed) {
             (Err(_), _) => Err(SAVE_FAILED.to_owned()),
-            (Ok(()), Err(report)) => Err(reason(&report)),
+            (Ok(()), Err(error)) => Err(error),
             (Ok(()), Ok(())) => Ok(()),
         };
         self.end_start(result);
@@ -2053,8 +2170,12 @@ impl SessionsActor {
             .any(|thread| thread.cwd == cwd && thread.status.in_progress())
     }
 
-    /// Saves a session just started in `cwd` on `branch` with `options`
-    /// under the project, in `group` if any.
+    /// Saves a session just started in `harness` in `cwd` on `branch` with
+    /// `options` under the project, in `group` if any.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is one field of the new thread's row"
+    )]
     fn save_new(
         &mut self,
         project_id: ProjectId,
@@ -2063,6 +2184,7 @@ impl SessionsActor {
         branch: Option<String>,
         options: &SessionOptions,
         group: Option<GroupId>,
+        harness: &HarnessId,
     ) -> Result<Thread, String> {
         let now = now_ms();
         let new = NewThread {
@@ -2073,6 +2195,7 @@ impl SessionsActor {
             model: options.model.clone(),
             permission_mode: options.permission_mode.clone(),
             group_id: group,
+            harness: harness.clone(),
         };
         let Ok(id) = self.store.insert_thread(&new) else {
             return Err(NEW_SESSION_UNSAVED.to_owned());
@@ -2101,11 +2224,12 @@ impl SessionsActor {
             permission_mode: new.permission_mode,
             renamed_title: None,
             group_id: new.group_id,
+            harness: new.harness,
         };
         if row.branch.is_some() && self.store.save_thread(&row).is_err() {
             return Err(NEW_SESSION_UNSAVED.to_owned());
         }
-        let thread = unpolled(&self.services.session_host, &row);
+        let thread = unpolled(&self.services.harnesses, &row);
         self.rows.push(row);
         Ok(thread)
     }
@@ -2279,6 +2403,7 @@ impl SessionsActor {
             created_at: now,
             draft_model: draft_model.clone(),
             draft_permission_mode: draft_permission_mode.clone(),
+            harness: self.services.harnesses.default_id(),
         });
         let Ok(id) = inserted else {
             if let Some(dir) = &dir {
@@ -2300,6 +2425,7 @@ impl SessionsActor {
             unsettled_at: None,
             draft_model,
             draft_permission_mode,
+            harness: self.services.harnesses.default_id(),
         };
         let shown = group(&row, &self.rows);
         self.groups.push(row);
@@ -2361,7 +2487,7 @@ impl SessionsActor {
     /// Settles a thread that isn't mid-turn, then stops its session if it's
     /// idle. A turn that started after the key press wins.
     async fn settle(&mut self, id: ThreadId) {
-        let (Some(short_id), Some(status)) = (self.short_id(id), self.status(id)) else {
+        let (Some((harness, short_id)), Some(status)) = (self.session(id), self.status(id)) else {
             return;
         };
         if status.in_progress() {
@@ -2370,7 +2496,7 @@ impl SessionsActor {
         self.edit(id, settle_row);
         if status == ThreadStatus::Idle {
             // ponytail: stop runs on the actor (~0.7 s); spawn it if triage feels laggy.
-            self.stop(&short_id).await;
+            self.stop(&harness, &short_id).await;
         }
     }
 
@@ -2381,19 +2507,25 @@ impl SessionsActor {
     /// Settles a group none of whose threads is mid-turn, then stops its
     /// idle sessions. A turn that started after the key press wins.
     async fn settle_group(&mut self, id: GroupId) {
-        let children: Vec<(String, ThreadStatus)> = self
+        let children: Vec<(HarnessId, String, ThreadStatus)> = self
             .rows
             .iter()
             .filter(|row| row.group_id == Some(id))
-            .filter_map(|row| Some((row.short_id.clone(), self.status(row.id)?)))
+            .filter_map(|row| {
+                Some((
+                    row.harness.clone(),
+                    row.short_id.clone(),
+                    self.status(row.id)?,
+                ))
+            })
             .collect();
-        if children.iter().any(|(_, status)| status.in_progress()) {
+        if children.iter().any(|(.., status)| status.in_progress()) {
             return;
         }
         self.edit_group(id, settle_group_row);
-        for (short_id, status) in children {
+        for (harness, short_id, status) in children {
             if status == ThreadStatus::Idle {
-                self.stop(&short_id).await;
+                self.stop(&harness, &short_id).await;
             }
         }
     }
@@ -2407,23 +2539,28 @@ impl SessionsActor {
         self.edit(id, |row, now| row.last_visited_at = now);
     }
 
-    /// Removes a thread's session, then forgets the thread. A session Claude
-    /// no longer knows isn't removed first. If the removal fails, the thread
-    /// stays, shown again, and the reason shows. However it ends, the thread
-    /// is no longer hidden as being deleted.
+    /// Removes a thread's session, then forgets the thread. A session its
+    /// harness no longer knows, or of a harness orb doesn't know, isn't
+    /// removed first. If the removal fails, the thread stays, shown again,
+    /// and the reason shows. However it ends, the thread is no longer hidden
+    /// as being deleted.
     async fn delete(&mut self, id: ThreadId) {
-        let (Some(short_id), Some(status)) = (self.short_id(id), self.status(id)) else {
+        let (Some((harness, short_id)), Some(status)) = (self.session(id), self.status(id)) else {
             self.state.write().sessions.deleting.remove(&id);
             (self.wake)();
             return;
         };
-        if status != ThreadStatus::Gone
-            && let Err(report) = self.services.session_host.remove(&short_id).await
-        {
+        let removed = match self.harness(&harness) {
+            Ok(harness) if status != ThreadStatus::Gone => {
+                harness.remove(&short_id).await.map_err(|r| reason(&r))
+            }
+            _ => Ok(()),
+        };
+        if let Err(error) = removed {
             {
                 let mut app = self.state.write();
                 app.sessions.deleting.remove(&id);
-                app.sessions.error = Some(reason(&report));
+                app.sessions.error = Some(error);
             }
             (self.wake)();
             return;
@@ -2674,11 +2811,28 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Stops a session, showing why if it can't.
-    async fn stop(&mut self, short_id: &str) {
-        if let Err(report) = self.services.session_host.stop(short_id).await {
-            self.fail(&report);
+    /// Stops a session in `harness`, showing why if it can't.
+    async fn stop(&mut self, harness: &HarnessId, short_id: &str) {
+        match self.harness(harness) {
+            Ok(harness) => {
+                if let Err(report) = harness.stop(short_id).await {
+                    self.fail(&report);
+                }
+            }
+            Err(error) => {
+                self.state.write().sessions.error = Some(error);
+                (self.wake)();
+            }
         }
+    }
+
+    /// The harness `id` names, or the mode-line text for one orb doesn't know.
+    fn harness(&self, id: &HarnessId) -> Result<Arc<dyn Harness>, String> {
+        self.services
+            .harnesses
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("unknown harness {id}"))
     }
 
     /// Shows a `claude` failure in the mode line.
@@ -2687,12 +2841,12 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// The session id `claude --bg` gave thread `id`.
-    fn short_id(&self, id: ThreadId) -> Option<String> {
+    /// Thread `id`'s harness and the session id that harness gave it.
+    fn session(&self, id: ThreadId) -> Option<(HarnessId, String)> {
         self.rows
             .iter()
             .find(|row| row.id == id)
-            .map(|row| row.short_id.clone())
+            .map(|row| (row.harness.clone(), row.short_id.clone()))
     }
 
     /// The directory project `id`'s sessions start in.
@@ -2881,18 +3035,20 @@ fn thread_mut(sessions: &mut Sessions, id: ThreadId) -> Option<&mut Thread> {
 }
 
 /// Brings a saved thread up to date with its record: the session id, the
-/// turn stamp, and the title and branch from any new transcript lines.
+/// turn stamp, and the title and branch from any new transcript lines, read
+/// in its harness's `format`. Returns whether a scan ran and named no
+/// branch, which leaves the branch to git.
 fn update_row(
     row: &mut ThreadRow,
     record: Option<&SessionRecord>,
     status: ThreadStatus,
     now_ms: i64,
-    claude_dir: &Path,
-) {
+    format: Option<&dyn TranscriptFormat>,
+) -> bool {
     if let Some(session_id) = record.and_then(|record| record.session_id.as_ref())
         && row.session_id.as_ref() != Some(session_id)
     {
-        // A new Claude session (e.g. after `/clear`) writes a new transcript.
+        // A new session (e.g. after Claude's `/clear`) writes a new transcript.
         if row.session_id.is_some() {
             row.transcript_path = None;
             row.transcript_offset = 0;
@@ -2902,31 +3058,41 @@ fn update_row(
     row.turn_started_at = status
         .in_progress()
         .then(|| row.turn_started_at.unwrap_or(now_ms));
-    let Some(session_id) = &row.session_id else {
-        return;
+    let (Some(session_id), Some(format)) = (&row.session_id, format) else {
+        return false;
     };
     if row.transcript_path.is_none() {
-        row.transcript_path = locate(claude_dir, &row.cwd, session_id);
+        row.transcript_path = format.locate(&row.cwd, session_id);
     }
-    if let Some(path) = &row.transcript_path
-        && let Ok(scan) = scan_title(
-            path,
-            row.transcript_offset,
-            row.title.clone(),
-            row.custom_title.clone(),
-            row.branch.clone(),
-        )
-    {
-        // A new `/rename` replaces the orb name; Claude re-writing its old
-        // name doesn't.
-        if scan.custom_title != row.custom_title {
-            row.renamed_title = None;
+    let previous = Scan {
+        title: row.title.clone(),
+        custom_title: row.custom_title.clone(),
+        branch: row.branch.clone(),
+        ai_titled: row.ai_titled,
+        offset: row.transcript_offset,
+    };
+    let Some(scan) = row
+        .transcript_path
+        .as_deref()
+        .and_then(|path| format.scan(path, row.transcript_offset, &previous).ok())
+    else {
+        return false;
+    };
+    // A new `/rename` replaces the orb name; the harness re-writing its old
+    // name doesn't.
+    if scan.custom_title != row.custom_title {
+        row.renamed_title = None;
+    }
+    row.title = scan.title;
+    row.custom_title = scan.custom_title;
+    row.ai_titled |= scan.ai_titled;
+    row.transcript_offset = scan.offset;
+    match scan.branch {
+        Some(branch) => {
+            row.branch = Some(branch);
+            false
         }
-        row.title = scan.title;
-        row.custom_title = scan.custom_title;
-        row.branch = scan.branch;
-        row.ai_titled |= scan.ai_titled;
-        row.transcript_offset = scan.offset;
+        None => true,
     }
 }
 
@@ -3037,6 +3203,7 @@ fn thread(row: &ThreadRow, status: ThreadStatus, attach_argv: Vec<OsString>) -> 
         group: row.group_id,
         model: row.model.clone(),
         permission: row.permission_mode.clone(),
+        harness: row.harness.clone(),
     }
 }
 
@@ -3069,6 +3236,7 @@ fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
             .map(from_ms),
         active_since: from_ms(row.created_at.max(row.unsettled_at.unwrap_or(0))),
         defaults: GroupDefaults {
+            harness: row.harness.clone(),
             model: row.draft_model.clone(),
             permission: row.draft_permission_mode.clone(),
         },
@@ -3076,9 +3244,17 @@ fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
     }
 }
 
-/// How a saved thread looks before its first poll.
-fn unpolled(host: &SessionHostService, row: &ThreadRow) -> Thread {
-    thread(row, ThreadStatus::Unknown, host.attach_argv(&row.short_id))
+/// How a saved thread looks before its first poll; one whose harness orb
+/// doesn't know is Gone, with nothing to attach.
+fn unpolled(harnesses: &Harnesses, row: &ThreadRow) -> Thread {
+    match harnesses.get(&row.harness) {
+        Some(harness) => thread(
+            row,
+            ThreadStatus::Unknown,
+            harness.attach_argv(&row.short_id),
+        ),
+        None => thread(row, ThreadStatus::Gone, Vec::new()),
+    }
 }
 
 /// The branch checked out in `cwd`, if git can tell.
@@ -3099,6 +3275,7 @@ fn draft_row(project_id: ProjectId, draft: &Draft) -> DraftRow {
         model: draft.model.clone(),
         permission_mode: draft.permission.clone(),
         created_at: to_ms(draft.created_at),
+        harness: draft.harness.clone(),
     }
 }
 
@@ -3174,6 +3351,7 @@ fn draft_of(row: &DraftRow) -> Draft {
         created_at: from_ms(row.created_at),
         repo: true,
         from: None,
+        harness: row.harness.clone(),
     }
 }
 
@@ -3262,6 +3440,7 @@ fn from_ms(ms: i64) -> SystemTime {
     reason = "tests propagate setup failures with `?` and assert on the outcome"
 )]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -3271,7 +3450,10 @@ mod tests {
     use async_trait::async_trait;
     use error_stack::{Report, ResultExt};
 
-    use super::{FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms};
+    use super::{
+        FAST_POLL, Probed, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms,
+        spawn_sessions_actor,
+    };
     use crate::Focus;
     use crate::TextInput;
     use crate::command::Workspace;
@@ -3279,10 +3461,16 @@ mod tests {
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
     use crate::feat::git::validator::BUSY_DIRECTORY;
     use crate::feat::git::worktree::hex_branch;
+    use crate::feat::harness::claude::ClaudeCode;
+    use crate::feat::harness::claude::models;
+    use crate::feat::harness::claude::transcript::transcript_path;
+    use crate::feat::harness::claude::trust::{WorkspaceTrust, WorkspaceTrustError};
+    use crate::feat::harness::fake::FakeHarness;
+    use crate::feat::harness::{HarnessInfo, Harnesses};
     use crate::feat::jumps::state::JumpList;
     use crate::feat::sessions::session_host::{
-        CreatedSession, SessionHost, SessionHostError, SessionHostService, SessionOptions,
-        SessionRecord, WorkspaceUntrusted,
+        CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
+        WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
         Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Notice, NoticeKind,
@@ -3291,10 +3479,6 @@ mod tests {
     use crate::feat::sessions::store::{
         DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store,
         StoreError, ThreadRow, Ui,
-    };
-    use crate::feat::sessions::transcript::transcript_path;
-    use crate::feat::sessions::workspace_trust::{
-        WorkspaceTrust, WorkspaceTrustError, WorkspaceTrustService,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
 
@@ -3466,7 +3650,10 @@ mod tests {
                 .map_err(|reason| Report::new(SessionHostError).attach(reason))
         }
 
-        async fn list(&self) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
+        async fn list(
+            &self,
+            _short_ids: &[String],
+        ) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
             self.list
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -3911,6 +4098,7 @@ mod tests {
     ) -> Result<ThreadId, Report<StoreError>> {
         let project_id = orb_project(store)?;
         store.insert_thread(&NewThread {
+            harness: HarnessId::new("claude"),
             project_id,
             short_id: short_id.to_owned(),
             cwd: PathBuf::from(PROJECT_ROOT),
@@ -3977,19 +4165,260 @@ mod tests {
         let state = State::default();
         let actor = SessionsActor::restore(SessionsActorDeps {
             services: Services {
-                session_host: SessionHostService::new(host.clone()),
+                harnesses: Harnesses::new(vec![Arc::new(ClaudeCode::new(
+                    host.clone(),
+                    trust.clone(),
+                    claude_dir.to_owned(),
+                    GitService::new(git.clone()),
+                ))]),
                 git: GitService::new(git.clone()),
-                workspace_trust: WorkspaceTrustService::new(trust.clone()),
             },
             state: state.clone(),
             store,
-            claude_dir: claude_dir.to_owned(),
             worktrees_root: PathBuf::from(WORKTREES_ROOT),
             orb_root: orb_root.to_owned(),
             incognito_root: incognito_root.to_owned(),
             wake: Arc::new(|| {}),
         });
         (actor, state)
+    }
+
+    /// The harness the routing tests run beside Claude.
+    const OTHER: &str = "other";
+
+    /// What the actor needs to run Claude over `claude` and [`OTHER`] over
+    /// `other`, sharing `state`.
+    fn deps_beside(
+        store: Store,
+        claude: &Arc<FakeHost>,
+        other: &Arc<FakeHost>,
+        state: &State,
+    ) -> SessionsActorDeps {
+        let git = FakeGit::local();
+        SessionsActorDeps {
+            services: Services {
+                harnesses: Harnesses::new(vec![
+                    Arc::new(ClaudeCode::new(
+                        claude.clone(),
+                        FakeTrust::accepting(),
+                        PathBuf::from(NO_CLAUDE_DIR),
+                        GitService::new(git.clone()),
+                    )),
+                    Arc::new(FakeHarness::new(OTHER, other.clone())),
+                ]),
+                git: GitService::new(git),
+            },
+            state: state.clone(),
+            store,
+            worktrees_root: PathBuf::from(WORKTREES_ROOT),
+            orb_root: PathBuf::from(ORB_ROOT),
+            incognito_root: PathBuf::from(INCOGNITO_ROOT),
+            wake: Arc::new(|| {}),
+        }
+    }
+
+    /// Starts the actor on `store` with Claude over `claude` and [`OTHER`]
+    /// over `other`, the way `on_start` does, without the ticker or probes.
+    fn start_beside(
+        store: Store,
+        claude: &Arc<FakeHost>,
+        other: &Arc<FakeHost>,
+    ) -> (SessionsActor, State) {
+        let state = State::default();
+        let actor = SessionsActor::restore(deps_beside(store, claude, other, &state));
+        (actor, state)
+    }
+
+    /// Saves a thread `short_id` of `harness` in the orb project, created an
+    /// hour ago.
+    fn add_thread_in(
+        store: &Store,
+        harness: &str,
+        short_id: &str,
+    ) -> Result<ThreadId, Report<StoreError>> {
+        let project_id = orb_project(store)?;
+        store.insert_thread(&NewThread {
+            harness: HarnessId::new(harness),
+            project_id,
+            short_id: short_id.to_owned(),
+            cwd: PathBuf::from(PROJECT_ROOT),
+            created_at: now_ms() - HOUR_MS,
+            model: None,
+            permission_mode: None,
+            group_id: None,
+        })
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settling_a_thread_stops_it_through_its_own_harness() -> Result<(), Report<StoreError>>
+    {
+        // Given an idle thread of the other harness.
+        let store = Store::open_in_memory()?;
+        let id = add_thread_in(&store, OTHER, "bb")?;
+        let claude = FakeHost::listing(Vec::new());
+        let other = FakeHost::listing(vec![record("bb", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start_beside(store, &claude, &other);
+        actor.poll().await;
+
+        // When settling it.
+        actor.settle(id).await;
+
+        // Then only the other harness stops its session.
+        assert_eq!(
+            (claude.stopped(), other.stopped()),
+            (Vec::new(), vec!["bb".to_owned()]),
+            "a thread should stop through the harness it runs in"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_draft_creates_its_session_through_the_drafts_harness()
+    -> Result<(), Report<StoreError>> {
+        // Given a local draft of the other harness.
+        let (store, id) = store_with_draft(|id| DraftRow {
+            harness: HarnessId::new(OTHER),
+            ..draft_row(id, DraftWorkspace::Local)
+        })?;
+        let claude = FakeHost::creating(Ok("aa"));
+        let other = FakeHost::creating(Ok("bb"));
+        let (mut actor, _state) = start_beside(store, &claude, &other);
+
+        // When starting the draft.
+        actor.start_draft(id).await;
+
+        // Then only the other harness creates a session, in the project's root.
+        assert_eq!(
+            (claude.created_in(), other.created_in()),
+            (Vec::new(), vec![PathBuf::from(PROJECT_ROOT)]),
+            "a draft should start in the harness it was drafted for"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn thread_of_an_unknown_harness_shows_gone_with_no_attach_command()
+    -> Result<(), Report<StoreError>> {
+        // Given a saved thread of a harness orb doesn't know.
+        let store = Store::open_in_memory()?;
+        let id = add_thread_in(&store, "gone-harness", "aa")?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then it shows gone and can't be attached.
+        assert_eq!(
+            shown(&state, id).map(|thread| (thread.status, thread.attach_argv.is_empty())),
+            Some((ThreadStatus::Gone, true)),
+            "a thread of an unknown harness should be gone with no attach command"
+        );
+        Ok(())
+    }
+
+    /// Claude's thread `aa` and the other harness's thread `bb`, both shown
+    /// idle by one poll, after which the other harness's list fails while
+    /// Claude lists `aa` working and polls again.
+    async fn poll_with_a_failed_list() -> Result<(State, ThreadId, ThreadId), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        let claude_thread = add_thread_in(&store, "claude", "aa")?;
+        let other_thread = add_thread_in(&store, OTHER, "bb")?;
+        let claude = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let other = FakeHost::listing(vec![record("bb", ThreadStatus::Idle)]);
+        let (mut actor, state) = start_beside(store, &claude, &other);
+        actor.poll().await;
+        other.set_list(Err("supervisor down".to_owned()));
+        claude.set_list(Ok(vec![record("aa", ThreadStatus::Working)]));
+        actor.poll().await;
+        Ok((state, claude_thread, other_thread))
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_list_keeps_its_threads_statuses() -> Result<(), Report<StoreError>> {
+        // Given threads of two harnesses a poll showed idle.
+        // When the other harness's list fails on the next poll.
+        let (state, _, other_thread) = poll_with_a_failed_list().await?;
+
+        // Then its thread keeps the status it had.
+        assert_eq!(
+            status_of(&state, other_thread),
+            Some(ThreadStatus::Idle),
+            "a failed list should leave its harness's threads as they were"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_list_of_one_harness_still_updates_the_others_threads()
+    -> Result<(), Report<StoreError>> {
+        // Given threads of two harnesses a poll showed idle.
+        // When the other harness's list fails while Claude lists its thread working.
+        let (state, claude_thread, _) = poll_with_a_failed_list().await?;
+
+        // Then Claude's thread shows working.
+        assert_eq!(
+            status_of(&state, claude_thread),
+            Some(ThreadStatus::Working),
+            "one harness's failed list shouldn't hold back the others' threads"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_publishes_a_placeholder_per_harness() -> Result<(), Report<StoreError>> {
+        // Given Claude and the other harness.
+        let claude = FakeHost::listing(Vec::new());
+        let other = FakeHost::listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start_beside(Store::open_in_memory()?, &claude, &other);
+
+        // Then each harness shows a placeholder, in registration order.
+        assert_eq!(
+            state.read().harnesses,
+            vec![
+                HarnessInfo::placeholder(HarnessId::new("claude"), "Claude Code"),
+                HarnessInfo::placeholder(HarnessId::new(OTHER), OTHER),
+            ],
+            "restore should publish a placeholder per harness before any probe answers"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn probed_info_replaces_its_placeholder() -> Result<(), Report<StoreError>> {
+        // Given a running actor with Claude and the other harness.
+        let state = State::default();
+        let claude = FakeHost::listing(Vec::new());
+        let other = FakeHost::listing(Vec::new());
+        let actor_ref = spawn_sessions_actor(deps_beside(
+            Store::open_in_memory()?,
+            &claude,
+            &other,
+            &state,
+        ));
+
+        // When it handles Claude's probe.
+        actor_ref
+            .ask(Probed(models::info()))
+            .await
+            .map_err(|error| Report::new(StoreError).attach(error.to_string()))?;
+
+        // Then Claude's entry is what the probe found.
+        assert_eq!(
+            state
+                .read()
+                .harness_info(&HarnessId::new("claude"))
+                .cloned(),
+            Some(models::info()),
+            "a probe's info should replace its harness's placeholder"
+        );
+        Ok(())
     }
 
     fn error_of(state: &State) -> Option<String> {
@@ -4364,6 +4793,7 @@ mod tests {
     /// branch, created at 1 s.
     fn draft_row(project_id: ProjectId, workspace: DraftWorkspace) -> DraftRow {
         DraftRow {
+            harness: HarnessId::new("claude"),
             project_id,
             workspace,
             branch: None,
@@ -4407,6 +4837,7 @@ mod tests {
     /// Settings used last with `workspace`, sonnet and plan mode.
     fn used(workspace: LastWorkspace) -> LastUsed {
         LastUsed {
+            harness: Some(HarnessId::new("claude")),
             workspace,
             model: Some("sonnet".to_owned()),
             permission_mode: Some("plan".to_owned()),
@@ -6262,6 +6693,7 @@ mod tests {
         let a = store.add_project(Path::new("/a"), "a", ProjectKind::Normal, 1)?;
         let insert = |project_id, short_id: &str, created_at| {
             store.insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
                 project_id,
                 short_id: short_id.to_owned(),
                 cwd: PathBuf::from("/a"),
@@ -6727,6 +7159,7 @@ mod tests {
         add_thread(&store, "aa", 1_000)?;
         let web = store.add_project(Path::new("/tmp/web"), "web", ProjectKind::Normal, 0)?;
         let thread = store.insert_thread(&NewThread {
+            harness: HarnessId::new("claude"),
             project_id: web,
             short_id: "bb".to_owned(),
             cwd: PathBuf::from("/tmp/web"),
@@ -6868,6 +7301,7 @@ mod tests {
         let project_id =
             store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1)?;
         store.insert_thread(&NewThread {
+            harness: HarnessId::new("claude"),
             project_id,
             short_id: "t1".to_owned(),
             cwd: PathBuf::from(PROJECT_ROOT),
@@ -6906,6 +7340,7 @@ mod tests {
         let project_id =
             store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1_500)?;
         store.insert_group(&NewGroup {
+            harness: HarnessId::new("claude"),
             project_id,
             kind: GroupKind::Feature,
             name: "GT-514-login".to_owned(),
@@ -6941,6 +7376,7 @@ mod tests {
             vec![(
                 true,
                 GroupDefaults {
+                    harness: HarnessId::new("claude"),
                     model: Some("opus".to_owned()),
                     permission: None,
                 }
@@ -6958,6 +7394,7 @@ mod tests {
         let project_id =
             store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1_500)?;
         store.save_draft(&DraftRow {
+            harness: HarnessId::new("claude"),
             project_id,
             workspace: DraftWorkspace::NewWorktree,
             branch: Some("main".to_owned()),
@@ -6985,6 +7422,7 @@ mod tests {
         assert_eq!(
             drafts,
             vec![Some(Draft {
+                harness: HarnessId::new("claude"),
                 workspace: DraftWorkspace::NewWorktree,
                 branch: Some("main".to_owned()),
                 model: Some("opus".to_owned()),
@@ -7459,6 +7897,41 @@ mod tests {
         assert!(
             saved(&actor.store, "aa")?.last_activity_at >= before,
             "the turn end should be the thread's last activity"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn turn_end_without_a_scanned_branch_takes_the_branch_from_git()
+    -> Result<(), Report<StoreError>> {
+        // Given a branchless thread a poll saw working, whose transcript names no branch.
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(&path, PROMPT_LINE).change_context(StoreError)?;
+        let (store, _) = store_with_thread("aa")?;
+        let working = SessionRecord {
+            session_id: Some("s1".to_owned()),
+            ..record("aa", ThreadStatus::Working)
+        };
+        let host = FakeHost::listing(vec![working.clone()]);
+        let (mut actor, _state) = start(store, &host, claude_dir.path());
+        actor.poll().await;
+
+        // When a poll sees its turn end.
+        host.set_list(Ok(vec![SessionRecord {
+            status: ThreadStatus::Idle,
+            ..working
+        }]));
+        actor.poll().await;
+
+        // Then the thread takes the branch git has checked out there.
+        assert_eq!(
+            saved(&actor.store, "aa")?.branch.as_deref(),
+            Some(CURRENT_BRANCH),
+            "a turn end with no scanned branch should ask git"
         );
         Ok(())
     }
@@ -8169,6 +8642,7 @@ mod tests {
         // Given a prompt-less thread started with sonnet in plan mode.
         let store = Store::open_in_memory()?;
         let id = store.insert_thread(&NewThread {
+            harness: HarnessId::new("claude"),
             project_id: orb_project(&store)?,
             short_id: "aa".to_owned(),
             cwd: PathBuf::from(PROJECT_ROOT),
@@ -8734,6 +9208,7 @@ mod tests {
         let id = {
             let project_id = store.add_project(root.path(), "orb", ProjectKind::Normal, 0)?;
             store.insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
                 project_id,
                 short_id: "aa".to_owned(),
                 cwd: Path::new(WORKTREES_ROOT).join("orb/orb-0123abcd"),
@@ -9505,6 +9980,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id = orb_project(&store)?;
         let id = store.insert_group(&NewGroup {
+            harness: HarnessId::new("claude"),
             project_id,
             kind,
             name: SLUG_BRANCH.to_owned(),
@@ -9888,6 +10364,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id = orb_project(&store)?;
         let group = store.insert_group(&NewGroup {
+            harness: HarnessId::new("claude"),
             project_id,
             kind,
             name: SLUG_BRANCH.to_owned(),
@@ -9901,6 +10378,7 @@ mod tests {
             .iter()
             .map(|short_id| {
                 store.insert_thread(&NewThread {
+                    harness: HarnessId::new("claude"),
                     project_id,
                     short_id: (*short_id).to_owned(),
                     cwd: dir.unwrap_or(Path::new(PROJECT_ROOT)).to_owned(),
@@ -11248,13 +11726,16 @@ mod tests {
         };
         let mut actor = SessionsActor::restore(SessionsActorDeps {
             services: Services {
-                session_host: SessionHostService::new(host),
+                harnesses: Harnesses::new(vec![Arc::new(ClaudeCode::new(
+                    host,
+                    FakeTrust::accepting(),
+                    PathBuf::from(NO_CLAUDE_DIR),
+                    GitService::new(git.clone()),
+                ))]),
                 git: GitService::new(git.clone()),
-                workspace_trust: WorkspaceTrustService::new(FakeTrust::accepting()),
             },
             state: state.clone(),
             store,
-            claude_dir: PathBuf::from(NO_CLAUDE_DIR),
             worktrees_root: PathBuf::from(WORKTREES_ROOT),
             orb_root: PathBuf::from(ORB_ROOT),
             incognito_root: PathBuf::from(INCOGNITO_ROOT),
@@ -11398,6 +11879,7 @@ mod tests {
             store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
         let project = orb_project(&store)?;
         store.insert_thread(&NewThread {
+            harness: HarnessId::new("claude"),
             project_id: project,
             short_id: "cc".to_owned(),
             cwd: HEX_WORKTREE.into(),
@@ -11464,6 +11946,7 @@ mod tests {
         fs::create_dir_all(&dir).change_context(StoreError)?;
         let (store, group, _) = store_with_group(GroupKind::Feature, Some(&dir), &["aa"])?;
         store.insert_thread(&NewThread {
+            harness: HarnessId::new("claude"),
             project_id: saved_group(&store, group)?.project_id,
             short_id: "cc".to_owned(),
             cwd: dir.clone(),

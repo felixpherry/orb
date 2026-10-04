@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::feat::dashboard::state::DashboardCursor;
+use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::picker::state::PickerState;
 use crate::feat::search::state::SearchProgress;
@@ -68,4 +69,14 @@ pub struct AppState {
     /// The search index's startup progress and failure. Written by the search
     /// actor, its owner.
     pub search: SearchProgress,
+    /// Every registered harness as the pickers and keymap see it, in
+    /// registration order. Written by the sessions actor, its owner.
+    pub harnesses: Vec<HarnessInfo>,
+}
+
+impl AppState {
+    /// What the frontend knows about harness `id`.
+    pub fn harness_info(&self, id: &HarnessId) -> Option<&HarnessInfo> {
+        self.harnesses.iter().find(|info| info.id == *id)
+    }
 }

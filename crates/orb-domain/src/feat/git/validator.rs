@@ -136,6 +136,7 @@ fn not_busy(sessions: &Sessions, dir: &Path) -> Result<(), SwitchBranchError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::time::SystemTime;
 
     use super::{
@@ -160,6 +161,7 @@ mod tests {
                     removed: false,
                     draft: None,
                     threads: vec![Thread {
+                        harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
                         cwd: "/work".into(),
@@ -285,6 +287,7 @@ mod tests {
         let mut state = with_working_thread("/work");
         if let Some(project) = state.sessions.projects.first_mut() {
             project.draft = Some(Draft {
+                harness: HarnessId::new("claude"),
                 workspace,
                 branch: None,
                 model: None,
@@ -354,6 +357,7 @@ mod tests {
             let mut state = with_working_thread("/work-tree");
             if let Some(project) = state.sessions.projects.first_mut() {
                 project.draft = Some(Draft {
+                    harness: HarnessId::new("claude"),
                     workspace: DraftWorkspace::Existing("/work-tree".into()),
                     branch: None,
                     model: None,
@@ -491,7 +495,11 @@ mod tests {
                 settled_at: None,
                 active_since: SystemTime::UNIX_EPOCH,
                 draft: false,
-                defaults: GroupDefaults::default(),
+                defaults: GroupDefaults {
+                    harness: HarnessId::new("claude"),
+                    model: None,
+                    permission: None,
+                },
             }];
         }
         state.sessions.cursor = Some(SidebarItem::Group(GroupId(9)));

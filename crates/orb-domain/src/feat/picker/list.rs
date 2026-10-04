@@ -8,6 +8,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
+use crate::feat::harness::HarnessInfo;
 use crate::feat::sessions::state::{ProjectId, ProjectKind, ThreadId};
 
 /// One row a picker can show.
@@ -27,12 +28,15 @@ pub enum PickerItem {
     Workspace(WorkspaceChoice),
     /// A branch to switch to, matched on its name.
     Branch(BranchRow),
-    /// A model or permission mode for a draft; `None` is Claude's default.
-    /// Matched on its label.
-    Setting(Option<&'static str>),
+    /// A model or permission mode for a draft, with its text; `None` is the
+    /// harness's default. Matched on its label.
+    Setting {
+        value: Option<String>,
+        label: String,
+    },
     /// A section label between rows. It can't be selected, and it's hidden
     /// while a filter is typed.
-    Heading(&'static str),
+    Heading(String),
     /// Make the draft's project a git repository. Matched on its label.
     InitGit,
     /// The project filter's row for no filter. Matched on its label.
@@ -88,118 +92,15 @@ pub fn confirm_label(yes: bool) -> &'static str {
     if yes { "Yes" } else { "No" }
 }
 
-/// A Claude model a draft can pick: the full ID passed as `--model`, the
-/// name shown for it, and the other values T3 Code's manifest maps to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Model {
-    pub id: &'static str,
-    pub name: &'static str,
-    /// Other names for the model, such as `opus`, that a draft or thread may
-    /// have stored.
-    pub aliases: &'static [&'static str],
-}
-
-/// The current models, in T3 Code's order.
-pub const MODELS: [Model; 4] = [
-    Model {
-        id: "claude-opus-5-5",
-        name: "Claude Opus 5.5",
-        aliases: &["opus-5.5", "claude-opus-5.5"],
-    },
-    Model {
-        id: "claude-fable-5-1",
-        name: "Claude Fable 5.1",
-        aliases: &["fable", "fable-5.1", "claude-fable-5.1"],
-    },
-    Model {
-        id: "claude-opus-5",
-        name: "Claude Opus 5",
-        aliases: &["opus", "opus-5", "claude-opus-5.0", "claude-opus-5-0"],
-    },
-    Model {
-        id: "claude-sonnet-5",
-        name: "Claude Sonnet 5",
-        aliases: &[
-            "sonnet",
-            "sonnet-5",
-            "claude-sonnet-5.0",
-            "claude-sonnet-5-0",
-        ],
-    },
-];
-
-/// The older models T3 Code files under "Legacy models", in its order.
-pub const LEGACY_MODELS: [Model; 7] = [
-    Model {
-        id: "claude-fable-5",
-        name: "Claude Fable 5",
-        aliases: &[],
-    },
-    Model {
-        id: "claude-opus-4-8",
-        name: "Claude Opus 4.8",
-        aliases: &["opus-4.8", "claude-opus-4.8"],
-    },
-    Model {
-        id: "claude-opus-4-7",
-        name: "Claude Opus 4.7",
-        aliases: &["opus-4.7", "claude-opus-4.7"],
-    },
-    Model {
-        id: "claude-opus-4-6",
-        name: "Claude Opus 4.6",
-        aliases: &["opus-4.6", "claude-opus-4.6", "claude-opus-4-6-20251117"],
-    },
-    Model {
-        id: "claude-opus-4-5",
-        name: "Claude Opus 4.5",
-        aliases: &[],
-    },
-    Model {
-        id: "claude-sonnet-4-6",
-        name: "Claude Sonnet 4.6",
-        aliases: &[
-            "sonnet-4.6",
-            "claude-sonnet-4.6",
-            "claude-sonnet-4-6-20251117",
-        ],
-    },
-    Model {
-        id: "claude-haiku-4-5",
-        name: "Claude Haiku 4.5",
-        aliases: &[
-            "haiku",
-            "haiku-4.5",
-            "claude-haiku-4.5",
-            "claude-haiku-4-5-20251001",
-        ],
-    },
-];
-
-/// The `--permission-mode` values a draft can pick, besides Claude's default.
-pub const PERMISSION_MODES: [&str; 6] = [
-    "acceptEdits",
-    "auto",
-    "bypassPermissions",
-    "manual",
-    "dontAsk",
-    "plan",
-];
-
-/// The model `value` names, by its ID or one of its aliases.
-pub fn model(value: &str) -> Option<&'static Model> {
-    MODELS
-        .iter()
-        .chain(&LEGACY_MODELS)
-        .find(|model| model.id == value || model.aliases.contains(&value))
-}
-
-/// A model's or permission mode's text: a known model's name (also for an
-/// alias), else the value as stored, or `Default` for none.
-pub fn setting_label(value: Option<&str>) -> &str {
+/// A model's or permission mode's text: a model `info` knows by its id or
+/// an alias shows its name, any other value shows as stored, and none is
+/// `Default`.
+pub fn setting_label<'a>(value: Option<&'a str>, info: Option<&'a HarnessInfo>) -> &'a str {
     match value {
         None => "Default",
-        Some(value) => model(value).map_or(value, |model| model.name),
+        Some(value) => info
+            .and_then(|info| info.model(value))
+            .map_or(value, |model| model.name.as_str()),
     }
 }
 
@@ -518,7 +419,7 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         PickerItem::Project { .. }
         | PickerItem::Workspace(_)
         | PickerItem::Branch(_)
-        | PickerItem::Setting(_)
+        | PickerItem::Setting { .. }
         | PickerItem::InitGit
         | PickerItem::AllProjects
         | PickerItem::Confirm(_)
@@ -582,12 +483,12 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::Directory { name } => (name.clone(), None),
         PickerItem::Workspace(choice) => (choice.label(), None),
         PickerItem::Branch(row) => (row.git_ref.name.clone(), None),
-        PickerItem::Setting(value) => (setting_label(*value).to_owned(), None),
-        PickerItem::Heading(text) => ((*text).to_owned(), None),
         PickerItem::InitGit => (INIT_GIT.to_owned(), None),
         PickerItem::AllProjects => (ALL_PROJECTS.to_owned(), None),
         PickerItem::Confirm(yes) => (confirm_label(*yes).to_owned(), None),
-        PickerItem::Thread { label, .. }
+        PickerItem::Setting { label, .. }
+        | PickerItem::Heading(label)
+        | PickerItem::Thread { label, .. }
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (label.clone(), None),
     };
@@ -618,6 +519,7 @@ mod tests {
 
     use super::{BranchRow, Matches, PickerItem, PickerList, setting_label};
     use crate::feat::git::git_service::GitRef;
+    use crate::feat::harness::claude::models::info;
     use crate::feat::sessions::state::{ProjectId, ProjectKind};
 
     fn directories(names: &[&str]) -> Vec<PickerItem> {
@@ -645,12 +547,12 @@ mod tests {
                 PickerItem::Project { title, .. } => title.clone(),
                 PickerItem::Workspace(choice) => choice.label(),
                 PickerItem::Branch(row) => row.git_ref.name.clone(),
-                PickerItem::Setting(value) => setting_label(*value).to_owned(),
-                PickerItem::Heading(text) => (*text).to_owned(),
                 PickerItem::InitGit => super::INIT_GIT.to_owned(),
                 PickerItem::AllProjects => super::ALL_PROJECTS.to_owned(),
                 PickerItem::Confirm(yes) => super::confirm_label(*yes).to_owned(),
-                PickerItem::Thread { label, .. }
+                PickerItem::Setting { label, .. }
+                | PickerItem::Heading(label)
+                | PickerItem::Thread { label, .. }
                 | PickerItem::Worktree { label, .. }
                 | PickerItem::Hit { label, .. } => label.clone(),
             })
@@ -732,7 +634,7 @@ mod tests {
                 PickerItem::Directory { .. }
                 | PickerItem::Workspace(_)
                 | PickerItem::Branch(_)
-                | PickerItem::Setting(_)
+                | PickerItem::Setting { .. }
                 | PickerItem::Heading(_)
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
@@ -1024,9 +926,15 @@ mod tests {
     fn heading_is_hidden_while_filtering() {
         // Given a heading between two settings.
         let mut list = PickerList::new(vec![
-            PickerItem::Setting(Some("claude-sonnet-5")),
-            PickerItem::Heading("Legacy models"),
-            PickerItem::Setting(Some("claude-fable-5")),
+            PickerItem::Setting {
+                value: Some("claude-sonnet-5".to_owned()),
+                label: "Claude Sonnet 5".to_owned(),
+            },
+            PickerItem::Heading("Legacy models".to_owned()),
+            PickerItem::Setting {
+                value: Some("claude-fable-5".to_owned()),
+                label: "Claude Fable 5".to_owned(),
+            },
         ]);
 
         // When typing text the heading matches.
@@ -1057,7 +965,12 @@ mod tests {
     ) {
         // Given / When / Then a model, by ID or alias, shows its name, and
         // anything else shows as is.
-        assert_eq!(setting_label(value), label, "the setting's label");
+        let info = info();
+        assert_eq!(
+            setting_label(value, Some(&info)),
+            label,
+            "the setting's label"
+        );
     }
 
     #[rstest::rstest]

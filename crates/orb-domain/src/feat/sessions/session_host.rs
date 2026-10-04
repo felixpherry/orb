@@ -2,9 +2,7 @@
 //! stopping or deleting one, and the command that attaches to one.
 
 use std::ffi::OsString;
-use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use error_stack::Report;
@@ -48,7 +46,7 @@ pub struct SessionRecord {
     pub status: ThreadStatus,
 }
 
-/// Runs Claude sessions in the background, independent of orb.
+/// Runs sessions in the background, independent of orb.
 #[async_trait]
 pub trait SessionHost: Send + Sync {
     fn name(&self) -> &'static str;
@@ -64,12 +62,16 @@ pub trait SessionHost: Send + Sync {
         options: &SessionOptions,
     ) -> Result<CreatedSession, Report<SessionHostError>>;
 
-    /// Every session the host knows about.
+    /// The sessions among `short_ids` the host knows about, and any others
+    /// it reports.
     ///
     /// # Errors
     ///
     /// Returns an error if the host can't be asked or its answer can't be read.
-    async fn list(&self) -> Result<Vec<SessionRecord>, Report<SessionHostError>>;
+    async fn list(
+        &self,
+        short_ids: &[String],
+    ) -> Result<Vec<SessionRecord>, Report<SessionHostError>>;
 
     /// Stops the session and keeps its conversation.
     ///
@@ -87,67 +89,4 @@ pub trait SessionHost: Send + Sync {
 
     /// The command that attaches a terminal to the session.
     fn attach_argv(&self, short_id: &str) -> Vec<OsString>;
-}
-
-/// Shared handle to the [`SessionHost`] in use.
-#[derive(Clone)]
-pub struct SessionHostService {
-    host: Arc<dyn SessionHost>,
-}
-
-impl SessionHostService {
-    pub fn new(host: Arc<dyn SessionHost>) -> Self {
-        Self { host }
-    }
-
-    /// Starts an idle session in `cwd` with `options`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the host refuses or fails to start the session.
-    pub async fn create(
-        &self,
-        cwd: &Path,
-        options: &SessionOptions,
-    ) -> Result<CreatedSession, Report<SessionHostError>> {
-        self.host.create(cwd, options).await
-    }
-
-    /// Every session the host knows about.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the host can't be asked or its answer can't be read.
-    pub async fn list(&self) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
-        self.host.list().await
-    }
-
-    /// Stops the session and keeps its conversation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the host refuses or fails to stop the session.
-    pub async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
-        self.host.stop(short_id).await
-    }
-
-    /// Deletes the session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the host refuses or fails to delete the session.
-    pub async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
-        self.host.remove(short_id).await
-    }
-
-    /// The command that attaches a terminal to the session.
-    pub fn attach_argv(&self, short_id: &str) -> Vec<OsString> {
-        self.host.attach_argv(short_id)
-    }
-}
-
-impl fmt::Debug for SessionHostService {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SessionHost<{}>", self.host.name())
-    }
 }

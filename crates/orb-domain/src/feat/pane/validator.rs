@@ -56,6 +56,7 @@ pub fn validate_detach(state: &AppState) -> Result<(), DetachError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::time::SystemTime;
 
     use super::{AttachError, DetachError, validate_attach, validate_detach};
@@ -109,6 +110,7 @@ mod tests {
                     removed: false,
                     draft: None,
                     threads: vec![Thread {
+                        harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
                         cwd: "/work".into(),

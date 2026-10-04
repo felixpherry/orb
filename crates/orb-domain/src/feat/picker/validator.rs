@@ -221,6 +221,7 @@ pub fn validate_delete_worktree(state: &AppState) -> Result<(), DeleteWorktreeEr
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::path::{Path, PathBuf};
 
     use std::time::SystemTime;
@@ -504,6 +505,7 @@ mod tests {
     /// The worktree picker over `WORKTREE`, where thread 1, `status`, runs.
     fn deleting(status: ThreadStatus) -> AppState {
         let thread = Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(1),
             title: None,
             cwd: WORKTREE.into(),

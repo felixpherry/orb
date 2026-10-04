@@ -303,6 +303,7 @@ fn lit_text(text: &str, lit: &[usize], width: usize) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use orb_domain::feat::harness::HarnessId;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -708,6 +709,7 @@ mod tests {
                     removed: false,
                     draft: None,
                     threads: vec![Thread {
+                        harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: Some("fix the bug".to_owned()),
                         cwd: "/Users/me/dev/orb".into(),

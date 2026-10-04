@@ -697,6 +697,7 @@ mod tests {
         self, AddProject, Branch, FilterProjects, Incognito, Lazygit, Model, Neovim, NewSession,
         Open, Permission, Quit, Shell, Start, Workspace,
     };
+    use orb_domain::feat::harness::HarnessId;
     use std::time::SystemTime;
 
     use orb_domain::feat::sessions::state::{
@@ -1463,6 +1464,7 @@ mod tests {
             active_since: SystemTime::UNIX_EPOCH,
             draft,
             defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
                 model: None,
                 permission: None,
             },
@@ -1481,6 +1483,7 @@ mod tests {
                 removed: false,
                 draft: None,
                 threads: vec![Thread {
+                    harness: HarnessId::new("claude"),
                     id: ThreadId(1),
                     title: None,
                     cwd: "/orb".into(),
@@ -1545,6 +1548,7 @@ mod tests {
                 .iter_mut()
                 .for_each(|thread| thread.group = None);
             project.draft = Some(Draft {
+                harness: HarnessId::new("claude"),
                 workspace: DraftWorkspace::Local,
                 branch: None,
                 model: None,

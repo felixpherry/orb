@@ -10,10 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::feat::git::git_service::GitRef;
-use crate::feat::picker::list::{
-    BranchRow, LEGACY_MODELS, MODELS, Matches, Model, PERMISSION_MODES, PickerItem, PickerList,
-    model,
-};
+use crate::feat::harness::HarnessInfo;
+use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList, setting_label};
 use crate::feat::sessions::state::{
     GroupId, GroupKind, NEW_THREAD, Project, ProjectId, Sessions, Thread, ThreadId, ThreadStatus,
 };
@@ -357,31 +355,50 @@ impl PickerState {
         }
     }
 
-    /// A model picker for `target`'s draft: `Default`, then [`MODELS`], then
-    /// a `Legacy models` heading over [`LEGACY_MODELS`], with `current`
-    /// selected, also when it's one of a model's aliases.
-    pub fn models(target: DraftTarget, current: Option<&str>, return_to: Focus) -> Self {
-        let ids = |models: &[Model]| {
-            models
-                .iter()
-                .map(|model| PickerItem::Setting(Some(model.id)))
-                .collect::<Vec<_>>()
-        };
-        let items = std::iter::once(PickerItem::Setting(None))
-            .chain(ids(&MODELS))
-            .chain(std::iter::once(PickerItem::Heading("Legacy models")))
-            .chain(ids(&LEGACY_MODELS))
+    /// A model picker for `target`'s draft: `Default`, then each of the
+    /// harness's (`info`'s) model groups under its heading, if it has one,
+    /// with `current` selected, also when it's one of a model's aliases.
+    pub fn models(
+        target: DraftTarget,
+        info: Option<&HarnessInfo>,
+        current: Option<&str>,
+        return_to: Focus,
+    ) -> Self {
+        let groups = info.map_or(&[][..], |info| info.models.as_slice());
+        let items = std::iter::once(default_setting())
+            .chain(groups.iter().flat_map(|group| {
+                group
+                    .heading
+                    .clone()
+                    .map(PickerItem::Heading)
+                    .into_iter()
+                    .chain(group.models.iter().map(|model| PickerItem::Setting {
+                        value: Some(model.id.clone()),
+                        label: model.name.clone(),
+                    }))
+            }))
             .collect();
-        let current = current.map(|value| model(value).map_or(value, |model| model.id));
+        let current = current.map(|value| {
+            info.and_then(|info| info.model(value))
+                .map_or(value, |model| model.id.as_str())
+        });
         Self::settings(PickerKind::Model { target }, items, current, return_to)
     }
 
-    /// A permission-mode picker for `target`'s draft: `Default`, then
-    /// [`PERMISSION_MODES`], with `current` selected.
-    pub fn permissions(target: DraftTarget, current: Option<&str>, return_to: Focus) -> Self {
-        let items = std::iter::once(None)
-            .chain(PERMISSION_MODES.map(Some))
-            .map(PickerItem::Setting)
+    /// A permission-mode picker for `target`'s draft: `Default`, then the
+    /// harness's (`info`'s) permission modes, with `current` selected.
+    pub fn permissions(
+        target: DraftTarget,
+        info: Option<&HarnessInfo>,
+        current: Option<&str>,
+        return_to: Focus,
+    ) -> Self {
+        let modes = info.map_or(&[][..], |info| info.permission_modes.as_slice());
+        let items = std::iter::once(default_setting())
+            .chain(modes.iter().map(|mode| PickerItem::Setting {
+                value: Some(mode.clone()),
+                label: mode.clone(),
+            }))
             .collect();
         Self::settings(PickerKind::Permission { target }, items, current, return_to)
     }
@@ -397,7 +414,9 @@ impl PickerState {
         let list = {
             let selected = items
                 .iter()
-                .find(|item| matches!(item, PickerItem::Setting(value) if *value == current))
+                .find(|item| {
+                    matches!(item, PickerItem::Setting { value, .. } if value.as_deref() == current)
+                })
                 .cloned();
             let mut list = PickerList::new(items);
             if let Some(selected) = selected {
@@ -675,7 +694,7 @@ impl PickerState {
                 PickerItem::Project { .. }
                 | PickerItem::Workspace(_)
                 | PickerItem::Branch(_)
-                | PickerItem::Setting(_)
+                | PickerItem::Setting { .. }
                 | PickerItem::Heading(_)
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
@@ -818,6 +837,14 @@ impl PickerState {
     }
 }
 
+/// The `Default` row of a model or permission picker.
+fn default_setting() -> PickerItem {
+    PickerItem::Setting {
+        value: None,
+        label: setting_label(None, None).to_owned(),
+    }
+}
+
 /// Splits a path the user typed into the directory part, through the last
 /// `/`, and the rest. `None` unless it starts with `/` or `~/`.
 pub fn split_path(input: &str) -> Option<(&str, &str)> {
@@ -927,6 +954,7 @@ pub fn worktree_items(app: &AppState) -> Vec<PickerItem> {
 
 #[cfg(test)]
 mod tests {
+    use crate::feat::harness::HarnessId;
     use std::path::{Path, PathBuf};
 
     use std::time::UNIX_EPOCH;
@@ -934,7 +962,8 @@ mod tests {
     use super::{DraftTarget, PickTarget, PickerState, expand, split_path, thread_label};
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
-    use crate::feat::picker::list::{LEGACY_MODELS, PickerItem};
+    use crate::feat::harness::claude::models::{LEGACY_MODELS, info};
+    use crate::feat::picker::list::{PickerItem, setting_label};
     use crate::feat::sessions::state::{
         Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId, ProjectKind, Thread,
         ThreadId, ThreadStatus,
@@ -1294,12 +1323,21 @@ mod tests {
         );
     }
 
+    /// Claude's setting row for `value`.
+    fn setting(value: Option<&str>) -> PickerItem {
+        let info = info();
+        PickerItem::Setting {
+            value: value.map(str::to_owned),
+            label: setting_label(value, Some(&info)).to_owned(),
+        }
+    }
+
     /// The labels of the shown setting rows.
-    fn setting_labels(picker: &PickerState) -> Vec<Option<&'static str>> {
+    fn setting_labels(picker: &PickerState) -> Vec<Option<&str>> {
         picker
             .shown()
             .filter_map(|(item, _)| match item {
-                PickerItem::Setting(value) => Some(*value),
+                PickerItem::Setting { value, .. } => Some(value.as_deref()),
                 _ => None,
             })
             .collect()
@@ -1308,8 +1346,12 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_lists_default_then_the_models() {
         // Given / When opening a model picker for a draft with no model.
-        let picker =
-            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
+            None,
+            Focus::Dashboard,
+        );
 
         // Then Default comes first, then every model ID, current then legacy.
         assert_eq!(
@@ -1335,8 +1377,12 @@ mod tests {
     #[rstest::rstest]
     fn model_picker_heads_the_legacy_models() {
         // Given / When opening a model picker.
-        let picker =
-            PickerState::models(DraftTarget::Project(ProjectId(1)), None, Focus::Dashboard);
+        let picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
+            None,
+            Focus::Dashboard,
+        );
 
         // Then the Legacy models heading sits between Sonnet 5 and Fable 5.
         let rows: Vec<&PickerItem> = picker.shown().map(|(item, _)| item).collect();
@@ -1344,9 +1390,9 @@ mod tests {
             rows.get(4..7),
             Some(
                 [
-                    &PickerItem::Setting(Some("claude-sonnet-5")),
-                    &PickerItem::Heading("Legacy models"),
-                    &PickerItem::Setting(Some("claude-fable-5")),
+                    &setting(Some("claude-sonnet-5")),
+                    &PickerItem::Heading("Legacy models".to_owned()),
+                    &setting(Some("claude-fable-5")),
                 ]
                 .as_slice()
             ),
@@ -1359,6 +1405,7 @@ mod tests {
         // Given a model picker on Claude Sonnet 5, the last current model.
         let mut picker = PickerState::models(
             DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
             Some("claude-sonnet-5"),
             Focus::Dashboard,
         );
@@ -1369,7 +1416,7 @@ mod tests {
         // Then the first legacy model is selected, not the heading.
         assert_eq!(
             picker.selected(),
-            Some(&PickerItem::Setting(Some("claude-fable-5"))),
+            Some(&setting(Some("claude-fable-5"))),
             "the heading can't be selected"
         );
     }
@@ -1378,8 +1425,12 @@ mod tests {
     fn moving_down_from_the_last_model_wraps_to_default() {
         // Given a model picker on the last legacy model.
         let last = LEGACY_MODELS.last().map(|model| model.id);
-        let mut picker =
-            PickerState::models(DraftTarget::Project(ProjectId(1)), last, Focus::Dashboard);
+        let mut picker = PickerState::models(
+            DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
+            last,
+            Focus::Dashboard,
+        );
 
         // When moving down.
         picker.next();
@@ -1387,7 +1438,7 @@ mod tests {
         // Then Default, the first row, is selected.
         assert_eq!(
             picker.selected(),
-            Some(&PickerItem::Setting(None)),
+            Some(&setting(None)),
             "moving down from the last model should wrap to Default"
         );
     }
@@ -1397,6 +1448,7 @@ mod tests {
         // Given / When opening a model picker for a draft on Claude Haiku 4.5.
         let picker = PickerState::models(
             DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
             Some("claude-haiku-4-5"),
             Focus::Dashboard,
         );
@@ -1404,7 +1456,7 @@ mod tests {
         // Then Claude Haiku 4.5 is selected.
         assert_eq!(
             picker.selected(),
-            Some(&PickerItem::Setting(Some("claude-haiku-4-5"))),
+            Some(&setting(Some("claude-haiku-4-5"))),
             "the draft's legacy model should be selected"
         );
     }
@@ -1421,6 +1473,7 @@ mod tests {
         // Given / When opening a model picker for a draft on an alias.
         let picker = PickerState::models(
             DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
             Some(alias),
             Focus::Dashboard,
         );
@@ -1428,7 +1481,7 @@ mod tests {
         // Then that model is selected.
         assert_eq!(
             picker.selected(),
-            Some(&PickerItem::Setting(Some(id))),
+            Some(&setting(Some(id))),
             "{alias} should select {id}"
         );
     }
@@ -1438,6 +1491,7 @@ mod tests {
         // Given / When opening a model picker for a draft on a value no model has.
         let picker = PickerState::models(
             DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
             Some("opus[1m]"),
             Focus::Dashboard,
         );
@@ -1445,7 +1499,7 @@ mod tests {
         // Then Default is selected.
         assert_eq!(
             picker.selected(),
-            Some(&PickerItem::Setting(None)),
+            Some(&setting(None)),
             "a model not in the list should select Default"
         );
     }
@@ -1455,6 +1509,7 @@ mod tests {
         // Given / When opening a permission picker for a draft in plan mode.
         let picker = PickerState::permissions(
             DraftTarget::Project(ProjectId(1)),
+            Some(&info()),
             Some("plan"),
             Focus::Dashboard,
         );
@@ -1462,7 +1517,7 @@ mod tests {
         // Then plan is selected.
         assert_eq!(
             picker.selected(),
-            Some(&PickerItem::Setting(Some("plan"))),
+            Some(&setting(Some("plan"))),
             "the draft's current mode should be selected"
         );
     }
@@ -1684,10 +1739,15 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: UNIX_EPOCH,
-            defaults: GroupDefaults::default(),
+            defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
+                model: None,
+                permission: None,
+            },
             draft: false,
         };
         let thread = Thread {
+            harness: HarnessId::new("claude"),
             id: ThreadId(1),
             title: Some("api".to_owned()),
             cwd: PathBuf::from("/code/orb"),
