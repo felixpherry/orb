@@ -1,10 +1,10 @@
 # orb
 
-A vim-first terminal manager for running many [Claude Code](https://claude.com/claude-code) sessions at once, across projects and git worktrees.
+A vim-first terminal manager for running many [Claude Code](https://claude.com/claude-code) and pi sessions at once, across projects and git worktrees.
 
 ## Quickstart
 
-You need macOS, a recent stable Rust toolchain, [Claude Code](https://docs.claude.com/en/docs/claude-code), [zellij](https://zellij.dev) and a [Nerd Font](https://www.nerdfonts.com) in your terminal. [lazygit](https://github.com/jesseduffield/lazygit), [neovim](https://neovim.io) and [terminal-notifier](https://github.com/julienXX/terminal-notifier) are optional.
+You need macOS, a recent stable Rust toolchain, [Claude Code](https://docs.claude.com/en/docs/claude-code), [zellij](https://zellij.dev) and a [Nerd Font](https://www.nerdfonts.com) in your terminal. [lazygit](https://github.com/jesseduffield/lazygit), [neovim](https://neovim.io) and [terminal-notifier](https://github.com/julienXX/terminal-notifier) are optional. For pi sessions you also need pi and dtach (`brew install dtach`) on your `PATH` when orb starts; without either, `␣h` shows pi disabled as `pi not found` or `dtach not found`.
 
 ```sh
 cargo install --git https://github.com/felixpherry/orb --locked
@@ -15,9 +15,9 @@ orb
 Then:
 
 1. `␣p` adds a project from a directory picker (`Tab` opens a folder, `⏎` adds it).
-2. `␣n` picks a project and opens a draft. `␣w`, `␣b`, `␣m` and `␣a` set its workspace, branch, model and permission.
-3. `⏎` starts the session and attaches you to Claude.
-4. `<C-\>` takes you back to orb. The session keeps running in Claude's background supervisor, even after you quit orb.
+2. `␣n` picks a project and opens a draft. `␣h`, `␣w`, `␣b`, `␣m` and `␣a` set its harness (Claude Code or pi), workspace, branch, model and permission.
+3. `⏎` starts the session and attaches you to Claude or pi.
+4. `<C-\>` takes you back to orb. The session keeps running, in Claude's background supervisor or, for pi, under dtach, even after you quit orb.
 5. For related threads, `␣gf`, `␣gr` and `␣gl` make a Feature, Research or Learn group. For a quick question outside any project, `␣i` opens an Incognito draft.
 
 ## Demo
@@ -45,15 +45,16 @@ The demo shows, in order:
 ## Features
 
 - **One list for every session.** The sidebar shows each thread's status (working, needs approval, needs input, done), its project, branch and elapsed time, across all projects. Pinned threads sit on top, and quiet ones settle onto a collapsible shelf.
-- **The real Claude, attached.** `⏎` runs `claude attach` in a terminal pane inside orb, so every slash command, permission prompt and picker works. Each attached thread keeps its own pane.
+- **The real Claude or pi, attached.** `⏎` runs `claude attach`, or `dtach -A` for a pi thread, in a terminal pane inside orb, so every slash command, permission prompt and picker works. Each attached thread keeps its own pane.
+- **pi beside Claude.** `␣h` on a draft picks Claude Code or pi. A pi session runs under dtach, so it outlives orb too. orb reads its status (working, idle, stopped), its title (`/name`, else the first prompt), the session picker's preview and `␣sg`'s messages from pi's session file, and `␣m` lists the models `pi --list-models` printed at orb's start, under a heading per provider. pi has no permission modes, so `␣a` isn't offered on a pi draft, and orb's trust confirm doesn't apply to it. A lone pi thread shows a dim `pi` tag before its status.
 - **Worktrees built in.** A new session can get its own worktree under `~/.orb/worktrees/`. Once Claude names the thread, its `orb/<hex>` branch is renamed to match the title. Every hour, and at start, orb prunes worktrees that nothing uses, or whose threads were all settled at least 7 days ago, keeping their branches and skipping any with uncommitted changes; `⏎` on a pruned thread recreates its worktree on its branch and resumes the chat.
-- **Drafts.** Set up the project, workspace, base branch, model and permission before starting a session. A draft in a folder that isn't a git repository starts in that folder, and `␣w`/`␣b` there offer to initialize git.
-- **Trust handled for you.** When Claude refuses a folder it hasn't been trusted in, orb asks `Trust <path>?` (`No` selected). `Yes` marks it trusted in Claude's `.claude.json` and retries the start.
-- **Groups.** Threads that belong together share one directory and sit under one card: a **Feature** group's worktree (on a branch named after the group, like `GT-514-login`), or a **Research** or **Learn** folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/` (orb writes a default there first: for Research, a research kit with an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions, a report template and `SOURCES.md`; for Learn, an `AGENTS.md`). Each group has a default model and permission, set with `␣m`/`␣a` on its card or draft. `n` starts another thread in an active group at once with those defaults (on a group that has only its draft, `⏎` on the draft starts it first); threads already running keep theirs. `␣b` on a started Feature group's card switches its worktree's branch, which moves every thread in it. A name another group has, or whose branch or folder already exists, is refused with the name box still open. Groups are pinned, settled and deleted as a whole. Deleting one also removes its folder, or its worktree (even with changes) and the branch orb made for it, which frees the name. A Feature group whose branch has unmerged commits (as `git branch -d` sees it) isn't deleted at all, and the mode line says `branch <name> has unmerged commits`.
+- **Drafts.** Set up the project, harness, workspace, base branch, model and permission before starting a session. A draft in a folder that isn't a git repository starts in that folder, and `␣w`/`␣b` there offer to initialize git.
+- **Trust handled for you.** When Claude refuses a folder it hasn't been trusted in, orb asks `Trust <path>?` (`No` selected). `Yes` marks it trusted in Claude's `.claude.json` and retries the start. pi threads never get this confirm.
+- **Groups.** Threads that belong together share one directory and sit under one card: a **Feature** group's worktree (on a branch named after the group, like `GT-514-login`), or a **Research** or **Learn** folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/` (orb writes a default there first: for Research, a research kit with an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions, a report template and `SOURCES.md`; for Learn, an `AGENTS.md`). Each group has a default harness, model and permission, set with `␣h`/`␣m`/`␣a` on its card; threads already running keep theirs. `n` in an active group opens its draft, making one at the top of the group when it has none. The draft follows the card's defaults except for each one you pick on it with `␣h`/`␣m`/`␣a`, and `⏎` starts it in the group's folder or worktree. Once the group has a thread, `d` discards its draft. `␣b` on a started Feature group's card switches its worktree's branch, which moves every thread in it. A name another group has, or whose branch or folder already exists, is refused with the name box still open. Groups are pinned, settled and deleted as a whole. Deleting one also removes its folder, or its worktree (even with changes) and the branch orb made for it, which frees the name. A Feature group whose branch has unmerged commits (as `git branch -d` sees it) isn't deleted at all, and the mode line says `branch <name> has unmerged commits`.
 - **Incognito.** `␣i` (or `i` on the dashboard) opens the Incognito draft, for a Claude session outside any project, with no picker step; `⏎` starts it, as on any draft. Every incognito thread runs in orb's `Incognito` project at `/tmp/orb-incognito/`, which orb creates at start and again before each incognito start. The first one asks `Trust /tmp/orb-incognito?` once (orb writes Claude's trust for its realpath, `/private/tmp/orb-incognito` on macOS), and later ones don't. Incognito threads are normal threads: they settle, delete, rename and resume like any other. `␣n` doesn't list Incognito, and `␣f` lists it after Research and Learn. `␣w`/`␣b` aren't bound on its rows, and its draft never shows Workspace or Branch, even if the folder becomes a git repository.
-- **Find and jump.** `/` searches thread titles and group names, `␣f` narrows the sidebar to one project, and `<C-o>`/`<C-i>` move back and forward through a jump list, as in neovim. `␣␣` (or `<C-Space>` in the Claude pane) opens a session picker over your other threads, newest chat first, with a preview of each chat; `⏎` jumps into the thread's pane. `␣sg` searches what was said in every thread, your prompts and Claude's replies, newest message first, and previews the exchange around each match.
+- **Find and jump.** `/` searches thread titles and group names, `␣f` narrows the sidebar to one project, and `<C-o>`/`<C-i>` move back and forward through a jump list, as in neovim. `␣␣` (or `<C-Space>` in the Claude pane) opens a session picker over your other threads, newest chat first, with a preview of each chat; `⏎` jumps into the thread's pane. `␣sg` searches what was said in every thread, your prompts and Claude's or pi's replies, newest message first, and previews the exchange around each match.
 - **Tools where the code is.** `␣t` opens a shell, `␣gg` lazygit and `␣v` `nvim .` in the thread's directory, as a full-screen zellij floating pane.
-- **Notifications.** When orb isn't focused, you get a macOS notification when a thread finishes, needs approval or needs input.
+- **Notifications.** When orb isn't focused, you get a macOS notification when a thread finishes, needs approval or needs input (a pi thread only ever finishes).
 - **LazyVim look.** A snacks-style explorer, a dashboard start screen, a lualine mode line, a helix which-key popup, vim.ui.select pickers and snacks session, worktree and search pickers, all in tokyonight-moon.
 
 ## Keys
@@ -71,21 +72,22 @@ The demo shows, in order:
 | `␣␣` / `<C-Space>` | Session picker: threads newest chat first, with a preview of the selected chat (`<C-Space>` in the Claude pane; `<C-s>` shows or hides settled threads) |
 | `␣sw` | Worktree picker: every worktree under `~/.orb/worktrees/`, with its size, changes, users and when the sweep will prune it |
 | `<C-x>` | In the worktree picker, delete the worktree, changes included, after a `No`/`Yes` confirm; the branch stays, and a worktree whose thread is attached or mid-turn can't be deleted |
-| `␣sg` | Search picker: every prompt and Claude reply in orb's threads, newest first, with the exchange around the match (`⏎` jumps into the thread's pane) |
+| `␣sg` | Search picker: every prompt and reply in orb's threads, newest first, with the exchange around the match (`⏎` jumps into the thread's pane) |
 | `/` or `i` | Search thread titles and group names |
 | `r` | Rename the thread |
 | `l` / `h` | Open / close the group (or the Settled shelf) |
-| `n` | New thread in the group, with the group's default model and permission; not on a settled group, and on a group with only its draft it points at the draft |
+| `n` | Open the group's draft, making one at the top of the group when it has none; not on a settled group |
 | `p` | Pin or unpin (a lone thread or a group) |
 | `s` | Settle (after a `No`/`Yes` confirm) or un-settle (a lone thread or a group) |
-| `d` | Delete the thread or the group, or discard the draft (after a `No`/`Yes` confirm); a group's last thread can't be deleted |
+| `d` | Delete the thread or the group, or discard the draft (after a `No`/`Yes` confirm); a group's last thread can't be deleted, nor the draft of a group with no thread |
 | `␣n` | New session (project picker) |
 | `␣i` | Open the Incognito draft in `/tmp/orb-incognito/` (`⏎` starts it) |
 | `␣gf` / `␣gr` / `␣gl` | New Feature (project picker, then a name) / Research / Learn group |
 | `␣p` | Add a project |
 | `␣f` | Filter by project, with Research, Learn and Incognito right after All projects (`<C-x>` removes one) |
 | `␣w` / `␣b` | Workspace / branch picker (not in a group or the Incognito project; `␣b` also on a started Feature group's card) |
-| `␣m` / `␣a` | Model / permission picker (drafts; on a group's card or draft, the group's defaults) |
+| `␣h` | Harness picker: Claude Code or pi (drafts; on a group's card, the group's default; on a group's draft, its own) |
+| `␣m` / `␣a` | Model / permission picker (drafts; on a group's card, the group's defaults; on a group's draft, its own; `␣a` not on pi) |
 | `␣t` / `␣gg` / `␣v` | Shell / lazygit / Neovim |
 | `␣e` | Hide or show the sidebar |
 | `<C-Left>` / `<C-Right>` | Narrow / widen the focused side |

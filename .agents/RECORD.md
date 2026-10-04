@@ -158,7 +158,7 @@ Entries are added or amended **only with human approval**.
 - (groups) `n` does nothing on a settled group, and on a group with only its draft it shows `Group already has a draft`.
 - (keybinds) On a group's draft, `⏎` starts it; `␣m`/`␣a` there or on the group's card pick the group's one default model and permission, which its draft and every `n` sibling start with, leaving running threads alone; a group's draft has no workspace or base-branch pick.
 - (zellij) A group card's and group draft's tools open in the group's directory, or in the project root before a Feature group's worktree exists.
-- (groups) Settling a group is refused with `Can't settle while Claude is working` while any of its threads has a turn underway, and it stops the group's idle sessions.
+- (groups) Settling a group is refused with `Can't settle while a session is working` while any of its threads has a turn underway, and it stops the group's idle sessions.
 - (groups) Deleting a group runs `claude rm` for each of its threads, then deletes the group and its directory: its own folder under `~/.orb/<kind>/`, or its worktree (`git worktree remove --force`) and then the slug branch orb made for it (`git branch -d`).
 - (groups) Deleting a Feature group whose slug branch has commits `git branch -d` calls unmerged (not in its upstream if it has one, else not in `HEAD`) is refused before anything is touched or hidden, with `branch <slug> has unmerged commits`; a branch the group was switched to with `␣b` is never deleted.
 - (groups) Deleting a Feature group keeps its worktree and branch, showing `kept the worktree: another thread works in it`, while a thread outside the group still works in that worktree.
