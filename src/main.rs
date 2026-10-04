@@ -15,8 +15,8 @@ use orb_domain::feat::harness::claude::supervisor::ClaudeSupervisor;
 use orb_domain::feat::harness::claude::trust::{ClaudeConfigTrust, claude_config_file};
 use orb_domain::feat::harness::pi::Pi;
 use orb_domain::feat::harness::pi::runner::ProcessRunner;
+use orb_domain::feat::notify::click::{ClickTarget, Kitty, ZellijTarget, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
-use orb_domain::feat::notify::terminal_notifier::{ClickTarget, Kitty, ZellijTarget, on_path};
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::child_env::child_env;
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
@@ -159,5 +159,12 @@ fn desktop_notifier(session: Option<OsString>, pane: Option<u32>) -> NotifierSer
             _ => None,
         }
     };
-    NotifierService::desktop(&path, ClickTarget { kitty, zellij })
+    NotifierService::desktop(
+        &path,
+        ClickTarget {
+            kitty,
+            zellij,
+            niri: None,
+        },
+    )
 }

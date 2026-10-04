@@ -9,21 +9,32 @@ use std::thread;
 use error_stack::{Report, ResultExt};
 use wherror::Error;
 
+use super::click::{ClickTarget, on_path};
 use super::osascript::OsascriptNotifier;
-use super::terminal_notifier::{ClickTarget, TerminalNotifierNotifier, on_path};
-use crate::feat::sessions::state::{Notice, ThreadId};
+use super::terminal_notifier::TerminalNotifierNotifier;
+use crate::feat::sessions::state::{Notice, NoticeKind, ThreadId};
 
 /// A notification couldn't be sent.
 #[derive(Debug, Error)]
 #[error(debug)]
 pub struct NotifyError;
 
+/// How insistently a notification asks for attention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Urgency {
+    /// Shown and let go, like any other notification.
+    Normal,
+    /// Stays on screen until the user deals with it, where the desktop can.
+    Critical,
+}
+
 /// Shows desktop notifications.
 pub trait Notifier: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Shows a notification titled `title` saying `body` about `thread`,
-    /// without waiting for it to be shown. A notifier that can replaces an
+    /// without waiting for it to be shown, asking at `urgency` where the
+    /// notifier can say how insistently. A notifier that can replaces an
     /// earlier notification about `thread`, and takes a click back to orb,
     /// on zellij tab `tab` if known.
     ///
@@ -34,6 +45,7 @@ pub trait Notifier: Send + Sync {
         &self,
         title: &str,
         body: &str,
+        urgency: Urgency,
         thread: ThreadId,
         tab: Option<u64>,
     ) -> Result<(), Report<NotifyError>>;
@@ -73,8 +85,22 @@ impl NotifierService {
     /// Returns an error if the notification couldn't be sent.
     pub fn announce(&self, notice: &Notice, tab: Option<u64>) -> Result<(), Report<NotifyError>> {
         let title = format!("{} · {}", notice.project, notice.title);
-        self.notifier
-            .notify(&title, notice.kind.label(), notice.thread, tab)
+        self.notifier.notify(
+            &title,
+            notice.kind.label(),
+            urgency(notice.kind),
+            notice.thread,
+            tab,
+        )
+    }
+}
+
+/// How insistently a notice of `kind` asks: a thread that is blocked on the
+/// user is critical, a finished turn is not.
+fn urgency(kind: NoticeKind) -> Urgency {
+    match kind {
+        NoticeKind::Finished => Urgency::Normal,
+        NoticeKind::NeedsApproval | NoticeKind::NeedsInput => Urgency::Critical,
     }
 }
 
@@ -135,8 +161,8 @@ mod tests {
     use error_stack::Report;
     use tempfile::TempDir;
 
-    use super::{Notifier, NotifierService, NotifyError};
-    use crate::feat::notify::terminal_notifier::ClickTarget;
+    use super::{Notifier, NotifierService, NotifyError, Urgency};
+    use crate::feat::notify::click::ClickTarget;
     use crate::feat::sessions::state::{Notice, NoticeKind, ThreadId};
 
     /// What the fake notifier was asked to show.
@@ -144,6 +170,7 @@ mod tests {
     struct Shown {
         title: String,
         body: String,
+        urgency: Urgency,
         thread: ThreadId,
         tab: Option<u64>,
     }
@@ -172,6 +199,7 @@ mod tests {
             &self,
             title: &str,
             body: &str,
+            urgency: Urgency,
             thread: ThreadId,
             tab: Option<u64>,
         ) -> Result<(), Report<NotifyError>> {
@@ -181,6 +209,7 @@ mod tests {
                 .push(Shown {
                     title: title.to_owned(),
                     body: body.to_owned(),
+                    urgency,
                     thread,
                     tab,
                 });
@@ -236,6 +265,30 @@ mod tests {
             .map(|shown| shown.body)
             .collect();
         assert_eq!(bodies, [expected], "the body for {kind:?}");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(NoticeKind::Finished, Urgency::Normal)]
+    #[case(NoticeKind::NeedsApproval, Urgency::Critical)]
+    #[case(NoticeKind::NeedsInput, Urgency::Critical)]
+    fn announce_urgency_follows_notice_kind(
+        #[case] kind: NoticeKind,
+        #[case] expected: Urgency,
+    ) -> Result<(), Report<NotifyError>> {
+        // Given a notifier.
+        let notifier = Arc::new(FakeNotifier::default());
+
+        // When announcing a notice of `kind`.
+        NotifierService::new(notifier.clone()).announce(&notice(kind), None)?;
+
+        // Then the notifier is asked at `expected` urgency.
+        let urgencies: Vec<Urgency> = notifier
+            .shown()
+            .into_iter()
+            .map(|shown| shown.urgency)
+            .collect();
+        assert_eq!(urgencies, [expected], "the urgency for {kind:?}");
         Ok(())
     }
 

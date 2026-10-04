@@ -20,48 +20,16 @@
 //! it isn't allowed to notify, that thread sends the same notification through
 //! a fallback notifier instead.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt::Write;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use error_stack::Report;
 
-use super::notifier::{Notifier, NotifyError, spawn_detached};
+use super::click::ClickTarget;
+use super::notifier::{Notifier, NotifyError, Urgency, spawn_detached};
 use crate::feat::sessions::state::ThreadId;
-
-/// Where a click on a notification takes the user: what orb found at startup.
-#[derive(Debug, Clone, Default)]
-pub struct ClickTarget {
-    /// orb's kitty; `None` without `kitten` or kitty's socket.
-    pub kitty: Option<Kitty>,
-    /// orb's zellij pane; `None` outside zellij.
-    pub zellij: Option<ZellijTarget>,
-}
-
-/// The kitty orb runs in, driven by its remote control.
-#[derive(Debug, Clone)]
-pub struct Kitty {
-    /// The `kitten` program.
-    pub kitten: PathBuf,
-    /// kitty's remote control socket, as `KITTY_LISTEN_ON` gives it.
-    pub socket: String,
-    /// orb's kitty window, `KITTY_WINDOW_ID`, used outside zellij only.
-    pub window: Option<u64>,
-}
-
-/// orb's pane in its zellij session.
-#[derive(Debug, Clone)]
-pub struct ZellijTarget {
-    /// The `zellij` program.
-    pub zellij: PathBuf,
-    /// orb's session.
-    pub session: String,
-    /// orb's terminal pane, `terminal_<pane>`.
-    pub pane: u32,
-}
 
 /// Shows notifications with `terminal-notifier`, whose click runs a command,
 /// and through `fallback` when terminal-notifier exits unsuccessfully.
@@ -102,7 +70,7 @@ impl TerminalNotifierNotifier {
 
     /// The `sh` line a click runs; `None` if orb knows nothing to go back to.
     fn click_command(&self, tab: Option<u64>) -> Option<String> {
-        let ClickTarget { kitty, zellij } = &self.click;
+        let ClickTarget { kitty, zellij, .. } = &self.click;
         let window = match (kitty, zellij) {
             (Some(kitty), Some(zellij)) => Some((kitty, window_title_match(&zellij.session))),
             (Some(kitty), None) => kitty.window.map(|id| (kitty, format!("id:{id}"))),
@@ -164,6 +132,7 @@ impl Notifier for TerminalNotifierNotifier {
         &self,
         title: &str,
         body: &str,
+        urgency: Urgency,
         thread: ThreadId,
         tab: Option<u64>,
     ) -> Result<(), Report<NotifyError>> {
@@ -171,7 +140,7 @@ impl Notifier for TerminalNotifierNotifier {
             let fallback = Arc::clone(&self.fallback);
             let (title, body) = (title.to_owned(), body.to_owned());
             move || {
-                let _ = fallback.notify(&title, &body, thread, tab);
+                let _ = fallback.notify(&title, &body, urgency, thread, tab);
             }
         };
         spawn_detached(&self.program, self.args(title, body, thread, tab), resend)
@@ -204,19 +173,6 @@ fn window_title_match(session: &str) -> String {
         })
 }
 
-/// The executable `program` in the first absolute directory of `path` (a
-/// `PATH` value) that has one.
-pub fn on_path(program: &str, path: &OsStr) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(program))
-        .find(|candidate| is_executable(candidate))
-}
-
-fn is_executable(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-}
-
 #[cfg(test)]
 #[expect(
     clippy::panic_in_result_fn,
@@ -235,8 +191,9 @@ mod tests {
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
 
-    use super::{ClickTarget, Kitty, TerminalNotifierNotifier, ZellijTarget, window_title_match};
-    use crate::feat::notify::notifier::{Notifier, NotifyError};
+    use super::{TerminalNotifierNotifier, window_title_match};
+    use crate::feat::notify::click::{ClickTarget, Kitty, ZellijTarget};
+    use crate::feat::notify::notifier::{Notifier, NotifyError, Urgency};
     use crate::feat::sessions::state::ThreadId;
 
     /// What a fallback notifier was asked to show: title, body, thread and tab.
@@ -255,6 +212,7 @@ mod tests {
             &self,
             title: &str,
             body: &str,
+            _urgency: Urgency,
             thread: ThreadId,
             tab: Option<u64>,
         ) -> Result<(), Report<NotifyError>> {
@@ -336,6 +294,7 @@ mod tests {
         let notifier = notifier(ClickTarget {
             kitty: None,
             zellij: Some(zellij("s")),
+            niri: None,
         });
 
         // When building the arguments.
@@ -398,7 +357,11 @@ mod tests {
         #[case] expected: Option<&str>,
     ) {
         // Given a notifier knowing `kitty` and `zellij`.
-        let notifier = notifier(ClickTarget { kitty, zellij });
+        let notifier = notifier(ClickTarget {
+            kitty,
+            zellij,
+            niri: None,
+        });
 
         // When building the arguments with orb on `tab`.
         let args = notifier.args("orb · x", "Finished", ThreadId(7), tab);
@@ -417,6 +380,7 @@ mod tests {
         let notifier = notifier(ClickTarget {
             kitty: Some(kitty(None)),
             zellij: Some(zellij("it's a.b")),
+            niri: None,
         });
 
         // When building the arguments.
@@ -467,6 +431,7 @@ mod tests {
                 session: session.to_owned(),
                 pane: 4,
             }),
+            niri: None,
         };
         let args = notifier(click).args("orb · x", "Finished", ThreadId(7), Some(3));
 
@@ -528,7 +493,7 @@ mod tests {
         );
 
         // When notifying that thread 7 finished, with orb on tab 3.
-        notifier.notify("orb · x", "Finished", ThreadId(7), Some(3))?;
+        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(7), Some(3))?;
 
         // Then the fallback is asked to show the same notification.
         assert_eq!(
@@ -557,7 +522,7 @@ mod tests {
         );
 
         // When notifying that thread 7 finished.
-        notifier.notify("orb · x", "Finished", ThreadId(7), None)?;
+        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(7), None)?;
 
         // Then the fallback is asked to show nothing.
         assert!(

@@ -18,7 +18,7 @@ use error_stack::Report;
 use self::host::ZmxHost;
 use self::runner::Runner;
 use super::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat};
-use crate::feat::notify::terminal_notifier::on_path;
+use crate::feat::notify::click::on_path;
 use crate::feat::sessions::session_host::{
     AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
 };

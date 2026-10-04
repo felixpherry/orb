@@ -9,7 +9,7 @@ use std::ffi::OsString;
 
 use error_stack::Report;
 
-use super::notifier::{Notifier, NotifyError, spawn_detached};
+use super::notifier::{Notifier, NotifyError, Urgency, spawn_detached};
 use crate::feat::sessions::state::ThreadId;
 
 /// Shows notifications with `osascript … display notification`, which macOS
@@ -27,6 +27,7 @@ impl Notifier for OsascriptNotifier {
         &self,
         title: &str,
         body: &str,
+        _urgency: Urgency,
         _thread: ThreadId,
         _tab: Option<u64>,
     ) -> Result<(), Report<NotifyError>> {

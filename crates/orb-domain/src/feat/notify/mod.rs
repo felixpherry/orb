@@ -10,6 +10,9 @@
 //! allowed to notify), it goes out through `osascript`, whose click opens
 //! Script Editor. Either way its text is passed as arguments, never as code.
 
+pub mod click;
+pub mod none;
 pub mod notifier;
 pub mod osascript;
 pub mod terminal_notifier;
+pub mod xdg;
