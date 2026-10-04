@@ -52,11 +52,17 @@ The saboteur starts with a fresh context and without this file. Give it everythi
 
 ```
 Role: saboteur. Raid: R<n>.
-Proving ground: <path from MISSION.md>
+Proving ground: <absolute path from MISSION.md>
 Units in play: <source/ files, with the mechanism each teaches in one line>
 Difficulty: <from MISSION.md>
-Write: raids/R<n>.md. Return: "ready" plus the branch name and the one command that reproduces the measurement, nothing about the plant.
+Write: <absolute path of this folder>/raids/R<n>.md. Return: "ready" plus the branch name and the one command that reproduces the measurement, nothing about the plant.
 ```
+
+How to spawn it depends on the harness running this thread:
+
+- **Claude Code** has named agents: spawn the `saboteur` agent (`.claude/agents/saboteur.md`) with the message above.
+- **pi** has no named agents. Call the `subagent` tool with one task whose text is the message above followed by the whole body of `.claude/agents/saboteur.md` below its frontmatter. The subagent has read, write, edit and bash, which is all it needs.
+- **Neither tool is available**: tell the learner the raid needs a harness with subagents, log the event as `skipped`, and let the storyteller pick a minor incident instead.
 
 Only the learner can approve changes outside a fresh branch of the proving ground. Don't grant that to the saboteur yourself.
 
