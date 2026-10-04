@@ -38,8 +38,8 @@ mod tests {
     use super::{OpenToolError, validate_open_tool};
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
-        ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Project,
+        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
     /// One project at `/work` with a thread, a draft and group 9 (still a
@@ -93,7 +93,7 @@ mod tests {
                         pinned_at: None,
                         settled_at: None,
                         active_since: SystemTime::UNIX_EPOCH,
-                        draft: true,
+                        draft: Some(GroupDraft::default()),
                         defaults: GroupDefaults {
                             harness: HarnessId::new("claude"),
                             model: None,

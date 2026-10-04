@@ -494,7 +494,7 @@ mod tests {
                 pinned_at: None,
                 settled_at: None,
                 active_since: SystemTime::UNIX_EPOCH,
-                draft: false,
+                draft: None,
                 defaults: GroupDefaults {
                     harness: HarnessId::new("claude"),
                     model: None,

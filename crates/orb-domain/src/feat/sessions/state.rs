@@ -206,7 +206,7 @@ pub struct Draft {
     pub harness: HarnessId,
 }
 
-/// A group's default session setup: its draft's, and each new sibling's.
+/// A group's default session setup, which its draft follows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupDefaults {
     /// The harness its threads start in.
@@ -215,6 +215,35 @@ pub struct GroupDefaults {
     pub model: Option<String>,
     /// The `--permission-mode`; `None` = the harness's default.
     pub permission: Option<String>,
+}
+
+/// A group draft's setting: the group's default, or its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Own<T> {
+    /// Follows the group's card, live.
+    #[default]
+    Group,
+    /// Picked on the draft itself.
+    Set(T),
+}
+
+impl<T> Own<T> {
+    /// The draft's own value, else `default`.
+    pub fn or<'a>(&'a self, default: &'a T) -> &'a T {
+        match self {
+            Self::Group => default,
+            Self::Set(value) => value,
+        }
+    }
+}
+
+/// A group's draft: the next session's setup, each setting following the
+/// group's default unless the draft picked its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupDraft {
+    pub harness: Own<HarnessId>,
+    pub model: Own<Option<String>>,
+    pub permission: Own<Option<String>>,
 }
 
 /// Threads that work on one thing together, in one directory.
@@ -235,10 +264,23 @@ pub struct Group {
     pub settled_at: Option<SystemTime>,
     /// Sorts Active: the later of its creation and its latest un-settle.
     pub active_since: SystemTime,
-    /// The model and permission its draft and each `n` sibling start with.
+    /// The harness, model and permission its draft follows.
     pub defaults: GroupDefaults,
-    /// Whether it shows its draft: while it has no thread yet.
-    pub draft: bool,
+    /// Its draft, if it has one: always before its first thread, then after `n`.
+    pub draft: Option<GroupDraft>,
+}
+
+impl Group {
+    /// Its draft's harness, model and permission: each its own pick, else the
+    /// group's default. `None` without a draft.
+    pub fn draft_settings(&self) -> Option<(&HarnessId, Option<&str>, Option<&str>)> {
+        let draft = self.draft.as_ref()?;
+        Some((
+            draft.harness.or(&self.defaults.harness),
+            draft.model.or(&self.defaults.model).as_deref(),
+            draft.permission.or(&self.defaults.permission).as_deref(),
+        ))
+    }
 }
 
 /// A directory the user starts sessions in.
@@ -315,10 +357,12 @@ pub enum SidebarRow<'a> {
         /// The group's final listed child.
         last: bool,
     },
-    /// A group's draft, under its card.
+    /// A group's draft, first under its card.
     GroupDraftRow {
         project: &'a Project,
         group: &'a Group,
+        /// The group's only listed child.
+        last: bool,
     },
     /// A settled group, drawn as a one-line row.
     SettledGroup {
@@ -374,8 +418,7 @@ pub struct Search {
 /// `starting` when a start ends, `fetching`, `trust`, `attach`, the cursor
 /// and `filter`
 /// after a restore, the cursor when a still-selected draft becomes a thread,
-/// or when a sibling starts from the still-selected row, the cursor on a new
-/// group's draft,
+/// the cursor on a new group's draft,
 /// removing a thread from `deleting`, pushing `notices`) and by the intent
 /// handler (the cursor on navigation, settle and delete, `shelf_open`,
 /// `folded` and `opened`,
@@ -608,13 +651,12 @@ impl Sessions {
             .and_then(|project| project.draft.as_mut())
     }
 
-    /// Group `id`'s default model and permission, if the group still exists.
-    pub fn group_defaults_mut(&mut self, id: GroupId) -> Option<&mut GroupDefaults> {
+    /// Group `id`, if it still exists.
+    pub fn group_mut(&mut self, id: GroupId) -> Option<&mut Group> {
         self.projects
             .iter_mut()
             .flat_map(|project| project.groups.iter_mut())
             .find(|group| group.id == id)
-            .map(|group| &mut group.defaults)
     }
 
     /// The project holding the thread or group under the cursor.
@@ -642,23 +684,44 @@ impl Sessions {
         }
     }
 
-    /// The harness `␣h`/`␣m`/`␣a` set up at the cursor: the selected draft's,
-    /// or on a group's card or draft the group's default.
-    pub fn setting_harness(&self) -> Option<&HarnessId> {
-        match (self.cursor?, self.selected_draft(), self.selected_group()) {
-            (SidebarItem::Draft(_), Some((_, draft)), _) => Some(&draft.harness),
-            (SidebarItem::Group(_) | SidebarItem::GroupDraft(_), _, Some((_, group))) => {
-                Some(&group.defaults.harness)
-            }
-            _ => None,
+    /// The harness, model and permission `␣h`/`␣m`/`␣a` set at the cursor: a
+    /// project draft's, a group card's defaults, or a group draft's resolved
+    /// ones.
+    pub fn settings(&self) -> Option<(&HarnessId, Option<&str>, Option<&str>)> {
+        match self.cursor? {
+            SidebarItem::Draft(_) => self.selected_draft().map(|(_, draft)| {
+                (
+                    &draft.harness,
+                    draft.model.as_deref(),
+                    draft.permission.as_deref(),
+                )
+            }),
+            SidebarItem::Group(id) => self.group(id).map(|(_, group)| {
+                let defaults = &group.defaults;
+                (
+                    &defaults.harness,
+                    defaults.model.as_deref(),
+                    defaults.permission.as_deref(),
+                )
+            }),
+            SidebarItem::GroupDraft(_) => self.selected_group_draft()?.1.draft_settings(),
+            SidebarItem::Thread(_) | SidebarItem::SettledShelf => None,
         }
+    }
+
+    /// The harness `␣h`/`␣m`/`␣a` set up at the cursor, as [`Self::settings`]
+    /// resolves it.
+    pub fn setting_harness(&self) -> Option<&HarnessId> {
+        self.settings().map(|(harness, ..)| harness)
     }
 
     /// The group whose draft is under the cursor, with its project, if the
     /// group still has its draft.
     pub fn selected_group_draft(&self) -> Option<(&Project, &Group)> {
         match self.cursor? {
-            SidebarItem::GroupDraft(id) => self.group(id).filter(|(_, group)| group.draft),
+            SidebarItem::GroupDraft(id) => {
+                self.group(id).filter(|(_, group)| group.draft.is_some())
+            }
             _ => None,
         }
     }
@@ -908,7 +971,7 @@ impl Sessions {
                 project
                     .groups
                     .iter()
-                    .any(|group| group.id == id && group.draft)
+                    .any(|group| group.id == id && group.draft.is_some())
             }),
             SidebarItem::SettledShelf => false,
         }
@@ -996,7 +1059,7 @@ impl Sessions {
             .filter(|thread| !self.deleting.contains(&thread.id))
             .filter(|thread| named || self.lists(thread))
             .collect();
-        let draft = group.draft && (named || self.title_matches(NEW_THREAD).is_some());
+        let draft = group.draft.is_some() && (named || self.title_matches(NEW_THREAD).is_some());
         (draft || !threads.is_empty()).then_some(Entry::Group {
             project,
             group,
@@ -1043,12 +1106,17 @@ impl Sessions {
                             !self.folded.contains(&group.id)
                         });
                 let listed = |item| open || self.cursor == Some(item);
-                let draft = (draft && listed(SidebarItem::GroupDraft(group.id)))
-                    .then_some(SidebarRow::GroupDraftRow { project, group });
                 let threads: Vec<&Thread> = threads
                     .into_iter()
                     .filter(|thread| listed(SidebarItem::Thread(thread.id)))
                     .collect();
+                let draft = (draft && listed(SidebarItem::GroupDraft(group.id))).then_some(
+                    SidebarRow::GroupDraftRow {
+                        project,
+                        group,
+                        last: threads.is_empty(),
+                    },
+                );
                 let children = draft.is_some() || !threads.is_empty();
                 if !(shown || children || self.cursor == Some(SidebarItem::Group(group.id))) {
                     return;
@@ -1232,8 +1300,9 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
-        ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, Project,
+        ProjectId, ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId,
+        ThreadStatus,
     };
     use crate::TextInput;
     use crate::feat::sidebar::state::SidebarLayout;
@@ -2584,7 +2653,7 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            draft: false,
+            draft: None,
             defaults: GroupDefaults {
                 harness: HarnessId::new("claude"),
                 model: None,
@@ -2668,7 +2737,7 @@ mod tests {
         let sessions = grouped_sessions(
             vec![],
             vec![Group {
-                draft: true,
+                draft: Some(GroupDraft::default()),
                 defaults: GroupDefaults {
                     harness: HarnessId::new("claude"),
                     model: None,
@@ -2686,6 +2755,56 @@ mod tests {
             rows,
             vec![on_group(9), SidebarItem::GroupDraft(GroupId(9))],
             "the draft should follow its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_draft_row_comes_first_under_the_card() {
+        // Given a group with a draft and a thread.
+        let sessions = grouped_sessions(
+            vec![grouped(thread(1), 9)],
+            vec![Group {
+                draft: Some(GroupDraft::default()),
+                ..group(9, GroupKind::Feature)
+            }],
+        );
+
+        // When listing the sidebar.
+        let rows = items(&sessions);
+
+        // Then the card is followed by its draft, then its thread.
+        assert_eq!(
+            rows,
+            vec![on_group(9), SidebarItem::GroupDraft(GroupId(9)), on(1)],
+            "the draft should come before the group's threads"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_draft_settings_take_the_drafts_own_picks() {
+        // Given a group on Claude with opus in auto mode, whose draft picked
+        // its own model and follows the rest.
+        let group = Group {
+            draft: Some(GroupDraft {
+                model: Own::Set(Some("sonnet".into())),
+                ..GroupDraft::default()
+            }),
+            defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
+                model: Some("opus".into()),
+                permission: Some("auto".into()),
+            },
+            ..group(9, GroupKind::Feature)
+        };
+
+        // When resolving the draft's settings.
+        let settings = group.draft_settings();
+
+        // Then the model is the draft's and the rest the group's.
+        assert_eq!(
+            settings,
+            Some((&HarnessId::new("claude"), Some("sonnet"), Some("auto"))),
+            "a draft's own pick should win over the group's default"
         );
     }
 

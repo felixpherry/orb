@@ -22,7 +22,8 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use wherror::Error;
 
 use super::state::{
-    DraftWorkspace, GroupId, GroupKind, ProjectId, ProjectKind, SidebarItem, ThreadId,
+    DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, ProjectId, ProjectKind, SidebarItem,
+    ThreadId,
 };
 use crate::feat::harness::HarnessId;
 
@@ -161,6 +162,8 @@ pub struct GroupRow {
     pub draft_permission_mode: Option<String>,
     /// The harness its threads start in by default.
     pub harness: HarnessId,
+    /// Its draft, if it has one.
+    pub draft: Option<GroupDraft>,
 }
 
 /// A group that was just created and isn't saved yet.
@@ -407,7 +410,8 @@ impl Store {
             .query(
                 "SELECT id, project_id, kind, name, dir, branch, created_at, pinned_at,
                         settled_override, settled_at, unsettled_at, draft_model,
-                        draft_permission_mode, harness
+                        draft_permission_mode, harness, has_draft, own_harness,
+                        own_model_set, own_model, own_permission_set, own_permission
                  FROM groups ORDER BY id",
                 group_row,
             )
@@ -567,7 +571,7 @@ impl Store {
     }
 
     /// Updates everything about a group that changes after it's created: its
-    /// directory, branch, pin and settle state, and draft setup. Its project,
+    /// directory, branch, pin and settle state, default setup and draft. Its project,
     /// kind and name stay as inserted.
     ///
     /// # Errors
@@ -576,11 +580,25 @@ impl Store {
     /// written.
     pub fn save_group(&self, row: &GroupRow) -> Result<(), Report<StoreError>> {
         let dir = row.dir.as_deref().map(utf8).transpose()?;
+        let (own_harness, (own_model_set, own_model), (own_permission_set, own_permission)) =
+            match &row.draft {
+                Some(draft) => (
+                    match &draft.harness {
+                        Own::Group => None,
+                        Own::Set(id) => Some(id.as_str()),
+                    },
+                    own_columns(&draft.model),
+                    own_columns(&draft.permission),
+                ),
+                None => (None, (false, None), (false, None)),
+            };
         self.conn
             .execute(
                 "UPDATE groups SET dir = ?2, pinned_at = ?3, settled_override = ?4,
                         settled_at = ?5, unsettled_at = ?6, draft_model = ?7,
-                        draft_permission_mode = ?8, branch = ?9, harness = ?10
+                        draft_permission_mode = ?8, branch = ?9, harness = ?10,
+                        has_draft = ?11, own_harness = ?12, own_model_set = ?13,
+                        own_model = ?14, own_permission_set = ?15, own_permission = ?16
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -593,6 +611,12 @@ impl Store {
                     row.draft_permission_mode,
                     row.branch,
                     row.harness.as_str(),
+                    row.draft.is_some(),
+                    own_harness,
+                    own_model_set,
+                    own_model,
+                    own_permission_set,
+                    own_permission,
                 ],
             )
             .change_context(StoreError)
@@ -965,7 +989,31 @@ fn group_row(row: &Row<'_>) -> rusqlite::Result<GroupRow> {
         draft_model: row.get(11)?,
         draft_permission_mode: row.get(12)?,
         harness: HarnessId::new(row.get::<_, String>(13)?),
+        draft: if row.get::<_, bool>(14)? {
+            Some(GroupDraft {
+                harness: row
+                    .get::<_, Option<String>>(15)?
+                    .map_or(Own::Group, |id| Own::Set(HarnessId::new(id))),
+                model: own(row.get(16)?, row.get(17)?),
+                permission: own(row.get(18)?, row.get(19)?),
+            })
+        } else {
+            None
+        },
     })
+}
+
+/// A group draft's setting from its `own_*_set` flag and `own_*` value.
+fn own(set: bool, value: Option<String>) -> Own<Option<String>> {
+    if set { Own::Set(value) } else { Own::Group }
+}
+
+/// The `own_*_set` flag and `own_*` value a group draft's setting saves as.
+fn own_columns(own: &Own<Option<String>>) -> (bool, Option<&str>) {
+    match own {
+        Own::Group => (false, None),
+        Own::Set(value) => (true, value.as_deref()),
+    }
 }
 
 fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
@@ -1081,9 +1129,9 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        DraftRow, DraftWorkspace, GroupId, GroupKind, GroupRow, LastUsed, LastWorkspace,
-        MIGRATIONS, NewGroup, NewThread, ProjectId, ProjectKind, SettledOverride, SidebarItem,
-        Store, StoreError, ThreadId, ThreadRow, Ui,
+        DraftRow, DraftWorkspace, GroupDraft, GroupId, GroupKind, GroupRow, LastUsed,
+        LastWorkspace, MIGRATIONS, NewGroup, NewThread, Own, ProjectId, ProjectKind,
+        SettledOverride, SidebarItem, Store, StoreError, ThreadId, ThreadRow, Ui,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -1736,6 +1784,7 @@ mod tests {
             unsettled_at: None,
             draft_model: Some("opus".to_owned()),
             draft_permission_mode: None,
+            draft: None,
         };
         assert_eq!(
             store.load()?.3,
@@ -1778,6 +1827,40 @@ mod tests {
             store.load()?.3,
             vec![updated],
             "the group updates should load back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn group_draft_overrides_survive_a_reload() -> Result<(), Report<StoreError>> {
+        // Given a store with one group.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        store.insert_group(&new_group(project_id))?;
+        let inserted = store
+            .load()?
+            .3
+            .pop()
+            .ok_or_else(|| Report::new(StoreError).attach("the group wasn't saved"))?;
+
+        // When saving a draft with its own harness, its own default model and
+        // the group's permission.
+        let updated = GroupRow {
+            draft: Some(GroupDraft {
+                harness: Own::Set(HarnessId::new("pi")),
+                model: Own::Set(None),
+                permission: Own::Group,
+            }),
+            ..inserted
+        };
+        store.save_group(&updated)?;
+
+        // Then loading returns the same draft.
+        assert_eq!(
+            store.load()?.3,
+            vec![updated],
+            "the draft's overrides should load back"
         );
         Ok(())
     }

@@ -29,9 +29,9 @@
 //! on them, and `␣b` (the dashboard's `b` too) only on the card of a Feature
 //! group whose worktree exists, where it switches that worktree's branch.
 //! `␣h`/`␣m`/`␣a` on a card pick the group's default harness, model and
-//! permission (its
-//! draft's and each sibling's). `n` on a group's card or thread starts a
-//! sibling; `d` on a card deletes the group.
+//! permission, and on a group's draft that draft's own. `n` on a group's card
+//! or thread opens the group's draft, making one when it has none; `d` on a
+//! card deletes the group.
 //! `␣gf`/`␣gr`/`␣gl` add a Feature, Research or Learn group in every scope.
 //! On orb's Incognito draft and its threads, `␣w`/`␣b` and the dashboard's
 //! `w`/`b` aren't bound: every other key is the same as on any draft or
@@ -137,17 +137,17 @@ pub(crate) enum Scope {
     SidebarDraft,
     /// The sidebar with no thread or draft selected.
     SidebarEmpty,
-    /// The sidebar on a group's card: fold keys, pin, settle, delete and a
-    /// sibling, but no rename.
+    /// The sidebar on a group's card: fold keys, pin, settle, delete and
+    /// `n`, but no rename.
     SidebarGroup,
     /// The sidebar on a started Feature group's card: [`Scope::SidebarGroup`]'s
     /// keys and its worktree's branch.
     SidebarWorktreeGroup,
-    /// The sidebar on a thread in a group: fold keys, rename, delete and a
-    /// sibling; no pin or settle.
+    /// The sidebar on a thread in a group: fold keys, rename, delete and
+    /// `n`; no pin or settle.
     SidebarGroupThread,
     /// The sidebar on a group's draft: fold keys, its setting pickers, and
-    /// `d`, which is refused.
+    /// `d`, which discards it once the group has a thread.
     SidebarGroupDraft,
     /// The sidebar on an Incognito thread: [`Scope::Sidebar`]'s keys but
     /// `␣w`/`␣b`.
@@ -418,7 +418,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, KeyScope, Intent, KeyCategory> {
         Scope::SidebarWorktreeGroup,
         Scope::SidebarGroupThread,
     ] {
-        keymap.bind("n", Intent::NewSibling, KeyCategory::Sessions, scope);
+        keymap.bind("n", Intent::OpenGroupDraft, KeyCategory::Sessions, scope);
     }
     for scope in [
         Scope::Sidebar,
@@ -773,8 +773,8 @@ mod tests {
     use std::time::SystemTime;
 
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
-        ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Project,
+        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::zellij::zellij_service::Tool;
     use orb_domain::{Focus, Intent};
@@ -1534,7 +1534,7 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            draft,
+            draft: draft.then(GroupDraft::default),
             defaults: GroupDefaults {
                 harness: HarnessId::new("claude"),
                 model: None,
@@ -1682,12 +1682,16 @@ mod tests {
     #[case(Scope::SidebarGroup, KeyCode::Char('d'), Intent::DeleteThread)]
     #[case(Scope::SidebarGroupThread, KeyCode::Char('d'), Intent::DeleteThread)]
     #[case(Scope::SidebarGroupDraft, KeyCode::Char('d'), Intent::DeleteThread)]
-    #[case(Scope::SidebarGroup, KeyCode::Char('n'), Intent::NewSibling)]
+    #[case(Scope::SidebarGroup, KeyCode::Char('n'), Intent::OpenGroupDraft)]
     #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('l'), Intent::OpenGroup)]
     #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('p'), Intent::TogglePin)]
     #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('d'), Intent::DeleteThread)]
-    #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('n'), Intent::NewSibling)]
-    #[case(Scope::SidebarGroupThread, KeyCode::Char('n'), Intent::NewSibling)]
+    #[case(
+        Scope::SidebarWorktreeGroup,
+        KeyCode::Char('n'),
+        Intent::OpenGroupDraft
+    )]
+    #[case(Scope::SidebarGroupThread, KeyCode::Char('n'), Intent::OpenGroupDraft)]
     #[case(Scope::SidebarGroupThread, KeyCode::Char('j'), Intent::SelectNext)]
     #[case(Scope::SidebarGroupThread, KeyCode::Enter, Intent::Attach)]
     #[case(Scope::SidebarGroupThread, KeyCode::Char('l'), Intent::OpenGroup)]

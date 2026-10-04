@@ -28,12 +28,15 @@ pub enum PickTarget {
     Group(GroupId),
 }
 
-/// What a harness, model or permission picker sets: a project's draft, or a
-/// group's.
+/// What a harness, model or permission picker sets: a project's draft, a
+/// group's card or a group's draft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftTarget {
     Project(ProjectId),
+    /// A group's card: its defaults.
     Group(GroupId),
+    /// A group's draft: its own picks over the group's defaults.
+    GroupDraft(GroupId),
 }
 
 /// What an open picker picks.
@@ -79,6 +82,8 @@ pub enum PickerKind {
     DeleteThread { thread: ThreadId },
     /// `d` on a draft: confirm discarding it.
     DiscardDraft { project: ProjectId },
+    /// `d` on a group's draft: confirm discarding it.
+    DiscardGroupDraft { group: GroupId },
     /// `s` on a group's card: confirm settling it.
     SettleGroup { group: GroupId },
     /// `d` on a group's card: confirm deleting it, its threads and its
@@ -251,6 +256,12 @@ impl PickerState {
     /// selected.
     pub fn discard_draft(project: ProjectId, return_to: Focus) -> Self {
         Self::confirm(PickerKind::DiscardDraft { project }, return_to)
+    }
+
+    /// The `No`/`Yes` confirm for discarding `group`'s draft, with `No`
+    /// selected.
+    pub fn discard_group_draft(group: GroupId, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::DiscardGroupDraft { group }, return_to)
     }
 
     /// The `No`/`Yes` confirm for settling `group`, with `No` selected.
@@ -1877,7 +1888,7 @@ mod tests {
                 model: None,
                 permission: None,
             },
-            draft: false,
+            draft: None,
         };
         let thread = Thread {
             harness: HarnessId::new("claude"),

@@ -2,7 +2,7 @@
 //! selected draft or picking its model or permission mode, pinning the
 //! selected lone thread or group, settling or deleting the selected thread
 //! or group, discarding the selected draft, opening or closing the Settled shelf or a
-//! group, creating a group, starting a group's sibling, and opening the
+//! group, creating a group, opening a group's draft, and opening the
 //! incognito draft.
 
 use wherror::Error;
@@ -175,8 +175,8 @@ pub enum DeleteError {
     /// The cursor is on a draft, or a group card with a draft, while a
     /// session is being started, which may be starting from it.
     Starting,
-    /// The row is its group's last draft or thread; `d` on the card deletes
-    /// the group.
+    /// The row is its group's last thread, or the draft of a group with no
+    /// thread; `d` on the card deletes the group.
     LastInGroup,
 }
 
@@ -184,23 +184,33 @@ pub enum DeleteError {
 pub const LAST_IN_GROUP: &str = "Group needs at least one draft or thread";
 
 /// Allow deleting the selected thread, whatever it is doing, unless it is its
-/// group's last; deleting the selected group; and discarding the selected
-/// draft between session starts.
+/// group's last; deleting the selected group; discarding the selected draft
+/// between session starts; and discarding a group's draft once the group has
+/// a thread.
 ///
 /// # Errors
 ///
 /// Returns [`DeleteError::NoSelection`] without a selected thread, group or
-/// draft, [`DeleteError::LastInGroup`] on a group draft or a group's last
-/// thread, and [`DeleteError::Starting`] on a draft, or a card with a draft,
-/// while a start is in flight.
+/// draft, [`DeleteError::LastInGroup`] on the draft of a group with no thread
+/// or on a group's last thread, and [`DeleteError::Starting`] on a draft, or
+/// a card with a draft, while a start is in flight.
 pub fn validate_delete(state: &AppState) -> Result<(), DeleteError> {
     let sessions = &state.sessions;
     match (sessions.cursor, sessions.selected_group()) {
-        (Some(SidebarItem::GroupDraft(_)), Some(_)) => Err(DeleteError::LastInGroup),
-        (Some(SidebarItem::Group(_)), Some((_, group))) if group.draft && sessions.starting => {
+        (Some(SidebarItem::GroupDraft(_)), Some((_, group)))
+            if sessions.group_threads(group.id).next().is_none() =>
+        {
+            Err(DeleteError::LastInGroup)
+        }
+        (Some(SidebarItem::GroupDraft(_)), Some(_)) if sessions.starting => {
             Err(DeleteError::Starting)
         }
-        (Some(SidebarItem::Group(_)), Some(_)) => Ok(()),
+        (Some(SidebarItem::Group(_)), Some((_, group)))
+            if group.draft.is_some() && sessions.starting =>
+        {
+            Err(DeleteError::Starting)
+        }
+        (Some(SidebarItem::GroupDraft(_) | SidebarItem::Group(_)), Some(_)) => Ok(()),
         (Some(SidebarItem::Thread(_)), Some((_, group)))
             if sessions.group_threads(group.id).nth(1).is_none() =>
         {
@@ -283,45 +293,31 @@ pub fn validate_start_group_draft(state: &AppState) -> Result<(), StartGroupDraf
     }
 }
 
-/// Why starting a sibling in the selected group can't proceed.
+/// Why opening the selected group's draft can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
-pub enum NewSiblingError {
+pub enum OpenGroupDraftError {
     /// The cursor isn't on a group's card or one of its threads.
     NoGroup,
     /// The group is settled: `n` works only on an active group.
     Settled,
-    /// The group has no thread yet: its draft starts it instead.
-    NoThread,
-    /// A session is already being started.
-    Starting,
 }
 
-/// What the mode line says when `n` is pressed on a group that has only its draft.
-pub const STARTS_FROM_DRAFT: &str = "Group already has a draft";
-
-/// Allow a sibling from an active group's card or thread, one start at a
-/// time, once the group has a thread.
+/// Allow opening the draft of the active group under the cursor's card or thread.
 ///
 /// # Errors
 ///
-/// Returns [`NewSiblingError::NoGroup`] off a group's card or thread,
-/// [`NewSiblingError::Settled`] on a settled group,
-/// [`NewSiblingError::Starting`] while a start is in flight, and
-/// [`NewSiblingError::NoThread`] for a group that has no thread yet.
-pub fn validate_new_sibling(state: &AppState) -> Result<(), NewSiblingError> {
+/// Returns [`OpenGroupDraftError::NoGroup`] off a group's card or thread, and
+/// [`OpenGroupDraftError::Settled`] on a settled group.
+pub fn validate_open_group_draft(state: &AppState) -> Result<(), OpenGroupDraftError> {
     let sessions = &state.sessions;
     let group = match sessions.cursor {
         Some(SidebarItem::Group(_) | SidebarItem::Thread(_)) => sessions.selected_group(),
         _ => None,
     };
     match group {
-        None => Err(NewSiblingError::NoGroup),
-        Some((_, group)) if group.settled_at.is_some() => Err(NewSiblingError::Settled),
-        Some(_) if sessions.starting => Err(NewSiblingError::Starting),
-        Some((_, group)) if sessions.group_threads(group.id).next().is_none() => {
-            Err(NewSiblingError::NoThread)
-        }
+        None => Err(OpenGroupDraftError::NoGroup),
+        Some((_, group)) if group.settled_at.is_some() => Err(OpenGroupDraftError::Settled),
         Some(_) => Ok(()),
     }
 }
@@ -453,16 +449,16 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        CloseGroupError, DeleteError, NewGroupError, NewIncognitoError, NewSiblingError,
+        CloseGroupError, DeleteError, NewGroupError, NewIncognitoError, OpenGroupDraftError,
         OpenGroupError, PickSettingError, StartDraftError, StartGroupDraftError, TogglePinError,
         ToggleSettleError, validate_close_group, validate_delete, validate_new_group,
-        validate_new_incognito, validate_new_sibling, validate_open_group, validate_pick_setting,
-        validate_start_draft, validate_start_group_draft, validate_toggle_pin,
-        validate_toggle_settle,
+        validate_new_incognito, validate_open_group, validate_open_group_draft,
+        validate_pick_setting, validate_start_draft, validate_start_group_draft,
+        validate_toggle_pin, validate_toggle_settle,
     };
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
-        ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Project,
+        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::{AppState, TextInput};
@@ -791,7 +787,7 @@ mod tests {
                     pinned_at: None,
                     settled_at: Some(SystemTime::UNIX_EPOCH),
                     active_since: SystemTime::UNIX_EPOCH,
-                    draft: false,
+                    draft: None,
                     defaults: GroupDefaults {
                         harness: HarnessId::new("claude"),
                         model: None,
@@ -929,7 +925,7 @@ mod tests {
                         pinned_at: None,
                         settled_at: None,
                         active_since: SystemTime::UNIX_EPOCH,
-                        draft: true,
+                        draft: Some(GroupDraft::default()),
                         defaults: GroupDefaults {
                             harness: HarnessId::new("claude"),
                             model: None,
@@ -1086,7 +1082,7 @@ mod tests {
                         pinned_at: None,
                         settled_at: None,
                         active_since: SystemTime::UNIX_EPOCH,
-                        draft: false,
+                        draft: None,
                         defaults: GroupDefaults {
                             harness: HarnessId::new("claude"),
                             model: None,
@@ -1104,66 +1100,34 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn new_sibling_rejected_on_a_lone_thread() {
+    fn open_group_draft_rejected_on_a_lone_thread() {
         // Given the cursor on a thread in no group.
         let state = lone_thread();
 
-        // When validating a sibling start.
-        let result = validate_new_sibling(&state);
+        // When validating opening the group draft.
+        let result = validate_open_group_draft(&state);
 
         // Then validation fails with NoGroup.
         assert_eq!(
             result,
-            Err(NewSiblingError::NoGroup),
+            Err(OpenGroupDraftError::NoGroup),
             "a lone thread has no group"
         );
     }
 
     #[rstest::rstest]
-    fn new_sibling_rejected_on_a_group_draft() {
+    fn open_group_draft_rejected_on_a_group_draft() {
         // Given the cursor on a group's draft.
         let state = group_draft_at(SidebarItem::GroupDraft(GroupId(7)), false);
 
-        // When validating a sibling start.
-        let result = validate_new_sibling(&state);
+        // When validating opening the group draft.
+        let result = validate_open_group_draft(&state);
 
         // Then validation fails with NoGroup.
         assert_eq!(
             result,
-            Err(NewSiblingError::NoGroup),
-            "a group draft starts its group instead"
-        );
-    }
-
-    #[rstest::rstest]
-    fn new_sibling_rejected_while_starting() {
-        // Given the cursor on a group's card while a start is in flight.
-        let state = grouped_at(SidebarItem::Group(GroupId(7)), &[ThreadStatus::Idle], true);
-
-        // When validating a sibling start.
-        let result = validate_new_sibling(&state);
-
-        // Then validation fails with Starting.
-        assert_eq!(
-            result,
-            Err(NewSiblingError::Starting),
-            "one start at a time"
-        );
-    }
-
-    #[rstest::rstest]
-    fn new_sibling_rejected_without_a_thread() {
-        // Given the cursor on the card of a group that's still a draft.
-        let state = group_draft_at(SidebarItem::Group(GroupId(7)), false);
-
-        // When validating a sibling start.
-        let result = validate_new_sibling(&state);
-
-        // Then validation fails with NoThread.
-        assert_eq!(
-            result,
-            Err(NewSiblingError::NoThread),
-            "a draft-only group starts from its draft"
+            Err(OpenGroupDraftError::NoGroup),
+            "n works from the group's card or threads"
         );
     }
 
@@ -1183,31 +1147,31 @@ mod tests {
     #[rstest::rstest]
     #[case(SidebarItem::Group(GroupId(7)))]
     #[case(SidebarItem::Thread(ThreadId(1)))]
-    fn new_sibling_rejected_on_a_settled_group(#[case] cursor: SidebarItem) {
+    fn open_group_draft_rejected_on_a_settled_group(#[case] cursor: SidebarItem) {
         // Given the cursor on a settled group's card or thread.
         let state = settled(grouped_at(cursor, &[ThreadStatus::Idle], false));
 
-        // When validating a sibling start.
-        let result = validate_new_sibling(&state);
+        // When validating opening the group draft.
+        let result = validate_open_group_draft(&state);
 
         // Then validation fails with Settled.
         assert_eq!(
             result,
-            Err(NewSiblingError::Settled),
+            Err(OpenGroupDraftError::Settled),
             "n works only on an active group"
         );
     }
 
     #[rstest::rstest]
-    fn new_sibling_allowed_on_a_card() {
-        // Given the cursor on the card of a group with a thread.
+    fn open_group_draft_allowed_on_a_card() {
+        // Given the cursor on the card of an active group with a thread.
         let state = grouped_at(SidebarItem::Group(GroupId(7)), &[ThreadStatus::Idle], false);
 
-        // When validating a sibling start.
-        let result = validate_new_sibling(&state);
+        // When validating opening the group draft.
+        let result = validate_open_group_draft(&state);
 
         // Then it's allowed.
-        assert_eq!(result, Ok(()), "a group with a thread takes a sibling");
+        assert_eq!(result, Ok(()), "an active group's card opens its draft");
     }
 
     #[rstest::rstest]
@@ -1340,6 +1304,49 @@ mod tests {
             result,
             Err(DeleteError::LastInGroup),
             "a group keeps its draft"
+        );
+    }
+
+    /// Group 7 with one idle thread and a draft, the cursor on the draft, and
+    /// a start in flight if `starting`.
+    fn started_group_draft(starting: bool) -> AppState {
+        let mut state = grouped_at(
+            SidebarItem::GroupDraft(GroupId(7)),
+            &[ThreadStatus::Idle],
+            starting,
+        );
+        if let Some(group) = state.sessions.group_mut(GroupId(7)) {
+            group.draft = Some(GroupDraft::default());
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn delete_allowed_on_a_group_draft_with_a_thread() {
+        // Given the cursor on the draft of group 7, which has a thread.
+        let state = started_group_draft(false);
+
+        // When validating a delete.
+        let result = validate_delete(&state);
+
+        // Then it's allowed.
+        assert_eq!(result, Ok(()), "a started group's draft can be discarded");
+    }
+
+    #[rstest::rstest]
+    fn delete_rejected_on_a_group_draft_while_starting() {
+        // Given the cursor on the draft of group 7, which has a thread, while
+        // a start is in flight.
+        let state = started_group_draft(true);
+
+        // When validating a delete.
+        let result = validate_delete(&state);
+
+        // Then validation fails with Starting.
+        assert_eq!(
+            result,
+            Err(DeleteError::Starting),
+            "the draft may be starting"
         );
     }
 

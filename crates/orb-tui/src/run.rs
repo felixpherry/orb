@@ -931,22 +931,6 @@ impl App {
                     .tell(sessions_actor::SaveGroupDraft(*group))
                     .try_send();
             }
-            Command::StartSibling {
-                group,
-                model,
-                permission_mode,
-                from,
-            } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::StartSibling {
-                        group: *group,
-                        model: model.clone(),
-                        permission_mode: permission_mode.clone(),
-                        from: *from,
-                    })
-                    .try_send();
-            }
             Command::PinGroup(group) => {
                 let _ = self
                     .sessions

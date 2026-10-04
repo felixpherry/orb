@@ -314,7 +314,7 @@ fn look(item: DashboardItem) -> (&'static str, &'static str) {
 
 /// An item's current value: the selected thread's directory and branch, the
 /// selected draft's workspace, branch, harness, model and permission, or a
-/// group's harness, model and permission.
+/// group's harness, model and permission (a group draft's resolved ones).
 fn value(state: &AppState, item: DashboardItem) -> Option<String> {
     let sessions = &state.sessions;
     let home = &state.home;
@@ -326,23 +326,15 @@ fn value(state: &AppState, item: DashboardItem) -> Option<String> {
         (DashboardItem::Branch, Some((_, draft)), _) => Some(branch_label(draft)),
         (DashboardItem::Branch, None, Some(thread)) => thread.branch.clone(),
         (DashboardItem::Branch, None, None) => sessions.selected_group()?.1.branch.clone(),
-        (DashboardItem::Harness, Some((_, draft)), _) => Some(harness_label(state, &draft.harness)),
-        (DashboardItem::Harness, None, None) => sessions
-            .selected_group()
-            .map(|(_, group)| harness_label(state, &group.defaults.harness)),
-        (DashboardItem::Model, Some((_, draft)), _) => Some(
-            setting_label(draft.model.as_deref(), state.harness_info(&draft.harness)).to_owned(),
-        ),
-        (DashboardItem::Permission, Some((_, draft)), _) => {
-            Some(setting_label(draft.permission.as_deref(), None).to_owned())
-        }
-        (DashboardItem::Model, None, None) => sessions.selected_group().map(|(_, group)| {
-            let info = state.harness_info(&group.defaults.harness);
-            setting_label(group.defaults.model.as_deref(), info).to_owned()
+        (DashboardItem::Harness, ..) => sessions
+            .settings()
+            .map(|(harness, ..)| harness_label(state, harness)),
+        (DashboardItem::Model, ..) => sessions.settings().map(|(harness, model, _)| {
+            setting_label(model, state.harness_info(harness)).to_owned()
         }),
-        (DashboardItem::Permission, None, None) => sessions
-            .selected_group()
-            .map(|(_, group)| setting_label(group.defaults.permission.as_deref(), None).to_owned()),
+        (DashboardItem::Permission, ..) => sessions
+            .settings()
+            .map(|(.., permission)| setting_label(permission, None).to_owned()),
         _ => None,
     }
 }
@@ -457,15 +449,16 @@ fn lerp(from: Color, to: Color, t: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use orb_domain::feat::harness::HarnessId;
+    use orb_domain::feat::harness::{HarnessId, HarnessInfo};
     use std::time::SystemTime;
 
     use orb_domain::AppState;
     use orb_domain::feat::harness::claude::models::info;
     use orb_domain::feat::picker::list::setting_label;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, NEW_THREAD, Project,
-        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, NEW_THREAD,
+        Own, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId,
+        ThreadStatus,
     };
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
@@ -718,7 +711,7 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            draft: true,
+            draft: Some(GroupDraft::default()),
             defaults: GroupDefaults {
                 harness: HarnessId::new("claude"),
                 model: None,
@@ -774,7 +767,11 @@ mod tests {
     fn group_draft_menu_shows_its_model() {
         // Given Feature group GT-514-login's draft on opus, selected.
         let mut state = in_group(SidebarItem::GroupDraft(GroupId(9)));
-        if let Some(defaults) = state.sessions.group_defaults_mut(GroupId(9)) {
+        if let Some(defaults) = state
+            .sessions
+            .group_mut(GroupId(9))
+            .map(|group| &mut group.defaults)
+        {
             defaults.model = Some("opus".to_owned());
         }
         state.harnesses = vec![info()];
@@ -789,10 +786,35 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn group_draft_menu_shows_its_own_harness() {
+        // Given Feature group GT-514-login on Claude, its draft picking pi,
+        // selected.
+        let mut state = in_group(SidebarItem::GroupDraft(GroupId(9)));
+        if let Some(group) = state.sessions.group_mut(GroupId(9)) {
+            group.draft = Some(GroupDraft {
+                harness: Own::Set(HarnessId::new("pi")),
+                ..GroupDraft::default()
+            });
+        }
+        state.harnesses = vec![info(), HarnessInfo::placeholder(HarnessId::new("pi"), "pi")];
+
+        // When drawing the dashboard 80×40.
+        let (buf, _) = draw(&state, None, 80, 40);
+
+        // Then the Harness row shows pi.
+        let row = line_with(&buf, "Harness");
+        assert!(row.contains("Harness  pi"), "Harness row was '{row}'");
+    }
+
+    #[rstest::rstest]
     fn group_card_menu_shows_the_groups_default_model() {
         // Given Feature group GT-514-login's card selected, its default opus.
         let mut state = in_group(SidebarItem::Group(GroupId(9)));
-        if let Some(defaults) = state.sessions.group_defaults_mut(GroupId(9)) {
+        if let Some(defaults) = state
+            .sessions
+            .group_mut(GroupId(9))
+            .map(|group| &mut group.defaults)
+        {
             defaults.model = Some("opus".to_owned());
         }
         state.harnesses = vec![info()];
@@ -819,7 +841,7 @@ mod tests {
         {
             group.dir = Some("/wt/orb-1a2b3c4d".into());
             group.branch = Some("main".to_owned());
-            group.draft = false;
+            group.draft = None;
         }
 
         // When drawing the dashboard 80×40.

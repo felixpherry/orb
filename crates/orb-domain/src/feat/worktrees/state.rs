@@ -328,7 +328,7 @@ mod tests {
                 model: None,
                 permission: None,
             },
-            draft: false,
+            draft: None,
         }
     }
 

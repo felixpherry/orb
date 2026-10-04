@@ -99,7 +99,8 @@ mod tests {
     use crate::feat::harness::claude::models::info;
     use crate::feat::harness::fake::pi_like;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, SidebarItem,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, Project,
+        ProjectId, ProjectKind, Sessions, SidebarItem,
     };
 
     /// One project whose draft runs `harness`, selected, with Claude and a
@@ -158,5 +159,44 @@ mod tests {
 
         // Then it does.
         assert!(offers, "Claude lists permission modes");
+    }
+
+    #[rstest::rstest]
+    fn group_draft_overriding_a_harness_without_permission_modes_offers_none() {
+        // Given a Claude group whose selected draft picked pi.
+        let group = Group {
+            id: GroupId(9),
+            kind: GroupKind::Feature,
+            name: "GT-514-login".into(),
+            dir: None,
+            branch: None,
+            created_at: SystemTime::UNIX_EPOCH,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            draft: Some(GroupDraft {
+                harness: Own::Set(HarnessId::new("pi")),
+                ..GroupDraft::default()
+            }),
+            defaults: GroupDefaults {
+                harness: HarnessId::new("claude"),
+                model: None,
+                permission: None,
+            },
+        };
+        let mut state = drafting("claude");
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.groups = vec![group];
+        }
+        state.sessions.cursor = Some(SidebarItem::GroupDraft(GroupId(9)));
+
+        // When asking whether the selection offers permission modes.
+        let offers = state.offers_permissions();
+
+        // Then it doesn't.
+        assert!(
+            !offers,
+            "the draft's own pi harness lists no permission modes"
+        );
     }
 }

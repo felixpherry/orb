@@ -147,8 +147,8 @@ pub(crate) mod tests {
     use super::items;
     use crate::Intent;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
-        ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Project,
+        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
     /// Project 1 holding thread 1 and, when `repo` is given, a local draft in
@@ -220,7 +220,7 @@ pub(crate) mod tests {
                 pinned_at: None,
                 settled_at: None,
                 active_since: SystemTime::UNIX_EPOCH,
-                draft,
+                draft: draft.then(GroupDraft::default),
                 defaults: GroupDefaults {
                     harness: HarnessId::new("claude"),
                     model: None,

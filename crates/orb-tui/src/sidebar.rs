@@ -232,7 +232,11 @@ fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
         .iter()
         .map(|project| {
             usize::from(project.draft.is_some())
-                + project.groups.iter().filter(|group| group.draft).count()
+                + project
+                    .groups
+                    .iter()
+                    .filter(|group| group.draft.is_some())
+                    .count()
         })
         .sum::<usize>();
     let threads = sessions
@@ -483,10 +487,10 @@ fn render_row(
             area,
             buf,
         ),
-        SidebarRow::GroupDraftRow { .. } => render_split(
+        SidebarRow::GroupDraftRow { last, .. } => render_split(
             Line::from(
                 [
-                    span(LAST_CHILD_GUIDE, GUTTER),
+                    span(if *last { LAST_CHILD_GUIDE } else { CHILD_GUIDE }, GUTTER),
                     span(format!("{PENCIL} "), YELLOW),
                 ]
                 .into_iter()
@@ -670,6 +674,7 @@ fn render_group_card(
     );
     let icons = group
         .draft
+        .is_some()
         .then_some((PENCIL, YELLOW))
         .into_iter()
         .chain(threads.iter().map(|thread| {
@@ -1164,8 +1169,8 @@ mod tests {
 
     use orb_domain::TextInput;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
-        ProjectKind, Search, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Project,
+        ProjectId, ProjectKind, Search, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::SidebarLayout;
     use ratatui::buffer::{Buffer, Cell};
@@ -2526,7 +2531,7 @@ mod tests {
             pinned_at: None,
             settled_at: settled.then(|| at(20)),
             active_since: SystemTime::UNIX_EPOCH,
-            draft,
+            draft: draft.then(GroupDraft::default),
             defaults: GroupDefaults {
                 harness: HarnessId::new("claude"),
                 model: None,
@@ -2588,7 +2593,7 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            draft,
+            draft: draft.then(GroupDraft::default),
             defaults: GroupDefaults {
                 harness: HarnessId::new("claude"),
                 model: None,
@@ -2946,6 +2951,25 @@ mod tests {
         // Then its draft row is the last guide, the pencil and `New thread`.
         assert!(
             child.starts_with(&format!("{LAST_CHILD_GUIDE}{PENCIL} New thread ")),
+            "line was '{child}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn group_draft_row_above_a_thread_draws_the_child_guide() {
+        // Given a group holding its draft and thread 1.
+        let sessions = grouped(
+            GroupKind::Feature,
+            vec![thread(1, ThreadStatus::Idle)],
+            true,
+        );
+
+        // When rendering the sidebar.
+        let child = line(&draw(&sessions, at(1000), 12), 6);
+
+        // Then the draft row, first under the card, branches on.
+        assert!(
+            child.starts_with(&format!("{CHILD_GUIDE}{PENCIL} New thread ")),
             "line was '{child}'"
         );
     }

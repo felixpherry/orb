@@ -164,7 +164,7 @@ fn title(kind: &PickerKind, home: &Path) -> Cow<'static, str> {
         PickerKind::RemoveProject { .. } => "Remove project?",
         PickerKind::SettleThread { .. } => "Settle thread?",
         PickerKind::DeleteThread { .. } => "Delete thread?",
-        PickerKind::DiscardDraft { .. } => "Discard draft?",
+        PickerKind::DiscardDraft { .. } | PickerKind::DiscardGroupDraft { .. } => "Discard draft?",
         PickerKind::SettleGroup { .. } => "Settle group?",
         PickerKind::DeleteGroup { dir: None, .. } => "Delete group?",
         PickerKind::DeleteGroup {
@@ -190,6 +190,7 @@ fn hints(kind: &PickerKind) -> Line<'static> {
         | PickerKind::SettleThread { .. }
         | PickerKind::DeleteThread { .. }
         | PickerKind::DiscardDraft { .. }
+        | PickerKind::DiscardGroupDraft { .. }
         | PickerKind::SettleGroup { .. }
         | PickerKind::DeleteGroup { .. }
         | PickerKind::TrustWorkspace { .. }

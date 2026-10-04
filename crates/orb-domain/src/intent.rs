@@ -104,10 +104,9 @@ pub enum Intent {
     CloseGroup,
     /// Start a new group of `kind`: pick its project (Feature), then name it.
     NewGroup(GroupKind),
-    /// Start a sibling at the top of the selected group, in its directory,
-    /// with the selected thread's model and permission (the newest thread's
-    /// on the card).
-    NewSibling,
+    /// Select the selected group's draft, making one at the top of the group
+    /// when it has none, and open the group.
+    OpenGroupDraft,
     /// Open the directory picker to add a project.
     AddProject,
     /// Open the workspace picker for the selected draft, or the selected
@@ -219,7 +218,7 @@ impl fmt::Display for Intent {
             Self::NewGroup(GroupKind::Feature) => "feature group",
             Self::NewGroup(GroupKind::Research) => "research group",
             Self::NewGroup(GroupKind::Learn) => "learn group",
-            Self::NewSibling => "new sibling",
+            Self::OpenGroupDraft => "group draft",
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",
@@ -308,11 +307,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn new_sibling_displays_as_new_sibling() {
-        // Given / When / Then: which-key labels NewSibling "new sibling".
+    fn open_group_draft_displays_as_group_draft() {
+        // Given / When / Then: which-key labels OpenGroupDraft "group draft".
         assert_eq!(
-            Intent::NewSibling.to_string(),
-            "new sibling",
+            Intent::OpenGroupDraft.to_string(),
+            "group draft",
             "which-key label"
         );
     }

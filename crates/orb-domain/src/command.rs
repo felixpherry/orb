@@ -3,17 +3,15 @@
 //! `ListDirectories`, `ListBranches`, `LoadPreview` and `OpenTool` are carried
 //! out by the frontend loop; session commands (drafts, add or remove a project, move to
 //! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle, delete,
-//! visit, save the sidebar's width and filter, save the jump list, create and start groups, start a
-//! group's sibling, pin, settle and delete groups, save a group draft, answer a trust confirm) go
+//! visit, save the sidebar's width and filter, save the jump list, create, start, pin,
+//! settle and delete groups, save a group draft, answer a trust confirm) go
 //! to the sessions actor; worktree commands (refresh, delete) go to the worktrees actor; search
 //! commands (query, preview) go to the search actor.
 
 use std::path::PathBuf;
 
 use crate::feat::git::git_service::GitRef;
-use crate::feat::sessions::state::{
-    AttachTarget, GroupId, GroupKind, ProjectId, SidebarItem, ThreadId,
-};
+use crate::feat::sessions::state::{AttachTarget, GroupId, GroupKind, ProjectId, ThreadId};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// Something that must happen in response to an intent.
@@ -108,18 +106,8 @@ pub enum Command {
     },
     /// Start the group's first thread from its draft.
     StartGroupDraft(GroupId),
-    /// Save the group's default model and permission (its draft's and each
-    /// new sibling's) as they now are in the app state.
+    /// Save the group's default setup and draft as they now are in the app state.
     SaveGroupDraft(GroupId),
-    /// Start a thread at the top of `group`, in its directory, with `model`
-    /// and `permission_mode` (the group's defaults); select and attach it if
-    /// the cursor is still on `from`.
-    StartSibling {
-        group: GroupId,
-        model: Option<String>,
-        permission_mode: Option<String>,
-        from: Option<SidebarItem>,
-    },
     /// Pin the group to the top of the sidebar; a settled group un-settles.
     PinGroup(GroupId),
     /// Unpin the group.

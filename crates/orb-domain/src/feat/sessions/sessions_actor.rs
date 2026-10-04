@@ -67,15 +67,14 @@
 //! orb's own project for its kind, added when first needed, in a new folder
 //! copied from the user's template for the kind; orb writes that template
 //! from its built-in default when it's missing, and never overwrites a
-//! folder that already exists. A new group's default model and permission
-//! are the project's last-used ones; the group's draft is selected, and the
-//! defaults are saved as the user edits them on the draft or the card.
-//! Starting the draft starts the group's first thread: a Feature group in a
-//! new worktree on the branch named after it, which becomes the group's
-//! directory, and a Research or Learn group in its folder. `n` starts a
-//! sibling at the top of a group, in its directory, with the group's
-//! defaults. A group is pinned, settled and deleted as a whole: pinning a
-//! settled group un-settles it, settling it stops its idle sessions, and
+//! folder that already exists. A new group's default harness, model and
+//! permission are the project's last-used ones; the group's draft is
+//! selected, and its defaults and draft are saved as the user edits them.
+//! Starting the draft starts a thread: a Feature group's first in a new
+//! worktree on the branch named after it, which becomes the group's
+//! directory, any other in the group's directory. `n` opens a group's draft,
+//! making one at the top of the group when it has none. A group is pinned,
+//! settled and deleted as a whole: pinning a settled group un-settles it, settling it stops its idle sessions, and
 //! deleting it deletes each thread, then the group and its directory: a
 //! Research or Learn folder, or a Feature worktree (forced, or only pruned
 //! from git's records when it's already gone) and its branch. A Feature group
@@ -111,8 +110,8 @@ use tokio::sync::Notify;
 
 use super::session_host::{SessionHostError, SessionOptions, SessionRecord, WorkspaceUntrusted};
 use super::state::{
-    Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, NEW_THREAD, Notice,
-    NoticeKind, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId,
+    Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, NEW_THREAD,
+    Notice, NoticeKind, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId,
     ThreadStatus,
 };
 use super::store::{
@@ -180,9 +179,8 @@ pub struct SessionsActorDeps {
 /// the origin ref a start is fetching, the folder a harness asks to trust
 /// before a start, and the started or restored thread the frontend should
 /// attach to. It adds orb's Incognito project at start. It also restores the sidebar's width
-/// and project filter, selects a new group's draft, and moves the cursor to a
-/// sibling it started. The intent handler also moves the cursor, opens and
-/// closes the shelf, marks a start as starting, edits a draft's fields before
+/// and project filter, and selects a new group's draft. The intent handler
+/// also moves the cursor, opens and closes the shelf, marks a start as starting, edits a draft's fields before
 /// asking for them to be saved, and resizes or filters the sidebar before
 /// asking for that to be saved.
 pub struct SessionsActor {
@@ -345,16 +343,6 @@ pub struct StartGroupDraft(pub GroupId);
 #[derive(Debug)]
 pub struct SaveGroupDraft(pub GroupId);
 
-/// Start a thread at the top of `group`, in its directory, with `model` and
-/// `permission_mode`; select and attach it if the cursor is still on `from`.
-#[derive(Debug)]
-pub struct StartSibling {
-    pub group: GroupId,
-    pub model: Option<String>,
-    pub permission_mode: Option<String>,
-    pub from: Option<SidebarItem>,
-}
-
 /// Pin group `.0`; a settled group un-settles.
 #[derive(Debug)]
 pub struct PinGroup(pub GroupId);
@@ -405,8 +393,8 @@ enum StartKind {
         project: ProjectId,
         workspace: LastWorkspace,
     },
-    /// A thread of group `group` in `project`: its first, from its draft,
-    /// or a sibling. The cursor follows the thread if it's still on `from`.
+    /// A thread of group `group` in `project`, from its draft. The cursor
+    /// follows the thread if it's still on `from`.
     Group {
         project: ProjectId,
         group: GroupId,
@@ -809,28 +797,7 @@ impl Message<SaveGroupDraft> for SessionsActor {
         SaveGroupDraft(id): SaveGroupDraft,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.save_group_defaults(id);
-    }
-}
-
-impl Message<StartSibling> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        StartSibling {
-            group,
-            model,
-            permission_mode,
-            from,
-        }: StartSibling,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let options = SessionOptions {
-            model,
-            permission_mode,
-        };
-        self.start_sibling(group, options, from).await;
+        self.save_group_draft(id);
     }
 }
 
@@ -1146,7 +1113,7 @@ impl SessionsActor {
                 .iter()
                 .filter(|row| changed_groups.contains(&row.id))
             {
-                if let Some(shown) = group_mut(sessions, row.id) {
+                if let Some(shown) = sessions.group_mut(row.id) {
                     *shown = group(row, &self.rows);
                     changed = true;
                 }
@@ -1241,20 +1208,7 @@ impl SessionsActor {
             }
             _ => (DraftWorkspace::Local, None),
         };
-        let (harness, model, permission) = {
-            let default = self.services.harnesses.default_id();
-            match last.or_else(|| self.store.latest_last_used().ok().flatten()) {
-                Some(LastUsed {
-                    harness: Some(id), ..
-                }) if self.services.harnesses.get(&id).is_none() => (default, None, None),
-                Some(used) => (
-                    used.harness.unwrap_or(default),
-                    used.model,
-                    used.permission_mode,
-                ),
-                None => (default, None, None),
-            }
-        };
+        let (harness, model, permission) = self.last_settings(last);
         let draft = with_git(
             &self.services.git,
             &root,
@@ -1283,6 +1237,26 @@ impl SessionsActor {
         (self.wake)();
     }
 
+    /// The harness, model and permission a new draft or group starts with:
+    /// `last`, else the latest last-used record from any project. A harness
+    /// orb no longer knows gives the first registered one with its defaults;
+    /// a record from before harnesses keeps its model and permission on the
+    /// first one.
+    fn last_settings(&self, last: Option<LastUsed>) -> (HarnessId, Option<String>, Option<String>) {
+        let default = self.services.harnesses.default_id();
+        match last.or_else(|| self.store.latest_last_used().ok().flatten()) {
+            Some(LastUsed {
+                harness: Some(id), ..
+            }) if self.services.harnesses.get(&id).is_none() => (default, None, None),
+            Some(used) => (
+                used.harness.unwrap_or(default),
+                used.model,
+                used.permission_mode,
+            ),
+            None => (default, None, None),
+        }
+    }
+
     /// Saves project `id`'s draft as the app state has it, first bringing
     /// what git says about it up to date; see [`with_git`].
     fn save_draft(&mut self, id: ProjectId) {
@@ -1309,22 +1283,23 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Saves group `id`'s default model and permission as the app state has
-    /// them, on its kept row, so nothing else of the group changes.
-    fn save_group_defaults(&mut self, id: GroupId) {
-        let defaults = self
+    /// Saves group `id`'s default setup and draft as the app state has them,
+    /// on its kept row, so nothing else of the group changes.
+    fn save_group_draft(&mut self, id: GroupId) {
+        let shown = self
             .state
             .read()
             .sessions
             .group(id)
-            .map(|(_, group)| group.defaults.clone());
-        let Some(defaults) = defaults else {
+            .map(|(_, group)| (group.defaults.clone(), group.draft.clone()));
+        let Some((defaults, draft)) = shown else {
             return;
         };
         self.edit_group(id, |row, _now| {
             row.harness = defaults.harness;
             row.draft_model = defaults.model;
             row.draft_permission_mode = defaults.permission;
+            row.draft = draft;
         });
     }
 
@@ -1643,10 +1618,10 @@ impl SessionsActor {
         self.end_start(result);
     }
 
-    /// Starts group `id`'s first thread from its draft, with its model and
-    /// permission: a Feature group in a new worktree of its project on the
-    /// branch named after it, refused while that branch exists; a Research or
-    /// Learn group in its folder.
+    /// Starts a thread from group `id`'s draft with its resolved settings: a
+    /// Feature group not yet started in a new worktree of its project on the
+    /// branch named after it, refused while that branch exists; any other
+    /// group in its directory, a Feature group on the branch checked out there.
     async fn start_group_draft(&mut self, id: GroupId) {
         let found = self
             .state
@@ -1656,25 +1631,24 @@ impl SessionsActor {
             .iter()
             .find_map(|project| {
                 let group = project.groups.iter().find(|group| group.id == id)?;
-                group.draft.then(|| {
-                    (
-                        project.id,
-                        project.root.clone(),
-                        project.title.clone(),
-                        group.clone(),
-                    )
-                })
+                let (harness, model, permission) = group.draft_settings()?;
+                Some((
+                    project.id,
+                    project.root.clone(),
+                    project.title.clone(),
+                    group.clone(),
+                    harness.clone(),
+                    SessionOptions {
+                        model: model.map(str::to_owned),
+                        permission_mode: permission.map(str::to_owned),
+                    },
+                ))
             });
-        let Some((project, root, title, group)) = found else {
+        let Some((project, root, title, group, harness, options)) = found else {
             return self.end_start(Err("the draft is gone".to_owned()));
         };
-        let options = SessionOptions {
-            model: group.defaults.model,
-            permission_mode: group.defaults.permission,
-        };
-        let harness = group.defaults.harness;
         let (cwd, branch, made) = match (group.kind, group.dir) {
-            (GroupKind::Feature, _) => {
+            (GroupKind::Feature, None) => {
                 let branch = group.branch.unwrap_or(group.name);
                 if self.services.git.branch_exists(&root, &branch) {
                     return self.end_start(Err(on_disk(GroupKind::Feature, &branch, &title)));
@@ -1684,7 +1658,13 @@ impl SessionsActor {
                     Err(report) => return self.end_start(Err(git_reason(&report))),
                 }
             }
-            (_, Some(dir)) if dir.is_dir() => (dir, None, None),
+            (kind, Some(dir)) if dir.is_dir() => {
+                let branch = match kind {
+                    GroupKind::Feature => current_branch(&self.services.git, &dir),
+                    GroupKind::Research | GroupKind::Learn => None,
+                };
+                (dir, branch, None)
+            }
             (_, dir) => {
                 let dir = dir.unwrap_or_default();
                 return self.end_start(Err(format!("folder no longer exists: {}", dir.display())));
@@ -1699,58 +1679,6 @@ impl SessionsActor {
             cwd,
             branch,
             made,
-            options,
-            harness,
-        };
-        self.start(pending, true).await;
-    }
-
-    /// Starts a thread at the top of group `id`, in its directory, with
-    /// `options`; the cursor follows it if it's still on `from`.
-    async fn start_sibling(
-        &mut self,
-        id: GroupId,
-        options: SessionOptions,
-        from: Option<SidebarItem>,
-    ) {
-        let found = self
-            .state
-            .read()
-            .sessions
-            .projects
-            .iter()
-            .find_map(|project| {
-                let group = project.groups.iter().find(|group| group.id == id)?;
-                Some((
-                    project.id,
-                    group.kind,
-                    group.dir.clone(),
-                    group.defaults.harness.clone(),
-                ))
-            });
-        let Some((project, kind, dir, harness)) = found else {
-            return self.end_start(Err("the group is gone".to_owned()));
-        };
-        let cwd = match dir {
-            Some(dir) if dir.is_dir() => dir,
-            dir => {
-                let dir = dir.unwrap_or_default();
-                return self.end_start(Err(format!("folder no longer exists: {}", dir.display())));
-            }
-        };
-        let branch = match kind {
-            GroupKind::Feature => current_branch(&self.services.git, &cwd),
-            GroupKind::Research | GroupKind::Learn => None,
-        };
-        let pending = PendingStart {
-            kind: StartKind::Group {
-                project,
-                group: id,
-                from,
-            },
-            cwd,
-            branch,
-            made: None,
             options,
             harness,
         };
@@ -1774,6 +1702,7 @@ impl SessionsActor {
             let saved = match self.groups.iter_mut().find(|row| row.id == group_id) {
                 Some(row) => {
                     row.dir.get_or_insert_with(|| cwd.to_owned());
+                    row.draft = None;
                     self.store
                         .save_group(row)
                         .map_err(|_report| SAVE_FAILED.to_owned())
@@ -1789,7 +1718,7 @@ impl SessionsActor {
                 .ok_or_else(|| NEW_SESSION_UNSAVED.to_owned())?;
             if let Some(group) = project.groups.iter_mut().find(|group| group.id == group_id) {
                 group.dir.get_or_insert_with(|| cwd.to_owned());
-                group.draft = false;
+                group.draft = None;
             }
             let id = thread.id;
             project.threads.insert(0, thread);
@@ -2154,7 +2083,7 @@ impl SessionsActor {
             if self.store.save_group(row).is_err() {
                 saved = Err(SAVE_FAILED.to_owned());
             }
-            if let Some(shown) = group_mut(&mut app.sessions, row.id) {
+            if let Some(shown) = app.sessions.group_mut(row.id) {
                 *shown = group(row, &self.rows);
             }
         }
@@ -2406,15 +2335,8 @@ impl SessionsActor {
                 (Some(dir), None)
             }
         };
-        let settings = self
-            .store
-            .last_used(project)
-            .ok()
-            .flatten()
-            .or_else(|| self.store.latest_last_used().ok().flatten());
-        let (draft_model, draft_permission_mode) = settings
-            .map(|used| (used.model, used.permission_mode))
-            .unwrap_or_default();
+        let (harness, draft_model, draft_permission_mode) =
+            self.last_settings(self.store.last_used(project).ok().flatten());
         let inserted = self.store.insert_group(&NewGroup {
             project_id: project,
             kind,
@@ -2424,7 +2346,7 @@ impl SessionsActor {
             created_at: now,
             draft_model: draft_model.clone(),
             draft_permission_mode: draft_permission_mode.clone(),
-            harness: self.services.harnesses.default_id(),
+            harness: harness.clone(),
         });
         let Ok(id) = inserted else {
             if let Some(dir) = &dir {
@@ -2446,7 +2368,8 @@ impl SessionsActor {
             unsettled_at: None,
             draft_model,
             draft_permission_mode,
-            harness: self.services.harnesses.default_id(),
+            harness,
+            draft: None,
         };
         let shown = group(&row, &self.rows);
         self.groups.push(row);
@@ -2825,7 +2748,7 @@ impl SessionsActor {
             if saved.is_err() {
                 sessions.error = Some(SAVE_FAILED.to_owned());
             }
-            if let Some(shown) = group_mut(sessions, id) {
+            if let Some(shown) = sessions.group_mut(id) {
                 *shown = group(row, &self.rows);
             }
         }
@@ -3019,15 +2942,6 @@ fn unsettle_group_row(row: &mut GroupRow, now: i64) {
     }
     row.settled_override = Some(SettledOverride::Active);
     row.settled_at = None;
-}
-
-/// The shown group with id `id`.
-fn group_mut(sessions: &mut Sessions, id: GroupId) -> Option<&mut Group> {
-    sessions
-        .projects
-        .iter_mut()
-        .flat_map(|project| &mut project.groups)
-        .find(|group| group.id == id)
 }
 
 /// Answers the name box that asked for a group, if it's still waiting: closes
@@ -3241,7 +3155,8 @@ fn exists(projects: &[Project], item: SidebarItem) -> bool {
     })
 }
 
-/// How a saved group looks: a draft exactly while no saved thread is in it.
+/// How a saved group looks: its saved draft, and a draft whenever no saved
+/// thread is in it.
 fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
     Group {
         id: row.id,
@@ -3261,7 +3176,10 @@ fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
             model: row.draft_model.clone(),
             permission: row.draft_permission_mode.clone(),
         },
-        draft: !threads.iter().any(|thread| thread.group_id == Some(row.id)),
+        draft: row.draft.clone().or_else(|| {
+            (!threads.iter().any(|thread| thread.group_id == Some(row.id)))
+                .then(GroupDraft::default)
+        }),
     }
 }
 
@@ -3494,8 +3412,9 @@ mod tests {
         WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Notice, NoticeKind,
-        ProjectId, ProjectKind, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Notice,
+        NoticeKind, Own, ProjectId, ProjectKind, SidebarItem, SidebarRow, Thread, ThreadId,
+        ThreadStatus,
     };
     use crate::feat::sessions::store::{
         DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store,
@@ -7578,7 +7497,7 @@ mod tests {
                 project
                     .groups
                     .iter()
-                    .map(|group| (group.draft, group.defaults.clone()))
+                    .map(|group| (group.draft.is_some(), group.defaults.clone()))
             })
             .collect();
         assert_eq!(
@@ -10296,7 +10215,7 @@ mod tests {
             .threads()
             .map(|thread| thread.group)
             .collect();
-        let draft = shown_group(&state, id).map(|group| group.draft);
+        let draft = shown_group(&state, id).map(|group| group.draft.is_some());
         assert_eq!(
             (grouped, draft),
             (vec![Some(id)], Some(false)),
@@ -10421,7 +10340,7 @@ mod tests {
         assert_eq!(
             (
                 error_of(&state),
-                shown_group(&state, id).is_some_and(|group| group.draft)
+                shown_group(&state, id).is_some_and(|group| group.draft.is_some())
             ),
             (
                 Some("branch GT-514-login already exists in orb".to_owned()),
@@ -10449,7 +10368,7 @@ mod tests {
         });
         assert_eq!(
             (
-                shown_group(&state, id).is_some_and(|group| group.draft),
+                shown_group(&state, id).is_some_and(|group| group.draft.is_some()),
                 removed
             ),
             (true, true),
@@ -10476,6 +10395,301 @@ mod tests {
         Ok(())
     }
 
+    /// Gives group `id` `draft` in the app state, with the cursor on it.
+    fn give_draft(state: &State, id: GroupId, draft: GroupDraft) {
+        let sessions = &mut state.write().sessions;
+        if let Some(group) = sessions.group_mut(id) {
+            group.draft = Some(draft);
+        }
+        sessions.cursor = Some(SidebarItem::GroupDraft(id));
+    }
+
+    /// A `kind` group in a temp folder holding thread aa, whose saved draft
+    /// is selected, with the actor started on `host` and `git`.
+    fn started_group_draft(
+        kind: GroupKind,
+        host: &Arc<FakeHost>,
+        git: &Arc<FakeGit>,
+    ) -> Result<(tempfile::TempDir, GroupId, SessionsActor, State), Report<StoreError>> {
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let (store, group, _) = store_with_group(kind, Some(dir.path()), &["aa"])?;
+        let (mut actor, state) = start_with(store, host, git, Path::new(NO_CLAUDE_DIR));
+        give_draft(&state, group, GroupDraft::default());
+        actor.save_group_draft(group);
+        Ok((dir, group, actor, state))
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_group_draft_in_a_started_feature_group_uses_its_worktree()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group in its worktree, with a draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (dir, id, mut actor, _state) = started_group_draft(GroupKind::Feature, &host, &git)?;
+
+        // When starting the draft.
+        actor.start_group_draft(id).await;
+
+        // Then the session starts in the group's worktree, and git adds none.
+        assert_eq!(
+            (host.created_in(), git.added()),
+            (vec![dir.path().to_owned()], None),
+            "a started Feature group's draft should reuse its worktree"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_group_draft_in_a_started_feature_group_takes_its_checked_out_branch()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Feature group whose worktree has dev checked out,
+        // with a draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (_dir, id, mut actor, _state) = started_group_draft(GroupKind::Feature, &host, &git)?;
+
+        // When starting the draft as thread bb.
+        actor.start_group_draft(id).await;
+
+        // Then bb is saved on dev.
+        assert_eq!(
+            saved(&actor.store, "bb")?.branch.as_deref(),
+            Some(CURRENT_BRANCH),
+            "the new thread should be on the worktree's checked out branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_group_draft_in_a_started_group_puts_its_thread_first()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Research group holding thread aa, with a draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (_dir, id, mut actor, state) = started_group_draft(GroupKind::Research, &host, &git)?;
+
+        // When starting the draft as thread bb.
+        actor.start_group_draft(id).await;
+
+        // Then bb is listed first in the group.
+        let first = state
+            .read()
+            .sessions
+            .group_threads(id)
+            .next()
+            .map(|thread| thread.attach_argv.clone());
+        assert_eq!(
+            first,
+            Some(vec![OsString::from("bb")]),
+            "a new thread should go to the top of its group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_group_draft_after_the_cursor_moved_keeps_the_cursor()
+    -> Result<(), Report<StoreError>> {
+        // Given a started Research group's draft, with the cursor since moved
+        // to the group's card.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (_dir, id, mut actor, state) = started_group_draft(GroupKind::Research, &host, &git)?;
+        state.write().sessions.cursor = Some(SidebarItem::Group(id));
+
+        // When the draft starts.
+        actor.start_group_draft(id).await;
+
+        // Then the cursor stays on the card, and nothing is attached.
+        let sessions = &state.read().sessions;
+        assert_eq!(
+            (sessions.cursor, sessions.attach),
+            (Some(SidebarItem::Group(id)), None),
+            "a moved cursor should stay put"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(GroupKind::Feature)]
+    #[case(GroupKind::Research)]
+    #[case(GroupKind::Learn)]
+    #[tokio::test]
+    async fn starting_a_group_draft_in_a_missing_directory_fails(
+        #[case] kind: GroupKind,
+    ) -> Result<(), Report<StoreError>> {
+        // Given a started `kind` group whose directory is gone, its draft
+        // selected and a start in flight.
+        let (store, id, _) =
+            store_with_group(kind, Some(Path::new("/nonexistent/GT-514-login")), &["aa"])?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        give_draft(&state, id, GroupDraft::default());
+        state.write().sessions.starting = true;
+
+        // When starting the draft.
+        actor.start_group_draft(id).await;
+
+        // Then the start ends with the missing folder on the mode line.
+        let sessions = &state.read().sessions;
+        assert_eq!(
+            (
+                sessions
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("folder no longer exists")),
+                sessions.starting
+            ),
+            (true, false),
+            "a missing directory should fail the start"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_group_draft_uses_its_overrides() -> Result<(), Report<StoreError>> {
+        // Given a Feature group on opus in auto mode whose draft picked
+        // sonnet.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
+        give_draft(
+            &state,
+            id,
+            GroupDraft {
+                model: Own::Set(Some("sonnet".to_owned())),
+                ..GroupDraft::default()
+            },
+        );
+
+        // When starting it.
+        actor.start_group_draft(id).await;
+
+        // Then the session starts on sonnet in the group's auto mode.
+        assert_eq!(
+            host.created_with(),
+            vec![SessionOptions {
+                model: Some("sonnet".to_owned()),
+                permission_mode: Some("auto".to_owned()),
+            }],
+            "the draft's own pick should win over the group's default"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_group_draft_clears_it() -> Result<(), Report<StoreError>> {
+        // Given a started Research group with a draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (_dir, id, mut actor, state) = started_group_draft(GroupKind::Research, &host, &git)?;
+
+        // When starting the draft.
+        actor.start_group_draft(id).await;
+
+        // Then the group shows no draft.
+        assert_eq!(
+            shown_group(&state, id).map(|group| group.draft),
+            Some(None),
+            "a started draft should leave the group"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn starting_a_group_draft_saves_the_cleared_draft() -> Result<(), Report<StoreError>> {
+        // Given a started Research group with a saved draft.
+        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
+        let (_dir, id, mut actor, _state) = started_group_draft(GroupKind::Research, &host, &git)?;
+
+        // When starting the draft.
+        actor.start_group_draft(id).await;
+
+        // Then the saved group has no draft.
+        assert_eq!(
+            saved_group(&actor.store, id)?.draft,
+            None,
+            "the cleared draft should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn group_draft_overrides_are_saved() -> Result<(), Report<StoreError>> {
+        // Given a group holding thread aa whose draft picked pi on its
+        // default model.
+        let (store, id, _) = store_with_group(GroupKind::Research, None, &["aa"])?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let draft = GroupDraft {
+            harness: Own::Set(HarnessId::new("pi")),
+            model: Own::Set(None),
+            permission: Own::Group,
+        };
+        give_draft(&state, id, draft.clone());
+
+        // When saving it.
+        actor.save_group_draft(id);
+
+        // Then the saved row has the draft.
+        assert_eq!(
+            saved_group(&actor.store, id)?.draft,
+            Some(draft),
+            "the draft's overrides should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn threadless_group_saved_without_a_draft_still_shows_one() -> Result<(), Report<StoreError>> {
+        // Given a group with no thread, saved without a draft.
+        let (store, id, _) = store_with_group(GroupKind::Research, None, &[])?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When restoring it.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then it shows a draft that follows the group.
+        assert_eq!(
+            shown_group(&state, id).map(|group| group.draft),
+            Some(Some(GroupDraft::default())),
+            "a threadless group should always show a draft"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_group_takes_the_last_used_harness_with_its_model() -> Result<(), Report<StoreError>> {
+        // Given orb last started in the other harness on other-model.
+        let store = Store::open_in_memory()?;
+        let orb = orb_project(&store)?;
+        store.record_last_used(
+            orb,
+            &LastUsed {
+                model: Some("other-model".to_owned()),
+                ..used_in(OTHER)
+            },
+            10,
+        )?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start_beside(store, &host, &host);
+
+        // When creating Feature group `GT-514-login` in it.
+        actor.create_group(GroupKind::Feature, Some(orb), SLUG_BRANCH.into());
+
+        // Then the group's defaults are the other harness on other-model.
+        let defaults: Vec<(HarnessId, Option<String>)> = groups_of(&state)
+            .into_iter()
+            .map(|group| (group.defaults.harness, group.defaults.model))
+            .collect();
+        assert_eq!(
+            defaults,
+            vec![(HarnessId::new(OTHER), Some("other-model".to_owned()))],
+            "a new group should take the last-used harness with its model"
+        );
+        Ok(())
+    }
+
     #[rstest::rstest]
     #[tokio::test]
     async fn saving_a_started_groups_defaults_keeps_the_rest_of_its_row()
@@ -10484,13 +10698,18 @@ mod tests {
         // were changed on its card to sonnet in plan mode.
         let (group, mut actor, state) = started_feature_group(&FakeGit::local()).await?;
         actor.check_out_group(group, &git_ref("main", false));
-        if let Some(defaults) = state.write().sessions.group_defaults_mut(group) {
+        if let Some(defaults) = state
+            .write()
+            .sessions
+            .group_mut(group)
+            .map(|group| &mut group.defaults)
+        {
             defaults.model = Some("sonnet".to_owned());
             defaults.permission = Some("plan".to_owned());
         }
 
         // When saving them.
-        actor.save_group_defaults(group);
+        actor.save_group_draft(group);
 
         // Then the saved row has the defaults and still its directory and
         // branch.
@@ -10520,12 +10739,17 @@ mod tests {
         // Given a started Feature group whose thread aa runs Claude's default,
         // and whose defaults were changed to sonnet.
         let (group, mut actor, state) = started_feature_group(&FakeGit::local()).await?;
-        if let Some(defaults) = state.write().sessions.group_defaults_mut(group) {
+        if let Some(defaults) = state
+            .write()
+            .sessions
+            .group_mut(group)
+            .map(|group| &mut group.defaults)
+        {
             defaults.model = Some("sonnet".to_owned());
         }
 
         // When saving them.
-        actor.save_group_defaults(group);
+        actor.save_group_draft(group);
 
         // Then thread aa keeps its saved model.
         assert_eq!(
@@ -10542,12 +10766,17 @@ mod tests {
         // harness.
         let (host, git) = (FakeHost::listing(Vec::new()), FakeGit::local());
         let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-        if let Some(defaults) = state.write().sessions.group_defaults_mut(id) {
+        if let Some(defaults) = state
+            .write()
+            .sessions
+            .group_mut(id)
+            .map(|group| &mut group.defaults)
+        {
             defaults.harness = HarnessId::new(OTHER);
         }
 
         // When saving it.
-        actor.save_group_defaults(id);
+        actor.save_group_draft(id);
 
         // Then the group's stored row reads back with the other harness.
         let saved: Vec<HarnessId> = actor
@@ -10570,12 +10799,17 @@ mod tests {
         // Given a group draft whose model was changed to sonnet.
         let (host, git) = (FakeHost::listing(Vec::new()), FakeGit::local());
         let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-        if let Some(defaults) = state.write().sessions.group_defaults_mut(id) {
+        if let Some(defaults) = state
+            .write()
+            .sessions
+            .group_mut(id)
+            .map(|group| &mut group.defaults)
+        {
             defaults.model = Some("sonnet".to_owned());
         }
 
         // When saving it.
-        actor.save_group_defaults(id);
+        actor.save_group_draft(id);
 
         // Then the store has sonnet for the group's draft.
         let saved: Vec<Option<String>> = actor
@@ -10647,212 +10881,6 @@ mod tests {
         F: FnOnce(GroupRow) -> GroupRow,
     {
         store.save_group(&change(saved_group(store, id)?))
-    }
-
-    /// Opus in auto mode.
-    fn opus_auto() -> SessionOptions {
-        SessionOptions {
-            model: Some("opus".to_owned()),
-            permission_mode: Some("auto".to_owned()),
-        }
-    }
-
-    /// A Research group in a temp folder holding thread `aa`, with the actor
-    /// started on `host` and the cursor on `aa`.
-    fn sibling_group(
-        host: &Arc<FakeHost>,
-    ) -> Result<(tempfile::TempDir, GroupId, ThreadId, SessionsActor, State), Report<StoreError>>
-    {
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let (store, group, threads) =
-            store_with_group(GroupKind::Research, Some(dir.path()), &["aa"])?;
-        let thread = threads
-            .first()
-            .copied()
-            .ok_or_else(|| Report::new(StoreError).attach("aa isn't saved"))?;
-        let (actor, state) = start(store, host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Thread(thread));
-        Ok((dir, group, thread, actor, state))
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn sibling_starts_in_the_groups_directory() -> Result<(), Report<StoreError>> {
-        // Given a Research group in its folder, holding thread aa.
-        let host = FakeHost::creating(Ok("bb"));
-        let (dir, group, thread, mut actor, _state) = sibling_group(&host)?;
-
-        // When starting a sibling from aa.
-        actor
-            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
-            .await;
-
-        // Then the session starts in the group's folder.
-        assert_eq!(
-            host.created_in(),
-            vec![dir.path().to_owned()],
-            "a sibling should start in its group's directory"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn sibling_starts_with_the_given_model_and_permission() -> Result<(), Report<StoreError>>
-    {
-        // Given a Research group holding thread aa.
-        let host = FakeHost::creating(Ok("bb"));
-        let (_dir, group, thread, mut actor, _state) = sibling_group(&host)?;
-
-        // When starting a sibling on opus in auto mode.
-        actor
-            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
-            .await;
-
-        // Then the session starts with them.
-        assert_eq!(
-            host.created_with(),
-            vec![opus_auto()],
-            "the sibling should start with the given settings"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn sibling_is_the_groups_first_thread() -> Result<(), Report<StoreError>> {
-        // Given a Research group holding thread aa.
-        let host = FakeHost::creating(Ok("bb"));
-        let (_dir, group, thread, mut actor, state) = sibling_group(&host)?;
-
-        // When starting sibling bb.
-        actor
-            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
-            .await;
-
-        // Then bb is listed first in the group.
-        let first = state
-            .read()
-            .sessions
-            .group_threads(group)
-            .next()
-            .map(|thread| thread.attach_argv.clone());
-        assert_eq!(
-            first,
-            Some(vec![OsString::from("bb")]),
-            "a sibling should go to the top of its group"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn sibling_is_saved_in_the_group() -> Result<(), Report<StoreError>> {
-        // Given a Research group holding thread aa.
-        let host = FakeHost::creating(Ok("bb"));
-        let (_dir, group, thread, mut actor, _state) = sibling_group(&host)?;
-
-        // When starting sibling bb.
-        actor
-            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
-            .await;
-
-        // Then bb is saved in the group.
-        assert_eq!(
-            saved(&actor.store, "bb")?.group_id,
-            Some(group),
-            "a sibling should be saved in its group"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn sibling_started_from_the_selected_row_is_selected_and_attached()
-    -> Result<(), Report<StoreError>> {
-        // Given the cursor still on thread aa of a Research group.
-        let host = FakeHost::creating(Ok("bb"));
-        let (_dir, group, thread, mut actor, state) = sibling_group(&host)?;
-
-        // When starting a sibling from aa.
-        actor
-            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
-            .await;
-
-        // Then the sibling is selected and attached.
-        let sessions = &state.read().sessions;
-        let sibling = sessions.group_threads(group).next().map(|thread| thread.id);
-        assert_eq!(
-            (sessions.cursor, sessions.attach),
-            (sibling.map(SidebarItem::Thread), sibling),
-            "the cursor should follow the sibling"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn sibling_started_after_the_cursor_moved_keeps_the_cursor()
-    -> Result<(), Report<StoreError>> {
-        // Given a sibling asked for from thread aa, with the cursor since
-        // moved to the group's card.
-        let host = FakeHost::creating(Ok("bb"));
-        let (_dir, group, thread, mut actor, state) = sibling_group(&host)?;
-        state.write().sessions.cursor = Some(SidebarItem::Group(group));
-
-        // When the sibling starts.
-        actor
-            .start_sibling(group, opus_auto(), Some(SidebarItem::Thread(thread)))
-            .await;
-
-        // Then the cursor stays on the card, and nothing is attached.
-        let sessions = &state.read().sessions;
-        assert_eq!(
-            (sessions.cursor, sessions.attach),
-            (Some(SidebarItem::Group(group)), None),
-            "a moved cursor should stay put"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[case(GroupKind::Feature)]
-    #[case(GroupKind::Research)]
-    #[case(GroupKind::Learn)]
-    #[tokio::test]
-    async fn sibling_in_a_missing_directory_fails(
-        #[case] kind: GroupKind,
-    ) -> Result<(), Report<StoreError>> {
-        // Given a `kind` group whose directory is gone, with a start in flight.
-        let (store, group, threads) =
-            store_with_group(kind, Some(Path::new("/nonexistent/GT-514-login")), &["aa"])?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.starting = true;
-
-        // When starting a sibling.
-        actor
-            .start_sibling(
-                group,
-                opus_auto(),
-                threads.first().copied().map(SidebarItem::Thread),
-            )
-            .await;
-
-        // Then the start ends with the missing folder on the mode line.
-        let sessions = &state.read().sessions;
-        assert_eq!(
-            (
-                sessions
-                    .error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("folder no longer exists")),
-                sessions.starting
-            ),
-            (true, false),
-            "a missing directory should fail the start"
-        );
-        Ok(())
     }
 
     #[rstest::rstest]
