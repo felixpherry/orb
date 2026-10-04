@@ -49,7 +49,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) A Claude thread's title is the name given with `r` in the sidebar, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, else "New thread".
 - (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread outside a group is a three-line tree node showing its status icon, title, and time, then its project and status word, then its branch.
 - (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the sidebar search has the keys and a shown/total count of drafts and threads, and the selected row's first line highlighted.
-- (pane) Attaching runs `claude attach <id>` for a Claude thread, or `dtach -A <socket> -E -r winch pi --session-id <id>` for a pi thread, in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
+- (pane) Attaching runs `claude attach <id>` for a Claude thread, or `zmx attach <id> pi --session-id <id>` for a pi thread, in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
 - (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the dashboard, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
@@ -58,7 +58,7 @@ Entries are added or amended **only with human approval**.
 - (sidebar) A thread shows a green check and "done" when its latest turn ended after the user last selected it.
 - (settle) Any new turn, approval request, or input request un-settles a lone thread, or the group of a thread in one.
 - (settle) An unpinned lone thread or group auto-settles after 3 days without turn activity in any of its threads, unless the user un-settled it since that activity or orb is attached to one of them.
-- (settle) Settling a thread stops its session (`claude stop`, or ending a pi thread's dtach process); attaching resumes it.
+- (settle) Settling a thread stops its session (`claude stop`, or `zmx kill` for a pi thread); attaching resumes it.
 - (sessions) Deleting a Claude thread runs `claude rm` and removes it from orb; its transcript stays in Claude's projects directory.
 - (keybinds) In the sidebar, `p` pins or unpins and `s` settles or un-settles the selected lone thread or group, and `d` deletes a thread or group (on a draft, discards it); settling, deleting and discarding ask a `No`/`Yes` confirm first.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled thread closes the shelf.
@@ -134,7 +134,7 @@ Entries are added or amended **only with human approval**.
 - (dashboard) While the Settled shelf's header is selected, the dashboard's context line shows the shelf hint.
 - (dashboard) When the Claude pane fails to start, the reason shows in red under the dashboard's footer; other errors, such as a failed `claude --bg` or `claude agents`, show on the mode line.
 - (dashboard) While the dashboard has the keys, a steady block cursor sits on the first cell of the highlighted item's label.
-- (pane) orb keeps a separate attach pane (`claude attach`, or `dtach -A` for pi) for each attached thread, and selecting another thread leaves it running.
+- (pane) orb keeps a separate attach pane (`claude attach`, or `zmx attach` for pi) for each attached thread, and selecting another thread leaves it running.
 - (pane) orb is attached to a thread from `⏎` into its pane until `<C-\>`, settling or deleting the thread or its group detaches it, or its Claude exits.
 - (keybinds) In the sidebar, `<C-\>` on an attached thread detaches it and keeps the keys in the sidebar.
 - (sidebar) An idle thread orb is attached to shows a filled `FG` (`#c8d3f5`) circle in place of the hollow idle circle; with unseen output it still shows the green done check.
@@ -224,20 +224,21 @@ Entries are added or amended **only with human approval**.
 - (picker) `⏎` in the search picker reveals the thread in the sidebar and attaches to its current session, and on a thread deleted since, or one Claude no longer knows, it only closes the picker.
 - (arch) Everything orb does differently per harness (hosting, transcripts, models, permission modes, trust) lives in that harness's own implementation of one shared interface, picked by the harness id each draft, group and thread stores.
 - (sessions) A thread whose stored harness orb doesn't know shows as gone.
-- (sessions) dtach hosts every pi thread, running `pi --session-id <id>` behind a socket under `~/.orb/pi/`.
+- (sessions) zmx hosts every pi thread, running `pi --session-id <id>` behind a socket under `~/.orb/pi/`.
+- (sessions) A pi session starts on the first attach to its thread, with orb's pane as zmx's first client.
+- (sessions) A pi thread's attach passes `--model` only until pi has written its session file.
 - (sessions) Quitting orb does not stop Claude or pi sessions.
-- (sessions) A pi start fails with `pi exited at start` when its dtach socket stops answering within about a second.
-- (sessions) A pi thread's status is read from the tail of its pi session file and whether its dtach socket answers, on the same schedule as Claude's poll.
-- (sessions) A pi thread counts as working only while its session file's last conversation entry is mid-turn and newer than its dtach socket.
+- (sessions) A pi thread's status is read from the tail of its pi session file and whether its zmx socket answers, on the same schedule as Claude's poll.
+- (sessions) A pi thread counts as working only while its session file's last conversation entry is mid-turn and newer than its zmx socket.
 - (sessions) A pi thread is only ever working, idle or stopped, because pi never waits for approval or input and writes its session file on the first prompt.
 - (sessions) A pi thread's title is the name given with `r`, else its latest `/name`, else its first prompt, else "New thread".
 - (sessions) A pi thread's branch is read from git in its directory after each turn.
-- (sessions) Deleting a pi thread ends its dtach process and removes its socket; its session file stays in pi's sessions directory.
-- (pane) 500 ms after a pi thread's pane starts, orb shrinks its PTY by one row and restores it 50 ms later, so pi redraws on reattach.
+- (sessions) Deleting a pi thread ends its zmx session and removes its socket; its session file stays in pi's sessions directory.
+- (pane) An attach pane whose program exits within about a second of starting shows `session exited at start`.
 - (drafts) On a pi draft, the model picker lists `Default`, then the models `pi --list-models` printed at orb's start under a heading per provider, labelled `provider/model`, which orb passes to `--model`.
 - (drafts) When `pi --list-models` fails at orb's start, the mode line shows its reason once and pi's model picker lists only `Default`.
 - (drafts) Picking another harness resets a draft's model and permission to `Default`.
-- (drafts) The harness picker lists Claude Code and pi, each disabled as `checking` until orb's startup probe of it answers, and pi disabled as `pi not found` or `dtach not found` when either was missing from `PATH` at orb's start.
+- (drafts) The harness picker lists Claude Code and pi, each disabled as `checking` until orb's startup probe of it answers, and pi disabled as `pi not found` or `zmx not found` when either was missing from `PATH` at orb's start.
 - (keybinds) On a group's draft, `⏎` starts it, and `␣h`/`␣m`/`␣a` override the group's default for that draft alone; it has no workspace or base-branch pick.
 - (keybinds) `d` on a group's draft discards it after the `Discard draft?` confirm once the group has a thread, and does nothing while a session is starting.
 - (groups) A group's draft follows the group's current default harness, model and permission, except for each one picked on the draft itself.
