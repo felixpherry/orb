@@ -62,7 +62,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) Deleting a thread runs `claude rm` and removes it from orb; its transcript stays in Claude's projects directory.
 - (keybinds) In the sidebar, `p` pins or unpins and `s` settles or un-settles the selected lone thread or group, and `d` deletes a thread or group (on a draft, discards it); settling, deleting and discarding ask a `No`/`Yes` confirm first.
 - (keybinds) On the sidebar's Settled header, `⏎` opens or closes the shelf, `l` opens it, and `h` closes it; `h` on a settled thread closes the shelf.
-- (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order.
+- (picker) The picker is ported from jinn's `jinn-selection-widget` and ranks typed filter text by fuzzy score, breaking ties by list order, except in the search picker, which asks the search index.
 - (projects) The project picker lists projects by their threads' latest activity, else when they were added, until filter text is typed.
 - (projects) The project picker filters on each project's name and path.
 - (projects) Projects are added only from the `␣p` directory picker, except orb's `Research` and `Learn` projects, which the first `␣gr`/`␣gl` adds, and its `Incognito` project, which orb adds at start.
@@ -72,8 +72,8 @@ Entries are added or amended **only with human approval**.
 - (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, the selected thread's or draft's branch and project (`<project>/<group>` in a group), and the latest error in red on the left; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
 - (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
-- (picker) Every picker but the session picker is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide with its name centred in the top border, a > prompt over an orange rule, numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
-- (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · <C-x> remove · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, discard, trust and Initialize Git confirms, and `⏎ select · Esc close` otherwise; the session picker shows no keys.
+- (picker) Every picker but the session, worktree and search pickers is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide (wider when its name needs it) with its name centred in the top border, a > prompt over an orange rule, numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
+- (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · <C-x> remove · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, discard, delete-worktree, trust and Initialize Git confirms, and `⏎ select · Esc close` otherwise; the session, worktree and search pickers show no keys.
 - (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code sessions across projects and git worktrees, written in Rust (edition 2024).
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>`, on branch `orb/<hex>`, or on the group's slug branch for a Feature group.
 - (worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w` and for a Feature group) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
@@ -168,7 +168,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `␣b` (and the dashboard's `b`) on a started Feature group's card switches its worktree's branch for the group and every thread in it; `␣b` isn't bound on a group's other rows, and `␣w` is bound on none.
 - (groups) Groups and each thread's group persist to orb's store (store migration v8 added the `groups` table and `threads.group_id`).
 - (keybinds) In the sidebar, the dashboard or the attached pane, `<C-o>`/`<C-i>` move back/forward through the jump list, as in neovim.
-- (jumps) A jump is entering a thread's pane (`⏎`, `<C-l>`, a double-click on its row, a click into its pane, or a draft or `n` sibling starting), `gg`/`G`, a search ended by `⏎` or a click, a `␣n` pick, or a session picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.
+- (jumps) A jump is entering a thread's pane (`⏎`, `<C-l>`, a double-click on its row, a click into its pane, or a draft or `n` sibling starting), `gg`/`G`, a search ended by `⏎` or a click, a `␣n` pick, or a session or search picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one; it never attaches, starts a draft, or clears the project filter.
 - (jumps) Deleted rows, rows hidden by the project filter, and the Settled header are skipped, and a folded group opens on arrival.
 - (jumps) orb persists the newest 20 jump-list rows to its store (store migration v9 added the `jumps` table); a row already in the list moves to the newest slot.
@@ -186,7 +186,7 @@ Entries are added or amended **only with human approval**.
 - (picker) A session picker row is labelled `<project>/title`, or `<group>/title` for a thread in a group, with `New thread` as the title while it has none, and typed text fuzzy-matches the whole label.
 - (picker) The session picker's rows and their order are fixed when it opens, while their status, spinner and time update live, and `⏎` on a thread deleted since, or one Claude no longer knows, only closes it.
 - (picker) `⏎` in the session picker reveals the thread in the sidebar and attaches to it like `⏎` on its row.
-- (picker) The session picker is drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions, with a lit `s` while settled threads show and `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.
+- (picker) The session and worktree pickers are drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions or Worktrees with `shown/total` on its input row (and a lit `s` in the session picker while settled threads show), beside a preview box, side by side from 120 columns and stacked below that, the list on top.
 - (picker) The session picker's preview shows the selected thread's status, branch and model, then its latest exchanges from the transcript (the prompt, the tools Claude ran, and the end of Claude's last reply as Markdown), or `No transcript yet` when there is none, and refreshes while the transcript grows.
 - (mouse) orb captures the mouse from startup until it exits.
 - (mouse) A click on a sidebar row or the sidebar's input box moves the keys to the sidebar, and a click on the right-hand area moves them to the dashboard or into the Claude pane shown there; the click that moves them into the pane isn't forwarded to Claude.
@@ -195,6 +195,30 @@ Entries are added or amended **only with human approval**.
 - (mouse) The wheel over the sidebar moves the selection one row without wrapping while the sidebar has the keys, and otherwise, with no picker or rename box open, scrolls only its view, 3 lines a notch; the view goes back to the selection once the selection moves or the sidebar takes the keys.
 - (mouse) Clicking the sidebar's input box starts a search; during a search, clicking a row ends it as `⏎` does on that row, and clicking the right-hand area ends it as `⏎` does and moves the keys there.
 - (mouse) A click on a dashboard menu item moves the menu cursor to it without running it.
-- (mouse) In a picker, a click selects a row, a double-click picks it, the wheel over its list moves the selection one row without wrapping (over the session picker's preview it does nothing), a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.
+- (mouse) In a picker, a click selects a row, a double-click picks it, the wheel over its list moves the selection one row without wrapping (over the session, worktree or search picker's preview it does nothing), a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.
 - (mouse) A click outside the rename box cancels it like `Esc`.
 - (mouse) A click on the input line of the sidebar search, a picker or the rename box moves its text cursor to the grapheme under it, to the first shown grapheme on the prompt, or to the end past the text.
+- (worktrees) A worktree under `~/.orb/worktrees/` is pruned once nothing uses it, or once no draft uses it and every thread and Feature group in it has been settled, the latest for at least 7 days.
+- (worktrees) Pruning skips a worktree with uncommitted changes or untracked files, and one whose thread is attached or has a turn underway.
+- (worktrees) Pruning removes the worktree's directory and keeps its branch.
+- (worktrees) orb sweeps for worktrees to prune at start and then every hour, showing `pruned N worktrees` on the mode line when it removes any.
+- (worktrees) Attaching to a thread whose worktree is gone first recreates it at the same path on the thread's branch, or on a new branch of that name from the project's default branch when the branch is gone.
+- (groups) Deleting a Feature group whose worktree was pruned deletes the group and its slug branch without the worktree removal.
+- (keybinds) `␣sw` in the sidebar or dashboard opens the worktree picker, under the `+search` which-key group.
+- (picker) The worktree picker lists every directory under `~/.orb/worktrees/<repo>/`, active ones first and unused ones last, most recently used first within each, each with its state: `active · <title>`, `settled <age>` or `no thread`.
+- (picker) The worktree picker's preview shows the worktree's path, branch, size, uncommitted changes, last commit, last use, sweep verdict, and the threads, Feature groups and drafts that use it.
+- (picker) The worktree picker's sweep verdict comes from the same rule the sweep applies.
+- (keybinds) In the worktree picker, `⏎` does nothing and `<C-x>` deletes the selected worktree after a `No`/`Yes` confirm drawn over the list, which either answer returns to; it is refused, with the reason on the mode line, while a thread in it is attached or has a turn underway.
+- (worktrees) Deleting a worktree from the worktree picker force-removes it, uncommitted changes included, and keeps its branch.
+- (paths) orb persists its transcript search index to `~/.orb/userdata/search.sqlite`, which it rebuilds from the transcripts when the file is missing, can't be read, or holds another schema version.
+- (search) The search index holds the prompts the user typed and Claude's text replies from every orb thread's transcripts, settled threads included; tool calls, tool output and thinking are left out.
+- (search) At startup orb indexes, newest chat first and in the background, the lines each thread's current transcript gained since the search index last read it.
+- (search) Before each search picker query, orb indexes the lines added to each transcript since it last read it, so results include replies written while the picker is open.
+- (search) A thread's earlier transcripts stay indexed after `/clear` starts a new one, and a deleted thread's messages leave the index.
+- (keybinds) `␣sg` in the sidebar or dashboard opens the search picker, labelled grep under the `+search` which-key group.
+- (picker) The search picker matches typed text as case-insensitive substrings across all orb threads, ignoring the project filter, with every whitespace-separated term of at least 3 characters required.
+- (picker) The search picker lists one row per matching message, newest first, at most 200, labelled `<project>/title` (or `<group>/title`) followed by a snippet of the message with its matches lit.
+- (picker) The search picker is drawn like the session picker, with its list box titled Search, `indexing n/total` beside the title while transcripts are still being indexed, `200+` as its count when more than 200 messages matched, and `search unavailable: <error>` in place of the rows when the index can't be opened.
+- (picker) The search picker's preview shows the thread's status, branch and model, then the exchange the matching message is in, naming the speaker only where it changes; the matching message is plain wrapped text with its matches lit and the first one in view, and the other messages render as Markdown.
+- (picker) The search picker loads the first row's preview along with the results.
+- (picker) `⏎` in the search picker reveals the thread in the sidebar and attaches to its current session, and on a thread deleted since, or one Claude no longer knows, it only closes the picker.
