@@ -624,3 +624,58 @@ The jump list takes `<C-o>`/`<C-i>` inside the attached pane, so Claude's transc
 - Key names are case-insensitive; `ctrl+shift+o` is written with `shift+`, not as `ctrl+O`. **[docs]**
 - Reserved (can't be rebound): Ctrl+C, Ctrl+D, Ctrl+M (Enter), Ctrl+[ (Escape), **Ctrl+I (always Tab)**, Ctrl+H. So Claude has no Ctrl+I action of its own for orb's `<C-i>` to shadow. **[docs]**
 - Written 2026-09-28 with only `"ctrl+shift+o": "app:toggleTranscript"` in `Global`; the file didn't exist before.
+
+## 17. pi & dtach (verified 2026-10-04, pi 1.0.0, dtach 0.9)
+
+Probed on this machine with pi 1.0.0 (`~/.local/bin/pi`, which links to `@earendil-works/pi-coding-agent/dist/bundle/cli.js`; it reports 1.0.2 as available) and dtach 0.9 (`brew install dtach`, `/opt/homebrew/bin/dtach`). A throwaway zellij 0.45.0 session `pi-spike`, held by a 120×40 Python `pty.fork()` client as in §13, stood in for kitty → zellij, and a second Python pty client attached dtach directly to stand in for orb's own pane. pi ran in an empty scratch directory with `PI_CODING_AGENT_SESSION_DIR` pointed at a scratch sessions directory and `FORCE_COLOR` removed from its environment. Sockets lived in `/tmp/orb-pi-spike`. Prompts were typed into pi with `printf '<text>\r' | dtach -p <sock>`. The model was `openai-codex/gpt-6-astra` (the user's default) except in the model check. Eight prompts were sent in all. Where pi's behaviour came from its source (`dist/core/session-manager.js`, `dist/main.js`, `dist/core/keybindings.js`), the tag says so. Tags as in §6.
+
+### dtach hosting **[verified]**
+- `dtach -n <sock> -E -r winch pi --session-id <id>` accepts `-E` and `-r` with `-n`, returns exit 0 in 0.05 s, and pi keeps running with no client attached.
+- dtach exits 1 only when it can't exec the command (`dtach: could not execute no-such-command: No such file or directory`). When pi starts and then fails, `dtach -n` still exits 0 and the socket disappears a moment later: seen with an invalid session id (`--session-id 'bad id!'`, which pi rejects with `Error: Session id must be non-empty, contain only alphanumeric characters, '-', '_', and '.', and start and end with an alphanumeric character`) and with an unknown model (`--model nosuch/model-xyz`). pi's error text goes to the detached PTY, so nobody sees it.
+- pi rewrites its process title to `pi`. `pgrep -f <sock>` or `pgrep -f <id>` therefore finds only the dtach processes. pi is the dtach master's child.
+- On a raw pty, pi's first frame (footer drawn) arrives about 0.55 s after start, both for `pi --session-id <id>` alone and for a fresh `dtach -A <sock> -E -r winch pi --session-id <id>`.
+- Attaching to a live session redraws pi only when the attaching terminal's size differs from the PTY's current size. dtach's `-r winch` sends SIGWINCH on every attach, but pi (Node's `resize` event) redraws only on a real size change. The first attach after `dtach -n` drew pi's whole UI (prompt box, footer). Closing that pane killed only the client, and pi kept running. Re-attaching at the same size (twice in zellij, once on the raw pty) showed a blank screen, still blank 6 s and 9 s later, and the raw pty client got only 6 bytes. A one-row resize (40 → 39 → 40 rows, 0.5 s after attaching) produced a full redraw at once, and so did a zellij `resize`.
+- `-r ctrl_l` is not a usable fallback: `ctrl+l` opens pi's model selector (`app.model.select` in `dist/core/keybindings.js`). **[verified: source]**
+- In the headless zellij session, a fresh `dtach -A` start showed a blank pane for the first 3 to 9 s in all four runs, and two of them later drew without any input (by 8 s and by 10 s). On the raw pty the same start drew in 0.5 s. This wasn't explained. orb's own pane is the case that matters, and Verification checks it.
+- No trust dialog appeared in the empty scratch directory.
+
+### `<C-\>` under `-E` **[verified]**
+- With the client attached through `-E`, `zellij action write 28` (0x1c) left the pane running and pi's screen unchanged. The next prompt got its reply normally.
+- Control: a second client attached without `-E` exited on the same key with `[detached]`, its pane held, and pi kept running.
+
+### Session file **[verified]**
+- pi writes its session file on the first prompt, not at startup. After 10 s detached, and after attaching, the sessions directory was empty. The file appeared with the first prompt, holding everything from startup at once (`session`, `model_change`, `thinking_level_change`, two `custom` entries, then the messages). A second session that was started and killed with no prompt left no file. In the source, `_persist` writes nothing until the session has a `user` or `assistant` message. **[verified + source]**
+- The file name carries the session's start time, not the time of the first write: `2026-10-04T01-15-46-340Z_orb-4035abe5557a79d2b818d4c26a4cf241.jsonl` for a session started at 01:15:46 UTC and first prompted at 01:17:24.
+- An `orb-<32 hex>` id is kept as given: the header is `{"type":"session","version":3,"id":"orb-4035abe5557a79d2b818d4c26a4cf241","timestamp":…,"cwd":…}`. pi accepts ids matching `^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$` and exits with the error above otherwise. **[verified + source]**
+- With `PI_CODING_AGENT_SESSION_DIR` set, the file goes straight into that directory, with no per-cwd subdirectory. Only when no session directory is configured (no `--session-dir`, no `PI_CODING_AGENT_SESSION_DIR`, no `sessionDir` in settings) does pi use `~/.pi/agent/sessions/--<cwd without its leading /, with / \ : replaced by ->--/`. **[verified + source: `getDefaultSessionDirPath`, `main.js` line 549]**
+- `--session-id <id>` resumes by reading each `*.jsonl` header in the session directory and matching its `id`, not the file name. In the default layout it looks only in the current directory's subdirectory; with a configured directory it also requires the header's `cwd` to match. Run from another directory, the same id would start a new session. **[source: `SessionManager.findById`]**
+- A single `Reply with the word pong.` turn made an 87 KB file. Most of it is one `system` role message written just before the first user message.
+
+### Turn entries **[verified]**
+- Each line below is the last non-`system` message after the file changed, from a watcher polling every 0.3 s.
+- Plain turn: `user` (stopReason none), then `assistant` `stop` about 3 s later.
+- Tool turn (`sleep 6 && echo done` through the bash tool): `user` at 08:20:14, `assistant` `toolUse` at 08:20:21, `toolResult` at 08:20:27, `assistant` `stop` at 08:20:29. The `toolUse` entry lands when the model has finished its message, before the tool runs.
+- Streaming turn (about 300 words): 4 s in, the screen showed three lines of the reply under `Working` while the file still ended at the `user` message. The `assistant` `stop` entry arrived whole at 20 s.
+- Abort (`Esc` sent with `dtach -p` 4 s into a streaming reply): one `assistant` entry with `stopReason: aborted`, `errorMessage: "Operation aborted"`, and the partial text as its content.
+- Throughout, every line parsed and the file only grew; pi appends whole lines.
+- `/name spike-title` (typed with `dtach -p`; autocomplete didn't eat the Enter) appended `{"type":"session_info",…,"name":"spike-title"}` and the footer showed `• spike-title`.
+- `stopReason: length` was not reproduced. In the user's 125 own session files (read only): `toolUse` 2613, `stop` 412, `error` 16, `aborted` 11, no `length`.
+- Message roles seen there: `user` 443, `assistant` 3052, `toolResult` 4189, `system` 5, `bashExecution` 4 (a `!command` the user ran, with `command`, `output`, `exitCode`). pi's types also define `custom`, `branchSummary` and `compactionSummary` roles. **[source: `dist/core/messages.d.ts`]**
+- Other entry types seen: `session`, `model_change`, `thinking_level_change`, `custom`, `label`, `compaction`. Between a user message and its reply, only `thinking_level_change` appeared (6 times). On resume, pi appended a `custom` entry (`customType: plannotator`).
+- User message content was always an array of blocks, never a plain string. Assistant blocks are `text`, `thinking` and `toolCall`.
+
+### Stopping and resuming **[verified]**
+- `pkill -f -- <sock>` on an idle session exited 0. The dtach master, the attached client and pi were all gone within 0.08 s, dtach removed its own socket, and the session file's `shasum` was unchanged. The attached client printed `[got signal 15 - dying]` and its pane was held. A second `pkill` exited 1.
+- `dtach -A <sock> -E -r winch pi --session-id <id>` with the socket gone started pi again on the same file: the earlier conversation was on screen, and the next prompt appended to the same file. No second `*_<id>.jsonl` appeared.
+- Stopped mid-turn (while `sleep 30` ran in the bash tool), the file ended on the `assistant` `toolUse` entry, with no partial line and no `toolResult`. The `sleep` and its `bash -c` parent were gone too, so nothing was orphaned. After `dtach -A`, pi sat idle with the tool call shown, and the file still ended on `toolUse` (plus a `custom` entry).
+- `pkill -9 -f -- <sock>` left the socket file, and connecting to it was refused (`ECONNREFUSED`). pi died anyway. `dtach -A` on the stale socket worked: it replaced the socket and started pi, with no manual `rm`.
+
+### Model on resume **[verified]**
+- Started with `--model openai-codex/gpt-5.5` (the default is `gpt-6-astra`), the file got `model_change openai-codex gpt-5.5`, and the reply's assistant entry had `provider: openai-codex`, `model: gpt-5.5`.
+- After `pkill` and `dtach -A … pi --session-id <id>` with no `--model`, the footer showed `(openai-codex) gpt-5.5 • medium`, the next reply's entry had `model: gpt-5.5`, and no new `model_change` was written.
+
+### `pi --list-models` **[verified]**
+- Three runs (`env -u FORCE_COLOR pi --list-models`): exit 0, 0.75 s, 0.57 s and 0.49 s wall, nothing on stderr, identical output, no ANSI escapes.
+- 438 lines: a header, then 437 models. The header is `provider       model       …       context  max-out  thinking  images`, and each row has six whitespace-separated columns, for example `anthropic      claude-haiku-4-5      200K     64K      yes       yes`. Columns are padded with spaces, and rows end with trailing spaces.
+- Rows are grouped by provider: `anthropic` 16, `claude-bridge` 13, `openai-codex` 9, `openrouter` 399.
+- No value contains a space, so splitting on whitespace works. Model ids can contain `/` and `:` (`openrouter     z-ai/glm-5.3:batch`, up to 50 characters). `--model openrouter/z-ai/glm-5.3:batch` resolved to the model `glm-5.3:batch` with the default thinking level, not to `glm-5.3` with a `batch` thinking suffix.
