@@ -1575,12 +1575,12 @@ mod tests {
         );
     }
 
-    /// Claude, and a pi-like harness that can't run because dtach is missing.
+    /// Claude, and a pi-like harness that can't run because zmx is missing.
     fn claude_and_unavailable_pi() -> Vec<HarnessInfo> {
         vec![
             info(),
             HarnessInfo {
-                unavailable: Some("dtach not found".to_owned()),
+                unavailable: Some("zmx not found".to_owned()),
                 ..pi_like()
             },
         ]
@@ -1588,7 +1588,7 @@ mod tests {
 
     #[rstest::rstest]
     fn harness_picker_disables_an_unavailable_harness() {
-        // Given / When opening a harness picker where pi lacks dtach.
+        // Given / When opening a harness picker where pi lacks zmx.
         let picker = PickerState::harnesses(
             DraftTarget::Project(ProjectId(1)),
             &claude_and_unavailable_pi(),
@@ -1607,7 +1607,7 @@ mod tests {
                     id: HarnessId::new("pi"),
                     label: "pi".to_owned(),
                     icon: None,
-                    unavailable: Some("dtach not found".to_owned()),
+                    unavailable: Some("zmx not found".to_owned()),
                 },
                 true
             )),

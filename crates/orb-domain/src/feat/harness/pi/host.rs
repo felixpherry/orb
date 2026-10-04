@@ -1,10 +1,11 @@
-//! dtach as the host of pi sessions.
+//! zmx as the host of pi sessions.
 //!
-//! `dtach -n <socket> -E -r winch pi --session-id <id>` starts pi detached,
-//! `dtach -A` on the same socket attaches (and starts pi again on the same
-//! session when the socket is gone), and `pkill -f` on the socket ends it.
-//! A socket that answers `connect` means the session is running; its status
-//! then comes from the tail of pi's session file.
+//! A start only picks the session's id. The thread's pane runs
+//! `zmx attach <id> pi --session-id <id>`, which creates the session with the
+//! pane as its first client, so pi's startup modes reach orb live, and joins
+//! it when it already runs, getting zmx's snapshot of the screen and modes.
+//! `zmx kill` ends it. A socket that answers `connect` means the session is
+//! running; its status then comes from the tail of pi's session file.
 
 use std::ffi::OsString;
 use std::fs;
@@ -17,38 +18,29 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt};
 use serde_json::Value;
-use tokio::time::{Instant, sleep};
 
 use super::runner::{RunOutput, Runner};
 use super::session_file;
 use crate::feat::git::worktree::hex;
 use crate::feat::sessions::session_host::{
-    CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
+    AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
 };
 use crate::feat::sessions::state::ThreadStatus;
 use crate::feat::sessions::transcript::read_new_lines;
 
-/// How long `dtach -n` gets to start pi and hand back.
-const CREATE_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a started pi gets to fail before the start counts as good.
-const START_CHECK: Duration = Duration::from_secs(1);
-/// How long `pkill` gets to run.
-const PKILL_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long `stop` waits for the socket to stop answering.
-const STOP_WAIT: Duration = Duration::from_secs(2);
-/// How often `stop` checks the socket while it waits.
-const STOP_POLL: Duration = Duration::from_millis(50);
+/// How long `zmx kill` gets to run.
+const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How much of a session file's end the status reads.
 const TAIL: u64 = 512 * 1024;
 
-/// Hosts pi sessions under dtach, one socket per session in `socket_dir`.
-pub struct DtachHost {
+/// Hosts pi sessions under zmx, keeping their sockets in `socket_dir`.
+pub struct ZmxHost {
     runner: Arc<dyn Runner>,
     socket_dir: PathBuf,
     sessions_dir: PathBuf,
 }
 
-impl DtachHost {
+impl ZmxHost {
     /// A host keeping its sockets in `socket_dir` and finding pi's session
     /// files under `sessions_dir`.
     pub fn new(runner: Arc<dyn Runner>, socket_dir: PathBuf, sessions_dir: PathBuf) -> Self {
@@ -59,9 +51,29 @@ impl DtachHost {
         }
     }
 
-    /// The dtach socket of session `id`.
+    /// The socket of session `id`; zmx names it after the session.
     fn socket(&self, id: &str) -> PathBuf {
-        self.socket_dir.join(format!("{id}.sock"))
+        self.socket_dir.join(id)
+    }
+
+    /// `zmx <args>` on orb's socket directory with zmx's detach key off. The
+    /// `env` prefix carries `ZMX_DIR`, since panes and the runner pass only
+    /// orb's child environment.
+    fn zmx(&self, args: &[&str]) -> Vec<OsString> {
+        let dir = {
+            let mut dir = OsString::from("ZMX_DIR=");
+            dir.push(&self.socket_dir);
+            dir
+        };
+        [
+            OsString::from("env"),
+            dir,
+            "ZMX_NO_DETACH_KEY=1".into(),
+            "zmx".into(),
+        ]
+        .into_iter()
+        .chain(args.iter().map(OsString::from))
+        .collect()
     }
 }
 
@@ -70,25 +82,14 @@ fn new_id() -> String {
     format!("orb-{}{}{}{}", hex(0), hex(1), hex(2), hex(3))
 }
 
-/// `dtach <mode> <socket> -E -r winch pi --session-id <id>`.
-fn dtach_argv(mode: &str, socket: &Path, id: &str) -> Vec<OsString> {
-    let mut argv = vec![OsString::from("dtach"), mode.into(), socket.into()];
-    argv.extend(
-        ["-E", "-r", "winch", "pi", "--session-id", id]
-            .into_iter()
-            .map(OsString::from),
-    );
-    argv
-}
-
 /// An error whose reason is the first line `output` printed, else `fallback`.
 fn failure(output: &RunOutput, fallback: &str) -> Report<SessionHostError> {
     let reason = output.first_line().unwrap_or(fallback).to_owned();
     Report::new(SessionHostError).attach(reason)
 }
 
-/// Whether a dtach master answers on `socket`. A socket file nobody answers
-/// on is left from a dtach that died, so it's removed.
+/// Whether a zmx session answers on `socket`. A socket file nobody answers
+/// on is left from a zmx that died, so it's removed.
 fn answers(socket: &Path) -> bool {
     match UnixStream::connect(socket) {
         Ok(_) => true,
@@ -159,44 +160,23 @@ fn timestamp(entry: &Value) -> Option<jiff::Timestamp> {
 }
 
 #[async_trait]
-impl SessionHost for DtachHost {
+impl SessionHost for ZmxHost {
     fn name(&self) -> &'static str {
         super::ID
     }
 
     async fn create(
         &self,
-        cwd: &Path,
-        options: &SessionOptions,
+        _cwd: &Path,
+        _options: &SessionOptions,
     ) -> Result<CreatedSession, Report<SessionHostError>> {
-        let id = new_id();
-        let socket = self.socket(&id);
         fs::create_dir_all(&self.socket_dir).map_err(|error| {
             let reason = format!("couldn't create {}: {error}", self.socket_dir.display());
             Report::new(error)
                 .change_context(SessionHostError)
                 .attach(reason)
         })?;
-        let argv = {
-            let mut argv = dtach_argv("-n", &socket, &id);
-            if let Some(model) = &options.model {
-                argv.extend([OsString::from("--model"), model.into()]);
-            }
-            argv
-        };
-        let output = self
-            .runner
-            .run(&argv, cwd, CREATE_TIMEOUT)
-            .await
-            .change_context(SessionHostError)?;
-        if output.code != Some(0) {
-            return Err(failure(&output, "dtach exited with an error"));
-        }
-        sleep(START_CHECK).await;
-        if UnixStream::connect(&socket).is_err() {
-            return Err(Report::new(SessionHostError).attach(String::from("pi exited at start")));
-        }
-        Ok(CreatedSession { short_id: id })
+        Ok(CreatedSession { short_id: new_id() })
     }
 
     async fn list(
@@ -227,32 +207,17 @@ impl SessionHost for DtachHost {
     }
 
     async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
-        let socket = self.socket(short_id);
-        let argv = vec![
-            OsString::from("pkill"),
-            "-f".into(),
-            "--".into(),
-            socket.clone().into(),
-        ];
         let output = self
             .runner
-            .run(&argv, Path::new("/"), PKILL_TIMEOUT)
+            .run(&self.zmx(&["kill", short_id]), Path::new("/"), KILL_TIMEOUT)
             .await
             .change_context(SessionHostError)?;
-        // pkill exits 1 when no process matched: nothing was running.
-        if !matches!(output.code, Some(0 | 1)) {
-            return Err(failure(&output, "pkill exited with an error"));
+        // zmx exits 1 with SessionNotFound when nothing runs the session.
+        match (output.code, output.stderr.contains("SessionNotFound")) {
+            (Some(0), _) | (Some(1), true) => {}
+            _ => return Err(failure(&output, "zmx kill exited with an error")),
         }
-        let deadline = Instant::now() + STOP_WAIT;
-        while UnixStream::connect(&socket).is_ok() {
-            if Instant::now() >= deadline {
-                return Err(
-                    Report::new(SessionHostError).attach(String::from("pi is still running"))
-                );
-            }
-            sleep(STOP_POLL).await;
-        }
-        let _ = fs::remove_file(&socket);
+        let _ = fs::remove_file(self.socket(short_id));
         Ok(())
     }
 
@@ -260,8 +225,12 @@ impl SessionHost for DtachHost {
         self.stop(short_id).await
     }
 
-    fn attach_argv(&self, short_id: &str) -> Vec<OsString> {
-        dtach_argv("-A", &self.socket(short_id), short_id)
+    fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString> {
+        let mut argv = self.zmx(&["attach", short_id, "pi", "--session-id", short_id]);
+        if let (Some(model), false) = (start.model, start.has_transcript) {
+            argv.extend(["--model", model].map(OsString::from));
+        }
+        argv
     }
 }
 
@@ -285,10 +254,12 @@ mod tests {
     use serde_json::json;
     use tempfile::{TempDir, tempdir, tempdir_in};
 
-    use super::{DtachHost, tail_status};
+    use super::{ZmxHost, tail_status};
     use crate::feat::harness::pi::runner::RunOutput;
     use crate::feat::harness::pi::runner::fake::FakeRunner;
-    use crate::feat::sessions::session_host::{SessionHost, SessionHostError, SessionOptions};
+    use crate::feat::sessions::session_host::{
+        AttachStart, SessionHost, SessionHostError, SessionOptions,
+    };
     use crate::feat::sessions::state::ThreadStatus;
 
     type TestResult = Result<(), Box<dyn Error>>;
@@ -327,7 +298,7 @@ mod tests {
         Ok(path)
     }
 
-    /// Leaves a socket file at `path` that nobody answers on, as a dtach
+    /// Leaves a socket file at `path` that nobody answers on, as a zmx
     /// that died leaves it. macOS marks a new socket close-on-exec only after
     /// creating it, so a child another test spawns in that moment can hold
     /// the listener open for a while; this waits until connecting is refused.
@@ -352,8 +323,17 @@ mod tests {
         }
     }
 
-    fn host(runner: &Arc<FakeRunner>, sockets: &Path, sessions: &Path) -> DtachHost {
-        DtachHost::new(
+    /// What `zmx kill` answers when nothing runs the session.
+    fn not_found() -> RunOutput {
+        RunOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "error: failed to kill session=orb-a: SessionNotFound\n".to_owned(),
+        }
+    }
+
+    fn host(runner: &Arc<FakeRunner>, sockets: &Path, sessions: &Path) -> ZmxHost {
+        ZmxHost::new(
             runner.clone(),
             sockets.to_path_buf(),
             sessions.to_path_buf(),
@@ -364,7 +344,7 @@ mod tests {
         result.err()?.downcast_ref::<String>().cloned()
     }
 
-    async fn status_of(host: &DtachHost, id: &str) -> Result<Vec<ThreadStatus>, Box<dyn Error>> {
+    async fn status_of(host: &ZmxHost, id: &str) -> Result<Vec<ThreadStatus>, Box<dyn Error>> {
         Ok(host
             .list(&[id.to_owned()])
             .await?
@@ -410,13 +390,32 @@ mod tests {
         Ok(())
     }
 
+    /// The attach argv for orb-a on sockets in /s, then `extra`.
+    fn attach_of_orb_a(extra: &[&str]) -> Vec<OsString> {
+        [
+            "env",
+            "ZMX_DIR=/s",
+            "ZMX_NO_DETACH_KEY=1",
+            "zmx",
+            "attach",
+            "orb-a",
+            "pi",
+            "--session-id",
+            "orb-a",
+        ]
+        .iter()
+        .chain(extra)
+        .map(OsString::from)
+        .collect()
+    }
+
     #[rstest::rstest]
     #[tokio::test]
     async fn stale_socket_lists_as_stopped() -> TestResult {
-        // Given a socket whose dtach is gone.
+        // Given a socket whose zmx is gone.
         let sockets = socket_dir()?;
         let sessions = tempdir()?;
-        stale_socket(&sockets.path().join("orb-a.sock"))?;
+        stale_socket(&sockets.path().join("orb-a"))?;
         let host = host(
             &Arc::new(FakeRunner::new(ok())),
             sockets.path(),
@@ -438,10 +437,10 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test]
     async fn stale_socket_file_is_removed() -> TestResult {
-        // Given a socket whose dtach is gone.
+        // Given a socket whose zmx is gone.
         let sockets = socket_dir()?;
         let sessions = tempdir()?;
-        let socket = sockets.path().join("orb-a.sock");
+        let socket = sockets.path().join("orb-a");
         stale_socket(&socket)?;
         let host = host(
             &Arc::new(FakeRunner::new(ok())),
@@ -480,10 +479,10 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test]
     async fn live_socket_without_a_file_lists_as_idle() -> TestResult {
-        // Given a live dtach whose pi hasn't had a prompt yet.
+        // Given a live zmx session whose pi hasn't had a prompt yet.
         let sockets = socket_dir()?;
         let sessions = tempdir()?;
-        let _dtach = UnixListener::bind(sockets.path().join("orb-a.sock"))?;
+        let _zmx = UnixListener::bind(sockets.path().join("orb-a"))?;
         let host = host(
             &Arc::new(FakeRunner::new(ok())),
             sockets.path(),
@@ -501,10 +500,10 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test]
     async fn live_socket_with_a_newer_prompt_lists_as_working() -> TestResult {
-        // Given a live dtach whose file ends in a prompt written after it started.
+        // Given a live zmx session whose file ends in a prompt written after it started.
         let sockets = socket_dir()?;
         let sessions = tempdir()?;
-        let _dtach = UnixListener::bind(sockets.path().join("orb-a.sock"))?;
+        let _zmx = UnixListener::bind(sockets.path().join("orb-a"))?;
         write_session(sessions.path(), &[header(), message("user", None, NEWER)])?;
         let host = host(
             &Arc::new(FakeRunner::new(ok())),
@@ -521,77 +520,72 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn attach_argv_resumes_through_dtach() {
+    fn attach_argv_runs_zmx_with_orbs_socket_dir() {
         // Given a host keeping its sockets in /s.
         let runner = Arc::new(FakeRunner::new(ok()));
         let host = host(&runner, Path::new("/s"), Path::new("/p"));
 
-        // When building the attach command for orb-a.
-        let argv = host.attach_argv("orb-a");
+        // When building the attach command for orb-a with no model.
+        let argv = host.attach_argv("orb-a", &AttachStart::default());
 
-        // Then dtach attaches to (or starts) pi on the session.
-        let expected: Vec<OsString> = [
-            "dtach",
-            "-A",
-            "/s/orb-a.sock",
-            "-E",
-            "-r",
-            "winch",
-            "pi",
-            "--session-id",
-            "orb-a",
-        ]
-        .into_iter()
-        .map(OsString::from)
-        .collect();
-        assert_eq!(argv, expected, "attach should go through dtach -A");
+        // Then zmx attaches to (or starts) pi on the session in orb's socket dir.
+        assert_eq!(
+            argv,
+            attach_of_orb_a(&[]),
+            "attach should go through zmx attach on orb's socket dir"
+        );
     }
 
     #[rstest::rstest]
-    #[tokio::test(start_paused = true)]
-    async fn create_runs_dtach_detached_in_the_cwd() -> TestResult {
-        // Given a dtach that starts, and a model to start pi on.
-        let sockets = socket_dir()?;
-        let runner = Arc::new(FakeRunner::binding(ok()));
-        let host = host(&runner, sockets.path(), Path::new("/p"));
-        let options = SessionOptions {
-            model: Some("openai-codex/gpt-5.5".to_owned()),
-            permission_mode: None,
+    fn attach_argv_passes_the_model_before_a_session_file() {
+        // Given a host keeping its sockets in /s, and a thread with a model
+        // whose session file isn't known yet.
+        let runner = Arc::new(FakeRunner::new(ok()));
+        let host = host(&runner, Path::new("/s"), Path::new("/p"));
+        let start = AttachStart {
+            model: Some("openai-codex/gpt-5.5"),
+            has_transcript: false,
         };
 
-        // When creating a session in /work/a.
-        let id = host.create(Path::new("/work/a"), &options).await?.short_id;
+        // When building the attach command for orb-a.
+        let argv = host.attach_argv("orb-a", &start);
 
-        // Then dtach -n started pi on that id and model, in /work/a.
-        let socket = sockets.path().join(format!("{id}.sock"));
-        let expected: Vec<OsString> = [
-            OsString::from("dtach"),
-            "-n".into(),
-            socket.into(),
-            "-E".into(),
-            "-r".into(),
-            "winch".into(),
-            "pi".into(),
-            "--session-id".into(),
-            id.clone().into(),
-            "--model".into(),
-            "openai-codex/gpt-5.5".into(),
-        ]
-        .into();
+        // Then pi starts on that model.
         assert_eq!(
-            runner.calls(),
-            [(expected, PathBuf::from("/work/a"))],
-            "create should run dtach -n in the cwd"
+            argv,
+            attach_of_orb_a(&["--model", "openai-codex/gpt-5.5"]),
+            "a first start should pass the model"
         );
-        Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test(start_paused = true)]
+    fn attach_argv_leaves_out_the_model_once_the_session_file_is_known() {
+        // Given a host keeping its sockets in /s, and a thread with a model
+        // whose session file is known.
+        let runner = Arc::new(FakeRunner::new(ok()));
+        let host = host(&runner, Path::new("/s"), Path::new("/p"));
+        let start = AttachStart {
+            model: Some("openai-codex/gpt-5.5"),
+            has_transcript: true,
+        };
+
+        // When building the attach command for orb-a.
+        let argv = host.attach_argv("orb-a", &start);
+
+        // Then pi resumes without a model, keeping the one the session uses.
+        assert_eq!(
+            argv,
+            attach_of_orb_a(&[]),
+            "a resume should leave the model to the session file"
+        );
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn create_returns_an_orb_id_of_32_hex() -> TestResult {
-        // Given a dtach that starts.
+        // Given a host.
         let sockets = socket_dir()?;
-        let runner = Arc::new(FakeRunner::binding(ok()));
+        let runner = Arc::new(FakeRunner::new(ok()));
         let host = host(&runner, sockets.path(), Path::new("/p"));
 
         // When creating a session.
@@ -613,62 +607,64 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[tokio::test(start_paused = true)]
-    async fn create_fails_when_pi_exits_at_start() -> TestResult {
-        // Given dtach -n exiting 0 but nothing listening on the socket.
+    #[tokio::test]
+    async fn create_runs_no_command() -> TestResult {
+        // Given a host and a model to start pi on.
+        let sockets = socket_dir()?;
+        let runner = Arc::new(FakeRunner::new(ok()));
+        let host = host(&runner, sockets.path(), Path::new("/p"));
+        let options = SessionOptions {
+            model: Some("openai-codex/gpt-5.5".to_owned()),
+            permission_mode: None,
+        };
+
+        // When creating a session.
+        host.create(Path::new("/work/a"), &options).await?;
+
+        // Then nothing ran; the pane's attach starts pi.
+        assert!(runner.calls().is_empty(), "create should run no command");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn stop_runs_zmx_kill() -> TestResult {
+        // Given a host keeping its sockets in a socket dir.
         let sockets = socket_dir()?;
         let runner = Arc::new(FakeRunner::new(ok()));
         let host = host(&runner, sockets.path(), Path::new("/p"));
 
-        // When creating a session.
-        let result = host
-            .create(Path::new("/work/a"), &SessionOptions::default())
-            .await;
+        // When stopping orb-a.
+        host.stop("orb-a").await?;
 
-        // Then it fails because pi exited.
+        // Then zmx kill ran on orb's socket dir, in /.
+        let expected: Vec<OsString> = {
+            let mut dir = OsString::from("ZMX_DIR=");
+            dir.push(sockets.path());
+            [
+                OsString::from("env"),
+                dir,
+                "ZMX_NO_DETACH_KEY=1".into(),
+                "zmx".into(),
+                "kill".into(),
+                "orb-a".into(),
+            ]
+            .into()
+        };
         assert_eq!(
-            reason(result).as_deref(),
-            Some("pi exited at start"),
-            "a missing socket should fail the start"
+            runner.calls(),
+            [(expected, PathBuf::from("/"))],
+            "stop should run zmx kill"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test(start_paused = true)]
-    async fn create_fails_with_dtachs_first_line() -> TestResult {
-        // Given dtach failing to run pi.
+    #[tokio::test]
+    async fn stop_of_a_stopped_session_succeeds() -> TestResult {
+        // Given zmx kill finding no session.
         let sockets = socket_dir()?;
-        let runner = Arc::new(FakeRunner::new(RunOutput {
-            code: Some(1),
-            stdout: String::new(),
-            stderr: "dtach: could not execute pi: No such file or directory\n".to_owned(),
-        }));
-        let host = host(&runner, sockets.path(), Path::new("/p"));
-
-        // When creating a session.
-        let result = host
-            .create(Path::new("/work/a"), &SessionOptions::default())
-            .await;
-
-        // Then dtach's message is the reason.
-        assert_eq!(
-            reason(result).as_deref(),
-            Some("dtach: could not execute pi: No such file or directory"),
-            "dtach's first line should be the reason"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test(start_paused = true)]
-    async fn stop_treats_no_matching_process_as_done() -> TestResult {
-        // Given pkill finding no process (exit 1) and no socket.
-        let sockets = socket_dir()?;
-        let runner = Arc::new(FakeRunner::new(RunOutput {
-            code: Some(1),
-            ..RunOutput::default()
-        }));
+        let runner = Arc::new(FakeRunner::new(not_found()));
         let host = host(&runner, sockets.path(), Path::new("/p"));
 
         // When stopping the session.
@@ -680,11 +676,35 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[tokio::test(start_paused = true)]
-    async fn stop_removes_the_socket() -> TestResult {
-        // Given a socket that stops answering once pkill has run.
+    #[tokio::test]
+    async fn stop_reports_zmx_kills_error() -> TestResult {
+        // Given zmx kill failing for another reason.
         let sockets = socket_dir()?;
-        let socket = sockets.path().join("orb-a.sock");
+        let runner = Arc::new(FakeRunner::new(RunOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "error: failed to kill session=orb-a: ConnectionRefused\n".to_owned(),
+        }));
+        let host = host(&runner, sockets.path(), Path::new("/p"));
+
+        // When stopping the session.
+        let result = host.stop("orb-a").await;
+
+        // Then zmx's line is the reason.
+        assert_eq!(
+            reason(result).as_deref(),
+            Some("error: failed to kill session=orb-a: ConnectionRefused"),
+            "zmx's first line should be the reason"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn stop_removes_the_socket() -> TestResult {
+        // Given a socket left behind once zmx kill has run.
+        let sockets = socket_dir()?;
+        let socket = sockets.path().join("orb-a");
         stale_socket(&socket)?;
         let runner = Arc::new(FakeRunner::new(ok()));
         let host = host(&runner, sockets.path(), Path::new("/p"));
@@ -698,37 +718,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[tokio::test(start_paused = true)]
-    async fn stop_fails_while_pi_still_answers() -> TestResult {
-        // Given a dtach that keeps answering after pkill.
-        let sockets = socket_dir()?;
-        let _dtach = UnixListener::bind(sockets.path().join("orb-a.sock"))?;
-        let runner = Arc::new(FakeRunner::new(ok()));
-        let host = host(&runner, sockets.path(), Path::new("/p"));
-
-        // When stopping the session.
-        let result = host.stop("orb-a").await;
-
-        // Then it fails, saying pi is still running.
-        assert_eq!(
-            reason(result).as_deref(),
-            Some("pi is still running"),
-            "a socket that still answers should fail the stop"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn remove_keeps_the_session_file() -> TestResult {
         // Given a stopped session with a session file.
         let sockets = socket_dir()?;
         let sessions = tempdir()?;
         let file = write_session(sessions.path(), &[header(), message("user", None, OLDER)])?;
-        let runner = Arc::new(FakeRunner::new(RunOutput {
-            code: Some(1),
-            ..RunOutput::default()
-        }));
+        let runner = Arc::new(FakeRunner::new(not_found()));
         let host = host(&runner, sockets.path(), sessions.path());
 
         // When removing the session.

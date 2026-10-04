@@ -1,5 +1,5 @@
-//! The programs the pi harness runs: dtach to host a session, pkill to end
-//! one, and pi itself to list its models.
+//! The programs the pi harness runs: zmx to end a session, and pi itself to
+//! list its models.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -114,7 +114,6 @@ impl Runner for ProcessRunner {
 #[cfg(test)]
 pub(crate) mod fake {
     use std::ffi::OsString;
-    use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
     use std::time::Duration;
@@ -125,13 +124,10 @@ pub(crate) mod fake {
     use super::{RunError, RunOutput, Runner};
 
     /// A runner that records each command and answers every one with the
-    /// same output. A binding runner also listens on the socket a `dtach -n`
-    /// names, standing in for a dtach that started.
+    /// same output.
     pub(crate) struct FakeRunner {
         output: RunOutput,
-        bind: bool,
         calls: Mutex<Vec<(Vec<OsString>, PathBuf)>>,
-        listeners: Mutex<Vec<UnixListener>>,
     }
 
     impl FakeRunner {
@@ -139,17 +135,7 @@ pub(crate) mod fake {
         pub(crate) fn new(output: RunOutput) -> Self {
             Self {
                 output,
-                bind: false,
                 calls: Mutex::default(),
-                listeners: Mutex::default(),
-            }
-        }
-
-        /// A runner whose `dtach -n` leaves a dtach listening on its socket.
-        pub(crate) fn binding(output: RunOutput) -> Self {
-            Self {
-                bind: true,
-                ..Self::new(output)
             }
         }
 
@@ -178,17 +164,6 @@ pub(crate) mod fake {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push((argv.to_vec(), cwd.to_path_buf()));
-            if self.bind
-                && argv.get(1).is_some_and(|mode| mode == "-n")
-                && let Some(listener) = argv
-                    .get(2)
-                    .and_then(|socket| UnixListener::bind(socket).ok())
-            {
-                self.listeners
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(listener);
-            }
             Ok(self.output.clone())
         }
     }

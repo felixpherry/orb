@@ -1186,9 +1186,9 @@ mod tests {
 
     #[rstest::rstest]
     fn unavailable_harness_row_shows_its_reason() {
-        // Given a harness picker where pi lacks dtach.
+        // Given a harness picker where pi lacks zmx.
         let pi = HarnessInfo {
-            unavailable: Some("dtach not found".to_owned()),
+            unavailable: Some("zmx not found".to_owned()),
             ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
         };
         let picker = PickerState::harnesses(
@@ -1204,9 +1204,7 @@ mod tests {
         // Then pi's row names why it can't be picked.
         let lines = lines(&buf);
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("pi  dtach not found")),
+            lines.iter().any(|line| line.contains("pi  zmx not found")),
             "screen was {lines:#?}"
         );
     }

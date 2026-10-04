@@ -249,7 +249,7 @@ pub(crate) mod fake {
 
     use super::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat};
     use crate::feat::sessions::session_host::{
-        CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
+        AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
     };
     use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
@@ -311,7 +311,7 @@ pub(crate) mod fake {
         }
 
         /// `[<id>, <short id>]`, so tests can tell which harness built it.
-        fn attach_argv(&self, short_id: &str) -> Vec<OsString> {
+        fn attach_argv(&self, short_id: &str, _start: &AttachStart<'_>) -> Vec<OsString> {
             vec![OsString::from(self.id), OsString::from(short_id)]
         }
     }

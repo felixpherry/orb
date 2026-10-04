@@ -37,6 +37,15 @@ pub struct SessionOptions {
     pub permission_mode: Option<String>,
 }
 
+/// What a thread's attach needs to start its session when nothing runs it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttachStart<'a> {
+    /// The model the thread was started with, if one was picked.
+    pub model: Option<&'a str>,
+    /// Whether the harness has written the session's transcript yet.
+    pub has_transcript: bool,
+}
+
 /// One session the host knows about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
@@ -87,6 +96,7 @@ pub trait SessionHost: Send + Sync {
     /// Returns an error if the host refuses or fails to delete the session.
     async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>>;
 
-    /// The command that attaches a terminal to the session.
-    fn attach_argv(&self, short_id: &str) -> Vec<OsString>;
+    /// The command that attaches a terminal to the session. A harness whose
+    /// attach can also start the session uses `start` for that.
+    fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString>;
 }

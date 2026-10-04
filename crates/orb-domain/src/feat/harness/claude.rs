@@ -19,7 +19,7 @@ use self::trust::WorkspaceTrust;
 use super::{Harness, HarnessError, HarnessId, HarnessInfo, Scan, TranscriptFormat};
 use crate::feat::git::git_service::GitService;
 use crate::feat::sessions::session_host::{
-    CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
+    AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
 };
 use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
@@ -83,8 +83,8 @@ impl SessionHost for ClaudeCode {
         self.host.remove(short_id).await
     }
 
-    fn attach_argv(&self, short_id: &str) -> Vec<OsString> {
-        self.host.attach_argv(short_id)
+    fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString> {
+        self.host.attach_argv(short_id, start)
     }
 }
 

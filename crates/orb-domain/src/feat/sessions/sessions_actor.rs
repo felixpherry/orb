@@ -108,7 +108,9 @@ use kameo::mailbox;
 use kameo::prelude::{Actor, ActorRef, Context, Message, Reply, Spawn};
 use tokio::sync::Notify;
 
-use super::session_host::{SessionHostError, SessionOptions, SessionRecord, WorkspaceUntrusted};
+use super::session_host::{
+    AttachStart, SessionHostError, SessionOptions, SessionRecord, WorkspaceUntrusted,
+};
 use super::state::{
     Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, NEW_THREAD,
     Notice, NoticeKind, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId,
@@ -1105,7 +1107,12 @@ impl SessionsActor {
                     changed = true;
                 }
                 if let Some(thread) = thread_mut(sessions, row.id) {
-                    changed |= show(thread, row, status);
+                    changed |= show(
+                        thread,
+                        row,
+                        status,
+                        attach_argv(&self.services.harnesses, row),
+                    );
                 }
             }
             for row in self
@@ -2078,7 +2085,12 @@ impl SessionsActor {
             }
             if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
                 let status = thread.status;
-                show(thread, row, status);
+                show(
+                    thread,
+                    row,
+                    status,
+                    attach_argv(&self.services.harnesses, row),
+                );
             }
         }
         for row in self
@@ -2732,7 +2744,12 @@ impl SessionsActor {
             }
             if let Some(thread) = thread_mut(sessions, id) {
                 let status = thread.status;
-                show(thread, row, status);
+                show(
+                    thread,
+                    row,
+                    status,
+                    attach_argv(&self.services.harnesses, row),
+                );
             }
         }
         (self.wake)();
@@ -3056,10 +3073,15 @@ fn rename_hex_branch(git: &GitService, worktrees_root: &Path, row: &mut ThreadRo
     }
 }
 
-/// Shows a saved thread and `status` on `thread`. Returns whether anything
-/// visible changed.
-fn show(thread: &mut Thread, row: &ThreadRow, status: ThreadStatus) -> bool {
-    let shown = self::thread(row, status, thread.attach_argv.clone());
+/// Shows a saved thread and `status` on `thread`, attached to with
+/// `attach_argv`. Returns whether anything visible changed.
+fn show(
+    thread: &mut Thread,
+    row: &ThreadRow,
+    status: ThreadStatus,
+    attach_argv: Vec<OsString>,
+) -> bool {
+    let shown = self::thread(row, status, attach_argv);
     let changed = *thread != shown;
     *thread = shown;
     changed
@@ -3193,14 +3215,29 @@ fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
 /// How a saved thread looks before its first poll; one whose harness orb
 /// doesn't know is Gone, with nothing to attach.
 fn unpolled(harnesses: &Harnesses, row: &ThreadRow) -> Thread {
-    match harnesses.get(&row.harness) {
-        Some(harness) => thread(
-            row,
-            ThreadStatus::Unknown,
-            harness.attach_argv(&row.short_id),
-        ),
-        None => thread(row, ThreadStatus::Gone, Vec::new()),
-    }
+    let status = match harnesses.get(&row.harness) {
+        Some(_) => ThreadStatus::Unknown,
+        None => ThreadStatus::Gone,
+    };
+    thread(row, status, attach_argv(harnesses, row))
+}
+
+/// The command that attaches to `row`'s session, built by its harness from
+/// the row's model and whether its transcript is known, so an attach that
+/// starts the session again starts it right; nothing for a harness orb
+/// doesn't know.
+fn attach_argv(harnesses: &Harnesses, row: &ThreadRow) -> Vec<OsString> {
+    harnesses
+        .get(&row.harness)
+        .map_or_else(Vec::new, |harness| {
+            harness.attach_argv(
+                &row.short_id,
+                &AttachStart {
+                    model: row.model.as_deref(),
+                    has_transcript: row.transcript_path.is_some(),
+                },
+            )
+        })
 }
 
 /// The branch checked out in `cwd`, if git can tell.
@@ -3415,7 +3452,7 @@ mod tests {
     use crate::feat::harness::{HarnessInfo, Harnesses};
     use crate::feat::jumps::state::JumpList;
     use crate::feat::sessions::session_host::{
-        CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
+        AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
         WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
@@ -3632,8 +3669,14 @@ mod tests {
                 .map_err(|reason| Report::new(SessionHostError).attach(reason))
         }
 
-        fn attach_argv(&self, short_id: &str) -> Vec<OsString> {
-            vec![OsString::from(short_id)]
+        /// `[<short id>]`, plus `--model <m>` until the thread's transcript
+        /// is known, as pi's host builds it.
+        fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString> {
+            let mut argv = vec![OsString::from(short_id)];
+            if let (Some(model), false) = (start.model, start.has_transcript) {
+                argv.extend(["--model", model].map(OsString::from));
+            }
+            argv
         }
     }
 
@@ -4038,6 +4081,26 @@ mod tests {
         Ok((store, id))
     }
 
+    /// A store holding one thread in the orb project started on `model`.
+    fn store_with_model_thread(
+        short_id: &str,
+        model: &str,
+    ) -> Result<(Store, ThreadId), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        let project_id = orb_project(&store)?;
+        let id = store.insert_thread(&NewThread {
+            harness: HarnessId::new("claude"),
+            project_id,
+            short_id: short_id.to_owned(),
+            cwd: PathBuf::from(PROJECT_ROOT),
+            created_at: now_ms() - HOUR_MS,
+            model: Some(model.to_owned()),
+            permission_mode: None,
+            group_id: None,
+        })?;
+        Ok((store, id))
+    }
+
     /// Saves the orb project rooted at [`PROJECT_ROOT`].
     fn orb_project(store: &Store) -> Result<ProjectId, Report<StoreError>> {
         store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 0)
@@ -4309,6 +4372,58 @@ mod tests {
             shown(&state, id).map(|thread| (thread.status, thread.attach_argv.is_empty())),
             Some((ThreadStatus::Gone, true)),
             "a thread of an unknown harness should be gone with no attach command"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn thread_attach_argv_passes_the_model_before_its_transcript_is_found()
+    -> Result<(), Report<StoreError>> {
+        // Given a saved thread `aa` started on sonnet, with no transcript found.
+        let (store, id) = store_with_model_thread("aa", "sonnet")?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then its attach command carries the model.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.attach_argv),
+            Some(vec![
+                OsString::from("aa"),
+                OsString::from("--model"),
+                OsString::from("sonnet"),
+            ]),
+            "an attach before the transcript is found should start on the thread's model"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn thread_attach_argv_drops_the_model_once_its_transcript_is_found()
+    -> Result<(), Report<StoreError>> {
+        // Given a thread `aa` started on sonnet whose session has a transcript.
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(&path, "").change_context(StoreError)?;
+        let (store, id) = store_with_model_thread("aa", "sonnet")?;
+        let host = FakeHost::listing(vec![SessionRecord {
+            session_id: Some("s1".to_owned()),
+            ..record("aa", ThreadStatus::Idle)
+        }]);
+        let (mut actor, state) = start(store, &host, claude_dir.path());
+
+        // When polling finds the transcript.
+        actor.poll().await;
+
+        // Then its attach command no longer carries the model.
+        assert_eq!(
+            shown(&state, id).map(|thread| thread.attach_argv),
+            Some(vec![OsString::from("aa")]),
+            "an attach once the transcript is found should resume without the model"
         );
         Ok(())
     }

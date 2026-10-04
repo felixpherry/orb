@@ -21,7 +21,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::feat::sessions::session_host::{
-    CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
+    AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
     WorkspaceUntrusted,
 };
 use crate::feat::sessions::state::ThreadStatus;
@@ -110,7 +110,7 @@ impl SessionHost for ClaudeSupervisor {
         Ok(())
     }
 
-    fn attach_argv(&self, short_id: &str) -> Vec<OsString> {
+    fn attach_argv(&self, short_id: &str, _start: &AttachStart<'_>) -> Vec<OsString> {
         ["claude", "attach", short_id].map(OsString::from).into()
     }
 }
@@ -242,8 +242,8 @@ mod tests {
     use error_stack::Report;
 
     use super::{
-        ClaudeSupervisor, SessionHostError, SessionOptions, ThreadStatus, WorkspaceUntrusted,
-        bg_args, parse_agents, parse_backgrounded,
+        AttachStart, ClaudeSupervisor, SessionHostError, SessionOptions, ThreadStatus,
+        WorkspaceUntrusted, bg_args, parse_agents, parse_backgrounded,
     };
     use crate::feat::sessions::session_host::SessionHost;
 
@@ -454,7 +454,7 @@ mod tests {
         let supervisor = ClaudeSupervisor::new(Vec::new());
 
         // When asking for the attach command.
-        let argv = supervisor.attach_argv("28bf38e2");
+        let argv = supervisor.attach_argv("28bf38e2", &AttachStart::default());
 
         // Then it is `claude attach <id>`.
         assert_eq!(

@@ -1,6 +1,6 @@
-//! pi, a coding agent orb hosts under dtach: one dtach socket per session,
-//! status and titles read from pi's own session files, models from
-//! `pi --list-models`.
+//! pi, a coding agent orb hosts under zmx: one zmx session per thread, its
+//! socket under orb's own zmx directory, status and titles read from pi's own
+//! session files, models from `pi --list-models`.
 
 pub mod host;
 pub mod models;
@@ -15,12 +15,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use error_stack::Report;
 
-use self::host::DtachHost;
+use self::host::ZmxHost;
 use self::runner::Runner;
 use super::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat};
 use crate::feat::notify::terminal_notifier::on_path;
 use crate::feat::sessions::session_host::{
-    CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
+    AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
 };
 use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
@@ -38,30 +38,31 @@ const LABEL: &str = "pi";
 const ATTACH_MODES: &[u8] =
     b"\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h\x1b[?2004h";
 
-/// pi: sessions under dtach, session files under `sessions_dir`, models from
+/// pi: sessions under zmx, session files under `sessions_dir`, models from
 /// `pi --list-models`.
 pub struct Pi {
-    host: DtachHost,
+    host: ZmxHost,
     runner: Arc<dyn Runner>,
     sessions_dir: PathBuf,
-    /// The first of `pi` and `dtach` missing from `PATH` when orb started.
+    /// The first of `pi` and `zmx` missing from `PATH` when orb started.
     missing: Option<&'static str>,
 }
 
 impl Pi {
-    /// `path` is the `PATH` orb started with; `socket_dir` holds dtach's
-    /// sockets and `sessions_dir` is where pi writes its session files.
+    /// `path` is the `PATH` orb started with; `socket_dir` is zmx's directory
+    /// for orb's sessions (`ZMX_DIR`) and `sessions_dir` is where pi writes
+    /// its session files.
     pub fn new(
         runner: Arc<dyn Runner>,
         path: &OsStr,
         socket_dir: PathBuf,
         sessions_dir: PathBuf,
     ) -> Self {
-        let missing = ["pi", "dtach"]
+        let missing = ["pi", "zmx"]
             .into_iter()
             .find(|program| on_path(program, path).is_none());
         Self {
-            host: DtachHost::new(runner.clone(), socket_dir, sessions_dir.clone()),
+            host: ZmxHost::new(runner.clone(), socket_dir, sessions_dir.clone()),
             runner,
             sessions_dir,
             missing,
@@ -98,8 +99,8 @@ impl SessionHost for Pi {
         self.host.remove(short_id).await
     }
 
-    fn attach_argv(&self, short_id: &str) -> Vec<OsString> {
-        self.host.attach_argv(short_id)
+    fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString> {
+        self.host.attach_argv(short_id, start)
     }
 }
 
@@ -131,7 +132,7 @@ impl Harness for Pi {
         LABEL
     }
 
-    /// pi's models when pi and dtach are both on `PATH`; a failed model list
+    /// pi's models when pi and zmx are both on `PATH`; a failed model list
     /// leaves no models and its reason as the notice.
     async fn probe(&self) -> HarnessInfo {
         let (models, notice) = match self.missing {
@@ -211,9 +212,9 @@ anthropic      claude-haiku-4-5         200K     64K      yes       yes
     #[rstest::rstest]
     #[tokio::test]
     async fn probe_without_pi_reports_pi_not_found() -> io::Result<()> {
-        // Given only dtach on PATH.
+        // Given only zmx on PATH.
         // When probing pi.
-        let info = probe(&["dtach"], listing(MODELS)).await?;
+        let info = probe(&["zmx"], listing(MODELS)).await?;
 
         // Then pi is unavailable because it's missing.
         assert_eq!(
@@ -226,16 +227,16 @@ anthropic      claude-haiku-4-5         200K     64K      yes       yes
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn probe_without_dtach_reports_dtach_not_found() -> io::Result<()> {
+    async fn probe_without_zmx_reports_zmx_not_found() -> io::Result<()> {
         // Given only pi on PATH.
         // When probing pi.
         let info = probe(&["pi"], listing(MODELS)).await?;
 
-        // Then pi is unavailable because dtach is missing.
+        // Then pi is unavailable because zmx is missing.
         assert_eq!(
             info.unavailable.as_deref(),
-            Some("dtach not found"),
-            "a missing dtach should be the reason"
+            Some("zmx not found"),
+            "a missing zmx should be the reason"
         );
         Ok(())
     }
@@ -243,9 +244,9 @@ anthropic      claude-haiku-4-5         200K     64K      yes       yes
     #[rstest::rstest]
     #[tokio::test]
     async fn probe_without_pi_leaves_no_notice() -> io::Result<()> {
-        // Given only dtach on PATH.
+        // Given only zmx on PATH.
         // When probing pi.
-        let info = probe(&["dtach"], listing(MODELS)).await?;
+        let info = probe(&["zmx"], listing(MODELS)).await?;
 
         // Then there's nothing to tell on the mode line.
         assert_eq!(info.notice, None, "a missing program is no notice");
@@ -255,9 +256,9 @@ anthropic      claude-haiku-4-5         200K     64K      yes       yes
     #[rstest::rstest]
     #[tokio::test]
     async fn probe_lists_pi_models_by_provider() -> io::Result<()> {
-        // Given pi and dtach on PATH, and pi listing two providers' models.
+        // Given pi and zmx on PATH, and pi listing two providers' models.
         // When probing pi.
-        let info = probe(&["pi", "dtach"], listing(MODELS)).await?;
+        let info = probe(&["pi", "zmx"], listing(MODELS)).await?;
 
         // Then the models are grouped under their providers.
         let groups: Vec<_> = info
@@ -288,14 +289,14 @@ anthropic      claude-haiku-4-5         200K     64K      yes       yes
     #[rstest::rstest]
     #[tokio::test]
     async fn probe_reports_a_failed_model_list_as_its_notice() -> io::Result<()> {
-        // Given pi and dtach on PATH, and pi failing to list its models.
+        // Given pi and zmx on PATH, and pi failing to list its models.
         let runner = FakeRunner::new(RunOutput {
             code: Some(1),
             ..RunOutput::default()
         });
 
         // When probing pi.
-        let info = probe(&["pi", "dtach"], runner).await?;
+        let info = probe(&["pi", "zmx"], runner).await?;
 
         // Then the failure is the notice.
         assert_eq!(
@@ -309,9 +310,9 @@ anthropic      claude-haiku-4-5         200K     64K      yes       yes
     #[rstest::rstest]
     #[tokio::test]
     async fn probe_offers_no_permission_modes() -> io::Result<()> {
-        // Given pi and dtach on PATH.
+        // Given pi and zmx on PATH.
         // When probing pi.
-        let info = probe(&["pi", "dtach"], listing(MODELS)).await?;
+        let info = probe(&["pi", "zmx"], listing(MODELS)).await?;
 
         // Then it has no permission modes to pick.
         assert!(
@@ -324,24 +325,12 @@ anthropic      claude-haiku-4-5         200K     64K      yes       yes
     #[rstest::rstest]
     #[tokio::test]
     async fn probe_tags_threads_pi() -> io::Result<()> {
-        // Given pi and dtach on PATH.
+        // Given pi and zmx on PATH.
         // When probing pi.
-        let info = probe(&["pi", "dtach"], listing(MODELS)).await?;
+        let info = probe(&["pi", "zmx"], listing(MODELS)).await?;
 
         // Then its threads are tagged pi.
         assert_eq!(info.tag.as_deref(), Some("pi"), "pi's tag");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn probe_asks_for_a_nudge_on_attach() -> io::Result<()> {
-        // Given pi and dtach on PATH.
-        // When probing pi.
-        let info = probe(&["pi", "dtach"], listing(MODELS)).await?;
-
-        // Then attaching to a pi thread nudges the pane's size.
-        assert!(info.nudge_on_attach, "pi redraws only on a size change");
         Ok(())
     }
 }
