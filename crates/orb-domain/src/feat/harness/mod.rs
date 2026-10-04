@@ -6,6 +6,7 @@
 //! stores the id of its harness, and shared code picks the harness by it.
 
 pub mod claude;
+pub mod pi;
 
 use std::fmt;
 use std::io;
@@ -56,6 +57,11 @@ pub struct HarnessInfo {
     pub models: Vec<ModelGroup>,
     /// The permission modes on offer; empty when the harness has none.
     pub permission_modes: Vec<String>,
+    /// The attached program redraws only when its screen size changes, so
+    /// orb nudges the size once the attach has connected.
+    pub nudge_on_attach: bool,
+    /// Something the probe ran into, shown once on the mode line.
+    pub notice: Option<String>,
 }
 
 impl HarnessInfo {
@@ -69,6 +75,8 @@ impl HarnessInfo {
             unavailable: None,
             models: Vec::new(),
             permission_modes: Vec::new(),
+            nudge_on_attach: false,
+            notice: None,
         }
     }
 

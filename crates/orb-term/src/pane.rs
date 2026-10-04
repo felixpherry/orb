@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::Dimensions;
 use error_stack::{Report, ResultExt};
@@ -78,6 +78,16 @@ pub enum PaneEvent {
     Exited,
 }
 
+/// How long a size nudge holds the smaller size before restoring it.
+const NUDGE_HOLD: Duration = Duration::from_millis(50);
+
+/// A pending size nudge: shrink at the first instant, restore at the second.
+#[derive(Debug, Clone, Copy)]
+enum Nudge {
+    Shrink(Instant),
+    Restore(Instant),
+}
+
 /// The pane's child could not be started.
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -94,6 +104,8 @@ pub struct Pane {
     killer: Box<dyn ChildKiller + Send + Sync>,
     exited: Arc<AtomicBool>,
     size: PaneSize,
+    /// A size nudge in progress, if one was asked for.
+    nudge: Option<Nudge>,
 }
 
 impl Pane {
@@ -140,6 +152,7 @@ impl Pane {
             killer: child.clone_killer(),
             exited: Arc::new(AtomicBool::new(false)),
             size,
+            nudge: None,
         };
         // From here on, an early return drops `pane`, which kills the child.
         spawn_reader(reader, pane.emulator.clone(), notify.clone())?;
@@ -195,6 +208,38 @@ impl Pane {
     /// `now`.
     pub fn flush_expired_sync(&self, now: Instant) {
         lock(&self.emulator).flush_expired_sync(now);
+    }
+
+    /// Asks the pane to shrink the child's screen by one row after `delay`,
+    /// then restore it, so a child that redraws only on a real size change
+    /// draws its screen again. Only the child sees the smaller size; the
+    /// pane keeps drawing at its own.
+    pub fn nudge_after(&mut self, delay: Duration) {
+        self.nudge = Some(Nudge::Shrink(Instant::now() + delay));
+    }
+
+    /// When the pending nudge's next step is due; `None` when there's none.
+    /// The owner should call [`Pane::run_nudge`] once this passes.
+    pub fn nudge_deadline(&self) -> Option<Instant> {
+        match self.nudge? {
+            Nudge::Shrink(at) | Nudge::Restore(at) => Some(at),
+        }
+    }
+
+    /// Takes the nudge step due at or before `now`.
+    pub fn run_nudge(&mut self, now: Instant) {
+        match self.nudge {
+            Some(Nudge::Shrink(at)) if at <= now => {
+                let rows = self.size.rows.saturating_sub(1).max(1);
+                let _ = self.master.resize(pty_size(PaneSize { rows, ..self.size }));
+                self.nudge = Some(Nudge::Restore(now + NUDGE_HOLD));
+            }
+            Some(Nudge::Restore(at)) if at <= now => {
+                let _ = self.master.resize(pty_size(self.size));
+                self.nudge = None;
+            }
+            _ => {}
+        }
     }
 
     /// Draws the child's screen into `area` of `buf`; returns where the cursor
@@ -464,6 +509,61 @@ mod tests {
         assert!(
             wait_until(|| screen(&pane).contains("30 100")),
             "stty should report the new size, got {:?}",
+            screen(&pane)
+        );
+        Ok(())
+    }
+
+    /// A child that prints its size after each of two lines of input.
+    fn size_printer() -> PaneCommand {
+        command(
+            &[
+                "/bin/sh",
+                "-c",
+                "read x; /bin/stty size; read y; /bin/stty size",
+            ],
+            &[],
+        )
+    }
+
+    #[rstest::rstest]
+    fn nudge_shrinks_the_childs_screen_by_a_row() -> Result<(), Report<PaneError>> {
+        // Given an 80×24 pane whose child prints its size after a line of input.
+        let mut pane = Pane::spawn(&size_printer(), SIZE, |_| {})?;
+
+        // When a nudge's first step runs and the user presses Enter.
+        pane.nudge_after(Duration::ZERO);
+        pane.run_nudge(Instant::now());
+        pane.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Then the child sees one row fewer.
+        assert!(
+            wait_until(|| screen(&pane).contains("23 80")),
+            "stty should report one row fewer, got {:?}",
+            screen(&pane)
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn nudge_then_restores_the_childs_size() -> Result<(), Report<PaneError>> {
+        // Given an 80×24 pane whose child has seen the nudge's smaller size.
+        let mut pane = Pane::spawn(&size_printer(), SIZE, |_| {})?;
+        pane.nudge_after(Duration::ZERO);
+        let shrunk_at = Instant::now();
+        pane.run_nudge(shrunk_at);
+        pane.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let shrunk = wait_until(|| screen(&pane).contains("23 80"));
+
+        // When the nudge's second step runs 50 ms later and the user presses
+        // Enter again.
+        pane.run_nudge(shrunk_at + Duration::from_millis(50));
+        pane.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Then the child sees the pane's own size again.
+        assert!(
+            shrunk && wait_until(|| screen(&pane).contains("24 80")),
+            "stty should report 23 80, then 24 80, got {:?}",
             screen(&pane)
         );
         Ok(())

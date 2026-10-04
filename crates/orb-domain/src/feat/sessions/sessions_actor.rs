@@ -468,13 +468,17 @@ impl Message<Probed> for SessionsActor {
 
     async fn handle(
         &mut self,
-        Probed(info): Probed,
+        Probed(mut info): Probed,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         {
+            let notice = info.notice.take();
             let mut app = self.state.write();
             if let Some(entry) = app.harnesses.iter_mut().find(|entry| entry.id == info.id) {
                 *entry = info;
+            }
+            if let Some(notice) = notice {
+                app.sessions.error = Some(notice);
             }
         }
         (self.wake)();
@@ -3177,7 +3181,7 @@ fn reason(report: &Report<SessionHostError>) -> String {
     report
         .downcast_ref::<String>()
         .cloned()
-        .unwrap_or_else(|| "claude failed".to_owned())
+        .unwrap_or_else(|| "session command failed".to_owned())
 }
 
 /// How a saved thread looks with `status`, attached to with `attach_argv`.
@@ -4417,6 +4421,39 @@ mod tests {
                 .cloned(),
             Some(models::info()),
             "a probe's info should replace its harness's placeholder"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn probe_notice_shows_on_the_mode_line() -> Result<(), Report<StoreError>> {
+        // Given a running actor with Claude and the other harness.
+        let state = State::default();
+        let claude = FakeHost::listing(Vec::new());
+        let other = FakeHost::listing(Vec::new());
+        let actor_ref = spawn_sessions_actor(deps_beside(
+            Store::open_in_memory()?,
+            &claude,
+            &other,
+            &state,
+        ));
+
+        // When it handles a probe that came back with a notice.
+        let notice = "pi --list-models failed: exit code 1";
+        actor_ref
+            .ask(Probed(HarnessInfo {
+                notice: Some(notice.to_owned()),
+                ..models::info()
+            }))
+            .await
+            .map_err(|error| Report::new(StoreError).attach(error.to_string()))?;
+
+        // Then the notice is on the mode line.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some(notice),
+            "a probe's notice should show on the mode line"
         );
         Ok(())
     }

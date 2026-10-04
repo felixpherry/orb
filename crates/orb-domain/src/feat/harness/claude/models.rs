@@ -119,6 +119,8 @@ pub fn info() -> HarnessInfo {
             },
         ],
         permission_modes: PERMISSION_MODES.map(str::to_owned).to_vec(),
+        nudge_on_attach: false,
+        notice: None,
     }
 }
 

@@ -7,10 +7,10 @@
 //! while a thread is working or a session is starting, so the spinners turn
 //! and a working thread's elapsed time counts up.
 //!
-//! Each attached thread keeps its own `claude attach` pane while other
+//! Each attached thread keeps its own attach command's pane while other
 //! threads are selected; the right side shows the selected thread's pane
 //! when it's attached, else the dashboard. While attached, input goes
-//! straight to Claude, except the resize keys; otherwise keys go through the resize keys, then the
+//! straight to the attached program, except the resize keys; otherwise keys go through the resize keys, then the
 //! [`keymap`]. The loop itself reads the directory picker's listings, the
 //! branch picker's refs and the session picker's preview, re-reading the
 //! preview whenever the selected thread's transcript changes length, and
@@ -18,8 +18,8 @@
 //!
 //! `<C-h>` moves the keys from the pane to the sidebar and leaves it drawn,
 //! so `<C-l>` goes back into it; `<C-\>`, in the pane or on the thread in the
-//! sidebar, detaches it, and settling or deleting the thread or its Claude
-//! exiting ends the pane too.
+//! sidebar, detaches it, and settling or deleting the thread or its
+//! attached program exiting ends the pane too.
 //!
 //! When a thread finishes a turn or starts needing an approval or an answer
 //! while orb's pane isn't focused, the loop announces it as a desktop
@@ -42,12 +42,12 @@
 //! back.
 //!
 //! orb captures the mouse throughout. Mouse events over the attached pane go
-//! to Claude; the rest are mapped through the last frame's hit map to intents
+//! to the attached program; the rest are mapped through the last frame's hit map to intents
 //! or a scroll of the sidebar's view (see [`mouse`]).
 //!
 //! After each frame the outer terminal's cursor takes the shape of where the
-//! keys are: a block in the sidebar, a bar in a text input, Claude's own
-//! shape while attached.
+//! keys are: a block in the sidebar, a bar in a text input, the attached
+//! program's own shape while attached.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -58,7 +58,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
@@ -88,6 +88,10 @@ use crate::mouse::{self, Clicks, HitMap, MouseRoute};
 use crate::picker::PickerScroll;
 use crate::sidebar::{SPINNER_FRAME, SidebarScroll};
 use crate::{outer_terminal, render};
+
+/// How long after a pane starts that orb nudges its size, giving the attach
+/// command time to connect and send its own size first.
+const ATTACH_NUDGE: Duration = Duration::from_millis(500);
 
 /// The frontend loop failed to draw a frame or read a terminal event.
 #[derive(Debug, Error)]
@@ -121,7 +125,7 @@ impl Frontend {
     /// `sessions`; worktree commands go to `worktrees`; search commands go
     /// to `search`; a thread whose worktree under `worktrees_root` is gone has
     /// it recreated before attaching; the branch picker's refs come from
-    /// `git`; attached sessions run with `claude_env`; tools open through
+    /// `git`; attached sessions run with `env`; tools open through
     /// `zellij`, `None` outside zellij; notices are announced through
     /// `notifier` while orb's pane isn't focused, or while zellij says no
     /// client is on it. The terminal is restored on exit and on panic.
@@ -139,7 +143,7 @@ impl Frontend {
         search: ActorRef<SearchActor>,
         git: GitService,
         harnesses: Harnesses,
-        claude_env: Vec<(OsString, OsString)>,
+        env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
         notifier: NotifierService,
     ) -> Result<(), Report<TuiRunError>> {
@@ -155,7 +159,7 @@ impl Frontend {
                 search,
                 git,
                 harnesses,
-                claude_env,
+                env,
                 zellij,
                 notifier,
                 tx,
@@ -230,7 +234,7 @@ fn started_attach(
 /// What `Command::Attach` does for a thread without a live pane.
 #[derive(Debug, PartialEq, Eq)]
 enum AttachPlan {
-    /// Start `claude attach` in the thread's directory.
+    /// Start the attach command in the thread's directory.
     Spawn,
     /// The thread's orb worktree is gone: have the sessions actor recreate it.
     Restore,
@@ -325,13 +329,13 @@ struct App {
     /// Every harness, to read a thread's transcript in its own format.
     harnesses: Harnesses,
     keys: Keys,
-    /// Each attached thread's `claude attach`, kept while other threads are
+    /// Each attached thread's attach command, kept while other threads are
     /// selected.
     panes: HashMap<ThreadId, Pane>,
     /// The thread whose pane last got the keys, so the pane loses focus when
     /// the keys move on even though the selection already has.
     focused_pane: Option<ThreadId>,
-    /// Shown on the right when `claude attach` couldn't start.
+    /// Shown on the right when a thread's attach command couldn't start.
     pane_error: Option<String>,
     /// The folder the trust confirm was opened for, while its start waits.
     opened_trust: Option<PathBuf>,
@@ -339,7 +343,7 @@ struct App {
     /// to the sidebar or the dashboard.
     attach_waited: bool,
     /// The environment attached sessions run with.
-    claude_env: Vec<(OsString, OsString)>,
+    env: Vec<(OsString, OsString)>,
     /// Opens tools; `None` outside zellij.
     zellij: Option<ZellijService>,
     /// Announces the sessions actor's notices.
@@ -370,7 +374,7 @@ impl App {
         search: ActorRef<SearchActor>,
         git: GitService,
         harnesses: Harnesses,
-        claude_env: Vec<(OsString, OsString)>,
+        env: Vec<(OsString, OsString)>,
         zellij: Option<ZellijService>,
         notifier: NotifierService,
         tx: Sender<LoopEvent>,
@@ -394,7 +398,7 @@ impl App {
             pane_error: None,
             opened_trust: None,
             attach_waited: false,
-            claude_env,
+            env,
             zellij,
             notifier,
             tz,
@@ -485,15 +489,17 @@ impl App {
             self.ask_trust();
             self.open_started();
             let now = Instant::now();
-            for pane in self.panes.values() {
+            for pane in self.panes.values_mut() {
                 pane.flush_expired_sync(now);
+                pane.run_nudge(now);
             }
         }
     }
 
     /// When the loop must wake without an event: a pane's synchronized
-    /// update times out, or a spinner frame passes while a thread is working
-    /// or a session is starting, so the spinners and elapsed time tick.
+    /// update times out, a pane's size nudge is due, or a spinner frame
+    /// passes while a thread is working or a session is starting, so the
+    /// spinners and elapsed time tick.
     fn deadline(&self) -> Option<Instant> {
         let tick = self
             .state
@@ -502,7 +508,8 @@ impl App {
             .spinning()
             .then(|| Instant::now() + SPINNER_FRAME);
         let sync = self.panes.values().filter_map(Pane::sync_deadline);
-        tick.into_iter().chain(sync).min()
+        let nudges = self.panes.values().filter_map(Pane::nudge_deadline);
+        tick.into_iter().chain(sync).chain(nudges).min()
     }
 
     /// The pane that receives input: the shown one, while the user is
@@ -661,12 +668,15 @@ impl App {
                         return;
                     }
                     match self.spawn_pane(target.argv.clone(), target.cwd.clone()) {
-                        Some(pane) => {
+                        Some(mut pane) => {
+                            if target.nudge {
+                                pane.nudge_after(ATTACH_NUDGE);
+                            }
                             self.panes.insert(target.thread, pane);
                             self.pane_error = None;
                         }
                         None => {
-                            self.pane_error = Some("couldn't start claude attach".to_owned());
+                            self.pane_error = Some("couldn't start the attach command".to_owned());
                             let mut app = self.state.write();
                             app.focus = Focus::Dashboard;
                             app.attached.remove(&target.thread);
@@ -971,8 +981,8 @@ impl App {
         }
     }
 
-    /// Drops the panes whose Claude exited or whose thread is no longer
-    /// attached, which kills their `claude attach`, and takes them out of
+    /// Drops the panes whose attached program exited or whose thread is no
+    /// longer attached, which kills their attach command, and takes them out of
     /// `attached`. If the keys were in a pane that's no longer shown, orb
     /// leaves it.
     fn reconcile(&mut self) {
@@ -1131,13 +1141,13 @@ impl App {
     }
 
     /// Runs `argv` in `cwd` in a pane the size of the pane area, with
-    /// Claude's environment; `None` if it can't start.
+    /// orb's child environment; `None` if it can't start.
     fn spawn_pane(&self, argv: Vec<OsString>, cwd: PathBuf) -> Option<Pane> {
         let tx = self.tx.clone();
         let command = PaneCommand {
             argv,
             cwd,
-            env: self.claude_env.clone(),
+            env: self.env.clone(),
         };
         Pane::spawn(&command, PaneSize::from(self.pane_area), move |event| {
             let _ = tx.send(LoopEvent::Pane(event));

@@ -13,6 +13,8 @@ use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::harness::claude::ClaudeCode;
 use orb_domain::feat::harness::claude::supervisor::ClaudeSupervisor;
 use orb_domain::feat::harness::claude::trust::{ClaudeConfigTrust, claude_config_file};
+use orb_domain::feat::harness::pi::Pi;
+use orb_domain::feat::harness::pi::runner::ProcessRunner;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::notify::terminal_notifier::{ClickTarget, Kitty, ZellijTarget, on_path};
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
@@ -40,7 +42,10 @@ fn main() -> Result<(), Report<OrbError>> {
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let claude_config = claude_config_file(config_dir.as_deref(), &home);
     let claude_dir = config_dir.unwrap_or_else(|| home.join(".claude"));
-    let claude_env = child_env(std::env::vars_os());
+    let pi_sessions = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
+        .map_or_else(|| home.join(".pi/agent/sessions"), PathBuf::from);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let env = child_env(std::env::vars_os());
     let tz = TimeZone::system();
     let session = std::env::var_os("ZELLIJ_SESSION_NAME");
     let pane = std::env::var("ZELLIJ_PANE_ID")
@@ -64,15 +69,21 @@ fn main() -> Result<(), Report<OrbError>> {
     });
     let frontend = Frontend::new(tz);
     let services = {
-        let git = GitService::new(Arc::new(GitCli::new(claude_env.clone())));
+        let git = GitService::new(Arc::new(GitCli::new(env.clone())));
         let claude = ClaudeCode::new(
-            Arc::new(ClaudeSupervisor::new(claude_env.clone())),
+            Arc::new(ClaudeSupervisor::new(env.clone())),
             Arc::new(ClaudeConfigTrust::new(claude_config)),
             claude_dir,
             git.clone(),
         );
+        let pi = Pi::new(
+            Arc::new(ProcessRunner::new(env.clone())),
+            &path,
+            orb_root.join("pi"),
+            pi_sessions,
+        );
         Services {
-            harnesses: Harnesses::new(vec![Arc::new(claude)]),
+            harnesses: Harnesses::new(vec![Arc::new(claude), Arc::new(pi)]),
             git,
         }
     };
@@ -110,7 +121,7 @@ fn main() -> Result<(), Report<OrbError>> {
             search,
             git,
             harnesses,
-            claude_env,
+            env,
             zellij,
             notifier,
         )

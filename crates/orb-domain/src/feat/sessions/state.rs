@@ -1208,6 +1208,9 @@ pub struct AttachTarget {
     pub thread: ThreadId,
     pub argv: Vec<OsString>,
     pub cwd: PathBuf,
+    /// The attached program redraws only on a size change, so the pane
+    /// nudges its size once the attach has connected.
+    pub nudge: bool,
 }
 
 #[cfg(test)]
