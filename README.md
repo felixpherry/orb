@@ -4,7 +4,7 @@ A vim-first terminal manager for running many [Claude Code](https://claude.com/c
 
 ## Quickstart
 
-You need macOS, a recent stable Rust toolchain, [Claude Code](https://docs.claude.com/en/docs/claude-code), [zellij](https://zellij.dev) and a [Nerd Font](https://www.nerdfonts.com) in your terminal. [lazygit](https://github.com/jesseduffield/lazygit), [neovim](https://neovim.io) and [terminal-notifier](https://github.com/julienXX/terminal-notifier) are optional. For pi sessions you also need pi and dtach (`brew install dtach`) on your `PATH` when orb starts; without either, `␣h` shows pi disabled as `pi not found` or `dtach not found`.
+You need macOS, a recent stable Rust toolchain, [Claude Code](https://docs.claude.com/en/docs/claude-code), [zellij](https://zellij.dev) and a [Nerd Font](https://www.nerdfonts.com) in your terminal. [lazygit](https://github.com/jesseduffield/lazygit), [neovim](https://neovim.io) and [terminal-notifier](https://github.com/julienXX/terminal-notifier) are optional. For pi sessions you also need pi and zmx (`brew install neurosnap/tap/zmx`) on your `PATH` when orb starts; without either, `␣h` shows pi disabled as `pi not found` or `zmx not found`.
 
 ```sh
 cargo install --git https://github.com/felixpherry/orb --locked
@@ -17,7 +17,7 @@ Then:
 1. `␣p` adds a project from a directory picker (`Tab` opens a folder, `⏎` adds it).
 2. `␣n` picks a project and opens a draft. `␣h`, `␣w`, `␣b`, `␣m` and `␣a` set its harness (Claude Code or pi), workspace, branch, model and permission.
 3. `⏎` starts the session and attaches you to Claude or pi.
-4. `<C-\>` takes you back to orb. The session keeps running, in Claude's background supervisor or, for pi, under dtach, even after you quit orb.
+4. `<C-\>` takes you back to orb. The session keeps running, in Claude's background supervisor or, for pi, under zmx, even after you quit orb.
 5. For related threads, `␣gf`, `␣gr` and `␣gl` make a Feature, Research or Learn group. For a quick question outside any project, `␣i` opens an Incognito draft.
 
 ## Demo
@@ -45,8 +45,8 @@ The demo shows, in order:
 ## Features
 
 - **One list for every session.** The sidebar shows each thread's status (working, needs approval, needs input, done), its project, branch and elapsed time, across all projects. Pinned threads sit on top, and quiet ones settle onto a collapsible shelf.
-- **The real Claude or pi, attached.** `⏎` runs `claude attach`, or `dtach -A` for a pi thread, in a terminal pane inside orb, so every slash command, permission prompt and picker works. Each attached thread keeps its own pane.
-- **pi beside Claude.** `␣h` on a draft picks Claude Code or pi. A pi session runs under dtach, so it outlives orb too. orb reads its status (working, idle, stopped), its title (`/name`, else the first prompt), the session picker's preview and `␣sg`'s messages from pi's session file, and `␣m` lists the models `pi --list-models` printed at orb's start, under a heading per provider. pi has no permission modes, so `␣a` isn't offered on a pi draft, and orb's trust confirm doesn't apply to it. A lone pi thread shows a dim `pi` tag before its status.
+- **The real Claude or pi, attached.** `⏎` runs `claude attach`, or `zmx attach` for a pi thread, in a terminal pane inside orb, so every slash command, permission prompt and picker works. Each attached thread keeps its own pane.
+- **pi beside Claude.** `␣h` on a draft picks Claude Code or pi. A pi session runs under zmx, so it outlives orb too. orb reads its status (working, idle, stopped), its title (`/name`, else the first prompt), the session picker's preview and `␣sg`'s messages from pi's session file, and `␣m` lists the models `pi --list-models` printed at orb's start, under a heading per provider. pi has no permission modes, so `␣a` isn't offered on a pi draft, and orb's trust confirm doesn't apply to it. A lone pi thread shows a dim `pi` tag before its status.
 - **Worktrees built in.** A new session can get its own worktree under `~/.orb/worktrees/`. Once Claude names the thread, its `orb/<hex>` branch is renamed to match the title. Every hour, and at start, orb prunes worktrees that nothing uses, or whose threads were all settled at least 7 days ago, keeping their branches and skipping any with uncommitted changes; `⏎` on a pruned thread recreates its worktree on its branch and resumes the chat.
 - **Drafts.** Set up the project, harness, workspace, base branch, model and permission before starting a session. A draft in a folder that isn't a git repository starts in that folder, and `␣w`/`␣b` there offer to initialize git.
 - **Trust handled for you.** When Claude refuses a folder it hasn't been trusted in, orb asks `Trust <path>?` (`No` selected). `Yes` marks it trusted in Claude's `.claude.json` and retries the start. pi threads never get this confirm.
