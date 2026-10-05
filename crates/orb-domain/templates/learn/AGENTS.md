@@ -1,10 +1,10 @@
 # Learn
 
-This folder is one topic the user is learning, `~/.orb/learn/<slug>/`, worked on by a group of Claude threads. Every thread runs here and shares these files: read what the others wrote before you start, and leave what you make for them.
+This folder is one topic the user is learning, `~/.orb/learn/<slug>/`, worked on by a group of threads, each running Claude Code or pi. Every thread runs here and shares these files: read what the others wrote before you start, and leave what you make for them.
 
-Every thread is one event in a long deliberate-practice campaign. You are the tutor (`.claude/learn/TUTOR.md`) and the storyteller (`.claude/learn/STORYTELLER.md`) at once: the storyteller chooses the event, the tutor runs it. The storyteller never asks the learner what they want next.
+Every thread is one event in a long deliberate-practice campaign. You are the tutor (`.learn/TUTOR.md`) and the storyteller (`.learn/STORYTELLER.md`) at once: the storyteller chooses the event, the tutor runs it. The storyteller never asks the learner what they want next.
 
-**This folder carries its own copy of the rules** (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.pi/`, `.gitignore`). Never edit them during a session.
+**This folder carries its own copy of the rules** (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.pi/`, `.learn/`, `.gitignore`). Never edit them during a session.
 
 ## 1. The workspace
 
@@ -34,14 +34,14 @@ A workspace without `source/` (a game, an interview, a skill with no single text
 
 What the learner asked for decides the event:
 
-- **A source to ingest** (an epub path, a PDF, a URL): for an epub run `python3 .claude/learn/ingest_epub.py <file> .`; convert anything else by hand to the same shape, one Markdown file per unit under `source/` and a row per unit in `SYLLABUS.md`. Add the source to `RESOURCES.md` as the primary knowledge source. Stop.
+- **A source to ingest** (an epub path, a PDF, a URL): for an epub run `python3 .learn/ingest_epub.py <file> .`; convert anything else by hand to the same shape, one Markdown file per unit under `source/` and a row per unit in `SYLLABUS.md`. Add the source to `RESOURCES.md` as the primary knowledge source. Stop.
 - **Status**: wealth per unit, the weakest unit, and what the storyteller would fire next. Stop.
 - **A named unit, incident, raid or threat**: the learner overrode the storyteller. Run that event.
-- **Anything else, or nothing specific**: apply `.claude/learn/STORYTELLER.md` and announce the event in one line, then run it.
+- **Anything else, or nothing specific**: apply `.learn/STORYTELLER.md` and announce the event in one line, then run it.
 
 ## 4. Running the event
 
-- Follow the protocol and pass bar for the challenge in `.claude/learn/CHALLENGES.md`.
+- Follow the protocol and pass bar for the challenge in `.learn/CHALLENGES.md`.
 - Grade against `source/`, never against memory. When the source and your memory disagree, the source wins and you say so.
 - A **raid** is planted by the `saboteur` subagent (§5) so you don't know the answer while the learner hunts. Read `raids/R<n>.md` only after the learner says they're done.
 - A challenge ends when the pass bar is met or the learner stops. It never ends early because the learner sounds confident: a "got it" is answered with a request to explain it from memory.

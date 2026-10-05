@@ -80,24 +80,24 @@ const LEARN: &[(&str, &str)] = &[
         include_str!("../../../templates/learn/.pi/agents/saboteur.md"),
     ),
     (
-        ".claude/learn/STORYTELLER.md",
-        include_str!("../../../templates/learn/.claude/learn/STORYTELLER.md"),
+        ".learn/STORYTELLER.md",
+        include_str!("../../../templates/learn/.learn/STORYTELLER.md"),
     ),
     (
-        ".claude/learn/CHALLENGES.md",
-        include_str!("../../../templates/learn/.claude/learn/CHALLENGES.md"),
+        ".learn/CHALLENGES.md",
+        include_str!("../../../templates/learn/.learn/CHALLENGES.md"),
     ),
     (
-        ".claude/learn/TUTOR.md",
-        include_str!("../../../templates/learn/.claude/learn/TUTOR.md"),
+        ".learn/TUTOR.md",
+        include_str!("../../../templates/learn/.learn/TUTOR.md"),
     ),
     (
-        ".claude/learn/CONVENTIONS.md",
-        include_str!("../../../templates/learn/.claude/learn/CONVENTIONS.md"),
+        ".learn/CONVENTIONS.md",
+        include_str!("../../../templates/learn/.learn/CONVENTIONS.md"),
     ),
     (
-        ".claude/learn/ingest_epub.py",
-        include_str!("../../../templates/learn/.claude/learn/ingest_epub.py"),
+        ".learn/ingest_epub.py",
+        include_str!("../../../templates/learn/.learn/ingest_epub.py"),
     ),
 ];
 

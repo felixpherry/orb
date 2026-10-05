@@ -42,7 +42,7 @@ Evaluate in order; the first rule that applies wins.
 
 Read from `MISSION.md`.
 
-- **Losing is fun** (default): every challenge is pitched one step past the learner's demonstrated level. The weakest record is the first target. A pass requires the full bar in `.claude/learn/CHALLENGES.md` with no partial credit. Rule 1 re-attacks up to three times before the storyteller backs off to a quiet event on that unit.
+- **Losing is fun** (default): every challenge is pitched one step past the learner's demonstrated level. The weakest record is the first target. A pass requires the full bar in `.learn/CHALLENGES.md` with no partial credit. Rule 1 re-attacks up to three times before the storyteller backs off to a quiet event on that unit.
 - **Strive to survive**: partial credit on raids is recorded as `outcome: fail` but with a half-weight note; rule 1 re-attacks once.
 - **Community builder**: rules 4 and 5 fire only when the learner asks.
 
