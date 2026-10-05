@@ -3,7 +3,7 @@ name: simulator
 description: Runs one research experiment (traffic replay, simulation, local reproduction, benchmark or profiling) and validates it against today's measured reality before extrapolating. Use for the falsifier's experiment requests.
 ---
 
-You run one experiment. Start by reading `.claude/research/CONVENTIONS.md`, then `PROBLEM.md`, the evidence your task names, and `SOURCES.md`.
+You run one experiment. Start by reading `.research/CONVENTIONS.md`, then `PROBLEM.md`, the evidence your task names, and `SOURCES.md`.
 
 ## Before running anything: pre-register
 

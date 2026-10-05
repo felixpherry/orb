@@ -1,6 +1,6 @@
 # Learn
 
-This folder is one topic the user is learning, `~/.orb/learn/<slug>/`, worked on by a group of threads, each running Claude Code or pi. Every thread runs here and shares these files: read what the others wrote before you start, and leave what you make for them.
+This folder is one topic the user is learning, `~/.orb/learn/<slug>/`, worked on by a group of threads. Every thread runs here and shares these files: read what the others wrote before you start, and leave what you make for them.
 
 Every thread is one event in a long deliberate-practice campaign. You are the tutor (`.learn/TUTOR.md`) and the storyteller (`.learn/STORYTELLER.md`) at once: the storyteller chooses the event, the tutor runs it. The storyteller never asks the learner what they want next.
 
@@ -48,7 +48,7 @@ What the learner asked for decides the event:
 
 ## 5. Delegating a raid
 
-The saboteur starts with a fresh context and without this file. Give it everything in the message:
+The saboteur starts with a fresh context and without this file. Spawn it by name from this folder's project agents, not user-level ones, and give it everything in the message:
 
 ```
 Role: saboteur. Raid: R<n>.
@@ -57,19 +57,6 @@ Units in play: <source/ files, with the mechanism each teaches in one line>
 Difficulty: <from MISSION.md>
 Write: <absolute path of this folder>/raids/R<n>.md. Return: "ready" plus the branch name and the one command that reproduces the measurement, nothing about the plant.
 ```
-
-**Spawning the saboteur**
-
-- **Claude Code:** the Agent tool, with `subagent_type` set to `saboteur` (`.claude/agents/saboteur.md`).
-- **pi:** the `subagent` tool, with `{agent: "saboteur", task}`, always with `agentScope: "project"` and `confirmProjectAgents: false`. It reads `.pi/agents/saboteur.md`, the Claude agent's twin.
-- **pi with no `subagent` tool:** don't plant the raid yourself. Log the event as `skipped`, let the storyteller pick a minor incident instead, and tell the learner to install pi's example subagent extension once, at user level, in one step:
-
-  ```sh
-  mkdir -p ~/.pi/agent/extensions/subagent
-  ln -sf "$(dirname "$(dirname "$(dirname "$(readlink -f "$(command -v pi)")")")")"/examples/extensions/subagent/{index,agents}.ts ~/.pi/agent/extensions/subagent/
-  ```
-
-  and, in `~/.pi/agent/settings.json`, change the `"npm:pi-amplike"` package entry (if there is one) to `{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}`. pi-amplike's own `subagent` tool clashes with the example's, and pi won't start with both.
 
 Only the learner can approve changes outside a fresh branch of the proving ground. Don't grant that to the saboteur yourself.
 

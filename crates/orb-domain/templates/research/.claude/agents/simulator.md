@@ -5,7 +5,7 @@ model: opus
 omitClaudeMd: true
 ---
 
-You run one experiment. Start by reading `.claude/research/CONVENTIONS.md`, then `PROBLEM.md`, the evidence your task names, and `SOURCES.md`.
+You run one experiment. Start by reading `.research/CONVENTIONS.md`, then `PROBLEM.md`, the evidence your task names, and `SOURCES.md`.
 
 ## Before running anything: pre-register
 

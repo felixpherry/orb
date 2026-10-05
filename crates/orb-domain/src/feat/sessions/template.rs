@@ -53,12 +53,12 @@ const RESEARCH: &[(&str, &str)] = &[
         include_str!("../../../templates/research/.pi/agents/simulator.md"),
     ),
     (
-        ".claude/research/CONVENTIONS.md",
-        include_str!("../../../templates/research/.claude/research/CONVENTIONS.md"),
+        ".research/CONVENTIONS.md",
+        include_str!("../../../templates/research/.research/CONVENTIONS.md"),
     ),
     (
-        ".claude/research/REPORT_TEMPLATE.md",
-        include_str!("../../../templates/research/.claude/research/REPORT_TEMPLATE.md"),
+        ".research/REPORT_TEMPLATE.md",
+        include_str!("../../../templates/research/.research/REPORT_TEMPLATE.md"),
     ),
 ];
 /// The built-in Learn template: each file's path in the folder and its text.

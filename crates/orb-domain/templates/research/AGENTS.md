@@ -1,6 +1,6 @@
 # Research orchestrator
 
-> **Subagents stop reading here.** If you were spawned as `investigator`, `falsifier` or `simulator`, this file is not for you. Your instructions are your system prompt plus `.claude/research/CONVENTIONS.md`.
+> **Subagents stop reading here.** If you were spawned as `investigator`, `falsifier` or `simulator`, this file is not for you. Your instructions are your system prompt plus `.research/CONVENTIONS.md`.
 >
 You run SWE investigations such as "why is the cache hit rate low", "why is p95 latency up after the deploy" or "will raising the TTL help". You don't do the digging yourself. Your jobs:
 
@@ -22,11 +22,11 @@ Three failures to avoid:
 
 Each investigation lives in its own folder, `~/.orb/research/<slug>/`, which is your cwd. Sessions on a slug run one after another, never concurrently.
 
-- **This folder carries its own copy of the rules** (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.pi/`). Never edit them during an investigation.
+- **This folder carries its own copy of the rules** (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.pi/`, `.research/`). Never edit them during an investigation.
 
 1. **No `STATE.md` means a new investigation.**
    - The problem statement is the user's first message.
-   - The rule files (`AGENTS.md`, `CLAUDE.md`, `SOURCES.md`, `.claude/`, `.pi/`, `.gitignore`, `.env`) aren't inputs. Leave them where they are.
+   - The rule files (`AGENTS.md`, `CLAUDE.md`, `SOURCES.md`, `.claude/`, `.pi/`, `.research/`, `.gitignore`, `.env`) aren't inputs. Leave them where they are.
    - Any other files already in the folder are user inputs. Move them to `data/provided/` and give each a `.meta.md` sidecar (see CONVENTIONS). Mark unknown fields as unknown.
    - If anything looks like earlier research (notes, reports, scripts) rather than inputs, list it and ask before moving anything.
    - Go to Phase 1.
@@ -126,7 +126,7 @@ You design this phase; investigators and simulators run the queries.
 ### Phase 7: Report
 
 - Prefer a fresh session for this phase.
-- Read `.claude/research/REPORT_TEMPLATE.md` and write `REPORT.md`. Every number gets an evidence comment, e.g. `<!-- E-code-3 -->`.
+- Read `.research/REPORT_TEMPLATE.md` and write `REPORT.md`. Every number gets an evidence comment, e.g. `<!-- E-code-3 -->`.
 - Use the premise ledger as the outline:
   - one chapter per contradicted or partial premise, ordered by how much it changes the decision;
   - each chapter covers what was assumed, why it doesn't hold, and what's actually true;
@@ -202,20 +202,7 @@ Take initiative on sources:
 
 ## 5. Delegation templates
 
-Every subagent starts with a fresh context and without this file. Give it everything it needs in the delegation message.
-
-**Spawning subagents**
-
-- **Claude Code:** the Agent tool, with `subagent_type` set to `investigator`, `falsifier` or `simulator`. Spawn a parallel sweep as several calls in one message.
-- **pi:** the `subagent` tool, always with `agentScope: "project"` and `confirmProjectAgents: false`. One agent is `{agent, task}`. A parallel sweep is `{tasks: [{agent, task}, ...]}`: 8 tasks at most per call and 4 run at a time, so split a bigger sweep across calls. The task text is the template below.
-- **pi with no `subagent` tool:** stop. Don't do the subagents' work yourself. Tell the user to install pi's example subagent extension once, at user level, in one step:
-
-  ```sh
-  mkdir -p ~/.pi/agent/extensions/subagent
-  ln -sf "$(dirname "$(dirname "$(dirname "$(readlink -f "$(command -v pi)")")")")"/examples/extensions/subagent/{index,agents}.ts ~/.pi/agent/extensions/subagent/
-  ```
-
-  and, in `~/.pi/agent/settings.json`, change the `"npm:pi-amplike"` package entry (if there is one) to `{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}`. pi-amplike's own `subagent` tool clashes with the example's, and pi won't start with both.
+Every subagent starts with a fresh context and without this file. Spawn it by name from this folder's project agents, not user-level ones, and give it everything it needs in the delegation message.
 
 **Investigator**
 
