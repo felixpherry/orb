@@ -12,3 +12,4 @@ pub mod sessions;
 pub mod sidebar;
 pub mod worktrees;
 pub mod zellij;
+pub mod zmx;

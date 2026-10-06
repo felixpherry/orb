@@ -7,8 +7,18 @@
 //! fixed terminal identity, so the attached program picks the same
 //! capabilities (kitty keys, synchronized output) no matter how orb was
 //! launched.
+//!
+//! Each pane's program also gets `ORB_PANE_ID`, naming the pane it runs in;
+//! one inherited from orb's own environment is dropped, so harness commands
+//! and an orb started inside a pane never see a stale one.
 
 use std::ffi::OsString;
+
+use super::state::PaneId;
+
+/// The variable naming the pane a program runs in. orb sets it on each
+/// pane's program, and drops one inherited from its own environment.
+pub const ORB_PANE_ID: &str = "ORB_PANE_ID";
 
 /// The terminal identity every child gets.
 const IDENTITY: [(&str, &str); 4] = [
@@ -76,8 +86,18 @@ where
         .collect()
 }
 
+/// `env` plus `ORB_PANE_ID=<pane>`. zmx hands it to the program it starts
+/// when it creates the pane's session; a reattach keeps the program's own.
+pub fn pane_env(env: &[(OsString, OsString)], pane: PaneId) -> Vec<(OsString, OsString)> {
+    env.iter()
+        .cloned()
+        .chain([(ORB_PANE_ID.into(), pane.0.to_string().into())])
+        .collect()
+}
+
 fn is_scrubbed(key: &str) -> bool {
-    SESSION_VARS.contains(&key)
+    key == ORB_PANE_ID
+        || SESSION_VARS.contains(&key)
         || TERMINAL_VARS.contains(&key)
         || IDENTITY.iter().any(|(name, _)| *name == key)
         || TERMINAL_PREFIXES
@@ -89,7 +109,8 @@ fn is_scrubbed(key: &str) -> bool {
 mod tests {
     use std::ffi::OsString;
 
-    use super::child_env;
+    use super::{ORB_PANE_ID, child_env, pane_env};
+    use crate::feat::sessions::state::PaneId;
 
     fn env_of(vars: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         child_env(
@@ -190,6 +211,37 @@ mod tests {
             values_of(&env, key),
             [&OsString::from(value)],
             "{key} should be set once to {value}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pane_env_sets_orb_pane_id() {
+        // Given orb's child environment.
+        let env = env_of(&[("PATH", "/bin")]);
+
+        // When building pane 7's environment.
+        let pane = pane_env(&env, PaneId(7));
+
+        // Then ORB_PANE_ID names pane 7, once.
+        assert_eq!(
+            values_of(&pane, ORB_PANE_ID),
+            [&OsString::from("7")],
+            "ORB_PANE_ID should be the pane's id"
+        );
+    }
+
+    #[rstest::rstest]
+    fn child_env_drops_an_inherited_orb_pane_id() {
+        // Given orb runs inside another orb's pane.
+        let parent = [(ORB_PANE_ID, "3")];
+
+        // When building the child's environment.
+        let env = env_of(&parent);
+
+        // Then the inherited pane id is gone.
+        assert!(
+            values_of(&env, ORB_PANE_ID).is_empty(),
+            "an inherited ORB_PANE_ID should be removed"
         );
     }
 }

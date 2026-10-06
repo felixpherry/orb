@@ -26,6 +26,8 @@ use orb_domain::feat::worktrees::worktrees_actor::{
 };
 use orb_domain::feat::zellij::zellij_cli::ZellijCli;
 use orb_domain::feat::zellij::zellij_service::ZellijService;
+use orb_domain::feat::zmx::zmx_cli::ZmxCli;
+use orb_domain::feat::zmx::zmx_service::ZmxService;
 use orb_domain::{AppState, Services, State};
 use orb_tui::Frontend;
 use wherror::Error;
@@ -57,8 +59,8 @@ fn main() -> Result<(), Report<OrbError>> {
         let cli = ZellijCli::new(std::env::var_os("NO_COLOR"));
         ZellijService::new(Arc::new(cli), shell, home.clone(), pane)
     });
-    let store = Store::open(&home.join(".orb/userdata/state.sqlite")).change_context(OrbError)?;
     let orb_root = home.join(".orb");
+    let store = Store::open(&orb_root.join("userdata/state.sqlite")).change_context(OrbError)?;
     let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
@@ -85,10 +87,12 @@ fn main() -> Result<(), Report<OrbError>> {
         Services {
             harnesses: Harnesses::new(vec![Arc::new(claude), Arc::new(pi)]),
             git,
+            zmx: ZmxService::new(Arc::new(ZmxCli::new(env.clone())), orb_root.join("zmx")),
         }
     };
     let git = services.git.clone();
     let harnesses = services.harnesses.clone();
+    let zmx = services.zmx.clone();
     let sessions = spawn_sessions_actor(SessionsActorDeps {
         services,
         state: state.clone(),
@@ -122,6 +126,7 @@ fn main() -> Result<(), Report<OrbError>> {
             git,
             harnesses,
             env,
+            zmx,
             zellij,
             notifier,
         )

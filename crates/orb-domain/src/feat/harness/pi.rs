@@ -23,6 +23,7 @@ use crate::feat::sessions::session_host::{
     AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
 };
 use crate::feat::sessions::transcript::{Exchange, MessageRead};
+use crate::feat::zmx::zmx_service::ZmxSession;
 
 /// The id pi threads are stored under.
 pub const ID: &str = "pi";
@@ -93,6 +94,10 @@ impl SessionHost for Pi {
 
     fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString> {
         self.host.attach_argv(short_id, start)
+    }
+
+    fn zmx_session(&self, short_id: &str) -> Option<ZmxSession> {
+        self.host.zmx_session(short_id)
     }
 }
 

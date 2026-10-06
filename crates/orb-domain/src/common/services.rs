@@ -2,6 +2,7 @@
 
 use crate::feat::git::git_service::GitService;
 use crate::feat::harness::Harnesses;
+use crate::feat::zmx::zmx_service::ZmxService;
 
 /// Every service the actors depend on.
 #[derive(Debug, Clone)]
@@ -9,4 +10,6 @@ pub struct Services {
     /// Every harness a thread can run in.
     pub harnesses: Harnesses,
     pub git: GitService,
+    /// Runs every pane's program under zmx.
+    pub zmx: ZmxService,
 }

@@ -13,6 +13,7 @@ use crate::TextInput;
 use crate::feat::harness::HarnessId;
 use crate::feat::picker::list::fuzzy_match;
 use crate::feat::sidebar::state::SidebarLayout;
+use crate::feat::zmx::zmx_service::ZmxSession;
 
 /// What a draft is called, and a thread before its transcript names it.
 pub const NEW_THREAD: &str = "New thread";
@@ -20,6 +21,31 @@ pub const NEW_THREAD: &str = "New thread";
 /// Identifies a thread across launches (its row in orb's store).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ThreadId(pub i64);
+
+/// Identifies a pane. Each thread has one pane, numbered as the thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PaneId(pub i64);
+
+impl PaneId {
+    /// The zmx session name of a pane orb made: `orb-p<id>`.
+    pub fn zmx_name(self) -> String {
+        format!("orb-p{}", self.0)
+    }
+}
+
+impl From<ThreadId> for PaneId {
+    fn from(thread: ThreadId) -> Self {
+        Self(thread.0)
+    }
+}
+
+/// How a thread's pane runs: its harness's command, in a zmx session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneLaunch {
+    pub zmx: ZmxSession,
+    /// The harness's command; zmx runs it when it creates the session.
+    pub command: Vec<OsString>,
+}
 
 /// Identifies a project across launches (its row in orb's store).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -134,8 +160,8 @@ pub struct Thread {
     pub status: ThreadStatus,
     /// When orb first saw the current turn running; `None` between turns.
     pub turn_started_at: Option<SystemTime>,
-    /// The command that attaches to the session.
-    pub attach_argv: Vec<OsString>,
+    /// How its pane runs; `None` for a harness orb doesn't know.
+    pub pane: Option<PaneLaunch>,
     /// The git branch the transcript last named.
     pub branch: Option<String>,
     /// When the thread was pinned; `None` = not pinned.
@@ -168,6 +194,16 @@ impl Thread {
         self.turn_started_at
             .unwrap_or(UNIX_EPOCH)
             .max(self.last_activity_at)
+    }
+
+    /// What the frontend needs to attach to the thread's pane; `None` when
+    /// its harness is unknown.
+    pub fn attach_target(&self) -> Option<AttachTarget> {
+        Some(AttachTarget {
+            thread: self.id,
+            launch: self.pane.clone()?,
+            cwd: self.cwd.clone(),
+        })
     }
 }
 
@@ -1286,7 +1322,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachTarget {
     pub thread: ThreadId,
-    pub argv: Vec<OsString>,
+    pub launch: PaneLaunch,
     pub cwd: PathBuf,
 }
 
@@ -1297,12 +1333,24 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, Project,
-        ProjectId, ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread, ThreadId,
-        ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, PaneId,
+        Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread,
+        ThreadId, ThreadStatus,
     };
     use crate::TextInput;
     use crate::feat::sidebar::state::SidebarLayout;
+
+    #[rstest::rstest]
+    fn pane_zmx_name_is_orb_p_and_its_id() {
+        // Given pane 7.
+        let pane = PaneId(7);
+
+        // When naming its zmx session.
+        let name = pane.zmx_name();
+
+        // Then it is orb-p7.
+        assert_eq!(name, "orb-p7", "a pane's zmx session is orb-p<id>");
+    }
 
     fn at(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -1317,7 +1365,7 @@ mod tests {
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            attach_argv: vec![],
+            pane: None,
             branch: None,
             pinned_at: None,
             settled_at: None,

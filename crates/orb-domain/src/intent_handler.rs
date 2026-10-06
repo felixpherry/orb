@@ -21,8 +21,8 @@ use crate::feat::picker::validator::{
     validate_pick_project, validate_pick_session, validate_remove_project,
 };
 use crate::feat::sessions::state::{
-    AttachTarget, Draft, DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, Project, ProjectId,
-    ProjectKind, Search, Sessions, SidebarItem, ThreadId, group_slug,
+    Draft, DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, Project, ProjectId, ProjectKind,
+    Search, Sessions, SidebarItem, Thread, ThreadId, group_slug,
 };
 use crate::feat::sessions::validator::{
     DeleteError, LAST_IN_GROUP, NewGroupError, SETTLE_IN_PROGRESS, ToggleSettleError,
@@ -1671,13 +1671,14 @@ fn attach_thread(state: &mut AppState) -> Vec<Command> {
 /// threads and showing its pane with the keys in it, unless the thread can't
 /// be attached to.
 fn show_pane(state: &mut AppState) -> Vec<Command> {
-    match (validate_attach(state), state.sessions.selected_thread()) {
-        (Ok(()), Some(thread)) => {
-            let target = AttachTarget {
-                thread: thread.id,
-                argv: thread.attach_argv.clone(),
-                cwd: thread.cwd.clone(),
-            };
+    match (
+        validate_attach(state),
+        state
+            .sessions
+            .selected_thread()
+            .and_then(Thread::attach_target),
+    ) {
+        (Ok(()), Some(target)) => {
             state.focus = Focus::Attached;
             state.attached.insert(target.thread);
             vec![Command::Attach(target), Command::RefreshSessions]
@@ -1894,13 +1895,14 @@ mod tests {
     use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
         AttachTarget, Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind,
-        Own, Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread,
-        ThreadId, ThreadStatus,
+        Own, PaneLaunch, Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem,
+        SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::validator::{LAST_IN_GROUP, SETTLE_IN_PROGRESS};
     use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use crate::feat::worktrees::state::{Worktree, Worktrees};
     use crate::feat::zellij::zellij_service::Tool;
+    use crate::feat::zmx::zmx_service::ZmxSession;
     use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
 
     /// Claude's setting row for `value`.
@@ -1909,6 +1911,17 @@ mod tests {
         PickerItem::Setting {
             value: value.map(str::to_owned),
             label: setting_label(value, Some(&info)).to_owned(),
+        }
+    }
+
+    /// How thread `id`'s pane runs: `claude attach t<id>` in `orb-p<id>` on /zmx.
+    fn launch(id: i64) -> PaneLaunch {
+        PaneLaunch {
+            zmx: ZmxSession {
+                name: format!("orb-p{id}"),
+                dir: "/zmx".into(),
+            },
+            command: vec!["claude".into(), "attach".into(), format!("t{id}").into()],
         }
     }
 
@@ -1921,7 +1934,7 @@ mod tests {
             transcript: None,
             status,
             turn_started_at: None,
-            attach_argv: vec!["claude".into(), "attach".into(), format!("t{id}").into()],
+            pane: Some(launch(id)),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -2375,7 +2388,7 @@ mod tests {
             vec![
                 Command::Attach(AttachTarget {
                     thread: ThreadId(1),
-                    argv: vec!["claude".into(), "attach".into(), "t1".into()],
+                    launch: launch(1),
                     cwd: "/work/1".into(),
                 }),
                 Command::RefreshSessions,
@@ -2677,7 +2690,7 @@ mod tests {
             vec![
                 Command::Attach(AttachTarget {
                     thread: ThreadId(2),
-                    argv: vec!["claude".into(), "attach".into(), "t2".into()],
+                    launch: launch(2),
                     cwd: "/work/2".into(),
                 }),
                 Command::RefreshSessions,
@@ -7806,7 +7819,7 @@ mod tests {
         assert!(
             commands.contains(&Command::Attach(AttachTarget {
                 thread: ThreadId(1),
-                argv: vec!["claude".into(), "attach".into(), "t1".into()],
+                launch: launch(1),
                 cwd: "/work/1".into(),
             })),
             "<C-o> onto a live pane should show it"
@@ -8531,7 +8544,7 @@ mod tests {
         assert!(
             commands.contains(&Command::Attach(AttachTarget {
                 thread: ThreadId(1),
-                argv: vec!["claude".into(), "attach".into(), "t1".into()],
+                launch: launch(1),
                 cwd: "/work/1".into(),
             })),
             "picking should attach to the thread"
@@ -9715,7 +9728,7 @@ mod tests {
         assert!(
             commands.contains(&Command::Attach(AttachTarget {
                 thread: ThreadId(1),
-                argv: vec!["claude".into(), "attach".into(), "t1".into()],
+                launch: launch(1),
                 cwd: "/work/1".into(),
             })),
             "picking a hit should attach to its thread"

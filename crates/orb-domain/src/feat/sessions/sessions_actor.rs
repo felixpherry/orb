@@ -96,7 +96,7 @@
 //! an answer, in any project, unless the thread is being deleted.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -113,8 +113,8 @@ use super::session_host::{
 };
 use super::state::{
     Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, NEW_THREAD,
-    Notice, NoticeKind, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId,
-    ThreadStatus,
+    Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Sessions, SidebarItem,
+    Thread, ThreadId, ThreadStatus,
 };
 use super::store::{
     DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store,
@@ -129,7 +129,7 @@ use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{
     hex, hex_branch, is_orb_worktree, new_worktree_path, previous_worktree, slug,
 };
-use crate::feat::harness::{Harness, HarnessId, HarnessInfo, Harnesses, Scan, TranscriptFormat};
+use crate::feat::harness::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
 use crate::{AppState, Focus};
@@ -921,7 +921,7 @@ impl SessionsActor {
                 threads: rows
                     .iter()
                     .filter(|row| row.project_id == project.id)
-                    .map(|row| unpolled(&services.harnesses, row))
+                    .map(|row| unpolled(&services, row))
                     .collect(),
                 draft: drafts
                     .iter()
@@ -1107,12 +1107,7 @@ impl SessionsActor {
                     changed = true;
                 }
                 if let Some(thread) = thread_mut(sessions, row.id) {
-                    changed |= show(
-                        thread,
-                        row,
-                        status,
-                        attach_argv(&self.services.harnesses, row),
-                    );
+                    changed |= show(thread, row, status, pane_launch(&self.services, row));
                 }
             }
             for row in self
@@ -1968,7 +1963,7 @@ impl SessionsActor {
             ..row.clone()
         };
         let saved = self.store.save_thread(row);
-        let shown = unpolled(&self.services.harnesses, row);
+        let shown = unpolled(&self.services, row);
         let project_id = row.project_id;
         if let Some(thread) = thread_mut(&mut self.state.write().sessions, moved.thread) {
             *thread = shown;
@@ -2085,12 +2080,7 @@ impl SessionsActor {
             }
             if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
                 let status = thread.status;
-                show(
-                    thread,
-                    row,
-                    status,
-                    attach_argv(&self.services.harnesses, row),
-                );
+                show(thread, row, status, pane_launch(&self.services, row));
             }
         }
         for row in self
@@ -2198,7 +2188,7 @@ impl SessionsActor {
         if row.branch.is_some() && self.store.save_thread(&row).is_err() {
             return Err(NEW_SESSION_UNSAVED.to_owned());
         }
-        let thread = unpolled(&self.services.harnesses, &row);
+        let thread = unpolled(&self.services, &row);
         self.rows.push(row);
         Ok(thread)
     }
@@ -2744,12 +2734,7 @@ impl SessionsActor {
             }
             if let Some(thread) = thread_mut(sessions, id) {
                 let status = thread.status;
-                show(
-                    thread,
-                    row,
-                    status,
-                    attach_argv(&self.services.harnesses, row),
-                );
+                show(thread, row, status, pane_launch(&self.services, row));
             }
         }
         (self.wake)();
@@ -3073,15 +3058,15 @@ fn rename_hex_branch(git: &GitService, worktrees_root: &Path, row: &mut ThreadRo
     }
 }
 
-/// Shows a saved thread and `status` on `thread`, attached to with
-/// `attach_argv`. Returns whether anything visible changed.
+/// Shows a saved thread and `status` on `thread`, its pane run as `pane`.
+/// Returns whether anything visible changed.
 fn show(
     thread: &mut Thread,
     row: &ThreadRow,
     status: ThreadStatus,
-    attach_argv: Vec<OsString>,
+    pane: Option<PaneLaunch>,
 ) -> bool {
-    let shown = self::thread(row, status, attach_argv);
+    let shown = self::thread(row, status, pane);
     let changed = *thread != shown;
     *thread = shown;
     changed
@@ -3144,8 +3129,8 @@ fn reason(report: &Report<SessionHostError>) -> String {
         .unwrap_or_else(|| "session command failed".to_owned())
 }
 
-/// How a saved thread looks with `status`, attached to with `attach_argv`.
-fn thread(row: &ThreadRow, status: ThreadStatus, attach_argv: Vec<OsString>) -> Thread {
+/// How a saved thread looks with `status`, its pane run as `pane`.
+fn thread(row: &ThreadRow, status: ThreadStatus, pane: Option<PaneLaunch>) -> Thread {
     Thread {
         id: row.id,
         title: display_title(row),
@@ -3153,7 +3138,7 @@ fn thread(row: &ThreadRow, status: ThreadStatus, attach_argv: Vec<OsString>) -> 
         transcript: row.transcript_path.clone(),
         status,
         turn_started_at: row.turn_started_at.map(from_ms),
-        attach_argv,
+        pane,
         branch: row.branch.clone(),
         pinned_at: row.pinned_at.map(from_ms),
         settled_at: row
@@ -3214,30 +3199,33 @@ fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
 
 /// How a saved thread looks before its first poll; one whose harness orb
 /// doesn't know is Gone, with nothing to attach.
-fn unpolled(harnesses: &Harnesses, row: &ThreadRow) -> Thread {
-    let status = match harnesses.get(&row.harness) {
+fn unpolled(services: &Services, row: &ThreadRow) -> Thread {
+    let status = match services.harnesses.get(&row.harness) {
         Some(_) => ThreadStatus::Unknown,
         None => ThreadStatus::Gone,
     };
-    thread(row, status, attach_argv(harnesses, row))
+    thread(row, status, pane_launch(services, row))
 }
 
-/// The command that attaches to `row`'s session, built by its harness from
-/// the row's model and whether its transcript is known, so an attach that
-/// starts the session again starts it right; nothing for a harness orb
-/// doesn't know.
-fn attach_argv(harnesses: &Harnesses, row: &ThreadRow) -> Vec<OsString> {
-    harnesses
-        .get(&row.harness)
-        .map_or_else(Vec::new, |harness| {
-            harness.attach_argv(
-                &row.short_id,
-                &AttachStart {
-                    model: row.model.as_deref(),
-                    has_transcript: row.transcript_path.is_some(),
-                },
-            )
-        })
+/// How `row`'s pane runs: its harness's command, built from the row's model
+/// and whether its transcript is known, so a pane that starts the session
+/// again starts it right, in the zmx session its harness runs it in, else in
+/// the pane's own `orb-p<id>` on orb's pane socket dir; nothing for a harness
+/// orb doesn't know.
+fn pane_launch(services: &Services, row: &ThreadRow) -> Option<PaneLaunch> {
+    let harness = services.harnesses.get(&row.harness)?;
+    Some(PaneLaunch {
+        zmx: harness
+            .zmx_session(&row.short_id)
+            .unwrap_or_else(|| services.zmx.session(PaneId::from(row.id).zmx_name())),
+        command: harness.attach_argv(
+            &row.short_id,
+            &AttachStart {
+                model: row.model.as_deref(),
+                has_transcript: row.transcript_path.is_some(),
+            },
+        ),
+    })
 }
 
 /// The branch checked out in `cwd`, if git can tell.
@@ -3465,6 +3453,8 @@ mod tests {
         StoreError, ThreadRow, Ui,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
+    use crate::feat::zmx::zmx_service::fake::FakeZmx;
+    use crate::feat::zmx::zmx_service::{ZmxOutput, ZmxService, ZmxSession};
 
     /// The orb project's root, a folder that exists so its drafts can start.
     const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -4066,6 +4056,14 @@ mod tests {
         }
     }
 
+    /// A zmx with no sessions, on the pane socket dir /zmx.
+    fn fake_zmx() -> ZmxService {
+        ZmxService::new(
+            Arc::new(FakeZmx::new(ZmxOutput::default())),
+            PathBuf::from("/zmx"),
+        )
+    }
+
     fn record(short_id: &str, status: ThreadStatus) -> SessionRecord {
         SessionRecord {
             short_id: short_id.to_owned(),
@@ -4188,6 +4186,7 @@ mod tests {
                     GitService::new(git.clone()),
                 ))]),
                 git: GitService::new(git.clone()),
+                zmx: fake_zmx(),
             },
             state: state.clone(),
             store,
@@ -4223,6 +4222,7 @@ mod tests {
                     Arc::new(FakeHarness::new(OTHER, other.clone())),
                 ]),
                 git: GitService::new(git),
+                zmx: fake_zmx(),
             },
             state: state.clone(),
             store,
@@ -4349,9 +4349,37 @@ mod tests {
 
         // Then it attaches with the command its harness builds.
         assert_eq!(
-            shown(&state, id).map(|thread| thread.attach_argv),
+            shown(&state, id)
+                .and_then(|thread| thread.pane)
+                .map(|launch| launch.command),
             Some(vec![OsString::from(OTHER), OsString::from("bb")]),
             "a thread should attach through its own harness"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn thread_pane_runs_in_its_own_session_on_orbs_pane_socket_dir()
+    -> Result<(), Report<StoreError>> {
+        // Given a saved thread `bb` of a harness that runs no zmx session of
+        // its own.
+        let store = Store::open_in_memory()?;
+        let id = add_thread_in(&store, OTHER, "bb")?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start_beside(store, &host, &host);
+
+        // Then its pane runs in orb-p<id> on orb's pane socket dir.
+        assert_eq!(
+            shown(&state, id)
+                .and_then(|thread| thread.pane)
+                .map(|launch| launch.zmx),
+            Some(ZmxSession {
+                name: format!("orb-p{}", id.0),
+                dir: PathBuf::from("/zmx"),
+            }),
+            "a pane without a harness session gets its own on orb's dir"
         );
         Ok(())
     }
@@ -4369,7 +4397,7 @@ mod tests {
 
         // Then it shows gone and can't be attached.
         assert_eq!(
-            shown(&state, id).map(|thread| (thread.status, thread.attach_argv.is_empty())),
+            shown(&state, id).map(|thread| (thread.status, thread.pane.is_none())),
             Some((ThreadStatus::Gone, true)),
             "a thread of an unknown harness should be gone with no attach command"
         );
@@ -4388,7 +4416,9 @@ mod tests {
 
         // Then its attach command carries the model.
         assert_eq!(
-            shown(&state, id).map(|thread| thread.attach_argv),
+            shown(&state, id)
+                .and_then(|thread| thread.pane)
+                .map(|launch| launch.command),
             Some(vec![
                 OsString::from("aa"),
                 OsString::from("--model"),
@@ -4421,7 +4451,9 @@ mod tests {
 
         // Then its attach command no longer carries the model.
         assert_eq!(
-            shown(&state, id).map(|thread| thread.attach_argv),
+            shown(&state, id)
+                .and_then(|thread| thread.pane)
+                .map(|launch| launch.command),
             Some(vec![OsString::from("aa")]),
             "an attach once the transcript is found should resume without the model"
         );
@@ -10637,7 +10669,8 @@ mod tests {
             .sessions
             .group_threads(id)
             .next()
-            .map(|thread| thread.attach_argv.clone());
+            .and_then(|thread| thread.pane.clone())
+            .map(|launch| launch.command);
         assert_eq!(
             first,
             Some(vec![OsString::from("bb")]),
@@ -12160,6 +12193,7 @@ mod tests {
                     GitService::new(git.clone()),
                 ))]),
                 git: GitService::new(git.clone()),
+                zmx: fake_zmx(),
             },
             state: state.clone(),
             store,

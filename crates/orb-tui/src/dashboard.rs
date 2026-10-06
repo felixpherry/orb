@@ -475,7 +475,7 @@ mod tests {
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            attach_argv: vec![],
+            pane: None,
             branch: Some("main".to_owned()),
             pinned_at: None,
             settled_at: None,

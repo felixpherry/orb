@@ -7,9 +7,14 @@
 //! while a thread is working or a session is starting, so the spinners turn
 //! and a working thread's elapsed time counts up.
 //!
-//! Each attached thread keeps its own attach command's pane while other
-//! threads are selected; the right side shows the selected thread's pane
-//! when it's attached, else the dashboard. While attached, input goes
+//! Each pane is a `zmx attach` client: its program runs in a zmx session, so
+//! dropping the pane (a detach, or its thread leaving the attached threads)
+//! leaves the program running. Each attached thread keeps its pane while
+//! other threads are selected; the right side shows the selected thread's
+//! pane when it's attached, else the dashboard. At start every thread whose
+//! zmx session still runs gets its pane back, attached. A client that dies
+//! while zmx still lists its session is attached again once; a second death
+//! closes the pane with an error on the mode line. While attached, input goes
 //! straight to the attached program, except the resize keys; otherwise keys go through the resize keys, then the
 //! [`keymap`]. The loop itself reads the directory picker's listings, the
 //! branch picker's refs and the session picker's preview, re-reading the
@@ -70,12 +75,14 @@ use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::search_actor::{self, SearchActor};
+use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
-use orb_domain::feat::sessions::state::{AttachTarget, ThreadId};
+use orb_domain::feat::sessions::state::{AttachTarget, PaneId, Thread, ThreadId};
 use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
 use orb_domain::feat::zellij::zellij_service::{
     NOT_IN_ZELLIJ, ZellijError, ZellijService, zellij_reason,
 };
+use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
 use orb_domain::{AppState, Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
@@ -130,7 +137,7 @@ impl Frontend {
     /// `sessions`; worktree commands go to `worktrees`; search commands go
     /// to `search`; a thread whose worktree under `worktrees_root` is gone has
     /// it recreated before attaching; the branch picker's refs come from
-    /// `git`; attached sessions run with `env`; tools open through
+    /// `git`; panes run with `env` and attach through `zmx`; tools open through
     /// `zellij`, `None` outside zellij; notices are announced through
     /// `notifier` while orb's pane isn't focused, or while zellij says no
     /// client is on it. The terminal is restored on exit and on panic.
@@ -149,6 +156,7 @@ impl Frontend {
         git: GitService,
         harnesses: Harnesses,
         env: Vec<(OsString, OsString)>,
+        zmx: ZmxService,
         zellij: Option<ZellijService>,
         notifier: NotifierService,
     ) -> Result<(), Report<TuiRunError>> {
@@ -165,6 +173,7 @@ impl Frontend {
                 git,
                 harnesses,
                 env,
+                zmx,
                 zellij,
                 notifier,
                 tx,
@@ -182,7 +191,8 @@ impl Frontend {
 enum LoopEvent {
     Input(Event),
     InputFailed(io::Error),
-    Pane(PaneEvent),
+    /// Pane `PaneId` reported `PaneEvent`.
+    Pane(PaneId, PaneEvent),
     /// An actor changed the state.
     StateChanged,
 }
@@ -258,11 +268,7 @@ fn attach_or_restore(cwd: &Path, worktrees_root: &Path) -> AttachPlan {
 
 /// The pane the right-hand area draws: none while the dashboard has the
 /// keys, else the selected thread's.
-fn shown_pane<P>(
-    panes: &HashMap<ThreadId, P>,
-    selected: Option<ThreadId>,
-    focus: Focus,
-) -> Option<&P> {
+fn shown_pane<P>(panes: &HashMap<PaneId, P>, selected: Option<PaneId>, focus: Focus) -> Option<&P> {
     match focus {
         Focus::Dashboard => None,
         Focus::Attached | Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search => {
@@ -271,17 +277,38 @@ fn shown_pane<P>(
     }
 }
 
-/// The panes to drop, given each as (thread, exited): the exited ones, and
+/// The panes to drop, given each as (pane, ended): the ended ones, and
 /// those whose thread left `attached`.
-fn to_drop<I>(panes: I, attached: &HashSet<ThreadId>) -> Vec<ThreadId>
+fn to_drop<I>(panes: I, attached: &HashSet<PaneId>) -> Vec<PaneId>
 where
-    I: IntoIterator<Item = (ThreadId, bool)>,
+    I: IntoIterator<Item = (PaneId, bool)>,
 {
     panes
         .into_iter()
         .filter(|&(id, exited)| exited || !attached.contains(&id))
         .map(|(id, _)| id)
         .collect()
+}
+
+/// Why a pane's `zmx attach` client exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneExit {
+    /// zmx no longer lists the session: its program ended, so the pane closes.
+    Ended,
+    /// zmx still lists it, so only the client died: attach again.
+    Respawn,
+    /// The client died again after one respawn: close the pane and say so.
+    Failed,
+}
+
+/// How to treat a pane whose client exited, given whether zmx still `listed`
+/// its session and whether it was `respawned` once already.
+fn classify_exit(listed: bool, respawned: bool) -> PaneExit {
+    match (listed, respawned) {
+        (false, _) => PaneExit::Ended,
+        (true, false) => PaneExit::Respawn,
+        (true, true) => PaneExit::Failed,
+    }
 }
 
 /// The dashboard's pane error once panes are dropped, given whether each
@@ -348,12 +375,16 @@ struct App {
     /// Every harness, to read a thread's transcript in its own format.
     harnesses: Harnesses,
     keys: Keys,
-    /// Each attached thread's attach command, kept while other threads are
-    /// selected.
-    panes: HashMap<ThreadId, Pane>,
-    /// The thread whose pane last got the keys, so the pane loses focus when
-    /// the keys move on even though the selection already has.
-    focused_pane: Option<ThreadId>,
+    /// Every pane orb holds a `zmx attach` client for, kept while other
+    /// threads are selected.
+    panes: HashMap<PaneId, Pane>,
+    /// The pane that last got the keys, so it loses focus when the keys move
+    /// on even though the selection already has.
+    focused_pane: Option<PaneId>,
+    /// Panes whose client exit the loop hasn't classified yet.
+    exited: Vec<PaneId>,
+    /// Panes already attached again once after their client died.
+    respawned: HashSet<PaneId>,
     /// Shown on the right when a thread's attach command couldn't start.
     pane_error: Option<String>,
     /// The folder the trust confirm was opened for, while its start waits.
@@ -361,8 +392,10 @@ struct App {
     /// A started draft's attach request is waiting for the keys to come back
     /// to the sidebar or the dashboard.
     attach_waited: bool,
-    /// The environment attached sessions run with.
+    /// The environment panes run with.
     env: Vec<(OsString, OsString)>,
+    /// Lists the zmx sessions panes attach to.
+    zmx: ZmxService,
     /// Opens tools; `None` outside zellij.
     zellij: Option<ZellijService>,
     /// Announces the sessions actor's notices.
@@ -394,6 +427,7 @@ impl App {
         git: GitService,
         harnesses: Harnesses,
         env: Vec<(OsString, OsString)>,
+        zmx: ZmxService,
         zellij: Option<ZellijService>,
         notifier: NotifierService,
         tx: Sender<LoopEvent>,
@@ -414,10 +448,13 @@ impl App {
             keys: Keys::new(keymap::keymap(), scope),
             panes: HashMap::new(),
             focused_pane: None,
+            exited: Vec::new(),
+            respawned: HashSet::new(),
             pane_error: None,
             opened_trust: None,
             attach_waited: false,
             env,
+            zmx,
             zellij,
             notifier,
             tz,
@@ -434,6 +471,9 @@ impl App {
 
     fn run(mut self, terminal: &mut DefaultTerminal, rx: &Receiver<LoopEvent>) -> io::Result<()> {
         spawn_input_thread(self.tx.clone())?;
+        let [_, pane_area, _] = render::layout(terminal.size()?.into(), &self.state.read().sidebar);
+        self.pane_area = pane_area;
+        self.reattach_live();
         loop {
             let [_, pane_area, _] =
                 render::layout(terminal.size()?.into(), &self.state.read().sidebar);
@@ -449,8 +489,12 @@ impl App {
             }
             terminal.draw(|frame| {
                 let state = self.state.read();
-                let pane = shown_pane(&self.panes, state.sessions.selected_id(), state.focus)
-                    .filter(|pane| !pane.has_exited());
+                let pane = shown_pane(
+                    &self.panes,
+                    state.sessions.selected_id().map(PaneId::from),
+                    state.focus,
+                )
+                .filter(|pane| !pane.has_exited());
                 drawn = render::render(
                     frame,
                     &state,
@@ -533,7 +577,11 @@ impl App {
     fn attached_pane(&self) -> Option<&Pane> {
         let state = self.state.read();
         match state.focus {
-            Focus::Attached => shown_pane(&self.panes, state.sessions.selected_id(), state.focus),
+            Focus::Attached => shown_pane(
+                &self.panes,
+                state.sessions.selected_id().map(PaneId::from),
+                state.focus,
+            ),
             Focus::Sidebar | Focus::Dashboard | Focus::Picker | Focus::Rename | Focus::Search => {
                 None
             }
@@ -546,8 +594,12 @@ impl App {
     fn mouse(&mut self, mouse: MouseEvent) {
         let (focus, pane_shown, cursor) = {
             let state = self.state.read();
-            let shown = shown_pane(&self.panes, state.sessions.selected_id(), state.focus)
-                .is_some_and(|pane| !pane.has_exited());
+            let shown = shown_pane(
+                &self.panes,
+                state.sessions.selected_id().map(PaneId::from),
+                state.focus,
+            )
+            .is_some_and(|pane| !pane.has_exited());
             (state.focus, shown, state.sessions.cursor)
         };
         let route = mouse::route(
@@ -652,10 +704,11 @@ impl App {
             // Resize and the rest: the next iteration lays out and redraws;
             // `reconcile` sweeps exited thread panes.
             LoopEvent::Input(_)
-            | LoopEvent::Pane(PaneEvent::Output | PaneEvent::Exited)
+            | LoopEvent::Pane(_, PaneEvent::Output)
             | LoopEvent::StateChanged => {}
+            LoopEvent::Pane(id, PaneEvent::Exited) => self.exited.push(id),
             LoopEvent::InputFailed(error) => return Err(error),
-            LoopEvent::Pane(PaneEvent::Clipboard(text)) => {
+            LoopEvent::Pane(_, PaneEvent::Clipboard(text)) => {
                 outer_terminal::copy_to_clipboard(out, &text)?;
             }
         }
@@ -666,11 +719,12 @@ impl App {
     fn execute(&mut self, command: &Command) {
         match command {
             Command::Attach(target) => {
-                let left = self.focused_pane.take().filter(|id| *id != target.thread);
-                if let Some(pane) = left.and_then(|id| self.panes.get(&id)) {
+                let id = PaneId::from(target.thread);
+                let left = self.focused_pane.take().filter(|left| *left != id);
+                if let Some(pane) = left.and_then(|left| self.panes.get(&left)) {
                     pane.focus(false);
                 }
-                if self.panes.get(&target.thread).is_none_or(Pane::has_exited) {
+                if self.panes.get(&id).is_none_or(Pane::has_exited) {
                     if attach_or_restore(&target.cwd, &self.worktrees_root) == AttachPlan::Restore {
                         let _ = self
                             .sessions
@@ -684,11 +738,11 @@ impl App {
                     }
                     match self.spawn_pane(target) {
                         Some(pane) => {
-                            self.panes.insert(target.thread, pane);
+                            self.panes.insert(id, pane);
                             self.pane_error = None;
                         }
                         None => {
-                            self.pane_error = Some("couldn't start the attach command".to_owned());
+                            self.pane_error = Some("couldn't start zmx attach".to_owned());
                             let mut app = self.state.write();
                             app.focus = Focus::Dashboard;
                             app.attached.remove(&target.thread);
@@ -696,9 +750,9 @@ impl App {
                         }
                     }
                 }
-                if let Some(pane) = self.panes.get(&target.thread) {
+                if let Some(pane) = self.panes.get(&id) {
                     pane.focus(true);
-                    self.focused_pane = Some(target.thread);
+                    self.focused_pane = Some(id);
                 }
             }
             Command::Detach => {
@@ -708,7 +762,7 @@ impl App {
                 let focused = self
                     .focused_pane
                     .take()
-                    .or_else(|| self.state.read().sessions.selected_id());
+                    .or_else(|| self.state.read().sessions.selected_id().map(PaneId::from));
                 if let Some(pane) = focused.and_then(|id| self.panes.get(&id)) {
                     pane.focus(false);
                 }
@@ -977,15 +1031,77 @@ impl App {
         }
     }
 
-    /// Drops the panes whose attached program exited or whose thread is no
-    /// longer attached, which kills their attach command, and takes them out of
-    /// `attached`. A pane whose program exited within [`EARLY_EXIT`] of
-    /// starting leaves `session exited at start` on the dashboard. If the keys
-    /// were in a pane that's no longer shown, orb leaves it.
+    /// Classifies each pane whose client exit arrived (see [`classify_exit`]):
+    /// attaches a dead client again once, and on a second death puts
+    /// `couldn't reattach to zmx session <name>` on the mode line. Returns the
+    /// panes to close. An exit from a pane already replaced or dropped is
+    /// ignored.
+    fn classify_exits(&mut self) -> HashSet<PaneId> {
+        let mut ended = HashSet::new();
+        for id in mem::take(&mut self.exited) {
+            if !self.panes.get(&id).is_some_and(Pane::has_exited) {
+                continue;
+            }
+            let target = self
+                .state
+                .read()
+                .sessions
+                .threads()
+                .find(|thread| PaneId::from(thread.id) == id)
+                .and_then(Thread::attach_target);
+            let Some(target) = target else {
+                ended.insert(id);
+                continue;
+            };
+            let session = &target.launch.zmx;
+            let listed = self
+                .zmx
+                .list(&session.dir)
+                .is_ok_and(|entries| entries.iter().any(|entry| entry.name == session.name));
+            let exit = classify_exit(listed, self.respawned.contains(&id));
+            let respawned = match exit {
+                PaneExit::Respawn => self.spawn_pane(&target),
+                PaneExit::Ended | PaneExit::Failed => None,
+            };
+            match (exit, respawned) {
+                (_, Some(pane)) => {
+                    if self.focused_pane == Some(id) {
+                        pane.focus(true);
+                    }
+                    self.panes.insert(id, pane);
+                    self.respawned.insert(id);
+                }
+                (PaneExit::Ended, None) => {
+                    ended.insert(id);
+                }
+                (PaneExit::Respawn | PaneExit::Failed, None) => {
+                    ended.insert(id);
+                    self.state.write().sessions.error =
+                        Some(format!("couldn't reattach to zmx session {}", session.name));
+                }
+            }
+        }
+        ended
+    }
+
+    /// Drops the panes whose program ended or whose client died for good
+    /// (see [`Self::classify_exits`]) and those whose thread is no longer
+    /// attached, which ends their `zmx attach` client, and takes them out of
+    /// `attached`. A pane that ended within [`EARLY_EXIT`] of starting leaves
+    /// `session exited at start` on the dashboard. If the keys were in a pane
+    /// that's no longer shown, orb leaves it.
     fn reconcile(&mut self) {
+        let ended = self.classify_exits();
+        let attached: HashSet<PaneId> = self
+            .state
+            .read()
+            .attached
+            .iter()
+            .map(|&thread| PaneId::from(thread))
+            .collect();
         let gone = to_drop(
-            self.panes.iter().map(|(id, pane)| (*id, pane.has_exited())),
-            &self.state.read().attached,
+            self.panes.keys().map(|id| (*id, ended.contains(id))),
+            &attached,
         );
         self.pane_error = pane_error_after(
             self.pane_error.take(),
@@ -995,13 +1111,18 @@ impl App {
         );
         for id in &gone {
             self.panes.remove(id);
+            self.respawned.remove(id);
         }
         let mut app = self.state.write();
-        for id in &gone {
-            app.attached.remove(id);
-        }
+        app.attached
+            .retain(|&thread| !gone.contains(&PaneId::from(thread)));
         if app.focus == Focus::Attached
-            && shown_pane(&self.panes, app.sessions.selected_id(), app.focus).is_none()
+            && shown_pane(
+                &self.panes,
+                app.sessions.selected_id().map(PaneId::from),
+                app.focus,
+            )
+            .is_none()
         {
             app.focus = after_pane(app.focus);
         }
@@ -1143,17 +1264,60 @@ impl App {
             });
     }
 
-    /// Runs `target`'s attach command in a pane the size of the pane area,
-    /// with orb's child environment; `None` if it can't start.
+    /// Gives every thread whose zmx session still runs its pane back,
+    /// attached, so programs left running when orb quit show again. Each
+    /// socket dir the threads use is listed once; a dir zmx can't list brings
+    /// nothing back.
+    fn reattach_live(&mut self) {
+        let targets: Vec<AttachTarget> = self
+            .state
+            .read()
+            .sessions
+            .threads()
+            .filter_map(Thread::attach_target)
+            .collect();
+        let running: HashSet<ZmxSession> = {
+            let dirs: HashSet<&Path> = targets
+                .iter()
+                .map(|target| target.launch.zmx.dir.as_path())
+                .collect();
+            dirs.into_iter()
+                .flat_map(|dir| {
+                    self.zmx
+                        .list(dir)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(move |entry| ZmxSession {
+                            name: entry.name,
+                            dir: dir.to_owned(),
+                        })
+                })
+                .collect()
+        };
+        for target in targets
+            .iter()
+            .filter(|target| running.contains(&target.launch.zmx))
+        {
+            if let Some(pane) = self.spawn_pane(target) {
+                self.panes.insert(PaneId::from(target.thread), pane);
+                self.state.write().attached.insert(target.thread);
+            }
+        }
+    }
+
+    /// Runs `zmx attach` for `target`'s pane in a pane the size of the pane
+    /// area, with orb's child environment and the pane's `ORB_PANE_ID`;
+    /// `None` if it can't start.
     fn spawn_pane(&self, target: &AttachTarget) -> Option<Pane> {
+        let id = PaneId::from(target.thread);
         let tx = self.tx.clone();
         let command = PaneCommand {
-            argv: target.argv.clone(),
+            argv: attach_argv(&target.launch.zmx, &target.launch.command),
             cwd: target.cwd.clone(),
-            env: self.env.clone(),
+            env: pane_env(&self.env, id),
         };
         Pane::spawn(&command, PaneSize::from(self.pane_area), move |event| {
-            let _ = tx.send(LoopEvent::Pane(event));
+            let _ = tx.send(LoopEvent::Pane(id, event));
         })
         .ok()
     }
@@ -1249,16 +1413,16 @@ mod tests {
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+        PaneId, Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::zellij::zellij_service::ZellijError;
     use orb_domain::{AppState, Focus};
     use ratatui::crossterm::cursor::SetCursorStyle;
 
     use super::{
-        AttachPlan, StartedAttach, after_pane, announces, attach_or_restore, cursor_style,
-        list_directories, pane_error_after, shown_pane, stale_preview, started_attach, to_drop,
-        trust_return_to, trust_to_open,
+        AttachPlan, PaneExit, StartedAttach, after_pane, announces, attach_or_restore,
+        classify_exit, cursor_style, list_directories, pane_error_after, shown_pane, stale_preview,
+        started_attach, to_drop, trust_return_to, trust_to_open,
     };
 
     #[rstest::rstest]
@@ -1345,7 +1509,7 @@ mod tests {
                         transcript: Some(transcript.clone()),
                         status: ThreadStatus::Idle,
                         turn_started_at: None,
-                        attach_argv: vec![],
+                        pane: None,
                         branch: None,
                         pinned_at: None,
                         settled_at: None,
@@ -1574,13 +1738,13 @@ mod tests {
     #[rstest::rstest]
     fn to_drop_takes_an_exited_pane() {
         // Given pane 1 exited and pane 2 alive, both attached.
-        let attached = HashSet::from([ThreadId(1), ThreadId(2)]);
+        let attached = HashSet::from([PaneId(1), PaneId(2)]);
 
         // When choosing the panes to drop.
-        let dropped = to_drop([(ThreadId(1), true), (ThreadId(2), false)], &attached);
+        let dropped = to_drop([(PaneId(1), true), (PaneId(2), false)], &attached);
 
         // Then only the exited pane goes.
-        assert_eq!(dropped, vec![ThreadId(1)], "the exited pane is dropped");
+        assert_eq!(dropped, vec![PaneId(1)], "the exited pane is dropped");
     }
 
     #[rstest::rstest]
@@ -1589,29 +1753,43 @@ mod tests {
         let attached = HashSet::new();
 
         // When choosing the panes to drop.
-        let dropped = to_drop([(ThreadId(1), false)], &attached);
+        let dropped = to_drop([(PaneId(1), false)], &attached);
 
         // Then the pane goes.
-        assert_eq!(
-            dropped,
-            vec![ThreadId(1)],
-            "the un-attached pane is dropped"
-        );
+        assert_eq!(dropped, vec![PaneId(1)], "the un-attached pane is dropped");
     }
 
     #[rstest::rstest]
     fn to_drop_keeps_a_live_attached_pane() {
         // Given live pane 1 with thread 1 attached.
-        let attached = HashSet::from([ThreadId(1)]);
+        let attached = HashSet::from([PaneId(1)]);
 
         // When choosing the panes to drop.
-        let dropped = to_drop([(ThreadId(1), false)], &attached);
+        let dropped = to_drop([(PaneId(1), false)], &attached);
 
         // Then nothing goes.
         assert!(
             dropped.is_empty(),
             "a live attached pane stays, got {dropped:?}"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::ended(false, false, PaneExit::Ended)]
+    #[case::ended_after_a_respawn(false, true, PaneExit::Ended)]
+    #[case::client_died(true, false, PaneExit::Respawn)]
+    #[case::client_died_again(true, true, PaneExit::Failed)]
+    fn pane_exit_is_classified_by_zmx_listing_and_an_earlier_respawn(
+        #[case] listed: bool,
+        #[case] respawned: bool,
+        #[case] expected: PaneExit,
+    ) {
+        // Given / When a pane's client exits, zmx `listed` its session or
+        // not, and the pane was `respawned` once or not.
+        let exit = classify_exit(listed, respawned);
+
+        // Then the exit is `expected`.
+        assert_eq!(exit, expected, "listed {listed}, respawned {respawned}");
     }
 
     #[rstest::rstest]
@@ -1649,10 +1827,10 @@ mod tests {
     #[rstest::rstest]
     fn shown_pane_is_the_selected_threads_pane() {
         // Given panes for threads 1 and 2, with 2 selected in the sidebar.
-        let panes = HashMap::from([(ThreadId(1), "thread 1"), (ThreadId(2), "thread 2")]);
+        let panes = HashMap::from([(PaneId(1), "thread 1"), (PaneId(2), "thread 2")]);
 
         // When choosing the pane to show.
-        let shown = shown_pane(&panes, Some(ThreadId(2)), Focus::Sidebar);
+        let shown = shown_pane(&panes, Some(PaneId(2)), Focus::Sidebar);
 
         // Then it is thread 2's pane.
         assert_eq!(
@@ -1665,10 +1843,10 @@ mod tests {
     #[rstest::rstest]
     fn shown_pane_is_none_while_the_dashboard_has_the_keys() {
         // Given thread 1's pane, with 1 selected and the dashboard focused.
-        let panes = HashMap::from([(ThreadId(1), "thread 1")]);
+        let panes = HashMap::from([(PaneId(1), "thread 1")]);
 
         // When choosing the pane to show.
-        let shown = shown_pane(&panes, Some(ThreadId(1)), Focus::Dashboard);
+        let shown = shown_pane(&panes, Some(PaneId(1)), Focus::Dashboard);
 
         // Then no pane is shown.
         assert_eq!(shown, None, "the dashboard hides every pane");

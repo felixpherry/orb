@@ -71,7 +71,7 @@ mod tests {
                         transcript: None,
                         status: ThreadStatus::Idle,
                         turn_started_at: None,
-                        attach_argv: vec![],
+                        pane: None,
                         branch: None,
                         pinned_at: None,
                         settled_at: None,

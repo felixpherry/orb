@@ -1200,7 +1200,7 @@ mod tests {
             transcript: None,
             status,
             turn_started_at: Some(at(866)),
-            attach_argv: vec![],
+            pane: None,
             branch: None,
             pinned_at: None,
             settled_at: None,

@@ -1,10 +1,11 @@
 //! zmx as the host of pi sessions.
 //!
-//! A start only picks the session's id. The thread's pane runs
-//! `zmx attach <id> pi --session-id <id>`, which creates the session with the
-//! pane as its first client, so pi's startup modes reach orb live, and joins
-//! it when it already runs, getting zmx's snapshot of the screen and modes.
-//! `zmx kill` ends it. A socket that answers `connect` means the session is
+//! A start only picks the session's id. The host names the zmx session (the
+//! session id, on its socket dir) and gives pi's command, and the thread's
+//! pane runs `zmx attach <id> pi --session-id <id>` from the two. That creates
+//! the session with the pane as its first client, so pi's startup modes reach
+//! orb live, and joins it when it already runs, getting zmx's snapshot of the
+//! screen and modes. `zmx kill` ends it. A socket that answers `connect` means the session is
 //! running; its status then comes from the tail of pi's session file.
 
 use std::ffi::OsString;
@@ -27,6 +28,7 @@ use crate::feat::sessions::session_host::{
 };
 use crate::feat::sessions::state::ThreadStatus;
 use crate::feat::sessions::transcript::read_new_lines;
+use crate::feat::zmx::zmx_service::{ZmxSession, zmx_argv};
 
 /// How long `zmx kill` gets to run.
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,24 +58,9 @@ impl ZmxHost {
         self.socket_dir.join(id)
     }
 
-    /// `zmx <args>` on orb's socket directory with zmx's detach key off. The
-    /// `env` prefix carries `ZMX_DIR`, since panes and the runner pass only
-    /// orb's child environment.
+    /// `zmx <args>` on the host's socket directory (see [`zmx_argv`]).
     fn zmx(&self, args: &[&str]) -> Vec<OsString> {
-        let dir = {
-            let mut dir = OsString::from("ZMX_DIR=");
-            dir.push(&self.socket_dir);
-            dir
-        };
-        [
-            OsString::from("env"),
-            dir,
-            "ZMX_NO_DETACH_KEY=1".into(),
-            "zmx".into(),
-        ]
-        .into_iter()
-        .chain(args.iter().map(OsString::from))
-        .collect()
+        zmx_argv(&self.socket_dir, args.iter().copied())
     }
 }
 
@@ -226,11 +213,20 @@ impl SessionHost for ZmxHost {
     }
 
     fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString> {
-        let mut argv = self.zmx(&["attach", short_id, "pi", "--session-id", short_id]);
+        let mut argv: Vec<OsString> = ["pi", "--session-id", short_id].map(OsString::from).into();
         if let (Some(model), false) = (start.model, start.has_transcript) {
             argv.extend(["--model", model].map(OsString::from));
         }
         argv
+    }
+
+    /// pi's session runs in the zmx session named after its id, on the
+    /// host's socket directory.
+    fn zmx_session(&self, short_id: &str) -> Option<ZmxSession> {
+        Some(ZmxSession {
+            name: short_id.to_owned(),
+            dir: self.socket_dir.clone(),
+        })
     }
 }
 
@@ -261,6 +257,7 @@ mod tests {
         AttachStart, SessionHost, SessionHostError, SessionOptions,
     };
     use crate::feat::sessions::state::ThreadStatus;
+    use crate::feat::zmx::zmx_service::ZmxSession;
 
     type TestResult = Result<(), Box<dyn Error>>;
 
@@ -390,23 +387,13 @@ mod tests {
         Ok(())
     }
 
-    /// The attach argv for orb-a on sockets in /s, then `extra`.
+    /// pi's command for orb-a, then `extra`.
     fn attach_of_orb_a(extra: &[&str]) -> Vec<OsString> {
-        [
-            "env",
-            "ZMX_DIR=/s",
-            "ZMX_NO_DETACH_KEY=1",
-            "zmx",
-            "attach",
-            "orb-a",
-            "pi",
-            "--session-id",
-            "orb-a",
-        ]
-        .iter()
-        .chain(extra)
-        .map(OsString::from)
-        .collect()
+        ["pi", "--session-id", "orb-a"]
+            .iter()
+            .chain(extra)
+            .map(OsString::from)
+            .collect()
     }
 
     #[rstest::rstest]
@@ -520,7 +507,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn attach_argv_runs_zmx_with_orbs_socket_dir() {
+    fn attach_argv_starts_pi_on_the_session_id() {
         // Given a host keeping its sockets in /s.
         let runner = Arc::new(FakeRunner::new(ok()));
         let host = host(&runner, Path::new("/s"), Path::new("/p"));
@@ -528,11 +515,31 @@ mod tests {
         // When building the attach command for orb-a with no model.
         let argv = host.attach_argv("orb-a", &AttachStart::default());
 
-        // Then zmx attaches to (or starts) pi on the session in orb's socket dir.
+        // Then pi starts on that session id.
         assert_eq!(
             argv,
             attach_of_orb_a(&[]),
-            "attach should go through zmx attach on orb's socket dir"
+            "the pane's command should be pi on the session id"
+        );
+    }
+
+    #[rstest::rstest]
+    fn zmx_session_is_the_session_id_on_the_hosts_socket_dir() {
+        // Given a host keeping its sockets in /s.
+        let runner = Arc::new(FakeRunner::new(ok()));
+        let host = host(&runner, Path::new("/s"), Path::new("/p"));
+
+        // When asking which zmx session orb-a runs in.
+        let session = host.zmx_session("orb-a");
+
+        // Then it is orb-a on /s.
+        assert_eq!(
+            session,
+            Some(ZmxSession {
+                name: "orb-a".to_owned(),
+                dir: PathBuf::from("/s"),
+            }),
+            "pi's zmx session is its id on the host's socket dir"
         );
     }
 

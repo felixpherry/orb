@@ -1,5 +1,5 @@
 //! Where a harness's sessions run: starting one, listing what each is doing,
-//! stopping or deleting one, and the command that attaches to one.
+//! stopping or deleting one, and the command a pane runs for one.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -9,6 +9,7 @@ use error_stack::Report;
 use wherror::Error;
 
 use super::state::ThreadStatus;
+use crate::feat::zmx::zmx_service::ZmxSession;
 
 /// A session host call failed. Every report carries a one-line reason as its
 /// latest `String` attachment, fit for the mode line.
@@ -96,7 +97,14 @@ pub trait SessionHost: Send + Sync {
     /// Returns an error if the host refuses or fails to delete the session.
     async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>>;
 
-    /// The command that attaches a terminal to the session. A harness whose
-    /// attach can also start the session uses `start` for that.
+    /// The command a pane runs for the session. A harness whose command can
+    /// also start the session uses `start` for that.
     fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString>;
+
+    /// The zmx session the host already runs the session in, which a pane
+    /// joins instead of making its own; `None` (the default) when the host
+    /// doesn't use zmx.
+    fn zmx_session(&self, _short_id: &str) -> Option<ZmxSession> {
+        None
+    }
 }
