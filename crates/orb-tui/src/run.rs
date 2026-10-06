@@ -8,21 +8,21 @@
 //! and a working thread's elapsed time counts up.
 //!
 //! Each pane is a `zmx attach` client: its program runs in a zmx session, so
-//! dropping the pane (a detach, or its thread leaving the attached threads)
-//! leaves the program running. Each attached thread keeps its layout (tabs
-//! of split panes) while other threads are selected; the right side shows
-//! the selected thread's layout, a tab bar over its shown tab's panes, while
-//! it's attached, else the start screen. Each frame resizes every visible
-//! pane to its own rect; panes of hidden tabs and unselected threads keep
-//! their size. A split-off pane runs a shell under zmx in its thread's
-//! directory and is killed with `zmx kill` once it leaves every layout. A
-//! thread's layout lasts while it's attached, so detaching, settling or
-//! deleting it, or its own pane ending, ends its split-off panes too. At
-//! start every leftover split-off session (`orb-p-*` on orb's pane dir) is
-//! killed, then every thread whose zmx session still runs gets its pane
-//! back, attached. A client that dies while zmx still lists its session is
-//! attached again once; a second death closes the pane with an error on the
-//! mode line. While a pane has the keys, input goes straight to its program,
+//! dropping the pane (a detach, or its session losing its last attached
+//! thread) leaves the program running. Every session's layout (tabs of split
+//! panes) is kept and saved; while one of a session's threads is attached,
+//! each of its panes has a client. The right side shows the selected
+//! thread's session, a tab bar over its shown tab's panes, while that thread
+//! is attached, else the start screen. Each frame resizes every visible pane
+//! to its own rect; panes of hidden tabs and other sessions keep their size.
+//! A pane that leaves every layout (closed, or its session deleted) is killed
+//! with `zmx kill`. A pane whose program ended closes in its layout, unless a
+//! thread runs in it: that thread is detached instead. At start every
+//! `orb-p*` session on orb's pane dir that no pane names is killed (left by
+//! earlier versions, or by panes closed while orb was down), then every
+//! thread whose pane's zmx session still runs is attached again. A client
+//! that dies while zmx still lists its session is attached again once; a
+//! second death closes the pane with an error on the mode line. While a pane has the keys, input goes straight to its program,
 //! except the Cmd keys ([`keymap::cmd_route`]) and the resize keys;
 //! otherwise keys go through the Cmd keys, the resize keys, then the
 //! [`keymap`]. The loop itself reads the directory picker's listings, the
@@ -86,7 +86,7 @@ use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
-use orb_domain::feat::sessions::state::{AttachTarget, PaneId, PaneLaunch, Thread, ThreadId};
+use orb_domain::feat::sessions::state::{PaneId, SessionId, ThreadId};
 use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
 use orb_domain::feat::zellij::zellij_service::{
     NOT_IN_ZELLIJ, ZellijError, ZellijService, zellij_reason,
@@ -286,21 +286,30 @@ where
         .collect()
 }
 
-/// The dropped panes whose zmx session to kill: split-off panes that didn't
-/// end on their own. A thread's own pane keeps running for its next attach.
-fn to_kill(gone: &[PaneId], ended: &HashSet<PaneId>) -> Vec<PaneId> {
+/// Dropped panes no layout holds any more (`all`) and that didn't end:
+/// closed or deleted while running, so their zmx session is killed. A pane
+/// still in a layout keeps running for its session's next attach.
+fn to_kill(gone: &[PaneId], ended: &HashSet<PaneId>, all: &HashSet<PaneId>) -> Vec<PaneId> {
     gone.iter()
         .copied()
-        .filter(|id| id.thread().is_none() && !ended.contains(id))
+        .filter(|id| !ended.contains(id) && !all.contains(id))
         .collect()
 }
 
-/// The split-off panes a layout holds (`keep`) with no client in `live` yet.
-/// A thread's own pane is started by its attach instead.
+/// Every kept pane without a client in `live`.
 fn to_spawn<P>(keep: &HashSet<PaneId>, live: &HashMap<PaneId, P>) -> Vec<PaneId> {
     keep.iter()
         .copied()
-        .filter(|id| id.thread().is_none() && !live.contains_key(id))
+        .filter(|id| !live.contains_key(id))
+        .collect()
+}
+
+/// The sessions on orb's pane dir to kill at start: every `orb-p*` name no
+/// pane names (`owned`). Other names are left alone.
+fn stale_sessions(listed: Vec<String>, owned: &HashSet<String>) -> Vec<String> {
+    listed
+        .into_iter()
+        .filter(|name| name.starts_with("orb-p") && !owned.contains(name))
         .collect()
 }
 
@@ -391,6 +400,9 @@ struct App {
     /// Every pane orb holds a `zmx attach` client for, kept while other
     /// threads are selected.
     panes: HashMap<PaneId, Pane>,
+    /// The zmx session each held pane's client attached to, for killing it
+    /// once its layout no longer says.
+    pane_sessions: HashMap<PaneId, ZmxSession>,
     /// The pane that last got a focus-in, so it gets a focus-out when the
     /// keys move on (see [`App::sync_focus`]).
     focused_pane: Option<PaneId>,
@@ -460,6 +472,7 @@ impl App {
             harnesses,
             keys: Keys::new(keymap::keymap(), scope),
             panes: HashMap::new(),
+            pane_sessions: HashMap::new(),
             focused_pane: None,
             exited: Vec::new(),
             respawned: HashSet::new(),
@@ -763,34 +776,43 @@ impl App {
     fn execute(&mut self, command: &Command) {
         match command {
             Command::Attach(target) => {
-                let id = PaneId::from(target.thread);
-                if self.panes.get(&id).is_none_or(Pane::has_exited) {
-                    if attach_or_restore(&target.cwd, &self.worktrees_root) == AttachPlan::Restore {
-                        let _ = self
-                            .sessions
-                            .tell(sessions_actor::RestoreWorktree(target.thread))
-                            .try_send();
-                        let mut app = self.state.write();
-                        app.focus = Focus::Sidebar;
-                        app.attached.remove(&target.thread);
-                        app.sessions.starting = true;
-                        return;
-                    }
-                    match self.spawn_pane(id, &target.launch, &target.cwd) {
-                        Some(pane) => {
-                            self.panes.insert(id, pane);
-                            self.pane_error = None;
-                        }
-                        None => {
-                            self.pane_error = Some("couldn't start zmx attach".to_owned());
-                            let mut app = self.state.write();
-                            app.focus = Focus::Sidebar;
-                            app.attached.remove(&target.thread);
-                            return;
-                        }
-                    }
+                if self.panes.get(&target.pane).is_none_or(Pane::has_exited)
+                    && attach_or_restore(&target.cwd, &self.worktrees_root) == AttachPlan::Restore
+                {
+                    let _ = self
+                        .sessions
+                        .tell(sessions_actor::RestoreWorktree(target.thread))
+                        .try_send();
+                    let mut app = self.state.write();
+                    app.focus = Focus::Sidebar;
+                    app.attached.remove(&target.thread);
+                    app.sessions.starting = true;
+                    return;
                 }
+                self.pane_error = None;
+                self.reconcile();
                 self.sync_focus();
+            }
+            Command::SplitPane { session, split } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::SplitPane {
+                        session: *session,
+                        split: *split,
+                    })
+                    .try_send();
+            }
+            Command::NewTab(session) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::NewTab(*session))
+                    .try_send();
+            }
+            Command::SaveLayout(session) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::SaveLayout(*session))
+                    .try_send();
             }
             Command::Detach => self.sync_focus(),
             Command::CreateDraft(project) => {
@@ -1068,18 +1090,17 @@ impl App {
             if !self.panes.get(&id).is_some_and(Pane::has_exited) {
                 continue;
             }
-            let Some((launch, cwd)) = self.pane_launch(id) else {
+            let Some((session, command, cwd)) = self.pane_launch(id) else {
                 ended.insert(id);
                 continue;
             };
-            let session = &launch.zmx;
             let listed = self
                 .zmx
                 .list(&session.dir)
                 .is_ok_and(|entries| entries.iter().any(|entry| entry.name == session.name));
             let exit = classify_exit(listed, self.respawned.contains(&id));
             let respawned = match exit {
-                PaneExit::Respawn => self.spawn_pane(id, &launch, &cwd),
+                PaneExit::Respawn => self.spawn_pane(id, &session, &command, &cwd),
                 PaneExit::Ended | PaneExit::Failed => None,
             };
             match (exit, respawned) {
@@ -1088,6 +1109,7 @@ impl App {
                         pane.focus(true);
                     }
                     self.panes.insert(id, pane);
+                    self.pane_sessions.insert(id, session.clone());
                     self.respawned.insert(id);
                 }
                 (PaneExit::Ended, None) => {
@@ -1104,29 +1126,58 @@ impl App {
     }
 
     /// Drops the panes whose program ended or whose client died for good
-    /// (see [`Self::classify_exits`]) and those no layout holds any more,
-    /// which ends their `zmx attach` client. A thread whose own pane ended
-    /// leaves `attached`, and its layout goes with it; a split-off pane that
-    /// ended leaves its layout. A dropped split-off pane that didn't end is
-    /// killed with `zmx kill`. A pane that ended within [`EARLY_EXIT`] of
-    /// starting leaves `session exited at start` on the start screen. Each
-    /// split-off pane a layout holds without a client gets one; one that
-    /// can't start leaves its layout with an error on the mode line. If the
+    /// (see [`Self::classify_exits`]) and those whose session has no
+    /// attached thread, which ends their `zmx attach` client. A thread whose
+    /// pane ended leaves `attached`; any other pane that ended closes in its
+    /// layout, which is saved. A dropped pane no layout holds any more that
+    /// didn't end is killed with `zmx kill`. A pane that ended within
+    /// [`EARLY_EXIT`] of starting leaves `session exited at start` on the
+    /// start screen. Every pane of a session with an attached thread gets a
+    /// client; when one can't start, its session's threads leave `attached`
+    /// and `couldn't start zmx attach` shows on the start screen. If the
     /// keys were in a pane and no layout is shown any more, they go to the
     /// sidebar.
     fn reconcile(&mut self) {
         let ended = self.classify_exits();
-        let keep = {
+        let (keep, all, edited) = {
             let mut app = self.state.write();
-            app.attached
-                .retain(|&thread| !ended.contains(&PaneId::from(thread)));
-            for &id in ended.iter().filter(|id| id.thread().is_none()) {
-                app.layouts.close_pane(id);
+            let thread_panes: HashMap<ThreadId, PaneId> = app
+                .sessions
+                .threads()
+                .filter_map(|thread| Some((thread.id, thread.pane.as_ref()?.pane)))
+                .collect();
+            let mut edited = HashSet::new();
+            for &id in &ended {
+                let threads: Vec<ThreadId> = thread_panes
+                    .iter()
+                    .filter(|(_, pane)| **pane == id)
+                    .map(|(thread, _)| *thread)
+                    .collect();
+                if threads.is_empty() {
+                    if let Some(owner) = app.layouts.owner_of(id) {
+                        app.layouts.close_pane(id);
+                        edited.insert(owner);
+                    }
+                } else {
+                    app.attached.retain(|thread| !threads.contains(thread));
+                }
             }
-            let attached = app.attached.clone();
-            app.layouts.retain_attached(&attached);
-            app.layouts.pane_ids()
+            let keep: HashSet<PaneId> = app
+                .attached
+                .iter()
+                .filter_map(|thread| app.layouts.owner_of(*thread_panes.get(thread)?))
+                .collect::<HashSet<SessionId>>()
+                .into_iter()
+                .flat_map(|owner| app.layouts.session_panes(owner))
+                .collect();
+            (keep, app.layouts.pane_ids(), edited)
         };
+        for owner in edited {
+            let _ = self
+                .sessions
+                .tell(sessions_actor::SaveLayout(owner))
+                .try_send();
+        }
         let gone = to_drop(self.panes.keys().map(|id| (*id, ended.contains(id))), &keep);
         self.pane_error = pane_error_after(
             self.pane_error.take(),
@@ -1134,25 +1185,45 @@ impl App {
                 .filter_map(|id| self.panes.get(id))
                 .map(|pane| pane.exited_early(EARLY_EXIT)),
         );
-        for id in to_kill(&gone, &ended) {
-            let _ = self.zmx.kill(&self.zmx.session(id.zmx_name()));
+        for id in to_kill(&gone, &ended, &all) {
+            if let Some(session) = self.pane_sessions.get(&id) {
+                let _ = self.zmx.kill(session);
+            }
         }
         for id in &gone {
             self.panes.remove(id);
+            self.pane_sessions.remove(id);
             self.respawned.remove(id);
         }
         for id in to_spawn(&keep, &self.panes) {
-            let pane = self
-                .pane_launch(id)
-                .and_then(|(launch, cwd)| self.spawn_pane(id, &launch, &cwd));
-            match pane {
-                Some(pane) => {
+            let spawned = self.pane_launch(id).and_then(|(session, command, cwd)| {
+                self.spawn_pane(id, &session, &command, &cwd)
+                    .map(|pane| (pane, session))
+            });
+            match spawned {
+                Some((pane, session)) => {
+                    if self.focused_pane == Some(id) {
+                        pane.focus(true);
+                    }
                     self.panes.insert(id, pane);
+                    self.pane_sessions.insert(id, session);
                 }
                 None => {
+                    self.pane_error = Some("couldn't start zmx attach".to_owned());
                     let mut app = self.state.write();
-                    app.layouts.close_pane(id);
-                    app.sessions.error = Some("couldn't start zmx attach".to_owned());
+                    let app = &mut *app;
+                    let owner = app.layouts.owner_of(id);
+                    let threads: Vec<ThreadId> =
+                        app.sessions
+                            .threads()
+                            .filter(|thread| {
+                                thread.pane.as_ref().is_some_and(|launch| {
+                                    app.layouts.owner_of(launch.pane) == owner
+                                })
+                            })
+                            .map(|thread| thread.id)
+                            .collect();
+                    app.attached.retain(|thread| !threads.contains(thread));
                 }
             }
         }
@@ -1295,31 +1366,46 @@ impl App {
             });
     }
 
-    /// Kills every leftover split-off session (`orb-p-*` on orb's pane dir),
-    /// since layouts aren't kept across launches, then gives every thread
-    /// whose zmx session still runs its pane back, attached, so programs
-    /// left running when orb quit show again. Each socket dir the threads use
-    /// is listed once; a dir zmx can't list brings nothing back.
+    /// Kills every `orb-p*` session on orb's pane dir that no pane names
+    /// (see [`stale_sessions`]), then attaches every thread whose pane's zmx
+    /// session still runs and gives its session's panes their clients, so
+    /// programs left running when orb quit show again. Each socket dir the
+    /// panes use is listed once; a dir zmx can't list brings nothing back.
     fn reattach_live(&mut self) {
-        let leftovers = self.zmx.list(self.zmx.dir()).unwrap_or_default();
-        for entry in leftovers
+        let owned: HashSet<String> = {
+            let state = self.state.read();
+            state
+                .layouts
+                .pane_ids()
+                .into_iter()
+                .filter_map(|id| state.layouts.entry(id))
+                .filter(|entry| entry.zmx.dir == self.zmx.dir())
+                .map(|entry| entry.zmx.name.clone())
+                .collect()
+        };
+        let listed = self
+            .zmx
+            .list(self.zmx.dir())
+            .unwrap_or_default()
             .into_iter()
-            .filter(|entry| entry.name.starts_with("orb-p-"))
-        {
-            let _ = self.zmx.kill(&self.zmx.session(entry.name));
-        }
-        let targets: Vec<AttachTarget> = self
-            .state
-            .read()
-            .sessions
-            .threads()
-            .filter_map(Thread::attach_target)
+            .map(|entry| entry.name)
             .collect();
+        for name in stale_sessions(listed, &owned) {
+            let _ = self.zmx.kill(&self.zmx.session(name));
+        }
+        let threads: Vec<(ThreadId, ZmxSession)> = {
+            let state = self.state.read();
+            state
+                .sessions
+                .threads()
+                .filter_map(|thread| {
+                    let entry = state.layouts.entry(thread.pane.as_ref()?.pane)?;
+                    Some((thread.id, entry.zmx.clone()))
+                })
+                .collect()
+        };
         let running: HashSet<ZmxSession> = {
-            let dirs: HashSet<&Path> = targets
-                .iter()
-                .map(|target| target.launch.zmx.dir.as_path())
-                .collect();
+            let dirs: HashSet<&Path> = threads.iter().map(|(_, zmx)| zmx.dir.as_path()).collect();
             dirs.into_iter()
                 .flat_map(|dir| {
                     self.zmx
@@ -1333,57 +1419,45 @@ impl App {
                 })
                 .collect()
         };
-        for target in targets
-            .iter()
-            .filter(|target| running.contains(&target.launch.zmx))
-        {
-            let id = PaneId::from(target.thread);
-            if let Some(pane) = self.spawn_pane(id, &target.launch, &target.cwd) {
-                self.panes.insert(id, pane);
-                let mut app = self.state.write();
-                app.attached.insert(target.thread);
-                app.layouts.open(target.thread);
-            }
-        }
+        self.state.write().attached.extend(
+            threads
+                .into_iter()
+                .filter(|(_, zmx)| running.contains(zmx))
+                .map(|(thread, _)| thread),
+        );
+        self.reconcile();
     }
 
-    /// How pane `id` runs and where: a thread's own pane as its thread says;
-    /// a split-off pane as a shell in `orb-p<id>` on orb's pane dir, in its
-    /// thread's directory. `None` when its thread is gone.
-    fn pane_launch(&self, id: PaneId) -> Option<(PaneLaunch, PathBuf)> {
+    /// Where pane `id` runs, as its layout says: its zmx session, the command
+    /// of the thread that runs in it (none for a shell pane), and its
+    /// directory. `None` once no layout holds it.
+    fn pane_launch(&self, id: PaneId) -> Option<(ZmxSession, Vec<OsString>, PathBuf)> {
         let state = self.state.read();
-        match id.thread() {
-            Some(thread) => {
-                let target = state
-                    .sessions
-                    .threads()
-                    .find(|candidate| candidate.id == thread)
-                    .and_then(Thread::attach_target)?;
-                Some((target.launch, target.cwd))
-            }
-            None => {
-                let owner = state.layouts.owner_of(id)?;
-                let thread = state
-                    .sessions
-                    .threads()
-                    .find(|candidate| candidate.id == owner)?;
-                let launch = PaneLaunch {
-                    zmx: self.zmx.session(id.zmx_name()),
-                    command: vec![],
-                };
-                Some((launch, thread.cwd.clone()))
-            }
-        }
+        let entry = state.layouts.entry(id)?;
+        let command = state
+            .sessions
+            .threads()
+            .filter_map(|thread| thread.pane.as_ref())
+            .find(|launch| launch.pane == id)
+            .map(|launch| launch.command.clone())
+            .unwrap_or_default();
+        Some((entry.zmx.clone(), command, entry.cwd.clone()))
     }
 
-    /// Runs `zmx attach` for pane `id` as `launch` says, in `cwd`, sized to
-    /// its place in the shown layout (else the whole pane area), with orb's
-    /// child environment and the pane's `ORB_PANE_ID`; `None` if it can't
-    /// start.
-    fn spawn_pane(&self, id: PaneId, launch: &PaneLaunch, cwd: &Path) -> Option<Pane> {
+    /// Runs `zmx attach` on `session` with `command` for pane `id`, in `cwd`,
+    /// sized to its place in the shown layout (else the whole pane area),
+    /// with orb's child environment and the pane's `ORB_PANE_ID`; `None` if
+    /// it can't start.
+    fn spawn_pane(
+        &self,
+        id: PaneId,
+        session: &ZmxSession,
+        command: &[OsString],
+        cwd: &Path,
+    ) -> Option<Pane> {
         let tx = self.tx.clone();
         let command = PaneCommand {
-            argv: attach_argv(&launch.zmx, &launch.command),
+            argv: attach_argv(session, command),
             cwd: cwd.to_owned(),
             env: pane_env(&self.env, id),
         };
@@ -1504,7 +1578,7 @@ mod tests {
     use super::{
         AttachPlan, PaneExit, StartedAttach, after_pane, announces, attach_or_restore,
         classify_exit, cursor_style, list_directories, pane_error_after, stale_preview,
-        started_attach, to_drop, to_kill, to_spawn, trust_return_to, trust_to_open,
+        stale_sessions, started_attach, to_drop, to_kill, to_spawn, trust_return_to, trust_to_open,
     };
 
     #[rstest::rstest]
@@ -1855,65 +1929,96 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn to_kill_takes_a_dropped_split_pane() {
-        // Given split-off pane -1 dropped while still running.
-        let gone = [PaneId(-1)];
+    fn to_kill_takes_a_dropped_pane_no_layout_holds() {
+        // Given pane 7 dropped while running, in no layout any more.
+        let gone = [PaneId(7)];
 
         // When choosing the zmx sessions to kill.
-        let killed = to_kill(&gone, &HashSet::new());
+        let killed = to_kill(&gone, &HashSet::new(), &HashSet::new());
 
         // Then its session is killed.
-        assert_eq!(killed, vec![PaneId(-1)], "a dropped split pane is killed");
+        assert_eq!(killed, vec![PaneId(7)], "a closed pane's program is killed");
     }
 
     #[rstest::rstest]
-    fn to_kill_leaves_a_split_pane_that_ended() {
-        // Given split-off pane -1 dropped because its program ended.
-        let gone = [PaneId(-1)];
+    fn to_kill_leaves_a_dropped_pane_still_in_a_layout() {
+        // Given pane 7 dropped by a detach, still in its session's layout.
+        let gone = [PaneId(7)];
 
         // When choosing the zmx sessions to kill.
-        let killed = to_kill(&gone, &HashSet::from([PaneId(-1)]));
+        let killed = to_kill(&gone, &HashSet::new(), &HashSet::from([PaneId(7)]));
+
+        // Then its program keeps running.
+        assert!(killed.is_empty(), "a laid-out pane outlives its detach");
+    }
+
+    #[rstest::rstest]
+    fn to_kill_leaves_a_pane_that_ended() {
+        // Given pane 7 dropped because its program ended.
+        let gone = [PaneId(7)];
+
+        // When choosing the zmx sessions to kill.
+        let killed = to_kill(&gone, &HashSet::from([PaneId(7)]), &HashSet::new());
 
         // Then nothing is killed.
         assert!(killed.is_empty(), "an ended pane has nothing to kill");
     }
 
     #[rstest::rstest]
-    fn to_kill_leaves_a_threads_pane() {
-        // Given thread 1's own pane dropped by a detach.
-        let gone = [PaneId(1)];
-
-        // When choosing the zmx sessions to kill.
-        let killed = to_kill(&gone, &HashSet::new());
-
-        // Then its program keeps running.
-        assert!(killed.is_empty(), "a thread's pane outlives its detach");
-    }
-
-    #[rstest::rstest]
-    fn to_spawn_takes_a_split_pane_without_a_client() {
-        // Given split-off pane -1 in a layout with no client.
-        let keep = HashSet::from([PaneId(-1)]);
-        let live: HashMap<PaneId, &str> = HashMap::new();
+    fn to_spawn_takes_every_kept_pane_without_a_client() {
+        // Given kept panes 7 and 8, pane 8 with a client.
+        let keep = HashSet::from([PaneId(7), PaneId(8)]);
+        let live: HashMap<PaneId, &str> = HashMap::from([(PaneId(8), "client")]);
 
         // When choosing the panes to start.
         let spawned = to_spawn(&keep, &live);
 
-        // Then it gets a client.
-        assert_eq!(spawned, vec![PaneId(-1)], "a new split pane is started");
+        // Then pane 7 gets a client.
+        assert_eq!(
+            spawned,
+            vec![PaneId(7)],
+            "a kept pane without a client starts"
+        );
     }
 
     #[rstest::rstest]
-    fn to_spawn_leaves_a_threads_pane() {
-        // Given thread 1's own pane in a layout with no client.
-        let keep = HashSet::from([PaneId(1)]);
-        let live: HashMap<PaneId, &str> = HashMap::new();
+    fn stale_sessions_takes_old_thread_and_split_names() {
+        // Given zmx listing phase-era names no pane owns.
+        let listed = vec!["orb-p3".to_owned(), "orb-p-1".to_owned()];
 
-        // When choosing the panes to start.
-        let spawned = to_spawn(&keep, &live);
+        // When choosing what to kill.
+        let stale = stale_sessions(listed, &HashSet::new());
 
-        // Then the attach starts it instead.
-        assert!(spawned.is_empty(), "a thread's pane starts on attach");
+        // Then both are killed.
+        assert_eq!(
+            stale,
+            vec!["orb-p3".to_owned(), "orb-p-1".to_owned()],
+            "leftover thread and split sessions go"
+        );
+    }
+
+    #[rstest::rstest]
+    fn stale_sessions_spares_a_pane_rows_session() {
+        // Given zmx listing orb-p12, which pane 12 owns.
+        let listed = vec!["orb-p12".to_owned()];
+
+        // When choosing what to kill.
+        let stale = stale_sessions(listed, &HashSet::from(["orb-p12".to_owned()]));
+
+        // Then nothing is killed.
+        assert!(stale.is_empty(), "a pane's own session stays");
+    }
+
+    #[rstest::rstest]
+    fn stale_sessions_spares_names_without_the_orb_p_prefix() {
+        // Given zmx listing a session orb didn't name.
+        let listed = vec!["work".to_owned()];
+
+        // When choosing what to kill.
+        let stale = stale_sessions(listed, &HashSet::new());
+
+        // Then it is left alone.
+        assert!(stale.is_empty(), "only orb-p* sessions are orb's");
     }
 
     #[rstest::rstest]

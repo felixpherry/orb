@@ -2,7 +2,7 @@
 //! name box, which names a thread, or a new group.
 
 use crate::TextInput;
-use crate::feat::sessions::state::{GroupKind, ProjectId, ThreadId};
+use crate::feat::sessions::state::{GroupKind, PaneId, ProjectId, SessionId, ThreadId};
 
 /// The sidebar's width in columns until the user resizes it.
 pub const DEFAULT_WIDTH: u16 = 32;
@@ -76,7 +76,9 @@ pub enum RenameTarget {
         project: Option<ProjectId>,
     },
     /// Tab `tab` (0-based) of `owner`'s layout.
-    Tab { owner: ThreadId, tab: usize },
+    Tab { owner: SessionId, tab: usize },
+    /// A pane of the shown layout.
+    Pane(PaneId),
 }
 
 /// The name box: what it names, and the name typed so far.

@@ -61,20 +61,20 @@ pub(crate) fn render(
     cursor
 }
 
-/// Each tab's label, padded by a space each side, the shown one in reverse
-/// blue.
+/// Each tab's label (its name, else its focused pane's), padded by a space
+/// each side, the shown one in reverse blue.
 fn tab_bar(layout: &SessionLayout, bar: Rect, buf: &mut Buffer) {
     let spans: Vec<Span<'static>> = layout
         .tabs()
         .iter()
         .enumerate()
-        .map(|(index, tab)| {
+        .map(|(index, _)| {
             let style = if index == layout.active() {
                 Style::new().fg(BG_DARK).bg(BLUE)
             } else {
                 Style::new().fg(COMMENT)
             };
-            Span::styled(format!(" {} ", tab.label(index)), style)
+            Span::styled(format!(" {} ", layout.tab_label(index)), style)
         })
         .collect();
     Line::from(spans).render(bar, buf);

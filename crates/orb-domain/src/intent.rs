@@ -69,10 +69,12 @@ pub enum Intent {
     ShrinkFocused,
     /// Open a tab with one shell, shown.
     NewTab,
-    /// Close the shown tab; one holding the thread's own pane detaches the thread.
+    /// Close the shown tab; one holding a pane a thread runs in detaches the thread.
     CloseTab,
     /// Open the rename box for the shown tab.
     RenameTab,
+    /// Open the rename box for the focused pane.
+    RenamePane,
     /// Show tab N, counting from 1.
     GoToTab(usize),
     /// Show the next tab, wrapping to the first.
@@ -236,6 +238,7 @@ impl fmt::Display for Intent {
             Self::NewTab => "new tab",
             Self::CloseTab => "close tab",
             Self::RenameTab => "rename tab",
+            Self::RenamePane => "rename pane",
             Self::GoToTab(_) => "tab",
             Self::NextTab => "next tab",
             Self::PreviousTab => "previous tab",
@@ -312,6 +315,7 @@ mod tests {
     #[case(Intent::NewTab, "new tab")]
     #[case(Intent::CloseTab, "close tab")]
     #[case(Intent::RenameTab, "rename tab")]
+    #[case(Intent::RenamePane, "rename pane")]
     #[case(Intent::GoToTab(3), "tab")]
     #[case(Intent::NextTab, "next tab")]
     #[case(Intent::PreviousTab, "previous tab")]

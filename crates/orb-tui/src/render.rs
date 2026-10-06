@@ -212,15 +212,17 @@ mod tests {
 
     use jiff::tz::TimeZone;
     use orb_domain::Intent;
+    use orb_domain::feat::layout::state::{PaneEntry, SessionLayout};
     use orb_domain::feat::layout::tree::Split;
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::search::state::SearchProgress;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, PaneId, Project, ProjectId, ProjectKind, Search, Sessions,
-        SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search,
+        SessionId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
+    use orb_domain::feat::zmx::zmx_service::ZmxSession;
     use orb_domain::{AppState, Focus, TextInput};
     use orb_term::{Pane, PaneCommand, PaneSize};
     use ratatui::Terminal;
@@ -395,12 +397,38 @@ mod tests {
         }
     }
 
-    /// Thread 1, selected and attached with its one-tab layout, with the
-    /// given focus.
+    /// Pane `id`, a shell in `orb-p<id>`.
+    fn entry(id: i64) -> PaneEntry {
+        PaneEntry {
+            id: PaneId(id),
+            zmx: ZmxSession {
+                name: format!("orb-p{id}"),
+                dir: "/tmp/zmx".into(),
+            },
+            cwd: "/tmp".into(),
+            name: None,
+        }
+    }
+
+    /// Thread 1, selected and attached, running in pane 1, the one tab of
+    /// session 1, with the given focus.
     fn shown(focus: Focus) -> AppState {
         let mut state = selected(focus);
         state.attached.insert(ThreadId(1));
-        state.layouts.open(ThreadId(1));
+        if let Some(thread) = state
+            .sessions
+            .projects
+            .first_mut()
+            .and_then(|project| project.threads.first_mut())
+        {
+            thread.pane = Some(PaneLaunch {
+                pane: PaneId(1),
+                command: vec![],
+            });
+        }
+        state
+            .layouts
+            .insert(SessionId(1), SessionLayout::of(entry(1)));
         state
     }
 
@@ -1088,8 +1116,8 @@ mod tests {
         let state = laid_out(|state| {
             state
                 .layouts
-                .rename_tab(ThreadId(1), 0, Some("logs".to_owned()));
-            state.layouts.new_tab(ThreadId(1));
+                .rename_tab(SessionId(1), 0, Some("logs".to_owned()));
+            state.layouts.new_tab(SessionId(1), entry(2));
         });
 
         // When drawing a frame.
@@ -1102,11 +1130,29 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn unnamed_tab_shows_its_focused_panes_name() {
+        // Given an unnamed tab whose focused pane is named "server".
+        let state = laid_out(|state| {
+            state
+                .layouts
+                .rename_pane(PaneId(1), Some("server".to_owned()));
+        });
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the tab bar reads ` 1 server `.
+        let right = right_of(&buffer);
+        let bar = text(&buffer, Rect::new(right.x, right.y, right.width, 1));
+        assert!(bar.starts_with(" 1 server "), "tab bar was '{bar}'");
+    }
+
+    #[rstest::rstest]
     fn shown_tab_is_highlighted_in_the_tab_bar() {
         // Given two tabs, the first shown.
         let state = laid_out(|state| {
-            state.layouts.new_tab(ThreadId(1));
-            state.layouts.go_to_tab(ThreadId(1), 1);
+            state.layouts.new_tab(SessionId(1), entry(2));
+            state.layouts.go_to_tab(SessionId(1), 1);
         });
 
         // When drawing a frame.
@@ -1125,7 +1171,7 @@ mod tests {
     #[rstest::rstest]
     fn split_right_draws_a_line_between_the_panes() {
         // Given thread 1's pane split right, neither pane running yet.
-        let state = laid_out(|state| state.layouts.split(ThreadId(1), Split::Right));
+        let state = laid_out(|state| state.layouts.split(SessionId(1), Split::Right, entry(2)));
 
         // When drawing a frame on the 48-column right side.
         let buffer = draw(&state);
@@ -1149,8 +1195,8 @@ mod tests {
     fn zoomed_tab_draws_no_border() {
         // Given thread 1's pane split right, then zoomed.
         let state = laid_out(|state| {
-            state.layouts.split(ThreadId(1), Split::Right);
-            state.layouts.toggle_zoom(ThreadId(1));
+            state.layouts.split(SessionId(1), Split::Right, entry(2));
+            state.layouts.toggle_zoom(SessionId(1));
         });
 
         // When drawing a frame.

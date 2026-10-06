@@ -14,7 +14,6 @@ use crate::TextInput;
 use crate::feat::harness::HarnessId;
 use crate::feat::picker::list::fuzzy_match;
 use crate::feat::sidebar::state::SidebarLayout;
-use crate::feat::zmx::zmx_service::ZmxSession;
 
 /// What a draft is called, and a thread before its transcript names it.
 pub const NEW_THREAD: &str = "New thread";
@@ -23,8 +22,11 @@ pub const NEW_THREAD: &str = "New thread";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ThreadId(pub i64);
 
-/// Identifies a pane. A thread's own pane is numbered as the thread; panes
-/// orb splits off are numbered down from -1, so the two never meet.
+/// Identifies a session across launches (its row in orb's store).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionId(pub i64);
+
+/// Identifies a pane across launches (its row in orb's store).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PaneId(pub i64);
@@ -34,24 +36,14 @@ impl PaneId {
     pub fn zmx_name(self) -> String {
         format!("orb-p{}", self.0)
     }
-
-    /// The thread whose own pane this is; `None` for a split-off pane.
-    pub fn thread(self) -> Option<ThreadId> {
-        (self.0 > 0).then_some(ThreadId(self.0))
-    }
 }
 
-impl From<ThreadId> for PaneId {
-    fn from(thread: ThreadId) -> Self {
-        Self(thread.0)
-    }
-}
-
-/// How a thread's pane runs: its harness's command, in a zmx session.
+/// A thread's pane, and what zmx runs when it creates that pane's session:
+/// the harness's command, or nothing (a login shell) for a pane orb will type
+/// a resume command into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneLaunch {
-    pub zmx: ZmxSession,
-    /// The harness's command; zmx runs it when it creates the session.
+    pub pane: PaneId,
     pub command: Vec<OsString>,
 }
 
@@ -209,7 +201,7 @@ impl Thread {
     pub fn attach_target(&self) -> Option<AttachTarget> {
         Some(AttachTarget {
             thread: self.id,
-            launch: self.pane.clone()?,
+            pane: self.pane.as_ref()?.pane,
             cwd: self.cwd.clone(),
         })
     }
@@ -1326,11 +1318,12 @@ where
         .max(1)
 }
 
-/// What the frontend needs to attach to a thread's session.
+/// What the frontend needs to attach to a thread's session: the thread, the
+/// pane it runs in, and its directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachTarget {
     pub thread: ThreadId,
-    pub launch: PaneLaunch,
+    pub pane: PaneId,
     pub cwd: PathBuf,
 }
 
@@ -1358,34 +1351,6 @@ mod tests {
 
         // Then it is orb-p7.
         assert_eq!(name, "orb-p7", "a pane's zmx session is orb-p<id>");
-    }
-
-    #[rstest::rstest]
-    fn thread_pane_names_its_thread() {
-        // Given thread 7's own pane.
-        let pane = PaneId::from(ThreadId(7));
-
-        // When asking whose thread's pane it is.
-        let thread = pane.thread();
-
-        // Then it is thread 7's.
-        assert_eq!(
-            thread,
-            Some(ThreadId(7)),
-            "a thread's pane names its thread"
-        );
-    }
-
-    #[rstest::rstest]
-    fn split_pane_names_no_thread() {
-        // Given split-off pane -1.
-        let pane = PaneId(-1);
-
-        // When asking whose thread's pane it is.
-        let thread = pane.thread();
-
-        // Then it is no thread's.
-        assert_eq!(thread, None, "a split-off pane is no thread's own");
     }
 
     fn at(secs: u64) -> SystemTime {

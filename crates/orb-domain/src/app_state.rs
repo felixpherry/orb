@@ -10,7 +10,7 @@ use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::PickerState;
 use crate::feat::search::state::SearchProgress;
-use crate::feat::sessions::state::{Sessions, ThreadId};
+use crate::feat::sessions::state::{SessionId, Sessions, ThreadId};
 use crate::feat::sidebar::state::{Rename, SidebarView};
 use crate::feat::worktrees::state::Worktrees;
 
@@ -46,14 +46,15 @@ pub struct AppState {
     pub dashboard: DashboardCursor,
     /// The sidebar's width, visibility and last layout.
     pub sidebar: SidebarView,
-    /// The threads orb holds a live pane for: added on attach, removed by
-    /// `<C-\>`, settling, deleting, the pane's exit and a failed spawn. The
-    /// right-hand area shows the selected thread's pane while it's in here.
+    /// The threads orb holds live panes for: added on attach, removed by
+    /// `<C-\>`, settling, deleting, the pane's exit and a failed spawn. While
+    /// one of a session's threads is in here, every pane of that session has
+    /// a client, and the right-hand area shows the selected thread's session.
     /// Written by the intent handler, the frontend, and the sessions actor
-    /// (which detaches a group it goes ahead deleting). Each attached thread
-    /// has a layout in `layouts`, dropped once it leaves.
+    /// (which detaches a group it goes ahead deleting).
     pub attached: HashSet<ThreadId>,
-    /// Each attached thread's tabs and splits (see [`Layouts`]).
+    /// Every session's tabs and splits, saved in the store as they change
+    /// (see [`Layouts`]).
     pub layouts: Layouts,
     /// The open picker, if any.
     pub picker: Option<PickerState>,
@@ -79,10 +80,20 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The layout the right-hand area shows: the selected thread's, while it
-    /// is attached. `None` means the start screen.
+    /// The session the right-hand area shows: the selected thread's, while
+    /// that thread is attached.
+    pub fn shown_session(&self) -> Option<SessionId> {
+        let thread = self.sessions.selected_thread()?;
+        if !self.attached.contains(&thread.id) {
+            return None;
+        }
+        self.layouts.owner_of(thread.pane.as_ref()?.pane)
+    }
+
+    /// The layout the right-hand area shows: the shown session's. `None`
+    /// means the start screen.
     pub fn shown_layout(&self) -> Option<&SessionLayout> {
-        self.layouts.get(self.sessions.selected_id()?)
+        self.layouts.get(self.shown_session()?)
     }
 
     /// What the frontend knows about harness `id`.
@@ -108,10 +119,13 @@ mod tests {
     use crate::feat::harness::HarnessId;
     use crate::feat::harness::claude::models::info;
     use crate::feat::harness::fake::pi_like;
+    use crate::feat::layout::state::{PaneEntry, SessionLayout};
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, Project,
-        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, PaneId,
+        PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus,
     };
+    use crate::feat::zmx::zmx_service::ZmxSession;
 
     /// One project whose draft runs `harness`, selected, with Claude and a
     /// pi-like harness registered.
@@ -210,7 +224,8 @@ mod tests {
         );
     }
 
-    /// Thread 1 selected; its layout open when `attached`.
+    /// Thread 1 selected, running in pane 10 of session 1; attached when
+    /// `attached`.
     fn selecting_thread(attached: bool) -> AppState {
         let thread = Thread {
             harness: HarnessId::new("claude"),
@@ -220,7 +235,10 @@ mod tests {
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(10),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -237,25 +255,36 @@ mod tests {
             project.threads = vec![thread];
         }
         state.sessions.cursor = Some(SidebarItem::Thread(ThreadId(1)));
+        state.layouts.insert(
+            SessionId(1),
+            SessionLayout::of(PaneEntry {
+                id: PaneId(10),
+                zmx: ZmxSession {
+                    name: "orb-p10".into(),
+                    dir: "/tmp/zmx".into(),
+                },
+                cwd: "/tmp".into(),
+                name: None,
+            }),
+        );
         if attached {
             state.attached.insert(ThreadId(1));
-            state.layouts.open(ThreadId(1));
         }
         state
     }
 
     #[rstest::rstest]
-    fn shown_layout_is_the_selected_attached_threads() {
-        // Given selected thread 1 attached with its layout open.
+    fn shown_layout_is_the_selected_attached_threads_session() {
+        // Given selected thread 1 attached, running in session 1.
         let state = selecting_thread(true);
 
         // When asking for the shown layout.
         let shown = state.shown_layout();
 
-        // Then it is thread 1's.
+        // Then it is session 1's.
         assert!(
-            shown.is_some() && shown == state.layouts.get(ThreadId(1)),
-            "the selected attached thread's layout is shown"
+            shown.is_some() && shown == state.layouts.get(SessionId(1)),
+            "the selected attached thread's session is shown"
         );
     }
 

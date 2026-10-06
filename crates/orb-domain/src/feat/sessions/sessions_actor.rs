@@ -113,12 +113,12 @@ use super::session_host::{
 };
 use super::state::{
     Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, NEW_THREAD,
-    Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Sessions, SidebarItem,
-    Thread, ThreadId, ThreadStatus,
+    Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
+    SidebarItem, Thread, ThreadId, ThreadStatus,
 };
 use super::store::{
-    DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store,
-    ThreadRow, Ui,
+    DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, PaneRow, SettledOverride,
+    Store, TabRow, ThreadRow, Ui,
 };
 use super::template;
 use super::validator::{group_exists, on_disk};
@@ -129,9 +129,12 @@ use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{
     hex, hex_branch, is_orb_worktree, new_worktree_path, previous_worktree, slug,
 };
-use crate::feat::harness::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat};
+use crate::feat::harness::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat, claude};
 use crate::feat::jumps::state::JumpList;
+use crate::feat::layout::state::{PaneEntry, SessionLayout, Tab};
+use crate::feat::layout::tree::{Split, TileLayout};
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
+use crate::feat::zmx::zmx_service::ZmxSession;
 use crate::{AppState, Focus};
 
 /// How long to wait between polls while a turn is underway or orb is attached
@@ -181,7 +184,11 @@ pub struct SessionsActorDeps {
 /// the origin ref a start is fetching, the folder a harness asks to trust
 /// before a start, and the started or restored thread the frontend should
 /// attach to. It adds orb's Incognito project at start. It also restores the sidebar's width
-/// and project filter, and selects a new group's draft. The intent handler
+/// and project filter, and selects a new group's draft. It loads every
+/// session's layout at start, adds the panes splits and new tabs make (it
+/// saves their store rows, so it gives them their ids), lays out a new
+/// thread's session, drops a deleted session's layout, and saves a layout
+/// when asked. The intent handler
 /// also moves the cursor, opens and closes the shelf, marks a start as starting, edits a draft's fields before
 /// asking for them to be saved, and resizes or filters the sidebar before
 /// asking for that to be saved.
@@ -198,6 +205,10 @@ pub struct SessionsActor {
     rows: Vec<ThreadRow>,
     /// The saved groups, as last written to the store.
     groups: Vec<GroupRow>,
+    /// The saved panes, as last written to the store.
+    panes: HashMap<PaneId, PaneRow>,
+    /// Each saved session's directory, where its new panes start.
+    session_dirs: HashMap<SessionId, PathBuf>,
     /// The start waiting for the user to trust the folder its harness names,
     /// and that path.
     pending: Option<(PendingStart, PathBuf)>,
@@ -206,6 +217,28 @@ pub struct SessionsActor {
 /// Poll the session host now.
 #[derive(Debug)]
 pub struct Poll;
+
+/// Split `session`'s focused pane `split` with a new shell pane, and save
+/// the layout.
+#[derive(Debug)]
+pub struct SplitPane {
+    pub session: SessionId,
+    pub split: Split,
+}
+
+/// Open a tab of one new shell pane in a session, and save the layout.
+#[derive(Debug)]
+pub struct NewTab(pub SessionId);
+
+/// Save a session's tabs, splits, focus and pane names as the app state has
+/// them.
+#[derive(Debug)]
+pub struct SaveLayout(pub SessionId);
+
+/// Stop the Claude `--bg` sessions the store's migration to sessions turned
+/// into panes, so they don't fight the `claude --resume` those panes run.
+#[derive(Debug)]
+pub struct StopMigrated;
 
 /// How long to wait before the next [`Poll`].
 #[derive(Debug, Reply)]
@@ -440,6 +473,12 @@ impl Actor for SessionsActor {
                 let _ = actor_ref.tell(Probed(info)).await;
             });
         }
+        {
+            let actor_ref = actor_ref.clone();
+            tokio::spawn(async move {
+                let _ = actor_ref.tell(StopMigrated).await;
+            });
+        }
         let poke = actor.poke.clone();
         tokio::spawn(async move {
             while let Ok(NextPoll(next)) = actor_ref.ask(Poll).await {
@@ -450,6 +489,50 @@ impl Actor for SessionsActor {
             }
         });
         std::future::ready(Ok(actor))
+    }
+}
+
+impl Message<SplitPane> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: SplitPane,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.add_pane(msg.session, Some(msg.split));
+    }
+}
+
+impl Message<NewTab> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(&mut self, msg: NewTab, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.add_pane(msg.0, None);
+    }
+}
+
+impl Message<SaveLayout> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: SaveLayout,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.save_layout(msg.0);
+    }
+}
+
+impl Message<StopMigrated> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: StopMigrated,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.stop_migrated().await;
     }
 }
 
@@ -880,8 +963,13 @@ impl SessionsActor {
     /// was saved, kept within its bounds, filters it to the saved project if
     /// that's still shown and not removed, and selects its first row. Each
     /// draft learns what git says about it. The saved jump list comes back
-    /// without the rows that no longer exist. orb's Incognito project is added
+    /// without the rows that no longer exist, and every session's layout comes
+    /// back as it was saved. orb's Incognito project is added
     /// (or un-removed) and its folder made first.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "brings back every saved piece of the sidebar and layouts in one place"
+    )]
     fn restore(deps: SessionsActorDeps) -> Self {
         let SessionsActorDeps {
             services,
@@ -899,6 +987,12 @@ impl SessionsActor {
             ProjectKind::Incognito,
             now_ms(),
         );
+        let RestoredLayouts {
+            panes,
+            session_dirs,
+            layouts,
+            error: layouts_error,
+        } = restore_layouts(&store, &services, &orb_root);
         let (projects, rows, drafts, groups, error) = match store.load() {
             Ok((projects, rows, drafts, groups)) => (
                 projects,
@@ -915,13 +1009,14 @@ impl SessionsActor {
                 Some("couldn't load orb's saved sessions".to_owned()),
             ),
         };
+        let error = error.or_else(|| layouts_error.map(str::to_owned));
         let projects: Vec<Project> = projects
             .into_iter()
             .map(|project| Project {
                 threads: rows
                     .iter()
                     .filter(|row| row.project_id == project.id)
-                    .map(|row| unpolled(&services, row))
+                    .map(|row| unpolled(&services, row, &panes))
                     .collect(),
                 draft: drafts
                     .iter()
@@ -960,6 +1055,9 @@ impl SessionsActor {
             app.sidebar.width = ui.sidebar_width.map_or(DEFAULT_WIDTH, clamp_width);
             app.jumps = jumps;
             app.harnesses = services.harnesses.placeholders();
+            for (session, layout) in layouts {
+                app.layouts.insert(session, layout);
+            }
             let sessions = &mut app.sessions;
             sessions.projects = projects;
             sessions.cursor = None;
@@ -977,6 +1075,8 @@ impl SessionsActor {
             poke: Arc::default(),
             rows,
             groups,
+            panes,
+            session_dirs,
             pending: None,
         }
     }
@@ -1107,7 +1207,12 @@ impl SessionsActor {
                     changed = true;
                 }
                 if let Some(thread) = thread_mut(sessions, row.id) {
-                    changed |= show(thread, row, status, pane_launch(&self.services, row));
+                    changed |= show(
+                        thread,
+                        row,
+                        status,
+                        pane_launch(&self.services, row, &self.panes),
+                    );
                 }
             }
             for row in self
@@ -1963,7 +2068,7 @@ impl SessionsActor {
             ..row.clone()
         };
         let saved = self.store.save_thread(row);
-        let shown = unpolled(&self.services, row);
+        let shown = unpolled(&self.services, row, &self.panes);
         let project_id = row.project_id;
         if let Some(thread) = thread_mut(&mut self.state.write().sessions, moved.thread) {
             *thread = shown;
@@ -2080,7 +2185,12 @@ impl SessionsActor {
             }
             if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
                 let status = thread.status;
-                show(thread, row, status, pane_launch(&self.services, row));
+                show(
+                    thread,
+                    row,
+                    status,
+                    pane_launch(&self.services, row, &self.panes),
+                );
             }
         }
         for row in self
@@ -2155,12 +2265,34 @@ impl SessionsActor {
             permission_mode: options.permission_mode.clone(),
             group_id: group,
             harness: harness.clone(),
+            zmx: self
+                .services
+                .harnesses
+                .get(harness)
+                .and_then(|harness| harness.zmx_session(short_id)),
         };
-        let Ok(id) = self.store.insert_thread(&new) else {
+        let Ok(inserted) = self.store.insert_thread(&new) else {
             return Err(NEW_SESSION_UNSAVED.to_owned());
         };
+        let pane = PaneRow {
+            id: inserted.pane,
+            session_id: inserted.session,
+            cwd: new.cwd.clone(),
+            zmx_name: new.zmx.as_ref().map(|zmx| zmx.name.clone()),
+            zmx_dir: new.zmx.as_ref().map(|zmx| zmx.dir.clone()),
+            resume: None,
+            migrated_bg: None,
+            name: None,
+        };
+        let entry = pane_entry(&self.services, &self.orb_root, &pane);
+        self.state
+            .write()
+            .layouts
+            .insert(inserted.session, SessionLayout::of(entry));
+        self.session_dirs.insert(inserted.session, new.cwd.clone());
+        self.panes.insert(pane.id, pane);
         let row = ThreadRow {
-            id,
+            id: inserted.thread,
             project_id,
             short_id: new.short_id,
             session_id: None,
@@ -2184,11 +2316,12 @@ impl SessionsActor {
             renamed_title: None,
             group_id: new.group_id,
             harness: new.harness,
+            pane_id: Some(inserted.pane),
         };
         if row.branch.is_some() && self.store.save_thread(&row).is_err() {
             return Err(NEW_SESSION_UNSAVED.to_owned());
         }
-        let thread = unpolled(&self.services, &row);
+        let thread = unpolled(&self.services, &row, &self.panes);
         self.rows.push(row);
         Ok(thread)
     }
@@ -2518,8 +2651,30 @@ impl SessionsActor {
             (self.wake)();
             return;
         }
+        let session = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .and_then(|row| self.panes.get(&row.pane_id?))
+            .map(|pane| pane.session_id);
         let deleted = self.store.delete_thread(id);
         self.rows.retain(|row| row.id != id);
+        let emptied = session.filter(|session| {
+            !self.rows.iter().any(|row| {
+                row.pane_id
+                    .and_then(|pane| self.panes.get(&pane))
+                    .is_some_and(|pane| pane.session_id == *session)
+            })
+        });
+        let deleted = match emptied {
+            Some(session) => deleted.and_then(|()| {
+                self.panes.retain(|_, pane| pane.session_id != session);
+                self.session_dirs.remove(&session);
+                self.state.write().layouts.remove(session);
+                self.store.delete_session(session)
+            }),
+            None => deleted,
+        };
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
@@ -2692,6 +2847,89 @@ impl SessionsActor {
     }
 
     /// Saves the sidebar's width and project filter, showing why if it can't.
+    /// Adds a shell pane in `session`'s directory: splitting its focused pane
+    /// `split`, or in a new tab when `None`. Then saves the layout. Nothing
+    /// happens once the session's layout is gone; a pane that can't be saved
+    /// shows why.
+    fn add_pane(&mut self, session: SessionId, split: Option<Split>) {
+        let Some(dir) = self.session_dirs.get(&session).cloned() else {
+            return;
+        };
+        if self.state.read().layouts.get(session).is_none() {
+            return;
+        }
+        let Ok(id) = self.store.insert_pane(session, &dir) else {
+            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+            return (self.wake)();
+        };
+        let row = PaneRow {
+            id,
+            session_id: session,
+            cwd: dir,
+            zmx_name: None,
+            zmx_dir: None,
+            resume: None,
+            migrated_bg: None,
+            name: None,
+        };
+        let entry = pane_entry(&self.services, &self.orb_root, &row);
+        self.panes.insert(id, row);
+        {
+            let mut app = self.state.write();
+            match split {
+                Some(split) => app.layouts.split(session, split, entry),
+                None => app.layouts.new_tab(session, entry),
+            }
+        }
+        self.save_layout(session);
+        (self.wake)();
+    }
+
+    /// Saves `session`'s tabs, active tab and pane names as the app state
+    /// has them; panes no tab holds any more are deleted from the store.
+    /// Nothing happens once its layout is gone.
+    fn save_layout(&mut self, session: SessionId) {
+        let saved = {
+            let app = self.state.read();
+            app.layouts.get(session).map(|layout| {
+                let tabs: Vec<TabRow> = layout
+                    .tabs()
+                    .iter()
+                    .enumerate()
+                    .map(|(position, tab)| TabRow {
+                        session_id: session,
+                        position,
+                        name: tab.name().map(str::to_owned),
+                        layout: tab.layout_json(),
+                        focus_pane: Some(tab.focused()),
+                    })
+                    .collect();
+                let names: Vec<(PaneId, Option<String>)> = layout
+                    .panes()
+                    .map(|entry| (entry.id, entry.name.clone()))
+                    .collect();
+                (tabs, layout.active(), names)
+            })
+        };
+        let Some((tabs, active, names)) = saved else {
+            return;
+        };
+        match self.store.save_layout(session, active, &tabs, &names) {
+            Ok(dropped) => {
+                for pane in dropped {
+                    self.panes.remove(&pane);
+                    for row in self.rows.iter_mut().filter(|row| row.pane_id == Some(pane)) {
+                        row.pane_id = None;
+                    }
+                }
+            }
+            Err(_) => {
+                self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+                (self.wake)();
+            }
+        }
+    }
+
     fn save_ui(&self) {
         let ui = {
             let app = self.state.read();
@@ -2734,7 +2972,12 @@ impl SessionsActor {
             }
             if let Some(thread) = thread_mut(sessions, id) {
                 let status = thread.status;
-                show(thread, row, status, pane_launch(&self.services, row));
+                show(
+                    thread,
+                    row,
+                    status,
+                    pane_launch(&self.services, row, &self.panes),
+                );
             }
         }
         (self.wake)();
@@ -2762,6 +3005,52 @@ impl SessionsActor {
             }
         }
         (self.wake)();
+    }
+
+    /// Stops each `--bg` session a migrated pane still names, through Claude,
+    /// in pane order, ignoring failures (a session already gone is fine),
+    /// then forgets them all. Without Claude registered nothing happens and
+    /// the markers stay.
+    async fn stop_migrated(&mut self) {
+        let Some(claude) = self
+            .services
+            .harnesses
+            .get(&HarnessId::new(claude::ID))
+            .cloned()
+        else {
+            return;
+        };
+        let marked: Vec<(PaneId, String)> = {
+            let mut marked: Vec<(PaneId, String)> = self
+                .panes
+                .values()
+                .filter_map(|pane| Some((pane.id, pane.migrated_bg.clone()?)))
+                .collect();
+            marked.sort_by_key(|(pane, _)| pane.0);
+            marked
+        };
+        if marked.is_empty() {
+            return;
+        }
+        // ponytail: stops run in order on the actor (~0.7 s each), once after
+        // the migration; run them concurrently if many threads ever migrate.
+        for (_, short_id) in &marked {
+            let _ = claude.stop(short_id).await;
+        }
+        let panes: Vec<PaneId> = marked.iter().map(|(pane, _)| *pane).collect();
+        match self.store.clear_migrated_bg(&panes) {
+            Ok(()) => {
+                for pane in &panes {
+                    if let Some(row) = self.panes.get_mut(pane) {
+                        row.migrated_bg = None;
+                    }
+                }
+            }
+            Err(_) => {
+                self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+                (self.wake)();
+            }
+        }
     }
 
     /// Stops a session in `harness`, showing why if it can't.
@@ -3199,33 +3488,133 @@ fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
 
 /// How a saved thread looks before its first poll; one whose harness orb
 /// doesn't know is Gone, with nothing to attach.
-fn unpolled(services: &Services, row: &ThreadRow) -> Thread {
+fn unpolled(services: &Services, row: &ThreadRow, panes: &HashMap<PaneId, PaneRow>) -> Thread {
     let status = match services.harnesses.get(&row.harness) {
         Some(_) => ThreadStatus::Unknown,
         None => ThreadStatus::Gone,
     };
-    thread(row, status, pane_launch(services, row))
+    thread(row, status, pane_launch(services, row, panes))
 }
 
-/// How `row`'s pane runs: its harness's command, built from the row's model
-/// and whether its transcript is known, so a pane that starts the session
-/// again starts it right, in the zmx session its harness runs it in, else in
-/// the pane's own `orb-p<id>` on orb's pane socket dir; nothing for a harness
-/// orb doesn't know.
-fn pane_launch(services: &Services, row: &ThreadRow) -> Option<PaneLaunch> {
+/// `row`'s pane and what runs in it: nothing for a pane with a resume
+/// command (it starts as a shell to type that into), else its harness's
+/// command, built from the row's model and whether its transcript is known,
+/// so a pane that starts the session again starts it right. `None` for a
+/// thread with no pane or a harness orb doesn't know.
+fn pane_launch(
+    services: &Services,
+    row: &ThreadRow,
+    panes: &HashMap<PaneId, PaneRow>,
+) -> Option<PaneLaunch> {
     let harness = services.harnesses.get(&row.harness)?;
+    let pane = panes.get(&row.pane_id?)?;
     Some(PaneLaunch {
-        zmx: harness
-            .zmx_session(&row.short_id)
-            .unwrap_or_else(|| services.zmx.session(PaneId::from(row.id).zmx_name())),
-        command: harness.attach_argv(
-            &row.short_id,
-            &AttachStart {
-                model: row.model.as_deref(),
-                has_transcript: row.transcript_path.is_some(),
-            },
-        ),
+        pane: pane.id,
+        command: match pane.resume {
+            Some(_) => vec![],
+            None => harness.attach_argv(
+                &row.short_id,
+                &AttachStart {
+                    model: row.model.as_deref(),
+                    has_transcript: row.transcript_path.is_some(),
+                },
+            ),
+        },
     })
+}
+
+/// Where pane `row`'s program runs: its kept zmx session, on a socket dir
+/// under orb's folder unless the dir is absolute (orb's pane dir when none),
+/// else `orb-p<id>` on orb's pane dir.
+fn pane_entry(services: &Services, orb_root: &Path, row: &PaneRow) -> PaneEntry {
+    let zmx = match &row.zmx_name {
+        Some(name) => ZmxSession {
+            name: name.clone(),
+            dir: row
+                .zmx_dir
+                .as_ref()
+                .map_or_else(|| services.zmx.dir().to_owned(), |dir| orb_root.join(dir)),
+        },
+        None => services.zmx.session(row.id.zmx_name()),
+    };
+    PaneEntry {
+        id: row.id,
+        zmx,
+        cwd: row.cwd.clone(),
+        name: row.name.clone(),
+    }
+}
+
+/// What the store's saved layouts restore to.
+struct RestoredLayouts {
+    /// Every saved pane.
+    panes: HashMap<PaneId, PaneRow>,
+    /// Each saved session's directory.
+    session_dirs: HashMap<SessionId, PathBuf>,
+    /// Each session's layout.
+    layouts: Vec<(SessionId, SessionLayout)>,
+    /// Why some or all of them couldn't be read.
+    error: Option<&'static str>,
+}
+
+/// Every saved session's layout: its tabs by position, each focused on its
+/// saved pane (else its first), showing its saved tab, with where each pane
+/// runs. A tab whose tree doesn't read is left out, and so is a session left
+/// with no tab. Nothing comes back when the store can't be read.
+fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> RestoredLayouts {
+    let Ok(saved) = store.layouts() else {
+        return RestoredLayouts {
+            panes: HashMap::new(),
+            session_dirs: HashMap::new(),
+            layouts: Vec::new(),
+            error: Some("couldn't load orb's saved layouts"),
+        };
+    };
+    let mut unread = false;
+    let layouts = saved
+        .sessions
+        .iter()
+        .filter_map(|session| {
+            let tabs: Vec<Tab> = saved
+                .tabs
+                .iter()
+                .filter(|tab| tab.session_id == session.id)
+                .filter_map(|tab| {
+                    let focus = tab.focus_pane.unwrap_or(PaneId(0));
+                    match TileLayout::from_json(&tab.layout, focus) {
+                        Ok(tree) => Some(Tab::restore(tab.name.clone(), tree)),
+                        Err(_) => {
+                            unread = true;
+                            None
+                        }
+                    }
+                })
+                .collect();
+            if tabs.is_empty() {
+                return None;
+            }
+            let panes = saved
+                .panes
+                .iter()
+                .filter(|pane| pane.session_id == session.id)
+                .map(|pane| pane_entry(services, orb_root, pane))
+                .collect();
+            Some((
+                session.id,
+                SessionLayout::restore(tabs, session.active_tab, panes),
+            ))
+        })
+        .collect();
+    RestoredLayouts {
+        session_dirs: saved
+            .sessions
+            .into_iter()
+            .map(|row| (row.id, row.dir))
+            .collect(),
+        panes: saved.panes.into_iter().map(|row| (row.id, row)).collect(),
+        layouts,
+        error: unread.then_some("couldn't read a saved tab"),
+    }
 }
 
 /// The branch checked out in `cwd`, if git can tell.
@@ -3439,18 +3828,19 @@ mod tests {
     use crate::feat::harness::fake::FakeHarness;
     use crate::feat::harness::{HarnessInfo, Harnesses};
     use crate::feat::jumps::state::JumpList;
+    use crate::feat::layout::tree::Split;
     use crate::feat::sessions::session_host::{
         AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
         WorkspaceUntrusted,
     };
     use crate::feat::sessions::state::{
         Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Notice,
-        NoticeKind, Own, ProjectId, ProjectKind, SidebarItem, SidebarRow, Thread, ThreadId,
+        NoticeKind, Own, PaneId, ProjectId, ProjectKind, SidebarItem, SidebarRow, Thread, ThreadId,
         ThreadStatus,
     };
     use crate::feat::sessions::store::{
-        DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, SettledOverride, Store,
-        StoreError, ThreadRow, Ui,
+        DraftRow, GroupRow, InsertedThread, LastUsed, LastWorkspace, NewGroup, NewThread,
+        SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::feat::zmx::zmx_service::fake::FakeZmx;
@@ -4086,16 +4476,19 @@ mod tests {
     ) -> Result<(Store, ThreadId), Report<StoreError>> {
         let store = Store::open_in_memory()?;
         let project_id = orb_project(&store)?;
-        let id = store.insert_thread(&NewThread {
-            harness: HarnessId::new("claude"),
-            project_id,
-            short_id: short_id.to_owned(),
-            cwd: PathBuf::from(PROJECT_ROOT),
-            created_at: now_ms() - HOUR_MS,
-            model: Some(model.to_owned()),
-            permission_mode: None,
-            group_id: None,
-        })?;
+        let id = store
+            .insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
+                project_id,
+                short_id: short_id.to_owned(),
+                cwd: PathBuf::from(PROJECT_ROOT),
+                created_at: now_ms() - HOUR_MS,
+                model: Some(model.to_owned()),
+                permission_mode: None,
+                group_id: None,
+                zmx: None,
+            })
+            .map(|inserted| inserted.thread)?;
         Ok((store, id))
     }
 
@@ -4111,16 +4504,19 @@ mod tests {
         created_at: i64,
     ) -> Result<ThreadId, Report<StoreError>> {
         let project_id = orb_project(store)?;
-        store.insert_thread(&NewThread {
-            harness: HarnessId::new("claude"),
-            project_id,
-            short_id: short_id.to_owned(),
-            cwd: PathBuf::from(PROJECT_ROOT),
-            created_at,
-            model: None,
-            permission_mode: None,
-            group_id: None,
-        })
+        store
+            .insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
+                project_id,
+                short_id: short_id.to_owned(),
+                cwd: PathBuf::from(PROJECT_ROOT),
+                created_at,
+                model: None,
+                permission_mode: None,
+                group_id: None,
+                zmx: None,
+            })
+            .map(|inserted| inserted.thread)
     }
 
     /// Saves `change` over the saved row of the thread `short_id`.
@@ -4253,16 +4649,19 @@ mod tests {
         short_id: &str,
     ) -> Result<ThreadId, Report<StoreError>> {
         let project_id = orb_project(store)?;
-        store.insert_thread(&NewThread {
-            harness: HarnessId::new(harness),
-            project_id,
-            short_id: short_id.to_owned(),
-            cwd: PathBuf::from(PROJECT_ROOT),
-            created_at: now_ms() - HOUR_MS,
-            model: None,
-            permission_mode: None,
-            group_id: None,
-        })
+        store
+            .insert_thread(&NewThread {
+                harness: HarnessId::new(harness),
+                project_id,
+                short_id: short_id.to_owned(),
+                cwd: PathBuf::from(PROJECT_ROOT),
+                created_at: now_ms() - HOUR_MS,
+                model: None,
+                permission_mode: None,
+                group_id: None,
+                zmx: None,
+            })
+            .map(|inserted| inserted.thread)
     }
 
     #[rstest::rstest]
@@ -4358,29 +4757,321 @@ mod tests {
         Ok(())
     }
 
+    /// Saves a Claude thread `short_id` in the orb project, created an hour
+    /// ago, running in the zmx session `zmx` of its harness's own, if any.
+    fn insert_thread(
+        store: &Store,
+        short_id: &str,
+        zmx: Option<ZmxSession>,
+    ) -> Result<InsertedThread, Report<StoreError>> {
+        let project_id = orb_project(store)?;
+        store.insert_thread(&NewThread {
+            harness: HarnessId::new("claude"),
+            project_id,
+            short_id: short_id.to_owned(),
+            cwd: PathBuf::from(PROJECT_ROOT),
+            created_at: now_ms() - HOUR_MS,
+            model: None,
+            permission_mode: None,
+            group_id: None,
+            zmx,
+        })
+    }
+
+    /// Where pane `pane` runs, as the restored layouts say.
+    fn zmx_of(state: &State, pane: PaneId) -> Option<ZmxSession> {
+        state
+            .read()
+            .layouts
+            .entry(pane)
+            .map(|entry| entry.zmx.clone())
+    }
+
     #[rstest::rstest]
-    fn thread_pane_runs_in_its_own_session_on_orbs_pane_socket_dir()
-    -> Result<(), Report<StoreError>> {
-        // Given a saved thread `bb` of a harness that runs no zmx session of
-        // its own.
+    fn thread_pane_runs_in_its_pane_rows_zmx_session() -> Result<(), Report<StoreError>> {
+        // Given a saved thread whose harness runs no zmx session of its own.
         let store = Store::open_in_memory()?;
-        let id = add_thread_in(&store, OTHER, "bb")?;
+        let inserted = insert_thread(&store, "aa", None)?;
         let host = FakeHost::listing(Vec::new());
 
         // When restoring.
-        let (_actor, state) = start_beside(store, &host, &host);
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
-        // Then its pane runs in orb-p<id> on orb's pane socket dir.
+        // Then its pane runs in orb-p<pane id> on orb's pane socket dir.
         assert_eq!(
-            shown(&state, id)
-                .and_then(|thread| thread.pane)
-                .map(|launch| launch.zmx),
+            zmx_of(&state, inserted.pane),
             Some(ZmxSession {
-                name: format!("orb-p{}", id.0),
+                name: format!("orb-p{}", inserted.pane.0),
                 dir: PathBuf::from("/zmx"),
             }),
-            "a pane without a harness session gets its own on orb's dir"
+            "a pane without a kept session gets its own on orb's dir"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn kept_pi_session_resolves_under_orbs_folder() -> Result<(), Report<StoreError>> {
+        // Given a thread whose pane keeps zmx session `orb-abc` on dir `pi`.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(
+            &store,
+            "aa",
+            Some(ZmxSession {
+                name: "orb-abc".into(),
+                dir: PathBuf::from("pi"),
+            }),
+        )?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then it runs in orb-abc under orb's folder.
+        assert_eq!(
+            zmx_of(&state, inserted.pane),
+            Some(ZmxSession {
+                name: "orb-abc".into(),
+                dir: Path::new(ORB_ROOT).join("pi"),
+            }),
+            "a relative socket dir is under orb's folder"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pane_with_a_resume_command_starts_a_shell() -> Result<(), Report<StoreError>> {
+        // Given a thread whose pane has a resume command to type.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| {
+                conn.execute(
+                    "UPDATE panes SET resume = 'claude --resume s-aa' WHERE id = ?1",
+                    [inserted.pane.0],
+                )
+            })
+            .change_context(StoreError)?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then its pane runs no command, so zmx starts a shell.
+        assert_eq!(
+            shown(&state, inserted.thread)
+                .and_then(|thread| thread.pane)
+                .map(|launch| launch.command),
+            Some(vec![]),
+            "a pane orb will type a resume command into starts as a shell"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_loads_each_sessions_tabs_into_layouts() -> Result<(), Report<StoreError>> {
+        // Given a thread's session saved with two tabs, the second shown.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let tab = |position, pane: PaneId| TabRow {
+            session_id: inserted.session,
+            position,
+            name: None,
+            layout: format!("{{\"pane\":{}}}", pane.0),
+            focus_pane: Some(pane),
+        };
+        store.save_layout(
+            inserted.session,
+            1,
+            &[tab(0, inserted.pane), tab(1, second)],
+            &[(inserted.pane, None), (second, None)],
+        )?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then its layout has both tabs, the second shown and focused on its pane.
+        let restored = state
+            .read()
+            .layouts
+            .get(inserted.session)
+            .map(|layout| (layout.tabs().len(), layout.active(), layout.focused()));
+        assert_eq!(
+            restored,
+            Some((2, 1, Some(second))),
+            "the saved tabs should come back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn split_pane_saves_a_new_focused_pane() -> Result<(), Report<StoreError>> {
+        // Given a thread's one-pane session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When splitting it right.
+        actor.add_pane(inserted.session, Some(Split::Right));
+
+        // Then the store has a second pane, which the tab focuses.
+        let saved = actor.store.layouts()?;
+        let new_pane = saved
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .find(|id| *id != inserted.pane);
+        let focus: Vec<Option<PaneId>> = saved.tabs.iter().map(|tab| tab.focus_pane).collect();
+        assert_eq!(
+            (new_pane.is_some(), focus),
+            (true, vec![new_pane]),
+            "a split should save a new focused pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_tab_saves_a_new_tab() -> Result<(), Report<StoreError>> {
+        // Given a thread's one-pane session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When opening a tab.
+        actor.add_pane(inserted.session, None);
+
+        // Then the store has two tabs, the second shown.
+        let saved = actor.store.layouts()?;
+        let active: Vec<usize> = saved.sessions.iter().map(|row| row.active_tab).collect();
+        assert_eq!(
+            (saved.tabs.len(), active),
+            (2, vec![1]),
+            "a new tab should be saved and shown"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn save_layout_writes_the_sessions_tabs() -> Result<(), Report<StoreError>> {
+        // Given a thread's session whose tab was renamed in the app state.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state
+            .write()
+            .layouts
+            .rename_tab(inserted.session, 0, Some("agent".into()));
+
+        // When saving its layout.
+        actor.save_layout(inserted.session);
+
+        // Then the store has the name.
+        let names: Vec<Option<String>> = actor
+            .store
+            .layouts()?
+            .tabs
+            .into_iter()
+            .map(|tab| tab.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![Some("agent".to_owned())],
+            "the tab's name should be saved"
+        );
+        Ok(())
+    }
+
+    /// A store at `path` holding Claude threads `aa` and `bb`, whose panes
+    /// still name their `--bg` sessions, as the migration leaves them.
+    fn migrated_store(path: &Path) -> Result<Store, Report<StoreError>> {
+        let store = Store::open(path)?;
+        for short_id in ["aa", "bb"] {
+            let pane = insert_thread(&store, short_id, None)?.pane;
+            rusqlite::Connection::open(path)
+                .and_then(|conn| {
+                    conn.execute(
+                        "UPDATE panes SET migrated_bg = ?2 WHERE id = ?1",
+                        rusqlite::params![pane.0, short_id],
+                    )
+                })
+                .change_context(StoreError)?;
+        }
+        Store::open(path)
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn stop_migrated_stops_each_marked_bg_session() -> Result<(), Report<StoreError>> {
+        // Given panes still naming --bg sessions aa and bb.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let store = migrated_store(&dir.path().join("state.sqlite"))?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When stopping the migrated sessions.
+        actor.stop_migrated().await;
+
+        // Then Claude stopped aa and then bb.
+        assert_eq!(
+            host.stopped(),
+            vec!["aa".to_owned(), "bb".to_owned()],
+            "every marked --bg session should be stopped in pane order"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn stop_migrated_clears_the_markers() -> Result<(), Report<StoreError>> {
+        // Given panes still naming --bg sessions aa and bb.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let store = migrated_store(&dir.path().join("state.sqlite"))?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When stopping the migrated sessions.
+        actor.stop_migrated().await;
+
+        // Then no pane names a --bg session any more.
+        let marked: Vec<String> = actor
+            .store
+            .layouts()?
+            .panes
+            .into_iter()
+            .filter_map(|pane| pane.migrated_bg)
+            .collect();
+        assert!(
+            marked.is_empty(),
+            "stopped sessions should be forgotten: {marked:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_lone_thread_deletes_its_session() -> Result<(), Report<StoreError>> {
+        // Given an idle thread in a session of its own.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete(inserted.thread).await;
+
+        // Then its session is neither laid out nor saved.
+        let kept = (
+            state.read().layouts.get(inserted.session).is_some(),
+            actor.store.layouts()?.sessions.len(),
+        );
+        assert_eq!(kept, (false, 0), "a lone thread's session goes with it");
         Ok(())
     }
 
@@ -6550,6 +7241,32 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn started_draft_thread_gets_its_own_session() -> Result<(), Report<StoreError>> {
+        // Given a local draft, selected.
+        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        let host = FakeHost::creating(Ok("bb"));
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.cursor = Some(SidebarItem::Draft(id));
+
+        // When starting it.
+        actor.start_draft(id).await;
+
+        // Then the new thread's pane is laid out in a session of its own.
+        let thread = saved(&actor.store, "bb")?;
+        let laid_out = thread
+            .pane_id
+            .and_then(|pane| state.read().layouts.owner_of(pane))
+            .map(|session| state.read().layouts.session_panes(session));
+        assert_eq!(
+            laid_out,
+            Some(thread.pane_id.into_iter().collect()),
+            "a started thread should get a one-pane session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn start_after_the_cursor_moved_does_not_ask_to_attach() -> Result<(), Report<StoreError>>
     {
         // Given a thread and a local draft, with the thread selected.
@@ -7011,16 +7728,19 @@ mod tests {
         let b = store.add_project(Path::new("/b"), "b", ProjectKind::Normal, 2)?;
         let a = store.add_project(Path::new("/a"), "a", ProjectKind::Normal, 1)?;
         let insert = |project_id, short_id: &str, created_at| {
-            store.insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
-                project_id,
-                short_id: short_id.to_owned(),
-                cwd: PathBuf::from("/a"),
-                created_at,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-            })
+            store
+                .insert_thread(&NewThread {
+                    harness: HarnessId::new("claude"),
+                    project_id,
+                    short_id: short_id.to_owned(),
+                    cwd: PathBuf::from("/a"),
+                    created_at,
+                    model: None,
+                    permission_mode: None,
+                    group_id: None,
+                    zmx: None,
+                })
+                .map(|inserted| inserted.thread)
         };
         let a_old = insert(a, "a1", 10)?;
         let b_only = insert(b, "b1", 20)?;
@@ -7477,16 +8197,19 @@ mod tests {
         let store = Store::open_in_memory()?;
         add_thread(&store, "aa", 1_000)?;
         let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
-        let thread = store.insert_thread(&NewThread {
-            harness: HarnessId::new("claude"),
-            project_id: web,
-            short_id: "bb".to_owned(),
-            cwd: PathBuf::from(WEB_ROOT),
-            created_at: 500,
-            model: None,
-            permission_mode: None,
-            group_id: None,
-        })?;
+        let thread = store
+            .insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
+                project_id: web,
+                short_id: "bb".to_owned(),
+                cwd: PathBuf::from(WEB_ROOT),
+                created_at: 500,
+                model: None,
+                permission_mode: None,
+                group_id: None,
+                zmx: None,
+            })
+            .map(|inserted| inserted.thread)?;
         store.save_ui(&Ui {
             sidebar_width: None,
             project_filter: Some(web),
@@ -7619,16 +8342,19 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1)?;
-        store.insert_thread(&NewThread {
-            harness: HarnessId::new("claude"),
-            project_id,
-            short_id: "t1".to_owned(),
-            cwd: PathBuf::from(PROJECT_ROOT),
-            created_at: 1_500,
-            model: None,
-            permission_mode: None,
-            group_id: None,
-        })?;
+        store
+            .insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
+                project_id,
+                short_id: "t1".to_owned(),
+                cwd: PathBuf::from(PROJECT_ROOT),
+                created_at: 1_500,
+                model: None,
+                permission_mode: None,
+                group_id: None,
+                zmx: None,
+            })
+            .map(|inserted| inserted.thread)?;
 
         // When the actor starts.
         let (_actor, state) = start(
@@ -8962,16 +9688,19 @@ mod tests {
     {
         // Given a prompt-less thread started with sonnet in plan mode.
         let store = Store::open_in_memory()?;
-        let id = store.insert_thread(&NewThread {
-            harness: HarnessId::new("claude"),
-            project_id: orb_project(&store)?,
-            short_id: "aa".to_owned(),
-            cwd: PathBuf::from(PROJECT_ROOT),
-            created_at: now_ms() - HOUR_MS,
-            model: Some("sonnet".to_owned()),
-            permission_mode: Some("plan".to_owned()),
-            group_id: None,
-        })?;
+        let id = store
+            .insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
+                project_id: orb_project(&store)?,
+                short_id: "aa".to_owned(),
+                cwd: PathBuf::from(PROJECT_ROOT),
+                created_at: now_ms() - HOUR_MS,
+                model: Some("sonnet".to_owned()),
+                permission_mode: Some("plan".to_owned()),
+                group_id: None,
+                zmx: None,
+            })
+            .map(|inserted| inserted.thread)?;
         let host = FakeHost::moving(Ok("bb"));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
@@ -9528,16 +10257,19 @@ mod tests {
         let store = Store::open_in_memory()?;
         let id = {
             let project_id = store.add_project(root.path(), "orb", ProjectKind::Normal, 0)?;
-            store.insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
-                project_id,
-                short_id: "aa".to_owned(),
-                cwd: Path::new(WORKTREES_ROOT).join("orb/orb-0123abcd"),
-                created_at: now_ms() - HOUR_MS,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-            })?
+            store
+                .insert_thread(&NewThread {
+                    harness: HarnessId::new("claude"),
+                    project_id,
+                    short_id: "aa".to_owned(),
+                    cwd: Path::new(WORKTREES_ROOT).join("orb/orb-0123abcd"),
+                    created_at: now_ms() - HOUR_MS,
+                    model: None,
+                    permission_mode: None,
+                    group_id: None,
+                    zmx: None,
+                })
+                .map(|inserted| inserted.thread)?
         };
         let host = FakeHost::moving(Ok("bb"));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -11043,16 +11775,19 @@ mod tests {
         let threads = short_ids
             .iter()
             .map(|short_id| {
-                store.insert_thread(&NewThread {
-                    harness: HarnessId::new("claude"),
-                    project_id,
-                    short_id: (*short_id).to_owned(),
-                    cwd: dir.unwrap_or(Path::new(PROJECT_ROOT)).to_owned(),
-                    created_at: now_ms() - HOUR_MS,
-                    model: None,
-                    permission_mode: None,
-                    group_id: Some(group),
-                })
+                store
+                    .insert_thread(&NewThread {
+                        harness: HarnessId::new("claude"),
+                        project_id,
+                        short_id: (*short_id).to_owned(),
+                        cwd: dir.unwrap_or(Path::new(PROJECT_ROOT)).to_owned(),
+                        created_at: now_ms() - HOUR_MS,
+                        model: None,
+                        permission_mode: None,
+                        group_id: Some(group),
+                        zmx: None,
+                    })
+                    .map(|inserted| inserted.thread)
             })
             .collect::<Result<_, _>>()?;
         Ok((store, group, threads))
@@ -12339,16 +13074,19 @@ mod tests {
         let (store, group, _) =
             store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
         let project = orb_project(&store)?;
-        store.insert_thread(&NewThread {
-            harness: HarnessId::new("claude"),
-            project_id: project,
-            short_id: "cc".to_owned(),
-            cwd: HEX_WORKTREE.into(),
-            created_at: now_ms() - HOUR_MS,
-            model: None,
-            permission_mode: None,
-            group_id: None,
-        })?;
+        store
+            .insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
+                project_id: project,
+                short_id: "cc".to_owned(),
+                cwd: HEX_WORKTREE.into(),
+                created_at: now_ms() - HOUR_MS,
+                model: None,
+                permission_mode: None,
+                group_id: None,
+                zmx: None,
+            })
+            .map(|inserted| inserted.thread)?;
         let host = FakeHost::listing(vec![
             record("aa", ThreadStatus::Idle),
             record("cc", ThreadStatus::Idle),
@@ -12406,16 +13144,19 @@ mod tests {
         let dir = worktrees_root.path().join("orb").join("orb-1a2b3c4d");
         fs::create_dir_all(&dir).change_context(StoreError)?;
         let (store, group, _) = store_with_group(GroupKind::Feature, Some(&dir), &["aa"])?;
-        store.insert_thread(&NewThread {
-            harness: HarnessId::new("claude"),
-            project_id: saved_group(&store, group)?.project_id,
-            short_id: "cc".to_owned(),
-            cwd: dir.clone(),
-            created_at: now_ms() - HOUR_MS,
-            model: None,
-            permission_mode: None,
-            group_id: None,
-        })?;
+        store
+            .insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
+                project_id: saved_group(&store, group)?.project_id,
+                short_id: "cc".to_owned(),
+                cwd: dir.clone(),
+                created_at: now_ms() - HOUR_MS,
+                model: None,
+                permission_mode: None,
+                group_id: None,
+                zmx: None,
+            })
+            .map(|inserted| inserted.thread)?;
         let host = FakeHost::listing(vec![
             record("aa", ThreadStatus::Idle),
             record("cc", ThreadStatus::Idle),

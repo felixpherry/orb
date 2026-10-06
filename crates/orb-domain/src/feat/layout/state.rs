@@ -1,12 +1,25 @@
-//! Each attached session's tabs, which tab is shown, and the tab body's size.
+//! Every session's tabs, which tab is shown, where each pane's program runs,
+//! and the tab body's size.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use ratatui::layout::Rect;
 
 use super::tree::{NavDirection, Split, TileLayout, find_in_direction};
-use crate::feat::sessions::state::{PaneId, ThreadId};
+use crate::feat::sessions::state::{PaneId, SessionId};
 use crate::feat::sidebar::state::STEP;
+use crate::feat::zmx::zmx_service::ZmxSession;
+
+/// Where a pane's program runs: its zmx session and directory, and the name
+/// the user gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneEntry {
+    pub id: PaneId,
+    pub zmx: ZmxSession,
+    pub cwd: PathBuf,
+    pub name: Option<String>,
+}
 
 /// One tab: its name, its panes' tree, and whether it shows only the focused pane.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,18 +32,15 @@ pub struct Tab {
 
 impl Tab {
     fn new(pane: PaneId) -> Self {
-        Self {
-            name: None,
-            tree: TileLayout::new(pane),
-            zoomed: false,
-        }
+        Self::restore(None, TileLayout::new(pane))
     }
 
-    /// What the tab bar shows for the tab at 0-based `index`: `"1"` or `"1 name"`.
-    pub fn label(&self, index: usize) -> String {
-        match &self.name {
-            Some(name) => format!("{} {name}", index + 1),
-            None => (index + 1).to_string(),
+    /// A saved tab: its name and tree, not zoomed.
+    pub fn restore(name: Option<String>, tree: TileLayout) -> Self {
+        Self {
+            name,
+            tree,
+            zoomed: false,
         }
     }
 
@@ -48,18 +58,59 @@ impl Tab {
     pub fn holds(&self, pane: PaneId) -> bool {
         self.tree.pane_ids().contains(&pane)
     }
+
+    /// The tab's focused pane.
+    pub fn focused(&self) -> PaneId {
+        self.tree.focused()
+    }
+
+    /// The tab's tree, as the store saves it.
+    pub fn layout_json(&self) -> String {
+        self.tree.to_json()
+    }
 }
 
-/// A session's tabs, in order, and the one shown.
+/// A session's tabs, in order, the one shown, and where each of their panes
+/// runs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionLayout {
     tabs: Vec<Tab>,
     active: usize,
+    panes: HashMap<PaneId, PaneEntry>,
 }
 
 impl SessionLayout {
+    /// One tab of the one pane `pane`.
+    pub fn of(pane: PaneEntry) -> Self {
+        Self {
+            tabs: vec![Tab::new(pane.id)],
+            active: 0,
+            panes: HashMap::from([(pane.id, pane)]),
+        }
+    }
+
+    /// Saved tabs showing tab `active` (the last when past it), with where
+    /// their panes run. Entries for panes no tab holds are left out.
+    pub fn restore(tabs: Vec<Tab>, active: usize, panes: Vec<PaneEntry>) -> Self {
+        let panes = panes
+            .into_iter()
+            .filter(|entry| tabs.iter().any(|tab| tab.holds(entry.id)))
+            .map(|entry| (entry.id, entry))
+            .collect();
+        Self {
+            active: active.min(tabs.len().saturating_sub(1)),
+            tabs,
+            panes,
+        }
+    }
+
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
+    }
+
+    /// Where each of the session's panes runs, in no order.
+    pub fn panes(&self) -> impl Iterator<Item = &PaneEntry> {
+        self.panes.values()
     }
 
     /// The shown tab's 0-based index.
@@ -74,7 +125,23 @@ impl SessionLayout {
 
     /// The shown tab's focused pane.
     pub fn focused(&self) -> Option<PaneId> {
-        self.active_tab().map(|tab| tab.tree.focused())
+        self.active_tab().map(Tab::focused)
+    }
+
+    /// What the tab bar shows for the tab at 0-based `index`: its number,
+    /// then its name, else its focused pane's name, as `"1"` or `"1 name"`.
+    pub fn tab_label(&self, index: usize) -> String {
+        let name = self.tabs.get(index).and_then(|tab| {
+            tab.name.as_deref().or_else(|| {
+                self.panes
+                    .get(&tab.focused())
+                    .and_then(|entry| entry.name.as_deref())
+            })
+        });
+        match name {
+            Some(name) => format!("{} {name}", index + 1),
+            None => (index + 1).to_string(),
+        }
     }
 
     /// Where the shown tab's panes are drawn in `body`. A zoomed tab places
@@ -111,6 +178,10 @@ impl SessionLayout {
             .collect()
     }
 
+    fn holds(&self, pane: PaneId) -> bool {
+        self.tabs.iter().any(|tab| tab.holds(pane))
+    }
+
     fn tab_mut(&mut self) -> Option<&mut Tab> {
         self.tabs.get_mut(self.active)
     }
@@ -123,6 +194,16 @@ impl SessionLayout {
                 self.active = self.active.saturating_sub(1);
             }
         }
+    }
+
+    /// Forgets where panes no tab holds any more run.
+    fn drop_loose_entries(&mut self) {
+        let held: HashSet<PaneId> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.tree.pane_ids())
+            .collect();
+        self.panes.retain(|id, _| held.contains(id));
     }
 }
 
@@ -146,40 +227,61 @@ pub enum FocusMove {
     Stuck,
 }
 
-/// Every attached thread's layout. Written by the intent handler and by the
-/// frontend, which opens a layout for each pane it reattaches at start,
-/// drops the layout of a thread that left `attached`, closes panes whose
-/// program ended, and records the tab body's size after each draw.
+/// Every session's tabs and splits. Written by the sessions actor (loading
+/// them at start, adding a pane on split, new tab or a new thread, dropping a
+/// deleted session), the intent handler (focus, resize, zoom, tab moves,
+/// renames, closes) and the frontend (closing panes whose program ended, the
+/// tab body's size).
 #[derive(Debug, Default)]
 pub struct Layouts {
-    sessions: HashMap<ThreadId, SessionLayout>,
-    /// The id the next split-off pane gets, once decremented; counts down
-    /// from -1.
-    next_pane: i64,
+    sessions: HashMap<SessionId, SessionLayout>,
     /// The tab body's area in the last frame; focus moves and resizes
     /// measure against it.
     body: Rect,
 }
 
 impl Layouts {
-    /// Makes a one-tab layout of `owner`'s own pane when it has none.
-    pub fn open(&mut self, owner: ThreadId) {
-        self.sessions.entry(owner).or_insert_with(|| SessionLayout {
-            tabs: vec![Tab::new(PaneId::from(owner))],
-            active: 0,
-        });
+    /// Puts `layout` in as `session`'s, replacing the one it had.
+    pub fn insert(&mut self, session: SessionId, layout: SessionLayout) {
+        self.sessions.insert(session, layout);
     }
 
-    pub fn get(&self, owner: ThreadId) -> Option<&SessionLayout> {
+    /// Drops `session`'s layout.
+    pub fn remove(&mut self, session: SessionId) {
+        self.sessions.remove(&session);
+    }
+
+    pub fn get(&self, owner: SessionId) -> Option<&SessionLayout> {
         self.sessions.get(&owner)
     }
 
-    /// The thread whose layout holds `pane`.
-    pub fn owner_of(&self, pane: PaneId) -> Option<ThreadId> {
+    /// The session whose layout holds `pane`.
+    pub fn owner_of(&self, pane: PaneId) -> Option<SessionId> {
         self.sessions
             .iter()
-            .find(|(_, layout)| layout.tabs.iter().any(|tab| tab.holds(pane)))
+            .find(|(_, layout)| layout.holds(pane))
             .map(|(owner, _)| *owner)
+    }
+
+    /// Where pane `pane` runs.
+    pub fn entry(&self, pane: PaneId) -> Option<&PaneEntry> {
+        self.sessions
+            .values()
+            .find_map(|layout| layout.panes.get(&pane))
+    }
+
+    /// Every pane of every tab of `owner`'s layout.
+    pub fn session_panes(&self, owner: SessionId) -> Vec<PaneId> {
+        self.sessions
+            .get(&owner)
+            .map(|layout| {
+                layout
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.tree.pane_ids())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Every pane of every tab of every layout.
@@ -201,33 +303,25 @@ impl Layouts {
         self.body = body;
     }
 
-    /// Drops the layout of every thread not in `attached`.
-    pub fn retain_attached(&mut self, attached: &HashSet<ThreadId>) {
-        self.sessions.retain(|owner, _| attached.contains(owner));
-    }
-
-    /// Splits the shown tab's focused pane `split`; the new pane takes the
-    /// focus and the tab shows every pane again.
-    pub fn split(&mut self, owner: ThreadId, split: Split) {
-        if !self.sessions.contains_key(&owner) {
+    /// Splits the shown tab's focused pane `split` with `pane`, which takes
+    /// the focus; the tab shows every pane again.
+    pub fn split(&mut self, owner: SessionId, split: Split, pane: PaneEntry) {
+        let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
-        }
-        let id = self.next_id();
-        if let Some(tab) = self.tab_mut(owner) {
-            tab.tree.split_focused(split, id);
+        };
+        if let Some(tab) = layout.tab_mut() {
+            tab.tree.split_focused(split, pane.id);
             tab.zoomed = false;
+            layout.panes.insert(pane.id, pane);
         }
     }
 
-    /// Appends a tab of one new pane and shows it.
-    pub fn new_tab(&mut self, owner: ThreadId) {
-        if !self.sessions.contains_key(&owner) {
-            return;
-        }
-        let id = self.next_id();
+    /// Appends a tab of the one pane `pane` and shows it.
+    pub fn new_tab(&mut self, owner: SessionId, pane: PaneEntry) {
         if let Some(layout) = self.sessions.get_mut(&owner) {
-            layout.tabs.push(Tab::new(id));
+            layout.tabs.push(Tab::new(pane.id));
             layout.active = layout.tabs.len() - 1;
+            layout.panes.insert(pane.id, pane);
         }
     }
 
@@ -250,14 +344,16 @@ impl Layouts {
         if emptied {
             layout.remove_tab(index);
         }
+        layout.drop_loose_entries();
         self.drop_if_empty(owner);
     }
 
     /// Closes the shown tab; the tab before it is shown. A layout left
     /// without tabs goes.
-    pub fn close_tab(&mut self, owner: ThreadId) {
+    pub fn close_tab(&mut self, owner: SessionId) {
         if let Some(layout) = self.sessions.get_mut(&owner) {
             layout.remove_tab(layout.active);
+            layout.drop_loose_entries();
         }
         self.drop_if_empty(owner);
     }
@@ -265,7 +361,7 @@ impl Layouts {
     /// Moves the focus to the pane `nav` of the focused one. With none to the
     /// left the keys go to the sidebar; with none to the right the next tab
     /// is shown.
-    pub fn move_focus(&mut self, owner: ThreadId, nav: NavDirection) -> FocusMove {
+    pub fn move_focus(&mut self, owner: SessionId, nav: NavDirection) -> FocusMove {
         let body = self.body;
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return FocusMove::Stuck;
@@ -295,28 +391,28 @@ impl Layouts {
     }
 
     /// Focuses `pane` in `owner`'s shown tab.
-    pub fn focus_pane(&mut self, owner: ThreadId, pane: PaneId) {
+    pub fn focus_pane(&mut self, owner: SessionId, pane: PaneId) {
         if let Some(tab) = self.tab_mut(owner) {
             tab.tree.focus_pane(pane);
         }
     }
 
     /// Shows only the focused pane over the shown tab, or every pane again.
-    pub fn toggle_zoom(&mut self, owner: ThreadId) {
+    pub fn toggle_zoom(&mut self, owner: SessionId) {
         if let Some(tab) = self.tab_mut(owner) {
             tab.zoomed = !tab.zoomed;
         }
     }
 
     /// Grows (or shrinks) the focused pane a step; whether it changed.
-    pub fn resize_focused(&mut self, owner: ThreadId, grow: bool) -> bool {
+    pub fn resize_focused(&mut self, owner: SessionId, grow: bool) -> bool {
         let body = self.body;
         self.tab_mut(owner)
             .is_some_and(|tab| tab.tree.resize_focused(grow, STEP, body))
     }
 
     /// Shows tab `n`, counting from 1; past the last changes nothing.
-    pub fn go_to_tab(&mut self, owner: ThreadId, n: usize) {
+    pub fn go_to_tab(&mut self, owner: SessionId, n: usize) {
         if let Some(layout) = self.sessions.get_mut(&owner)
             && (1..=layout.tabs.len()).contains(&n)
         {
@@ -325,14 +421,14 @@ impl Layouts {
     }
 
     /// Shows the next tab, wrapping to the first.
-    pub fn next_tab(&mut self, owner: ThreadId) {
+    pub fn next_tab(&mut self, owner: SessionId) {
         if let Some(layout) = self.sessions.get_mut(&owner) {
             layout.active = (layout.active + 1) % layout.tabs.len().max(1);
         }
     }
 
     /// Shows the previous tab, wrapping to the last.
-    pub fn previous_tab(&mut self, owner: ThreadId) {
+    pub fn previous_tab(&mut self, owner: SessionId) {
         if let Some(layout) = self.sessions.get_mut(&owner) {
             let count = layout.tabs.len().max(1);
             layout.active = (layout.active + count - 1) % count;
@@ -340,7 +436,7 @@ impl Layouts {
     }
 
     /// Swaps the shown tab with the one before it; the first stays put.
-    pub fn move_tab_left(&mut self, owner: ThreadId) {
+    pub fn move_tab_left(&mut self, owner: SessionId) {
         if let Some(layout) = self.sessions.get_mut(&owner)
             && layout.active > 0
         {
@@ -350,7 +446,7 @@ impl Layouts {
     }
 
     /// Swaps the shown tab with the one after it; the last stays put.
-    pub fn move_tab_right(&mut self, owner: ThreadId) {
+    pub fn move_tab_right(&mut self, owner: SessionId) {
         if let Some(layout) = self.sessions.get_mut(&owner)
             && layout.active + 1 < layout.tabs.len()
         {
@@ -359,8 +455,19 @@ impl Layouts {
         }
     }
 
+    /// Names pane `pane`, wherever it is; `None` clears the name.
+    pub fn rename_pane(&mut self, pane: PaneId, name: Option<String>) {
+        if let Some(entry) = self
+            .sessions
+            .values_mut()
+            .find_map(|layout| layout.panes.get_mut(&pane))
+        {
+            entry.name = name;
+        }
+    }
+
     /// Names tab `tab` (0-based) of `owner`'s layout; `None` clears the name.
-    pub fn rename_tab(&mut self, owner: ThreadId, tab: usize, name: Option<String>) {
+    pub fn rename_tab(&mut self, owner: SessionId, tab: usize, name: Option<String>) {
         if let Some(tab) = self
             .sessions
             .get_mut(&owner)
@@ -370,16 +477,11 @@ impl Layouts {
         }
     }
 
-    fn next_id(&mut self) -> PaneId {
-        self.next_pane -= 1;
-        PaneId(self.next_pane)
-    }
-
-    fn tab_mut(&mut self, owner: ThreadId) -> Option<&mut Tab> {
+    fn tab_mut(&mut self, owner: SessionId) -> Option<&mut Tab> {
         self.sessions.get_mut(&owner)?.tab_mut()
     }
 
-    fn drop_if_empty(&mut self, owner: ThreadId) {
+    fn drop_if_empty(&mut self, owner: SessionId) {
         if self
             .sessions
             .get(&owner)
@@ -390,32 +492,46 @@ impl Layouts {
     }
 }
 
+/// Pane `id` running in `orb-p<id>` on `/tmp/zmx`, in `/work`, for tests.
+#[cfg(test)]
+pub(crate) fn test_entry(id: i64) -> PaneEntry {
+    PaneEntry {
+        id: PaneId(id),
+        zmx: ZmxSession {
+            name: format!("orb-p{id}"),
+            dir: "/tmp/zmx".into(),
+        },
+        cwd: "/work".into(),
+        name: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use ratatui::layout::Rect;
 
-    use super::{FocusMove, Layouts, Placed, SessionLayout};
-    use crate::feat::layout::tree::{NavDirection, Split};
-    use crate::feat::sessions::state::{PaneId, ThreadId};
+    use super::{FocusMove, Layouts, Placed, SessionLayout, Tab, test_entry as entry};
+    use crate::feat::layout::tree::{NavDirection, Split, TileLayout};
+    use crate::feat::sessions::state::{PaneId, SessionId};
 
-    const OWNER: ThreadId = ThreadId(7);
+    const OWNER: SessionId = SessionId(1);
     const BODY: Rect = Rect::new(0, 0, 80, 24);
 
-    /// Thread 7's layout, opened, measured against an 80×24 body.
+    /// Session 1's layout of pane 7, measured against an 80×24 body.
     fn opened() -> Layouts {
         let mut layouts = Layouts::default();
-        layouts.open(OWNER);
+        layouts.insert(OWNER, SessionLayout::of(entry(7)));
         layouts.fit_to(BODY);
         layouts
     }
 
-    /// Thread 7's layout split right once: its own pane on the left, pane
-    /// -1 on the right and focused.
+    /// Session 1's layout split right once: pane 7 on the left, pane 8 on
+    /// the right and focused.
     fn split_right() -> Layouts {
         let mut layouts = opened();
-        layouts.split(OWNER, Split::Right);
+        layouts.split(OWNER, Split::Right, entry(8));
         layouts
     }
 
@@ -438,46 +554,97 @@ mod tests {
         layouts.get(OWNER).map_or(0, |layout| layout.tabs().len())
     }
 
-    /// Thread 7's layout with three tabs, the first shown.
+    /// Session 1's layout with three tabs (panes 7, 8, 9), the first shown.
     fn three_tabs() -> Layouts {
         let mut layouts = opened();
-        layouts.new_tab(OWNER);
-        layouts.new_tab(OWNER);
+        layouts.new_tab(OWNER, entry(8));
+        layouts.new_tab(OWNER, entry(9));
         layouts.go_to_tab(OWNER, 1);
         layouts
     }
 
     #[rstest::rstest]
-    fn open_makes_one_tab_of_the_threads_pane() {
+    fn layout_of_a_pane_is_one_tab_of_it() {
         // Given no layouts.
         let mut layouts = Layouts::default();
 
-        // When opening thread 7's.
-        layouts.open(OWNER);
+        // When putting in session 1's layout of pane 7.
+        layouts.insert(OWNER, SessionLayout::of(entry(7)));
 
-        // Then it has one tab focused on the thread's own pane.
+        // Then it has one tab focused on pane 7.
         assert_eq!(
             (tab_count(&layouts), focused(&layouts)),
             (1, Some(PaneId(7))),
-            "a new layout is one tab of the thread's pane"
+            "a new layout is one tab of its pane"
         );
     }
 
     #[rstest::rstest]
-    fn split_numbers_new_panes_down_from_minus_one() {
-        // Given an opened layout.
+    fn split_takes_the_given_pane_and_focuses_it() {
+        // Given a layout of pane 7.
         let mut layouts = opened();
 
-        // When splitting twice.
-        layouts.split(OWNER, Split::Right);
-        layouts.split(OWNER, Split::Down);
+        // When splitting it right with pane 8.
+        layouts.split(OWNER, Split::Right, entry(8));
 
-        // Then the new panes are -1 and -2.
-        let panes: Vec<PaneId> = placed(&layouts).iter().map(|place| place.pane).collect();
+        // Then pane 8 is placed beside it and focused.
+        let panes: Vec<(PaneId, bool)> = placed(&layouts)
+            .iter()
+            .map(|place| (place.pane, place.focused))
+            .collect();
         assert_eq!(
             panes,
-            vec![PaneId(7), PaneId(-1), PaneId(-2)],
-            "split-off panes count down from -1"
+            vec![(PaneId(7), false), (PaneId(8), true)],
+            "the given pane joins the tab with the focus"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_tab_takes_the_given_pane() {
+        // Given a layout of pane 7.
+        let mut layouts = opened();
+
+        // When opening a tab of pane 8.
+        layouts.new_tab(OWNER, entry(8));
+
+        // Then pane 8's entry is there.
+        assert_eq!(
+            layouts.entry(PaneId(8)),
+            Some(&entry(8)),
+            "a new tab's pane says where it runs"
+        );
+    }
+
+    #[rstest::rstest]
+    fn closing_a_pane_drops_its_entry() {
+        // Given two panes side by side.
+        let mut layouts = split_right();
+
+        // When closing pane 8.
+        layouts.close_pane(PaneId(8));
+
+        // Then nothing says where pane 8 runs.
+        assert_eq!(layouts.entry(PaneId(8)), None, "a closed pane has no entry");
+    }
+
+    #[rstest::rstest]
+    fn restored_tab_keeps_its_name_tree_and_focus() {
+        // Given a saved tab named "logs" of panes 7 and 8, focused on 7.
+        let tree = {
+            let mut tree = TileLayout::new(PaneId(7));
+            tree.split_focused(Split::Right, PaneId(8));
+            tree.focus_pane(PaneId(7));
+            tree
+        };
+
+        // When restoring it.
+        let tab = Tab::restore(Some("logs".into()), tree.clone());
+
+        // Then it has that name, tree and focus.
+        assert_eq!(
+            (tab.name(), tab.layout_json(), tab.focused()),
+            (Some("logs"), tree.to_json(), PaneId(7)),
+            "a restored tab is the saved one"
         );
     }
 
@@ -488,7 +655,7 @@ mod tests {
         layouts.toggle_zoom(OWNER);
 
         // When splitting again.
-        layouts.split(OWNER, Split::Down);
+        layouts.split(OWNER, Split::Down, entry(9));
 
         // Then the tab isn't zoomed.
         assert_eq!(
@@ -566,7 +733,7 @@ mod tests {
         assert_eq!(
             placed(&layouts),
             vec![Placed {
-                pane: PaneId(-1),
+                pane: PaneId(8),
                 area: BODY,
                 focused: true,
             }],
@@ -607,7 +774,7 @@ mod tests {
     fn placed_panes_leave_a_row_for_the_border_between_them() {
         // Given two stacked panes over a 24-row body.
         let mut layouts = opened();
-        layouts.split(OWNER, Split::Down);
+        layouts.split(OWNER, Split::Down, entry(8));
 
         // When placing them.
         let areas: Vec<Rect> = placed(&layouts).iter().map(|place| place.area).collect();
@@ -624,10 +791,10 @@ mod tests {
     fn closing_a_tabs_last_pane_closes_the_tab() {
         // Given a second tab of one pane, shown.
         let mut layouts = opened();
-        layouts.new_tab(OWNER);
+        layouts.new_tab(OWNER, entry(8));
 
         // When closing that pane.
-        layouts.close_pane(PaneId(-1));
+        layouts.close_pane(PaneId(8));
 
         // Then only the first tab is left, shown.
         assert_eq!(
@@ -654,13 +821,13 @@ mod tests {
         // Given a layout of one tab.
         let mut layouts = opened();
 
-        // When opening a tab.
-        layouts.new_tab(OWNER);
+        // When opening a tab of pane 8.
+        layouts.new_tab(OWNER, entry(8));
 
-        // Then the second tab is shown, focused on a new pane.
+        // Then the second tab is shown, focused on pane 8.
         assert_eq!(
             (active(&layouts), focused(&layouts)),
-            (Some(1), Some(PaneId(-1))),
+            (Some(1), Some(PaneId(8))),
             "the new tab is shown"
         );
     }
@@ -736,25 +903,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn retain_attached_drops_a_detached_threads_layout() {
-        // Given thread 7's layout.
-        let mut layouts = opened();
-
-        // When keeping only attached thread 8.
-        layouts.retain_attached(&HashSet::from([ThreadId(8)]));
-
-        // Then thread 7's layout is gone.
-        assert!(
-            layouts.get(OWNER).is_none(),
-            "detached thread loses its layout"
-        );
-    }
-
-    #[rstest::rstest]
     fn pane_ids_lists_every_tabs_panes() {
         // Given a split first tab and a second tab.
         let mut layouts = split_right();
-        layouts.new_tab(OWNER);
+        layouts.new_tab(OWNER, entry(9));
 
         // When listing the panes.
         let panes = layouts.pane_ids();
@@ -762,21 +914,21 @@ mod tests {
         // Then all three are there.
         assert_eq!(
             panes,
-            HashSet::from([PaneId(7), PaneId(-1), PaneId(-2)]),
+            HashSet::from([PaneId(7), PaneId(8), PaneId(9)]),
             "panes of every tab"
         );
     }
 
     #[rstest::rstest]
-    fn owner_of_finds_a_split_panes_thread() {
-        // Given thread 7's split layout.
+    fn owner_of_finds_a_panes_session() {
+        // Given session 1's split layout.
         let layouts = split_right();
 
-        // When asking whose pane -1 is.
-        let owner = layouts.owner_of(PaneId(-1));
+        // When asking whose pane 8 is.
+        let owner = layouts.owner_of(PaneId(8));
 
-        // Then it is thread 7's.
-        assert_eq!(owner, Some(OWNER), "pane -1 is in thread 7's layout");
+        // Then it is session 1's.
+        assert_eq!(owner, Some(OWNER), "pane 8 is in session 1's layout");
     }
 
     #[rstest::rstest]
@@ -785,9 +937,7 @@ mod tests {
         let layouts = opened();
 
         // When labelling it.
-        let label = layouts
-            .get(OWNER)
-            .and_then(|layout| layout.tabs().first().map(|tab| tab.label(0)));
+        let label = layouts.get(OWNER).map(|layout| layout.tab_label(0));
 
         // Then the label is its number.
         assert_eq!(label.as_deref(), Some("1"), "unnamed tab label");
@@ -800,11 +950,26 @@ mod tests {
         layouts.rename_tab(OWNER, 0, Some("logs".into()));
 
         // When labelling it.
-        let label = layouts
-            .get(OWNER)
-            .and_then(|layout| layout.tabs().first().map(|tab| tab.label(0)));
+        let label = layouts.get(OWNER).map(|layout| layout.tab_label(0));
 
         // Then the label is its number and name.
         assert_eq!(label.as_deref(), Some("1 logs"), "named tab label");
+    }
+
+    #[rstest::rstest]
+    fn unnamed_tab_is_labelled_by_its_focused_panes_name() {
+        // Given an unnamed tab whose focused pane is named "server".
+        let mut layouts = opened();
+        layouts.rename_pane(PaneId(7), Some("server".into()));
+
+        // When labelling it.
+        let label = layouts.get(OWNER).map(|layout| layout.tab_label(0));
+
+        // Then the label is its number and the pane's name.
+        assert_eq!(
+            label.as_deref(),
+            Some("1 server"),
+            "pane name labels the tab"
+        );
     }
 }

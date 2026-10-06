@@ -4,14 +4,17 @@
 //! out by the frontend loop; session commands (drafts, add or remove a project, move to
 //! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle, delete,
 //! visit, save the sidebar's width and filter, save the jump list, create, start, pin,
-//! settle and delete groups, save a group draft, answer a trust confirm) go
-//! to the sessions actor; worktree commands (refresh, delete) go to the worktrees actor; search
+//! settle and delete groups, save a group draft, answer a trust confirm,
+//! split a pane, open a tab, save a layout) go to the sessions actor; worktree commands (refresh, delete) go to the worktrees actor; search
 //! commands (query, preview) go to the search actor.
 
 use std::path::PathBuf;
 
 use crate::feat::git::git_service::GitRef;
-use crate::feat::sessions::state::{AttachTarget, GroupId, GroupKind, ProjectId, ThreadId};
+use crate::feat::layout::tree::Split;
+use crate::feat::sessions::state::{
+    AttachTarget, GroupId, GroupKind, ProjectId, SessionId, ThreadId,
+};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// Something that must happen in response to an intent.
@@ -23,6 +26,13 @@ pub enum Command {
     Attach(AttachTarget),
     /// Stop sending input to the terminal pane.
     Detach,
+    /// Split `session`'s focused pane `split`; the sessions actor makes the pane.
+    SplitPane { session: SessionId, split: Split },
+    /// Open a tab of one new pane in `session`.
+    NewTab(SessionId),
+    /// Save `session`'s tabs, splits, focus and pane names as the app state
+    /// has them.
+    SaveLayout(SessionId),
     /// Give the project a draft, prefilled from its last-used settings,
     /// unless it has one.
     CreateDraft(ProjectId),

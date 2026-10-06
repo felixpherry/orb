@@ -86,10 +86,11 @@ mod tests {
         validate_tab_action,
     };
     use crate::feat::harness::HarnessId;
+    use crate::feat::layout::state::{SessionLayout, test_entry};
     use crate::feat::layout::tree::Split;
     use crate::feat::sessions::state::{
-        PaneId, Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId,
-        ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
+        Thread, ThreadId, ThreadStatus,
     };
     use crate::{AppState, Focus};
 
@@ -102,7 +103,10 @@ mod tests {
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -116,8 +120,8 @@ mod tests {
         }
     }
 
-    /// Thread 1 selected, with the keys at `focus`; its layout is open when
-    /// `open`.
+    /// Thread 1 selected, running in pane 1 of session 1, with the keys at
+    /// `focus`; attached, so its session is shown, when `open`.
     fn selected(focus: Focus, open: bool) -> AppState {
         let mut state = AppState {
             sessions: Sessions {
@@ -138,8 +142,11 @@ mod tests {
             focus,
             ..AppState::default()
         };
+        state
+            .layouts
+            .insert(SessionId(1), SessionLayout::of(test_entry(1)));
         if open {
-            state.layouts.open(ThreadId(1));
+            state.attached.insert(ThreadId(1));
         }
         state
     }
@@ -218,9 +225,9 @@ mod tests {
 
     #[rstest::rstest]
     fn focus_pane_is_refused_for_a_pane_of_another_tab() {
-        // Given a second tab shown, holding pane -1.
+        // Given a second tab shown, holding pane 2.
         let mut state = selected(Focus::Sidebar, true);
-        state.layouts.new_tab(ThreadId(1));
+        state.layouts.new_tab(SessionId(1), test_entry(2));
 
         // When validating a click on the thread's own pane in the first tab.
         let result = validate_focus_pane(&state, PaneId(1));
@@ -237,10 +244,12 @@ mod tests {
     fn focus_pane_is_allowed_for_a_pane_of_the_shown_tab() {
         // Given a split shown tab.
         let mut state = selected(Focus::Sidebar, true);
-        state.layouts.split(ThreadId(1), Split::Right);
+        state
+            .layouts
+            .split(SessionId(1), Split::Right, test_entry(2));
 
-        // When validating a click on pane -1.
-        let result = validate_focus_pane(&state, PaneId(-1));
+        // When validating a click on pane 2.
+        let result = validate_focus_pane(&state, PaneId(2));
 
         // Then it is allowed.
         assert_eq!(result, Ok(()), "a shown pane takes clicks");

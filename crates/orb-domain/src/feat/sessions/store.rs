@@ -11,10 +11,15 @@
 //! kind (one the user added, or orb's Research or Learn folder), and it keeps
 //! each project's groups: their kind, name, directory, branch, pin and settle
 //! state, and the session setup of their draft. Each thread keeps the group it
-//! belongs to. It also keeps the jump list's rows, oldest first. The schema
-//! grows through an ordered list of migrations. Times are milliseconds since
-//! the Unix epoch.
+//! belongs to. It also keeps the jump list's rows, oldest first. Each session
+//! keeps its directory and its tabs in order, each tab its split tree and
+//! focused pane, and each pane its directory, zmx session, name and the
+//! command that brings its agent back; a thread keeps the pane it runs in.
+//! The schema grows through an ordered list of migrations, and a database
+//! from before sessions is copied aside before it is migrated. Times are
+//! milliseconds since the Unix epoch.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use error_stack::{Report, ResultExt};
@@ -22,10 +27,12 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use wherror::Error;
 
 use super::state::{
-    DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, ProjectId, ProjectKind, SidebarItem,
-    ThreadId,
+    DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, PaneId, ProjectId, ProjectKind, SessionId,
+    SidebarItem, ThreadId,
 };
 use crate::feat::harness::HarnessId;
+use crate::feat::layout::tree::{Node, Split, TileLayout};
+use crate::feat::zmx::zmx_service::ZmxSession;
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -92,6 +99,8 @@ pub struct ThreadRow {
     pub group_id: Option<GroupId>,
     /// The harness its session runs in.
     pub harness: HarnessId,
+    /// The pane it runs in; `None` once it has ended.
+    pub pane_id: Option<PaneId>,
 }
 
 /// A thread's settle state as set by the user, auto-settle, or activity.
@@ -133,6 +142,70 @@ pub struct NewThread {
     pub group_id: Option<GroupId>,
     /// The harness its session runs in.
     pub harness: HarnessId,
+    /// The zmx session the harness runs the thread in itself (pi); `None`
+    /// for a pane orb names.
+    pub zmx: Option<ZmxSession>,
+}
+
+/// What [`Store::insert_thread`] made: the thread and its one-pane session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InsertedThread {
+    pub thread: ThreadId,
+    pub session: SessionId,
+    pub pane: PaneId,
+}
+
+/// A saved session: what its layout needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRow {
+    pub id: SessionId,
+    /// The directory its panes start in.
+    pub dir: PathBuf,
+    /// The position of the tab it shows.
+    pub active_tab: usize,
+}
+
+/// A saved tab of a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabRow {
+    pub session_id: SessionId,
+    /// Where the tab sits in the tab bar, from 0.
+    pub position: usize,
+    /// The name the user gave it.
+    pub name: Option<String>,
+    /// Its split tree, as `TileLayout::to_json` writes it.
+    pub layout: String,
+    /// Its focused pane.
+    pub focus_pane: Option<PaneId>,
+}
+
+/// A saved pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneRow {
+    pub id: PaneId,
+    pub session_id: SessionId,
+    /// The directory its program starts in.
+    pub cwd: PathBuf,
+    /// Its zmx session's name; `None` = `orb-p<id>`.
+    pub zmx_name: Option<String>,
+    /// Its zmx socket dir, relative to orb's folder unless absolute; `None`
+    /// = orb's own pane dir.
+    pub zmx_dir: Option<PathBuf>,
+    /// The command to type into a fresh shell to bring its agent back.
+    pub resume: Option<String>,
+    /// A Claude `--bg` session the migration replaced, still to stop.
+    pub migrated_bg: Option<String>,
+    /// The name the user gave it.
+    pub name: Option<String>,
+}
+
+/// Every saved session, tab and pane, for restoring layouts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SavedLayouts {
+    pub sessions: Vec<SessionRow>,
+    /// Ordered by session, then position.
+    pub tabs: Vec<TabRow>,
+    pub panes: Vec<PaneRow>,
 }
 
 /// A saved group.
@@ -261,9 +334,25 @@ pub struct Store {
     conn: Connection,
 }
 
+/// One schema step: SQL, or Rust for what SQL can't do (layout JSON).
+#[derive(Clone, Copy)]
+enum Migration {
+    Sql(&'static str),
+    Code(fn(&Connection) -> rusqlite::Result<()>),
+}
+
+impl Migration {
+    fn apply(self, conn: &Connection) -> rusqlite::Result<()> {
+        match self {
+            Self::Sql(sql) => conn.execute_batch(sql),
+            Self::Code(step) => step(conn),
+        }
+    }
+}
+
 /// Schema migrations in order: entry `i` moves `user_version` from `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[
-    "
+const MIGRATIONS: &[Migration] = &[
+    Migration::Sql("
     CREATE TABLE projects (
       id INTEGER PRIMARY KEY, root TEXT NOT NULL UNIQUE, title TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE threads (
@@ -271,9 +360,9 @@ const MIGRATIONS: &[&str] = &[
       short_id TEXT NOT NULL UNIQUE, session_id TEXT, title TEXT, cwd TEXT NOT NULL,
       transcript_path TEXT, transcript_offset INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL, turn_started_at INTEGER);
-",
-    "ALTER TABLE threads ADD COLUMN custom_title TEXT;",
-    "
+"),
+    Migration::Sql("ALTER TABLE threads ADD COLUMN custom_title TEXT;"),
+    Migration::Sql("
     ALTER TABLE threads ADD COLUMN branch TEXT;
     ALTER TABLE threads ADD COLUMN pinned_at INTEGER;
     ALTER TABLE threads ADD COLUMN settled_override TEXT;
@@ -282,9 +371,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE threads ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE threads ADD COLUMN last_visited_at INTEGER NOT NULL DEFAULT 0;
     UPDATE threads SET last_activity_at = created_at, last_visited_at = created_at;
-",
-    "ALTER TABLE threads ADD COLUMN ai_titled INTEGER NOT NULL DEFAULT 0;",
-    "
+"),
+    Migration::Sql("ALTER TABLE threads ADD COLUMN ai_titled INTEGER NOT NULL DEFAULT 0;"),
+    Migration::Sql("
     CREATE TABLE drafts (
       project_id INTEGER PRIMARY KEY REFERENCES projects(id),
       workspace TEXT NOT NULL, workspace_path TEXT,
@@ -296,16 +385,16 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE projects ADD COLUMN last_used_at INTEGER;
     ALTER TABLE threads ADD COLUMN model TEXT;
     ALTER TABLE threads ADD COLUMN permission_mode TEXT;
-",
-    "
+"),
+    Migration::Sql("
     ALTER TABLE projects ADD COLUMN removed_at INTEGER;
     CREATE TABLE ui (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       sidebar_width INTEGER,
       project_filter INTEGER REFERENCES projects(id));
-",
-    "ALTER TABLE threads ADD COLUMN renamed_title TEXT;",
-    "
+"),
+    Migration::Sql("ALTER TABLE threads ADD COLUMN renamed_title TEXT;"),
+    Migration::Sql("
     ALTER TABLE projects ADD COLUMN kind TEXT;
     CREATE TABLE groups (
       id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),
@@ -315,9 +404,9 @@ const MIGRATIONS: &[&str] = &[
       draft_model TEXT, draft_permission_mode TEXT,
       UNIQUE (project_id, kind, name));
     ALTER TABLE threads ADD COLUMN group_id INTEGER REFERENCES groups(id);
-",
-    "CREATE TABLE jumps (position INTEGER PRIMARY KEY, kind TEXT NOT NULL, item_id INTEGER NOT NULL);",
-    "
+"),
+    Migration::Sql("CREATE TABLE jumps (position INTEGER PRIMARY KEY, kind TEXT NOT NULL, item_id INTEGER NOT NULL);"),
+    Migration::Sql("
     ALTER TABLE threads ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';
     ALTER TABLE drafts ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';
     ALTER TABLE projects ADD COLUMN last_harness TEXT;
@@ -330,7 +419,8 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE groups ADD COLUMN own_permission TEXT;
     UPDATE groups SET has_draft = 1
      WHERE id NOT IN (SELECT group_id FROM threads WHERE group_id IS NOT NULL);
-",
+"),
+    Migration::Code(v11),
 ];
 
 impl Store {
@@ -350,6 +440,7 @@ impl Store {
         let conn = Connection::open(path)
             .change_context(StoreError)
             .attach_with(|| format!("failed to open {}", path.display()))?;
+        back_up_before_sessions(&conn, path)?;
         Self::from_connection(conn)
     }
 
@@ -393,7 +484,7 @@ impl Store {
                         transcript_offset, created_at, turn_started_at, custom_title,
                         branch, pinned_at, settled_override, settled_at, unsettled_at,
                         last_activity_at, last_visited_at, ai_titled, model, permission_mode,
-                        renamed_title, group_id, harness
+                        renamed_title, group_id, harness, pane_id
                  FROM threads ORDER BY created_at DESC, id DESC",
                 thread_row,
             )
@@ -448,15 +539,28 @@ impl Store {
             .attach("failed to save the project")
     }
 
-    /// Saves a new thread, last active and last visited when it was created.
+    /// Saves a new thread, last active and last visited when it was created,
+    /// with a session of its own: one tab of one pane in the thread's
+    /// directory, Incognito in the Incognito project.
     ///
     /// # Errors
     ///
     /// Returns an error if the cwd isn't UTF-8, the short id is already saved,
     /// the project doesn't exist, or the database can't be written.
-    pub fn insert_thread(&self, row: &NewThread) -> Result<ThreadId, Report<StoreError>> {
-        self.conn
-            .query_row(
+    pub fn insert_thread(&self, row: &NewThread) -> Result<InsertedThread, Report<StoreError>> {
+        let cwd = utf8(&row.cwd)?.to_owned();
+        let zmx_dir = row
+            .zmx
+            .as_ref()
+            .map(|zmx| utf8(&zmx.dir).map(str::to_owned))
+            .transpose()?;
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .change_context(StoreError)
+            .attach("failed to start saving the thread")?;
+        let inserted = (|| {
+            let thread = ThreadId(tx.query_row(
                 "INSERT INTO threads
                    (project_id, short_id, cwd, created_at, last_activity_at, last_visited_at,
                     model, permission_mode, group_id, harness)
@@ -464,7 +568,7 @@ impl Store {
                 params![
                     row.project_id.0,
                     row.short_id,
-                    utf8(&row.cwd)?,
+                    cwd,
                     row.created_at,
                     row.model,
                     row.permission_mode,
@@ -472,10 +576,249 @@ impl Store {
                     row.harness.as_str(),
                 ],
                 |row| row.get(0),
-            )
-            .map(ThreadId)
+            )?);
+            let kind: String = tx.query_row(
+                "SELECT CASE kind WHEN 'incognito' THEN 'incognito' ELSE 'plain' END
+                 FROM projects WHERE id = ?1",
+                [row.project_id.0],
+                |row| row.get(0),
+            )?;
+            let session = NewSession {
+                project_id: row.project_id.0,
+                kind,
+                dir: cwd.clone(),
+                name: None,
+                branch: None,
+                created_at: row.created_at,
+                pinned_at: None,
+                settled_override: None,
+                settled_at: None,
+                unsettled_at: None,
+                last_activity_at: row.created_at,
+                last_visited_at: row.created_at,
+            };
+            let pane = NewPane {
+                thread: Some(thread.0),
+                zmx_name: row.zmx.as_ref().map(|zmx| zmx.name.clone()),
+                zmx_dir,
+                ..NewPane::shell(cwd.clone())
+            };
+            let (session, panes) = insert_session(&tx, &session, &[pane])?;
+            let pane = panes
+                .first()
+                .copied()
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+            Ok::<_, rusqlite::Error>(InsertedThread {
+                thread,
+                session,
+                pane,
+            })
+        })()
+        .change_context(StoreError)
+        .attach("failed to save the thread")?;
+        tx.commit()
             .change_context(StoreError)
-            .attach("failed to save the thread")
+            .attach("failed to commit the thread")?;
+        Ok(inserted)
+    }
+
+    /// Every saved session, its tabs in order, and every pane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be read.
+    pub fn layouts(&self) -> Result<SavedLayouts, Report<StoreError>> {
+        let sessions = self
+            .query(
+                "SELECT id, dir, active_tab FROM sessions ORDER BY id",
+                |row| {
+                    Ok(SessionRow {
+                        id: SessionId(row.get(0)?),
+                        dir: PathBuf::from(row.get::<_, String>(1)?),
+                        active_tab: row.get::<_, Option<usize>>(2)?.unwrap_or(0),
+                    })
+                },
+            )
+            .attach("failed to load sessions")?;
+        let tabs = self
+            .query(
+                "SELECT session_id, position, name, layout, focus_pane FROM tabs
+                 ORDER BY session_id, position",
+                |row| {
+                    Ok(TabRow {
+                        session_id: SessionId(row.get(0)?),
+                        position: row.get(1)?,
+                        name: row.get(2)?,
+                        layout: row.get(3)?,
+                        focus_pane: row.get::<_, Option<i64>>(4)?.map(PaneId),
+                    })
+                },
+            )
+            .attach("failed to load tabs")?;
+        let panes = self
+            .query(
+                "SELECT id, session_id, cwd, zmx_name, zmx_dir, resume, migrated_bg, name
+                 FROM panes ORDER BY id",
+                |row| {
+                    Ok(PaneRow {
+                        id: PaneId(row.get(0)?),
+                        session_id: SessionId(row.get(1)?),
+                        cwd: PathBuf::from(row.get::<_, String>(2)?),
+                        zmx_name: row.get(3)?,
+                        zmx_dir: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
+                        resume: row.get(5)?,
+                        migrated_bg: row.get(6)?,
+                        name: row.get(7)?,
+                    })
+                },
+            )
+            .attach("failed to load panes")?;
+        Ok(SavedLayouts {
+            sessions,
+            tabs,
+            panes,
+        })
+    }
+
+    /// Saves a new pane running a shell in `cwd` in `session`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `cwd` isn't UTF-8, the session doesn't exist, or
+    /// the database can't be written.
+    pub fn insert_pane(
+        &self,
+        session: SessionId,
+        cwd: &Path,
+    ) -> Result<PaneId, Report<StoreError>> {
+        self.conn
+            .query_row(
+                "INSERT INTO panes (session_id, cwd) VALUES (?1, ?2) RETURNING id",
+                params![session.0, utf8(cwd)?],
+                |row| row.get(0),
+            )
+            .map(PaneId)
+            .change_context(StoreError)
+            .attach("failed to save the pane")
+    }
+
+    /// Saves `session`'s tabs, replacing the ones it had, the position of its
+    /// active tab, and the names of `panes`, which are every pane its tabs
+    /// hold. Its other panes are deleted, and a thread running in one of them
+    /// no longer has a pane. Returns the deleted panes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session doesn't exist or the database can't be
+    /// written.
+    pub fn save_layout(
+        &self,
+        session: SessionId,
+        active_tab: usize,
+        tabs: &[TabRow],
+        panes: &[(PaneId, Option<String>)],
+    ) -> Result<Vec<PaneId>, Report<StoreError>> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .change_context(StoreError)
+            .attach("failed to start saving the layout")?;
+        let dropped = (|| {
+            tx.execute("DELETE FROM tabs WHERE session_id = ?1", [session.0])?;
+            for tab in tabs {
+                tx.execute(
+                    "INSERT INTO tabs (session_id, position, name, layout, focus_pane)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        session.0,
+                        tab.position,
+                        tab.name,
+                        tab.layout,
+                        tab.focus_pane.map(|pane| pane.0)
+                    ],
+                )?;
+            }
+            tx.execute(
+                "UPDATE sessions SET active_tab = ?2 WHERE id = ?1",
+                params![session.0, active_tab],
+            )?;
+            for (pane, name) in panes {
+                tx.execute(
+                    "UPDATE panes SET name = ?3 WHERE id = ?1 AND session_id = ?2",
+                    params![pane.0, session.0, name],
+                )?;
+            }
+            let held: Vec<PaneId> = panes.iter().map(|(pane, _)| *pane).collect();
+            let dropped: Vec<PaneId> = collect(
+                &tx,
+                "SELECT id FROM panes WHERE session_id = ?1 ORDER BY id",
+                [session.0],
+                |row| row.get(0).map(PaneId),
+            )?
+            .into_iter()
+            .filter(|pane| !held.contains(pane))
+            .collect();
+            for pane in &dropped {
+                tx.execute(
+                    "UPDATE threads SET pane_id = NULL WHERE pane_id = ?1",
+                    [pane.0],
+                )?;
+                tx.execute("DELETE FROM panes WHERE id = ?1", [pane.0])?;
+            }
+            Ok::<_, rusqlite::Error>(dropped)
+        })()
+        .change_context(StoreError)
+        .attach("failed to save the layout")?;
+        tx.commit()
+            .change_context(StoreError)
+            .attach("failed to commit the layout")?;
+        Ok(dropped)
+    }
+
+    /// Deletes `session` with its tabs and panes; a thread that ran in one of
+    /// them no longer has a pane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be written.
+    pub fn delete_session(&self, session: SessionId) -> Result<(), Report<StoreError>> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .change_context(StoreError)
+            .attach("failed to start deleting the session")?;
+        [
+            "UPDATE threads SET pane_id = NULL
+              WHERE pane_id IN (SELECT id FROM panes WHERE session_id = ?1)",
+            "DELETE FROM tabs WHERE session_id = ?1",
+            "DELETE FROM panes WHERE session_id = ?1",
+            "DELETE FROM sessions WHERE id = ?1",
+        ]
+        .into_iter()
+        .try_for_each(|sql| tx.execute(sql, [session.0]).map(drop))
+        .change_context(StoreError)
+        .attach("failed to delete the session")?;
+        tx.commit()
+            .change_context(StoreError)
+            .attach("failed to commit deleting the session")
+    }
+
+    /// Forgets the `--bg` sessions `panes` replaced, once they're stopped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be written.
+    pub fn clear_migrated_bg(&self, panes: &[PaneId]) -> Result<(), Report<StoreError>> {
+        for pane in panes {
+            self.conn
+                .execute(
+                    "UPDATE panes SET migrated_bg = NULL WHERE id = ?1",
+                    [pane.0],
+                )
+                .change_context(StoreError)
+                .attach("failed to clear a pane's --bg session")?;
+        }
+        Ok(())
     }
 
     /// Updates everything about a thread that changes after it's created: its
@@ -905,8 +1248,9 @@ fn migrate(conn: &mut Connection) -> Result<(), Report<StoreError>> {
     if pending.is_empty() {
         return Ok(());
     }
-    for sql in pending {
-        tx.execute_batch(sql)
+    for migration in pending {
+        migration
+            .apply(&tx)
             .change_context(StoreError)
             .attach("failed to apply a migration")?;
     }
@@ -916,6 +1260,369 @@ fn migrate(conn: &mut Connection) -> Result<(), Report<StoreError>> {
     tx.commit()
         .change_context(StoreError)
         .attach("failed to commit the migration")
+}
+
+/// The schema version that turned threads and groups into sessions.
+const SESSIONS_VERSION: usize = 11;
+
+/// Copies a database that predates sessions to `<file>.bak-v<version>` beside
+/// it, once: an existing backup is kept. The copy is written to a `.tmp` file
+/// with `VACUUM INTO` (a consistent snapshot, `user_version` included) and
+/// renamed into place, so a half-written copy never counts as the backup. A
+/// fresh database (version 0) or one already past the sessions migration
+/// needs none.
+fn back_up_before_sessions(conn: &Connection, path: &Path) -> Result<(), Report<StoreError>> {
+    let version: usize = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .change_context(StoreError)
+        .attach("failed to read the schema version")?;
+    if version == 0 || version >= SESSIONS_VERSION {
+        return Ok(());
+    }
+    let backup = {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".bak-v{version}"));
+        PathBuf::from(name)
+    };
+    if backup.exists() {
+        return Ok(());
+    }
+    let partial = {
+        let mut name = backup.as_os_str().to_owned();
+        name.push(".tmp");
+        PathBuf::from(name)
+    };
+    if partial.exists() {
+        std::fs::remove_file(&partial)
+            .change_context(StoreError)
+            .attach_with(|| format!("failed to remove {}", partial.display()))?;
+    }
+    conn.execute("VACUUM INTO ?1", params![utf8(&partial)?])
+        .change_context(StoreError)
+        .attach_with(|| format!("failed to back the database up to {}", partial.display()))?;
+    std::fs::rename(&partial, &backup)
+        .change_context(StoreError)
+        .attach_with(|| format!("failed to move the backup to {}", backup.display()))
+}
+
+/// Turns every group, and every thread outside a group (or in a group that is
+/// gone), into a session with one tab, each thread in a pane of its own.
+/// Thread ids don't change. Pane
+/// ids start above every thread id, since earlier versions named zmx sessions
+/// `orb-p<thread id>`. The `groups` and `drafts` tables and the threads' old
+/// columns stay.
+fn v11(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE sessions (
+          id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),
+          kind TEXT NOT NULL DEFAULT 'plain', dir TEXT NOT NULL, name TEXT, branch TEXT,
+          created_at INTEGER NOT NULL, pinned_at INTEGER, settled_override TEXT,
+          settled_at INTEGER, unsettled_at INTEGER,
+          last_activity_at INTEGER NOT NULL DEFAULT 0, last_visited_at INTEGER NOT NULL DEFAULT 0,
+          active_tab INTEGER);
+        CREATE TABLE tabs (
+          id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
+          position INTEGER NOT NULL, name TEXT, layout TEXT NOT NULL, focus_pane INTEGER);
+        CREATE TABLE panes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES sessions(id),
+          cwd TEXT NOT NULL, zmx_name TEXT, zmx_dir TEXT, resume TEXT, migrated_bg TEXT,
+          name TEXT);
+        ALTER TABLE threads ADD COLUMN pane_id INTEGER REFERENCES panes(id);
+        INSERT INTO sqlite_sequence (name, seq)
+        VALUES ('panes', (SELECT COALESCE(MAX(id), 0) FROM threads));
+        ",
+    )?;
+    let mut group_sessions = HashMap::new();
+    let groups = collect(
+        conn,
+        "SELECT g.id, g.project_id, g.kind, COALESCE(g.dir, p.root), g.name, g.branch,
+                g.created_at, g.pinned_at, g.settled_override, g.settled_at, g.unsettled_at,
+                COALESCE((SELECT MAX(last_activity_at) FROM threads WHERE group_id = g.id),
+                         g.created_at),
+                COALESCE((SELECT MAX(last_visited_at) FROM threads WHERE group_id = g.id),
+                         g.created_at)
+         FROM groups g JOIN projects p ON p.id = g.project_id ORDER BY g.id",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, migrated_session(row, 1)?)),
+    )?;
+    for (group, session) in groups {
+        let threads = collect(
+            conn,
+            "SELECT id, cwd, harness, short_id, session_id FROM threads
+             WHERE group_id = ?1 ORDER BY created_at DESC, id DESC",
+            [group],
+            migrated_pane,
+        )?;
+        let panes: Vec<NewPane> = if threads.is_empty() {
+            vec![NewPane::shell(session.dir.clone())]
+        } else {
+            threads
+        };
+        let (id, _) = insert_session(conn, &session, &panes)?;
+        group_sessions.insert(group, id);
+    }
+    let mut thread_sessions = HashMap::new();
+    let lone = collect(
+        conn,
+        "SELECT t.id, t.project_id,
+                CASE p.kind WHEN 'incognito' THEN 'incognito' ELSE 'plain' END,
+                t.cwd, t.renamed_title, t.branch, t.created_at, t.pinned_at,
+                t.settled_override, t.settled_at, t.unsettled_at, t.last_activity_at,
+                t.last_visited_at, t.id, t.cwd, t.harness, t.short_id, t.session_id
+         FROM threads t JOIN projects p ON p.id = t.project_id
+         WHERE t.group_id IS NULL OR t.group_id NOT IN (SELECT id FROM groups)
+         ORDER BY t.id",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                migrated_session(row, 1)?,
+                migrated_pane_at(row, 13)?,
+            ))
+        },
+    )?;
+    for (thread, session, pane) in lone {
+        let (id, _) = insert_session(conn, &session, &[pane])?;
+        thread_sessions.insert(thread, id);
+    }
+    let grouped = collect(
+        conn,
+        "SELECT id, group_id FROM threads WHERE group_id IS NOT NULL",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    for (thread, group) in grouped {
+        if let Some(session) = group_sessions.get(&group) {
+            thread_sessions.insert(thread, *session);
+        }
+    }
+    rewrite_jumps(conn, &thread_sessions, &group_sessions)
+}
+
+/// Points thread and group jump rows at their sessions and deletes the rest
+/// (drafts, rows whose thread or group is gone).
+fn rewrite_jumps(
+    conn: &Connection,
+    thread_sessions: &HashMap<i64, SessionId>,
+    group_sessions: &HashMap<i64, SessionId>,
+) -> rusqlite::Result<()> {
+    let jumps = collect(
+        conn,
+        "SELECT position, kind, item_id FROM jumps ORDER BY position",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
+    )?;
+    for (position, kind, item) in jumps {
+        let session = match kind.as_str() {
+            "thread" => thread_sessions.get(&item),
+            "group" | "group_draft" => group_sessions.get(&item),
+            _ => None,
+        };
+        match session {
+            Some(session) => conn.execute(
+                "UPDATE jumps SET kind = 'session', item_id = ?2 WHERE position = ?1",
+                params![position, session.0],
+            )?,
+            None => conn.execute("DELETE FROM jumps WHERE position = ?1", [position])?,
+        };
+    }
+    Ok(())
+}
+
+/// Every row `sql` returns, mapped.
+fn collect<T, P, F>(conn: &Connection, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+where
+    P: rusqlite::Params,
+    F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+{
+    conn.prepare(sql)?.query_map(params, map)?.collect()
+}
+
+/// A session to create: the `sessions` row's columns.
+struct NewSession {
+    project_id: i64,
+    /// `plain`, `research`, `learn` or `incognito`.
+    kind: String,
+    dir: String,
+    name: Option<String>,
+    branch: Option<String>,
+    created_at: i64,
+    pinned_at: Option<i64>,
+    settled_override: Option<String>,
+    settled_at: Option<i64>,
+    unsettled_at: Option<i64>,
+    last_activity_at: i64,
+    last_visited_at: i64,
+}
+
+/// A pane to create in a new session, and the thread that runs in it.
+struct NewPane {
+    thread: Option<i64>,
+    cwd: String,
+    zmx_name: Option<String>,
+    zmx_dir: Option<String>,
+    resume: Option<String>,
+    migrated_bg: Option<String>,
+}
+
+impl NewPane {
+    /// A pane running a shell in `cwd`, with no thread.
+    fn shell(cwd: String) -> Self {
+        Self {
+            thread: None,
+            cwd,
+            zmx_name: None,
+            zmx_dir: None,
+            resume: None,
+            migrated_bg: None,
+        }
+    }
+}
+
+/// A migrated session from the 12 columns starting at `at`: project, kind,
+/// dir, name, branch, created, pinned, settle override, settled, un-settled,
+/// last activity and last visit. A group kind other than Research or Learn
+/// becomes `plain`.
+fn migrated_session(row: &Row<'_>, at: usize) -> rusqlite::Result<NewSession> {
+    let kind = match row.get::<_, String>(at + 1)?.as_str() {
+        kind @ ("research" | "learn" | "incognito") => kind.to_owned(),
+        _ => "plain".to_owned(),
+    };
+    Ok(NewSession {
+        project_id: row.get(at)?,
+        kind,
+        dir: row.get(at + 2)?,
+        name: row.get(at + 3)?,
+        branch: row.get(at + 4)?,
+        created_at: row.get(at + 5)?,
+        pinned_at: row.get(at + 6)?,
+        settled_override: row.get(at + 7)?,
+        settled_at: row.get(at + 8)?,
+        unsettled_at: row.get(at + 9)?,
+        last_activity_at: row.get(at + 10)?,
+        last_visited_at: row.get(at + 11)?,
+    })
+}
+
+fn migrated_pane(row: &Row<'_>) -> rusqlite::Result<NewPane> {
+    migrated_pane_at(row, 0)
+}
+
+/// A migrated thread's pane from the 5 columns starting at `at`: thread id,
+/// cwd, harness, short id and session id. A Claude pane starts as a shell
+/// that will resume the session, its `--bg` session still to stop; a pi pane
+/// keeps the zmx session pi already runs in, under `~/.orb/pi`.
+fn migrated_pane_at(row: &Row<'_>, at: usize) -> rusqlite::Result<NewPane> {
+    let short_id: String = row.get(at + 3)?;
+    let session_id: Option<String> = row.get(at + 4)?;
+    let shell = NewPane {
+        thread: Some(row.get(at)?),
+        ..NewPane::shell(row.get(at + 1)?)
+    };
+    Ok(match row.get::<_, String>(at + 2)?.as_str() {
+        "claude" => NewPane {
+            resume: session_id.map(|id| format!("claude --resume {id}")),
+            migrated_bg: Some(short_id),
+            ..shell
+        },
+        "pi" => NewPane {
+            resume: Some(format!("pi --session-id {short_id}")),
+            zmx_name: Some(short_id),
+            zmx_dir: Some("pi".to_owned()),
+            ..shell
+        },
+        _ => shell,
+    })
+}
+
+/// Inserts `session` with `panes` in one tab, side by side in a right-split
+/// chain of equal widths with the first focused, and points each pane's
+/// thread at its pane. `panes` is never empty.
+fn insert_session(
+    conn: &Connection,
+    session: &NewSession,
+    panes: &[NewPane],
+) -> rusqlite::Result<(SessionId, Vec<PaneId>)> {
+    let id = SessionId(conn.query_row(
+        "INSERT INTO sessions
+           (project_id, kind, dir, name, branch, created_at, pinned_at, settled_override,
+            settled_at, unsettled_at, last_activity_at, last_visited_at, active_tab)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0) RETURNING id",
+        params![
+            session.project_id,
+            session.kind,
+            session.dir,
+            session.name,
+            session.branch,
+            session.created_at,
+            session.pinned_at,
+            session.settled_override,
+            session.settled_at,
+            session.unsettled_at,
+            session.last_activity_at,
+            session.last_visited_at,
+        ],
+        |row| row.get(0),
+    )?);
+    let mut ids = Vec::with_capacity(panes.len());
+    for pane in panes {
+        let pane_id = PaneId(conn.query_row(
+            "INSERT INTO panes (session_id, cwd, zmx_name, zmx_dir, resume, migrated_bg)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+            params![
+                id.0,
+                pane.cwd,
+                pane.zmx_name,
+                pane.zmx_dir,
+                pane.resume,
+                pane.migrated_bg
+            ],
+            |row| row.get(0),
+        )?);
+        if let Some(thread) = pane.thread {
+            conn.execute(
+                "UPDATE threads SET pane_id = ?2 WHERE id = ?1",
+                params![thread, pane_id.0],
+            )?;
+        }
+        ids.push(pane_id);
+    }
+    let Some(&first) = ids.first() else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    let layout = TileLayout::from_saved(side_by_side(&ids), first).to_json();
+    conn.execute(
+        "INSERT INTO tabs (session_id, position, layout, focus_pane) VALUES (?1, 0, ?2, ?3)",
+        params![id.0, layout, first.0],
+    )?;
+    Ok((id, ids))
+}
+
+/// `panes` side by side, equal widths: each split gives its first pane
+/// `1/n` of what is left.
+fn side_by_side(panes: &[PaneId]) -> Node {
+    match panes {
+        [] => Node::Pane(PaneId(0)),
+        [only] => Node::Pane(*only),
+        [first, rest @ ..] => {
+            #[expect(clippy::cast_precision_loss, reason = "a tab holds a handful of panes")]
+            let ratio = 1.0 / panes.len() as f32;
+            Node::Split {
+                split: Split::Right,
+                ratio,
+                first: Box::new(Node::Pane(*first)),
+                second: Box::new(side_by_side(rest)),
+            }
+        }
+    }
 }
 
 fn utf8(path: &Path) -> Result<&str, Report<StoreError>> {
@@ -1045,6 +1752,7 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         renamed_title: row.get(21)?,
         group_id: row.get::<_, Option<i64>>(22)?.map(GroupId),
         harness: HarnessId::new(row.get::<_, String>(23)?),
+        pane_id: row.get::<_, Option<i64>>(24)?.map(PaneId),
     })
 }
 
@@ -1130,8 +1838,9 @@ mod tests {
 
     use super::{
         DraftRow, DraftWorkspace, GroupDraft, GroupId, GroupKind, GroupRow, LastUsed,
-        LastWorkspace, MIGRATIONS, NewGroup, NewThread, Own, ProjectId, ProjectKind,
-        SettledOverride, SidebarItem, Store, StoreError, ThreadId, ThreadRow, Ui,
+        LastWorkspace, MIGRATIONS, NewGroup, NewThread, Own, PaneId, ProjectId, ProjectKind,
+        SavedLayouts, SessionId, SettledOverride, SidebarItem, Store, StoreError, TabRow, ThreadId,
+        ThreadRow, TileLayout, Ui,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -1150,6 +1859,7 @@ mod tests {
             model: None,
             permission_mode: None,
             group_id: None,
+            zmx: None,
         }
     }
 
@@ -1210,7 +1920,7 @@ mod tests {
                 .first()
                 .ok_or_else(|| Report::new(StoreError).attach("no v1 migration"))?;
             let conn = Connection::open(&path).change_context(StoreError)?;
-            conn.execute_batch(v1).change_context(StoreError)?;
+            v1.apply(&conn).change_context(StoreError)?;
             conn.pragma_update(None, "user_version", 1)
                 .change_context(StoreError)?;
         }
@@ -1243,7 +1953,7 @@ mod tests {
                 .get(..2)
                 .ok_or_else(|| Report::new(StoreError).attach("no v2 migrations"))?
             {
-                conn.execute_batch(sql).change_context(StoreError)?;
+                sql.apply(&conn).change_context(StoreError)?;
             }
             conn.execute_batch(
                 "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
@@ -1281,7 +1991,7 @@ mod tests {
                 .get(..3)
                 .ok_or_else(|| Report::new(StoreError).attach("no v3 migrations"))?
             {
-                conn.execute_batch(sql).change_context(StoreError)?;
+                sql.apply(&conn).change_context(StoreError)?;
             }
             conn.execute_batch(
                 "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
@@ -1316,7 +2026,7 @@ mod tests {
                 .get(..4)
                 .ok_or_else(|| Report::new(StoreError).attach("no v4 migrations"))?
             {
-                conn.execute_batch(sql).change_context(StoreError)?;
+                sql.apply(&conn).change_context(StoreError)?;
             }
             conn.execute_batch(
                 "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
@@ -1361,7 +2071,7 @@ mod tests {
                 .get(..5)
                 .ok_or_else(|| Report::new(StoreError).attach("no v5 migrations"))?
             {
-                conn.execute_batch(sql).change_context(StoreError)?;
+                sql.apply(&conn).change_context(StoreError)?;
             }
             conn.execute_batch(
                 "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
@@ -1411,7 +2121,7 @@ mod tests {
                 .get(..7)
                 .ok_or_else(|| Report::new(StoreError).attach("no v7 migrations"))?
             {
-                conn.execute_batch(sql).change_context(StoreError)?;
+                sql.apply(&conn).change_context(StoreError)?;
             }
             conn.execute_batch(
                 "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
@@ -1455,7 +2165,7 @@ mod tests {
                 .get(..8)
                 .ok_or_else(|| Report::new(StoreError).attach("no v8 migrations"))?
             {
-                conn.execute_batch(sql).change_context(StoreError)?;
+                sql.apply(&conn).change_context(StoreError)?;
             }
             conn.execute_batch(
                 "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
@@ -1488,7 +2198,7 @@ mod tests {
             .get(..9)
             .ok_or_else(|| Report::new(StoreError).attach("no v9 migrations"))?
         {
-            conn.execute_batch(sql).change_context(StoreError)?;
+            sql.apply(&conn).change_context(StoreError)?;
         }
         conn.execute_batch(
             "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
@@ -1583,7 +2293,7 @@ mod tests {
         // Given a thread saved in a store that was then closed.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let path = dir.path().join("state.sqlite");
-        let (project_id, thread_id) = {
+        let (project_id, inserted) = {
             let store = Store::open(&path)?;
             let project_id =
                 store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
@@ -1596,7 +2306,8 @@ mod tests {
         // Then the thread comes back with the fields it was saved with.
         let expected = ThreadRow {
             harness: HarnessId::new("claude"),
-            id: thread_id,
+            id: inserted.thread,
+            pane_id: Some(inserted.pane),
             project_id,
             short_id: "28bf38e2".to_owned(),
             session_id: None,
@@ -1893,10 +2604,12 @@ mod tests {
         let group: GroupId = store.insert_group(&new_group(project_id))?;
 
         // When inserting a thread in the group.
-        store.insert_thread(&NewThread {
-            group_id: Some(group),
-            ..new_thread(project_id)
-        })?;
+        store
+            .insert_thread(&NewThread {
+                group_id: Some(group),
+                ..new_thread(project_id)
+            })
+            .map(|inserted| inserted.thread)?;
 
         // Then the thread loads back in that group.
         let groups: Vec<Option<GroupId>> = store
@@ -2016,12 +2729,13 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let thread_id = store.insert_thread(&new_thread(project_id))?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
 
         // When saving its session id, titles, transcript cursor, and turn start.
         let updated = ThreadRow {
             harness: HarnessId::new("claude"),
-            id: thread_id,
+            id: inserted.thread,
+            pane_id: Some(inserted.pane),
             project_id,
             short_id: "28bf38e2".to_owned(),
             session_id: Some("5f0c1c1e-session".to_owned()),
@@ -2132,7 +2846,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let thread_id = store.insert_thread(&new_thread(project_id))?;
+        let thread_id = store.insert_thread(&new_thread(project_id))?.thread;
 
         // When deleting it.
         store.delete_thread(thread_id)?;
@@ -2175,11 +2889,13 @@ mod tests {
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
 
         // When inserting a thread started with sonnet in plan mode.
-        store.insert_thread(&NewThread {
-            model: Some("sonnet".to_owned()),
-            permission_mode: Some("plan".to_owned()),
-            ..new_thread(project_id)
-        })?;
+        store
+            .insert_thread(&NewThread {
+                model: Some("sonnet".to_owned()),
+                permission_mode: Some("plan".to_owned()),
+                ..new_thread(project_id)
+            })
+            .map(|inserted| inserted.thread)?;
 
         // Then loading returns its model and permission mode.
         let flags: Vec<(Option<String>, Option<String>)> = store
@@ -2425,6 +3141,839 @@ mod tests {
             jumps,
             "the latest jump list should replace the old"
         );
+        Ok(())
+    }
+
+    /// The pi thread's short id in the v10 fixture.
+    const PI_SHORT_ID: &str = "orb-0123456789abcdef0123456789abcdef";
+
+    /// A v10 database: project 1 `/work/orb` with a draft, project 2 the
+    /// Incognito folder; lone Claude thread 3 (`aa11`, pinned, renamed), lone
+    /// pi thread 4, Incognito thread 5, Feature group 1 in `/wt/x` holding
+    /// threads 6, 7 and 8 (created in that order), settled Research group 2
+    /// holding thread 9, threadless Feature group 3 with no dir, settled lone
+    /// thread 10; jumps to thread 3, group 1, the draft and thread 9.
+    fn v10_database(path: &Path) -> Result<(), Report<StoreError>> {
+        let conn = Connection::open(path).change_context(StoreError)?;
+        for migration in MIGRATIONS
+            .get(..10)
+            .ok_or_else(|| Report::new(StoreError).attach("no v10 migrations"))?
+        {
+            migration.apply(&conn).change_context(StoreError)?;
+        }
+        conn.execute_batch(&format!(
+            "INSERT INTO projects (id, root, title, created_at, kind)
+             VALUES (1, '/work/orb', 'orb', 100, NULL),
+                    (2, '/tmp/orb-incognito', 'Incognito', 100, 'incognito');
+             INSERT INTO drafts (project_id, workspace, created_at) VALUES (1, 'local', 150);
+             INSERT INTO groups (id, project_id, kind, name, dir, branch, created_at,
+                                 settled_override, settled_at)
+             VALUES (1, 1, 'feature', 'login', '/wt/x', 'login', 200, NULL, NULL),
+                    (2, 1, 'research', 'papers', '/r/papers', NULL, 300, 'settled', 8000),
+                    (3, 1, 'feature', 'later', NULL, NULL, 400, NULL, NULL);
+             INSERT INTO threads (id, project_id, short_id, session_id, cwd, created_at,
+                                  renamed_title, pinned_at, settled_override, settled_at,
+                                  last_activity_at, last_visited_at, group_id, harness)
+             VALUES (3, 1, 'aa11', 's-aa11', '/work/orb', 1000, 'Fix login', 5000,
+                     NULL, NULL, 6000, 7000, NULL, 'claude'),
+                    (4, 1, '{PI_SHORT_ID}', NULL, '/work/orb', 1100, NULL, NULL,
+                     NULL, NULL, 1100, 1100, NULL, 'pi'),
+                    (5, 2, 'cc33', 's-cc33', '/tmp/orb-incognito', 1200, NULL, NULL,
+                     NULL, NULL, 1200, 1200, NULL, 'claude'),
+                    (6, 1, 'dd44', 's-dd44', '/wt/x', 1300, NULL, NULL,
+                     NULL, NULL, 1300, 1300, 1, 'claude'),
+                    (7, 1, 'ee55', 's-ee55', '/wt/x', 1400, NULL, NULL,
+                     NULL, NULL, 1400, 1400, 1, 'claude'),
+                    (8, 1, 'ff66', 's-ff66', '/wt/x', 1500, NULL, NULL,
+                     NULL, NULL, 1500, 1500, 1, 'claude'),
+                    (9, 1, 'gg77', 's-gg77', '/r/papers', 1600, NULL, NULL,
+                     NULL, NULL, 1600, 1600, 2, 'claude'),
+                    (10, 1, 'hh88', 's-hh88', '/work/orb', 1700, NULL, NULL,
+                     'settled', 9000, 1700, 1700, NULL, 'claude');
+             INSERT INTO jumps (position, kind, item_id)
+             VALUES (0, 'thread', 3), (1, 'group', 1), (2, 'draft', 1), (3, 'thread', 9);
+             PRAGMA user_version = 10;"
+        ))
+        .change_context(StoreError)
+    }
+
+    /// A v10 fixture at `<dir>/state.sqlite`, opened (and so migrated).
+    fn migrated_v10(dir: &Path) -> Result<PathBuf, Report<StoreError>> {
+        let path = dir.join("state.sqlite");
+        v10_database(&path)?;
+        drop(Store::open(&path)?);
+        Ok(path)
+    }
+
+    /// Every row `sql` returns from the database at `path`, each column
+    /// debug-printed.
+    fn rows(path: &Path, sql: &str) -> Result<Vec<Vec<String>>, Report<StoreError>> {
+        let conn = Connection::open(path).change_context(StoreError)?;
+        let mut statement = conn.prepare(sql).change_context(StoreError)?;
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|at| {
+                        row.get::<_, rusqlite::types::Value>(at)
+                            .map(|value| format!("{value:?}"))
+                    })
+                    .collect()
+            })
+            .and_then(Iterator::collect)
+            .change_context(StoreError)
+    }
+
+    /// The one value `sql` returns from the database at `path`.
+    fn value<T>(path: &Path, sql: &str) -> Result<T, Report<StoreError>>
+    where
+        T: rusqlite::types::FromSql,
+    {
+        Connection::open(path)
+            .and_then(|conn| conn.query_row(sql, [], |row| row.get(0)))
+            .change_context(StoreError)
+    }
+
+    /// The session thread `id` runs in, after migrating.
+    fn session_of(path: &Path, thread: i64) -> Result<i64, Report<StoreError>> {
+        value(
+            path,
+            &format!(
+                "SELECT p.session_id FROM threads t JOIN panes p ON p.id = t.pane_id
+                 WHERE t.id = {thread}"
+            ),
+        )
+    }
+
+    /// The pane thread `id` runs in, after migrating.
+    fn pane_of(path: &Path, thread: i64) -> Result<i64, Report<StoreError>> {
+        value(
+            path,
+            &format!("SELECT pane_id FROM threads WHERE id = {thread}"),
+        )
+    }
+
+    fn backup_path(path: &Path) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".bak-v10");
+        PathBuf::from(name)
+    }
+
+    const THREAD_COLUMNS: &str = "SELECT * FROM threads ORDER BY id";
+
+    #[rstest::rstest]
+    fn migrating_v10_writes_the_backup_before_changing_anything() -> Result<(), Report<StoreError>>
+    {
+        // Given a v10 database and its threads as they were.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v10_database(&path)?;
+        let before = rows(&path, THREAD_COLUMNS)?;
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then the backup is a v10 database holding the same threads.
+        let backup = backup_path(&path);
+        assert_eq!(
+            (user_version(&backup)?, rows(&backup, THREAD_COLUMNS)?),
+            (10, before),
+            "the backup should be the v10 database as it was"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_keeps_an_existing_backup() -> Result<(), Report<StoreError>> {
+        // Given a v10 database with a backup already beside it.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v10_database(&path)?;
+        let backup = backup_path(&path);
+        std::fs::write(&backup, b"an earlier backup").change_context(StoreError)?;
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then the backup is left as it was.
+        assert_eq!(
+            std::fs::read(&backup).change_context(StoreError)?,
+            b"an earlier backup".to_vec(),
+            "an existing backup should never be overwritten"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn failed_backup_leaves_a_v10_database_unmigrated() -> Result<(), Report<StoreError>> {
+        // Given a v10 database whose backup can't be written (a directory
+        // sits where the partial copy goes).
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v10_database(&path)?;
+        let mut partial = backup_path(&path).into_os_string();
+        partial.push(".tmp");
+        std::fs::create_dir_all(PathBuf::from(partial).join("blocker"))
+            .change_context(StoreError)?;
+
+        // When opening the store.
+        let opened = Store::open(&path);
+
+        // Then opening fails and the database is still at v10.
+        assert_eq!(
+            (opened.is_err(), user_version(&path)?),
+            (true, 10),
+            "no migration should run without a backup"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn opening_a_fresh_database_writes_no_backup() -> Result<(), Report<StoreError>> {
+        // Given a path with no database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then the directory holds only the database.
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .change_context(StoreError)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".bak"))
+            .collect();
+        assert!(
+            names.is_empty(),
+            "a fresh database needs no backup: {names:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_keeps_every_thread_id() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading its threads.
+        let threads = rows(
+            &path,
+            "SELECT id, pane_id IS NOT NULL FROM threads ORDER BY id",
+        )?;
+
+        // Then threads 3 to 10 are there, each in a pane.
+        let expected: Vec<Vec<String>> = (3..=10)
+            .map(|id| vec![format!("Integer({id})"), "Integer(1)".to_owned()])
+            .collect();
+        assert_eq!(
+            threads, expected,
+            "every thread should keep its id and get a pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_gives_a_lone_claude_thread_one_session_tab_and_pane()
+    -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading thread 3's session and its tabs.
+        let session = session_of(&path, 3)?;
+        let pane = pane_of(&path, 3)?;
+        let found = rows(
+            &path,
+            &format!(
+                "SELECT s.dir, s.name, s.active_tab, t.position, t.layout, t.focus_pane,
+                        (SELECT COUNT(*) FROM panes WHERE session_id = s.id)
+                 FROM sessions s JOIN tabs t ON t.session_id = s.id WHERE s.id = {session}"
+            ),
+        )?;
+
+        // Then it has one tab of its one pane, in the thread's directory.
+        let expected = vec![vec![
+            "Text(\"/work/orb\")".to_owned(),
+            "Text(\"Fix login\")".to_owned(),
+            "Integer(0)".to_owned(),
+            "Integer(0)".to_owned(),
+            format!("Text(\"{{\\\"pane\\\":{pane}}}\")"),
+            format!("Integer({pane})"),
+            "Integer(1)".to_owned(),
+        ]];
+        assert_eq!(
+            found, expected,
+            "a lone thread should become a one-pane session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_records_a_claude_panes_resume_and_bg_session() -> Result<(), Report<StoreError>>
+    {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading thread 3's pane.
+        let pane = pane_of(&path, 3)?;
+        let found = rows(
+            &path,
+            &format!(
+                "SELECT cwd, zmx_name, zmx_dir, resume, migrated_bg FROM panes WHERE id = {pane}"
+            ),
+        )?;
+
+        // Then it resumes the Claude session and still has its --bg session to stop.
+        let expected = vec![vec![
+            "Text(\"/work/orb\")".to_owned(),
+            "Null".to_owned(),
+            "Null".to_owned(),
+            "Text(\"claude --resume s-aa11\")".to_owned(),
+            "Text(\"aa11\")".to_owned(),
+        ]];
+        assert_eq!(found, expected, "a Claude pane should resume its session");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_keeps_a_pi_panes_zmx_session() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading pi thread 4's pane.
+        let pane = pane_of(&path, 4)?;
+        let found = rows(
+            &path,
+            &format!("SELECT zmx_name, zmx_dir, resume, migrated_bg FROM panes WHERE id = {pane}"),
+        )?;
+
+        // Then it keeps pi's zmx session under orb's pi dir.
+        let expected = vec![vec![
+            format!("Text(\"{PI_SHORT_ID}\")"),
+            "Text(\"pi\")".to_owned(),
+            format!("Text(\"pi --session-id {PI_SHORT_ID}\")"),
+            "Null".to_owned(),
+        ]];
+        assert_eq!(found, expected, "a pi pane should keep its zmx session");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_puts_a_groups_threads_in_one_session_newest_first()
+    -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading the tabs of group 1's threads' sessions.
+        let sessions: Vec<i64> = [6, 7, 8]
+            .into_iter()
+            .map(|thread| session_of(&path, thread))
+            .collect::<Result<_, _>>()?;
+        let session = sessions.first().copied().unwrap_or_default();
+        let (layout, focus): (String, i64) = Connection::open(&path)
+            .and_then(|conn| {
+                conn.query_row(
+                    &format!("SELECT layout, focus_pane FROM tabs WHERE session_id = {session}"),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .change_context(StoreError)?;
+        let tree = TileLayout::from_json(&layout, PaneId(focus)).change_context(StoreError)?;
+
+        // Then all three share one tab, newest thread first and focused.
+        let panes: Vec<PaneId> = [8, 7, 6]
+            .into_iter()
+            .map(|thread| pane_of(&path, thread).map(PaneId))
+            .collect::<Result<_, _>>()?;
+        let first = panes.first().copied();
+        assert_eq!(
+            (
+                sessions.iter().all(|id| *id == session),
+                tree.pane_ids(),
+                Some(tree.focused())
+            ),
+            (true, panes, first),
+            "a group should become one session of side-by-side panes, newest first"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_copies_a_settled_groups_settle_state() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading the session of settled group 2's thread.
+        let session = session_of(&path, 9)?;
+        let found = rows(
+            &path,
+            &format!("SELECT settled_override, settled_at FROM sessions WHERE id = {session}"),
+        )?;
+
+        // Then it is settled when the group was.
+        let expected = vec![vec![
+            "Text(\"settled\")".to_owned(),
+            "Integer(8000)".to_owned(),
+        ]];
+        assert_eq!(
+            found, expected,
+            "a settled group's session should stay settled"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_copies_a_settled_threads_settle_state() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading settled thread 10's session.
+        let session = session_of(&path, 10)?;
+        let found = rows(
+            &path,
+            &format!("SELECT settled_override, settled_at FROM sessions WHERE id = {session}"),
+        )?;
+
+        // Then it is settled when the thread was.
+        let expected = vec![vec![
+            "Text(\"settled\")".to_owned(),
+            "Integer(9000)".to_owned(),
+        ]];
+        assert_eq!(
+            found, expected,
+            "a settled thread's session should stay settled"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_copies_a_pinned_threads_pin_activity_and_visit()
+    -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading pinned thread 3's session.
+        let session = session_of(&path, 3)?;
+        let found = rows(
+            &path,
+            &format!(
+                "SELECT pinned_at, last_activity_at, last_visited_at FROM sessions
+                 WHERE id = {session}"
+            ),
+        )?;
+
+        // Then it has the thread's pin, activity and visit times.
+        let expected = vec![vec![
+            "Integer(5000)".to_owned(),
+            "Integer(6000)".to_owned(),
+            "Integer(7000)".to_owned(),
+        ]];
+        assert_eq!(
+            found, expected,
+            "a thread's pin, activity and visit should carry over"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_makes_an_incognito_threads_session_incognito() -> Result<(), Report<StoreError>>
+    {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading Incognito thread 5's session.
+        let session = session_of(&path, 5)?;
+        let kind: String = value(
+            &path,
+            &format!("SELECT kind FROM sessions WHERE id = {session}"),
+        )?;
+
+        // Then it is an Incognito session.
+        assert_eq!(
+            kind, "incognito",
+            "an Incognito thread's session should be Incognito"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::feature(6, "plain")]
+    #[case::research(9, "research")]
+    fn migrating_v10_maps_group_kinds(
+        #[case] thread: i64,
+        #[case] expected: &str,
+    ) -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading the kind of the session the group's thread is in.
+        let session = session_of(&path, thread)?;
+        let kind: String = value(
+            &path,
+            &format!("SELECT kind FROM sessions WHERE id = {session}"),
+        )?;
+
+        // Then it is the group's kind, a Feature becoming plain.
+        assert_eq!(
+            kind, expected,
+            "a group's kind should map to a session kind"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_gives_a_threadless_group_one_pane_in_the_project_root()
+    -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading threadless group 3's session and panes.
+        let found = rows(
+            &path,
+            "SELECT s.dir, p.cwd, p.resume FROM sessions s JOIN panes p ON p.session_id = s.id
+             WHERE s.name = 'later'",
+        )?;
+
+        // Then it has one shell pane in the project's root.
+        let expected = vec![vec![
+            "Text(\"/work/orb\")".to_owned(),
+            "Text(\"/work/orb\")".to_owned(),
+            "Null".to_owned(),
+        ]];
+        assert_eq!(
+            found, expected,
+            "a threadless group should get one shell pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_rewrites_jumps_to_sessions() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading its jump rows.
+        let jumps = rows(&path, "SELECT kind, item_id FROM jumps ORDER BY position")?;
+
+        // Then thread and group rows point at their sessions and the draft's row is gone.
+        let expected: Vec<Vec<String>> = [
+            session_of(&path, 3)?,
+            session_of(&path, 6)?,
+            session_of(&path, 9)?,
+        ]
+        .into_iter()
+        .map(|session| {
+            vec![
+                "Text(\"session\")".to_owned(),
+                format!("Integer({session})"),
+            ]
+        })
+        .collect();
+        assert_eq!(jumps, expected, "jumps should point at sessions");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_numbers_panes_above_every_thread_id() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database whose highest thread id is 10.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading the lowest pane id.
+        let lowest: i64 = value(&path, "SELECT MIN(id) FROM panes")?;
+
+        // Then it is above every thread id.
+        assert!(
+            lowest > 10,
+            "pane ids should start above thread ids, got {lowest}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_gives_a_thread_of_a_missing_group_its_own_session()
+    -> Result<(), Report<StoreError>> {
+        // Given a v10 database with a thread whose group row is gone.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v10_database(&path)?;
+        Connection::open(&path)
+            .and_then(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO threads (id, project_id, short_id, cwd, created_at, group_id)
+                     VALUES (11, 1, 'ii99', '/work/orb', 1800, 42)",
+                )
+            })
+            .change_context(StoreError)?;
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then that thread runs in a one-pane session of its own.
+        let panes: i64 = value(
+            &path,
+            &format!(
+                "SELECT COUNT(*) FROM panes WHERE session_id = {}",
+                session_of(&path, 11)?
+            ),
+        )?;
+        assert_eq!(panes, 1, "a thread of a missing group should get a session");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn reopening_a_migrated_v10_database_writes_no_second_backup() -> Result<(), Report<StoreError>>
+    {
+        // Given a migrated v10 database whose backup was then removed.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+        std::fs::remove_file(backup_path(&path)).change_context(StoreError)?;
+
+        // When opening the store again.
+        drop(Store::open(&path)?);
+
+        // Then no backup is written.
+        assert!(
+            !backup_path(&path).exists(),
+            "a database already at v11 should not be backed up again"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn reopening_a_migrated_v10_database_makes_no_more_sessions() -> Result<(), Report<StoreError>>
+    {
+        // Given a migrated v10 database and its session count.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+        let before: i64 = value(&path, "SELECT COUNT(*) FROM sessions")?;
+
+        // When opening the store again.
+        drop(Store::open(&path)?);
+
+        // Then the sessions are the same.
+        let after: i64 = value(&path, "SELECT COUNT(*) FROM sessions")?;
+        assert_eq!(after, before, "the migration should run only once");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_keeps_groups_and_drafts() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When counting its groups and drafts.
+        let counts = (
+            value::<i64>(&path, "SELECT COUNT(*) FROM groups")?,
+            value::<i64>(&path, "SELECT COUNT(*) FROM drafts")?,
+        );
+
+        // Then every group and the draft are still there.
+        assert_eq!(
+            counts,
+            (3, 1),
+            "the migration should keep groups and drafts"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn inserted_thread_gets_a_session_with_one_pane() -> Result<(), Report<StoreError>> {
+        // Given a store with a project.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+
+        // When inserting a thread.
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+
+        // Then its session has one tab holding its one pane, in its directory.
+        let layouts = store.layouts()?;
+        let tabs: Vec<(SessionId, String, Option<PaneId>)> = layouts
+            .tabs
+            .into_iter()
+            .map(|tab| (tab.session_id, tab.layout, tab.focus_pane))
+            .collect();
+        let panes: Vec<(PaneId, SessionId, PathBuf)> = layouts
+            .panes
+            .into_iter()
+            .map(|pane| (pane.id, pane.session_id, pane.cwd))
+            .collect();
+        assert_eq!(
+            (tabs, panes),
+            (
+                vec![(
+                    inserted.session,
+                    format!("{{\"pane\":{}}}", inserted.pane.0),
+                    Some(inserted.pane)
+                )],
+                vec![(inserted.pane, inserted.session, PathBuf::from("/tmp/orb"))]
+            ),
+            "a new thread should get a one-pane session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saved_layout_loads_back() -> Result<(), Report<StoreError>> {
+        // Given a thread's session with a second pane.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let second = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
+
+        // When saving two tabs, the second active, and a name for the second pane.
+        let tabs = vec![
+            TabRow {
+                session_id: inserted.session,
+                position: 0,
+                name: Some("agent".to_owned()),
+                layout: format!("{{\"pane\":{}}}", inserted.pane.0),
+                focus_pane: Some(inserted.pane),
+            },
+            TabRow {
+                session_id: inserted.session,
+                position: 1,
+                name: None,
+                layout: format!("{{\"pane\":{}}}", second.0),
+                focus_pane: Some(second),
+            },
+        ];
+        store.save_layout(
+            inserted.session,
+            1,
+            &tabs,
+            &[(inserted.pane, None), (second, Some("logs".to_owned()))],
+        )?;
+
+        // Then the tabs, the active tab and the name load back.
+        let layouts = store.layouts()?;
+        let active: Vec<usize> = layouts.sessions.iter().map(|row| row.active_tab).collect();
+        let names: Vec<Option<String>> = layouts.panes.into_iter().map(|pane| pane.name).collect();
+        assert_eq!(
+            (layouts.tabs, active, names),
+            (tabs, vec![1], vec![None, Some("logs".to_owned())]),
+            "the saved layout should load back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saving_a_layout_without_a_pane_deletes_its_row() -> Result<(), Report<StoreError>> {
+        // Given a thread's session with a second pane.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let second = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
+
+        // When saving a layout holding only the thread's pane.
+        let tab = TabRow {
+            session_id: inserted.session,
+            position: 0,
+            name: None,
+            layout: format!("{{\"pane\":{}}}", inserted.pane.0),
+            focus_pane: Some(inserted.pane),
+        };
+        let dropped = store.save_layout(inserted.session, 0, &[tab], &[(inserted.pane, None)])?;
+
+        // Then the second pane's row is gone.
+        let panes: Vec<PaneId> = store
+            .layouts()?
+            .panes
+            .into_iter()
+            .map(|pane| pane.id)
+            .collect();
+        assert_eq!(
+            (dropped, panes),
+            (vec![second], vec![inserted.pane]),
+            "a pane no tab holds should be deleted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn deleted_session_takes_its_tabs_and_panes() -> Result<(), Report<StoreError>> {
+        // Given a thread's session.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+
+        // When deleting the session.
+        store.delete_session(inserted.session)?;
+
+        // Then no session, tab or pane is left.
+        assert_eq!(
+            store.layouts()?,
+            SavedLayouts::default(),
+            "a deleted session should take its tabs and panes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn inserted_pane_loads_back_in_its_session() -> Result<(), Report<StoreError>> {
+        // Given a thread's session.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+
+        // When inserting a pane in /tmp/logs.
+        let pane = store.insert_pane(inserted.session, Path::new("/tmp/logs"))?;
+
+        // Then it loads back in that session and directory.
+        let found: Vec<(SessionId, PathBuf)> = store
+            .layouts()?
+            .panes
+            .into_iter()
+            .filter(|row| row.id == pane)
+            .map(|row| (row.session_id, row.cwd))
+            .collect();
+        assert_eq!(
+            found,
+            vec![(inserted.session, PathBuf::from("/tmp/logs"))],
+            "the new pane should load back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn cleared_bg_marker_loads_back_empty() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database with a Claude pane still to stop.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+        let pane = PaneId(pane_of(&path, 3)?);
+        let store = Store::open(&path)?;
+
+        // When clearing its marker.
+        store.clear_migrated_bg(&[pane])?;
+
+        // Then it loads back without one.
+        let marker: Vec<Option<String>> = store
+            .layouts()?
+            .panes
+            .into_iter()
+            .filter(|row| row.id == pane)
+            .map(|row| row.migrated_bg)
+            .collect();
+        assert_eq!(marker, vec![None], "a cleared marker should stay cleared");
         Ok(())
     }
 

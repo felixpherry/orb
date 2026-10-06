@@ -84,13 +84,14 @@ fn title(target: RenameTarget) -> &'static str {
             ..
         } => " New Learn group ",
         RenameTarget::Tab { .. } => " Rename Tab ",
+        RenameTarget::Pane(_) => " Rename Pane ",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use orb_domain::TextInput;
-    use orb_domain::feat::sessions::state::{GroupKind, ProjectId, ThreadId};
+    use orb_domain::feat::sessions::state::{GroupKind, PaneId, ProjectId, SessionId, ThreadId};
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
     use ratatui::buffer::Buffer;
     use ratatui::layout::{Position, Rect};
@@ -148,7 +149,8 @@ mod tests {
 
     #[rstest::rstest]
     #[case(RenameTarget::Thread(ThreadId(1)), " Rename Session ")]
-    #[case(RenameTarget::Tab { owner: ThreadId(1), tab: 0 }, " Rename Tab ")]
+    #[case(RenameTarget::Tab { owner: SessionId(1), tab: 0 }, " Rename Tab ")]
+    #[case(RenameTarget::Pane(PaneId(1)), " Rename Pane ")]
     #[case(
         RenameTarget::NewGroup { kind: GroupKind::Feature, project: Some(ProjectId(1)) },
         " New Feature group "
