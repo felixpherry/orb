@@ -1,5 +1,5 @@
-//! Draws a frame: the sidebar on the left, the attached session or the
-//! dashboard on the right, the mode line at the bottom, and the which-key
+//! Draws a frame: the sidebar on the left, the shown session's tabs or the
+//! start screen on the right, the mode line at the bottom, and the which-key
 //! popup on top while a key sequence is pending.
 //! While the sidebar is hidden, the right side takes the full width.
 //! An open picker is drawn over everything but the mode line, without the
@@ -8,18 +8,19 @@
 //! picker draws on top of it, and only the confirm takes clicks.
 //! The terminal's cursor is shown only where the keys are: on the sidebar's
 //! selected row, at the text cursor of the picker, the rename box or the
-//! sidebar search, on the dashboard's highlighted item, or in the attached
-//! pane.
+//! sidebar search, or in the focused pane.
 //! Each frame records where it drew the sidebar's rows and input box, the
-//! dashboard's menu items, the pickers' rows and the rename box, so a click
-//! maps back to them.
+//! shown panes, the pickers' rows and the rename box, so a click maps back
+//! to them.
 //! Whatever is left on the terminal's default background gets orb's navy, so
 //! a transparent terminal doesn't show through.
 
+use std::collections::HashMap;
 use std::time::SystemTime;
 
 use jiff::tz::TimeZone;
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
+use orb_domain::feat::sessions::state::PaneId;
 use orb_domain::feat::sidebar::state::{SidebarLayout, SidebarView};
 use orb_domain::{AppState, Focus};
 use orb_term::Pane;
@@ -37,6 +38,7 @@ use crate::rename;
 use crate::search_picker;
 use crate::session_picker;
 use crate::sidebar::{self, SidebarScroll};
+use crate::tabs;
 use crate::which_key;
 use crate::worktree_picker;
 
@@ -55,12 +57,12 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
     [sidebar, right, mode_line]
 }
 
-/// Draws the whole frame. `pane` is the pane the frontend shows on the right
-/// (the selected attached thread's); its cursor shows only while attached.
-/// Without one, the right side shows the dashboard, with `pane_error` saying
-/// why the session couldn't start. While the sidebar or
-/// the dashboard has the keys, the cursor sits on the first cell of its
-/// selected row or highlighted item's label. The mode line's clock shows
+/// Draws the whole frame. The right side shows the shown layout's tabs with
+/// each of its panes that has a client in `panes`; the focused pane's cursor
+/// shows only while the keys are in it. Without a shown layout, the right
+/// side shows the start screen, with `pane_error` saying why the session
+/// couldn't start. While the sidebar has the keys, the cursor sits on the
+/// first cell of its selected row. The mode line's clock shows
 /// `now` in `tz`. Returns the sidebar's layout unless it's hidden, and how
 /// many rows the picker fits when it's open.
 #[expect(
@@ -70,7 +72,7 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 pub(crate) fn render(
     frame: &mut Frame,
     state: &AppState,
-    pane: Option<&Pane>,
+    panes: &HashMap<PaneId, Pane>,
     pane_error: Option<&str>,
     keys: &Keys,
     now: SystemTime,
@@ -96,19 +98,16 @@ pub(crate) fn render(
         );
         (selected_y, Some(sidebar_layout), search_cursor)
     };
-    let attached = state.focus == Focus::Attached;
-    match pane {
-        Some(pane) => {
-            if let Some(cursor) = pane.render(right, frame.buffer_mut()).filter(|_| attached) {
+    match state.shown_layout() {
+        Some(layout) => {
+            let keys_in_pane = state.focus == Focus::Attached;
+            if let Some(cursor) =
+                tabs::render(layout, panes, keys_in_pane, right, frame.buffer_mut(), hits)
+            {
                 frame.set_cursor_position(cursor);
             }
         }
-        None => {
-            let at = dashboard::render(state, pane_error, right, frame.buffer_mut(), hits);
-            if state.focus == Focus::Dashboard && right.contains(at) {
-                frame.set_cursor_position(at);
-            }
-        }
+        None => dashboard::render(state, pane_error, right, frame.buffer_mut()),
     }
     mode_line::render(state, now, tz, mode_area, frame.buffer_mut());
     let renaming = state
@@ -206,19 +205,20 @@ fn render_picker(
 #[cfg(test)]
 mod tests {
     use orb_domain::feat::harness::HarnessId;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::thread;
     use std::time::{Duration, Instant, SystemTime};
 
     use jiff::tz::TimeZone;
     use orb_domain::Intent;
+    use orb_domain::feat::layout::tree::Split;
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::search::state::SearchProgress;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem,
-        Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, PaneId, Project, ProjectId, ProjectKind, Search, Sessions,
+        SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use orb_domain::{AppState, Focus, TextInput};
@@ -229,6 +229,7 @@ mod tests {
     use ratatui::layout::{Position, Rect};
 
     use super::{BACKGROUND, layout, render};
+    use crate::sidebar::{BLUE, DARK3};
     use ratatui::crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -310,7 +311,7 @@ mod tests {
             render(
                 frame,
                 state,
-                None,
+                &HashMap::new(),
                 pane_error,
                 keys,
                 SystemTime::UNIX_EPOCH,
@@ -348,24 +349,28 @@ mod tests {
         None
     }
 
-    /// Draws `state` on an 80x8 screen with `pane` running for the selected
-    /// thread; returns the right side's text.
-    fn right_side_with_pane(state: &AppState, pane: &Pane) -> String {
-        let buffer = draw_with_pane(state, pane);
+    /// Thread 1's pane: a live pane that printed `PANE-TEXT`.
+    fn thread_pane() -> Option<HashMap<PaneId, Pane>> {
+        pane_with_text().map(|pane| HashMap::from([(PaneId(1), pane)]))
+    }
+
+    /// Draws `state` on an 80x8 screen with `panes` running; returns the
+    /// right side's text.
+    fn right_side_with_pane(state: &AppState, panes: &HashMap<PaneId, Pane>) -> String {
+        let buffer = draw_with_pane(state, panes);
         let [_, right, _] = layout(buffer.area, &SidebarView::default());
         text(&buffer, right)
     }
 
-    /// Draws `state` on an 80x8 screen with `pane` running for the selected
-    /// thread.
-    fn draw_with_pane(state: &AppState, pane: &Pane) -> Buffer {
+    /// Draws `state` on an 80x8 screen with `panes` running.
+    fn draw_with_pane(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Buffer {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
         let keys = Keys::new(keymap(), Scope::Sidebar.into());
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
                 state,
-                Some(pane),
+                panes,
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
@@ -388,6 +393,15 @@ mod tests {
             },
             ..AppState::default()
         }
+    }
+
+    /// Thread 1, selected and attached with its one-tab layout, with the
+    /// given focus.
+    fn shown(focus: Focus) -> AppState {
+        let mut state = selected(focus);
+        state.attached.insert(ThreadId(1));
+        state.layouts.open(ThreadId(1));
+        state
     }
 
     /// orb's local draft, selected, with the given focus.
@@ -565,7 +579,7 @@ mod tests {
                 render(
                     frame,
                     &state,
-                    None,
+                    &HashMap::new(),
                     None,
                     &keys,
                     SystemTime::UNIX_EPOCH,
@@ -591,7 +605,7 @@ mod tests {
                 event,
                 &hits,
                 Focus::Picker,
-                false,
+                None,
                 &mut Clicks::default(),
                 Instant::now(),
             )
@@ -606,22 +620,25 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn selected_thread_shows_the_dashboard() {
-        // Given a selected thread.
+    fn selected_thread_shows_the_start_screen() {
+        // Given a selected thread that isn't attached.
         let state = selected(Focus::Sidebar);
 
         // When drawing a frame.
         let buffer = draw_tall(&state, None);
 
-        // Then the right side is the dashboard's thread menu.
+        // Then the right side is the start screen's banner.
         let right = text(&buffer, right_of(&buffer));
-        assert!(right.contains("Open session"), "right side was\n{right}");
+        assert!(
+            right.contains("██╔═══██╗██╔══██╗██╔══██╗"),
+            "right side was\n{right}"
+        );
     }
 
     #[rstest::rstest]
-    fn pane_error_shows_on_the_dashboard() {
+    fn pane_error_shows_on_the_start_screen() {
         // Given a selected thread whose session couldn't start.
-        let state = selected(Focus::Dashboard);
+        let state = selected(Focus::Sidebar);
 
         // When drawing a frame with the pane's error.
         let buffer = draw_tall(&state, Some("claude attach failed"));
@@ -661,15 +678,15 @@ mod tests {
     #[rstest::rstest]
     fn attached_pane_default_background_gets_orbs() {
         // Given a live pane that printed text with no background colour.
-        let pane = pane_with_text();
-        let state = selected(Focus::Attached);
+        let panes = thread_pane();
+        let state = shown(Focus::Attached);
 
         // When drawing a frame while attached.
-        let buffer = pane.as_ref().map(|pane| draw_with_pane(&state, pane));
+        let buffer = panes.as_ref().map(|panes| draw_with_pane(&state, panes));
 
-        // Then the pane's first cell has orb's background.
+        // Then the pane's first cell, under the tab bar, has orb's background.
         let [_, right, _] = layout(Rect::new(0, 0, 80, 8), &SidebarView::default());
-        let bg = buffer.and_then(|buffer| buffer.cell((right.x, right.y)).map(|cell| cell.bg));
+        let bg = buffer.and_then(|buffer| buffer.cell((right.x, right.y + 1)).map(|cell| cell.bg));
         assert_eq!(bg, Some(BACKGROUND), "the pane's background");
     }
 
@@ -692,7 +709,7 @@ mod tests {
         let state = renaming(Focus::Rename);
 
         // When drawing a frame.
-        let cursor = cursor_of(&state, None);
+        let cursor = cursor_of(&state, &HashMap::new());
 
         // Then the cursor is after the name in the box, centred on the
         // 80-column screen two rows from the top.
@@ -735,7 +752,7 @@ mod tests {
             render(
                 frame,
                 &state,
-                None,
+                &HashMap::new(),
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
@@ -770,7 +787,7 @@ mod tests {
             render(
                 frame,
                 &state,
-                None,
+                &HashMap::new(),
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
@@ -790,11 +807,13 @@ mod tests {
     #[rstest::rstest]
     fn attached_focus_draws_the_live_pane() {
         // Given a live pane for the selected thread, attached.
-        let pane = pane_with_text();
-        let state = selected(Focus::Attached);
+        let panes = thread_pane();
+        let state = shown(Focus::Attached);
 
         // When drawing a frame.
-        let right = pane.as_ref().map(|pane| right_side_with_pane(&state, pane));
+        let right = panes
+            .as_ref()
+            .map(|panes| right_side_with_pane(&state, panes));
 
         // Then the pane's output is on the right side.
         assert!(
@@ -814,13 +833,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn sidebar_focus_draws_the_passed_pane() {
-        // Given a live pane passed with the sidebar focused on a thread not in `attached`.
-        let pane = pane_with_text();
-        let state = selected(Focus::Sidebar);
+    fn sidebar_focus_draws_the_shown_layouts_pane() {
+        // Given thread 1's live pane shown while the sidebar has the keys.
+        let panes = thread_pane();
+        let state = shown(Focus::Sidebar);
 
         // When drawing a frame.
-        let right = pane.as_ref().map(|pane| right_side_with_pane(&state, pane));
+        let right = panes
+            .as_ref()
+            .map(|panes| right_side_with_pane(&state, panes));
 
         // Then the pane's output is on the right side.
         assert!(
@@ -832,26 +853,29 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn sidebar_focus_without_a_pane_draws_the_dashboard() {
-        // Given thread 1 attached and selected in the sidebar, with no pane passed.
+    fn attached_thread_without_a_layout_shows_the_start_screen() {
+        // Given thread 1 attached and selected in the sidebar, with no layout.
         let state = left_pane();
 
         // When drawing a frame.
         let buffer = draw_tall(&state, None);
 
-        // Then the right side is the dashboard's thread menu.
+        // Then the right side is the start screen's banner.
         let right = right_side(&buffer);
-        assert!(right.contains("Open session"), "right side was\n{right}");
+        assert!(
+            right.contains("██╔═══██╗██╔══██╗██╔══██╗"),
+            "right side was\n{right}"
+        );
     }
 
     #[rstest::rstest]
     fn sidebar_focus_puts_the_cursor_on_the_sidebar_not_the_left_pane() {
-        // Given a live pane passed for the selected thread, with the sidebar focused.
-        let pane = pane_with_text();
-        let state = selected(Focus::Sidebar);
+        // Given thread 1's live pane shown, with the sidebar focused.
+        let panes = thread_pane();
+        let state = shown(Focus::Sidebar);
 
         // When drawing a frame.
-        let cursor = pane.as_ref().map(|pane| cursor_of(&state, Some(pane)));
+        let cursor = panes.as_ref().map(|panes| cursor_of(&state, panes));
 
         // Then the cursor is on the selected row's first cell, not in the pane.
         assert_eq!(
@@ -862,15 +886,15 @@ mod tests {
     }
 
     /// Where the cursor shows once `state` is drawn on an 80x8 screen with
-    /// `pane` running for the selected thread; `None` while it's hidden.
-    fn cursor_of(state: &AppState, pane: Option<&Pane>) -> Option<Position> {
+    /// `panes` running; `None` while it's hidden.
+    fn cursor_of(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Option<Position> {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
         let keys = Keys::new(keymap(), Scope::Sidebar.into());
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
                 state,
-                pane,
+                panes,
                 None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
@@ -897,7 +921,7 @@ mod tests {
         });
 
         // When drawing a frame.
-        let cursor = cursor_of(&state, None);
+        let cursor = cursor_of(&state, &HashMap::new());
 
         // Then the cursor is after "> ab" in the input box.
         assert_eq!(cursor, Some(Position::new(5, 1)), "the search cursor");
@@ -909,7 +933,7 @@ mod tests {
         let state = selected(Focus::Sidebar);
 
         // When drawing a frame.
-        let cursor = cursor_of(&state, None);
+        let cursor = cursor_of(&state, &HashMap::new());
 
         // Then the cursor is on the first cell of the selected row's first line.
         assert_eq!(cursor, Some(Position::new(0, 3)), "the sidebar cursor");
@@ -935,89 +959,41 @@ mod tests {
         };
 
         // When drawing a frame.
-        let cursor = cursor_of(&state, None);
+        let cursor = cursor_of(&state, &HashMap::new());
 
         // Then the cursor is on the first cell of the header's row.
         assert_eq!(cursor, Some(Position::new(0, 6)), "the sidebar cursor");
     }
 
     #[rstest::rstest]
-    fn attached_focus_puts_the_cursor_in_the_pane_not_the_sidebar() {
+    fn attached_focus_puts_the_cursor_in_the_focused_pane() {
         // Given a live pane for the selected thread, attached.
-        let pane = pane_with_text();
-        let state = selected(Focus::Attached);
+        let panes = thread_pane();
+        let state = shown(Focus::Attached);
 
         // When drawing a frame.
-        let cursor = pane.as_ref().and_then(|pane| cursor_of(&state, Some(pane)));
+        let cursor = panes.as_ref().and_then(|panes| cursor_of(&state, panes));
 
-        // Then the cursor is on the right side, in the pane.
+        // Then the cursor is in the pane, under the tab bar.
         let [_, right, _] = layout(Rect::new(0, 0, 80, 8), &state.sidebar);
+        let body = Rect::new(right.x, right.y + 1, right.width, right.height - 1);
         assert!(
-            cursor.is_some_and(|cursor| right.contains(cursor)),
-            "the attached cursor was {cursor:?}, outside {right:?}"
+            cursor.is_some_and(|cursor| body.contains(cursor)),
+            "the attached cursor was {cursor:?}, outside {body:?}"
         );
     }
 
     #[rstest::rstest]
-    fn dashboard_focus_puts_the_cursor_on_the_highlighted_label() {
-        // Given thread 1 selected with the dashboard focused.
-        let state = selected(Focus::Dashboard);
-
-        // When drawing a frame tall enough for the dashboard.
-        let mut terminal = frame(
-            &state,
-            None,
-            &Keys::new(keymap(), Scope::Dashboard.into()),
-            40,
-        );
-
-        // Then the cursor is shown on the first cell of Open session's label.
-        let cursor = terminal
-            .backend()
-            .cursor_visible()
-            .then(|| terminal.get_cursor_position().ok())
-            .flatten();
-        let label = cursor.map(|at| {
-            let buffer = terminal.backend().buffer();
-            text(buffer, Rect::new(at.x, at.y, buffer.area.right() - at.x, 1))
-        });
-        assert!(
-            label
-                .as_deref()
-                .is_some_and(|label| label.starts_with("Open session")),
-            "the cursor's row from the cursor was {label:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn selected_draft_shows_the_dashboard() {
+    fn selected_draft_shows_the_start_screen() {
         // Given orb's draft selected.
         let state = drafted(Focus::Sidebar);
 
         // When drawing a frame.
         let right = right_side(&draw_tall(&state, None));
 
-        // Then the right side is the dashboard's draft menu.
-        assert!(right.contains("Start session"), "right side was\n{right}");
-    }
-
-    #[rstest::rstest]
-    fn draft_cursor_before_its_draft_exists_shows_nothing_selected() {
-        // Given the cursor on orb's draft before the actor made it.
-        let state = AppState {
-            sessions: Sessions {
-                cursor: Some(SidebarItem::Draft(ProjectId(1))),
-                ..sessions(vec![])
-            },
-            ..AppState::default()
-        };
-
-        // When drawing a frame.
-        let right = right_side(&draw_tall(&state, None));
-
-        // Then the dashboard says nothing is selected.
+        // Then the right side is the start screen's banner.
         assert!(
-            right.contains("no session selected"),
+            right.contains("██╔═══██╗██╔══██╗██╔══██╗"),
             "right side was\n{right}"
         );
     }
@@ -1064,9 +1040,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn hidden_sidebar_centres_the_dashboard_on_the_whole_width() {
+    fn hidden_sidebar_centres_the_start_screen_on_the_whole_width() {
         // Given orb's draft selected with the sidebar hidden.
-        let state = hidden(drafted(Focus::Dashboard));
+        let state = hidden(drafted(Focus::Sidebar));
 
         // When drawing a frame 80 columns wide.
         let buffer = draw(&state);
@@ -1079,22 +1055,114 @@ mod tests {
     #[rstest::rstest]
     fn hidden_sidebar_draws_the_attached_pane_from_the_left_edge() {
         // Given a live pane for the selected thread, attached, with the sidebar hidden.
-        let pane = pane_with_text();
-        let state = hidden(selected(Focus::Attached));
+        let panes = thread_pane();
+        let state = hidden(shown(Focus::Attached));
 
         // When drawing a frame.
-        let screen = pane.as_ref().map(|pane| {
-            let buffer = draw_with_pane(&state, pane);
-            text(&buffer, buffer.area)
+        let row = panes.as_ref().map(|panes| {
+            let buffer = draw_with_pane(&state, panes);
+            text(&buffer, Rect::new(0, 1, 80, 1))
         });
 
-        // Then the pane's output starts in the first column.
+        // Then the pane's output starts in the first column, under the tab bar.
         assert!(
-            screen
-                .as_deref()
-                .is_some_and(|screen| screen.starts_with("PANE-TEXT")),
-            "screen was {screen:?}"
+            row.as_deref()
+                .is_some_and(|row| row.starts_with("PANE-TEXT")),
+            "the pane's first row was {row:?}"
         );
+    }
+
+    /// `shown(Focus::Sidebar)` after `edit` changed thread 1's layout.
+    fn laid_out<F>(edit: F) -> AppState
+    where
+        F: FnOnce(&mut AppState),
+    {
+        let mut state = shown(Focus::Sidebar);
+        edit(&mut state);
+        state
+    }
+
+    #[rstest::rstest]
+    fn tab_bar_labels_each_tab_by_number_and_name() {
+        // Given a first tab named logs and a second unnamed tab.
+        let state = laid_out(|state| {
+            state
+                .layouts
+                .rename_tab(ThreadId(1), 0, Some("logs".to_owned()));
+            state.layouts.new_tab(ThreadId(1));
+        });
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the tab bar reads ` 1 logs  2 `.
+        let right = right_of(&buffer);
+        let bar = text(&buffer, Rect::new(right.x, right.y, right.width, 1));
+        assert!(bar.starts_with(" 1 logs  2 "), "tab bar was '{bar}'");
+    }
+
+    #[rstest::rstest]
+    fn shown_tab_is_highlighted_in_the_tab_bar() {
+        // Given two tabs, the first shown.
+        let state = laid_out(|state| {
+            state.layouts.new_tab(ThreadId(1));
+            state.layouts.go_to_tab(ThreadId(1), 1);
+        });
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the first tab's number sits on blue and the second's doesn't.
+        let right = right_of(&buffer);
+        let bg = |x| buffer.cell((x, right.y)).map(|cell| cell.bg);
+        assert_eq!(
+            (bg(right.x + 1), bg(right.x + 4)),
+            (Some(BLUE), Some(BACKGROUND)),
+            "only the shown tab is highlighted"
+        );
+    }
+
+    #[rstest::rstest]
+    fn split_right_draws_a_line_between_the_panes() {
+        // Given thread 1's pane split right, neither pane running yet.
+        let state = laid_out(|state| state.layouts.split(ThreadId(1), Split::Right));
+
+        // When drawing a frame on the 48-column right side.
+        let buffer = draw(&state);
+
+        // Then column 24 of the tab body is a line all the way down.
+        let right = right_of(&buffer);
+        let column: Vec<(Option<&str>, Option<_>)> = (right.y + 1..right.bottom())
+            .map(|y| {
+                let cell = buffer.cell((right.x + 24, y));
+                (cell.map(Cell::symbol), cell.map(|cell| cell.fg))
+            })
+            .collect();
+        assert_eq!(
+            column,
+            vec![(Some("│"), Some(DARK3)); 6],
+            "the border between the panes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn zoomed_tab_draws_no_border() {
+        // Given thread 1's pane split right, then zoomed.
+        let state = laid_out(|state| {
+            state.layouts.split(ThreadId(1), Split::Right);
+            state.layouts.toggle_zoom(ThreadId(1));
+        });
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the tab body has no line in it.
+        let right = right_of(&buffer);
+        let body = text(
+            &buffer,
+            Rect::new(right.x, right.y + 1, right.width, right.height - 1),
+        );
+        assert!(!body.contains('│'), "body was\n{body}");
     }
 
     #[rstest::rstest]
@@ -1109,7 +1177,7 @@ mod tests {
             (sidebar_layout, _) = render(
                 frame,
                 &state,
-                None,
+                &HashMap::new(),
                 None,
                 &Keys::new(keymap(), Scope::Dashboard.into()),
                 SystemTime::UNIX_EPOCH,

@@ -13,6 +13,7 @@ mod run;
 mod search_picker;
 mod session_picker;
 mod sidebar;
+mod tabs;
 mod which_key;
 mod worktree_picker;
 

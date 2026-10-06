@@ -1410,6 +1410,7 @@ dependencies = [
  "jiff",
  "kameo",
  "notify-rust",
+ "ratatui",
  "rstest",
  "rusqlite",
  "serde",

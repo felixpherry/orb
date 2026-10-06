@@ -1,21 +1,21 @@
-//! The mouse in orb's own UI: a click on the sidebar or the right side moves
-//! the keys there, a click on a row selects it and a double-click attaches,
-//! a click on the sidebar's input box starts a search, and a click on a
-//! dashboard item highlights it. The wheel moves the sidebar's selection
-//! while it has the keys, and otherwise scrolls its view. While attached, the
-//! pane gets its own mouse events, as the attached program expects. In a picker a click
-//! selects a row, a double-click picks it and the wheel over its list moves
-//! the selection;
-//! a click outside a picker or the rename box closes it like `Esc`. A click
-//! in the text of the sidebar search, a picker's input or the rename box
-//! moves its cursor there.
+//! The mouse in orb's own UI: a click on the sidebar moves the keys there,
+//! a click on a row selects it and a double-click attaches, and a click on
+//! the sidebar's input box starts a search. A click on a pane focuses it and
+//! moves the keys there without reaching its program; while the keys are in
+//! a pane, events over that pane go to its program. The tab bar, the borders
+//! and the start screen take no clicks. The wheel moves the sidebar's
+//! selection while it has the keys, and otherwise scrolls its view. In a
+//! picker a click selects a row, a double-click picks it and the wheel over
+//! its list moves the selection; a click outside a picker or the rename box
+//! closes it like `Esc`. A click in the text of the sidebar search, a
+//! picker's input or the rename box moves its cursor there.
 //!
 //! Each frame records where it drew what a click can land on, and a mouse
 //! event is mapped back through that record.
 
 use std::time::{Duration, Instant};
 
-use orb_domain::feat::sessions::state::SidebarItem;
+use orb_domain::feat::sessions::state::{PaneId, SidebarItem};
 use orb_domain::{Focus, Intent};
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -33,14 +33,14 @@ const WHEEL_LINES: i16 = 3;
 pub(crate) struct HitMap {
     /// The sidebar; empty while it's hidden.
     sidebar: Rect,
-    /// The right side: the attached pane or the dashboard.
+    /// The right side: the shown session's tabs or the start screen.
     right: Rect,
     /// The sidebar's input box.
     sidebar_input: Option<Rect>,
     /// Each on-screen sidebar row's visible lines.
     sidebar_rows: Vec<(Rect, SidebarItem)>,
-    /// Each dashboard menu item's line and index; empty while a pane is shown.
-    dashboard_items: Vec<(Rect, usize)>,
+    /// Each shown pane's content area.
+    panes: Vec<(Rect, PaneId)>,
     /// The open picker's or rename box's popup.
     overlay: Option<Rect>,
     /// Where the wheel moves the open picker's selection: its popup, or the
@@ -91,9 +91,25 @@ impl HitMap {
         self.sidebar_rows.push((area, item));
     }
 
-    /// Records the line of the dashboard's menu item at `index`.
-    pub(crate) fn record_menu_item(&mut self, area: Rect, index: usize) {
-        self.dashboard_items.push((area, index));
+    /// Records where pane `id` was drawn.
+    pub(crate) fn record_pane(&mut self, area: Rect, id: PaneId) {
+        self.panes.push((area, id));
+    }
+
+    /// The pane drawn at `at`, if any.
+    pub(crate) fn pane_at(&self, at: Position) -> Option<PaneId> {
+        self.panes
+            .iter()
+            .find(|(area, _)| area.contains(at))
+            .map(|&(_, id)| id)
+    }
+
+    /// Where pane `id` was drawn, if it was.
+    pub(crate) fn pane_area(&self, id: PaneId) -> Option<Rect> {
+        self.panes
+            .iter()
+            .find(|(_, pane)| *pane == id)
+            .map(|&(area, _)| area)
     }
 
     /// The sidebar row drawn at `at`, if any.
@@ -107,14 +123,6 @@ impl HitMap {
     /// Whether `at` is on the sidebar's input box.
     pub(crate) fn on_sidebar_input(&self, at: Position) -> bool {
         self.sidebar_input.is_some_and(|area| area.contains(at))
-    }
-
-    /// The index of the dashboard menu item drawn at `at`, if any.
-    pub(crate) fn menu_item_at(&self, at: Position) -> Option<usize> {
-        self.dashboard_items
-            .iter()
-            .find(|(area, _)| area.contains(at))
-            .map(|&(_, index)| index)
     }
 
     /// Records where the open picker or rename box was drawn.
@@ -242,19 +250,23 @@ enum Action {
 }
 
 /// Maps a mouse event to what the loop does with it, given where the last
-/// frame drew things (`hits`), who has the keys, and whether the right side
-/// shows a pane. Every event over the pane while attached goes to it; other
-/// than that, only left clicks and the vertical wheel act.
+/// frame drew things (`hits`), who has the keys, and the shown layout's
+/// `focused` pane. Every event over the focused pane while the keys are in
+/// it goes to it; other than that, only left clicks and the vertical wheel
+/// act.
 pub(crate) fn route(
     event: MouseEvent,
     hits: &HitMap,
     focus: Focus,
-    pane_shown: bool,
+    focused: Option<PaneId>,
     clicks: &mut Clicks,
     now: Instant,
 ) -> MouseRoute {
     let at = Position::new(event.column, event.row);
-    if focus == Focus::Attached && hits.right.contains(at) {
+    let on_focused = focused
+        .and_then(|id| hits.pane_area(id))
+        .is_some_and(|area| area.contains(at));
+    if focus == Focus::Attached && on_focused {
         return MouseRoute::Forward;
     }
     let action = match event.kind {
@@ -274,7 +286,7 @@ pub(crate) fn route(
         (_, Action::Click) => {
             let row = hits.row_at(at);
             let click = clicks.click(row.map(ClickTarget::Row), now);
-            route_click(at, hits, focus, pane_shown, row, click)
+            route_click(at, hits, focus, row, click)
         }
     }
 }
@@ -323,12 +335,11 @@ fn route_overlay(
 }
 
 /// Where a left click at `at` sends the keys and what it selects; `row` is
-/// the sidebar row under it.
+/// the sidebar row under it. A click on a pane focuses it.
 fn route_click(
     at: Position,
     hits: &HitMap,
     focus: Focus,
-    pane_shown: bool,
     row: Option<SidebarItem>,
     click: Click,
 ) -> MouseRoute {
@@ -340,9 +351,10 @@ fn route_click(
                 (None, Some(grapheme), _) => {
                     MouseRoute::Intents(vec![Intent::PickerCursorTo(grapheme)])
                 }
-                (None, None, true) => {
-                    MouseRoute::Intents(vec![Intent::PickerConfirm, Intent::FocusRight])
-                }
+                (None, None, true) => intents([
+                    Some(Intent::PickerConfirm),
+                    hits.pane_at(at).map(Intent::FocusPane),
+                ]),
                 (None, None, false) => MouseRoute::Nothing,
             };
         }
@@ -356,15 +368,9 @@ fn route_click(
     if let Some(item) = row {
         return intents([lead, Some(Intent::SelectRow(item)), attach]);
     }
-    match (focus, hits.right.contains(at), hits.menu_item_at(at)) {
-        (Focus::Sidebar, true, item) => intents([
-            Some(Intent::FocusRight),
-            item.filter(|_| !pane_shown).map(Intent::DashboardHighlight),
-        ]),
-        (Focus::Dashboard, _, Some(index)) => {
-            MouseRoute::Intents(vec![Intent::DashboardHighlight(index)])
-        }
-        _ => MouseRoute::Nothing,
+    match hits.pane_at(at) {
+        Some(id) => MouseRoute::Intents(vec![Intent::FocusPane(id)]),
+        None => MouseRoute::Nothing,
     }
 }
 
@@ -380,7 +386,7 @@ where
 mod tests {
     use std::time::{Duration, Instant};
 
-    use orb_domain::feat::sessions::state::{SidebarItem, ThreadId};
+    use orb_domain::feat::sessions::state::{PaneId, SidebarItem, ThreadId};
     use orb_domain::{Focus, Intent};
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
@@ -390,13 +396,15 @@ mod tests {
     const THREAD_1: SidebarItem = SidebarItem::Thread(ThreadId(1));
 
     /// A 30-column sidebar and a 50-column right side, 20 lines tall over the
-    /// mode line: the input box on lines 0 to 2, thread 1 on lines 3 to 5,
-    /// and the dashboard's third menu item on line 10.
+    /// mode line: the input box on lines 0 to 2 and thread 1 on lines 3 to 5;
+    /// on the right a tab bar on line 0, then thread 1's pane in columns 30
+    /// to 54 and pane -1 in columns 56 to 79.
     fn hits() -> HitMap {
         let mut hits = HitMap::new(Rect::new(0, 0, 30, 20), Rect::new(30, 0, 50, 20));
         hits.record_sidebar_input(Rect::new(0, 0, 29, 3));
         hits.record_row(Rect::new(0, 3, 29, 3), THREAD_1);
-        hits.record_menu_item(Rect::new(40, 10, 30, 1), 2);
+        hits.record_pane(Rect::new(30, 1, 25, 19), PaneId(1));
+        hits.record_pane(Rect::new(56, 1, 24, 19), PaneId(-1));
         hits
     }
 
@@ -413,13 +421,14 @@ mod tests {
         mouse(MouseEventKind::Down(MouseButton::Left), column, row)
     }
 
-    /// Routes `event` with `focus`, no pane shown and no earlier click.
+    /// Routes `event` with `focus`, thread 1's pane focused and no earlier
+    /// click.
     fn route_once(event: MouseEvent, focus: Focus) -> MouseRoute {
         route(
             event,
             &hits(),
             focus,
-            false,
+            Some(PaneId(1)),
             &mut Clicks::default(),
             Instant::now(),
         )
@@ -469,7 +478,7 @@ mod tests {
             left_click(5, 4),
             &hits,
             Focus::Sidebar,
-            false,
+            None,
             &mut clicks,
             now,
         );
@@ -479,7 +488,7 @@ mod tests {
             left_click(5, 4),
             &hits,
             Focus::Sidebar,
-            false,
+            None,
             &mut clicks,
             now + Duration::from_millis(100),
         );
@@ -493,44 +502,91 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn click_on_the_pane_while_attached_is_forwarded() {
-        // Given the attached pane has the keys.
+    fn click_on_the_focused_pane_while_attached_is_forwarded() {
+        // Given thread 1's focused pane has the keys.
         // When clicking inside it.
-        let routed = route_once(left_click(50, 5), Focus::Attached);
+        let routed = route_once(left_click(40, 5), Focus::Attached);
 
         // Then the click goes to the pane.
         assert_eq!(
             routed,
             MouseRoute::Forward,
-            "a click on the attached pane should go to it"
+            "a click on the focused pane should go to it"
         );
     }
 
     #[rstest::rstest]
-    fn click_on_the_right_side_from_the_sidebar_focuses_right() {
-        // Given the sidebar has the keys.
-        // When clicking the right side away from the menu.
-        let routed = route_once(left_click(35, 5), Focus::Sidebar);
+    fn click_on_another_pane_while_attached_focuses_it() {
+        // Given thread 1's focused pane has the keys.
+        // When clicking pane -1.
+        let routed = route_once(left_click(60, 5), Focus::Attached);
 
-        // Then the keys move right.
-        assert_eq!(
-            intents_of(routed).first(),
-            Some(&Intent::FocusRight),
-            "a click on the right side should focus it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn click_on_a_menu_item_with_the_dashboard_focused_highlights_it() {
-        // Given the dashboard has the keys.
-        // When clicking its third menu item.
-        let routed = route_once(left_click(50, 10), Focus::Dashboard);
-
-        // Then that item is highlighted.
+        // Then pane -1 takes the focus.
         assert_eq!(
             routed,
-            MouseRoute::Intents(vec![Intent::DashboardHighlight(2)]),
-            "a click on a menu item should highlight it"
+            MouseRoute::Intents(vec![Intent::FocusPane(PaneId(-1))]),
+            "a click on another pane should focus it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_another_pane_while_attached_is_not_forwarded() {
+        // Given thread 1's focused pane has the keys.
+        // When clicking pane -1.
+        let routed = route_once(left_click(60, 5), Focus::Attached);
+
+        // Then the click doesn't reach any program.
+        assert_ne!(
+            routed,
+            MouseRoute::Forward,
+            "a focusing click shouldn't be forwarded"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_tab_bar_does_nothing() {
+        // Given the sidebar has the keys.
+        // When clicking the tab bar.
+        let routed = route_once(left_click(35, 0), Focus::Sidebar);
+
+        // Then nothing happens.
+        assert_eq!(routed, MouseRoute::Nothing, "the tab bar takes no clicks");
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_start_screen_does_nothing() {
+        // Given the start screen on the right, so no pane drawn there.
+        let hits = HitMap::new(Rect::new(0, 0, 30, 20), Rect::new(30, 0, 50, 20));
+
+        // When clicking the right side.
+        let routed = route(
+            left_click(50, 5),
+            &hits,
+            Focus::Sidebar,
+            None,
+            &mut Clicks::default(),
+            Instant::now(),
+        );
+
+        // Then nothing happens.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "the start screen takes no clicks"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_pane_from_the_sidebar_focuses_it() {
+        // Given the sidebar has the keys.
+        // When clicking thread 1's pane.
+        let routed = route_once(left_click(35, 5), Focus::Sidebar);
+
+        // Then the pane takes the focus and the keys.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::FocusPane(PaneId(1))]),
+            "a click on a pane should focus it"
         );
     }
 
@@ -594,16 +650,16 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn click_on_the_right_side_during_a_search_confirms_and_focuses_right() {
+    fn click_on_a_pane_during_a_search_confirms_and_focuses_it() {
         // Given a search has the keys.
-        // When clicking the right side.
+        // When clicking thread 1's pane.
         let routed = route_once(left_click(50, 5), Focus::Search);
 
-        // Then the search ends on its match and the keys move right.
+        // Then the search ends on its match and the pane takes the keys.
         assert_eq!(
             routed,
-            MouseRoute::Intents(vec![Intent::PickerConfirm, Intent::FocusRight]),
-            "a click on the right side should end the search there"
+            MouseRoute::Intents(vec![Intent::PickerConfirm, Intent::FocusPane(PaneId(1))]),
+            "a click on a pane should end the search there"
         );
     }
 
@@ -647,7 +703,7 @@ mod tests {
             event,
             hits,
             focus,
-            false,
+            None,
             &mut Clicks::default(),
             Instant::now(),
         )
@@ -689,7 +745,7 @@ mod tests {
             left_click(30, 8),
             &hits,
             Focus::Picker,
-            false,
+            None,
             &mut clicks,
             now,
         );
@@ -699,7 +755,7 @@ mod tests {
             left_click(30, 8),
             &hits,
             Focus::Picker,
-            false,
+            None,
             &mut clicks,
             now + Duration::from_millis(100),
         );
@@ -807,7 +863,7 @@ mod tests {
             left_click(30, 5),
             &hits,
             Focus::Picker,
-            false,
+            None,
             &mut clicks,
             now,
         );
@@ -817,7 +873,7 @@ mod tests {
             left_click(30, 5),
             &hits,
             Focus::Picker,
-            false,
+            None,
             &mut clicks,
             now + Duration::from_millis(100),
         );

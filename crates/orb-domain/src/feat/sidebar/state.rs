@@ -75,6 +75,8 @@ pub enum RenameTarget {
         kind: GroupKind,
         project: Option<ProjectId>,
     },
+    /// Tab `tab` (0-based) of `owner`'s layout.
+    Tab { owner: ThreadId, tab: usize },
 }
 
 /// The name box: what it names, and the name typed so far.

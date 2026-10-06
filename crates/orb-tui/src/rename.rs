@@ -83,6 +83,7 @@ fn title(target: RenameTarget) -> &'static str {
             kind: GroupKind::Learn,
             ..
         } => " New Learn group ",
+        RenameTarget::Tab { .. } => " Rename Tab ",
     }
 }
 
@@ -147,6 +148,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(RenameTarget::Thread(ThreadId(1)), " Rename Session ")]
+    #[case(RenameTarget::Tab { owner: ThreadId(1), tab: 0 }, " Rename Tab ")]
     #[case(
         RenameTarget::NewGroup { kind: GroupKind::Feature, project: Some(ProjectId(1)) },
         " New Feature group "

@@ -9,13 +9,22 @@
 //!
 //! Each pane is a `zmx attach` client: its program runs in a zmx session, so
 //! dropping the pane (a detach, or its thread leaving the attached threads)
-//! leaves the program running. Each attached thread keeps its pane while
-//! other threads are selected; the right side shows the selected thread's
-//! pane when it's attached, else the dashboard. At start every thread whose
-//! zmx session still runs gets its pane back, attached. A client that dies
-//! while zmx still lists its session is attached again once; a second death
-//! closes the pane with an error on the mode line. While attached, input goes
-//! straight to the attached program, except the resize keys; otherwise keys go through the resize keys, then the
+//! leaves the program running. Each attached thread keeps its layout (tabs
+//! of split panes) while other threads are selected; the right side shows
+//! the selected thread's layout, a tab bar over its shown tab's panes, while
+//! it's attached, else the start screen. Each frame resizes every visible
+//! pane to its own rect; panes of hidden tabs and unselected threads keep
+//! their size. A split-off pane runs a shell under zmx in its thread's
+//! directory and is killed with `zmx kill` once it leaves every layout. A
+//! thread's layout lasts while it's attached, so detaching, settling or
+//! deleting it, or its own pane ending, ends its split-off panes too. At
+//! start every leftover split-off session (`orb-p-*` on orb's pane dir) is
+//! killed, then every thread whose zmx session still runs gets its pane
+//! back, attached. A client that dies while zmx still lists its session is
+//! attached again once; a second death closes the pane with an error on the
+//! mode line. While a pane has the keys, input goes straight to its program,
+//! except the Cmd keys ([`keymap::cmd_route`]) and the resize keys;
+//! otherwise keys go through the Cmd keys, the resize keys, then the
 //! [`keymap`]. The loop itself reads the directory picker's listings, the
 //! branch picker's refs and the session picker's preview, re-reading the
 //! preview whenever the selected thread's transcript changes length, and
@@ -25,7 +34,7 @@
 //! so `<C-l>` goes back into it; `<C-\>`, in the pane or on the thread in the
 //! sidebar, detaches it, and settling or deleting the thread or its
 //! attached program exiting ends the pane too, with `session exited at start`
-//! on the dashboard when that happens within a second of attaching.
+//! on the start screen when that happens within a second of attaching.
 //!
 //! When a thread finishes a turn or starts needing an approval or an answer
 //! while orb's pane isn't focused, the loop announces it as a desktop
@@ -41,15 +50,14 @@
 //! `<C-h>`. When a started draft's thread comes up still selected, the loop
 //! attaches to it. If the user is typing in a picker, the rename box or the
 //! sidebar search, or is in a pane, it waits, and attaches once the keys are
-//! back in the sidebar or the dashboard, leaving them there with the pane
-//! drawn, as long as the thread is still selected. Attaching to a thread whose
-//! orb worktree is gone asks the sessions actor to recreate it instead,
-//! leaving the keys on the dashboard, and attaches the same way once it's
-//! back.
+//! back in the sidebar, leaving them there with the pane drawn, as long as
+//! the thread is still selected. Attaching to a thread whose orb worktree is
+//! gone asks the sessions actor to recreate it instead, leaving the keys in
+//! the sidebar, and attaches the same way once it's back.
 //!
-//! orb captures the mouse throughout. Mouse events over the attached pane go
-//! to the attached program; the rest are mapped through the last frame's hit map to intents
-//! or a scroll of the sidebar's view (see [`mouse`]).
+//! orb captures the mouse throughout. While a pane has the keys, mouse events
+//! over it go to its program; the rest are mapped through the last frame's
+//! hit map to intents or a scroll of the sidebar's view (see [`mouse`]).
 //!
 //! After each frame the outer terminal's cursor takes the shape of where the
 //! keys are: a block in the sidebar, a bar in a text input, the attached
@@ -72,12 +80,13 @@ use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::Harnesses;
+use orb_domain::feat::layout::state::SessionLayout;
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
-use orb_domain::feat::sessions::state::{AttachTarget, PaneId, Thread, ThreadId};
+use orb_domain::feat::sessions::state::{AttachTarget, PaneId, PaneLaunch, Thread, ThreadId};
 use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
 use orb_domain::feat::zellij::zellij_service::{
     NOT_IN_ZELLIJ, ZellijError, ZellijService, zellij_reason,
@@ -95,13 +104,13 @@ use crate::keymap::{self, KeyScope, Keys, Route};
 use crate::mouse::{self, Clicks, HitMap, MouseRoute};
 use crate::picker::PickerScroll;
 use crate::sidebar::{SPINNER_FRAME, SidebarScroll};
-use crate::{outer_terminal, render};
+use crate::{outer_terminal, render, tabs};
 
 /// How soon after its pane starts an attached program's exit counts as a
 /// failed start.
 const EARLY_EXIT: Duration = Duration::from_secs(1);
 
-/// What the dashboard says after an attached program exits within
+/// What the start screen says after an attached program exits within
 /// [`EARLY_EXIT`] of starting.
 const EXITED_AT_START: &str = "session exited at start";
 
@@ -204,16 +213,14 @@ fn trust_to_open(trust: Option<&Path>, opened: Option<&Path>) -> Option<PathBuf>
 }
 
 /// Where the keys go once the trust confirm closes, given where they were
-/// when it opened, the `return_to` of a picker it replaces, and whether the
-/// sidebar is hidden: back to the sidebar or the dashboard; to where a
-/// replaced picker would have returned them; to the sidebar from the rename
-/// box or the search; from a pane, to the sidebar (the dashboard while it's
-/// hidden), as `<C-h>` leaves it drawn.
-fn trust_return_to(focus: Focus, replaced: Option<Focus>, sidebar_hidden: bool) -> Focus {
+/// when it opened and the `return_to` of a picker it replaces: back to the
+/// sidebar (or the dashboard); to where a replaced picker would have
+/// returned them; to the sidebar from the rename box, the search or a pane,
+/// as `<C-h>` leaves it drawn.
+fn trust_return_to(focus: Focus, replaced: Option<Focus>) -> Focus {
     match focus {
         Focus::Sidebar | Focus::Dashboard => focus,
         Focus::Picker => replaced.unwrap_or(Focus::Sidebar),
-        Focus::Attached if sidebar_hidden => Focus::Dashboard,
         Focus::Rename | Focus::Search | Focus::Attached => Focus::Sidebar,
     }
 }
@@ -266,27 +273,34 @@ fn attach_or_restore(cwd: &Path, worktrees_root: &Path) -> AttachPlan {
     }
 }
 
-/// The pane the right-hand area draws: none while the dashboard has the
-/// keys, else the selected thread's.
-fn shown_pane<P>(panes: &HashMap<PaneId, P>, selected: Option<PaneId>, focus: Focus) -> Option<&P> {
-    match focus {
-        Focus::Dashboard => None,
-        Focus::Attached | Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search => {
-            panes.get(&selected?)
-        }
-    }
-}
-
 /// The panes to drop, given each as (pane, ended): the ended ones, and
-/// those whose thread left `attached`.
-fn to_drop<I>(panes: I, attached: &HashSet<PaneId>) -> Vec<PaneId>
+/// those no layout holds any more (`keep`).
+fn to_drop<I>(panes: I, keep: &HashSet<PaneId>) -> Vec<PaneId>
 where
     I: IntoIterator<Item = (PaneId, bool)>,
 {
     panes
         .into_iter()
-        .filter(|&(id, exited)| exited || !attached.contains(&id))
+        .filter(|&(id, exited)| exited || !keep.contains(&id))
         .map(|(id, _)| id)
+        .collect()
+}
+
+/// The dropped panes whose zmx session to kill: split-off panes that didn't
+/// end on their own. A thread's own pane keeps running for its next attach.
+fn to_kill(gone: &[PaneId], ended: &HashSet<PaneId>) -> Vec<PaneId> {
+    gone.iter()
+        .copied()
+        .filter(|id| id.thread().is_none() && !ended.contains(id))
+        .collect()
+}
+
+/// The split-off panes a layout holds (`keep`) with no client in `live` yet.
+/// A thread's own pane is started by its attach instead.
+fn to_spawn<P>(keep: &HashSet<PaneId>, live: &HashMap<PaneId, P>) -> Vec<PaneId> {
+    keep.iter()
+        .copied()
+        .filter(|id| id.thread().is_none() && !live.contains_key(id))
         .collect()
 }
 
@@ -311,7 +325,7 @@ fn classify_exit(listed: bool, respawned: bool) -> PaneExit {
     }
 }
 
-/// The dashboard's pane error once panes are dropped, given whether each
+/// The start screen's pane error once panes are dropped, given whether each
 /// dropped pane's program exited within [`EARLY_EXIT`] of starting:
 /// `session exited at start` when one did, else `error` as it was.
 fn pane_error_after<I>(error: Option<String>, early_exits: I) -> Option<String>
@@ -325,12 +339,11 @@ where
     }
 }
 
-/// Where the keys go once the pane is gone: from the pane to the dashboard;
-/// anywhere else (the sidebar after `<C-h>`, the dashboard, a text input) they
-/// stay.
+/// Where the keys go once the pane is gone: from the pane to the sidebar;
+/// anywhere else (the sidebar after `<C-h>`, a text input) they stay.
 fn after_pane(focus: Focus) -> Focus {
     match focus {
-        Focus::Attached => Focus::Dashboard,
+        Focus::Attached => Focus::Sidebar,
         Focus::Sidebar | Focus::Dashboard | Focus::Picker | Focus::Rename | Focus::Search => focus,
     }
 }
@@ -378,8 +391,8 @@ struct App {
     /// Every pane orb holds a `zmx attach` client for, kept while other
     /// threads are selected.
     panes: HashMap<PaneId, Pane>,
-    /// The pane that last got the keys, so it loses focus when the keys move
-    /// on even though the selection already has.
+    /// The pane that last got a focus-in, so it gets a focus-out when the
+    /// keys move on (see [`App::sync_focus`]).
     focused_pane: Option<PaneId>,
     /// Panes whose client exit the loop hasn't classified yet.
     exited: Vec<PaneId>,
@@ -471,16 +484,20 @@ impl App {
 
     fn run(mut self, terminal: &mut DefaultTerminal, rx: &Receiver<LoopEvent>) -> io::Result<()> {
         spawn_input_thread(self.tx.clone())?;
-        let [_, pane_area, _] = render::layout(terminal.size()?.into(), &self.state.read().sidebar);
-        self.pane_area = pane_area;
+        self.measure(terminal.size()?.into());
         self.reattach_live();
         loop {
-            let [_, pane_area, _] =
-                render::layout(terminal.size()?.into(), &self.state.read().sidebar);
-            self.pane_area = pane_area;
-            let size = PaneSize::from(pane_area);
-            for pane in self.panes.values_mut() {
-                pane.resize(size);
+            self.measure(terminal.size()?.into());
+            let placed = self
+                .state
+                .read()
+                .shown_layout()
+                .map(|layout| layout.placed(self.pane_area))
+                .unwrap_or_default();
+            for place in &placed {
+                if let Some(pane) = self.panes.get_mut(&place.pane) {
+                    pane.resize(PaneSize::from(place.area));
+                }
             }
             let now = SystemTime::now();
             let mut drawn = (None, None);
@@ -489,16 +506,10 @@ impl App {
             }
             terminal.draw(|frame| {
                 let state = self.state.read();
-                let pane = shown_pane(
-                    &self.panes,
-                    state.sessions.selected_id().map(PaneId::from),
-                    state.focus,
-                )
-                .filter(|pane| !pane.has_exited());
                 drawn = render::render(
                     frame,
                     &state,
-                    pane,
+                    &self.panes,
                     self.pane_error.as_deref(),
                     &self.keys,
                     now,
@@ -551,6 +562,7 @@ impl App {
             self.reconcile();
             self.ask_trust();
             self.open_started();
+            self.sync_focus();
             let now = Instant::now();
             for pane in self.panes.values() {
                 pane.flush_expired_sync(now);
@@ -572,48 +584,77 @@ impl App {
         tick.into_iter().chain(sync).min()
     }
 
-    /// The pane that receives input: the shown one, while the user is
-    /// attached to it.
-    fn attached_pane(&self) -> Option<&Pane> {
+    /// Lays the screen of `size` out: the tab body becomes the pane area,
+    /// and the layouts measure their focus moves and resizes against it.
+    fn measure(&mut self, size: Rect) {
+        let [_, right, _] = render::layout(size, &self.state.read().sidebar);
+        let [_, body] = tabs::areas(right);
+        self.pane_area = body;
+        if self.state.read().layouts.body() != body {
+            self.state.write().layouts.fit_to(body);
+        }
+    }
+
+    /// The shown layout's focused pane while the keys are in a pane.
+    fn attached_id(&self) -> Option<PaneId> {
         let state = self.state.read();
         match state.focus {
-            Focus::Attached => shown_pane(
-                &self.panes,
-                state.sessions.selected_id().map(PaneId::from),
-                state.focus,
-            ),
+            Focus::Attached => state.shown_layout()?.focused(),
             Focus::Sidebar | Focus::Dashboard | Focus::Picker | Focus::Rename | Focus::Search => {
                 None
             }
         }
     }
 
-    /// Acts on a mouse event: forwards it to the attached pane, runs the
+    /// The pane that receives input: the shown layout's focused pane while
+    /// the keys are in a pane.
+    fn attached_pane(&self) -> Option<&Pane> {
+        self.panes.get(&self.attached_id()?)
+    }
+
+    /// Gives a focus-in to the pane that has the keys, the shown layout's
+    /// focused pane, and a focus-out to the one that had them.
+    fn sync_focus(&mut self) {
+        let want = self.attached_id();
+        if want == self.focused_pane {
+            return;
+        }
+        if let Some(pane) = self.focused_pane.and_then(|id| self.panes.get(&id)) {
+            pane.focus(false);
+        }
+        if let Some(pane) = want.and_then(|id| self.panes.get(&id)) {
+            pane.focus(true);
+        }
+        self.focused_pane = want;
+    }
+
+    /// Acts on a mouse event: forwards it to the focused pane, runs the
     /// intents it maps to (ending any key sequence in progress), or scrolls
     /// the sidebar's view.
     fn mouse(&mut self, mouse: MouseEvent) {
-        let (focus, pane_shown, cursor) = {
+        let (focus, focused, cursor) = {
             let state = self.state.read();
-            let shown = shown_pane(
-                &self.panes,
-                state.sessions.selected_id().map(PaneId::from),
+            (
                 state.focus,
+                state.shown_layout().and_then(SessionLayout::focused),
+                state.sessions.cursor,
             )
-            .is_some_and(|pane| !pane.has_exited());
-            (state.focus, shown, state.sessions.cursor)
         };
         let route = mouse::route(
             mouse,
             &self.hits,
             focus,
-            pane_shown,
+            focused,
             &mut self.clicks,
             Instant::now(),
         );
         match route {
             MouseRoute::Forward => {
-                if let Some(pane) = self.attached_pane() {
-                    pane.mouse(mouse, self.pane_area);
+                let pane = self
+                    .attached_id()
+                    .and_then(|id| Some((self.panes.get(&id)?, self.hits.pane_area(id)?)));
+                if let Some((pane, area)) = pane {
+                    pane.mouse(mouse, area);
                 }
             }
             MouseRoute::Intents(intents) => {
@@ -640,7 +681,9 @@ impl App {
             LoopEvent::Input(Event::Key(key)) if key.kind != KeyEventKind::Release => {
                 let focus = self.state.read().focus;
                 let intent = match focus {
-                    Focus::Attached => match keymap::attached_route(key) {
+                    Focus::Attached => match keymap::cmd_route(key)
+                        .map_or_else(|| keymap::attached_route(key), Route::Intent)
+                    {
                         Route::Intent(intent) => Some(intent),
                         Route::Forward => {
                             if let Some(pane) = self.attached_pane() {
@@ -652,12 +695,13 @@ impl App {
                     Focus::Sidebar | Focus::Dashboard => {
                         match keymap::layout_route(key)
                             .or_else(|| keymap::jump_route(key))
+                            .or_else(|| keymap::cmd_route(key))
                             .or(match focus {
                                 Focus::Sidebar => keymap::sidebar_route(key),
                                 _ => None,
                             }) {
                             Some(intent) => {
-                                // A resize, a jump or a detach ends any key
+                                // A resize, a jump, a Cmd key or a detach ends any key
                                 // sequence in progress.
                                 self.keys.dismiss();
                                 Some(intent)
@@ -720,10 +764,6 @@ impl App {
         match command {
             Command::Attach(target) => {
                 let id = PaneId::from(target.thread);
-                let left = self.focused_pane.take().filter(|left| *left != id);
-                if let Some(pane) = left.and_then(|left| self.panes.get(&left)) {
-                    pane.focus(false);
-                }
                 if self.panes.get(&id).is_none_or(Pane::has_exited) {
                     if attach_or_restore(&target.cwd, &self.worktrees_root) == AttachPlan::Restore {
                         let _ = self
@@ -731,12 +771,12 @@ impl App {
                             .tell(sessions_actor::RestoreWorktree(target.thread))
                             .try_send();
                         let mut app = self.state.write();
-                        app.focus = Focus::Dashboard;
+                        app.focus = Focus::Sidebar;
                         app.attached.remove(&target.thread);
                         app.sessions.starting = true;
                         return;
                     }
-                    match self.spawn_pane(target) {
+                    match self.spawn_pane(id, &target.launch, &target.cwd) {
                         Some(pane) => {
                             self.panes.insert(id, pane);
                             self.pane_error = None;
@@ -744,29 +784,15 @@ impl App {
                         None => {
                             self.pane_error = Some("couldn't start zmx attach".to_owned());
                             let mut app = self.state.write();
-                            app.focus = Focus::Dashboard;
+                            app.focus = Focus::Sidebar;
                             app.attached.remove(&target.thread);
                             return;
                         }
                     }
                 }
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.focus(true);
-                    self.focused_pane = Some(id);
-                }
+                self.sync_focus();
             }
-            Command::Detach => {
-                // `Intent::Detach` already gave the dashboard the keys, and a
-                // jump already moved the selection, so the pane is the one
-                // that last got the keys rather than the shown one.
-                let focused = self
-                    .focused_pane
-                    .take()
-                    .or_else(|| self.state.read().sessions.selected_id().map(PaneId::from));
-                if let Some(pane) = focused.and_then(|id| self.panes.get(&id)) {
-                    pane.focus(false);
-                }
-            }
+            Command::Detach => self.sync_focus(),
             Command::CreateDraft(project) => {
                 let _ = self
                     .sessions
@@ -1042,25 +1068,18 @@ impl App {
             if !self.panes.get(&id).is_some_and(Pane::has_exited) {
                 continue;
             }
-            let target = self
-                .state
-                .read()
-                .sessions
-                .threads()
-                .find(|thread| PaneId::from(thread.id) == id)
-                .and_then(Thread::attach_target);
-            let Some(target) = target else {
+            let Some((launch, cwd)) = self.pane_launch(id) else {
                 ended.insert(id);
                 continue;
             };
-            let session = &target.launch.zmx;
+            let session = &launch.zmx;
             let listed = self
                 .zmx
                 .list(&session.dir)
                 .is_ok_and(|entries| entries.iter().any(|entry| entry.name == session.name));
             let exit = classify_exit(listed, self.respawned.contains(&id));
             let respawned = match exit {
-                PaneExit::Respawn => self.spawn_pane(&target),
+                PaneExit::Respawn => self.spawn_pane(id, &launch, &cwd),
                 PaneExit::Ended | PaneExit::Failed => None,
             };
             match (exit, respawned) {
@@ -1085,45 +1104,60 @@ impl App {
     }
 
     /// Drops the panes whose program ended or whose client died for good
-    /// (see [`Self::classify_exits`]) and those whose thread is no longer
-    /// attached, which ends their `zmx attach` client, and takes them out of
-    /// `attached`. A pane that ended within [`EARLY_EXIT`] of starting leaves
-    /// `session exited at start` on the dashboard. If the keys were in a pane
-    /// that's no longer shown, orb leaves it.
+    /// (see [`Self::classify_exits`]) and those no layout holds any more,
+    /// which ends their `zmx attach` client. A thread whose own pane ended
+    /// leaves `attached`, and its layout goes with it; a split-off pane that
+    /// ended leaves its layout. A dropped split-off pane that didn't end is
+    /// killed with `zmx kill`. A pane that ended within [`EARLY_EXIT`] of
+    /// starting leaves `session exited at start` on the start screen. Each
+    /// split-off pane a layout holds without a client gets one; one that
+    /// can't start leaves its layout with an error on the mode line. If the
+    /// keys were in a pane and no layout is shown any more, they go to the
+    /// sidebar.
     fn reconcile(&mut self) {
         let ended = self.classify_exits();
-        let attached: HashSet<PaneId> = self
-            .state
-            .read()
-            .attached
-            .iter()
-            .map(|&thread| PaneId::from(thread))
-            .collect();
-        let gone = to_drop(
-            self.panes.keys().map(|id| (*id, ended.contains(id))),
-            &attached,
-        );
+        let keep = {
+            let mut app = self.state.write();
+            app.attached
+                .retain(|&thread| !ended.contains(&PaneId::from(thread)));
+            for &id in ended.iter().filter(|id| id.thread().is_none()) {
+                app.layouts.close_pane(id);
+            }
+            let attached = app.attached.clone();
+            app.layouts.retain_attached(&attached);
+            app.layouts.pane_ids()
+        };
+        let gone = to_drop(self.panes.keys().map(|id| (*id, ended.contains(id))), &keep);
         self.pane_error = pane_error_after(
             self.pane_error.take(),
             gone.iter()
                 .filter_map(|id| self.panes.get(id))
                 .map(|pane| pane.exited_early(EARLY_EXIT)),
         );
+        for id in to_kill(&gone, &ended) {
+            let _ = self.zmx.kill(&self.zmx.session(id.zmx_name()));
+        }
         for id in &gone {
             self.panes.remove(id);
             self.respawned.remove(id);
         }
+        for id in to_spawn(&keep, &self.panes) {
+            let pane = self
+                .pane_launch(id)
+                .and_then(|(launch, cwd)| self.spawn_pane(id, &launch, &cwd));
+            match pane {
+                Some(pane) => {
+                    self.panes.insert(id, pane);
+                }
+                None => {
+                    let mut app = self.state.write();
+                    app.layouts.close_pane(id);
+                    app.sessions.error = Some("couldn't start zmx attach".to_owned());
+                }
+            }
+        }
         let mut app = self.state.write();
-        app.attached
-            .retain(|&thread| !gone.contains(&PaneId::from(thread)));
-        if app.focus == Focus::Attached
-            && shown_pane(
-                &self.panes,
-                app.sessions.selected_id().map(PaneId::from),
-                app.focus,
-            )
-            .is_none()
-        {
+        if app.focus == Focus::Attached && app.shown_layout().is_none() {
             app.focus = after_pane(app.focus);
         }
     }
@@ -1143,11 +1177,8 @@ impl App {
         self.keys.dismiss();
         let from_pane = {
             let mut app = self.state.write();
-            let return_to = trust_return_to(
-                app.focus,
-                app.picker.as_ref().map(PickerState::return_to),
-                app.sidebar.hidden,
-            );
+            let return_to =
+                trust_return_to(app.focus, app.picker.as_ref().map(PickerState::return_to));
             let from_pane = app.focus == Focus::Attached;
             app.rename = None;
             app.sessions.search = None;
@@ -1264,11 +1295,19 @@ impl App {
             });
     }
 
-    /// Gives every thread whose zmx session still runs its pane back,
-    /// attached, so programs left running when orb quit show again. Each
-    /// socket dir the threads use is listed once; a dir zmx can't list brings
-    /// nothing back.
+    /// Kills every leftover split-off session (`orb-p-*` on orb's pane dir),
+    /// since layouts aren't kept across launches, then gives every thread
+    /// whose zmx session still runs its pane back, attached, so programs
+    /// left running when orb quit show again. Each socket dir the threads use
+    /// is listed once; a dir zmx can't list brings nothing back.
     fn reattach_live(&mut self) {
+        let leftovers = self.zmx.list(self.zmx.dir()).unwrap_or_default();
+        for entry in leftovers
+            .into_iter()
+            .filter(|entry| entry.name.starts_with("orb-p-"))
+        {
+            let _ = self.zmx.kill(&self.zmx.session(entry.name));
+        }
         let targets: Vec<AttachTarget> = self
             .state
             .read()
@@ -1298,25 +1337,68 @@ impl App {
             .iter()
             .filter(|target| running.contains(&target.launch.zmx))
         {
-            if let Some(pane) = self.spawn_pane(target) {
-                self.panes.insert(PaneId::from(target.thread), pane);
-                self.state.write().attached.insert(target.thread);
+            let id = PaneId::from(target.thread);
+            if let Some(pane) = self.spawn_pane(id, &target.launch, &target.cwd) {
+                self.panes.insert(id, pane);
+                let mut app = self.state.write();
+                app.attached.insert(target.thread);
+                app.layouts.open(target.thread);
             }
         }
     }
 
-    /// Runs `zmx attach` for `target`'s pane in a pane the size of the pane
-    /// area, with orb's child environment and the pane's `ORB_PANE_ID`;
-    /// `None` if it can't start.
-    fn spawn_pane(&self, target: &AttachTarget) -> Option<Pane> {
-        let id = PaneId::from(target.thread);
+    /// How pane `id` runs and where: a thread's own pane as its thread says;
+    /// a split-off pane as a shell in `orb-p<id>` on orb's pane dir, in its
+    /// thread's directory. `None` when its thread is gone.
+    fn pane_launch(&self, id: PaneId) -> Option<(PaneLaunch, PathBuf)> {
+        let state = self.state.read();
+        match id.thread() {
+            Some(thread) => {
+                let target = state
+                    .sessions
+                    .threads()
+                    .find(|candidate| candidate.id == thread)
+                    .and_then(Thread::attach_target)?;
+                Some((target.launch, target.cwd))
+            }
+            None => {
+                let owner = state.layouts.owner_of(id)?;
+                let thread = state
+                    .sessions
+                    .threads()
+                    .find(|candidate| candidate.id == owner)?;
+                let launch = PaneLaunch {
+                    zmx: self.zmx.session(id.zmx_name()),
+                    command: vec![],
+                };
+                Some((launch, thread.cwd.clone()))
+            }
+        }
+    }
+
+    /// Runs `zmx attach` for pane `id` as `launch` says, in `cwd`, sized to
+    /// its place in the shown layout (else the whole pane area), with orb's
+    /// child environment and the pane's `ORB_PANE_ID`; `None` if it can't
+    /// start.
+    fn spawn_pane(&self, id: PaneId, launch: &PaneLaunch, cwd: &Path) -> Option<Pane> {
         let tx = self.tx.clone();
         let command = PaneCommand {
-            argv: attach_argv(&target.launch.zmx, &target.launch.command),
-            cwd: target.cwd.clone(),
+            argv: attach_argv(&launch.zmx, &launch.command),
+            cwd: cwd.to_owned(),
             env: pane_env(&self.env, id),
         };
-        Pane::spawn(&command, PaneSize::from(self.pane_area), move |event| {
+        let area = self
+            .state
+            .read()
+            .shown_layout()
+            .and_then(|layout| {
+                layout
+                    .placed(self.pane_area)
+                    .into_iter()
+                    .find(|place| place.pane == id)
+            })
+            .map_or(self.pane_area, |place| place.area);
+        Pane::spawn(&command, PaneSize::from(area), move |event| {
             let _ = tx.send(LoopEvent::Pane(id, event));
         })
         .ok()
@@ -1421,8 +1503,8 @@ mod tests {
 
     use super::{
         AttachPlan, PaneExit, StartedAttach, after_pane, announces, attach_or_restore,
-        classify_exit, cursor_style, list_directories, pane_error_after, shown_pane, stale_preview,
-        started_attach, to_drop, trust_return_to, trust_to_open,
+        classify_exit, cursor_style, list_directories, pane_error_after, stale_preview,
+        started_attach, to_drop, to_kill, to_spawn, trust_return_to, trust_to_open,
     };
 
     #[rstest::rstest]
@@ -1579,11 +1661,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Attached, Focus::Dashboard)]
+    #[case(Focus::Attached, Focus::Sidebar)]
     #[case(Focus::Sidebar, Focus::Sidebar)]
     #[case(Focus::Dashboard, Focus::Dashboard)]
     #[case(Focus::Picker, Focus::Picker)]
-    fn keys_leave_a_gone_pane_for_the_dashboard_only_from_the_pane(
+    fn keys_leave_a_gone_pane_for_the_sidebar_only_from_the_pane(
         #[case] focus: Focus,
         #[case] expected: Focus,
     ) {
@@ -1623,21 +1705,19 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::sidebar(Focus::Sidebar, None, false, Focus::Sidebar)]
-    #[case::dashboard(Focus::Dashboard, None, false, Focus::Dashboard)]
-    #[case::replaced_picker(Focus::Picker, Some(Focus::Dashboard), false, Focus::Dashboard)]
-    #[case::rename(Focus::Rename, None, false, Focus::Sidebar)]
-    #[case::search(Focus::Search, None, false, Focus::Sidebar)]
-    #[case::pane(Focus::Attached, None, false, Focus::Sidebar)]
-    #[case::pane_hidden_sidebar(Focus::Attached, None, true, Focus::Dashboard)]
+    #[case::sidebar(Focus::Sidebar, None, Focus::Sidebar)]
+    #[case::dashboard(Focus::Dashboard, None, Focus::Dashboard)]
+    #[case::replaced_picker(Focus::Picker, Some(Focus::Dashboard), Focus::Dashboard)]
+    #[case::rename(Focus::Rename, None, Focus::Sidebar)]
+    #[case::search(Focus::Search, None, Focus::Sidebar)]
+    #[case::pane(Focus::Attached, None, Focus::Sidebar)]
     fn trust_confirm_returns_the_keys_to(
         #[case] focus: Focus,
         #[case] replaced: Option<Focus>,
-        #[case] sidebar_hidden: bool,
         #[case] expected: Focus,
     ) {
         // Given / When the trust confirm opens with the keys in `focus`.
-        let return_to = trust_return_to(focus, replaced, sidebar_hidden);
+        let return_to = trust_return_to(focus, replaced);
 
         // Then it gives them back to `expected`, never to a picker.
         assert_eq!(
@@ -1737,41 +1817,103 @@ mod tests {
 
     #[rstest::rstest]
     fn to_drop_takes_an_exited_pane() {
-        // Given pane 1 exited and pane 2 alive, both attached.
-        let attached = HashSet::from([PaneId(1), PaneId(2)]);
+        // Given pane 1 exited and pane 2 alive, both in a layout.
+        let keep = HashSet::from([PaneId(1), PaneId(2)]);
 
         // When choosing the panes to drop.
-        let dropped = to_drop([(PaneId(1), true), (PaneId(2), false)], &attached);
+        let dropped = to_drop([(PaneId(1), true), (PaneId(2), false)], &keep);
 
         // Then only the exited pane goes.
         assert_eq!(dropped, vec![PaneId(1)], "the exited pane is dropped");
     }
 
     #[rstest::rstest]
-    fn to_drop_takes_a_pane_whose_thread_left_attached() {
-        // Given live pane 1 with nothing attached.
-        let attached = HashSet::new();
+    fn to_drop_takes_a_pane_in_no_layout() {
+        // Given live pane 1 that no layout holds.
+        let keep = HashSet::new();
 
         // When choosing the panes to drop.
-        let dropped = to_drop([(PaneId(1), false)], &attached);
+        let dropped = to_drop([(PaneId(1), false)], &keep);
 
         // Then the pane goes.
-        assert_eq!(dropped, vec![PaneId(1)], "the un-attached pane is dropped");
+        assert_eq!(dropped, vec![PaneId(1)], "a pane in no layout is dropped");
     }
 
     #[rstest::rstest]
-    fn to_drop_keeps_a_live_attached_pane() {
-        // Given live pane 1 with thread 1 attached.
-        let attached = HashSet::from([PaneId(1)]);
+    fn to_drop_keeps_a_live_pane_in_a_layout() {
+        // Given live pane 1 held by a layout.
+        let keep = HashSet::from([PaneId(1)]);
 
         // When choosing the panes to drop.
-        let dropped = to_drop([(PaneId(1), false)], &attached);
+        let dropped = to_drop([(PaneId(1), false)], &keep);
 
         // Then nothing goes.
         assert!(
             dropped.is_empty(),
-            "a live attached pane stays, got {dropped:?}"
+            "a live pane in a layout stays, got {dropped:?}"
         );
+    }
+
+    #[rstest::rstest]
+    fn to_kill_takes_a_dropped_split_pane() {
+        // Given split-off pane -1 dropped while still running.
+        let gone = [PaneId(-1)];
+
+        // When choosing the zmx sessions to kill.
+        let killed = to_kill(&gone, &HashSet::new());
+
+        // Then its session is killed.
+        assert_eq!(killed, vec![PaneId(-1)], "a dropped split pane is killed");
+    }
+
+    #[rstest::rstest]
+    fn to_kill_leaves_a_split_pane_that_ended() {
+        // Given split-off pane -1 dropped because its program ended.
+        let gone = [PaneId(-1)];
+
+        // When choosing the zmx sessions to kill.
+        let killed = to_kill(&gone, &HashSet::from([PaneId(-1)]));
+
+        // Then nothing is killed.
+        assert!(killed.is_empty(), "an ended pane has nothing to kill");
+    }
+
+    #[rstest::rstest]
+    fn to_kill_leaves_a_threads_pane() {
+        // Given thread 1's own pane dropped by a detach.
+        let gone = [PaneId(1)];
+
+        // When choosing the zmx sessions to kill.
+        let killed = to_kill(&gone, &HashSet::new());
+
+        // Then its program keeps running.
+        assert!(killed.is_empty(), "a thread's pane outlives its detach");
+    }
+
+    #[rstest::rstest]
+    fn to_spawn_takes_a_split_pane_without_a_client() {
+        // Given split-off pane -1 in a layout with no client.
+        let keep = HashSet::from([PaneId(-1)]);
+        let live: HashMap<PaneId, &str> = HashMap::new();
+
+        // When choosing the panes to start.
+        let spawned = to_spawn(&keep, &live);
+
+        // Then it gets a client.
+        assert_eq!(spawned, vec![PaneId(-1)], "a new split pane is started");
+    }
+
+    #[rstest::rstest]
+    fn to_spawn_leaves_a_threads_pane() {
+        // Given thread 1's own pane in a layout with no client.
+        let keep = HashSet::from([PaneId(1)]);
+        let live: HashMap<PaneId, &str> = HashMap::new();
+
+        // When choosing the panes to start.
+        let spawned = to_spawn(&keep, &live);
+
+        // Then the attach starts it instead.
+        assert!(spawned.is_empty(), "a thread's pane starts on attach");
     }
 
     #[rstest::rstest]
@@ -1822,34 +1964,6 @@ mod tests {
             Some("couldn't start the attach command"),
             "a later exit leaves the pane error as is"
         );
-    }
-
-    #[rstest::rstest]
-    fn shown_pane_is_the_selected_threads_pane() {
-        // Given panes for threads 1 and 2, with 2 selected in the sidebar.
-        let panes = HashMap::from([(PaneId(1), "thread 1"), (PaneId(2), "thread 2")]);
-
-        // When choosing the pane to show.
-        let shown = shown_pane(&panes, Some(PaneId(2)), Focus::Sidebar);
-
-        // Then it is thread 2's pane.
-        assert_eq!(
-            shown,
-            Some(&"thread 2"),
-            "the selected thread's pane is shown"
-        );
-    }
-
-    #[rstest::rstest]
-    fn shown_pane_is_none_while_the_dashboard_has_the_keys() {
-        // Given thread 1's pane, with 1 selected and the dashboard focused.
-        let panes = HashMap::from([(PaneId(1), "thread 1")]);
-
-        // When choosing the pane to show.
-        let shown = shown_pane(&panes, Some(PaneId(1)), Focus::Dashboard);
-
-        // Then no pane is shown.
-        assert_eq!(shown, None, "the dashboard hides every pane");
     }
 
     #[rstest::rstest]

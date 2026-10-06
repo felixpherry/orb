@@ -33,6 +33,9 @@
 //! or thread opens the group's draft, making one when it has none; `d` on a
 //! card deletes the group.
 //! `␣gf`/`␣gr`/`␣gl` add a Feature, Research or Learn group in every scope.
+//! The Cmd keys (focus moves, split, close, grow and shrink, tab moves) work
+//! in the sidebar and in panes, outside which-key, which has no Super
+//! modifier.
 //! On orb's Incognito draft and its threads, `␣w`/`␣b` and the dashboard's
 //! `w`/`b` aren't bound: every other key is the same as on any draft or
 //! thread.
@@ -43,6 +46,7 @@ use orb_domain::feat::dashboard::DashboardItem::{
     AddProject, Branch, FilterProjects, Harness, Incognito, Lazygit, Model, Neovim, NewSession,
     Open, Permission, Quit, Shell, Start, Workspace,
 };
+use orb_domain::feat::layout::tree::{NavDirection, Split};
 use orb_domain::feat::sessions::state::{GroupKind, ProjectKind, Sessions};
 use orb_domain::feat::zellij::zellij_service::Tool;
 use orb_domain::{AppState, Focus, Intent};
@@ -726,6 +730,32 @@ pub(crate) fn layout_route(key: KeyEvent) -> Option<Intent> {
     }
 }
 
+/// The Cmd key `key` asks for, in the sidebar or a pane. Cmd arrives as
+/// Super through kitty's `map cmd+<key> send_key super+<key>`. Shift is
+/// ignored so `Cmd +` matches however kitty reports it. `None` for any other
+/// key, Cmd or not.
+pub(crate) fn cmd_route(key: KeyEvent) -> Option<Intent> {
+    if key.modifiers - KeyModifiers::SHIFT != KeyModifiers::SUPER {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('h') | KeyCode::Left => Some(Intent::MoveFocus(NavDirection::Left)),
+        KeyCode::Char('j') | KeyCode::Down => Some(Intent::MoveFocus(NavDirection::Down)),
+        KeyCode::Char('k') | KeyCode::Up => Some(Intent::MoveFocus(NavDirection::Up)),
+        KeyCode::Char('l') | KeyCode::Right => Some(Intent::MoveFocus(NavDirection::Right)),
+        KeyCode::Char('n') => Some(Intent::SplitPane(Split::Right)),
+        KeyCode::Char('x') => Some(Intent::ClosePane),
+        KeyCode::Char('+' | '=') => Some(Intent::GrowFocused),
+        KeyCode::Char('-') => Some(Intent::ShrinkFocused),
+        KeyCode::Char(digit @ '1'..='5') => digit.to_digit(10).map(|n| Intent::GoToTab(n as usize)),
+        KeyCode::Char('[') => Some(Intent::PreviousTab),
+        KeyCode::Char(']') => Some(Intent::NextTab),
+        KeyCode::Char('i') => Some(Intent::MoveTabLeft),
+        KeyCode::Char('o') => Some(Intent::MoveTabRight),
+        _ => None,
+    }
+}
+
 /// What `key` does in the sidebar outside which-key: `<C-\>` (the kitty
 /// `Char('\\')` and the legacy `Char('4')` forms) detaches the selected
 /// thread. `None` for any other key.
@@ -782,9 +812,10 @@ mod tests {
     use ratatui_which_key::NodeResult;
 
     use super::{
-        KeyScope, Keys, Route, Scope, Selection, attached_route, jump_route, keymap, layout_route,
-        picker_route, press, sidebar_route,
+        KeyScope, Keys, Route, Scope, Selection, attached_route, cmd_route, jump_route, keymap,
+        layout_route, picker_route, press, sidebar_route,
     };
+    use orb_domain::feat::layout::tree::{NavDirection, Split};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -2550,5 +2581,79 @@ mod tests {
             Route::Forward,
             "{code} with {modifiers} should be forwarded"
         );
+    }
+
+    fn cmd(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SUPER)
+    }
+
+    #[rstest::rstest]
+    #[case(KeyCode::Char('h'), Intent::MoveFocus(NavDirection::Left))]
+    #[case(KeyCode::Char('j'), Intent::MoveFocus(NavDirection::Down))]
+    #[case(KeyCode::Char('k'), Intent::MoveFocus(NavDirection::Up))]
+    #[case(KeyCode::Char('l'), Intent::MoveFocus(NavDirection::Right))]
+    #[case(KeyCode::Left, Intent::MoveFocus(NavDirection::Left))]
+    #[case(KeyCode::Down, Intent::MoveFocus(NavDirection::Down))]
+    #[case(KeyCode::Up, Intent::MoveFocus(NavDirection::Up))]
+    #[case(KeyCode::Right, Intent::MoveFocus(NavDirection::Right))]
+    #[case(KeyCode::Char('n'), Intent::SplitPane(Split::Right))]
+    #[case(KeyCode::Char('x'), Intent::ClosePane)]
+    #[case(KeyCode::Char('+'), Intent::GrowFocused)]
+    #[case(KeyCode::Char('='), Intent::GrowFocused)]
+    #[case(KeyCode::Char('-'), Intent::ShrinkFocused)]
+    #[case(KeyCode::Char('1'), Intent::GoToTab(1))]
+    #[case(KeyCode::Char('2'), Intent::GoToTab(2))]
+    #[case(KeyCode::Char('3'), Intent::GoToTab(3))]
+    #[case(KeyCode::Char('4'), Intent::GoToTab(4))]
+    #[case(KeyCode::Char('5'), Intent::GoToTab(5))]
+    #[case(KeyCode::Char('['), Intent::PreviousTab)]
+    #[case(KeyCode::Char(']'), Intent::NextTab)]
+    #[case(KeyCode::Char('i'), Intent::MoveTabLeft)]
+    #[case(KeyCode::Char('o'), Intent::MoveTabRight)]
+    fn cmd_keys_route_to_their_intents(#[case] code: KeyCode, #[case] expected: Intent) {
+        // Given / When routing Cmd with `code`.
+        let intent = cmd_route(cmd(code));
+
+        // Then it asks for its intent.
+        assert_eq!(intent, Some(expected), "Cmd {code} should route");
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_with_shift_grows() {
+        // Given Cmd + as kitty reports it with Shift.
+        let pressed = KeyEvent::new(
+            KeyCode::Char('+'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        );
+
+        // When routing it.
+        let intent = cmd_route(pressed);
+
+        // Then it grows.
+        assert_eq!(intent, Some(Intent::GrowFocused), "Cmd Shift + should grow");
+    }
+
+    #[rstest::rstest]
+    fn ctrl_letters_are_not_cmd_keys() {
+        // Given Ctrl h.
+        let pressed = ctrl('h');
+
+        // When routing it as a Cmd key.
+        let intent = cmd_route(pressed);
+
+        // Then it isn't one.
+        assert_eq!(intent, None, "<C-h> is not a Cmd key");
+    }
+
+    #[rstest::rstest]
+    fn cmd_f_is_unbound() {
+        // Given Cmd f, reserved for floating panes.
+        let pressed = cmd(KeyCode::Char('f'));
+
+        // When routing it.
+        let intent = cmd_route(pressed);
+
+        // Then nothing is asked for.
+        assert_eq!(intent, None, "Cmd f stays unbound");
     }
 }

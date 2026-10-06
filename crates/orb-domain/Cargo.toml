@@ -17,6 +17,7 @@ fuzzy-matcher = { workspace = true }
 jiff = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-normalization = { workspace = true }
+ratatui = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 notify-rust = { workspace = true }

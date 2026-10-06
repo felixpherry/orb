@@ -2,7 +2,8 @@
 
 use std::fmt;
 
-use crate::feat::sessions::state::{GroupKind, SidebarItem};
+use crate::feat::layout::tree::{NavDirection, Split};
+use crate::feat::sessions::state::{GroupKind, PaneId, SidebarItem};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// A user action produced by the keymap and applied by the
@@ -52,10 +53,42 @@ pub enum Intent {
     WidenFocused,
     /// Narrow the focused side: the sidebar, or the right side.
     NarrowFocused,
+    /// Move the focus to the pane that way; from the leftmost pane to the
+    /// sidebar, from the rightmost to the next tab, and from the sidebar
+    /// (`Right`) into the shown layout.
+    MoveFocus(NavDirection),
+    /// Split the focused pane, the new shell taking the focus.
+    SplitPane(Split),
+    /// Close the focused pane; on the thread's own pane, detach the thread.
+    ClosePane,
+    /// Show only the focused pane over its tab, or every pane again.
+    ToggleZoom,
+    /// Grow the focused pane, or widen the sidebar while it has the keys.
+    GrowFocused,
+    /// Shrink the focused pane, or narrow the sidebar while it has the keys.
+    ShrinkFocused,
+    /// Open a tab with one shell, shown.
+    NewTab,
+    /// Close the shown tab; one holding the thread's own pane detaches the thread.
+    CloseTab,
+    /// Open the rename box for the shown tab.
+    RenameTab,
+    /// Show tab N, counting from 1.
+    GoToTab(usize),
+    /// Show the next tab, wrapping to the first.
+    NextTab,
+    /// Show the previous tab, wrapping to the last.
+    PreviousTab,
+    /// Swap the shown tab with the one before it.
+    MoveTabLeft,
+    /// Swap the shown tab with the one after it.
+    MoveTabRight,
+    /// Focus this pane of the shown tab and move the keys there (a click).
+    FocusPane(PaneId),
     /// Attach to the selected thread's session, or start the selected draft,
     /// or open or close the selected group.
     Attach,
-    /// Return from the attached session to the dashboard.
+    /// Return from the attached session to the sidebar.
     Detach,
     /// Leave the attached session for the sidebar, keeping its pane shown.
     LeavePane,
@@ -183,7 +216,7 @@ impl fmt::Display for Intent {
             Self::SelectPrev | Self::SelectWheelPrev => "previous thread",
             Self::SelectRow(_) | Self::PickerSelectRow(_) => "select",
             Self::DashboardHighlight(_) => "highlight item",
-            Self::FocusRight => "focus right",
+            Self::FocusRight | Self::MoveFocus(NavDirection::Right) => "focus right",
             Self::FocusSidebar => "focus sidebar",
             Self::DashboardNext | Self::PickerNext | Self::PickerWheelNext => "next item",
             Self::DashboardPrev | Self::PickerPrev | Self::PickerWheelPrev => "previous item",
@@ -191,6 +224,24 @@ impl fmt::Display for Intent {
             Self::ToggleSidebar | Self::LeavePane => "sidebar",
             Self::WidenFocused => "widen",
             Self::NarrowFocused => "narrow",
+            Self::MoveFocus(NavDirection::Left) => "focus left",
+            Self::MoveFocus(NavDirection::Up) => "focus up",
+            Self::MoveFocus(NavDirection::Down) => "focus down",
+            Self::SplitPane(Split::Right) => "split right",
+            Self::SplitPane(Split::Down) => "split down",
+            Self::ClosePane => "close pane",
+            Self::ToggleZoom => "zoom",
+            Self::GrowFocused => "grow",
+            Self::ShrinkFocused => "shrink",
+            Self::NewTab => "new tab",
+            Self::CloseTab => "close tab",
+            Self::RenameTab => "rename tab",
+            Self::GoToTab(_) => "tab",
+            Self::NextTab => "next tab",
+            Self::PreviousTab => "previous tab",
+            Self::MoveTabLeft => "move tab left",
+            Self::MoveTabRight => "move tab right",
+            Self::FocusPane(_) => "focus pane",
             Self::Attach => "attach",
             Self::Detach => "back to orb",
             Self::DetachSelected => "detach",
@@ -243,8 +294,34 @@ impl fmt::Display for Intent {
 #[cfg(test)]
 mod tests {
     use super::Intent;
-    use crate::feat::sessions::state::GroupKind;
+    use crate::feat::layout::tree::{NavDirection, Split};
+    use crate::feat::sessions::state::{GroupKind, PaneId};
     use crate::feat::zellij::zellij_service::Tool;
+
+    #[rstest::rstest]
+    #[case(Intent::MoveFocus(NavDirection::Left), "focus left")]
+    #[case(Intent::MoveFocus(NavDirection::Right), "focus right")]
+    #[case(Intent::MoveFocus(NavDirection::Up), "focus up")]
+    #[case(Intent::MoveFocus(NavDirection::Down), "focus down")]
+    #[case(Intent::SplitPane(Split::Right), "split right")]
+    #[case(Intent::SplitPane(Split::Down), "split down")]
+    #[case(Intent::ClosePane, "close pane")]
+    #[case(Intent::ToggleZoom, "zoom")]
+    #[case(Intent::GrowFocused, "grow")]
+    #[case(Intent::ShrinkFocused, "shrink")]
+    #[case(Intent::NewTab, "new tab")]
+    #[case(Intent::CloseTab, "close tab")]
+    #[case(Intent::RenameTab, "rename tab")]
+    #[case(Intent::GoToTab(3), "tab")]
+    #[case(Intent::NextTab, "next tab")]
+    #[case(Intent::PreviousTab, "previous tab")]
+    #[case(Intent::MoveTabLeft, "move tab left")]
+    #[case(Intent::MoveTabRight, "move tab right")]
+    #[case(Intent::FocusPane(PaneId(-1)), "focus pane")]
+    fn layout_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
+        // Given / When / Then: which-key labels the layout intent.
+        assert_eq!(intent.to_string(), expected, "which-key label");
+    }
 
     #[rstest::rstest]
     #[case(Tool::Shell, "shell")]

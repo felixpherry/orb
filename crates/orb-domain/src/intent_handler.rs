@@ -11,6 +11,11 @@ use crate::feat::git::validator::{
 use crate::feat::git::worktree::previous_worktree;
 use crate::feat::harness::HarnessId;
 use crate::feat::jumps::validator::{validate_jump_back, validate_jump_forward};
+use crate::feat::layout::state::{FocusMove, Layouts, SessionLayout, Tab};
+use crate::feat::layout::tree::NavDirection;
+use crate::feat::layout::validator::{
+    validate_focus_pane, validate_pane_action, validate_tab_action,
+};
 use crate::feat::pane::validator::{validate_attach, validate_detach};
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
 use crate::feat::picker::state::{
@@ -21,8 +26,8 @@ use crate::feat::picker::validator::{
     validate_pick_project, validate_pick_session, validate_remove_project,
 };
 use crate::feat::sessions::state::{
-    Draft, DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, Project, ProjectId, ProjectKind,
-    Search, Sessions, SidebarItem, Thread, ThreadId, group_slug,
+    Draft, DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, PaneId, Project, ProjectId,
+    ProjectKind, Search, Sessions, SidebarItem, Thread, ThreadId, group_slug,
 };
 use crate::feat::sessions::validator::{
     DeleteError, LAST_IN_GROUP, NewGroupError, SETTLE_IN_PROGRESS, ToggleSettleError,
@@ -201,19 +206,45 @@ impl IntentHandler {
             }
             Intent::Attach => attach_thread(state),
             Intent::Detach => {
-                state.focus = Focus::Dashboard;
+                state.focus = Focus::Sidebar;
                 if let Some(id) = state.sessions.selected_id() {
                     state.attached.remove(&id);
                 }
                 vec![Command::Detach, Command::RefreshSessions]
             }
-            Intent::LeavePane => match validate_focus_sidebar(state) {
-                Ok(()) => {
-                    state.focus = Focus::Sidebar;
-                    vec![Command::Detach, Command::RefreshSessions]
-                }
-                Err(_) => vec![],
+            Intent::LeavePane => leave_pane(state),
+            Intent::MoveFocus(nav) => match (state.focus, nav) {
+                (Focus::Sidebar, NavDirection::Right) => focus_right(state),
+                (Focus::Attached, _) => move_focus(state, *nav),
+                _ => vec![],
             },
+            Intent::SplitPane(split) => {
+                in_pane(state, |layouts, owner| layouts.split(owner, *split))
+            }
+            Intent::ClosePane => close_pane(state),
+            Intent::ToggleZoom => in_pane(state, Layouts::toggle_zoom),
+            Intent::GrowFocused => grow_or_shrink(state, true),
+            Intent::ShrinkFocused => grow_or_shrink(state, false),
+            Intent::NewTab => on_tabs(state, Layouts::new_tab),
+            Intent::CloseTab => close_tab(state),
+            Intent::RenameTab => rename_tab(state),
+            Intent::GoToTab(n) => on_tabs(state, |layouts, owner| layouts.go_to_tab(owner, *n)),
+            Intent::NextTab => on_tabs(state, Layouts::next_tab),
+            Intent::PreviousTab => on_tabs(state, Layouts::previous_tab),
+            Intent::MoveTabLeft => on_tabs(state, Layouts::move_tab_left),
+            Intent::MoveTabRight => on_tabs(state, Layouts::move_tab_right),
+            Intent::FocusPane(pane) => {
+                match (
+                    validate_focus_pane(state, *pane),
+                    state.sessions.selected_id(),
+                ) {
+                    (Ok(()), Some(owner)) => {
+                        state.layouts.focus_pane(owner, *pane);
+                        attach_thread(state)
+                    }
+                    _ => vec![],
+                }
+            }
             Intent::JumpBack => match validate_jump_back(state) {
                 Ok(()) => {
                     let target = state
@@ -1322,7 +1353,6 @@ fn open_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
         state.sessions.filter = None;
     }
     state.sessions.cursor = Some(SidebarItem::Draft(project));
-    state.focus = Focus::Dashboard;
     (!exists)
         .then_some(Command::CreateDraft(project))
         .into_iter()
@@ -1681,25 +1711,145 @@ fn show_pane(state: &mut AppState) -> Vec<Command> {
         (Ok(()), Some(target)) => {
             state.focus = Focus::Attached;
             state.attached.insert(target.thread);
+            state.layouts.open(target.thread);
             vec![Command::Attach(target), Command::RefreshSessions]
         }
         _ => vec![],
     }
 }
 
-/// Moves the keys to the right-hand area: into the session pane while the
-/// selected thread is attached and can still be attached to, else to the
-/// dashboard.
+/// Moves the keys into the shown layout's focused pane while the selected
+/// thread is attached and can still be attached to; with no layout shown
+/// they stay put.
 fn focus_right(state: &mut AppState) -> Vec<Command> {
     match state.sessions.selected_id() {
         Some(id) if state.attached.contains(&id) && validate_attach(state).is_ok() => {
             attach_thread(state)
         }
-        _ => {
-            state.focus = Focus::Dashboard;
-            vec![]
-        }
+        _ => vec![],
     }
+}
+
+/// Moves the keys from a pane to the sidebar, unless it's hidden.
+fn leave_pane(state: &mut AppState) -> Vec<Command> {
+    match validate_focus_sidebar(state) {
+        Ok(()) => {
+            state.focus = Focus::Sidebar;
+            vec![Command::Detach, Command::RefreshSessions]
+        }
+        Err(_) => vec![],
+    }
+}
+
+/// Runs `edit` on the shown layout while the keys are in one of its panes.
+fn in_pane<F>(state: &mut AppState, edit: F) -> Vec<Command>
+where
+    F: FnOnce(&mut Layouts, ThreadId),
+{
+    if let (Ok(()), Some(owner)) = (validate_pane_action(state), state.sessions.selected_id()) {
+        edit(&mut state.layouts, owner);
+    }
+    vec![]
+}
+
+/// Runs `edit` on the shown layout's tabs; the keys stay where they are.
+fn on_tabs<F>(state: &mut AppState, edit: F) -> Vec<Command>
+where
+    F: FnOnce(&mut Layouts, ThreadId),
+{
+    if let (Ok(()), Some(owner)) = (validate_tab_action(state), state.sessions.selected_id()) {
+        edit(&mut state.layouts, owner);
+    }
+    vec![]
+}
+
+/// Moves the focus to the pane `nav` of the focused one; from the leftmost
+/// pane the keys go to the sidebar.
+fn move_focus(state: &mut AppState, nav: NavDirection) -> Vec<Command> {
+    let (Ok(()), Some(owner)) = (validate_pane_action(state), state.sessions.selected_id()) else {
+        return vec![];
+    };
+    match state.layouts.move_focus(owner, nav) {
+        FocusMove::Sidebar => leave_pane(state),
+        FocusMove::Moved | FocusMove::Stuck => vec![],
+    }
+}
+
+/// Closes the focused pane; on the thread's own pane, detaches the thread,
+/// which ends its layout.
+fn close_pane(state: &mut AppState) -> Vec<Command> {
+    let focused = state.shown_layout().and_then(SessionLayout::focused);
+    let (Ok(()), Some(owner), Some(focused)) = (
+        validate_pane_action(state),
+        state.sessions.selected_id(),
+        focused,
+    ) else {
+        return vec![];
+    };
+    if focused == PaneId::from(owner) {
+        return IntentHandler::handle(&Intent::Detach, state);
+    }
+    state.layouts.close_pane(focused);
+    vec![]
+}
+
+/// Closes the shown tab; one holding the thread's own pane detaches the
+/// thread instead.
+fn close_tab(state: &mut AppState) -> Vec<Command> {
+    let (Ok(()), Some(owner)) = (validate_tab_action(state), state.sessions.selected_id()) else {
+        return vec![];
+    };
+    let holds_own = state
+        .shown_layout()
+        .and_then(SessionLayout::active_tab)
+        .is_some_and(|tab| tab.holds(PaneId::from(owner)));
+    if holds_own {
+        return IntentHandler::handle(&Intent::Detach, state);
+    }
+    state.layouts.close_tab(owner);
+    vec![]
+}
+
+/// Grows (`grow`) or shrinks what has the keys: the sidebar, saving its new
+/// width, or the focused pane.
+fn grow_or_shrink(state: &mut AppState, grow: bool) -> Vec<Command> {
+    match state.focus {
+        Focus::Sidebar => {
+            if validate_resize(state).is_err() {
+                return vec![];
+            }
+            let changed = if grow {
+                state.sidebar.widen()
+            } else {
+                state.sidebar.narrow()
+            };
+            changed.then_some(Command::SaveUi).into_iter().collect()
+        }
+        Focus::Attached => in_pane(state, |layouts, owner| {
+            layouts.resize_focused(owner, grow);
+        }),
+        Focus::Dashboard | Focus::Picker | Focus::Rename | Focus::Search => vec![],
+    }
+}
+
+/// Opens the rename box on the shown tab, holding its name.
+fn rename_tab(state: &mut AppState) -> Vec<Command> {
+    let (Ok(()), Some(owner)) = (validate_tab_action(state), state.sessions.selected_id()) else {
+        return vec![];
+    };
+    let Some((tab, name)) = state.layouts.get(owner).map(|layout| {
+        let name = layout.active_tab().and_then(Tab::name).unwrap_or_default();
+        (layout.active(), TextInput::new(name))
+    }) else {
+        return vec![];
+    };
+    state.rename = Some(Rename {
+        target: RenameTarget::Tab { owner, tab },
+        input: name,
+        creating: false,
+    });
+    state.focus = Focus::Rename;
+    vec![]
 }
 
 /// What a picker key does in the rename box: edit the name, save it (a blank
@@ -1722,25 +1872,34 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         ) => return confirm_group_name(state),
         (Intent::PickerConfirm, _) => {
             state.focus = Focus::Sidebar;
-            return state
-                .rename
-                .take()
-                .and_then(|rename| match rename.target {
-                    RenameTarget::Thread(thread) => {
-                        let title = rename.input.text().trim();
-                        Some(Command::RenameThread {
-                            thread,
-                            title: (!title.is_empty()).then(|| title.to_owned()),
-                        })
-                    }
-                    RenameTarget::NewGroup { .. } => None,
-                })
-                .into_iter()
-                .collect();
+            let Some(rename) = state.rename.take() else {
+                return vec![];
+            };
+            let name = rename.input.text().trim();
+            let name = (!name.is_empty()).then(|| name.to_owned());
+            return match rename.target {
+                RenameTarget::Thread(thread) => vec![Command::RenameThread {
+                    thread,
+                    title: name,
+                }],
+                RenameTarget::NewGroup { .. } => vec![],
+                // The keys go back to the panes.
+                RenameTarget::Tab { owner, tab } => {
+                    state.layouts.rename_tab(owner, tab, name);
+                    show_pane(state)
+                }
+            };
         }
         (Intent::PickerCancel, _) => {
-            state.rename = None;
             state.focus = Focus::Sidebar;
+            // A tab's rename box was opened from the panes; the keys go back there.
+            if let Some(Rename {
+                target: RenameTarget::Tab { .. },
+                ..
+            }) = state.rename.take()
+            {
+                return show_pane(state);
+            }
         }
         _ => {}
     }
@@ -1844,8 +2003,7 @@ fn record_jump(state: &mut AppState, from: Option<SidebarItem>) -> Vec<Command> 
 
 /// Lands a jump back or forward on `target`: the cursor moves there and its
 /// row is revealed. From a pane, the keys follow into the target's pane while
-/// orb is attached to it, else go to the sidebar (the dashboard while it's
-/// hidden); elsewhere they stay put.
+/// orb is attached to it, else go to the sidebar; elsewhere they stay put.
 fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
     let Some(target) = target else {
         return vec![];
@@ -1860,10 +2018,7 @@ fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
     let mut commands = vec![Command::SaveJumps];
     match (from_pane, pane.is_empty()) {
         (true, true) => {
-            state.focus = match validate_focus_sidebar(state) {
-                Ok(()) => Focus::Sidebar,
-                Err(_) => Focus::Dashboard,
-            };
+            state.focus = Focus::Sidebar;
             commands.extend([Command::Detach, Command::RefreshSessions]);
         }
         _ => commands.extend(pane),
@@ -1891,11 +2046,13 @@ mod tests {
     use crate::feat::git::git_service::{GitRef, WorktreeFacts};
     use crate::feat::harness::claude::models::{PERMISSION_MODES, info};
     use crate::feat::jumps::state::JumpList;
+    use crate::feat::layout::state::{SessionLayout, Tab};
+    use crate::feat::layout::tree::{NavDirection, Split};
     use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice, setting_label};
     use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
         AttachTarget, Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind,
-        Own, PaneLaunch, Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem,
+        Own, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem,
         SidebarRow, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::validator::{LAST_IN_GROUP, SETTLE_IN_PROGRESS};
@@ -1904,6 +2061,7 @@ mod tests {
     use crate::feat::zellij::zellij_service::Tool;
     use crate::feat::zmx::zmx_service::ZmxSession;
     use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
+    use ratatui::layout::Rect;
 
     /// Claude's setting row for `value`.
     fn setting(value: Option<&str>) -> PickerItem {
@@ -2122,7 +2280,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Intent::FocusRight, Focus::Sidebar, Focus::Dashboard)]
+    #[case(Intent::FocusRight, Focus::Sidebar, Focus::Sidebar)]
     #[case(Intent::FocusSidebar, Focus::Dashboard, Focus::Sidebar)]
     fn focus_intents_move_focus(#[case] intent: Intent, #[case] from: Focus, #[case] to: Focus) {
         // Given orb focused on `from`.
@@ -2170,18 +2328,17 @@ mod tests {
     #[rstest::rstest]
     #[case(Focus::Sidebar)]
     #[case(Focus::Dashboard)]
-    fn hiding_the_sidebar_focuses_the_right_side(#[case] focus: Focus) {
-        // Given a shown sidebar, with `focus` focused.
+    fn hiding_the_sidebar_without_a_layout_keeps_the_keys(#[case] focus: Focus) {
+        // Given a shown sidebar, with `focus` focused and no layout shown.
         let mut state = laid_out(focus, 32, false);
 
         // When handling ToggleSidebar.
         IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
 
-        // Then the right side has the keys.
+        // Then the keys stay where they were.
         assert_eq!(
-            state.focus,
-            Focus::Dashboard,
-            "hiding from {focus:?} should focus the right side"
+            state.focus, focus,
+            "hiding from {focus:?} with nothing shown should keep the keys"
         );
     }
 
@@ -2467,6 +2624,23 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn attach_opens_a_one_tab_layout_for_the_thread() {
+        // Given a selected idle thread.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then thread 1 has one tab focused on its own pane.
+        let layout = state.layouts.get(ThreadId(1));
+        assert_eq!(
+            layout.map(|layout| (layout.tabs().len(), layout.focused())),
+            Some((1, Some(PaneId(1)))),
+            "attaching should open the thread's layout"
+        );
+    }
+
+    #[rstest::rstest]
     fn attach_adds_the_thread_to_attached() {
         // Given a selected idle thread.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
@@ -2512,18 +2686,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn detach_sets_focus_dashboard() {
+    fn detach_focuses_the_sidebar() {
         // Given keys going to thread 1's attached session.
         let mut state = attached();
 
         // When handling Detach.
         IntentHandler::handle(&Intent::Detach, &mut state);
 
-        // Then keys drive the dashboard.
+        // Then keys drive the sidebar.
         assert_eq!(
             state.focus,
-            Focus::Dashboard,
-            "Detach should return to the dashboard"
+            Focus::Sidebar,
+            "Detach should return to the sidebar"
         );
     }
 
@@ -2703,19 +2877,19 @@ mod tests {
     #[rstest::rstest]
     #[case(&[])]
     #[case(&[1])]
-    fn focus_right_on_an_unattached_thread_focuses_the_dashboard(#[case] attached: &[i64]) {
+    fn focus_right_on_an_unattached_thread_keeps_the_keys(#[case] attached: &[i64]) {
         // Given thread 2 selected and unattached, with no thread or thread 1
         // attached.
         let mut state = left_pane(attached, 2);
+        let before = state.focus;
 
         // When handling FocusRight.
         IntentHandler::handle(&Intent::FocusRight, &mut state);
 
-        // Then keys drive the dashboard.
+        // Then the keys stay put.
         assert_eq!(
-            state.focus,
-            Focus::Dashboard,
-            "FocusRight with {attached:?} attached should focus the dashboard"
+            state.focus, before,
+            "FocusRight with {attached:?} attached should keep the keys"
         );
     }
 
@@ -2928,19 +3102,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn picker_confirm_on_a_project_focuses_the_dashboard() {
+    fn picker_confirm_on_a_project_keeps_the_keys_in_the_sidebar() {
         // Given the project picker opened from the sidebar.
         let mut state = picking(Focus::Sidebar);
 
         // When handling PickerConfirm.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the picker is closed and the keys are on the dashboard, which
-        // shows the draft.
+        // Then the picker is closed and the keys are back in the sidebar.
         assert_eq!(
             (state.focus, state.picker.is_none()),
-            (Focus::Dashboard, true),
-            "picking a project should hand the keys to the dashboard"
+            (Focus::Sidebar, true),
+            "picking a project should hand the keys back to the sidebar"
         );
     }
 
@@ -6455,7 +6628,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn new_incognito_focuses_the_dashboard() {
+    fn new_incognito_keeps_the_keys_in_the_sidebar() {
         // Given the Incognito project and the sidebar focused.
         let mut state = incognito(true);
         state.focus = Focus::Sidebar;
@@ -6463,11 +6636,11 @@ mod tests {
         // When handling NewIncognito.
         IntentHandler::handle(&Intent::NewIncognito, &mut state);
 
-        // Then the dashboard has the focus, ready for ⏎ to start the draft.
+        // Then the sidebar keeps the keys, ready for ⏎ to start the draft.
         assert_eq!(
             state.focus,
-            Focus::Dashboard,
-            "the incognito draft should open on the dashboard"
+            Focus::Sidebar,
+            "the incognito draft should leave the keys in the sidebar"
         );
     }
 
@@ -7944,7 +8117,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn jump_back_from_a_pane_with_the_sidebar_hidden_focuses_the_dashboard() {
+    fn jump_back_from_a_pane_with_the_sidebar_hidden_focuses_the_hidden_sidebar() {
         // Given the keys in thread 2's pane with the sidebar hidden, and
         // thread 1 listed and unattached.
         let mut state = jumping(Focus::Attached, &[2], &[on_thread(1), on_thread(2)]);
@@ -7953,11 +8126,11 @@ mod tests {
         // When handling JumpBack.
         IntentHandler::handle(&Intent::JumpBack, &mut state);
 
-        // Then the dashboard has the keys.
+        // Then the hidden sidebar has the keys.
         assert_eq!(
             state.focus,
-            Focus::Dashboard,
-            "with the sidebar hidden, <C-o> out of a pane goes to the dashboard"
+            Focus::Sidebar,
+            "with the sidebar hidden, <C-o> out of a pane goes to the sidebar"
         );
     }
 
@@ -9757,5 +9930,466 @@ mod tests {
 
         // Then nothing happens.
         assert!(commands.is_empty(), "a gone thread can't be attached");
+    }
+
+    /// Thread 1 selected and attached, its one-tab layout open over an
+    /// 80×24 body, with the keys at `focus`.
+    fn with_layout(focus: Focus) -> AppState {
+        let mut state = AppState {
+            focus,
+            attached: HashSet::from([ThreadId(1)]),
+            ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
+        };
+        state.layouts.open(ThreadId(1));
+        state.layouts.fit_to(Rect::new(0, 0, 80, 24));
+        state
+    }
+
+    /// `with_layout(Focus::Attached)` split right once: thread 1's pane on
+    /// the left, pane -1 on the right with the focus.
+    fn split_layout() -> AppState {
+        let mut state = with_layout(Focus::Attached);
+        IntentHandler::handle(&Intent::SplitPane(Split::Right), &mut state);
+        state
+    }
+
+    /// `with_layout(Focus::Attached)` with a second tab, shown.
+    fn two_tabs() -> AppState {
+        let mut state = with_layout(Focus::Attached);
+        IntentHandler::handle(&Intent::NewTab, &mut state);
+        state
+    }
+
+    fn shown_focus(state: &AppState) -> Option<PaneId> {
+        state.shown_layout().and_then(SessionLayout::focused)
+    }
+
+    fn shown_tab(state: &AppState) -> Option<usize> {
+        state.shown_layout().map(SessionLayout::active)
+    }
+
+    fn tab_count(state: &AppState) -> usize {
+        state.shown_layout().map_or(0, |layout| layout.tabs().len())
+    }
+
+    fn pane_count(state: &AppState) -> usize {
+        state
+            .shown_layout()
+            .map_or(0, |layout| layout.placed(Rect::new(0, 0, 80, 24)).len())
+    }
+
+    #[rstest::rstest]
+    fn split_pane_right_focuses_a_new_pane() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Attached);
+
+        // When splitting it right.
+        IntentHandler::handle(&Intent::SplitPane(Split::Right), &mut state);
+
+        // Then the new pane -1 has the focus.
+        assert_eq!(
+            shown_focus(&state),
+            Some(PaneId(-1)),
+            "the new pane is focused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn split_pane_returns_no_commands() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Attached);
+
+        // When splitting it right.
+        let commands = IntentHandler::handle(&Intent::SplitPane(Split::Right), &mut state);
+
+        // Then nothing else is asked for; the frontend starts the shell.
+        assert_eq!(commands, vec![], "a split returns no commands");
+    }
+
+    #[rstest::rstest]
+    fn split_pane_outside_a_pane_does_nothing() {
+        // Given thread 1's layout shown while the sidebar has the keys.
+        let mut state = with_layout(Focus::Sidebar);
+
+        // When splitting.
+        IntentHandler::handle(&Intent::SplitPane(Split::Right), &mut state);
+
+        // Then the layout still has one pane.
+        assert_eq!(pane_count(&state), 1, "a split needs the keys in a pane");
+    }
+
+    #[rstest::rstest]
+    fn close_pane_on_a_split_removes_it() {
+        // Given pane -1 split off and focused.
+        let mut state = split_layout();
+
+        // When closing the focused pane.
+        IntentHandler::handle(&Intent::ClosePane, &mut state);
+
+        // Then only thread 1's pane is left, focused.
+        assert_eq!(
+            (pane_count(&state), shown_focus(&state)),
+            (1, Some(PaneId(1))),
+            "closing the split leaves the thread's pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_pane_on_the_threads_pane_detaches_the_thread() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Attached);
+
+        // When closing it.
+        IntentHandler::handle(&Intent::ClosePane, &mut state);
+
+        // Then thread 1 is detached.
+        assert!(
+            !state.attached.contains(&ThreadId(1)),
+            "closing the thread's own pane detaches it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_focus_left_from_the_leftmost_pane_focuses_the_sidebar() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Attached);
+
+        // When moving the focus left.
+        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
+
+        // Then the sidebar has the keys.
+        assert_eq!(state.focus, Focus::Sidebar, "leftmost left is the sidebar");
+    }
+
+    #[rstest::rstest]
+    fn move_focus_left_from_the_leftmost_pane_returns_detach() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Attached);
+
+        // When moving the focus left.
+        let commands = IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
+
+        // Then the pane loses the keys.
+        assert!(
+            commands.contains(&Command::Detach),
+            "leaving the pane should detach its keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_focus_left_with_the_sidebar_hidden_keeps_the_keys() {
+        // Given thread 1's lone pane with the keys and the sidebar hidden.
+        let mut state = with_layout(Focus::Attached);
+        state.sidebar.hidden = true;
+
+        // When moving the focus left.
+        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
+
+        // Then the pane keeps the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Attached,
+            "a hidden sidebar can't take the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_focus_right_from_the_sidebar_enters_the_shown_layout() {
+        // Given thread 1's layout shown while the sidebar has the keys.
+        let mut state = with_layout(Focus::Sidebar);
+
+        // When moving the focus right.
+        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+
+        // Then the keys are in the pane.
+        assert_eq!(state.focus, Focus::Attached, "Cmd l enters the layout");
+    }
+
+    #[rstest::rstest]
+    fn move_focus_right_from_the_sidebar_without_a_layout_keeps_the_keys() {
+        // Given thread 1 selected but not attached.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When moving the focus right.
+        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+
+        // Then the sidebar keeps the keys.
+        assert_eq!(state.focus, Focus::Sidebar, "nothing is shown to enter");
+    }
+
+    #[rstest::rstest]
+    fn grow_with_the_sidebar_focused_widens_it() {
+        // Given the sidebar 32 columns wide with the keys.
+        let mut state = with_layout(Focus::Sidebar);
+        state.sidebar.width = 32;
+
+        // When growing.
+        IntentHandler::handle(&Intent::GrowFocused, &mut state);
+
+        // Then it is a step wider.
+        assert_eq!(state.sidebar.width, 36, "Cmd + widens the sidebar");
+    }
+
+    #[rstest::rstest]
+    fn grow_in_a_pane_grows_it() {
+        // Given pane -1 split off on the right and focused.
+        let mut state = split_layout();
+        let width = |state: &AppState| {
+            state
+                .shown_layout()?
+                .placed(Rect::new(0, 0, 80, 24))
+                .into_iter()
+                .find(|place| place.pane == PaneId(-1))
+                .map(|place| place.area.width)
+        };
+        let before = width(&state);
+
+        // When growing.
+        IntentHandler::handle(&Intent::GrowFocused, &mut state);
+
+        // Then pane -1 is 4 columns wider.
+        assert_eq!(
+            width(&state),
+            before.map(|width| width + 4),
+            "Cmd + grows the focused pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_zoom_zooms_the_shown_tab() {
+        // Given two panes side by side.
+        let mut state = split_layout();
+
+        // When zooming.
+        IntentHandler::handle(&Intent::ToggleZoom, &mut state);
+
+        // Then the tab is zoomed.
+        let zoomed = state
+            .shown_layout()
+            .and_then(SessionLayout::active_tab)
+            .is_some_and(Tab::zoomed);
+        assert!(zoomed, "the shown tab should be zoomed");
+    }
+
+    #[rstest::rstest]
+    fn new_tab_shows_a_new_tab() {
+        // Given thread 1's one-tab layout.
+        let mut state = with_layout(Focus::Attached);
+
+        // When opening a tab.
+        IntentHandler::handle(&Intent::NewTab, &mut state);
+
+        // Then a second tab is shown.
+        assert_eq!(
+            (tab_count(&state), shown_tab(&state)),
+            (2, Some(1)),
+            "the new tab is shown"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_tab_removes_the_shown_tab() {
+        // Given a second tab shown.
+        let mut state = two_tabs();
+
+        // When closing the tab.
+        IntentHandler::handle(&Intent::CloseTab, &mut state);
+
+        // Then only the first tab is left, shown.
+        assert_eq!(
+            (tab_count(&state), shown_tab(&state)),
+            (1, Some(0)),
+            "the shown tab closes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_tab_holding_the_threads_pane_detaches_the_thread() {
+        // Given thread 1's one-tab layout.
+        let mut state = with_layout(Focus::Attached);
+
+        // When closing the tab.
+        IntentHandler::handle(&Intent::CloseTab, &mut state);
+
+        // Then thread 1 is detached.
+        assert!(
+            !state.attached.contains(&ThreadId(1)),
+            "closing the thread's own tab detaches it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_tab_opens_the_rename_box_on_the_tab() {
+        // Given a second tab shown.
+        let mut state = two_tabs();
+
+        // When renaming the tab.
+        IntentHandler::handle(&Intent::RenameTab, &mut state);
+
+        // Then the rename box names thread 1's second tab and has the keys.
+        assert_eq!(
+            (
+                state.rename.as_ref().map(|rename| rename.target),
+                state.focus
+            ),
+            (
+                Some(RenameTarget::Tab {
+                    owner: ThreadId(1),
+                    tab: 1
+                }),
+                Focus::Rename
+            ),
+            "the rename box opens on the shown tab"
+        );
+    }
+
+    /// The rename box open on thread 1's first tab, holding `name`.
+    fn renaming_tab(name: &str) -> AppState {
+        let mut state = with_layout(Focus::Rename);
+        state.rename = Some(Rename {
+            target: RenameTarget::Tab {
+                owner: ThreadId(1),
+                tab: 0,
+            },
+            input: TextInput::new(name),
+            creating: false,
+        });
+        state
+    }
+
+    fn shown_tab_name(state: &AppState) -> Option<String> {
+        state
+            .shown_layout()
+            .and_then(SessionLayout::active_tab)
+            .and_then(Tab::name)
+            .map(str::to_owned)
+    }
+
+    #[rstest::rstest]
+    fn rename_tab_confirm_names_the_tab() {
+        // Given the rename box on the first tab holding "logs".
+        let mut state = renaming_tab("logs");
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the tab is named logs.
+        assert_eq!(
+            shown_tab_name(&state).as_deref(),
+            Some("logs"),
+            "the tab takes the name"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_tab_confirm_puts_the_keys_back_in_the_panes() {
+        // Given the rename box on the first tab holding "logs".
+        let mut state = renaming_tab("logs");
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the keys are back in the pane.
+        assert_eq!(state.focus, Focus::Attached, "the panes get the keys back");
+    }
+
+    #[rstest::rstest]
+    fn rename_tab_cancel_puts_the_keys_back_in_the_panes() {
+        // Given the rename box on the first tab holding "logs".
+        let mut state = renaming_tab("logs");
+
+        // When cancelling.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the keys are back in the pane.
+        assert_eq!(state.focus, Focus::Attached, "the panes get the keys back");
+    }
+
+    #[rstest::rstest]
+    fn rename_tab_confirm_of_an_empty_name_clears_it() {
+        // Given the first tab named logs and the rename box holding spaces.
+        let mut state = renaming_tab("  ");
+        state
+            .layouts
+            .rename_tab(ThreadId(1), 0, Some("logs".to_owned()));
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the tab has no name.
+        assert_eq!(shown_tab_name(&state), None, "a blank name clears it");
+    }
+
+    #[rstest::rstest]
+    fn go_to_tab_shows_it() {
+        // Given a second tab shown.
+        let mut state = two_tabs();
+
+        // When going to tab 1.
+        IntentHandler::handle(&Intent::GoToTab(1), &mut state);
+
+        // Then the first tab is shown.
+        assert_eq!(shown_tab(&state), Some(0), "Cmd 1 shows the first tab");
+    }
+
+    #[rstest::rstest]
+    fn next_tab_shows_the_next() {
+        // Given two tabs, the first shown.
+        let mut state = two_tabs();
+        IntentHandler::handle(&Intent::GoToTab(1), &mut state);
+
+        // When showing the next tab.
+        IntentHandler::handle(&Intent::NextTab, &mut state);
+
+        // Then the second tab is shown.
+        assert_eq!(shown_tab(&state), Some(1), "Cmd ] shows the next tab");
+    }
+
+    #[rstest::rstest]
+    fn move_tab_left_swaps_it() {
+        // Given a second tab shown, named logs.
+        let mut state = two_tabs();
+        state
+            .layouts
+            .rename_tab(ThreadId(1), 1, Some("logs".to_owned()));
+
+        // When moving it left.
+        IntentHandler::handle(&Intent::MoveTabLeft, &mut state);
+
+        // Then logs is the first tab, still shown.
+        assert_eq!(
+            (shown_tab(&state), shown_tab_name(&state).as_deref()),
+            (Some(0), Some("logs")),
+            "Cmd i moves the tab left"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_pane_focuses_the_clicked_pane() {
+        // Given pane -1 split off and focused, the sidebar with the keys.
+        let mut state = split_layout();
+        state.focus = Focus::Sidebar;
+
+        // When clicking thread 1's pane.
+        IntentHandler::handle(&Intent::FocusPane(PaneId(1)), &mut state);
+
+        // Then thread 1's pane has the focus.
+        assert_eq!(
+            shown_focus(&state),
+            Some(PaneId(1)),
+            "the clicked pane is focused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_pane_moves_the_keys_into_the_panes() {
+        // Given thread 1's layout shown while the sidebar has the keys.
+        let mut state = with_layout(Focus::Sidebar);
+
+        // When clicking thread 1's pane.
+        IntentHandler::handle(&Intent::FocusPane(PaneId(1)), &mut state);
+
+        // Then the keys are in the pane.
+        assert_eq!(state.focus, Focus::Attached, "a click moves the keys in");
     }
 }

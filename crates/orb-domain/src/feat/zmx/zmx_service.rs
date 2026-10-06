@@ -152,6 +152,11 @@ impl ZmxService {
         Self { zmx, dir }
     }
 
+    /// orb's pane socket directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// The session named `name` on orb's pane socket directory.
     pub fn session(&self, name: String) -> ZmxSession {
         ZmxSession {

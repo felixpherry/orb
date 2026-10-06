@@ -904,16 +904,6 @@ fn project_colour(name: &str) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// The Settled shelf's label in the dashboard's shelf hint: `▸ Settled (N)`
-/// closed, `▾ Settled` open.
-pub(crate) fn shelf_label(count: usize, open: bool) -> String {
-    if open {
-        "▾ Settled".to_owned()
-    } else {
-        format!("▸ Settled ({count})")
-    }
-}
-
 /// Draws `left`, and `right` against the right edge with a cell between them.
 pub(crate) fn render_split(left: Line<'_>, right: Line<'_>, area: Rect, buf: &mut Buffer) {
     let [left_area, right_area] = Layout::horizontal([

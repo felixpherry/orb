@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::feat::dashboard::state::DashboardCursor;
 use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::jumps::state::JumpList;
+use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::PickerState;
 use crate::feat::search::state::SearchProgress;
 use crate::feat::sessions::state::{Sessions, ThreadId};
@@ -20,9 +21,9 @@ pub enum Focus {
     /// Keys move through the sidebar's threads.
     #[default]
     Sidebar,
-    /// Keys act on the dashboard on the right.
+    /// Nothing sets it any more; the start screen takes no keys.
     Dashboard,
-    /// Keys go to the attached session.
+    /// Keys go to the shown layout's focused pane.
     Attached,
     /// Keys edit the open picker's filter and move its selection.
     Picker,
@@ -49,8 +50,11 @@ pub struct AppState {
     /// `<C-\>`, settling, deleting, the pane's exit and a failed spawn. The
     /// right-hand area shows the selected thread's pane while it's in here.
     /// Written by the intent handler, the frontend, and the sessions actor
-    /// (which detaches a group it goes ahead deleting).
+    /// (which detaches a group it goes ahead deleting). Each attached thread
+    /// has a layout in `layouts`, dropped once it leaves.
     pub attached: HashSet<ThreadId>,
+    /// Each attached thread's tabs and splits (see [`Layouts`]).
+    pub layouts: Layouts,
     /// The open picker, if any.
     pub picker: Option<PickerState>,
     /// The open rename box, if any. Written by the intent handler, and
@@ -75,6 +79,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The layout the right-hand area shows: the selected thread's, while it
+    /// is attached. `None` means the start screen.
+    pub fn shown_layout(&self) -> Option<&SessionLayout> {
+        self.layouts.get(self.sessions.selected_id()?)
+    }
+
     /// What the frontend knows about harness `id`.
     pub fn harness_info(&self, id: &HarnessId) -> Option<&HarnessInfo> {
         self.harnesses.iter().find(|info| info.id == *id)
@@ -100,7 +110,7 @@ mod tests {
     use crate::feat::harness::fake::pi_like;
     use crate::feat::sessions::state::{
         Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, Project,
-        ProjectId, ProjectKind, Sessions, SidebarItem,
+        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
 
     /// One project whose draft runs `harness`, selected, with Claude and a
@@ -197,6 +207,70 @@ mod tests {
         assert!(
             !offers,
             "the draft's own pi harness lists no permission modes"
+        );
+    }
+
+    /// Thread 1 selected; its layout open when `attached`.
+    fn selecting_thread(attached: bool) -> AppState {
+        let thread = Thread {
+            harness: HarnessId::new("claude"),
+            id: ThreadId(1),
+            title: None,
+            cwd: "/tmp".into(),
+            transcript: None,
+            status: ThreadStatus::Idle,
+            turn_started_at: None,
+            pane: None,
+            branch: None,
+            pinned_at: None,
+            settled_at: None,
+            active_since: SystemTime::UNIX_EPOCH,
+            created_at: SystemTime::UNIX_EPOCH,
+            last_activity_at: SystemTime::UNIX_EPOCH,
+            unseen: false,
+            group: None,
+            model: None,
+            permission: None,
+        };
+        let mut state = drafting("claude");
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project.threads = vec![thread];
+        }
+        state.sessions.cursor = Some(SidebarItem::Thread(ThreadId(1)));
+        if attached {
+            state.attached.insert(ThreadId(1));
+            state.layouts.open(ThreadId(1));
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn shown_layout_is_the_selected_attached_threads() {
+        // Given selected thread 1 attached with its layout open.
+        let state = selecting_thread(true);
+
+        // When asking for the shown layout.
+        let shown = state.shown_layout();
+
+        // Then it is thread 1's.
+        assert!(
+            shown.is_some() && shown == state.layouts.get(ThreadId(1)),
+            "the selected attached thread's layout is shown"
+        );
+    }
+
+    #[rstest::rstest]
+    fn shown_layout_is_none_for_an_unattached_thread() {
+        // Given selected thread 1, not attached.
+        let state = selecting_thread(false);
+
+        // When asking for the shown layout.
+        let shown = state.shown_layout();
+
+        // Then nothing is shown.
+        assert!(
+            shown.is_none(),
+            "an unattached thread shows the start screen"
         );
     }
 }

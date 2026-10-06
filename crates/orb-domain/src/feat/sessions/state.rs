@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
+use serde::{Deserialize, Serialize};
 
 use crate::TextInput;
 use crate::feat::harness::HarnessId;
@@ -22,14 +23,21 @@ pub const NEW_THREAD: &str = "New thread";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ThreadId(pub i64);
 
-/// Identifies a pane. Each thread has one pane, numbered as the thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Identifies a pane. A thread's own pane is numbered as the thread; panes
+/// orb splits off are numbered down from -1, so the two never meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct PaneId(pub i64);
 
 impl PaneId {
     /// The zmx session name of a pane orb made: `orb-p<id>`.
     pub fn zmx_name(self) -> String {
         format!("orb-p{}", self.0)
+    }
+
+    /// The thread whose own pane this is; `None` for a split-off pane.
+    pub fn thread(self) -> Option<ThreadId> {
+        (self.0 > 0).then_some(ThreadId(self.0))
     }
 }
 
@@ -1350,6 +1358,34 @@ mod tests {
 
         // Then it is orb-p7.
         assert_eq!(name, "orb-p7", "a pane's zmx session is orb-p<id>");
+    }
+
+    #[rstest::rstest]
+    fn thread_pane_names_its_thread() {
+        // Given thread 7's own pane.
+        let pane = PaneId::from(ThreadId(7));
+
+        // When asking whose thread's pane it is.
+        let thread = pane.thread();
+
+        // Then it is thread 7's.
+        assert_eq!(
+            thread,
+            Some(ThreadId(7)),
+            "a thread's pane names its thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn split_pane_names_no_thread() {
+        // Given split-off pane -1.
+        let pane = PaneId(-1);
+
+        // When asking whose thread's pane it is.
+        let thread = pane.thread();
+
+        // Then it is no thread's.
+        assert_eq!(thread, None, "a split-off pane is no thread's own");
     }
 
     fn at(secs: u64) -> SystemTime {
