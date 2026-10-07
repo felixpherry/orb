@@ -437,15 +437,10 @@ mod tests {
                 session: SessionId(id),
             }),
             branch: None,
-            pinned_at: None,
-            settled_at: None,
-            active_since: UNIX_EPOCH,
             created_at: UNIX_EPOCH + Duration::from_millis(born_ms),
             last_activity_at: UNIX_EPOCH + Duration::from_secs(last_chat_secs),
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 
@@ -973,10 +968,12 @@ mod tests {
         // Given a backfilled settled thread.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("settled words")])?;
-        let state = State::new(app(vec![Thread {
-            settled_at: Some(UNIX_EPOCH + Duration::from_secs(30)),
-            ..thread(1, 1_000, Some(a), 20)
-        }]));
+        let mut app = app(vec![thread(1, 1_000, Some(a), 20)]);
+        app.sessions.sessions = sessions_for(&app.sessions.projects);
+        if let Some(session) = app.sessions.sessions.get_mut(0) {
+            session.settled_at = Some(UNIX_EPOCH + Duration::from_secs(30));
+        }
+        let state = State::new(app);
         let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
         let done = backfilled(&state).await;
         searching(&state, "settled");

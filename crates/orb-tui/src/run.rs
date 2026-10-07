@@ -27,9 +27,10 @@
 //! second death closes the pane with an error on the mode line. While a pane
 //! has the keys, input goes straight to its program except orb's Cmd keys,
 //! `<C-[>`/`<C-]>` and a `<C-g>` sequence (see [`keymap::route`]). The loop
-//! itself reads the directory picker's listings, the branch picker's refs and the session picker's preview, re-reading the
-//! preview whenever the selected thread's transcript changes length, and
-//! hands tools to zellij, since each takes milliseconds.
+//! itself reads the directory picker's listings, the branch picker's refs
+//! and the session picker's preview, re-reading the preview whenever the
+//! selected thread's transcript changes length, since each takes
+//! milliseconds.
 //!
 //! A click on the sidebar or `Cmd h` from the leftmost pane moves the keys to
 //! the sidebar and leaves the panes drawn, so `Cmd l` goes back in. Settling
@@ -87,7 +88,6 @@ use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::{PaneId, SessionId, ThreadId};
 use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
-use orb_domain::feat::zellij::zellij_service::{NOT_IN_ZELLIJ, ZellijService, zellij_reason};
 use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
 use orb_domain::{AppState, Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
@@ -145,9 +145,9 @@ impl Frontend {
     /// `sessions`; worktree commands go to `worktrees`; search commands go
     /// to `search`; a thread whose worktree under `worktrees_root` is gone has
     /// it recreated before attaching; the branch picker's refs come from
-    /// `git`; panes run with `env` and attach through `zmx`; tools open through
-    /// `zellij`, `None` outside zellij; notices are announced through
-    /// `notifier` while orb's terminal isn't focused. The terminal is restored on exit and on panic.
+    /// `git`; panes run with `env` and attach through `zmx`; notices are
+    /// announced through `notifier` while orb's terminal isn't focused. The
+    /// terminal is restored on exit and on panic.
     ///
     /// # Errors
     ///
@@ -164,7 +164,6 @@ impl Frontend {
         harnesses: Harnesses,
         env: Vec<(OsString, OsString)>,
         zmx: ZmxService,
-        zellij: Option<ZellijService>,
         notifier: NotifierService,
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx, tz } = self;
@@ -181,7 +180,6 @@ impl Frontend {
                 harnesses,
                 env,
                 zmx,
-                zellij,
                 notifier,
                 tx,
                 tz,
@@ -417,9 +415,8 @@ fn after_pane(focus: Focus) -> Focus {
 }
 
 /// The outer terminal's cursor shape with the keys in `focus`: a steady
-/// block on the sidebar's selected row or the dashboard's highlighted item, a
-/// steady bar in a text input (a picker's filter, the rename box, the sidebar
-/// search), the child's own shape (`pane`) while attached, and the user's
+/// block on the sidebar's selected row, a steady bar in a text input (a
+/// picker's filter, the rename box, the sidebar search), the child's own shape (`pane`) while attached, and the user's
 /// default while attached without a pane.
 fn cursor_style(focus: Focus, pane: Option<SetCursorStyle>) -> SetCursorStyle {
     match (focus, pane) {
@@ -459,17 +456,15 @@ struct App {
     respawned: HashSet<PaneId>,
     /// Resume commands waiting for their fresh pane's first output.
     typing: HashMap<PaneId, String>,
-    /// Shown on the right when a thread's attach command couldn't start.
+    /// Shown on the start screen when a pane's client couldn't start.
     pane_error: Option<String>,
     /// A new session's attach request is waiting for the keys to come back
-    /// to the sidebar or the dashboard.
+    /// to the sidebar.
     attach_waited: bool,
     /// The environment panes run with.
     env: Vec<(OsString, OsString)>,
     /// Lists the zmx sessions panes attach to.
     zmx: ZmxService,
-    /// Opens tools; `None` outside zellij.
-    zellij: Option<ZellijService>,
     /// Announces the sessions actor's notices.
     notifier: NotifierService,
     /// The zone the mode line's clock shows.
@@ -500,7 +495,6 @@ impl App {
         harnesses: Harnesses,
         env: Vec<(OsString, OsString)>,
         zmx: ZmxService,
-        zellij: Option<ZellijService>,
         notifier: NotifierService,
         tx: Sender<LoopEvent>,
         tz: TimeZone,
@@ -528,7 +522,6 @@ impl App {
             attach_waited: false,
             env,
             zmx,
-            zellij,
             notifier,
             tz,
             tx,
@@ -951,17 +944,6 @@ impl App {
                     }
                 }
             }
-            Command::OpenTool { tool, cwd } => {
-                let opened = match &self.zellij {
-                    None => Err(NOT_IN_ZELLIJ.to_owned()),
-                    Some(zellij) => zellij
-                        .open_tool(*tool, cwd)
-                        .map_err(|report| zellij_reason(&report)),
-                };
-                if let Err(reason) = opened {
-                    self.state.write().sessions.error = Some(reason);
-                }
-            }
             Command::AddProject(root) => {
                 let _ = self
                     .sessions
@@ -1253,8 +1235,8 @@ impl App {
 
     /// Attaches to a new session's request while it's still selected, as
     /// [`started_attach`] decides: at once, or, if the user was typing or in
-    /// a pane when it came up, once the keys are back in the sidebar or the
-    /// dashboard, leaving them there with the pane drawn (as a click on the sidebar does). A
+    /// a pane when it came up, once the keys are back in the sidebar, leaving
+    /// them there with the pane drawn (as a click on the sidebar does). A
     /// request whose session is no longer selected is dropped for good. A
     /// failure the start still reported (saving the store) stays on the mode
     /// line.
@@ -1424,7 +1406,7 @@ impl App {
     fn spawn_pane(&self, id: PaneId, session: &ZmxSession, cwd: &Path) -> Option<Pane> {
         let tx = self.tx.clone();
         let command = PaneCommand {
-            argv: attach_argv(session, &[]),
+            argv: attach_argv(session),
             cwd: cwd.to_owned(),
             env: pane_env(&self.env, id),
         };
@@ -1696,15 +1678,10 @@ mod tests {
                         turn_started_at: None,
                         pane: None,
                         branch: None,
-                        pinned_at: None,
-                        settled_at: None,
-                        active_since: UNIX_EPOCH,
                         created_at: UNIX_EPOCH,
                         last_activity_at: UNIX_EPOCH,
                         unseen: false,
-                        group: None,
                         model: None,
-                        permission: None,
                     }],
                     repo: true,
                     removed: false,
@@ -2170,7 +2147,7 @@ mod tests {
         // When one of the dropped panes exited early.
         let error = pane_error_after(error, [false, true]);
 
-        // Then the dashboard says the session exited at start.
+        // Then the start screen says the session exited at start.
         assert_eq!(
             error.as_deref(),
             Some("session exited at start"),

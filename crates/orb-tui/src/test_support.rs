@@ -4,7 +4,7 @@ use orb_domain::feat::sessions::state::{Project, ProjectKind, Session, SessionKi
 
 /// The sessions `projects`' threads run in, one per pane session, as the
 /// sessions actor would show them: each in its first thread's directory,
-/// pinned, settled and active as that thread.
+/// neither pinned nor settled, active since the thread's creation.
 pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
     let mut shown: Vec<Session> = Vec::new();
     for project in projects {
@@ -28,9 +28,9 @@ pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
                 name: None,
                 branch: None,
                 created_at: thread.created_at,
-                pinned_at: thread.pinned_at,
-                settled_at: thread.settled_at,
-                active_since: thread.active_since,
+                pinned_at: None,
+                settled_at: None,
+                active_since: thread.created_at,
                 last_activity_at: thread.last_activity_at,
             });
         }

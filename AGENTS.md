@@ -10,7 +10,7 @@ This document defines the _coding conventions_, _patterns_, and _architecture_ f
 - `docs/research.md` — verified external facts (versions, CLI flags, file formats). Re-verify version-sensitive facts before relying on them.
 - `.agents/RECORD.md` — the current state of the app.
 - **At the end of every milestone, write that milestone's group from the roadmap's "Record updates" section into `.agents/RECORD.md`** (after confirming each entry is true).
-- Keybindings: bind only keys the user has defined (roadmap Keys section or the milestone's approved plan). Never bind Alt/Option or Cmd (owned by the user's window manager and zellij).
+- Keybindings: bind only keys the user has defined (roadmap Keys section or the milestone's approved plan). Never bind Alt/Option (owned by the user's window manager, paneru); Cmd keys are orb's and reach it through kitty `send_key super+…` maps.
 
 ## 1. Overview
 

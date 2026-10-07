@@ -28,8 +28,6 @@ use orb_domain::feat::sessions::store::Store;
 use orb_domain::feat::worktrees::worktrees_actor::{
     SWEEP_EVERY, WorktreesActorDeps, spawn_worktrees_actor,
 };
-use orb_domain::feat::zellij::zellij_cli::ZellijCli;
-use orb_domain::feat::zellij::zellij_service::ZellijService;
 use orb_domain::feat::zmx::zmx_cli::ZmxCli;
 use orb_domain::feat::zmx::zmx_service::ZmxService;
 use orb_domain::{AppState, Finished, Services, State, ancestry, parse_parents, run_within};
@@ -57,16 +55,7 @@ fn main() -> Result<(), Report<OrbError>> {
         .map_or_else(|| home.join(".pi/agent/sessions"), PathBuf::from);
     let env = child_env(std::env::vars_os());
     let tz = TimeZone::system();
-    let session = std::env::var_os("ZELLIJ_SESSION_NAME");
-    let pane = std::env::var("ZELLIJ_PANE_ID")
-        .ok()
-        .and_then(|id| id.parse().ok());
     let notifier = desktop_notifier();
-    let zellij = session.map(|_| {
-        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "sh".into());
-        let cli = ZellijCli::new(std::env::var_os("NO_COLOR"));
-        ZellijService::new(Arc::new(cli), shell, home.clone(), pane)
-    });
     let store = Store::open(&orb_root.join("userdata/state.sqlite")).change_context(OrbError)?;
     let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
@@ -127,7 +116,6 @@ fn main() -> Result<(), Report<OrbError>> {
             harnesses,
             env,
             zmx,
-            zellij,
             notifier,
         )
         .change_context(OrbError)

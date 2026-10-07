@@ -195,26 +195,15 @@ pub struct Thread {
     pub last_session: Option<SessionId>,
     /// The git branch the transcript last named.
     pub branch: Option<String>,
-    /// When the thread was pinned; `None` = not pinned.
-    pub pinned_at: Option<SystemTime>,
-    /// When the thread was settled; `None` = not settled.
-    pub settled_at: Option<SystemTime>,
-    /// Sorts Active: the later of its creation and its latest un-settle.
-    pub active_since: SystemTime,
     /// When the thread was created (its store row's `created_at`).
     pub created_at: SystemTime,
     /// When orb last saw a turn end, else when the thread was created.
     pub last_activity_at: SystemTime,
     /// A turn ended after the user last selected the thread.
     pub unseen: bool,
-    /// The id of the group a store from before sessions put the thread in;
-    /// `None` = none.
-    pub group: Option<i64>,
-    /// The `--model` its session started with; `None` = the harness's default.
+    /// The `--model` a session from before the overhaul started with;
+    /// `None` = unknown.
     pub model: Option<String>,
-    /// The `--permission-mode` its session started with; `None` = the
-    /// harness's default.
-    pub permission: Option<String>,
     /// The harness its session runs in.
     pub harness: HarnessId,
 }
@@ -902,7 +891,7 @@ where
 
 /// The sessions `projects`' threads run in, one per pane session, as the
 /// sessions actor would show them: each in its first thread's directory,
-/// pinned, settled and active as that thread.
+/// neither pinned nor settled, active since the thread's creation.
 #[cfg(test)]
 pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
     let mut shown: Vec<Session> = Vec::new();
@@ -927,9 +916,9 @@ pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
                 name: None,
                 branch: None,
                 created_at: thread.created_at,
-                pinned_at: thread.pinned_at,
-                settled_at: thread.settled_at,
-                active_since: thread.active_since,
+                pinned_at: None,
+                settled_at: None,
+                active_since: thread.created_at,
                 last_activity_at: thread.last_activity_at,
             });
         }
@@ -990,15 +979,10 @@ mod tests {
                 session: SessionId(id),
             }),
             branch: None,
-            pinned_at: None,
-            settled_at: None,
-            active_since: SystemTime::UNIX_EPOCH,
             created_at: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 
@@ -1208,28 +1192,37 @@ mod tests {
         );
     }
 
-    /// Thread `id`, active since second `secs`.
+    /// Thread `id`, created at second `secs`, so its session is active
+    /// since then.
     fn active(id: i64, secs: u64) -> Thread {
         Thread {
-            active_since: at(secs),
+            created_at: at(secs),
             ..thread(id)
         }
     }
 
-    /// Thread `id`, pinned at second `secs`.
-    fn pinned(id: i64, secs: u64) -> Thread {
-        Thread {
-            pinned_at: Some(at(secs)),
-            ..thread(id)
+    /// `sessions` with each session `(id, secs)` pinned at second `secs`.
+    fn pinning(mut sessions: Sessions, pins: &[(i64, u64)]) -> Sessions {
+        for &(id, secs) in pins {
+            sessions
+                .sessions
+                .iter_mut()
+                .filter(|session| session.id == SessionId(id))
+                .for_each(|session| session.pinned_at = Some(at(secs)));
         }
+        sessions
     }
 
-    /// Thread `id`, settled at second `secs`.
-    fn settled(id: i64, secs: u64) -> Thread {
-        Thread {
-            settled_at: Some(at(secs)),
-            ..thread(id)
+    /// `sessions` with each session `(id, secs)` settled at second `secs`.
+    fn settling(mut sessions: Sessions, settles: &[(i64, u64)]) -> Sessions {
+        for &(id, secs) in settles {
+            sessions
+                .sessions
+                .iter_mut()
+                .filter(|session| session.id == SessionId(id))
+                .for_each(|session| session.settled_at = Some(at(secs)));
         }
+        sessions
     }
 
     /// Thread `id`, last active at second `secs`.
@@ -1374,7 +1367,10 @@ mod tests {
     fn sidebar_orders_pinned_by_newest_pin() {
         // Given threads 1 and 2 pinned at 10 s and 20 s, and thread 3 active
         // since 30 s.
-        let sessions = sessions(vec![pinned(1, 10), pinned(2, 20), active(3, 30)], None);
+        let sessions = pinning(
+            sessions(vec![thread(1), thread(2), active(3, 30)], None),
+            &[(1, 10), (2, 20)],
+        );
 
         // When listing the sidebar.
         let items = items(&sessions);
@@ -1410,7 +1406,10 @@ mod tests {
         // Given threads settled at 10 s, 30 s and 20 s, with the shelf open.
         let sessions = Sessions {
             shelf_open: true,
-            ..sessions(vec![settled(1, 10), settled(2, 30), settled(3, 20)], None)
+            ..settling(
+                sessions(vec![thread(1), thread(2), thread(3)], None),
+                &[(1, 10), (2, 30), (3, 20)],
+            )
         };
 
         // When listing the sidebar.
@@ -1427,7 +1426,10 @@ mod tests {
     #[rstest::rstest]
     fn collapsed_shelf_hides_settled_threads() {
         // Given two settled threads and the shelf collapsed.
-        let sessions = sessions(vec![settled(1, 10), settled(2, 20)], None);
+        let sessions = settling(
+            sessions(vec![thread(1), thread(2)], None),
+            &[(1, 10), (2, 20)],
+        );
 
         // When listing the sidebar.
         let items = items(&sessions);
@@ -1444,7 +1446,10 @@ mod tests {
     fn collapsed_shelf_keeps_the_selected_settled_session() {
         // Given two settled threads, the shelf collapsed, and the cursor on
         // thread 1.
-        let sessions = sessions(vec![settled(1, 10), settled(2, 20)], Some(on(1)));
+        let sessions = settling(
+            sessions(vec![thread(1), thread(2)], Some(on(1))),
+            &[(1, 10), (2, 20)],
+        );
 
         // When listing the sidebar.
         let items = items(&sessions);
@@ -1476,7 +1481,10 @@ mod tests {
     #[rstest::rstest]
     fn select_next_from_the_last_card_selects_the_shelf() {
         // Given an active thread 1, selected, and a settled thread 2.
-        let mut sessions = sessions(vec![active(1, 10), settled(2, 20)], Some(on(1)));
+        let mut sessions = settling(
+            sessions(vec![active(1, 10), thread(2)], Some(on(1))),
+            &[(2, 20)],
+        );
 
         // When selecting the next row.
         sessions.select_next();
@@ -1493,9 +1501,12 @@ mod tests {
     fn select_next_on_a_collapsed_shelf_wraps_to_the_first_row() {
         // Given an active thread, a settled thread, and the cursor on the
         // collapsed shelf's header.
-        let mut sessions = sessions(
-            vec![active(1, 10), settled(2, 20)],
-            Some(SidebarItem::SettledShelf),
+        let mut sessions = settling(
+            sessions(
+                vec![active(1, 10), thread(2)],
+                Some(SidebarItem::SettledShelf),
+            ),
+            &[(2, 20)],
         );
 
         // When selecting the next row.
@@ -1556,7 +1567,10 @@ mod tests {
     #[rstest::rstest]
     fn select_last_on_a_collapsed_shelf_selects_its_header() {
         // Given an active thread, selected, and a collapsed shelf.
-        let mut sessions = sessions(vec![active(1, 10), settled(2, 20)], Some(on(1)));
+        let mut sessions = settling(
+            sessions(vec![active(1, 10), thread(2)], Some(on(1))),
+            &[(2, 20)],
+        );
 
         // When selecting the last row.
         sessions.select_last();
@@ -1863,14 +1877,17 @@ mod tests {
     #[rstest::rstest]
     fn sidebar_lists_a_removed_projects_threads() {
         // Given project 1 removed, with an active and a settled thread, the shelf open.
-        let sessions = fill(Sessions {
-            projects: vec![Project {
-                removed: true,
-                ..project(1, vec![active(1, 10), settled(2, 20)])
-            }],
-            shelf_open: true,
-            ..Sessions::default()
-        });
+        let sessions = settling(
+            fill(Sessions {
+                projects: vec![Project {
+                    removed: true,
+                    ..project(1, vec![active(1, 10), thread(2)])
+                }],
+                shelf_open: true,
+                ..Sessions::default()
+            }),
+            &[(2, 20)],
+        );
 
         // When listing the sidebar.
         let rows = items(&sessions);
@@ -1887,13 +1904,16 @@ mod tests {
     /// and settled thread 4, the shelf open, filtered to `filter`.
     fn two_projects(filter: Option<i64>) -> Sessions {
         let [first, second] = [(1, 1, 2), (2, 3, 4)]
-            .map(|(id, card, settled_id)| project(id, vec![thread(card), settled(settled_id, 10)]));
-        fill(Sessions {
-            projects: vec![first, second],
-            shelf_open: true,
-            filter: filter.map(ProjectId),
-            ..Sessions::default()
-        })
+            .map(|(id, card, settled_id)| project(id, vec![thread(card), thread(settled_id)]));
+        settling(
+            fill(Sessions {
+                projects: vec![first, second],
+                shelf_open: true,
+                filter: filter.map(ProjectId),
+                ..Sessions::default()
+            }),
+            &[(2, 10), (4, 10)],
+        )
     }
 
     #[rstest::rstest]
@@ -2002,14 +2022,14 @@ mod tests {
     fn row_neighbour_skips_a_shelf_the_filter_hides() {
         // Given project 1 with only card 1, project 2 with only settled
         // thread 2, filtered to project 1.
-        let sessions = fill(Sessions {
-            projects: vec![
-                project(1, vec![thread(1)]),
-                project(2, vec![settled(2, 10)]),
-            ],
-            filter: Some(ProjectId(1)),
-            ..Sessions::default()
-        });
+        let sessions = settling(
+            fill(Sessions {
+                projects: vec![project(1, vec![thread(1)]), project(2, vec![thread(2)])],
+                filter: Some(ProjectId(1)),
+                ..Sessions::default()
+            }),
+            &[(2, 10)],
+        );
 
         // When finding where the cursor goes after deleting card 1.
         let next = sessions.row_neighbour(on(1));
@@ -2043,14 +2063,17 @@ mod tests {
     /// Active "fix login bug" (1), "add dark mode" (2) and "fix logout" (3),
     /// listed 3, 2, 1, and "fix lint" (4) settled, with the shelf closed.
     fn four_titles() -> Sessions {
-        sessions(
-            vec![
-                titled(active(1, 10), "fix login bug"),
-                titled(active(2, 20), "add dark mode"),
-                titled(active(3, 30), "fix logout"),
-                titled(settled(4, 40), "fix lint"),
-            ],
-            None,
+        settling(
+            sessions(
+                vec![
+                    titled(active(1, 10), "fix login bug"),
+                    titled(active(2, 20), "add dark mode"),
+                    titled(active(3, 30), "fix logout"),
+                    titled(thread(4), "fix lint"),
+                ],
+                None,
+            ),
+            &[(4, 40)],
         )
     }
 
@@ -2101,12 +2124,15 @@ mod tests {
     fn search_counts_only_matching_settled_threads_on_the_shelf() {
         // Given two settled threads, one matching.
         let sessions = searching(
-            sessions(
-                vec![
-                    titled(settled(1, 10), "fix lint"),
-                    titled(settled(2, 20), "add dark mode"),
-                ],
-                None,
+            settling(
+                sessions(
+                    vec![
+                        titled(thread(1), "fix lint"),
+                        titled(thread(2), "add dark mode"),
+                    ],
+                    None,
+                ),
+                &[(1, 10), (2, 20)],
             ),
             "lint",
         );
@@ -2130,7 +2156,10 @@ mod tests {
     ) {
         // Given a closed shelf holding "fix lint", searching for `text`.
         let sessions = searching(
-            sessions(vec![titled(settled(1, 10), "fix lint")], None),
+            settling(
+                sessions(vec![titled(thread(1), "fix lint")], None),
+                &[(1, 10)],
+            ),
             text,
         );
 
@@ -2421,7 +2450,7 @@ mod tests {
         // Given active session 2 and settled session 1, the shelf open.
         let sessions = Sessions {
             shelf_open: true,
-            ..sessions(vec![thread(2), settled(1, 10)], None)
+            ..settling(sessions(vec![thread(2), thread(1)], None), &[(1, 10)])
         };
 
         // When listing the sidebar.

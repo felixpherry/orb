@@ -234,24 +234,23 @@ mod tests {
                 session: SessionId(id),
             }),
             branch: None,
-            pinned_at: None,
-            settled_at: None,
-            active_since: UNIX_EPOCH,
             created_at: UNIX_EPOCH,
             last_activity_at: UNIX_EPOCH,
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 
-    /// `thread`, settled `ago` days before `now`.
-    fn settled(thread: Thread, ago: u64) -> Thread {
-        Thread {
-            settled_at: Some(now() - days(ago)),
-            ..thread
+    /// `app` with each session `(id, ago)` settled `ago` days before `now`.
+    fn settle(mut app: AppState, settles: &[(i64, u64)]) -> AppState {
+        for &(id, ago) in settles {
+            app.sessions
+                .sessions
+                .iter_mut()
+                .filter(|session| session.id == SessionId(id))
+                .for_each(|session| session.settled_at = Some(now() - days(ago)));
         }
+        app
     }
 
     /// `thread`, last chatted in `secs` seconds after the epoch.
@@ -315,7 +314,7 @@ mod tests {
     #[rstest::rstest]
     fn worktree_whose_sessions_settled_a_week_ago_is_prunable() {
         // Given a thread in the worktree settled eight days ago.
-        let app = app(vec![project(vec![settled(thread(1, WT), 8)])]);
+        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 8)]);
 
         // When judging it with clean facts.
         let verdict = verdict_at(&app, Some(&facts(0)));
@@ -331,7 +330,7 @@ mod tests {
     #[rstest::rstest]
     fn verdict_after_six_settled_days_is_prune_in_one_day() {
         // Given a thread in the worktree settled six days ago.
-        let app = app(vec![project(vec![settled(thread(1, WT), 6)])]);
+        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 6)]);
 
         // When judging it with clean facts.
         let verdict = verdict_at(&app, Some(&facts(0)));
@@ -347,10 +346,10 @@ mod tests {
     #[rstest::rstest]
     fn verdict_of_two_users_counts_from_the_newest_settle() {
         // Given two threads in the worktree, settled ten and six days ago.
-        let app = app(vec![project(vec![
-            settled(thread(1, WT), 10),
-            settled(thread(2, WT), 6),
-        ])]);
+        let app = settle(
+            app(vec![project(vec![thread(1, WT), thread(2, WT)])]),
+            &[(1, 10), (2, 6)],
+        );
 
         // When judging it with clean facts.
         let verdict = verdict_at(&app, Some(&facts(0)));
@@ -380,7 +379,7 @@ mod tests {
         // Given a thread settled eight days ago that is attached.
         let app = AppState {
             attached: HashSet::from([SessionId(1)]),
-            ..app(vec![project(vec![settled(thread(1, WT), 8)])])
+            ..settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 8)])
         };
 
         // When judging it with clean facts.
@@ -409,7 +408,7 @@ mod tests {
     #[rstest::rstest]
     fn verdict_with_changes_is_dirty() {
         // Given a thread settled eight days ago.
-        let app = app(vec![project(vec![settled(thread(1, WT), 8)])]);
+        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 8)]);
 
         // When judging it with three uncommitted files.
         let verdict = verdict_at(&app, Some(&facts(3)));
@@ -421,7 +420,7 @@ mod tests {
     #[rstest::rstest]
     fn verdict_without_facts_is_unknown() {
         // Given a thread settled eight days ago.
-        let app = app(vec![project(vec![settled(thread(1, WT), 8)])]);
+        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 8)]);
 
         // When judging it before its facts are read.
         let verdict = verdict_at(&app, None);
@@ -512,10 +511,13 @@ mod tests {
                 list: vec![worktree("/w/orb/orb-a"), worktree("/w/orb/orb-b")],
                 notice: None,
             },
-            ..app(vec![project(vec![
-                settled(chatted(thread(1, "/w/orb/orb-a"), 20), 1),
-                chatted(thread(2, "/w/orb/orb-b"), 10),
-            ])])
+            ..settle(
+                app(vec![project(vec![
+                    chatted(thread(1, "/w/orb/orb-a"), 20),
+                    chatted(thread(2, "/w/orb/orb-b"), 10),
+                ])]),
+                &[(1, 1)],
+            )
         };
 
         // When ordering the worktrees.
@@ -539,12 +541,8 @@ mod tests {
         #[case] expected: RowState,
     ) {
         // Given a worktree with or without a settled thread in it.
-        let threads = if used {
-            vec![settled(thread(1, WT), 6)]
-        } else {
-            vec![]
-        };
-        let app = app(vec![project(threads)]);
+        let threads = if used { vec![thread(1, WT)] } else { vec![] };
+        let app = settle(app(vec![project(threads)]), &[(1, 6)]);
 
         // When working out its row state.
         let state = row_state(&users(&app, Path::new(WT)), verdict);

@@ -41,9 +41,9 @@ pub struct AppState {
     pub sessions: Sessions,
     /// The sidebar's width, visibility and last layout.
     pub sidebar: SidebarView,
-    /// The sessions orb holds pane clients for: added on `⏎`, removed by
-    /// settling, deleting, a workspace change, a failed spawn and the layout
-    /// emptying.
+    /// The sessions orb holds pane clients for: added at start and on `⏎`,
+    /// removed by settling, deleting, a workspace change, a failed spawn and
+    /// the layout emptying.
     /// Every pane of a session in here has a client, and the right-hand area
     /// shows the selected session while it is in here. Written by the intent
     /// handler, the frontend, and the sessions actor (which drops a session it
@@ -144,15 +144,10 @@ mod tests {
                 session: SessionId(1),
             }),
             branch: None,
-            pinned_at: None,
-            settled_at: None,
-            active_since: SystemTime::UNIX_EPOCH,
             created_at: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 

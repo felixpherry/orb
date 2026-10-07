@@ -866,7 +866,7 @@ pub(crate) const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
 /// A completed turn; the picker's current branch and new worktree; the mode
 /// line's INSERT (`green`).
 pub(crate) const GREEN: Color = Color::Rgb(0xc3, 0xe8, 0x8d);
-/// The mode line's ATTACHED (`green1`, lualine's terminal mode).
+/// The mode line's PANE (`green1`, lualine's terminal mode).
 pub(crate) const GREEN1: Color = Color::Rgb(0x4f, 0xd6, 0xbe);
 /// A Research session's kind icon (`blue2`).
 pub(crate) const BLUE2: Color = Color::Rgb(0x0d, 0xb9, 0xd7);
@@ -891,7 +891,7 @@ pub(crate) const DARK5: Color = Color::Rgb(0x73, 0x7a, 0xa2);
 pub(crate) const BLUE1: Color = Color::Rgb(0x65, 0xbc, 0xff);
 /// The picker's border (`border_highlight`).
 pub(crate) const BORDER: Color = Color::Rgb(0x58, 0x9e, 0xd7);
-/// A harness's mark, and the dashboard's Start item (orange).
+/// A harness's mark (orange).
 pub(crate) const LOGO: Color = Color::Rgb(0xd9, 0x77, 0x57);
 
 /// Needing approval, here and in the mode line's count (Nerd Font
@@ -983,23 +983,27 @@ mod tests {
                 session: SessionId(id),
             }),
             branch: None,
-            pinned_at: None,
-            settled_at: None,
-            active_since: SystemTime::UNIX_EPOCH,
             created_at: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 
-    fn settled(id: i64, at_secs: u64) -> Thread {
-        Thread {
-            settled_at: Some(at(at_secs)),
-            ..thread(id, ThreadStatus::Stopped)
+    fn stopped(id: i64) -> Thread {
+        thread(id, ThreadStatus::Stopped)
+    }
+
+    /// `sessions` with each session `(id, secs)` settled at second `secs`.
+    fn settling(mut sessions: Sessions, settles: &[(i64, u64)]) -> Sessions {
+        for &(id, secs) in settles {
+            sessions
+                .sessions
+                .iter_mut()
+                .filter(|session| session.id == SessionId(id))
+                .for_each(|session| session.settled_at = Some(at(secs)));
         }
+        sessions
     }
 
     fn project(id: i64, title: &str, threads: Vec<Thread>) -> Project {
@@ -1216,8 +1220,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::shelf_open(Sessions { shelf_open: true, ..sessions(vec![settled(1, 10)]) }, (DARK3, BG_DARK))]
-    #[case::searching(searching(sessions(vec![settled(1, 10)]), ""), (BLUE, GUTTER))]
+    #[case::shelf_open(Sessions { shelf_open: true, ..settling(sessions(vec![stopped(1)]), &[(1, 10)]) }, (DARK3, BG_DARK))]
+    #[case::searching(searching(settling(sessions(vec![stopped(1)]), &[(1, 10)]), ""), (BLUE, GUTTER))]
     fn badge_lights_up_while_searching(
         #[case] sessions: Sessions,
         #[case] expected: (Color, Color),
@@ -1256,11 +1260,10 @@ mod tests {
     #[rstest::rstest]
     fn count_reads_listed_out_of_every_thread() {
         // Given one active and two settled threads, with the shelf closed.
-        let sessions = sessions(vec![
-            thread(1, ThreadStatus::Idle),
-            settled(2, 10),
-            settled(3, 20),
-        ]);
+        let sessions = settling(
+            sessions(vec![thread(1, ThreadStatus::Idle), stopped(2), stopped(3)]),
+            &[(2, 10), (3, 20)],
+        );
 
         // When rendering the sidebar.
         let prompt = line(&draw(&sessions, at(1000), 10), 1);
@@ -1493,7 +1496,7 @@ mod tests {
     #[rstest::rstest]
     fn search_highlights_the_matched_characters_of_a_settled_thread() {
         // Given settled "Thread 7" with the shelf closed, searching for "7".
-        let sessions = searching(sessions(vec![settled(7, 10)]), "7");
+        let sessions = searching(settling(sessions(vec![stopped(7)]), &[(7, 10)]), "7");
 
         // When rendering the sidebar.
         let buf = draw(&sessions, at(1000), 8);
@@ -1649,10 +1652,10 @@ mod tests {
     #[rstest::rstest]
     fn pinned_thread_shows_an_orange_pin() {
         // Given a pinned thread.
-        let sessions = sessions(vec![Thread {
-            pinned_at: Some(at(5)),
-            ..thread(1, ThreadStatus::Idle)
-        }]);
+        let mut sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+        if let Some(session) = sessions.sessions.get_mut(0) {
+            session.pinned_at = Some(at(5));
+        }
 
         // When rendering the sidebar.
         let buf = draw(&sessions, at(1000), 8);
@@ -1804,7 +1807,7 @@ mod tests {
         // Given a settled thread, with the shelf open or closed.
         let sessions = Sessions {
             shelf_open,
-            ..sessions(vec![settled(1, 10)])
+            ..settling(sessions(vec![stopped(1)]), &[(1, 10)])
         };
 
         // When rendering the sidebar.
@@ -1820,11 +1823,10 @@ mod tests {
     #[rstest::rstest]
     fn shelf_header_counts_settled_threads() {
         // Given one active and two settled threads, with the shelf closed.
-        let sessions = sessions(vec![
-            thread(1, ThreadStatus::Idle),
-            settled(2, 10),
-            settled(3, 20),
-        ]);
+        let sessions = settling(
+            sessions(vec![thread(1, ThreadStatus::Idle), stopped(2), stopped(3)]),
+            &[(2, 10), (3, 20)],
+        );
 
         // When rendering the sidebar.
         let header = shelf_line(&draw(&sessions, at(1000), 10));
@@ -1836,7 +1838,10 @@ mod tests {
     #[rstest::rstest]
     fn short_list_keeps_the_shelf_header_on_the_bottom_line() {
         // Given one active and one settled thread on a 10-line sidebar.
-        let sessions = sessions(vec![thread(1, ThreadStatus::Idle), settled(2, 10)]);
+        let sessions = settling(
+            sessions(vec![thread(1, ThreadStatus::Idle), stopped(2)]),
+            &[(2, 10)],
+        );
 
         // When rendering the sidebar.
         let bottom = line(&draw(&sessions, at(1000), 10), 9);
@@ -1850,7 +1855,7 @@ mod tests {
     fn open_shelf() -> Sessions {
         Sessions {
             shelf_open: true,
-            ..sessions(vec![settled(2, 10), settled(3, 20)])
+            ..settling(sessions(vec![stopped(2), stopped(3)]), &[(2, 10), (3, 20)])
         }
     }
 
@@ -1911,7 +1916,7 @@ mod tests {
         // Given a thread settled 5 minutes before now, with the shelf open.
         let sessions = Sessions {
             shelf_open: true,
-            ..sessions(vec![settled(2, 700)])
+            ..settling(sessions(vec![stopped(2)]), &[(2, 700)])
         };
 
         // When rendering the sidebar.
@@ -1939,10 +1944,7 @@ mod tests {
         // Given a thread settled in `status`, with the shelf open.
         let sessions = Sessions {
             shelf_open: true,
-            ..sessions(vec![Thread {
-                settled_at: Some(at(10)),
-                ..thread(1, status)
-            }])
+            ..settling(sessions(vec![thread(1, status)]), &[(1, 10)])
         };
 
         // When rendering a 5-line sidebar, its row on the last line.
@@ -2006,11 +2008,14 @@ mod tests {
     #[rstest::rstest]
     fn render_reports_the_list_height_and_each_rows_height() {
         // Given two threads and a collapsed shelf.
-        let sessions = sessions(vec![
-            thread(1, ThreadStatus::Idle),
-            thread(2, ThreadStatus::Idle),
-            settled(3, 10),
-        ]);
+        let sessions = settling(
+            sessions(vec![
+                thread(1, ThreadStatus::Idle),
+                thread(2, ThreadStatus::Idle),
+                stopped(3),
+            ]),
+            &[(3, 10)],
+        );
 
         // When rendering a 10-line sidebar.
         let (_, _, layout) = render_sized(&sessions, at(1000), 32, 10);
@@ -2052,9 +2057,10 @@ mod tests {
     fn overflowing(active: i64, settled_ids: &[i64], selected: i64) -> Sessions {
         let threads = (1..=active)
             .map(|id| thread(id, ThreadStatus::Idle))
-            .chain(settled_ids.iter().map(|&id| settled(id, 10)))
+            .chain(settled_ids.iter().map(|&id| stopped(id)))
             .collect();
-        select(sessions(threads), selected)
+        let settles: Vec<(i64, u64)> = settled_ids.iter().map(|&id| (id, 10)).collect();
+        select(settling(sessions(threads), &settles), selected)
     }
 
     #[rstest::rstest]
@@ -2117,16 +2123,16 @@ mod tests {
         // Given a pinned thread, an active one and an open shelf, filtered to
         // orb, with the settled thread selected.
         let sessions = {
-            let mut sessions = sessions(vec![]);
-            if let Some(project) = sessions.projects.first_mut() {
-                project.threads = vec![
-                    Thread {
-                        pinned_at: Some(at(5)),
-                        ..thread(1, ThreadStatus::Working)
-                    },
+            let mut sessions = settling(
+                sessions(vec![
+                    thread(1, ThreadStatus::Working),
                     thread(2, ThreadStatus::NeedsApproval),
-                    settled(3, 10),
-                ];
+                    stopped(3),
+                ]),
+                &[(3, 10)],
+            );
+            if let Some(session) = sessions.sessions.get_mut(0) {
+                session.pinned_at = Some(at(5));
             }
             Sessions {
                 shelf_open: true,
@@ -2253,7 +2259,7 @@ mod tests {
         // Given settled session 1 on an open shelf.
         let sessions = Sessions {
             shelf_open: true,
-            ..sessions(vec![settled(1, 700)])
+            ..settling(sessions(vec![stopped(1)]), &[(1, 700)])
         };
 
         // When drawing the sidebar.

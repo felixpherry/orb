@@ -1,26 +1,53 @@
 # orb
 
-A vim-first terminal manager for running many [Claude Code](https://claude.com/claude-code) and pi sessions at once, across projects and git worktrees.
+A terminal multiplexer that is mission control for your coding agents. Each session is a project checkout or git worktree holding tabs of split panes. Run [Claude Code](https://claude.com/claude-code) or pi in any pane and the sidebar shows what each agent is doing.
 
 ## Quickstart
 
-You need macOS or Linux, a recent stable Rust toolchain, [Claude Code](https://docs.claude.com/en/docs/claude-code), [zellij](https://zellij.dev) and a [Nerd Font](https://www.nerdfonts.com) in your terminal. [lazygit](https://github.com/jesseduffield/lazygit), [neovim](https://neovim.io) and, on macOS, [terminal-notifier](https://github.com/julienXX/terminal-notifier) are optional. For pi sessions you also need pi and zmx on your `PATH` when orb starts (`brew install neurosnap/tap/zmx` on macOS; on Linux, `paru -S zmx` from the AUR, or `paru -S zmx-bin` for the release build); without either, `␣h` shows pi disabled as `pi not found` or `zmx not found`.
+You need macOS or Linux, a recent stable Rust toolchain, [kitty](https://sw.kovidgoyal.net/kitty/) (orb's Cmd keys come through the kitty keyboard protocol), zmx 0.8.1 or later on your `PATH`, a [Nerd Font](https://www.nerdfonts.com), and [Claude Code](https://docs.claude.com/en/docs/claude-code) or pi. Every pane runs under zmx: `brew install neurosnap/tap/zmx` on macOS, or on Linux `paru -S zmx` from the AUR (`paru -S zmx-bin` for the release build). The Claude hook needs `python3`. On macOS, [terminal-notifier](https://github.com/julienXX/terminal-notifier) is optional.
 
-On Linux, notifications need a freedesktop notification server, which most desktops and shells run; without one, orb shows none. On niri, clicking a notification also brings orb's window forward; on other compositors it only goes to orb's zellij tab and pane.
+On Linux, notifications need a freedesktop notification server, which most desktops and shells run; without one, orb shows none. On niri, clicking a notification brings orb's window forward; on other compositors the click does nothing else.
 
 ```sh
 cargo install --git https://github.com/felixpherry/orb --locked
-zellij   # orb opens shells, lazygit and nvim as zellij floating panes
+orb integration install   # Claude Code hook and pi extension
 orb
 ```
 
 Then:
 
-1. `␣p` adds a project from a directory picker (`Tab` opens a folder, `⏎` adds it).
-2. `␣n` picks a project and opens a draft. `␣h`, `␣w`, `␣b`, `␣m` and `␣a` set its harness (Claude Code or pi), workspace, branch, model and permission.
-3. `⏎` starts the session and attaches you to Claude or pi.
-4. `<C-\>` takes you back to orb. The session keeps running, in Claude's background supervisor or, for pi, under zmx, even after you quit orb.
-5. For related threads, `␣gf`, `␣gr` and `␣gl` make a Feature, Research or Learn group. For a quick question outside any project, `␣i` opens an Incognito draft.
+1. `<C-g> a` adds a project from a directory picker (`Tab` opens a folder, `⏎` adds it).
+2. `<C-g> n` picks a project, then a workspace (the checkout, a new worktree, or a worktree the project used before) and, for a new worktree, its base branch. The session opens with one shell.
+3. Type `claude` or `pi` in the shell. The pane becomes an agent row under the session's card.
+4. `Cmd n` splits the pane right, `<C-g> p d` splits it down, and `<C-g> t n` opens a tab.
+5. `q` in the sidebar quits orb. Every pane keeps running under zmx, and orb reattaches them when it starts again.
+
+The Cmd keys reach orb only through kitty `map` lines in `kitty.conf`:
+
+```
+map cmd+h send_key super+h
+map cmd+j send_key super+j
+map cmd+k send_key super+k
+map cmd+l send_key super+l
+map cmd+left send_key super+left
+map cmd+down send_key super+down
+map cmd+up send_key super+up
+map cmd+right send_key super+right
+map cmd+n send_key super+n
+map cmd+x send_key super+x
+map cmd+plus send_key super+plus
+map cmd+equal send_key super+equal
+map cmd+minus send_key super+minus
+map cmd+1 send_key super+1
+map cmd+2 send_key super+2
+map cmd+3 send_key super+3
+map cmd+4 send_key super+4
+map cmd+5 send_key super+5
+map cmd+[ send_key super+[
+map cmd+] send_key super+]
+map cmd+i send_key super+i
+map cmd+o send_key super+o
+```
 
 ## Demo
 
@@ -46,85 +73,75 @@ The demo shows, in order:
 
 ## Features
 
-- **One list for every session.** The sidebar shows each thread's status (working, needs approval, needs input, done), its project, branch and elapsed time, across all projects. Pinned threads sit on top, and quiet ones settle onto a collapsible shelf.
-- **The real Claude or pi, attached.** `⏎` runs `claude attach`, or `zmx attach` for a pi thread, in a terminal pane inside orb, so every slash command, permission prompt and picker works. Each attached thread keeps its own pane.
-- **pi beside Claude.** `␣h` on a draft picks Claude Code or pi. A pi session runs under zmx, so it outlives orb too. orb reads its status (working, idle, stopped), its title (`/name`, else the first prompt), the session picker's preview and `␣sg`'s messages from pi's session file, and `␣m` lists the models `pi --list-models` printed at orb's start, under a heading per provider. pi has no permission modes, so `␣a` isn't offered on a pi draft, and orb's trust confirm doesn't apply to it. A lone pi thread shows a dim `pi` tag before its status.
-- **Worktrees built in.** A new session can get its own worktree under `~/.orb/worktrees/`. Once Claude names the thread, its `orb/<hex>` branch is renamed to match the title. Every hour, and at start, orb prunes worktrees that nothing uses, or whose threads were all settled at least 7 days ago, keeping their branches and skipping any with uncommitted changes; `⏎` on a pruned thread recreates its worktree on its branch and resumes the chat.
-- **Drafts.** Set up the project, harness, workspace, base branch, model and permission before starting a session. A draft in a folder that isn't a git repository starts in that folder, and `␣w`/`␣b` there offer to initialize git.
-- **Trust handled for you.** When Claude refuses a folder it hasn't been trusted in, orb asks `Trust <path>?` (`No` selected). `Yes` marks it trusted in Claude's `.claude.json` and retries the start. pi threads never get this confirm.
-- **Groups.** Threads that belong together share one directory and sit under one card: a **Feature** group's worktree (on a branch named after the group, like `GT-514-login`), or a **Research** or **Learn** folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/` (orb writes a default there first: for Research, a research kit with an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions, a report template and `SOURCES.md`; for Learn, a learning kit with an orchestrator `AGENTS.md`, a saboteur subagent, the storyteller, challenge, tutor and conventions files and an epub ingest script). The Research and Learn kits' subagents work under Claude Code and pi. Under pi they need pi's example `subagent` extension, installed once at user level (orb doesn't install it; the commands are in `docs/research.md` §20), and if you use pi-amplike that install also changes its `"npm:pi-amplike"` entry in `~/.pi/agent/settings.json` to `{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}`, because amplike has its own `subagent` tool and pi won't start with both. Each group has a default harness, model and permission, set with `␣h`/`␣m`/`␣a` on its card; threads already running keep theirs. `n` in an active group opens its draft, making one at the top of the group when it has none. The draft follows the card's defaults except for each one you pick on it with `␣h`/`␣m`/`␣a`, and `⏎` starts it in the group's folder or worktree. Once the group has a thread, `d` discards its draft. `␣b` on a started Feature group's card switches its worktree's branch, which moves every thread in it. A name another group has, or whose branch or folder already exists, is refused with the name box still open. Groups are pinned, settled and deleted as a whole. Deleting one also removes its folder, or its worktree (even with changes) and the branch orb made for it, which frees the name. A Feature group whose branch has unmerged commits (as `git branch -d` sees it) isn't deleted at all, and the mode line says `branch <name> has unmerged commits`.
-- **Incognito.** `␣i` (or `i` on the dashboard) opens the Incognito draft, for a Claude session outside any project, with no picker step; `⏎` starts it, as on any draft. Every incognito thread runs in orb's `Incognito` project at `/tmp/orb-incognito/`, which orb creates at start and again before each incognito start. The first one asks `Trust /tmp/orb-incognito?` once (orb writes Claude's trust for its realpath, `/private/tmp/orb-incognito` on macOS), and later ones don't. Incognito threads are normal threads: they settle, delete, rename and resume like any other. `␣n` doesn't list Incognito, and `␣f` lists it after Research and Learn. `␣w`/`␣b` aren't bound on its rows, and its draft never shows Workspace or Branch, even if the folder becomes a git repository.
-- **Find and jump.** `/` searches thread titles and group names, `␣f` narrows the sidebar to one project, and `<C-o>`/`<C-i>` move back and forward through a jump list, as in neovim. `␣␣` (or `<C-Space>` in the Claude pane) opens a session picker over your other threads, newest chat first, with a preview of each chat; `⏎` jumps into the thread's pane. `␣sg` searches what was said in every thread, your prompts and Claude's or pi's replies, newest message first, and previews the exchange around each match.
-- **Tools where the code is.** `␣t` opens a shell, `␣gg` lazygit and `␣v` `nvim .` in the thread's directory, as a full-screen zellij floating pane.
-- **Notifications.** When orb isn't focused, you get a desktop notification when a thread finishes, needs approval or needs input (a pi thread only ever finishes). On macOS it's sent through terminal-notifier, whose click takes you back to orb's zellij tab and pane, or through `osascript` when terminal-notifier isn't installed. On Linux it goes to the desktop's notification server: approval and input are critical, a newer notice about a thread replaces the last one, and a click takes you back to orb's tab and pane (on niri, bringing orb's window forward too).
-- **LazyVim look.** A snacks-style explorer, a dashboard start screen, a lualine mode line, a helix which-key popup, vim.ui.select pickers and snacks session, worktree and search pickers, all in tokyonight-moon.
+- Sessions across all your projects and git worktrees, each with tabs and splits. Every pane runs under zmx, so quitting or updating orb leaves its programs running.
+- Agents you start in any pane, once `orb integration install` has run, show under their session's card with their status (working, needs approval, needs input, idle, done), their title and a mark: `✳` for Claude Code, `π` for pi.
+- Settling a session, by hand or after 3 days without activity, kills every pane and moves the card to a collapsible Settled shelf. `⏎` brings the tabs and splits back and types `claude --resume` or `pi --session-id` into each agent's pane.
+- A new session can get its own worktree under `~/.orb/worktrees/`, made from a freshly fetched base branch. Its `orb/<hex>` branch is renamed after the agent's title once the first turn ends. Every hour, and at start, orb prunes worktrees that nothing uses, or whose sessions were all settled at least 7 days ago, keeping their branches and skipping any with uncommitted changes. Resuming a session whose worktree was pruned recreates it on its branch.
+- Research and Learn sessions (`<C-g> g r`, `<C-g> g l`) get a named folder under `~/.orb/research/` or `~/.orb/learn/`, copied from `~/.orb/templates/<kind>/`. orb writes a default template there first: for Research, a research kit with an orchestrator `AGENTS.md`, investigator, falsifier and simulator subagents, conventions, a report template and `SOURCES.md`; for Learn, a learning kit with an orchestrator `AGENTS.md`, a saboteur subagent, the storyteller, challenge, tutor and conventions files and an epub ingest script. The kits' subagents work under Claude Code and pi. Under pi they need pi's example `subagent` extension, installed once at user level (orb doesn't install it; the commands are in `docs/research.md` §20). If you use pi-amplike, that install also changes its `"npm:pi-amplike"` entry in `~/.pi/agent/settings.json` to `{"source":"npm:pi-amplike","extensions":["!extensions/subagent.ts"]}`, because amplike has its own `subagent` tool and pi won't start with both.
+- `<C-g> i` opens an Incognito session in `/tmp/orb-incognito/`, for a quick question outside any project. It settles, deletes, renames and resumes like any other session.
+- `/` searches session names and agent titles, settled ones included, `<C-g> f` narrows the sidebar to one project, and `<C-[>`/`<C-]>` move back and forward through a jump list. `<C-g> Space` opens a session picker, newest chat first, with a preview of each chat. `<C-g> /` searches what was said in every agent conversation, your prompts and the agents' replies, newest message first.
+- Each pane keeps 10 000 lines of history for the wheel, and dragging over text copies it to the clipboard.
+- When orb isn't focused, a desktop notification tells you an agent finished, needs approval or needs input. On macOS it goes through terminal-notifier, whose click brings kitty forward when kitty's remote control is on, or through `osascript` when terminal-notifier isn't installed. On Linux it goes to the desktop's notification server, and a click brings orb's window forward on niri.
+- A LazyVim look: a snacks-style explorer, a lualine mode line, a helix which-key popup, vim.ui.select pickers and snacks session, worktree and search pickers, all in tokyonight-moon.
 
 ## Keys
 
-`<Space>` is the leader. Press it and wait to see the which-key popup.
+`<C-g>` is the leader in the sidebar and in panes; press it and wait for the which-key popup. While a pane has the keys, every key goes to its program except the Cmd keys, `<C-g>`, `<C-[>` and `<C-]>`.
 
 | Key | Action |
 | --- | --- |
-| `j` / `k`, `gg` / `G`, `<C-d>` / `<C-u>` | Move in the sidebar |
-| `⏎` | Attach to the thread, start the draft, or open/close the group |
-| `<C-\>` | Detach and go back to orb |
-| `<C-b>` | In the Claude pane, hide or show the sidebar; the keys stay in the pane (Claude's background-task key is then `Ctrl+X Ctrl+B`) |
-| `<C-h>` / `<C-l>` | Focus the sidebar / the right-hand side |
-| `<C-o>` / `<C-i>` | Jump back / forward through the jump list (sidebar, dashboard and the Claude pane) |
-| `␣␣` / `<C-Space>` | Session picker: threads newest chat first, with a preview of the selected chat (`<C-Space>` in the Claude pane; `<C-s>` shows or hides settled threads) |
-| `␣sw` | Worktree picker: every worktree under `~/.orb/worktrees/`, with its size, changes, users and when the sweep will prune it |
-| `<C-x>` | In the worktree picker, delete the worktree, changes included, after a `No`/`Yes` confirm; the branch stays, and a worktree whose thread is attached or mid-turn can't be deleted |
-| `␣sg` | Search picker: every prompt and reply in orb's threads, newest first, with the exchange around the match (`⏎` jumps into the thread's pane) |
-| `/` or `i` | Search thread titles and group names |
-| `r` | Rename the thread |
-| `l` / `h` | Open / close the group (or the Settled shelf) |
-| `n` | Open the group's draft, making one at the top of the group when it has none; not on a settled group |
-| `p` | Pin or unpin (a lone thread or a group) |
-| `s` | Settle (after a `No`/`Yes` confirm) or un-settle (a lone thread or a group) |
-| `d` | Delete the thread or the group, or discard the draft (after a `No`/`Yes` confirm); a group's last thread can't be deleted, nor the draft of a group with no thread |
-| `␣n` | New session (project picker) |
-| `␣i` | Open the Incognito draft in `/tmp/orb-incognito/` (`⏎` starts it) |
-| `␣gf` / `␣gr` / `␣gl` | New Feature (project picker, then a name) / Research / Learn group |
-| `␣p` | Add a project |
-| `␣f` | Filter by project, with Research, Learn and Incognito right after All projects (`<C-x>` removes one) |
-| `␣w` / `␣b` | Workspace / branch picker (not in a group or the Incognito project; `␣b` also on a started Feature group's card) |
-| `␣h` | Harness picker: Claude Code or pi (drafts; on a group's card, the group's default; on a group's draft, its own) |
-| `␣m` / `␣a` | Model / permission picker (drafts; on a group's card, the group's defaults; on a group's draft, its own; `␣a` not on pi) |
-| `␣t` / `␣gg` / `␣v` | Shell / lazygit / Neovim |
-| `␣e` | Hide or show the sidebar |
-| `<C-Left>` / `<C-Right>` | Narrow / widen the focused side |
-| `q` | Quit orb (sessions keep running) |
+| `Cmd h/j/k/l`, Cmd arrows | Move focus between panes; `Cmd h` from the leftmost pane goes to the sidebar, `Cmd l` from the sidebar goes back, and `Cmd l` from the rightmost pane goes to the next tab |
+| `Cmd n` | Split right |
+| `Cmd x` | Close the pane |
+| `Cmd +` / `Cmd =`, `Cmd -` | Grow / shrink the focused pane or the sidebar |
+| `Cmd 1` to `Cmd 5` | Go to tab N |
+| `Cmd [` / `Cmd ]` | Previous / next tab |
+| `Cmd i` / `Cmd o` | Move the tab left / right |
+| `<C-[>` / `<C-]>` | Jump back / forward through the jump list |
+| `<C-g> s` | Hide or show the sidebar |
+| `<C-g> p d/r/f/x/c` | In a pane: split down, split right, zoom, close, rename |
+| `<C-g> t n/x/r/1-9` | Tab: new, close, rename, go to N |
+| `<C-g> Space` | Session picker (`<C-s>` shows or hides settled sessions) |
+| `<C-g> n` | New session |
+| `<C-g> a` | Add a project |
+| `<C-g> f` | In the sidebar, filter by project, with Research, Learn and Incognito right after All projects (`<C-x>` removes one) |
+| `<C-g> i` | Incognito session |
+| `<C-g> w` / `<C-g> b` | Workspace / branch picker (not on Incognito, Research or Learn sessions) |
+| `<C-g> g r` / `<C-g> g l` | New Research / Learn session |
+| `<C-g> /` | Search every prompt and reply, with the exchange around the match (`⏎` jumps to its session) |
+| `<C-g> W` | Worktree picker: every worktree under `~/.orb/worktrees/`, with its size, changes, users and when the sweep will prune it (`<C-x>` deletes one, changes included, after a `No`/`Yes` confirm; the branch stays) |
+| `<C-g> <C-g>` | Send Ctrl g to the focused pane |
 
-On the dashboard, each menu item's letter runs it directly (there `i` is Incognito; in the sidebar it searches), and `j`/`k` plus `⏎` work too.
+In the sidebar:
 
-`<C-o>`/`<C-i>` work like neovim's jump list. Entering a thread's pane, `gg`/`G`, a search `⏎` and a `␣n` pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. Entering the pane of the row the last `<C-o>`/`<C-i>` landed on isn't a new jump, so `<C-i>` still goes forward. orb keeps the newest 20 rows, each at most once, across restarts. A jump moves the cursor, and shows the thread's pane only while orb is still attached to it. It never attaches, starts a draft or clears the project filter.
+| Key | Action |
+| --- | --- |
+| `j` / `k`, `gg` / `G`, `<C-d>` / `<C-u>` | Move |
+| `⏎` | Focus the session's panes, resuming it if it was settled |
+| `p` | Pin or unpin |
+| `s` | Settle (after a `No`/`Yes` confirm) or un-settle |
+| `d` | Delete the session after a `No`/`Yes` confirm: its panes are killed, transcripts stay |
+| `r` | Rename the session |
+| `/` or `i` | Search |
+| `l` / `h` | Open / close the Settled shelf |
+| `q` | Quit orb (every pane keeps running) |
 
-Inside the Claude pane orb takes `<C-o>`, which is Claude's transcript key. To keep the transcript on `ctrl+shift+o`, add it to `~/.claude/keybindings.json` (`ctrl+o` stays bound for `claude` outside orb):
-
-```json
-{
-  "$schema": "https://www.schemastore.org/claude-code-keybindings.json",
-  "$docs": "https://code.claude.com/docs/en/keybindings",
-  "bindings": [
-    { "context": "Global", "bindings": { "ctrl+shift+o": "app:toggleTranscript" } }
-  ]
-}
-```
-
-kitty maps `ctrl+shift+o` to `pass_selection_to_program` by default and swallows it, so also add `map ctrl+shift+o no_op` to `kitty.conf` and reload kitty (`ctrl+shift+F5`).
+`<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎`, `Cmd l` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
 
 ## Mouse
 
 orb captures the mouse from the moment it starts.
 
-- A click selects a sidebar row or a picker row. A double-click, two clicks on the same row within 500 ms, acts as `⏎`: it attaches, starts the draft, opens or closes the group or the Settled shelf, or picks the picker row.
-- A click on a sidebar row moves the keys to the sidebar, and a click on the right-hand side moves them to the dashboard or into the Claude pane. The click that moves them into the pane isn't sent to Claude; later clicks and the wheel over the pane are.
+- A click selects a sidebar or picker row. A double-click, two clicks on the same row within 500 ms, acts as `⏎`.
+- A click on a pane focuses it, and the click doesn't reach the pane's program.
+- The wheel over a pane goes to its program if the program tracks the mouse. Otherwise it sends arrow keys on the alternate screen, and scrolls the pane's history everywhere else. History holds 10 000 lines, from what orb saw after it attached.
+- A left drag in a pane whose program doesn't track the mouse (a shell, plain `claude`, plain `pi`) selects text, and the release copies it through OSC 52. A double-click selects a word and a triple-click a line. Dragging past the top or bottom edge scrolls while selecting.
+- In a program that tracks the mouse, like lazygit or a fullscreen Claude, clicks and drags go to the program.
 - With the keys in the sidebar, the wheel moves the selection one row. Otherwise, with no picker or rename box open, the wheel over the sidebar scrolls only its view, 3 lines a notch. Over a picker's list it moves the picker's selection, and over the session, worktree or search picker's preview it does nothing. Neither wraps.
-- A click on a dashboard item highlights it and doesn't run it.
 - A click outside a picker or the rename box closes it, as `Esc` does.
 - A click on the sidebar's search box starts a search, and a click in any input's text moves the cursor there.
 
-To select text with the mouse, hold Shift while you drag. That's kitty's default; other terminals have their own key.
+kitty's Shift+drag still selects with kitty's own selection, past orb.
 
 ## Development
 

@@ -718,24 +718,21 @@ mod tests {
                 session: SessionId(id),
             }),
             branch: None,
-            pinned_at: None,
-            settled_at: None,
-            active_since: UNIX_EPOCH,
             created_at: UNIX_EPOCH,
             last_activity_at: now() - Duration::from_mins(5),
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 
-    /// `threads`, settled at [`now`].
-    fn settled(threads: Thread) -> Thread {
-        Thread {
-            settled_at: Some(now()),
-            ..threads
-        }
+    /// `sessions` with session 1 settled at [`now`].
+    fn settled(mut sessions: Sessions) -> Sessions {
+        sessions
+            .sessions
+            .iter_mut()
+            .filter(|session| session.id == SessionId(1))
+            .for_each(|session| session.settled_at = Some(now()));
+        sessions
     }
 
     /// `threads` in one project, `orb`, each in its own session.
@@ -921,7 +918,7 @@ mod tests {
     #[rstest::rstest]
     fn showing_settled_lights_an_s_after_the_title() {
         // Given a settled thread, with settled threads shown.
-        let sessions = sessions(vec![settled(thread(1, "Fix the bug", ThreadStatus::Idle))]);
+        let sessions = settled(sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]));
         let mut picker = picker(&sessions);
         picker.toggle_settled(&sessions);
 
@@ -938,10 +935,10 @@ mod tests {
     #[rstest::rstest]
     fn hiding_settled_lights_no_s() {
         // Given a settled and an active thread, with settled threads hidden.
-        let sessions = sessions(vec![
-            settled(thread(1, "Fix the bug", ThreadStatus::Idle)),
+        let sessions = settled(sessions(vec![
+            thread(1, "Fix the bug", ThreadStatus::Idle),
             thread(2, "Write docs", ThreadStatus::Idle),
-        ]);
+        ]));
 
         // When drawing the picker.
         let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
@@ -1017,7 +1014,7 @@ mod tests {
     #[rstest::rstest]
     fn settled_row_shows_the_check_in_dark3() {
         // Given a settled thread, with settled threads shown.
-        let sessions = sessions(vec![settled(thread(1, "Fix the bug", ThreadStatus::Idle))]);
+        let sessions = settled(sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]));
         let mut picker = picker(&sessions);
         picker.toggle_settled(&sessions);
 

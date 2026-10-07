@@ -86,14 +86,12 @@ where
 }
 
 /// The command a pane runs to attach to `session`. zmx creates a missing
-/// session running `command`, or a login `$SHELL` when `command` is empty;
-/// on a running session the command is ignored and zmx sends its snapshot.
-pub fn attach_argv(session: &ZmxSession, command: &[OsString]) -> Vec<OsString> {
+/// session running a login `$SHELL`; on a running session it sends its
+/// snapshot.
+pub fn attach_argv(session: &ZmxSession) -> Vec<OsString> {
     zmx_argv(
         &session.dir,
-        [OsString::from("attach"), session.name.clone().into()]
-            .into_iter()
-            .chain(command.iter().cloned()),
+        [OsString::from("attach"), session.name.clone().into()],
     )
 }
 
@@ -299,38 +297,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn attach_argv_with_a_command_runs_it_in_the_session() {
-        // Given orb-p7 on /z and a command to run.
-        let session = orb_p7("/z");
-
-        // When building the pane's command.
-        let argv = attach_argv(&session, &words(&["sh", "-c", "pi"]));
-
-        // Then zmx attaches to the session, creating it with the command.
-        assert_eq!(
-            argv,
-            words(&[
-                "env",
-                "ZMX_DIR=/z",
-                "ZMX_NO_DETACH_KEY=1",
-                "zmx",
-                "attach",
-                "orb-p7",
-                "sh",
-                "-c",
-                "pi",
-            ]),
-            "the command follows the session name"
-        );
-    }
-
-    #[rstest::rstest]
     fn attach_argv_without_a_command_leaves_the_shell_to_zmx() {
         // Given orb-p7 on /z and no command.
         let session = orb_p7("/z");
 
         // When building the pane's command.
-        let argv = attach_argv(&session, &[]);
+        let argv = attach_argv(&session);
 
         // Then it ends at the session name, so zmx starts a login shell.
         assert_eq!(
@@ -355,7 +327,7 @@ mod tests {
         let session = orb_p7(dir);
 
         // When building the pane's command.
-        let argv = attach_argv(&session, &[]);
+        let argv = attach_argv(&session);
 
         // Then ZMX_DIR names that directory.
         assert_eq!(

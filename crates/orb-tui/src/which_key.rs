@@ -7,7 +7,6 @@
 //! tall as its rows; on a shorter screen the rows that don't fit are cut off.
 
 use orb_domain::Intent;
-use orb_domain::feat::zellij::zellij_service::Tool;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -20,7 +19,7 @@ use crate::keymap::Keys;
 use crate::picker::WORKTREE;
 use crate::sidebar::{
     BG_DARK, BLUE, BLUE1, BORDER, COMMENT, CYAN, DARK5, FOLDER, FOLDER_OPEN, GREEN, MAGENTA,
-    ORANGE, RED, kind_look,
+    ORANGE, kind_look,
 };
 
 /// One row of the popup: a next key and what it does.
@@ -141,9 +140,6 @@ fn look(intent: &Intent) -> (&'static str, Color) {
         Intent::FilterProjects => ("\u{f0b0}", CYAN),
         Intent::ChangeWorkspace => ("\u{f1bb}", GREEN),
         Intent::SwitchBranch => ("\u{e725}", ORANGE),
-        Intent::OpenTool(Tool::Shell) => ("\u{f120}", CYAN),
-        Intent::OpenTool(Tool::Lazygit) => ("\u{f1d3}", RED),
-        Intent::OpenTool(Tool::Nvim) => ("\u{e62b}", GREEN),
         Intent::ToggleSidebar => ("\u{f0db}", BLUE1),
         Intent::SelectFirst => ("\u{f062}", BLUE),
         Intent::NewFolder(kind) => kind_look(*kind),

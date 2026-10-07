@@ -937,17 +937,11 @@ impl SessionsActor {
             created_at: now,
             turn_started_at: None,
             branch: None,
-            pinned_at: None,
-            settled_override: None,
-            settled_at: None,
-            unsettled_at: None,
             last_activity_at: now,
             last_visited_at: now,
             ai_titled: false,
             model: None,
-            permission_mode: None,
             renamed_title: None,
-            group_id: None,
             harness,
             pane_id: Some(pane),
             orb_session: self.panes.get(&pane).map(|row| row.session_id),
@@ -2563,18 +2557,10 @@ fn thread(row: &ThreadRow, status: ThreadStatus, pane: Option<PaneLaunch>) -> Th
         pane,
         last_session: row.orb_session,
         branch: row.branch.clone(),
-        pinned_at: row.pinned_at.map(from_ms),
-        settled_at: row
-            .settled_at
-            .filter(|_| row.settled_override == Some(SettledOverride::Settled))
-            .map(from_ms),
-        active_since: from_ms(row.created_at.max(row.unsettled_at.unwrap_or(0))),
         created_at: from_ms(row.created_at),
         last_activity_at: from_ms(row.last_activity_at),
         unseen: row.last_activity_at > row.last_visited_at,
-        group: row.group_id,
         model: row.model.clone(),
-        permission: row.permission_mode.clone(),
         harness: row.harness.clone(),
     }
 }
@@ -2744,8 +2730,8 @@ fn current_branch(git: &GitService, cwd: &Path) -> Option<String> {
 }
 
 /// The ref a new worktree of `repo` starts from for `base`: `origin/<b>` when
-/// the repository has an origin and `origin_has` says it has `b` (a fetch at
-/// Start, a look at the last fetch for the dashboard), else `base` as is.
+/// the repository has an origin and `origin_has` says it has `b` (a fetch of
+/// `b` from origin), else `base` as is.
 /// Only `origin/<b>`, a name without `/`, or an existing local branch is
 /// looked for on origin; another remote's ref, like `upstream/x`, is used as
 /// is.
@@ -9042,27 +9028,6 @@ mod tests {
         assert!(
             host.stopped().is_empty(),
             "an auto-settle should leave the session's agents running"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn long_idle_thread_no_longer_settles_itself() -> Result<(), Report<StoreError>> {
-        // Given thread aa idle for four days.
-        let (store, _) = store_with_thread("aa")?;
-        idle_for_four_days(&store, "aa")?;
-        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start_unselected(store, &host);
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the thread's own settle field stays unused.
-        assert_eq!(
-            saved(&actor.store, "aa")?.settled_override,
-            None,
-            "a thread settles only through its session"
         );
         Ok(())
     }

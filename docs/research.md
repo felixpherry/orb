@@ -2,6 +2,7 @@
 
 > Gathered 2026-09-23/24 against **Claude Code 2.1.280**, **zellij 0.45.0**, **T3 Code v0.0.42 (commit f5ef0dd)**, rustc 1.98.1, macOS.
 > These facts decay. Re-verify anything a milestone depends on (`claude --help`, `claude agents --json`, a real transcript) before building on it.
+> §21 holds the overhaul's facts, verified 2026-10-06/07.
 > Provenance tags: **[verified]** checked on this machine · **[docs]** official docs · **[reported]** from a research pass, not re-checked.
 
 ## 1. Claude Code CLI
@@ -121,11 +122,12 @@ Source: https://github.com/pingdotgg/t3code (commit f5ef0dd). Local data: `~/.t3
 
 ## 5. User environment
 
-- kitty on macOS, **no** `macos_option_as_alt` (Option types symbols). `kitty.conf` maps `cmd+{h,i,j,k,l,n,o,p,x,1-5,[,],f,+,-,=,arrows}` → `super+…` for zellij.
+- kitty on macOS, **no** `macos_option_as_alt` (Option types symbols). `kitty.conf` maps `cmd+{h,i,j,k,l,n,o,p,x,1-5,[,],f,+,-,=,arrows}` → `super+…` for orb (since the overhaul; zellij is gone).
 - zellij 0.45.0 (`~/.config/zellij/config.kdl`): `keybinds clear-defaults=true`, `default_mode "locked"`, `Ctrl g` toggles lock, navigation on `Super`. Kitty keyboard protocol on (default). Kitty graphics supported since 0.45 (https://zellij.dev/news/nested-sessions-kitty-graphics-new-ui/).
 - zellij CLI used by M8: `zellij action new-pane [--floating] [--name] [--cwd] [--width/--height] -- <cmd>` (returns pane id), `zellij action list-panes --json [-a]`, `zellij action focus-pane-id <id>`, `go-to-tab-by-id`. **[verified: `--help`]** What they do, as orb uses them, is in §13.
 - Tools: nvim, lazygit, yazi, gh installed; `$EDITOR` unset in non-interactive shells (fall back to `nvim`).
 - Related tool the user runs: `cwt` (worktree manager TUI) — opens duplicate zellij panes on re-entry; orb must de-dupe.
+- Since the overhaul orb runs straight in kitty (§21).
 
 ## 6. Terminal pane (verified 2026-09-24, Claude Code 2.1.281, alacritty_terminal 0.26.0)
 
@@ -860,3 +862,54 @@ Probed on this machine with pi 1.0.0 and its example `subagent` extension, `exam
 - AC5 and the spawn note's "pi without a `subagent` tool" assume a missing tool. With pi-amplike loaded unfiltered there's always a `subagent` tool, amplike's, with a different schema. Under remedy (a), AC5 means: amplike's subagent filtered out and the example not installed, so no `subagent` tool exists.
 - Edge Cases, "Confirm prompt", says Research folders are untrusted by default. A folder whose `.pi/` holds only `agents/` counts as trusted (`isProjectTrusted()` true), so the confirm doesn't show there even without `confirmProjectAgents: false`. The flag still matters under `--no-approve` or once the folder gains a protected resource, so passing it stays right.
 - Phase 1 fact 8 lists `read, bash, edit, write, grep, find, ls` (and `codemode`, `tool_search`). `powershell` is a built-in name too. Only `read, bash, edit, write` are active by default; `codemode` and `tool_search` are registered but inactive.
+
+## 21. Overhaul: panes, status and integrations (verified 2026-10-06/07, Claude Code 2.1.292, pi 1.0.0, zmx 0.8.1, kitty 0.48.2, crossterm 0.29, fish 4.8.1)
+
+Tags as in §6.
+
+### `claude agents` interactive records **[verified]**
+- `claude agents --json --all` lists a Claude the user started by hand as a `kind:"interactive"` record with `cwd, kind, name, pid, sessionId, startedAt, status`, plus `waitingFor` while waiting. Background records add `id` and `state`. In 2.1.281 interactive records had no `sessionId` or `cwd` (§7).
+- Example: `{"pid":60745,"cwd":"/Users/felixpherry","kind":"interactive","startedAt":1791277239194,"sessionId":"e80e4172-…","name":"felixpherry-6c","status":"idle"}`.
+- `pid` is the `claude` process itself (`ps -o pid=,ppid=,args= -p <pid>` gives `claude`, whose parent is the shell it was typed in).
+- `waitingFor` values seen in the bundle: `"dialog open"`, `"input needed"`, `"sandbox request"`. The status mapping of §7 applies unchanged.
+- `claude attach <id>` clients don't appear as records.
+- One call takes about 0.16 s wall.
+
+### Matching a record to a pane **[verified]**
+- zmx's `pid=` is the session's program for a session made with a command, and the login shell for one made without. A Claude typed into a pane's shell has the pane's `pid=` as an ancestor; a Claude run as the session's own program has `pid=` equal to its pid. orb matches a record to the pane whose `pid=` is the record's pid or one of its ancestors.
+- `ps -A -o pid=,ppid=` prints right-aligned `pid ppid` pairs, one per line, first line `    1     0`; about 0.03 s.
+
+### `zmx list` and attach **[verified]**
+- Each line is two spaces, then tab-separated `name=<n>`, `pid=<p>`, `clients=<c>`, `created=<unix seconds>`, `cwd=file://…`, and `cmd=…` only for a session running a command. A line with `err=` (`status=cleaning up`) is a session whose daemon died. Listing a socket dir that doesn't exist lists nothing.
+- The first output of `zmx attach` on a new session is zmx's own `session "<name>" created\r\n\x1b[2J\x1b[H`, about 20 ms after the spawn and before the shell starts. A reattach prints no banner; zmx sends the screen, not the history.
+- In 25 runs of attach, `exit`, client exit, `zmx list`, zmx never listed the session after its client exited.
+- `zmx version` prints `zmx 0.8.1` and its `ghostty_vt` build.
+
+### Typing into a fresh shell **[verified]**
+- fish 4.8.1 and zsh run a line written to a fresh `zmx attach` right after zmx's banner; it waits in the PTY until the shell reads it. fish reads no input until its DA1 query (`CSI 0 c`) is answered; orb's emulator answers it. The line is echoed twice in fish (once by the new PTY, once at the prompt).
+
+### kitty keys **[verified: crossterm 0.29 source, the user's `kitty.conf`]**
+- orb pushes `DISAMBIGUATE_ESCAPE_CODES | REPORT_ALTERNATE_KEYS`, written as `CSI > 5 u`.
+- `map cmd+h send_key super+h` makes kitty report Super h as `CSI 104;9u`; crossterm maps modifier bit 8 to `KeyModifiers::SUPER` and codepoint 104 to `KeyCode::Char('h')`.
+- Ctrl+[ under the disambiguate flag is `CSI 91;5u` (`Char('[')` with Ctrl); Esc is `CSI 27u` (`KeyCode::Esc`). Without the kitty protocol Ctrl+[ is byte 0x1B, read as Esc.
+- Ctrl+] is `CSI 93;5u`; its legacy byte 0x1D reads as Ctrl+5, which is also what kitty sends for a real Ctrl+5 (`CSI 53;5u`).
+- Ctrl+g is `CSI 103;5u`, or byte 0x07 without the protocol; both read as `Char('g')` with Ctrl.
+- `ratatui-which-key` 0.14: `Keymap::with_leader(key)` replaces the Space leader; its parser reads `<leader>`, `<c-g>`, `<space>` and plain characters, and has no Super modifier.
+
+### Claude hook input **[verified: Claude Code 2.1.292 bundle]**
+- Every hook input carries `session_id`, `transcript_path`, `cwd`, `permission_mode`, `agent_type`, `effort`, and `agent_id` only in a subagent. `agent_type` is also set for a main session run with `--agent`, so only `agent_id` marks a subagent.
+- `SessionStart` adds `hook_event_name`, `source` (`startup|resume|clear|compact|fork`, also the matcher's field), `model` and `session_title`.
+- `SessionEnd` adds `reason` (`clear|resume|logout|prompt_input_exit|other`). `/clear` fires `SessionEnd` with `reason: clear` for the old id, then `SessionStart` with `source: clear` for the new one; an in-app `/resume` does the same with `resume`.
+- User settings are `settings.json` in `CLAUDE_CONFIG_DIR`, else `~/.claude`. The user's file is strict JSON in serde_json's pretty form and round-trips byte for byte through `serde_json` with `preserve_order`.
+- Cursor's Claude-compatible events (`CURSOR_VERSION` in the environment or `cursor_version` in the input) are skipped as herdr does; not verified here, Cursor isn't installed.
+
+### pi extension events **[verified: pi 1.0.0 `dist/core/extensions/types.d.ts` and `docs/`]**
+- `session_start` `{ reason: "startup" | "reload" | "new" | "resume" | "fork"; previousSessionFile? }`.
+- `session_shutdown` `{ reason: "quit" | "reload" | "new" | "resume" | "fork"; targetSessionFile? }`, fired before the extension runtime is torn down. Only `quit` ends the conversation in the pane; the others are followed by a `session_start`.
+- `agent_start`, and `agent_settled` once a run has settled with no retry, compaction or queued continuation left.
+- `ctx.mode` is `"tui" | "rpc" | "json" | "print"`; pi subagents run `pi --mode json -p --no-session` and inherit the environment, so orb's extension reports only in `tui`.
+- `ctx.sessionManager.getSessionId()` and `getSessionFile()` (the file is `undefined` before the first prompt).
+- User extensions load from `<agent dir>/extensions/`, single `.ts` files included; the agent dir is `PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
+
+### orb's pane file
+- `~/.orb/panes/<pane id>.json`, written by orb's hook and extension through a temp file and a rename: `{"agent":"claude"|"pi","event":"start"|"working"|"idle"|"end","session_id":"…","transcript":"/abs/path"?,"source":"…"?,"at":<unix ms>}`. `source` is Claude's `SessionStart` source, or pi's latest `session_start` reason. A thread keeps its pane under a new id only when `source` is `clear` (Claude) or `new` (pi).

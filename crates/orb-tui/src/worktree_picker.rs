@@ -503,26 +503,29 @@ mod tests {
                 session: SessionId(id),
             }),
             branch: None,
-            pinned_at: None,
-            settled_at: None,
-            active_since: UNIX_EPOCH,
             created_at: UNIX_EPOCH,
             last_activity_at: now() - Duration::from_mins(5),
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 
-    /// `thread`, last active and settled `days` before [`now`].
-    fn settled(thread: Thread, days: u64) -> Thread {
-        let at = now() - Duration::from_hours(24 * days);
+    /// `thread`, last active `days` before [`now`].
+    fn idle_for(thread: Thread, days: u64) -> Thread {
         Thread {
-            settled_at: Some(at),
-            last_activity_at: at,
+            last_activity_at: now() - Duration::from_hours(24 * days),
             ..thread
         }
+    }
+
+    /// `app` with session `id` settled `ago` before [`now`].
+    fn settle(mut app: AppState, id: i64, ago: Duration) -> AppState {
+        app.sessions
+            .sessions
+            .iter_mut()
+            .filter(|session| session.id == SessionId(id))
+            .for_each(|session| session.settled_at = Some(now() - ago));
+        app
     }
 
     /// Git's facts: on `orb/work` with `changes`, committed two hours ago.
@@ -576,11 +579,11 @@ mod tests {
     /// `orb-cccc` settled 10 days ago with 3 changes, `orb-dddd` used by
     /// nothing, its size not yet known.
     fn fixture() -> AppState {
-        app(
+        let app = app(
             vec![
                 thread(1, "Fix the bug", "orb-aaaa"),
-                settled(thread(2, "Write docs", "orb-bbbb"), 9),
-                settled(thread(3, "Refactor", "orb-cccc"), 10),
+                idle_for(thread(2, "Write docs", "orb-bbbb"), 9),
+                idle_for(thread(3, "Refactor", "orb-cccc"), 10),
             ],
             vec![
                 worktree("orb-aaaa", Some(facts(0)), Some(1024 * 1024 * 3 / 2)),
@@ -588,7 +591,9 @@ mod tests {
                 worktree("orb-cccc", Some(facts(3)), Some(512)),
                 worktree("orb-dddd", Some(facts(0)), None),
             ],
-        )
+        );
+        let app = settle(app, 2, Duration::from_hours(24 * 9));
+        settle(app, 3, Duration::from_hours(24 * 10))
     }
 
     /// The worktree picker over `app`'s worktrees, row `row` selected.
@@ -875,12 +880,10 @@ mod tests {
         }
     }
 
-    /// `solo`, settled `ago` before [`now`].
-    fn settled_for(ago: Duration) -> Thread {
-        Thread {
-            settled_at: Some(now() - ago),
-            ..solo()
-        }
+    /// `orb-eeee` with `facts`, used by `solo`'s session settled `ago`
+    /// before [`now`].
+    fn settled_for(ago: Duration, facts: Option<WorktreeFacts>) -> AppState {
+        settle(lone(Some(solo()), facts), 1, ago)
     }
 
     #[rstest::rstest]
@@ -899,20 +902,20 @@ mod tests {
         "kept: a session in it is active",
         DARK5
     )]
-    #[case::unknown(lone(Some(settled_for(Duration::from_hours(1))), None), "…", DARK5)]
+    #[case::unknown(settled_for(Duration::from_hours(1), None), "…", DARK5)]
     #[case::dirty(
-        lone(Some(settled_for(Duration::from_hours(1))), Some(facts(2))),
+        settled_for(Duration::from_hours(1), Some(facts(2))),
         "kept: uncommitted changes",
         ORANGE
     )]
     #[case::prune_now(lone(None, Some(facts(0))), "prunes at next sweep", RED)]
     #[case::prune_in_days(
-        lone(Some(settled_for(Duration::from_hours(48))), Some(facts(0))),
+        settled_for(Duration::from_hours(48), Some(facts(0))),
         "prunes in 5d",
         YELLOW
     )]
     #[case::prune_in_hours(
-        lone(Some(settled_for(Duration::from_mins(7 * 24 * 60 - 150))), Some(facts(0))),
+        settled_for(Duration::from_mins(7 * 24 * 60 - 150), Some(facts(0))),
         "prunes in 3h",
         YELLOW
     )]

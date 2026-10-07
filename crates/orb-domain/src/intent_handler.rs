@@ -34,7 +34,6 @@ use crate::feat::sessions::validator::{
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
-use crate::feat::zellij::validator::validate_open_tool;
 use crate::{AppState, Command, Focus, Intent, TextInput};
 
 /// Applies each [`Intent`] to [`AppState`] in one match block.
@@ -447,15 +446,6 @@ impl IntentHandler {
                 }
                 _ => vec![],
             },
-            Intent::OpenTool(tool) => {
-                match (validate_open_tool(state), state.sessions.selected_session()) {
-                    (Ok(()), Some(session)) => vec![Command::OpenTool {
-                        tool: *tool,
-                        cwd: session.dir.clone(),
-                    }],
-                    _ => vec![],
-                }
-            }
             Intent::PickerOpen => match validate_open_directory(state) {
                 Ok(()) => list(state.picker.as_mut().and_then(PickerState::open_directory)),
                 Err(_) => vec![],
@@ -1541,7 +1531,6 @@ mod tests {
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use crate::feat::worktrees::state::{Worktree, Worktrees};
-    use crate::feat::zellij::zellij_service::Tool;
     use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
     use ratatui::layout::Rect;
 
@@ -1574,15 +1563,10 @@ mod tests {
             turn_started_at: None,
             pane: Some(launch(id)),
             branch: None,
-            pinned_at: None,
-            settled_at: None,
-            active_since: SystemTime::UNIX_EPOCH,
             created_at: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 
@@ -1590,12 +1574,19 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
 
-    /// Thread `id`, settled at second `id`.
-    fn settled(id: i64) -> Thread {
-        Thread {
-            settled_at: Some(at(id.unsigned_abs())),
-            ..thread(id, ThreadStatus::Stopped)
+    /// Thread `id`, stopped; [`settle`] settles its session.
+    fn stopped(id: i64) -> Thread {
+        thread(id, ThreadStatus::Stopped)
+    }
+
+    /// `state` with each session in `ids` settled at second `<id>`.
+    fn settle(mut state: AppState, ids: &[i64]) -> AppState {
+        for session in &mut state.sessions.sessions {
+            if ids.contains(&session.id.0) {
+                session.settled_at = Some(at(session.id.0.unsigned_abs()));
+            }
         }
+        state
     }
 
     /// One project holding `threads`, with the sidebar's cursor on `cursor`.
@@ -1994,7 +1985,7 @@ mod tests {
     #[rstest::rstest]
     fn enter_on_a_settled_session_unsettles_and_attaches_it() {
         // Given a selected settled session.
-        let mut state = state_with(vec![settled(1)], 1);
+        let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
 
         // When handling Attach.
         let commands = IntentHandler::handle(&Intent::Attach, &mut state);
@@ -2017,7 +2008,7 @@ mod tests {
         AppState {
             focus: Focus::Sidebar,
             layouts: Layouts::default(),
-            ..state_with(vec![settled(1)], 1)
+            ..settle(state_with(vec![stopped(1)], 1), &[1])
         }
     }
 
@@ -3171,7 +3162,7 @@ mod tests {
     #[case(true)]
     fn enter_on_the_shelf_toggles_it(#[case] open: bool) {
         // Given the cursor on the Settled header, with the shelf `open`.
-        let mut state = state_at(vec![settled(1)], SidebarItem::SettledShelf);
+        let mut state = settle(state_at(vec![stopped(1)], SidebarItem::SettledShelf), &[1]);
         state.sessions.shelf_open = open;
 
         // When handling Attach.
@@ -3187,7 +3178,7 @@ mod tests {
     #[rstest::rstest]
     fn enter_on_the_shelf_returns_no_commands() {
         // Given the cursor on the Settled header.
-        let mut state = state_at(vec![settled(1)], SidebarItem::SettledShelf);
+        let mut state = settle(state_at(vec![stopped(1)], SidebarItem::SettledShelf), &[1]);
 
         // When handling Attach.
         let commands = IntentHandler::handle(&Intent::Attach, &mut state);
@@ -3199,7 +3190,7 @@ mod tests {
     #[rstest::rstest]
     fn l_on_the_shelf_opens_it() {
         // Given the cursor on the collapsed Settled header.
-        let mut state = state_at(vec![settled(1)], SidebarItem::SettledShelf);
+        let mut state = settle(state_at(vec![stopped(1)], SidebarItem::SettledShelf), &[1]);
 
         // When handling OpenShelf.
         IntentHandler::handle(&Intent::OpenShelf, &mut state);
@@ -3214,7 +3205,7 @@ mod tests {
     #[rstest::rstest]
     fn h_on_a_settled_thread_closes_the_shelf_and_selects_it() {
         // Given the shelf open and the cursor on settled thread 1.
-        let mut state = state_with(vec![settled(1)], 1);
+        let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
         state.sessions.shelf_open = true;
 
         // When handling CloseShelf.
@@ -3231,7 +3222,10 @@ mod tests {
     #[rstest::rstest]
     fn h_on_an_active_card_does_nothing() {
         // Given the shelf open and the cursor on active thread 1.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle), settled(2)], 1);
+        let mut state = settle(
+            state_with(vec![thread(1, ThreadStatus::Idle), stopped(2)], 1),
+            &[2],
+        );
         state.sessions.shelf_open = true;
 
         // When handling CloseShelf.
@@ -3331,7 +3325,7 @@ mod tests {
     #[rstest::rstest]
     fn settle_on_a_settled_thread_returns_unsettle() {
         // Given a selected settled thread.
-        let mut state = state_with(vec![settled(1)], 1);
+        let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
 
         // When handling ToggleSettle.
         let commands = IntentHandler::handle(&Intent::ToggleSettle, &mut state);
@@ -3347,7 +3341,7 @@ mod tests {
     #[rstest::rstest]
     fn settle_on_a_settled_thread_keeps_the_cursor() {
         // Given a selected settled thread.
-        let mut state = state_with(vec![settled(1)], 1);
+        let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
 
         // When handling ToggleSettle.
         IntentHandler::handle(&Intent::ToggleSettle, &mut state);
@@ -3379,13 +3373,10 @@ mod tests {
     #[rstest::rstest]
     fn toggle_pin_on_a_pinned_thread_returns_unpin() {
         // Given a selected pinned thread.
-        let mut state = state_with(
-            vec![Thread {
-                pinned_at: Some(at(1)),
-                ..thread(1, ThreadStatus::Idle)
-            }],
-            1,
-        );
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        if let Some(session) = state.sessions.sessions.get_mut(0) {
+            session.pinned_at = Some(at(1));
+        }
 
         // When handling TogglePin.
         let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
@@ -3418,13 +3409,16 @@ mod tests {
     fn delete_selects_the_next_row_below() {
         // Given cards 2 and 1, then the open shelf holding thread 3, with card 1 selected, and Yes
         // highlighted in its delete confirm.
-        let mut state = state_with(
-            vec![
-                thread(1, ThreadStatus::Idle),
-                thread(2, ThreadStatus::Idle),
-                settled(3),
-            ],
-            1,
+        let mut state = settle(
+            state_with(
+                vec![
+                    thread(1, ThreadStatus::Idle),
+                    thread(2, ThreadStatus::Idle),
+                    stopped(3),
+                ],
+                1,
+            ),
+            &[3],
         );
         state.sessions.shelf_open = true;
         answer_yes(&Intent::Delete, &mut state);
@@ -3573,7 +3567,7 @@ mod tests {
     #[rstest::rstest]
     fn settle_on_a_settled_thread_opens_no_confirm() {
         // Given a selected settled thread.
-        let mut state = state_with(vec![settled(1)], 1);
+        let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
 
         // When handling ToggleSettle.
         IntentHandler::handle(&Intent::ToggleSettle, &mut state);
@@ -3656,7 +3650,8 @@ mod tests {
         // is settled.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
         answer_yes(&Intent::ToggleSettle, &mut state);
-        poll(&mut state, &[settled(1)]);
+        poll(&mut state, &[stopped(1)]);
+        let mut state = settle(state, &[1]);
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -3726,40 +3721,6 @@ mod tests {
             commands.is_empty(),
             "Yes on a thread that is gone should do nothing"
         );
-    }
-
-    #[rstest::rstest]
-    #[case(Tool::Shell)]
-    #[case(Tool::Lazygit)]
-    #[case(Tool::Nvim)]
-    fn open_tool_on_a_thread_opens_it_in_the_threads_directory(#[case] tool: Tool) {
-        // Given a selected thread in `/work/1`.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
-
-        // When handling OpenTool.
-        let commands = IntentHandler::handle(&Intent::OpenTool(tool), &mut state);
-
-        // Then the tool opens in the thread's directory.
-        assert_eq!(
-            commands,
-            vec![Command::OpenTool {
-                tool,
-                cwd: "/work/1".into(),
-            }],
-            "the tool should open where the thread runs"
-        );
-    }
-
-    #[rstest::rstest]
-    fn open_tool_without_a_selection_returns_no_commands() {
-        // Given nothing selected.
-        let mut state = AppState::default();
-
-        // When handling OpenTool.
-        let commands = IntentHandler::handle(&Intent::OpenTool(Tool::Shell), &mut state);
-
-        // Then nothing opens.
-        assert!(commands.is_empty(), "a tool needs a selected session");
     }
 
     /// The picker row for project `id` of [`with_projects`].
@@ -5299,9 +5260,12 @@ mod tests {
     #[rstest::rstest]
     fn session_picker_hides_a_settled_thread() {
         // Given settled thread 1 and idle thread 2.
-        let state = state_at(
-            vec![settled(1), thread(2, ThreadStatus::Idle)],
-            SidebarItem::SettledShelf,
+        let state = settle(
+            state_at(
+                vec![stopped(1), thread(2, ThreadStatus::Idle)],
+                SidebarItem::SettledShelf,
+            ),
+            &[1],
         );
 
         // When opening the session picker.
@@ -5318,9 +5282,12 @@ mod tests {
     #[rstest::rstest]
     fn toggling_settled_lists_a_settled_thread() {
         // Given the session picker over settled thread 1 and idle thread 2.
-        let mut state = open_sessions(state_at(
-            vec![settled(1), thread(2, ThreadStatus::Idle)],
-            SidebarItem::SettledShelf,
+        let mut state = open_sessions(settle(
+            state_at(
+                vec![stopped(1), thread(2, ThreadStatus::Idle)],
+                SidebarItem::SettledShelf,
+            ),
+            &[1],
         ));
 
         // When handling PickerToggleSettled.
@@ -5445,12 +5412,15 @@ mod tests {
     fn toggle_settled_with_text_typed_lists_the_settled_match() {
         // Given the session picker over settled `alpha` (1) and `beta` (2),
         // with `alpha` typed, which shows nothing.
-        let state = state_at(
-            vec![
-                named(settled(1), "alpha"),
-                named(thread(2, ThreadStatus::Idle), "beta"),
-            ],
-            SidebarItem::SettledShelf,
+        let state = settle(
+            state_at(
+                vec![
+                    named(stopped(1), "alpha"),
+                    named(thread(2, ThreadStatus::Idle), "beta"),
+                ],
+                SidebarItem::SettledShelf,
+            ),
+            &[1],
         );
         let mut state = typed(open_sessions(state), &['a', 'l', 'p', 'h', 'a']);
 
@@ -5851,15 +5821,18 @@ mod tests {
     /// The session picker over settled thread 1, last active at `secs`, and
     /// thread 2, ended at 10 s, both with transcripts.
     fn settled_last_active_at(secs: u64) -> AppState {
-        open_sessions(state_at(
-            vec![
-                with_transcript(Thread {
-                    last_activity_at: at(secs),
-                    ..settled(1)
-                }),
-                with_transcript(ended_at(2, 10)),
-            ],
-            SidebarItem::SettledShelf,
+        open_sessions(settle(
+            state_at(
+                vec![
+                    with_transcript(Thread {
+                        last_activity_at: at(secs),
+                        ..stopped(1)
+                    }),
+                    with_transcript(ended_at(2, 10)),
+                ],
+                SidebarItem::SettledShelf,
+            ),
+            &[1],
         ))
     }
 

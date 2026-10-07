@@ -4,7 +4,6 @@ use std::fmt;
 
 use crate::feat::layout::tree::{NavDirection, Split};
 use crate::feat::sessions::state::{FolderKind, PaneId, SidebarItem};
-use crate::feat::zellij::zellij_service::Tool;
 
 /// A user action produced by the keymap and applied by the
 /// [`IntentHandler`](crate::IntentHandler).
@@ -122,8 +121,6 @@ pub enum Intent {
     ChangeWorkspace,
     /// Open the branch picker for the selected thread.
     SwitchBranch,
-    /// Open the tool in the selected session's directory.
-    OpenTool(Tool),
     /// Type a character into the picker's filter, the rename box, or the
     /// sidebar search.
     PickerInput(char),
@@ -233,7 +230,6 @@ impl fmt::Display for Intent {
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",
-            Self::OpenTool(tool) => tool.label(),
             Self::PickerInput(_) => "type",
             Self::PickerDeleteWord => "delete word",
             Self::PickerCursorLeft => "cursor left",
@@ -253,7 +249,6 @@ mod tests {
     use super::Intent;
     use crate::feat::layout::tree::{NavDirection, Split};
     use crate::feat::sessions::state::{FolderKind, PaneId};
-    use crate::feat::zellij::zellij_service::Tool;
 
     #[rstest::rstest]
     #[case(Intent::MoveFocus(NavDirection::Left), "focus left")]
@@ -280,19 +275,6 @@ mod tests {
     fn layout_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the layout intent.
         assert_eq!(intent.to_string(), expected, "which-key label");
-    }
-
-    #[rstest::rstest]
-    #[case(Tool::Shell, "shell")]
-    #[case(Tool::Lazygit, "lazygit")]
-    #[case(Tool::Nvim, "nvim")]
-    fn open_tool_displays_the_tools_label(#[case] tool: Tool, #[case] expected: &str) {
-        // Given / When / Then: which-key labels the intent by its tool.
-        assert_eq!(
-            Intent::OpenTool(tool).to_string(),
-            expected,
-            "which-key label"
-        );
     }
 
     #[rstest::rstest]

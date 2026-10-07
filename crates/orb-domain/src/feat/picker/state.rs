@@ -1476,8 +1476,8 @@ mod tests {
     }
 
     /// Thread `id` titled `title`, in session `id`, its last chat at second
-    /// `secs`, settled when `settled`.
-    fn agent(id: i64, title: &str, secs: u64, settled: bool) -> Thread {
+    /// `secs`.
+    fn agent(id: i64, title: &str, secs: u64) -> Thread {
         let at = UNIX_EPOCH + Duration::from_secs(secs);
         Thread {
             harness: HarnessId::new("claude"),
@@ -1493,15 +1493,10 @@ mod tests {
             }),
             last_session: Some(SessionId(id)),
             branch: None,
-            pinned_at: None,
-            settled_at: settled.then_some(at),
-            active_since: UNIX_EPOCH,
             created_at: UNIX_EPOCH,
             last_activity_at: at,
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 
@@ -1538,7 +1533,7 @@ mod tests {
     #[rstest::rstest]
     fn session_items_list_sessions_newest_chat_first() {
         // Given sessions 1 and 2, session 2's agent chatting last.
-        let sessions = orb_sessions(vec![agent(1, "api", 10, false), agent(2, "ui", 20, false)]);
+        let sessions = orb_sessions(vec![agent(1, "api", 10), agent(2, "ui", 20)]);
 
         // When listing the session picker's rows.
         let items = session_items(&sessions, false);
@@ -1559,7 +1554,10 @@ mod tests {
         #[case] expected: Vec<SessionId>,
     ) {
         // Given session 1 and settled session 2.
-        let sessions = orb_sessions(vec![agent(1, "api", 10, false), agent(2, "ui", 20, true)]);
+        let mut sessions = orb_sessions(vec![agent(1, "api", 10), agent(2, "ui", 20)]);
+        if let Some(session) = sessions.sessions.get_mut(1) {
+            session.settled_at = Some(UNIX_EPOCH + Duration::from_secs(20));
+        }
 
         // When listing the rows with settled sessions `settled`.
         let items = session_items(&sessions, settled);
@@ -1571,7 +1569,7 @@ mod tests {
     #[rstest::rstest]
     fn session_row_previews_its_agent() {
         // Given session 1 running thread 1.
-        let sessions = orb_sessions(vec![agent(1, "api", 10, false)]);
+        let sessions = orb_sessions(vec![agent(1, "api", 10)]);
 
         // When opening the session picker over its rows.
         let picker = PickerState::sessions(session_items(&sessions, false), Focus::Sidebar);
@@ -1587,7 +1585,7 @@ mod tests {
     #[rstest::rstest]
     fn hit_label_names_a_threads_session() {
         // Given thread 1 in session 1, which the user named `login`.
-        let mut sessions = orb_sessions(vec![agent(1, "api", 10, false)]);
+        let mut sessions = orb_sessions(vec![agent(1, "api", 10)]);
         if let Some(session) = sessions.sessions.first_mut() {
             session.name = Some("login".to_owned());
         }
@@ -1613,7 +1611,7 @@ mod tests {
         let sessions = orb_sessions(vec![Thread {
             pane: None,
             last_session: None,
-            ..agent(1, "api", 10, false)
+            ..agent(1, "api", 10)
         }]);
 
         // When labelling a hit in thread 1.
@@ -1636,7 +1634,7 @@ mod tests {
         // Given thread 1 that ended in session 1, and the search picker over a
         // hit in it.
         let sessions = {
-            let mut sessions = orb_sessions(vec![agent(1, "api", 10, false)]);
+            let mut sessions = orb_sessions(vec![agent(1, "api", 10)]);
             if let Some(thread) = sessions
                 .projects
                 .first_mut()

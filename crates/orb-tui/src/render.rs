@@ -271,15 +271,10 @@ mod tests {
                 session: SessionId(id),
             }),
             branch: None,
-            pinned_at: None,
-            settled_at: None,
-            active_since: SystemTime::UNIX_EPOCH,
             created_at: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH,
             unseen: false,
-            group: None,
             model: None,
-            permission: None,
         }
     }
 
@@ -309,7 +304,7 @@ mod tests {
         frame(state, None, keys, 8).backend().buffer().clone()
     }
 
-    /// Draws `state` on an 80x40 screen, tall enough for the whole dashboard.
+    /// Draws `state` on an 80x40 screen, tall enough for the whole start screen.
     fn draw_tall(state: &AppState, pane_error: Option<&str>) -> Buffer {
         let keys = Keys::new(keymap(), Scope::Sidebar);
         frame(state, pane_error, &keys, 40)
@@ -964,20 +959,20 @@ mod tests {
     fn sidebar_cursor_follows_the_selection_to_a_later_row() {
         // Given thread 1 and a settled thread, with the sidebar focused on
         // the Settled header below thread 1's three-line node.
-        let state = AppState {
+        let mut state = AppState {
             focus: Focus::Sidebar,
             sessions: Sessions {
                 cursor: Some(SidebarItem::SettledShelf),
                 ..sessions(vec![
                     thread(1, ThreadStatus::Idle),
-                    Thread {
-                        settled_at: Some(SystemTime::UNIX_EPOCH),
-                        ..thread(2, ThreadStatus::Stopped)
-                    },
+                    thread(2, ThreadStatus::Stopped),
                 ])
             },
             ..AppState::default()
         };
+        if let Some(session) = state.sessions.sessions.get_mut(1) {
+            session.settled_at = Some(SystemTime::UNIX_EPOCH);
+        }
 
         // When drawing a frame.
         let cursor = cursor_of(&state, &HashMap::new());

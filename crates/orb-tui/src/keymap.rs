@@ -587,60 +587,43 @@ mod tests {
         );
     }
 
-    /// One project holding thread 1, in group 9 of a store from before
-    /// sessions, with the cursor on `cursor`.
-    fn grouped(cursor: SidebarItem) -> Sessions {
-        Sessions {
-            projects: vec![Project {
-                id: ProjectId(1),
-                title: "orb".into(),
-                root: "/orb".into(),
+    /// One project of `kind` holding thread 1 in session 1, with the cursor
+    /// on `cursor`.
+    fn lone(kind: ProjectKind, cursor: SidebarItem) -> Sessions {
+        let projects = vec![Project {
+            id: ProjectId(1),
+            title: "orb".into(),
+            root: "/orb".into(),
+            created_at: SystemTime::UNIX_EPOCH,
+            removed: false,
+            repo: true,
+            threads: vec![Thread {
+                last_session: None,
+                harness: HarnessId::new("claude"),
+                id: ThreadId(1),
+                title: None,
+                cwd: "/orb".into(),
+                transcript: None,
+                status: ThreadStatus::Idle,
+                turn_started_at: None,
+                pane: Some(PaneLaunch {
+                    pane: PaneId(1),
+                    session: SessionId(1),
+                }),
+                branch: None,
                 created_at: SystemTime::UNIX_EPOCH,
-                removed: false,
-                repo: true,
-                threads: vec![Thread {
-                    last_session: None,
-                    harness: HarnessId::new("claude"),
-                    id: ThreadId(1),
-                    title: None,
-                    cwd: "/orb".into(),
-                    transcript: None,
-                    status: ThreadStatus::Idle,
-                    turn_started_at: None,
-                    pane: Some(PaneLaunch {
-                        pane: PaneId(1),
-                        session: SessionId(1),
-                    }),
-                    branch: None,
-                    pinned_at: None,
-                    settled_at: None,
-                    active_since: SystemTime::UNIX_EPOCH,
-                    created_at: SystemTime::UNIX_EPOCH,
-                    last_activity_at: SystemTime::UNIX_EPOCH,
-                    unseen: false,
-                    group: Some(9),
-                    model: None,
-                    permission: None,
-                }],
-                kind: ProjectKind::Normal,
+                last_activity_at: SystemTime::UNIX_EPOCH,
+                unseen: false,
+                model: None,
             }],
+            kind,
+        }];
+        Sessions {
+            sessions: sessions_for(&projects),
+            projects,
             cursor: Some(cursor),
             ..Sessions::default()
         }
-    }
-
-    /// `grouped(cursor)` as a project of `kind`: thread 1 outside any group.
-    fn lone(kind: ProjectKind, cursor: SidebarItem) -> Sessions {
-        let mut sessions = grouped(cursor);
-        sessions.projects.iter_mut().for_each(|project| {
-            project.kind = kind;
-            project
-                .threads
-                .iter_mut()
-                .for_each(|thread| thread.group = None);
-        });
-        sessions.sessions = sessions_for(&sessions.projects);
-        sessions
     }
 
     #[rstest::rstest]
@@ -659,7 +642,7 @@ mod tests {
         #[case] cursor: SidebarItem,
         #[case] expected: Selection,
     ) {
-        // Given the cursor on a session outside any group.
+        // Given the cursor on a session.
         let sessions = lone(kind, cursor);
 
         // When reading the selection.
@@ -673,8 +656,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn n_is_unbound_off_a_group(#[values(Scope::Sidebar, Scope::SidebarEmpty)] scope: Scope) {
-        // Given the keymap off a group's card or thread.
+    fn n_is_unbound_in_the_sidebar(#[values(Scope::Sidebar, Scope::SidebarEmpty)] scope: Scope) {
+        // Given the keymap in the sidebar.
         let mut keys = Keys::new(keymap(), scope);
 
         // When pressing `n`.

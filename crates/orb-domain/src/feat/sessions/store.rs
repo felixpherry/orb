@@ -69,28 +69,15 @@ pub struct ThreadRow {
     pub turn_started_at: Option<i64>,
     /// The git branch the transcript last named.
     pub branch: Option<String>,
-    /// When the user pinned the thread; `None` = not pinned.
-    pub pinned_at: Option<i64>,
-    /// Whether the thread is settled or kept active; `None` = neither.
-    pub settled_override: Option<SettledOverride>,
-    /// When the thread was settled.
-    pub settled_at: Option<i64>,
-    /// When the thread was last un-settled.
-    pub unsettled_at: Option<i64>,
     /// When orb last saw a turn end, else when the thread was created.
     pub last_activity_at: i64,
     /// When the user last selected the thread.
     pub last_visited_at: i64,
     /// Whether the harness has generated a title for the thread.
     pub ai_titled: bool,
-    /// The `--model` its session started with; `None` = the harness's default.
+    /// The `--model` a session from before the overhaul started with;
+    /// `None` = unknown.
     pub model: Option<String>,
-    /// The `--permission-mode` its session started with; `None` = the
-    /// harness's default.
-    pub permission_mode: Option<String>,
-    /// The id of the group a store from before sessions put it in; `None`
-    /// = none.
-    pub group_id: Option<i64>,
     /// The harness its session runs in.
     pub harness: HarnessId,
     /// The pane it runs in; `None` once it has ended.
@@ -369,9 +356,8 @@ impl Store {
             .query(
                 "SELECT id, project_id, short_id, session_id, title, cwd, transcript_path,
                         transcript_offset, created_at, turn_started_at, custom_title,
-                        branch, pinned_at, settled_override, settled_at, unsettled_at,
-                        last_activity_at, last_visited_at, ai_titled, model, permission_mode,
-                        renamed_title, group_id, harness, pane_id, orb_session_id
+                        branch, last_activity_at, last_visited_at, ai_titled, model,
+                        renamed_title, harness, pane_id, orb_session_id
                  FROM threads ORDER BY created_at DESC, id DESC",
                 thread_row,
             )
@@ -793,9 +779,8 @@ impl Store {
 
     /// Updates everything about a thread that changes after it's created: its
     /// session and directory (a thread can move to another workspace), titles,
-    /// branch, transcript position, turn start, pin and settle state,
-    /// activity and visit stamps, and the pane it runs in. Its model,
-    /// permission mode and group stay as inserted.
+    /// branch, transcript position, turn start, activity and visit stamps,
+    /// and the pane it runs in. Its model stays as inserted.
     ///
     /// # Errors
     ///
@@ -807,10 +792,9 @@ impl Store {
             .execute(
                 "UPDATE threads SET session_id = ?2, title = ?3, transcript_path = ?4,
                         transcript_offset = ?5, turn_started_at = ?6, custom_title = ?7,
-                        branch = ?8, pinned_at = ?9, settled_override = ?10, settled_at = ?11,
-                        unsettled_at = ?12, last_activity_at = ?13, last_visited_at = ?14,
-                        short_id = ?15, cwd = ?16, ai_titled = ?17, renamed_title = ?18,
-                        pane_id = ?19, orb_session_id = ?20
+                        branch = ?8, last_activity_at = ?9, last_visited_at = ?10,
+                        short_id = ?11, cwd = ?12, ai_titled = ?13, renamed_title = ?14,
+                        pane_id = ?15, orb_session_id = ?16
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -821,10 +805,6 @@ impl Store {
                     row.turn_started_at,
                     row.custom_title,
                     row.branch,
-                    row.pinned_at,
-                    row.settled_override.map(SettledOverride::as_str),
-                    row.settled_at,
-                    row.unsettled_at,
                     row.last_activity_at,
                     row.last_visited_at,
                     row.short_id,
@@ -1414,23 +1394,14 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         created_at: row.get(8)?,
         turn_started_at: row.get(9)?,
         branch: row.get(11)?,
-        pinned_at: row.get(12)?,
-        settled_override: row
-            .get::<_, Option<String>>(13)?
-            .as_deref()
-            .and_then(SettledOverride::parse),
-        settled_at: row.get(14)?,
-        unsettled_at: row.get(15)?,
-        last_activity_at: row.get(16)?,
-        last_visited_at: row.get(17)?,
-        ai_titled: row.get(18)?,
-        model: row.get(19)?,
-        permission_mode: row.get(20)?,
-        renamed_title: row.get(21)?,
-        group_id: row.get(22)?,
-        harness: HarnessId::new(row.get::<_, String>(23)?),
-        pane_id: row.get::<_, Option<i64>>(24)?.map(PaneId),
-        orb_session: row.get::<_, Option<i64>>(25)?.map(SessionId),
+        last_activity_at: row.get(12)?,
+        last_visited_at: row.get(13)?,
+        ai_titled: row.get(14)?,
+        model: row.get(15)?,
+        renamed_title: row.get(16)?,
+        harness: HarnessId::new(row.get::<_, String>(17)?),
+        pane_id: row.get::<_, Option<i64>>(18)?.map(PaneId),
+        orb_session: row.get::<_, Option<i64>>(19)?.map(SessionId),
     })
 }
 
@@ -1976,17 +1947,11 @@ mod tests {
             created_at: 1_000,
             turn_started_at: None,
             branch: None,
-            pinned_at: None,
-            settled_override: None,
-            settled_at: None,
-            unsettled_at: None,
             last_activity_at: 1_000,
             last_visited_at: 1_000,
             ai_titled: false,
             model: None,
-            permission_mode: None,
             renamed_title: None,
-            group_id: None,
         };
         assert_eq!(threads, vec![expected], "the saved thread should load back");
         Ok(())
@@ -2231,60 +2196,17 @@ mod tests {
             created_at: 1_000,
             turn_started_at: Some(2_000),
             branch: None,
-            pinned_at: None,
-            settled_override: None,
-            settled_at: None,
-            unsettled_at: None,
             last_activity_at: 1_000,
             last_visited_at: 1_000,
             ai_titled: false,
             model: None,
-            permission_mode: None,
             renamed_title: None,
-            group_id: None,
         };
         store.save_thread(&updated)?;
 
         // Then loading returns the updated values.
         let (_, threads) = store.load()?;
         assert_eq!(threads, vec![updated], "the updates should load back");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[case(SettledOverride::Settled)]
-    #[case(SettledOverride::Active)]
-    fn settle_fields_load_back_after_saving(
-        #[case] settled_override: SettledOverride,
-    ) -> Result<(), Report<StoreError>> {
-        // Given a store with one thread.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        insert_thread(&store, project_id)?;
-        let inserted = store
-            .load()?
-            .1
-            .pop()
-            .ok_or_else(|| Report::new(StoreError).attach("the thread wasn't saved"))?;
-
-        // When saving its branch, pin, settle state, and stamps.
-        let updated = ThreadRow {
-            branch: Some("main".to_owned()),
-            pinned_at: Some(2_000),
-            settled_override: Some(settled_override),
-            settled_at: Some(3_000),
-            unsettled_at: Some(1_500),
-            last_activity_at: 2_500,
-            last_visited_at: 2_600,
-            ai_titled: false,
-            ..inserted
-        };
-        store.save_thread(&updated)?;
-
-        // Then loading returns them.
-        let (_, threads) = store.load()?;
-        assert_eq!(threads, vec![updated], "the settle fields should load back");
         Ok(())
     }
 
