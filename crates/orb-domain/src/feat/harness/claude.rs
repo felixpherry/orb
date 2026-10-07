@@ -93,6 +93,10 @@ impl Harness for ClaudeCode {
         self.agents.list().await
     }
 
+    async fn live_background(&self) -> Result<Vec<String>, Report<HarnessError>> {
+        self.agents.live_background().await
+    }
+
     async fn stop_migrated(&self, short_id: &str) -> Result<(), Report<HarnessError>> {
         self.agents.stop(short_id).await
     }
@@ -108,10 +112,13 @@ pub(crate) mod fake {
     use super::supervisor::ClaudeAgents;
     use crate::feat::harness::{HarnessError, RunningAgent};
 
-    /// A `claude` that runs the agents the test scripts and logs the
-    /// sessions it is asked to stop.
+    /// A `claude` that runs the agents and live background sessions the test
+    /// scripts and logs the sessions it is asked to stop.
     pub(crate) struct FakeClaude {
         running: Mutex<Result<Vec<RunningAgent>, String>>,
+        live: Mutex<Result<Vec<String>, String>>,
+        /// The session whose stop never finishes.
+        hangs: Mutex<Option<String>>,
         stopped: Mutex<Vec<String>>,
     }
 
@@ -120,8 +127,21 @@ pub(crate) mod fake {
         pub(crate) fn running(running: Vec<RunningAgent>) -> Self {
             Self {
                 running: Mutex::new(Ok(running)),
+                live: Mutex::new(Ok(Vec::new())),
+                hangs: Mutex::default(),
                 stopped: Mutex::default(),
             }
+        }
+
+        /// From now on `live_background` answers `live`, or fails with the
+        /// reason.
+        pub(crate) fn set_live(&self, live: Result<Vec<String>, String>) {
+            *self.live.lock().unwrap_or_else(PoisonError::into_inner) = live;
+        }
+
+        /// From now on stopping `short_id` never finishes.
+        pub(crate) fn hang_on(&self, short_id: &str) {
+            *self.hangs.lock().unwrap_or_else(PoisonError::into_inner) = Some(short_id.to_owned());
         }
 
         /// From now on `list` answers `running`, or fails with the reason.
@@ -152,7 +172,24 @@ pub(crate) mod fake {
                 .map_err(|reason| Report::new(HarnessError).attach(reason))
         }
 
+        async fn live_background(&self) -> Result<Vec<String>, Report<HarnessError>> {
+            self.live
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .map_err(|reason| Report::new(HarnessError).attach(reason))
+        }
+
         async fn stop(&self, short_id: &str) -> Result<(), Report<HarnessError>> {
+            let hangs = self
+                .hangs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref()
+                == Some(short_id);
+            if hangs {
+                std::future::pending::<()>().await;
+            }
             self.stopped
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

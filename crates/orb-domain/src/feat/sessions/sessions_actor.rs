@@ -215,9 +215,10 @@ pub struct SaveLayout(pub SessionId);
 /// Stop the Claude `--bg` sessions the store's migration to sessions turned
 /// into panes, so they don't fight the `claude --resume` those panes run.
 /// orb waits for it before the frontend starts, so no pane types
-/// `claude --resume` while its `--bg` session still runs.
+/// `claude --resume` while its `--bg` session still runs. The function is
+/// told how many sessions are about to be stopped, once, when any are.
 #[derive(Debug)]
-pub struct StopMigrated;
+pub struct StopMigrated(pub fn(usize));
 
 /// Kill the panes zmx still runs for sessions that are already settled.
 #[derive(Debug)]
@@ -397,10 +398,10 @@ impl Message<StopMigrated> for SessionsActor {
 
     async fn handle(
         &mut self,
-        _msg: StopMigrated,
+        msg: StopMigrated,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.stop_migrated().await;
+        self.stop_migrated(msg.0).await;
     }
 }
 
@@ -2172,11 +2173,14 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Stops each `--bg` session a migrated pane still names, through Claude,
-    /// in pane order, ignoring failures (a session already gone is fine),
-    /// then forgets them all. Without Claude registered nothing happens and
-    /// the markers stay.
-    async fn stop_migrated(&mut self) {
+    /// Stops each `--bg` session a migrated pane still names that Claude
+    /// lists as live, through Claude, in pane order, ignoring failures (a
+    /// session already gone is fine), and forgets each one as soon as its
+    /// stop returns, so an interrupted start keeps its progress. The rest are
+    /// forgotten without a stop; if Claude can't list them, every one is
+    /// stopped. `announce` hears how many stops will run, when any will.
+    /// Without Claude registered nothing happens and the markers stay.
+    async fn stop_migrated(&mut self, announce: fn(usize)) {
         let Some(claude) = self
             .services
             .harnesses
@@ -2197,15 +2201,30 @@ impl SessionsActor {
         if marked.is_empty() {
             return;
         }
-        // ponytail: stops run in order on the actor (~0.7 s each), once after
-        // the migration; run them concurrently if many threads ever migrate.
-        for (_, short_id) in &marked {
-            let _ = claude.stop_migrated(short_id).await;
+        let (live, ended): (Vec<_>, Vec<_>) = match claude.live_background().await {
+            Ok(live) => marked
+                .into_iter()
+                .partition(|(_, short_id)| live.contains(short_id)),
+            Err(_) => (marked, Vec::new()),
+        };
+        self.forget_migrated(&ended.iter().map(|(pane, _)| *pane).collect::<Vec<_>>());
+        if !live.is_empty() {
+            announce(live.len());
         }
-        let panes: Vec<PaneId> = marked.iter().map(|(pane, _)| *pane).collect();
-        match self.store.clear_migrated_bg(&panes) {
+        for (pane, short_id) in &live {
+            let _ = claude.stop_migrated(short_id).await;
+            self.forget_migrated(&[*pane]);
+        }
+    }
+
+    /// Forgets the `--bg` sessions `panes` named, in the store and here.
+    fn forget_migrated(&mut self, panes: &[PaneId]) {
+        if panes.is_empty() {
+            return;
+        }
+        match self.store.clear_migrated_bg(panes) {
             Ok(()) => {
-                for pane in &panes {
+                for pane in panes {
                     if let Some(row) = self.panes.get_mut(pane) {
                         row.migrated_bg = None;
                     }
@@ -4449,50 +4468,106 @@ mod tests {
         Store::open(path)
     }
 
+    /// The `--bg` sessions panes in `actor`'s store still name.
+    fn still_marked(actor: &SessionsActor) -> Result<Vec<String>, Report<StoreError>> {
+        Ok(actor
+            .store
+            .layouts()?
+            .panes
+            .into_iter()
+            .filter_map(|pane| pane.migrated_bg)
+            .collect())
+    }
+
     #[rstest::rstest]
     #[tokio::test]
-    async fn stop_migrated_stops_each_marked_session_once() -> Result<(), Report<StoreError>> {
-        // Given panes still naming --bg sessions aa and bb.
+    async fn stop_migrated_stops_only_live_sessions() -> Result<(), Report<StoreError>> {
+        // Given panes still naming --bg sessions aa and bb, of which Claude
+        // lists only bb as live.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = migrated_store(&dir.path().join("state.sqlite"))?;
         let host = listing(Vec::new());
+        host.set_live(Ok(vec!["bb".to_owned()]));
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When stopping the migrated sessions.
-        actor.stop_migrated().await;
+        actor.stop_migrated(|_| {}).await;
 
-        // Then Claude stopped aa and then bb.
+        // Then Claude stopped bb alone.
         assert_eq!(
             host.stopped(),
-            vec!["aa".to_owned(), "bb".to_owned()],
-            "every marked --bg session should be stopped in pane order"
+            vec!["bb".to_owned()],
+            "only a live --bg session should be stopped"
         );
         Ok(())
     }
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn stop_migrated_clears_the_markers() -> Result<(), Report<StoreError>> {
-        // Given panes still naming --bg sessions aa and bb.
+    async fn stop_migrated_forgets_sessions_that_are_not_live() -> Result<(), Report<StoreError>> {
+        // Given panes still naming --bg sessions aa and bb, neither of which
+        // Claude lists as live (done, stopped, failed or gone).
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = migrated_store(&dir.path().join("state.sqlite"))?;
         let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When stopping the migrated sessions.
-        actor.stop_migrated().await;
+        actor.stop_migrated(|_| {}).await;
 
         // Then no pane names a --bg session any more.
-        let marked: Vec<String> = actor
-            .store
-            .layouts()?
-            .panes
-            .into_iter()
-            .filter_map(|pane| pane.migrated_bg)
-            .collect();
+        let marked = still_marked(&actor)?;
         assert!(
             marked.is_empty(),
-            "stopped sessions should be forgotten: {marked:?}"
+            "sessions with nothing to stop should be forgotten: {marked:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn stop_migrated_forgets_each_session_as_its_stop_returns()
+    -> Result<(), Report<StoreError>> {
+        // Given live --bg sessions aa and bb, where stopping bb never ends.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let store = migrated_store(&dir.path().join("state.sqlite"))?;
+        let host = listing(Vec::new());
+        host.set_live(Ok(vec!["aa".to_owned(), "bb".to_owned()]));
+        host.hang_on("bb");
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When the stops are interrupted while bb's runs.
+        let _ = tokio::time::timeout(Duration::from_millis(100), actor.stop_migrated(|_| {})).await;
+
+        // Then only bb is still named.
+        assert_eq!(
+            still_marked(&actor)?,
+            vec!["bb".to_owned()],
+            "aa should be forgotten once its stop returned"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn stop_migrated_stops_every_session_when_claude_cant_list()
+    -> Result<(), Report<StoreError>> {
+        // Given panes still naming --bg sessions aa and bb, and a Claude that
+        // can't list its sessions.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let store = migrated_store(&dir.path().join("state.sqlite"))?;
+        let host = listing(Vec::new());
+        host.set_live(Err("claude agents failed".to_owned()));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When stopping the migrated sessions.
+        actor.stop_migrated(|_| {}).await;
+
+        // Then Claude stopped aa and then bb.
+        assert_eq!(
+            host.stopped(),
+            vec!["aa".to_owned(), "bb".to_owned()],
+            "every marked --bg session should be stopped in pane order"
         );
         Ok(())
     }

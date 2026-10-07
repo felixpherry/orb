@@ -91,7 +91,16 @@ fn main() -> Result<(), Report<OrbError>> {
     });
     runtime.block_on(sessions.wait_for_startup());
     // Stop migrated `--bg` sessions before any pane resumes them.
-    let _ = runtime.block_on(async { sessions.ask(StopMigrated).await });
+    let _ = runtime.block_on(async {
+        sessions
+            .ask(StopMigrated(|count| {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "orb: stopping {count} old claude --bg sessions…"
+                );
+            }))
+            .await
+    });
     let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
         git: git.clone(),
         state: state.clone(),

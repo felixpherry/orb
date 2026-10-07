@@ -138,6 +138,16 @@ pub trait Harness: TranscriptFormat {
         Ok(Vec::new())
     }
 
+    /// The ids of its background sessions that still run and need stopping;
+    /// none for harnesses that have none.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the harness can't be asked.
+    async fn live_background(&self) -> Result<Vec<String>, Report<HarnessError>> {
+        Ok(Vec::new())
+    }
+
     /// Stops the background session `short_id` the store migration replaced
     /// with a pane; nothing for harnesses that had none.
     ///

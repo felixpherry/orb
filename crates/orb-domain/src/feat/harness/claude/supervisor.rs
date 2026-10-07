@@ -43,6 +43,15 @@ pub trait ClaudeAgents: Send + Sync {
     /// read.
     async fn list(&self) -> Result<Vec<RunningAgent>, Report<HarnessError>>;
 
+    /// The ids of the background sessions that are still live: any state
+    /// but `done`, `stopped` or `failed`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `claude` can't be asked or its answer can't be
+    /// read.
+    async fn live_background(&self) -> Result<Vec<String>, Report<HarnessError>>;
+
     /// Stops background session `short_id`, keeping its conversation.
     ///
     /// # Errors
@@ -113,6 +122,11 @@ impl ClaudeAgents for ClaudeSupervisor {
         Ok(agents)
     }
 
+    async fn live_background(&self) -> Result<Vec<String>, Report<HarnessError>> {
+        let command = self.claude(&["agents", "--json", "--all"]);
+        parse_live_background(&run(command, "claude agents", LIST_TIMEOUT).await?)
+    }
+
     async fn stop(&self, short_id: &str) -> Result<(), Report<HarnessError>> {
         run(
             self.claude(&["stop", short_id]),
@@ -171,10 +185,33 @@ fn failure(text: &str, fallback: &str) -> Report<HarnessError> {
 #[serde(rename_all = "camelCase")]
 struct AgentRecord {
     pid: Option<u32>,
+    id: Option<String>,
     kind: Option<String>,
     status: Option<String>,
     waiting_for: Option<String>,
     state: Option<String>,
+}
+
+/// `state`s of a background session that has nothing left to stop.
+const ENDED: [&str; 3] = ["done", "stopped", "failed"];
+
+/// The ids of the background records (`kind` `background`) in `claude
+/// agents --json`'s array whose `state` isn't one of [`ENDED`].
+fn parse_live_background(json: &str) -> Result<Vec<String>, Report<HarnessError>> {
+    let records: Vec<AgentRecord> = serde_json::from_str(json)
+        .change_context(HarnessError)
+        .attach("claude agents printed unreadable JSON".to_owned())?;
+    Ok(records
+        .into_iter()
+        .filter(|record| record.kind.as_deref() == Some("background"))
+        .filter(|record| {
+            !record
+                .state
+                .as_deref()
+                .is_some_and(|state| ENDED.contains(&state))
+        })
+        .filter_map(|record| record.id)
+        .collect())
 }
 
 /// The interactive agents (`kind` `interactive`) in `claude agents
@@ -218,7 +255,31 @@ fn status_of(record: &AgentRecord) -> ThreadStatus {
 mod tests {
     use error_stack::Report;
 
-    use super::{HarnessError, RunningAgent, ThreadStatus, parse_agents};
+    use super::{HarnessError, RunningAgent, ThreadStatus, parse_agents, parse_live_background};
+
+    #[rstest::rstest]
+    #[case(r#"{"id":"aa","kind":"background","state":"busy"}"#, true)]
+    #[case(r#"{"id":"aa","kind":"background","state":"idle"}"#, true)]
+    #[case(r#"{"id":"aa","kind":"background","state":"blocked"}"#, true)]
+    #[case(r#"{"id":"aa","kind":"background"}"#, true)]
+    #[case(r#"{"id":"aa","kind":"background","state":"done"}"#, false)]
+    #[case(r#"{"id":"aa","kind":"background","state":"stopped"}"#, false)]
+    #[case(r#"{"id":"aa","kind":"background","state":"failed"}"#, false)]
+    #[case(r#"{"id":"aa","kind":"interactive","state":"busy"}"#, false)]
+    fn background_record_is_live_unless_ended(
+        #[case] record: &str,
+        #[case] live: bool,
+    ) -> Result<(), Report<HarnessError>> {
+        // Given one `claude agents --json` record with id aa.
+        let json = format!("[{record}]");
+
+        // When listing the live background sessions.
+        let ids = parse_live_background(&json)?;
+
+        // Then aa is listed only when it is a background session still live.
+        assert_eq!(ids == ["aa"], live, "{record} live should be {live}");
+        Ok(())
+    }
 
     #[rstest::rstest]
     #[case(
