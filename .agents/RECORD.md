@@ -206,6 +206,7 @@ Entries are added or amended **only with human approval**.
 - (mouse) A click on a dashboard menu item moves the menu cursor to it without running it.
 - (mouse) In a picker, a click selects a row, a double-click picks it, the wheel over its list moves the selection one row without wrapping (over the session, worktree or search picker's preview it does nothing), a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.
 - (mouse) A click outside the rename box cancels it like `Esc`.
+- (mouse) Clicks on the tab bar and on pane frames do nothing.
 - (mouse) A click on the input line of the sidebar search, a picker or the rename box moves its text cursor to the grapheme under it, to the first shown grapheme on the prompt, or to the end past the text.
 - (worktrees) A worktree under `~/.orb/worktrees/` is pruned once nothing uses it, or once no draft uses it and every thread and Feature group in it has been settled, the latest for at least 7 days.
 - (worktrees) Pruning skips a worktree with uncommitted changes or untracked files, and one whose thread is attached or has a turn underway.
@@ -261,7 +262,12 @@ Entries are added or amended **only with human approval**.
 - (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
 - (search) `␣sg` indexes pi threads' session files alongside Claude transcripts.
 - (layout) Adding a pane with `Cmd n` or closing one re-tiles the tab by pane count: `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
-- (layout) From 11 panes a tab shows its first pane on the left and the rest in a stack, where one pane is expanded and the others are one-row title bars.
+- (layout) From 11 panes a tab shows its first pane on the left and the rest in a stack: a list naming every stacked pane, with `>` on the shown one, beside the shown pane's full-height frame.
 - (layout) `<C-g> p r` and `<C-g> p d` split the focused pane and share the space evenly among the panes split in that direction, until the next add or close re-tiles the tab.
+- (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
+- (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
+- (layout) A zoomed tab draws one frame over the whole tab body.
+- (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
+- (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
 - (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab with the keys in its pane.
 - (sidebar) On an agent row, `r` renames the agent's pane and `d` closes it after a confirm.

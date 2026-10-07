@@ -4463,7 +4463,11 @@ mod tests {
             .read()
             .layouts
             .get(inserted.session)
-            .map(|layout| layout.placed(ratatui::layout::Rect::new(0, 0, 80, 24), 0).panes)
+            .map(|layout| {
+                layout
+                    .placed(ratatui::layout::Rect::new(0, 0, 80, 24), 0)
+                    .panes
+            })
             .unwrap_or_default()
             .chunk_by(|a, b| a.area.x == b.area.x)
             .map(<[_]>::len)

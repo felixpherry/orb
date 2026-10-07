@@ -70,9 +70,10 @@ impl Tab {
     /// The panes of the tab's stack, in stack order; empty without one, or
     /// while the tab is zoomed.
     pub fn stacked(&self) -> Vec<PaneId> {
-        match self.zoomed {
-            true => vec![],
-            false => self.tree.stacked_ids(),
+        if self.zoomed {
+            vec![]
+        } else {
+            self.tree.stacked_ids()
         }
     }
 
@@ -180,7 +181,11 @@ impl SessionLayout {
             .tree
             .panes(body)
             .into_iter()
-            .filter(|info| stack.as_ref().is_none_or(|stack| !stack.panes.contains(&info.id)))
+            .filter(|info| {
+                stack
+                    .as_ref()
+                    .is_none_or(|stack| !stack.panes.contains(&info.id))
+            })
             .map(|info| Placed {
                 pane: info.id,
                 area: info.rect,
@@ -202,14 +207,15 @@ impl SessionLayout {
             });
             let inner = inside(area);
             let fits = usize::from(inner.height);
-            let start = match stack.panes.len() > fits {
-                true => stack
+            let start = if stack.panes.len() > fits {
+                stack
                     .panes
                     .iter()
                     .position(|id| *id == stack.expanded)
                     .unwrap_or_default()
-                    .saturating_sub(fits.saturating_sub(1)),
-                false => 0,
+                    .saturating_sub(fits.saturating_sub(1))
+            } else {
+                0
             };
             let rows = stack
                 .panes
@@ -1041,7 +1047,11 @@ mod tests {
             .map(|place| place.area.height);
 
         // Then the shown stacked pane is as tall as the body.
-        assert_eq!(height, Some(BODY.height), "the shown pane takes the stack's height");
+        assert_eq!(
+            height,
+            Some(BODY.height),
+            "the shown pane takes the stack's height"
+        );
     }
 
     #[rstest::rstest]
@@ -1247,7 +1257,11 @@ mod tests {
         let content = place.content();
 
         // Then the frame takes one cell on every side.
-        assert_eq!(content, Rect::new(1, 1, 38, 22), "the frame is one cell thick");
+        assert_eq!(
+            content,
+            Rect::new(1, 1, 38, 22),
+            "the frame is one cell thick"
+        );
     }
 
     #[rstest::rstest]

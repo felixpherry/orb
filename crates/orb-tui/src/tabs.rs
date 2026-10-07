@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use orb_domain::AppState;
-use orb_domain::feat::layout::state::{Placement, SessionLayout, StackList};
+use orb_domain::feat::layout::state::{Placement, SessionLayout, StackList, Tab};
 use orb_domain::feat::sessions::state::PaneId;
 use orb_term::Pane;
 use ratatui::buffer::Buffer;
@@ -40,7 +40,7 @@ pub(crate) fn areas(right: Rect) -> [Rect; 2] {
 pub(crate) fn placement(state: &AppState, layout: &SessionLayout, body: Rect) -> Placement {
     let longest = layout
         .active_tab()
-        .map(|tab| tab.stacked())
+        .map(Tab::stacked)
         .unwrap_or_default()
         .into_iter()
         .map(|pane| Span::raw(pane_title(state, pane)).width())
@@ -179,7 +179,11 @@ fn tab_bar(state: &AppState, layout: &SessionLayout, bar: Rect, buf: &mut Buffer
         chevron(&mut spans, left_chip(range.start), rest);
     }
     for (index, label) in labels.iter().enumerate().take(range.end).skip(range.start) {
-        let style = if index == layout.active() { shown } else { rest };
+        let style = if index == layout.active() {
+            shown
+        } else {
+            rest
+        };
         chevron(&mut spans, label.clone(), style);
     }
     if range.end < labels.len() {
@@ -241,9 +245,12 @@ fn visible_tabs(widths: &[u16], active: usize, room: u16) -> Range<usize> {
         used + chip(range.start, left_chip) + chip(widths.len() - range.end, right_chip)
             <= u32::from(room)
     };
-    let grow = |range: &Range<usize>, left: bool| match left {
-        true => range.start.checked_sub(1).map(|start| start..range.end),
-        false => (range.end < widths.len()).then(|| range.start..range.end + 1),
+    let grow = |range: &Range<usize>, left: bool| {
+        if left {
+            range.start.checked_sub(1).map(|start| start..range.end)
+        } else {
+            (range.end < widths.len()).then(|| range.start..range.end + 1)
+        }
     };
     let mut range = active.min(widths.len())..(active + 1).min(widths.len());
     let mut left = true;

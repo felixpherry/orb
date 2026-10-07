@@ -1162,11 +1162,7 @@ mod tests {
             .filter_map(|x| buffer.cell((x, right.y)))
             .find(|cell| cell.symbol() == "1")
             .map(|cell| (cell.fg, cell.bg, cell.modifier.contains(Modifier::BOLD)));
-        assert_eq!(
-            number,
-            Some((BLACK, BLUE, true)),
-            "the shown tab's number"
-        );
+        assert_eq!(number, Some((BLACK, BLUE, true)), "the shown tab's number");
     }
 
     /// The tab bar's text.
@@ -1417,9 +1413,7 @@ mod tests {
     /// `stacked()` with pane 2 named `name`.
     fn stacked_naming(name: &str) -> AppState {
         let mut state = stacked();
-        state
-            .layouts
-            .rename_pane(PaneId(2), Some(name.to_owned()));
+        state.layouts.rename_pane(PaneId(2), Some(name.to_owned()));
         state
     }
 
@@ -1446,7 +1440,10 @@ mod tests {
 
         // Then its row ends in `…`.
         let right = right_side(&buffer);
-        assert!(right.contains("  abcdefghijklmnopqrs…"), "right side was\n{right}");
+        assert!(
+            right.contains("  abcdefghijklmnopqrs…"),
+            "right side was\n{right}"
+        );
     }
 
     #[rstest::rstest]
@@ -1458,7 +1455,11 @@ mod tests {
         let buffer = draw(&state);
 
         // Then the list is the name plus its frame, mark and a space.
-        assert_eq!(list_width(&buffer), Some(16), "11 columns of name and 5 of chrome");
+        assert_eq!(
+            list_width(&buffer),
+            Some(16),
+            "11 columns of name and 5 of chrome"
+        );
     }
 
     #[rstest::rstest]

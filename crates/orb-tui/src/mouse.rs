@@ -707,7 +707,11 @@ mod tests {
         let routed = route_once(left_click(55, 5), Focus::Pane);
 
         // Then nothing happens.
-        assert_eq!(routed, MouseRoute::Nothing, "a pane's frame takes no clicks");
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "a pane's frame takes no clicks"
+        );
     }
 
     #[rstest::rstest]

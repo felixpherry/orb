@@ -6851,9 +6851,9 @@ mod tests {
     }
 
     fn pane_count(state: &AppState) -> usize {
-        state
-            .shown_layout()
-            .map_or(0, |layout| layout.placed(Rect::new(0, 0, 80, 24), 0).panes.len())
+        state.shown_layout().map_or(0, |layout| {
+            layout.placed(Rect::new(0, 0, 80, 24), 0).panes.len()
+        })
     }
 
     #[rstest::rstest]
