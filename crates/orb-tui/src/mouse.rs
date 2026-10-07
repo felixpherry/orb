@@ -1,8 +1,11 @@
 //! The mouse in orb's own UI: a click on the sidebar moves the keys there,
 //! a click on a row selects it and a double-click attaches, and a click on
-//! the sidebar's input box starts a search. The tab bar, the pane frames and
-//! the start screen take no clicks. The wheel moves the sidebar's selection
-//! while it has the keys, and otherwise scrolls its view. In a
+//! the sidebar's input box starts a search. A click on a tab in the tab bar,
+//! or on a chip counting hidden tabs, shows that tab with the keys in its
+//! focused pane, and a click on its `+` opens a tab; the wheel over the bar
+//! shows the next tab on a scroll up and the previous on a scroll down. The
+//! pane frames and the start screen take no clicks. The wheel moves the
+//! sidebar's selection while it has the keys, and otherwise scrolls its view. In a
 //! picker a click selects a row, a double-click picks it and the wheel over
 //! its list moves the selection; a click outside a picker or the rename box
 //! closes it like `Esc`. A click in the text of the sidebar search, a
@@ -60,6 +63,13 @@ pub(crate) struct HitMap {
     /// The text line of the input that has the keys: the sidebar search, a
     /// picker's input or the rename box.
     text: Option<TextHit>,
+    /// The tab bar's row, the shown tab's 0-based index and the tab count.
+    tab_bar: Option<(Rect, usize, usize)>,
+    /// Each tab chevron or overflow chip: its cells, the 0-based tab it
+    /// shows and that tab's focused pane.
+    tab_targets: Vec<(Rect, usize, PaneId)>,
+    /// The tab bar's `+` chevron.
+    new_tab: Option<Rect>,
 }
 
 /// The text line of the input that has the keys, and what `visible` drew
@@ -139,6 +149,23 @@ impl HitMap {
     /// Whether `at` is on the sidebar's input box.
     pub(crate) fn on_sidebar_input(&self, at: Position) -> bool {
         self.sidebar_input.is_some_and(|area| area.contains(at))
+    }
+
+    /// Records the tab bar's row, with the shown tab's 0-based index and
+    /// the tab count.
+    pub(crate) fn record_tab_bar(&mut self, area: Rect, active: usize, count: usize) {
+        self.tab_bar = Some((area, active, count));
+    }
+
+    /// Records a tab chevron or overflow chip that shows tab `index`
+    /// (0-based), whose focused pane is `pane`.
+    pub(crate) fn record_tab(&mut self, area: Rect, index: usize, pane: PaneId) {
+        self.tab_targets.push((area, index, pane));
+    }
+
+    /// Records the tab bar's `+` chevron.
+    pub(crate) fn record_new_tab(&mut self, area: Rect) {
+        self.new_tab = Some(area);
     }
 
     /// Records where the open picker or rename box was drawn.
@@ -332,6 +359,9 @@ pub(crate) fn route(
         MouseEventKind::ScrollUp => Action::Wheel(-1),
         _ => return MouseRoute::Nothing,
     };
+    if let Some(routed) = route_tab_bar(at, hits, focus, &action, clicks, now) {
+        return routed;
+    }
     match (focus, action) {
         (Focus::Picker | Focus::Rename, action) => {
             route_overlay(at, hits, focus, action, clicks, now)
@@ -350,6 +380,59 @@ pub(crate) fn route(
             routed
         }
     }
+}
+
+/// Where a click or wheel notch on the tab bar goes, as zellij's tab bar
+/// does: a click on a tab or a chip shows that tab with the keys in its
+/// focused pane, a click on `+` opens a tab, and the wheel shows the next
+/// tab on a scroll up and the previous on a scroll down, without wrapping.
+/// Other clicks on the bar do nothing. `None` off the bar, or while a picker
+/// or the rename box is open (a click there closes it).
+fn route_tab_bar(
+    at: Position,
+    hits: &HitMap,
+    focus: Focus,
+    action: &Action,
+    clicks: &mut Clicks,
+    now: Instant,
+) -> Option<MouseRoute> {
+    if matches!(focus, Focus::Picker | Focus::Rename) {
+        return None;
+    }
+    let (_, active, count) = hits.tab_bar.filter(|(bar, ..)| bar.contains(at))?;
+    let lead = match focus {
+        Focus::Search => vec![Intent::PickerConfirm],
+        _ => vec![],
+    };
+    let target = hits
+        .tab_targets
+        .iter()
+        .find(|(area, ..)| area.contains(at))
+        .map(|&(_, index, pane)| (index, pane));
+    let on_new_tab = hits.new_tab.is_some_and(|area| area.contains(at));
+    Some(match (action, target, on_new_tab) {
+        (Action::Wheel(-1), ..) if active + 1 < count => {
+            MouseRoute::Intents(vec![Intent::GoToTab(active + 2)])
+        }
+        (Action::Wheel(1), ..) if active > 0 => MouseRoute::Intents(vec![Intent::GoToTab(active)]),
+        (Action::Wheel(_), ..) => MouseRoute::Nothing,
+        (Action::Click, Some((index, pane)), _) => {
+            clicks.click(None, now);
+            MouseRoute::Intents(
+                lead.into_iter()
+                    .chain([Intent::GoToTab(index + 1), Intent::FocusPane(pane)])
+                    .collect(),
+            )
+        }
+        (Action::Click, None, true) => {
+            clicks.click(None, now);
+            MouseRoute::Intents(lead.into_iter().chain([Intent::NewTab]).collect())
+        }
+        (Action::Click, None, false) => {
+            clicks.click(None, now);
+            MouseRoute::Nothing
+        }
+    })
 }
 
 /// Routes a left drag or release by the gesture its press started, and
@@ -690,14 +773,115 @@ mod tests {
         );
     }
 
+    /// `hits()` with a tab bar on line 0 showing tab `active` of four: the
+    /// session label in columns 30 to 39, a `← +1` chip for tab 0 in 40 to
+    /// 45, tabs 1 and 2 in 46 to 51 and 52 to 57, a `+1 →` chip for tab 3 in
+    /// 58 to 63 and `+` in 64 to 68. Tab N's focused pane is pane 10 + N.
+    fn tab_hits(active: usize) -> HitMap {
+        let mut hits = hits();
+        hits.record_tab_bar(Rect::new(30, 0, 50, 1), active, 4);
+        for (x, index) in [(40, 0), (46, 1), (52, 2), (58, 3)] {
+            hits.record_tab(Rect::new(x, 0, 6, 1), index, PaneId(10 + index as i64));
+        }
+        hits.record_new_tab(Rect::new(64, 0, 5, 1));
+        hits
+    }
+
+    /// Routes `event` over `tab_hits(active)` with `focus`.
+    fn route_on_tabs(event: MouseEvent, active: usize, focus: Focus) -> MouseRoute {
+        route_with(event, &tab_hits(active), focus, &mut Clicks::default())
+    }
+
     #[rstest::rstest]
-    fn click_on_the_tab_bar_does_nothing() {
-        // Given the sidebar has the keys.
-        // When clicking the tab bar.
-        let routed = route_once(left_click(35, 0), Focus::Sidebar);
+    #[case::sidebar(Focus::Sidebar)]
+    #[case::pane(Focus::Pane)]
+    fn click_on_a_tab_shows_it_with_the_keys_in_its_pane(#[case] focus: Focus) {
+        // Given tab 1 of four shown.
+        // When clicking tab 2.
+        let routed = route_on_tabs(left_click(54, 0), 1, focus);
+
+        // Then tab 2 is shown and its focused pane takes the keys.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::GoToTab(3), Intent::FocusPane(PaneId(12))]),
+            "a tab click shows the tab and focuses its pane"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::left_chip(42, Intent::GoToTab(1), PaneId(10))]
+    #[case::right_chip(60, Intent::GoToTab(4), PaneId(13))]
+    fn click_on_an_overflow_chip_shows_the_nearest_hidden_tab(
+        #[case] column: u16,
+        #[case] go_to: Intent,
+        #[case] pane: PaneId,
+    ) {
+        // Given tab 1 of four shown, tabs 0 and 3 hidden in chips.
+        // When clicking a chip.
+        let routed = route_on_tabs(left_click(column, 0), 1, Focus::Sidebar);
+
+        // Then the nearest hidden tab on that side is shown.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![go_to, Intent::FocusPane(pane)]),
+            "a chip shows the hidden tab next to the bar"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_plus_opens_a_tab() {
+        // Given tab 1 of four shown.
+        // When clicking `+`.
+        let routed = route_on_tabs(left_click(66, 0), 1, Focus::Pane);
+
+        // Then a tab is opened.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::NewTab]),
+            "`+` opens a tab as <C-g> t n does"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_tab_during_a_search_ends_it_first() {
+        // Given a sidebar search with tab 1 of four shown.
+        // When clicking tab 2.
+        let routed = route_on_tabs(left_click(54, 0), 1, Focus::Search);
+
+        // Then the search ends before the tab is shown.
+        assert_eq!(
+            intents_of(routed).first(),
+            Some(&Intent::PickerConfirm),
+            "the search ends first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_tab_bars_session_label_does_nothing() {
+        // Given tab 1 of four shown.
+        // When clicking the session label.
+        let routed = route_on_tabs(left_click(35, 0), 1, Focus::Sidebar);
 
         // Then nothing happens.
-        assert_eq!(routed, MouseRoute::Nothing, "the tab bar takes no clicks");
+        assert_eq!(routed, MouseRoute::Nothing, "the label takes no clicks");
+    }
+
+    #[rstest::rstest]
+    #[case::up_shows_the_next(MouseEventKind::ScrollUp, 1, MouseRoute::Intents(vec![Intent::GoToTab(3)]))]
+    #[case::down_shows_the_previous(MouseEventKind::ScrollDown, 1, MouseRoute::Intents(vec![Intent::GoToTab(1)]))]
+    #[case::up_on_the_last_stops(MouseEventKind::ScrollUp, 3, MouseRoute::Nothing)]
+    #[case::down_on_the_first_stops(MouseEventKind::ScrollDown, 0, MouseRoute::Nothing)]
+    fn wheel_over_the_tab_bar_steps_through_tabs_without_wrapping(
+        #[case] kind: MouseEventKind,
+        #[case] active: usize,
+        #[case] expected: MouseRoute,
+    ) {
+        // Given tab `active` of four shown.
+        // When turning the wheel over the session label.
+        let routed = route_on_tabs(mouse(kind, 35, 0), active, Focus::Pane);
+
+        // Then the tab beside it is shown, stopping at the ends.
+        assert_eq!(routed, expected, "the wheel over the tab bar");
     }
 
     #[rstest::rstest]

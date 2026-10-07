@@ -142,6 +142,7 @@ orb captures the mouse from the moment it starts.
 
 - A click selects a sidebar or picker row. A double-click, two clicks on the same row within 500 ms, acts as `⏎`.
 - A click on a pane focuses it, and the click doesn't reach the pane's program.
+- A click on a tab in the tab bar shows it with the keys in its focused pane, a click on a `← +N` or `+N →` chip shows the nearest hidden tab on that side, and a click on `+` opens a tab. The wheel over the bar shows the next tab on a scroll up and the previous one on a scroll down, without wrapping.
 - The wheel over a pane goes to its program if the program tracks the mouse. Otherwise it sends arrow keys on the alternate screen, and scrolls the pane's history everywhere else. History holds 10 000 lines, from what orb saw after it attached.
 - A left drag in a pane whose program doesn't track the mouse (a shell, plain `claude`, plain `pi`) selects text, and the release copies it through OSC 52. A double-click selects a word and a triple-click a line. Dragging past the top or bottom edge scrolls while selecting.
 - In a program that tracks the mouse, like lazygit or a fullscreen Claude, clicks and drags go to the program.

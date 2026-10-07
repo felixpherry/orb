@@ -46,7 +46,7 @@ pub(crate) fn render(
     hits: &mut HitMap,
 ) -> Option<Position> {
     let [bar, body] = areas(right);
-    tab_bar(state, layout, bar, buf);
+    tab_bar(state, layout, bar, buf, hits);
     let placement = layout.placed(body);
     let mut cursor = None;
     for place in &placement.panes {
@@ -133,7 +133,15 @@ pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
 /// The tab bar, like zellij's: the shown session's name, then a chevron per
 /// tab with the shown one bold on blue, then a ` + ` chevron. Tabs that
 /// don't fit are counted in `← +N` / `+N →` chips, keeping the shown tab.
-fn tab_bar(state: &AppState, layout: &SessionLayout, bar: Rect, buf: &mut Buffer) {
+/// Records the bar, each tab and chip with the tab it shows, and the `+` in
+/// `hits`.
+fn tab_bar(
+    state: &AppState,
+    layout: &SessionLayout,
+    bar: Rect,
+    buf: &mut Buffer,
+    hits: &mut HitMap,
+) {
     buf.set_style(bar, Style::new().bg(BLACK));
     let session = Span::styled(
         format!(" {} ", session_label(state)),
@@ -150,9 +158,25 @@ fn tab_bar(state: &AppState, layout: &SessionLayout, bar: Rect, buf: &mut Buffer
         .saturating_sub(span_width(&session))
         .saturating_sub(chevron_width(PLUS));
     let range = visible_tabs(&widths, layout.active(), room);
+    hits.record_tab_bar(bar, layout.active(), labels.len());
+    let mut x = bar.x.saturating_add(span_width(&session));
+    // The bar's cells the next chevron of `text` takes.
+    let mut next = |text: &str| {
+        let width = chevron_width(text);
+        let area = Rect::new(x, bar.y, width, 1).intersection(bar);
+        x = x.saturating_add(width);
+        area
+    };
+    let mut target = |area: Rect, index: usize| {
+        if let Some(tab) = layout.tabs().get(index).filter(|_| !area.is_empty()) {
+            hits.record_tab(area, index, tab.focused());
+        }
+    };
     let mut spans = vec![session];
     if range.start > 0 {
-        chevron(&mut spans, left_chip(range.start), rest);
+        let chip = left_chip(range.start);
+        target(next(&chip), range.start - 1);
+        chevron(&mut spans, chip, rest);
     }
     for (index, label) in labels.iter().enumerate().take(range.end).skip(range.start) {
         let style = if index == layout.active() {
@@ -160,10 +184,17 @@ fn tab_bar(state: &AppState, layout: &SessionLayout, bar: Rect, buf: &mut Buffer
         } else {
             rest
         };
+        target(next(label), index);
         chevron(&mut spans, label.clone(), style);
     }
     if range.end < labels.len() {
-        chevron(&mut spans, right_chip(labels.len() - range.end), rest);
+        let chip = right_chip(labels.len() - range.end);
+        target(next(&chip), range.end);
+        chevron(&mut spans, chip, rest);
+    }
+    let plus = next(PLUS);
+    if !plus.is_empty() {
+        hits.record_new_tab(plus);
     }
     chevron(&mut spans, PLUS.to_owned(), rest);
     Line::from(spans).render(bar, buf);

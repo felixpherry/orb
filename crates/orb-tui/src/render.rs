@@ -1248,6 +1248,124 @@ mod tests {
         assert!(bar.contains(" →"), "tab bar was '{bar}'");
     }
 
+    /// Where `needle` starts in the tab bar, if it's there.
+    fn find_in_bar(buffer: &Buffer, needle: &str) -> Option<Position> {
+        let right = right_of(buffer);
+        (right.x..right.right())
+            .map(|x| Position::new(x, right.y))
+            .find(|at| {
+                let rest = Rect::new(at.x, at.y, right.right() - at.x, 1);
+                text(buffer, rest).starts_with(needle)
+            })
+    }
+
+    /// Where a left click at `at` goes with the keys in the sidebar.
+    fn click_from_sidebar(hits: &HitMap, at: Position) -> MouseRoute {
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        mouse::route(
+            event,
+            hits,
+            Focus::Sidebar,
+            None,
+            &mut Clicks::default(),
+            Instant::now(),
+        )
+    }
+
+    /// The hidden tab count in the tab bar's chip that starts with `prefix`.
+    fn chip_count(buffer: &Buffer, prefix: &str) -> Option<usize> {
+        let bar = tab_bar(buffer);
+        let (_, rest) = bar.split_once(prefix)?;
+        rest.split(' ').next()?.parse().ok()
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_drawn_tab_shows_it() {
+        // Given three tabs of panes 1, 2 and 3, the first shown.
+        let state = laid_out(|state| {
+            state.layouts.new_tab(SessionId(1), entry(2));
+            state.layouts.new_tab(SessionId(1), entry(3));
+            state.layouts.go_to_tab(SessionId(1), 1);
+        });
+        let (buffer, hits) = draw_hits(&state);
+
+        // When clicking where tab 3's label is drawn.
+        let route = find_in_bar(&buffer, " 3 ").map(|at| click_from_sidebar(&hits, at));
+
+        // Then tab 3 is shown with the keys in pane 3.
+        assert_eq!(
+            route,
+            Some(MouseRoute::Intents(vec![
+                Intent::GoToTab(3),
+                Intent::FocusPane(PaneId(3))
+            ])),
+            "a click lands on the tab drawn there"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_drawn_plus_opens_a_tab() {
+        // Given two tabs.
+        let state = laid_out(|state| state.layouts.new_tab(SessionId(1), entry(2)));
+        let (buffer, hits) = draw_hits(&state);
+
+        // When clicking where `+` is drawn.
+        let route = find_in_bar(&buffer, "+").map(|at| click_from_sidebar(&hits, at));
+
+        // Then a tab is opened.
+        assert_eq!(
+            route,
+            Some(MouseRoute::Intents(vec![Intent::NewTab])),
+            "a click on `+` opens a tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_drawn_right_chip_shows_the_first_hidden_tab() {
+        // Given ten tabs, the first shown, some hidden on the right.
+        let (buffer, hits) = draw_hits(&ten_tabs(1));
+        let hidden = chip_count(&buffer, " +");
+
+        // When clicking the right chip.
+        let route = find_in_bar(&buffer, " +").map(|at| click_from_sidebar(&hits, at));
+
+        // Then the leftmost hidden tab is shown with the keys in its pane.
+        let first_hidden = hidden.map(|hidden| 10 - hidden + 1);
+        assert_eq!(
+            route,
+            first_hidden.map(|n| MouseRoute::Intents(vec![
+                Intent::GoToTab(n),
+                Intent::FocusPane(PaneId(n as i64))
+            ])),
+            "the right chip shows the nearest hidden tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_drawn_left_chip_shows_the_last_hidden_tab() {
+        // Given ten tabs, the last shown, some hidden on the left.
+        let (buffer, hits) = draw_hits(&ten_tabs(10));
+        let hidden = chip_count(&buffer, " ← +");
+
+        // When clicking the left chip.
+        let route = find_in_bar(&buffer, " ← +").map(|at| click_from_sidebar(&hits, at));
+
+        // Then the rightmost hidden tab is shown with the keys in its pane.
+        assert_eq!(
+            route,
+            hidden.map(|n| MouseRoute::Intents(vec![
+                Intent::GoToTab(n),
+                Intent::FocusPane(PaneId(n as i64))
+            ])),
+            "the left chip shows the nearest hidden tab"
+        );
+    }
+
     /// The colour of the top-left corner of the frame at column `x` of the
     /// tab body.
     fn corner_fg(buffer: &Buffer, x: u16) -> Option<Color> {
