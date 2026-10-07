@@ -131,9 +131,9 @@ In the sidebar:
 | `d` | Delete the session after a `No`/`Yes` confirm: its panes are killed, transcripts stay. On an agent row: close its pane after a `No`/`Yes` confirm |
 | `r` | Rename the session, or name the agent's pane on an agent row |
 | `/` or `i` | Search |
-| `l` / `h` | Open / close the Settled shelf |
+| `l` / `h` | Show / fold a card's agent rows (`h` on an agent row folds its card), or open / close the Settled shelf |
 
-`<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎` or `<C-S-l>` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
+`<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎`, `<C-S-l>` or `<C-g> e` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
 
 ## Mouse
 

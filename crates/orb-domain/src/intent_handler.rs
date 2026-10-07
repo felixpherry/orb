@@ -102,7 +102,7 @@ impl IntentHandler {
                 with_visit(state, vec![])
             }
             Intent::ToggleSidebar => match (state.sidebar.hidden, state.focus) {
-                // `<C-g> s` in a pane: the keys stay in the pane.
+                // `<C-g> e` in a pane: the keys stay in the pane.
                 (hidden, Focus::Pane) => {
                     state.sidebar.hidden = !hidden;
                     vec![]
@@ -1885,7 +1885,7 @@ mod tests {
         IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
 
         // Then the sidebar is hidden.
-        assert!(state.sidebar.hidden, "<C-g> s should hide the sidebar");
+        assert!(state.sidebar.hidden, "<C-g> e should hide the sidebar");
     }
 
     #[rstest::rstest]
@@ -1917,7 +1917,7 @@ mod tests {
         // Then the sidebar is shown.
         assert!(
             !state.sidebar.hidden,
-            "<C-g> s should show the sidebar again"
+            "<C-g> e should show the sidebar again"
         );
     }
 
@@ -1942,14 +1942,14 @@ mod tests {
         // Given a shown sidebar, with the Claude pane focused.
         let mut state = laid_out(Focus::Pane, 32, false);
 
-        // When handling ToggleSidebar (`<C-g> s`).
+        // When handling ToggleSidebar (`<C-g> e`).
         IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
 
         // Then the pane keeps the keys.
         assert_eq!(
             state.focus,
             Focus::Pane,
-            "<C-g> s should hide the sidebar and keep the pane focused"
+            "<C-g> e should hide the sidebar and keep the pane focused"
         );
     }
 
@@ -1958,14 +1958,14 @@ mod tests {
         // Given a hidden sidebar, with the Claude pane focused.
         let mut state = laid_out(Focus::Pane, 32, true);
 
-        // When handling ToggleSidebar (`<C-g> s`).
+        // When handling ToggleSidebar (`<C-g> e`).
         IntentHandler::handle(&Intent::ToggleSidebar, &mut state);
 
         // Then the pane keeps the keys.
         assert_eq!(
             state.focus,
             Focus::Pane,
-            "<C-g> s should show the sidebar and keep the pane focused"
+            "<C-g> e should show the sidebar and keep the pane focused"
         );
     }
 
