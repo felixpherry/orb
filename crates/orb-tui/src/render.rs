@@ -1501,9 +1501,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case("  api")]
-    #[case("  Fix the bug")]
-    #[case("  shell")]
+    #[case("│ api")]
+    #[case("│ Fix the bug")]
+    #[case("│ shell")]
     fn stack_list_names_every_stacked_pane(#[case] row: &str) {
         // Given a stack of a named pane, an agent's pane and shells.
         let state = stacked();
@@ -1524,9 +1524,9 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then its row reads `> shell`.
+        // Then its row reads `> │ shell`, the `>` outside the bar.
         let right = right_side(&buffer);
-        assert!(right.contains("> shell"), "right side was\n{right}");
+        assert!(right.contains("> │ shell"), "right side was\n{right}");
     }
 
     /// `stacked()` with pane 2 named `name`.
@@ -1546,7 +1546,7 @@ mod tests {
 
         // Then its row ends in `…`.
         let right = right_side(&buffer);
-        let row = right.lines().find(|line| line.contains("│  abcdefghij"));
+        let row = right.lines().find(|line| line.contains("│ abcdefghij"));
         assert!(
             row.is_some_and(|row| row.trim_end().ends_with("…│")),
             "right side was\n{right}"
@@ -1587,7 +1587,7 @@ mod tests {
             .map(|cell| cell.symbol().to_owned());
         assert_eq!(
             (first.trim().to_owned(), corner),
-            ("│  Fix the bug│".to_owned(), Some("╭".to_owned())),
+            ("│ Fix the bug │".to_owned(), Some("╭".to_owned())),
             "the list is on top, the shown pane below"
         );
     }
@@ -1600,14 +1600,16 @@ mod tests {
         // When drawing a frame tall enough for every row.
         let buffer = draw_tall(&state, None);
 
-        // Then each of the four list rows starts and ends with a bar.
+        // Then each of the four list rows starts and ends with a bar, past
+        // the shown row's `>`.
         let right = right_of(&buffer);
         let rows: Vec<String> = (1..=4)
             .map(|y| text(&buffer, Rect::new(right.x, right.y + y, right.width, 1)))
             .collect();
         assert!(
             rows.iter()
-                .all(|row| row.trim().starts_with('│') && row.trim().ends_with('│')),
+                .map(|row| row.trim().trim_start_matches('>').trim_start())
+                .all(|row| row.starts_with('│') && row.ends_with('│')),
             "list rows were {rows:#?}"
         );
     }
@@ -1721,9 +1723,9 @@ mod tests {
     fn click_on_the_shown_stack_row_does_nothing() {
         // Given a stack drawn with pane 3 shown and focused.
         let (buffer, hits) = draw_hits(&stacked());
-        let row = find(&buffer, "> shell");
+        let row = find(&buffer, "> │ shell").map(|at| Position::new(at.x + 4, at.y));
 
-        // When clicking the shown pane's row.
+        // When clicking the shown pane's name.
         let route = row.map(|at| click_in_stack(&hits, at));
 
         // Then nothing happens.

@@ -38,6 +38,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `<C-S-h>` moves the keys from a pane to the sidebar, showing the sidebar if it's hidden.
 - (keybinds) `<C-S-l>` moves the keys from the sidebar into the shown session's panes.
 - (keybinds) `<C-g> e` hides or shows the sidebar, and hiding it while it has the keys moves them into the shown session's panes.
+- (keybinds) `<C-g> t b` in a pane moves the focused pane to a new tab of its own after the last one and shows it; a tab's only pane stays put.
 - (keybinds) orb has no `:` command line.
 - (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
 - (pane) orb redraws when input, PTY output, child exit, or an actor's state change wakes the loop, and every 100 ms while a thread is working (the spinner's frame); there is no other tick or frame throttle.
@@ -164,6 +165,7 @@ Entries are added or amended **only with human approval**.
 - (sidebar) While a search has text, a folded card lists its agent rows as if open.
 - (sidebar) A cursor that lands on an agent row of a folded card, as when a search ends on one, unfolds the card.
 - (sidebar) A Research or Learn card's third line shows its folder as a `~/…` path.
+- (sidebar) A card's agent rows hang one level under its third line, which always closes the card's tree.
 - (sidebar) On the Settled shelf, a group is one line (kind icon, slug, thread count and time since it settled), with its threads under it while it's open.
 - (keybinds) In the sidebar, `l` opens a group, `h` closes it from any of its rows and puts the cursor on its card, and `⏎` on a group's card toggles it; on a settled group `l` also opens the Settled shelf, and `h` on a closed one closes the shelf.
 - (keybinds) `n` on an unsettled group's card or a thread in it moves the cursor to the group's draft, creating it at the top of the group if there is none and opening the group if it's folded.
@@ -278,7 +280,7 @@ Entries are added or amended **only with human approval**.
 - (layout) From 11 panes a tab is one stack: a list naming every pane at the top, with `>` on the shown one, and the shown pane's frame below it.
 - (layout) `<C-g> p s` stacks a new pane with the focused one and shows it, until the next add, split or close re-tiles the tab.
 - (layout) A tab holds at most one stack, so `<C-g> p s` on a pane outside it adds the new pane to that stack.
-- (layout) A stack's list is centred over the shown pane, as wide as its longest name with a dim bar on each side, and scrolls to keep the shown row once it would take more than half the stack's height.
+- (layout) A stack's list is centred over the shown pane, as wide as its longest name with a dim bar on each side and a `>` outside the left bar on the shown row, and scrolls to keep the shown row once it would take more than half the stack's height.
 - (layout) `<C-g> p r` and `<C-g> p d` split the focused pane and share the space evenly among the panes split in that direction, until the next add or close re-tiles the tab.
 - (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.

@@ -173,6 +173,8 @@ impl IntentHandler {
                 in_pane(state, Layouts::toggle_zoom);
                 vec![]
             }
+            Intent::BreakPane => in_pane(state, Layouts::break_pane)
+                .map_or_else(Vec::new, |owner| vec![Command::SaveLayout(owner)]),
             Intent::GrowFocused => grow_or_shrink(state, true),
             Intent::ShrinkFocused => grow_or_shrink(state, false),
             Intent::NewTab => match (validate_tab_action(state), state.shown_session()) {
@@ -7936,5 +7938,46 @@ mod tests {
 
         // Then every card is open.
         assert!(state.sessions.folded.is_empty(), "cards start open");
+    }
+
+    #[rstest::rstest]
+    fn break_pane_in_a_pane_opens_a_tab() {
+        // Given shell pane 50 split off and focused, the keys in it.
+        let mut state = split_layout();
+
+        // When handling BreakPane (`<C-g> t b`).
+        IntentHandler::handle(&Intent::BreakPane, &mut state);
+
+        // Then the session has a second tab.
+        assert_eq!(tab_count(&state), 2, "the pane breaks out to a new tab");
+    }
+
+    #[rstest::rstest]
+    fn break_pane_saves_the_layout() {
+        // Given shell pane 50 split off and focused, the keys in it.
+        let mut state = split_layout();
+
+        // When handling BreakPane (`<C-g> t b`).
+        let commands = IntentHandler::handle(&Intent::BreakPane, &mut state);
+
+        // Then session 1's layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "the new tab is saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn break_pane_from_the_sidebar_does_nothing() {
+        // Given shell pane 50 split off and focused, the sidebar with the keys.
+        let mut state = split_layout();
+        state.focus = Focus::Sidebar;
+
+        // When handling BreakPane.
+        IntentHandler::handle(&Intent::BreakPane, &mut state);
+
+        // Then the session keeps one tab.
+        assert_eq!(tab_count(&state), 1, "breaking a pane needs the keys in it");
     }
 }

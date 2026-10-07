@@ -162,8 +162,9 @@ impl SessionLayout {
     /// all of `body`. A stack becomes a list of its panes, one row each, at
     /// the top of its area and at most half its height, and its expanded
     /// pane below it at the stack's full width. The list is `list_width`
-    /// wide (at least 3, at most the stack's width), bars included, and
-    /// centred.
+    /// wide, bars included, and centred, leaving at least two columns on
+    /// each side for the shown row's `>` (at least 3 wide, at most the
+    /// stack's width).
     pub fn placed(&self, body: Rect, list_width: u16) -> Placement {
         let Some(tab) = self.active_tab() else {
             return Placement::default();
@@ -202,7 +203,10 @@ impl SessionLayout {
                 .max(1);
             let rows = u16::try_from(fits).unwrap_or(u16::MAX);
             let area = {
-                let width = list_width.max(3).min(stack.area.width);
+                let width = list_width
+                    .min(stack.area.width.saturating_sub(4))
+                    .max(3)
+                    .min(stack.area.width);
                 let x = stack.area.x + (stack.area.width - width) / 2;
                 Rect::new(x, stack.area.y, width, rows)
             };
@@ -487,6 +491,26 @@ impl Layouts {
             layout.active = layout.tabs.len() - 1;
             layout.panes.insert(pane.id, pane);
         }
+    }
+
+    /// Moves the shown tab's focused pane to a new tab after the last one and
+    /// shows it, as zellij's break pane does; the tab it leaves is re-tiled
+    /// by pane count. A tab of one pane stays as it is.
+    pub fn break_pane(&mut self, owner: SessionId) {
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return;
+        };
+        let Some(tab) = layout.tab_mut() else {
+            return;
+        };
+        let pane = tab.tree.focused();
+        if tab.tree.pane_ids().len() < 2 || !tab.tree.close_pane(pane) {
+            return;
+        }
+        tab.tree.tile();
+        tab.zoomed = false;
+        layout.tabs.push(Tab::new(pane));
+        layout.active = layout.tabs.len() - 1;
     }
 
     /// Closes `pane` wherever it is. The tab it leaves is re-tiled by pane
@@ -1131,7 +1155,7 @@ mod tests {
     #[rstest::rstest]
     #[case(0, 3)]
     #[case(1, 3)]
-    #[case(200, 80)]
+    #[case(200, 76)]
     fn stack_list_width_stays_between_three_and_the_stack(
         #[case] list_width: u16,
         #[case] expected: u16,
@@ -1144,7 +1168,8 @@ mod tests {
             .stack
             .map(|stack| stack.area.width);
 
-        // Then the list is clamped to fit two bars and a column, and the stack.
+        // Then the list is clamped to fit two bars and a column, and the
+        // stack with room for the `>` beside it.
         assert_eq!(width, Some(expected), "list width for {list_width}");
     }
 
@@ -1215,6 +1240,65 @@ mod tests {
             rows,
             vec![PaneId(14), PaneId(15), PaneId(16), PaneId(17)],
             "the list scrolls to the shown pane"
+        );
+    }
+
+    /// The panes each tab holds, in tab order.
+    fn tab_panes(layouts: &Layouts) -> Vec<Vec<PaneId>> {
+        layouts.get(OWNER).map_or_else(Vec::new, |layout| {
+            layout
+                .tabs()
+                .iter()
+                .map(|tab| tab.tree.pane_ids())
+                .collect()
+        })
+    }
+
+    #[rstest::rstest]
+    fn break_pane_moves_the_focused_pane_to_its_own_tab() {
+        // Given pane 7 split right with pane 8, which has the focus.
+        let mut layouts = split_right();
+
+        // When breaking the focused pane out.
+        layouts.break_pane(OWNER);
+
+        // Then pane 7 keeps the first tab and pane 8 has a second tab.
+        assert_eq!(
+            tab_panes(&layouts),
+            vec![vec![PaneId(7)], vec![PaneId(8)]],
+            "the focused pane leaves for a new tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn break_pane_shows_the_new_tab() {
+        // Given pane 7 split right with pane 8, which has the focus.
+        let mut layouts = split_right();
+
+        // When breaking the focused pane out.
+        layouts.break_pane(OWNER);
+
+        // Then the new tab is shown.
+        assert_eq!(
+            layouts.get(OWNER).map(SessionLayout::active),
+            Some(1),
+            "the broken-out pane's tab is shown"
+        );
+    }
+
+    #[rstest::rstest]
+    fn break_pane_on_a_lone_pane_does_nothing() {
+        // Given a tab of pane 7 alone.
+        let mut layouts = opened();
+
+        // When breaking the focused pane out.
+        layouts.break_pane(OWNER);
+
+        // Then there is still one tab of pane 7.
+        assert_eq!(
+            tab_panes(&layouts),
+            vec![vec![PaneId(7)]],
+            "a lone pane is already its own tab"
         );
     }
 

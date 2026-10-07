@@ -3,8 +3,8 @@
 //! with its name. The frame shows where the focus is: blue while the pane
 //! has the keys, grey while it has the focus and the keys are elsewhere,
 //! dim otherwise. A zoomed tab shows only its focused pane. A stack is a
-//! centred list naming its panes, one row each between two dim bars, above
-//! the shown one.
+//! centred list naming its panes, one row each between two dim bars and a
+//! `>` outside the left bar on the shown one, above the shown pane.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -82,7 +82,12 @@ pub(crate) fn render(
                 .panes
                 .iter()
                 .any(|place| place.pane == stack.shown && place.focused);
-        stack_list(state, stack, lit, buf, hits);
+        let left = placement
+            .panes
+            .iter()
+            .find(|place| place.pane == stack.shown)
+            .map_or(stack.area.x, |place| place.area.x);
+        stack_list(state, stack, left, lit, buf, hits);
         let order = layout.active_tab().map(Tab::stacked).unwrap_or_default();
         hits.record_stack(stack.area, order, stack.shown);
     }
@@ -105,27 +110,41 @@ pub(crate) fn placement(state: &AppState, layout: &SessionLayout, body: Rect) ->
 }
 
 /// Draws `stack`'s list: a dim bar down each side, and between them a row
-/// per pane that fits, the shown pane's as `> name`, bold blue while `lit`.
-/// Names too long for the row end in `…`. Records every other row in
-/// `hits`, reading the mouse so a click focuses its pane without starting a
-/// selection.
-fn stack_list(state: &AppState, stack: &StackList, lit: bool, buf: &mut Buffer, hits: &mut HitMap) {
+/// per pane that fits, the shown pane's bold blue while `lit`, with a `>`
+/// two columns left of the left bar when that stays right of `left`, the
+/// stack's left edge. Names too long for the row end in `…`. Records every
+/// other row in `hits`, reading the mouse so a click focuses its pane
+/// without starting a selection.
+fn stack_list(
+    state: &AppState,
+    stack: &StackList,
+    left: u16,
+    lit: bool,
+    buf: &mut Buffer,
+    hits: &mut HitMap,
+) {
     let bar = Style::new().fg(GUTTER);
     for y in stack.area.rows().map(|row| row.y) {
         buf.set_string(stack.area.x, y, "│", bar);
         buf.set_string(stack.area.right().saturating_sub(1), y, "│", bar);
     }
     for (pane, row) in &stack.rows {
-        let (mark, style) = match (*pane == stack.shown, lit) {
-            (true, true) => ("> ", Style::new().fg(BLUE).add_modifier(Modifier::BOLD)),
-            (true, false) => ("> ", Style::new().fg(FG_DARK)),
-            (false, _) => ("  ", Style::new().fg(DARK3)),
+        let style = match (*pane == stack.shown, lit) {
+            (true, true) => Style::new().fg(BLUE).add_modifier(Modifier::BOLD),
+            (true, false) => Style::new().fg(FG_DARK),
+            (false, _) => Style::new().fg(DARK3),
         };
         let text = cut_right(
-            &format!("{mark}{}", pane_title(state, *pane)),
+            &format!(" {}", pane_title(state, *pane)),
             usize::from(row.width),
         );
         buf.set_stringn(row.x, row.y, text, usize::from(row.width), style);
+        match stack.area.x.checked_sub(2) {
+            Some(x) if *pane == stack.shown && x >= left => {
+                buf.set_string(x, row.y, ">", style);
+            }
+            _ => {}
+        }
         if *pane != stack.shown {
             hits.record_pane(*row, *pane, true);
         }

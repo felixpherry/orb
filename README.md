@@ -108,7 +108,7 @@ The demo shows, in order:
 | `<C-g> e` | Hide or show the sidebar |
 | `<C-g> q` | Quit orb (every pane keeps running) |
 | `<C-g> p d/r/s/f/x/c` | In a pane: split down, split right, stack, zoom, close, rename |
-| `<C-g> t n/x/r/1-9` | Tab: new, close, rename, go to N |
+| `<C-g> t n/x/r/b/1-9` | Tab: new, close, rename, break the focused pane out to a new tab (in a pane), go to N |
 | `<C-g> Space` | Session picker (`<C-s>` shows or hides settled sessions) |
 | `<C-g> n` | New session |
 | `<C-g> a` | Add a project |

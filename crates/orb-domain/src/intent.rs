@@ -51,6 +51,8 @@ pub enum Intent {
     ClosePane,
     /// Show only the focused pane over its tab, or every pane again.
     ToggleZoom,
+    /// Move the focused pane to a new tab of its own and show it.
+    BreakPane,
     /// Grow the focused pane, or widen the sidebar while it has the keys.
     GrowFocused,
     /// Shrink the focused pane, or narrow the sidebar while it has the keys.
@@ -210,6 +212,7 @@ impl fmt::Display for Intent {
             Self::AddPane => "add pane",
             Self::ClosePane => "close pane",
             Self::ToggleZoom => "zoom",
+            Self::BreakPane => "break pane",
             Self::GrowFocused => "grow",
             Self::ShrinkFocused => "shrink",
             Self::NewTab => "new tab",
@@ -279,6 +282,7 @@ mod tests {
     #[case(Intent::AddPane, "add pane")]
     #[case(Intent::ClosePane, "close pane")]
     #[case(Intent::ToggleZoom, "zoom")]
+    #[case(Intent::BreakPane, "break pane")]
     #[case(Intent::GrowFocused, "grow")]
     #[case(Intent::ShrinkFocused, "shrink")]
     #[case(Intent::NewTab, "new tab")]

@@ -9,7 +9,7 @@
 //! match a plain Esc. `<C-g>` is the which-key leader in both; its popup
 //! lists only the keys that do something for the selection (`<C-g> w`/`<C-g>
 //! b` not on Incognito, Research and Learn sessions, `<C-g> p` and `<C-g>
-//! <C-g>` only in a pane, `<C-g> t` only with a session selected, `<C-g> f`
+//! <C-g>` only in a pane, `<C-g> t` only with a session selected and its `b` only in a pane, `<C-g> f`
 //! only in the sidebar); `<C-g> e` hides or shows the sidebar and `<C-g> q`
 //! quits. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
 //! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
@@ -332,6 +332,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             .bind(
                 "<leader>pf",
                 Intent::ToggleZoom,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>tb",
+                Intent::BreakPane,
                 KeyCategory::Navigation,
                 scope,
             )
@@ -1283,6 +1289,7 @@ mod tests {
     #[case(Scope::Pane, "px", Intent::ClosePane)]
     #[case(Scope::Pane, "pc", Intent::RenamePane)]
     #[case(Scope::Pane, "ps", Intent::StackPane)]
+    #[case(Scope::Pane, "tb", Intent::BreakPane)]
     #[case(Scope::Pane, "tn", Intent::NewTab)]
     #[case(Scope::Sidebar, "tn", Intent::NewTab)]
     #[case(Scope::Pane, "tx", Intent::CloseTab)]
@@ -1350,17 +1357,16 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_t_popup_lists_the_tab_keys(#[values(Scope::Sidebar, Scope::Pane)] scope: Scope) {
+    #[case::sidebar(Scope::Sidebar, "1 2 3 4 5 6 7 8 9 n r x")]
+    #[case::pane_adds_break(Scope::Pane, "1 2 3 4 5 6 7 8 9 b n r x")]
+    fn leader_t_popup_lists_the_tab_keys(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap with a session selected.
 
         // When listing the keys after `<C-g> t`.
         let found = leader_popup(scope, &[key(KeyCode::Char('t'))]).join(" ");
 
-        // Then they are the tab keys.
-        assert_eq!(
-            found, "1 2 3 4 5 6 7 8 9 n r x",
-            "<C-g> t keys in {scope:?}"
-        );
+        // Then they are the tab keys, `b` only where there is a focused pane to break out.
+        assert_eq!(found, expected, "<C-g> t keys in {scope:?}");
     }
 
     #[rstest::rstest]

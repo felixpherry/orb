@@ -7,7 +7,7 @@
 //! come first, then active ones, each a card: its most urgent agent's
 //! status icon and its title, then the project and status, then the branch
 //! (a Research or Learn session's folder as a `~/…` path), then one row per
-//! agent pane under the card, with its status, name or title and harness
+//! agent pane hanging one level under that line, with its status, name or title and harness
 //! mark. A card with agent rows ends its last line with `⌄`; folded, it
 //! hides them and shows `›` after one status icon per agent. The selected
 //! row's first line is highlighted. Settled sessions fold into a shelf at
@@ -521,11 +521,6 @@ fn render_card(
     );
     let rows = sessions.agent_rows(session.id);
     let folded = sessions.hides_agents(session.id);
-    let guide = if rows.is_empty() || folded {
-        LAST_GUIDE
-    } else {
-        GUIDE
-    };
     let (place, kind) = match session_look(session.kind) {
         Some(look) => (
             format!("{FOLDER} {}", tilde(&session.dir, home)),
@@ -552,7 +547,7 @@ fn render_card(
         (false, false) => Some(FOLD_OPEN),
     };
     render_split(
-        Line::from(vec![span(guide, GUTTER), span(place, COMMENT)]),
+        Line::from(vec![span(LAST_GUIDE, GUTTER), span(place, COMMENT)]),
         Line::from(
             kind.map(|(icon, colour)| span(format!("{icon} "), colour))
                 .into_iter()
@@ -571,7 +566,8 @@ fn render_card(
     );
 }
 
-/// An agent pane's row under its card: the tree guide (`└╴` on the last),
+/// An agent pane's row, hanging under its card's last line: the tree guide
+/// (`└╴` on the last),
 /// its status icon (the idle circle filled while `attached`), `label` with
 /// where the search matched it, and its harness mark on the right.
 #[expect(
@@ -589,7 +585,7 @@ fn render_agent(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let guide = if last { LAST_GUIDE } else { GUIDE };
+    let guide = if last { LAST_CHILD_GUIDE } else { CHILD_GUIDE };
     let (glyph, _, colour) = status(thread, attached, now);
     let matched = sessions.title_matches(label).unwrap_or_default();
     let mark = harnesses
@@ -998,12 +994,15 @@ const AGENT_ICONS: usize = 8;
 const FOLD_OPEN: &str = "\u{f47c}";
 /// A folded card (`nf-oct-chevron_right`).
 const FOLD_CLOSED: &str = "\u{f460}";
-/// The tree guide before a node's middle line, a card's agent row and a
-/// settled row.
+/// The tree guide before a node's middle line and a settled row.
 const GUIDE: &str = " ├╴";
-/// The tree guide before a node's last line, a card's last agent row and the
-/// last settled row.
+/// The tree guide before a node's last line and the last settled row.
 const LAST_GUIDE: &str = " └╴";
+/// The guide before a card's agent row, one level under the card's last
+/// line.
+const CHILD_GUIDE: &str = "    ├╴";
+/// The guide before a card's last agent row.
+const LAST_CHILD_GUIDE: &str = "    └╴";
 
 #[cfg(test)]
 mod tests {
@@ -1028,11 +1027,11 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::{
-        APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, BRANCH, COMMENT, COMPLETED_ICON,
-        CYAN, DARK3, FAILED_ICON, FG, FOLD_CLOSED, FOLD_OPEN, FOLDER, FOLDER_OPEN, GONE_ICON,
-        GREEN, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PIN, PURPLE, RED,
-        STOPPED_ICON, SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour, monogram, render,
-        working_label,
+        APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, BRANCH, CHILD_GUIDE, COMMENT,
+        COMPLETED_ICON, CYAN, DARK3, FAILED_ICON, FG, FOLD_CLOSED, FOLD_OPEN, FOLDER, FOLDER_OPEN,
+        GONE_ICON, GREEN, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON, LAST_CHILD_GUIDE, LAST_GUIDE,
+        MAGENTA, ORANGE, PIN, PURPLE, RED, STOPPED_ICON, SidebarScroll, VISUAL, YELLOW, ago_label,
+        badge_colour, monogram, render, working_label,
     };
     use crate::mouse::{Clicks, HitMap, MouseRoute};
     use crate::test_support::sessions_for;
@@ -1870,10 +1869,10 @@ mod tests {
         // When rendering the sidebar.
         let footer = line(&draw(&sessions, at(1000), 8), 5);
 
-        // Then its third line is the middle guide, its agent row below, and
-        // the branch.
+        // Then its third line closes the card's tree on the branch, its agent
+        // row hanging below.
         assert!(
-            footer.starts_with(&format!(" ├╴{BRANCH} main ")),
+            footer.starts_with(&format!(" └╴{BRANCH} main ")),
             "line was '{footer}'"
         );
     }
@@ -2454,9 +2453,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn folded_card_closes_its_tree() {
-        // Given session 1's card folded over two agents.
-        let sessions = card_of(2, true);
+    fn card_third_line_closes_its_tree(#[values(false, true)] folded: bool) {
+        // Given session 1's card over two agents, `folded` or not.
+        let sessions = card_of(2, folded);
 
         // When drawing the sidebar.
         let buf = draw(&sessions, at(1000), 12);
@@ -2466,6 +2465,22 @@ mod tests {
             line(&buf, 5).starts_with(LAST_GUIDE),
             "line was '{}'",
             line(&buf, 5)
+        );
+    }
+
+    #[rstest::rstest]
+    fn agent_rows_hang_one_level_under_the_card() {
+        // Given session 1's open card over two agents.
+        let sessions = card_of(2, false);
+
+        // When drawing the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then its agent rows branch from under the card's last line, the last one ending.
+        let guides = [line(&buf, 6), line(&buf, 7)];
+        assert!(
+            guides[0].starts_with(CHILD_GUIDE) && guides[1].starts_with(LAST_CHILD_GUIDE),
+            "lines were {guides:#?}"
         );
     }
 
