@@ -246,10 +246,10 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
 
     use super::{BACKGROUND, layout, render};
-    use crate::sidebar::{BLUE, COMMENT, GUTTER};
+    use crate::sidebar::{BLACK, BLUE, COMMENT, GUTTER};
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
     use crate::keymap::{Keys, LEADER, Scope, keymap, press};
@@ -1120,10 +1120,12 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the tab bar reads ` 1 logs  2 `.
-        let right = right_of(&buffer);
-        let bar = text(&buffer, Rect::new(right.x, right.y, right.width, 1));
-        assert!(bar.starts_with(" 1 logs  2 "), "tab bar was '{bar}'");
+        // Then the tab bar holds ` 1 logs ` and ` 2 `.
+        let bar = tab_bar(&buffer);
+        assert!(
+            bar.contains(" 1 logs ") && bar.contains(" 2 "),
+            "tab bar was '{bar}'"
+        );
     }
 
     #[rstest::rstest]
@@ -1138,14 +1140,13 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the tab bar reads ` 1 server `.
-        let right = right_of(&buffer);
-        let bar = text(&buffer, Rect::new(right.x, right.y, right.width, 1));
-        assert!(bar.starts_with(" 1 server "), "tab bar was '{bar}'");
+        // Then the tab bar holds ` 1 server `.
+        let bar = tab_bar(&buffer);
+        assert!(bar.contains(" 1 server "), "tab bar was '{bar}'");
     }
 
     #[rstest::rstest]
-    fn shown_tab_is_highlighted_in_the_tab_bar() {
+    fn shown_tab_is_bold_black_on_blue() {
         // Given two tabs, the first shown.
         let state = laid_out(|state| {
             state.layouts.new_tab(SessionId(1), entry(2));
@@ -1155,14 +1156,100 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the first tab's number sits on blue and the second's doesn't.
+        // Then the first tab's number is bold black on blue.
         let right = right_of(&buffer);
-        let bg = |x| buffer.cell((x, right.y)).map(|cell| cell.bg);
+        let number = (right.x..right.right())
+            .filter_map(|x| buffer.cell((x, right.y)))
+            .find(|cell| cell.symbol() == "1")
+            .map(|cell| (cell.fg, cell.bg, cell.modifier.contains(Modifier::BOLD)));
         assert_eq!(
-            (bg(right.x + 1), bg(right.x + 4)),
-            (Some(BLUE), Some(BACKGROUND)),
-            "only the shown tab is highlighted"
+            number,
+            Some((BLACK, BLUE, true)),
+            "the shown tab's number"
         );
+    }
+
+    /// The tab bar's text.
+    fn tab_bar(buffer: &Buffer) -> String {
+        let right = right_of(buffer);
+        text(buffer, Rect::new(right.x, right.y, right.width, 1))
+    }
+
+    /// `shown(Focus::Sidebar)` with session 1 named `name` on `branch`.
+    fn labelled(name: Option<&str>, branch: Option<&str>) -> AppState {
+        let mut state = shown(Focus::Sidebar);
+        for session in &mut state.sessions.sessions {
+            session.name = name.map(str::to_owned);
+            session.branch = branch.map(str::to_owned);
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    #[case::name(labelled(Some("work"), Some("feat")), " work ")]
+    #[case::branch(labelled(None, Some("feat")), " feat ")]
+    #[case::neither(labelled(None, None), " session ")]
+    fn tab_bar_starts_with_the_session_label(#[case] state: AppState, #[case] label: &str) {
+        // Given session 1 with a name, a branch, or neither.
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the tab bar starts with its name, else its branch, else `session`.
+        let bar = tab_bar(&buffer);
+        assert!(bar.starts_with(label), "tab bar was '{bar}'");
+    }
+
+    #[rstest::rstest]
+    fn tab_bar_ends_with_a_plus_chevron() {
+        // Given two tabs.
+        let state = laid_out(|state| state.layouts.new_tab(SessionId(1), entry(2)));
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then a ` + ` chevron follows the last tab.
+        let bar = tab_bar(&buffer);
+        assert!(
+            bar.trim_end().ends_with(" 2 \u{e0b0}\u{e0b0} + \u{e0b0}"),
+            "tab bar was '{bar}'"
+        );
+    }
+
+    /// Thread 1's session with ten tabs, tab `shown` (1-based) shown.
+    fn ten_tabs(shown: usize) -> AppState {
+        laid_out(|state| {
+            for id in 2..=10 {
+                state.layouts.new_tab(SessionId(1), entry(id));
+            }
+            state.layouts.go_to_tab(SessionId(1), shown);
+        })
+    }
+
+    #[rstest::rstest]
+    fn hidden_tabs_on_the_left_are_counted_in_a_chip() {
+        // Given ten tabs, the last shown, too many for the bar.
+        let state = ten_tabs(10);
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then a chip counts the tabs hidden on the left.
+        let bar = tab_bar(&buffer);
+        assert!(bar.contains(" ← +"), "tab bar was '{bar}'");
+    }
+
+    #[rstest::rstest]
+    fn hidden_tabs_on_the_right_are_counted_in_a_chip() {
+        // Given ten tabs, the first shown, too many for the bar.
+        let state = ten_tabs(1);
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then a chip counts the tabs hidden on the right.
+        let bar = tab_bar(&buffer);
+        assert!(bar.contains(" →"), "tab bar was '{bar}'");
     }
 
     /// The colour of the top-left corner of the frame at column `x` of the
