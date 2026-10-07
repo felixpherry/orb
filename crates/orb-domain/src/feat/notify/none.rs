@@ -20,7 +20,6 @@ impl Notifier for NoneNotifier {
         _body: &str,
         _urgency: Urgency,
         _thread: ThreadId,
-        _tab: Option<u64>,
     ) -> Result<(), Report<NotifyError>> {
         Ok(())
     }
@@ -38,7 +37,7 @@ mod tests {
         let notifier = NoneNotifier;
 
         // When notifying that thread 1 finished.
-        let result = notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(1), None);
+        let result = notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(1));
 
         // Then it succeeds.
         assert!(result.is_ok(), "the none notifier should always succeed");

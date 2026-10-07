@@ -35,8 +35,7 @@ pub trait Notifier: Send + Sync {
     /// Shows a notification titled `title` saying `body` about `thread`,
     /// without waiting for it to be shown, asking at `urgency` where the
     /// notifier can say how insistently. A notifier that can replaces an
-    /// earlier notification about `thread`, and takes a click back to orb,
-    /// on zellij tab `tab` if known.
+    /// earlier notification about `thread`, and takes a click back to orb.
     ///
     /// # Errors
     ///
@@ -47,7 +46,6 @@ pub trait Notifier: Send + Sync {
         body: &str,
         urgency: Urgency,
         thread: ThreadId,
-        tab: Option<u64>,
     ) -> Result<(), Report<NotifyError>>;
 }
 
@@ -76,20 +74,18 @@ impl NotifierService {
     }
 
     /// Announces `notice`: titled `<project> · <thread title>`, saying why
-    /// the thread needs the user. A click goes back to orb, on zellij tab
-    /// `tab` if known.
+    /// the thread needs the user. A click goes back to orb.
     ///
     /// # Errors
     ///
     /// Returns an error if the notification couldn't be sent.
-    pub fn announce(&self, notice: &Notice, tab: Option<u64>) -> Result<(), Report<NotifyError>> {
+    pub fn announce(&self, notice: &Notice) -> Result<(), Report<NotifyError>> {
         let title = format!("{} · {}", notice.project, notice.title);
         self.notifier.notify(
             &title,
             notice.kind.label(),
             urgency(notice.kind),
             notice.thread,
-            tab,
         )
     }
 }
@@ -204,7 +200,6 @@ mod tests {
         body: String,
         urgency: Urgency,
         thread: ThreadId,
-        tab: Option<u64>,
     }
 
     /// A notifier that records each notification it was asked to show.
@@ -233,7 +228,6 @@ mod tests {
             body: &str,
             urgency: Urgency,
             thread: ThreadId,
-            tab: Option<u64>,
         ) -> Result<(), Report<NotifyError>> {
             self.shown
                 .lock()
@@ -243,7 +237,6 @@ mod tests {
                     body: body.to_owned(),
                     urgency,
                     thread,
-                    tab,
                 });
             Ok(())
         }
@@ -264,7 +257,7 @@ mod tests {
         let notifier = Arc::new(FakeNotifier::default());
 
         // When announcing that orb's "Parser fix" thread finished.
-        NotifierService::new(notifier.clone()).announce(&notice(NoticeKind::Finished), None)?;
+        NotifierService::new(notifier.clone()).announce(&notice(NoticeKind::Finished))?;
 
         // Then one notification is titled by the project and the thread.
         let titles: Vec<String> = notifier
@@ -288,7 +281,7 @@ mod tests {
         let notifier = Arc::new(FakeNotifier::default());
 
         // When announcing a notice of `kind`.
-        NotifierService::new(notifier.clone()).announce(&notice(kind), None)?;
+        NotifierService::new(notifier.clone()).announce(&notice(kind))?;
 
         // Then the notification's body says `expected`.
         let bodies: Vec<String> = notifier
@@ -312,7 +305,7 @@ mod tests {
         let notifier = Arc::new(FakeNotifier::default());
 
         // When announcing a notice of `kind`.
-        NotifierService::new(notifier.clone()).announce(&notice(kind), None)?;
+        NotifierService::new(notifier.clone()).announce(&notice(kind))?;
 
         // Then the notifier is asked at `expected` urgency.
         let urgencies: Vec<Urgency> = notifier
@@ -325,20 +318,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn announce_tells_the_notifier_the_thread_and_orbs_tab() -> Result<(), Report<NotifyError>> {
+    fn announce_tells_the_notifier_the_thread() -> Result<(), Report<NotifyError>> {
         // Given a notifier.
         let notifier = Arc::new(FakeNotifier::default());
 
-        // When announcing thread 1's notice with orb on tab 3.
-        NotifierService::new(notifier.clone()).announce(&notice(NoticeKind::Finished), Some(3))?;
+        // When announcing thread 1's notice.
+        NotifierService::new(notifier.clone()).announce(&notice(NoticeKind::Finished))?;
 
-        // Then the notifier hears of thread 1 and tab 3.
-        let heard: Vec<(ThreadId, Option<u64>)> = notifier
+        // Then the notifier hears of thread 1.
+        let heard: Vec<ThreadId> = notifier
             .shown()
             .into_iter()
-            .map(|shown| (shown.thread, shown.tab))
+            .map(|shown| shown.thread)
             .collect();
-        assert_eq!(heard, [(ThreadId(1), Some(3))], "the thread and tab");
+        assert_eq!(heard, [ThreadId(1)], "the thread");
         Ok(())
     }
 

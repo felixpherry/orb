@@ -1,6 +1,6 @@
-//! Where a click on a notification takes the user: the kitty window, zellij
-//! tab and pane orb runs in, and on Linux the niri window showing it. On
-//! Linux orb runs the click's steps itself.
+//! Where a click on a notification takes the user: the kitty window orb runs
+//! in, and on Linux the niri window showing it. On Linux orb runs the click's
+//! steps itself.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -18,8 +18,6 @@ use crate::common::{Finished, run_within};
 pub struct ClickTarget {
     /// orb's kitty; `None` without `kitten` or kitty's socket.
     pub kitty: Option<Kitty>,
-    /// orb's zellij pane; `None` outside zellij.
-    pub zellij: Option<ZellijTarget>,
     /// niri, the compositor orb's window is on; `None` without `NIRI_SOCKET` or `niri`.
     pub niri: Option<NiriTarget>,
 }
@@ -31,19 +29,8 @@ pub struct Kitty {
     pub kitten: PathBuf,
     /// kitty's remote control socket, as `KITTY_LISTEN_ON` gives it.
     pub socket: String,
-    /// orb's kitty window, `KITTY_WINDOW_ID`, used outside zellij only.
+    /// orb's kitty window, `KITTY_WINDOW_ID`.
     pub window: Option<u64>,
-}
-
-/// orb's pane in its zellij session.
-#[derive(Debug, Clone)]
-pub struct ZellijTarget {
-    /// The `zellij` program.
-    pub zellij: PathBuf,
-    /// orb's session.
-    pub session: String,
-    /// orb's terminal pane, `terminal_<pane>`.
-    pub pane: u32,
 }
 
 /// The niri compositor, driven by `niri msg`.
@@ -51,6 +38,8 @@ pub struct ZellijTarget {
 pub struct NiriTarget {
     /// The `niri` program.
     pub niri: PathBuf,
+    /// orb's process and its parents, one of which owns orb's window.
+    pub ancestors: Vec<u32>,
 }
 
 /// How long one click step may run before it's killed.
@@ -89,14 +78,13 @@ impl ClickRunner for CommandClickRunner {
     }
 }
 
-/// Takes the user back to orb: raises orb's niri window, then goes to orb's
-/// zellij tab (when `tab` is known) and focuses orb's pane. A step orb
-/// can't do is skipped, and a failed step doesn't stop the next.
-pub fn focus_orb(click: &ClickTarget, tab: Option<u64>, runner: &dyn ClickRunner) {
-    if let (Some(niri), Some(zellij)) = (&click.niri, &click.zellij) {
+/// Takes the user back to orb: raises orb's niri window. A step orb can't
+/// do is skipped.
+pub fn focus_orb(click: &ClickTarget, runner: &dyn ClickRunner) {
+    if let Some(niri) = &click.niri {
         let window = runner
             .run(&niri.niri, &os_args(&["msg", "--json", "windows"]))
-            .and_then(|json| niri_window(&json, &zellij.session));
+            .and_then(|json| niri_window(&json, &niri.ancestors));
         if let Some(id) = window {
             let id = id.to_string();
             runner.run(
@@ -104,21 +92,6 @@ pub fn focus_orb(click: &ClickTarget, tab: Option<u64>, runner: &dyn ClickRunner
                 &os_args(&["msg", "action", "focus-window", "--id", &id]),
             );
         }
-    }
-    if let Some(zellij) = &click.zellij {
-        let session = zellij.session.as_str();
-        if let Some(tab) = tab {
-            let tab = tab.to_string();
-            runner.run(
-                &zellij.zellij,
-                &os_args(&["--session", session, "action", "go-to-tab-by-id", &tab]),
-            );
-        }
-        let pane = format!("terminal_{}", zellij.pane);
-        runner.run(
-            &zellij.zellij,
-            &os_args(&["--session", session, "action", "focus-pane-id", &pane]),
-        );
     }
 }
 
@@ -131,23 +104,18 @@ fn os_args(words: &[&str]) -> Vec<OsString> {
 #[derive(Deserialize)]
 struct NiriWindow {
     id: u64,
-    title: Option<String>,
+    pid: Option<u32>,
 }
 
-/// The first niri window in `json` showing zellij session `session`, whose
-/// title zellij sets to `<session> | <pane title>`; `None` if there's none
-/// or `json` isn't niri's window list.
-fn niri_window(json: &str, session: &str) -> Option<u64> {
-    let prefix = format!("{session} |");
+/// The first niri window in `json` whose process is one of `ancestors`
+/// (orb's terminal); `None` if there's none or `json` isn't niri's list.
+// ponytail: a single-instance kitty shows every window under one pid, so the
+// first wins; match kitty's window id too if that ever matters.
+fn niri_window(json: &str, ancestors: &[u32]) -> Option<u64> {
     serde_json::from_str::<Vec<NiriWindow>>(json)
         .ok()?
         .into_iter()
-        .find(|window| {
-            window
-                .title
-                .as_deref()
-                .is_some_and(|title| title.starts_with(&prefix))
-        })
+        .find(|window| window.pid.is_some_and(|pid| ancestors.contains(&pid)))
         .map(|window| window.id)
 }
 
@@ -170,30 +138,34 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
 
-    use super::{ClickRunner, ClickTarget, NiriTarget, ZellijTarget, focus_orb, niri_window};
+    use super::{ClickRunner, ClickTarget, NiriTarget, focus_orb, niri_window};
 
     /// One program run: the program and its arguments.
     type Call = (PathBuf, Vec<String>);
 
-    /// niri's window list with a browser whose title holds ` | ` and orb's kitty.
+    /// niri's window list: a browser, a window with no pid, and orb's kitty
+    /// (pid 900).
     const WINDOWS: &str = r#"[
-        {"id": 2, "title": "API Keys | Settings | Firefox", "app_id": "firefox"},
+        {"id": 2, "title": "API Keys | Firefox", "app_id": "firefox", "pid": 300},
         {"id": 5, "title": null, "app_id": "mpv"},
-        {"id": 6, "title": "tremendous-panda | orb ~", "app_id": "kitty"}
+        {"id": 6, "title": "orb ~", "app_id": "kitty", "pid": 900}
     ]"#;
+
+    /// orb (pid 1200) under fish (1100) under kitty (900) under launchd.
+    const ANCESTORS: [u32; 4] = [1200, 1100, 900, 1];
 
     /// A click runner that records every run and answers niri's window list
     /// with `windows`, everything else with empty output.
     struct FakeRunner {
         calls: Mutex<Vec<Call>>,
-        windows: Option<String>,
+        windows: String,
     }
 
     impl FakeRunner {
         fn new(windows: &str) -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
-                windows: Some(windows.to_owned()),
+                windows: windows.to_owned(),
             }
         }
 
@@ -220,140 +192,79 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push((program.to_owned(), args));
-            if lists_windows {
+            Some(if lists_windows {
                 self.windows.clone()
             } else {
-                Some(String::new())
-            }
+                String::new()
+            })
         }
     }
 
-    fn click(niri: bool) -> ClickTarget {
+    fn click() -> ClickTarget {
         ClickTarget {
             kitty: None,
-            zellij: Some(ZellijTarget {
-                zellij: PathBuf::from("/z/zellij"),
-                session: "tremendous-panda".to_owned(),
-                pane: 4,
-            }),
-            niri: niri.then(|| NiriTarget {
+            niri: Some(NiriTarget {
                 niri: PathBuf::from("/n/niri"),
+                ancestors: ANCESTORS.to_vec(),
             }),
         }
     }
 
-    fn call(program: &str, args: &[&str]) -> Call {
+    fn call(args: &[&str]) -> Call {
         (
-            PathBuf::from(program),
+            PathBuf::from("/n/niri"),
             args.iter().map(|arg| (*arg).to_owned()).collect(),
         )
     }
 
-    fn list_windows() -> Call {
-        call("/n/niri", &["msg", "--json", "windows"])
-    }
-
-    fn focus_window() -> Call {
-        call("/n/niri", &["msg", "action", "focus-window", "--id", "6"])
-    }
-
-    fn go_to_tab() -> Call {
-        call(
-            "/z/zellij",
-            &[
-                "--session",
-                "tremendous-panda",
-                "action",
-                "go-to-tab-by-id",
-                "3",
-            ],
-        )
-    }
-
-    fn focus_pane() -> Call {
-        call(
-            "/z/zellij",
-            &[
-                "--session",
-                "tremendous-panda",
-                "action",
-                "focus-pane-id",
-                "terminal_4",
-            ],
-        )
-    }
-
     #[rstest::rstest]
-    fn click_focuses_niri_window_then_zellij_pane() {
-        // Given orb under niri and zellij, with orb's kitty in niri's window list.
+    fn click_focuses_orbs_niri_window() {
+        // Given orb under niri, with orb's kitty in niri's window list.
         let runner = FakeRunner::new(WINDOWS);
 
-        // When the click takes the user back to orb on tab 3.
-        focus_orb(&click(true), Some(3), &runner);
+        // When the click takes the user back to orb.
+        focus_orb(&click(), &runner);
 
-        // Then niri raises orb's window, then zellij goes to the tab and focuses the pane.
+        // Then niri lists its windows and raises orb's.
         assert_eq!(
             runner.calls(),
-            vec![list_windows(), focus_window(), go_to_tab(), focus_pane()],
+            vec![
+                call(&["msg", "--json", "windows"]),
+                call(&["msg", "action", "focus-window", "--id", "6"]),
+            ],
             "the click's steps, in order"
         );
     }
 
     #[rstest::rstest]
-    fn click_without_niri_runs_only_zellij_steps() {
-        // Given orb in zellij without niri.
-        let runner = FakeRunner::new(WINDOWS);
-
-        // When the click takes the user back to orb on tab 3.
-        focus_orb(&click(false), Some(3), &runner);
-
-        // Then only zellij's steps run.
-        assert_eq!(
-            runner.calls(),
-            vec![go_to_tab(), focus_pane()],
-            "the click's steps without niri"
-        );
-    }
-
-    #[rstest::rstest]
-    fn click_without_tab_skips_go_to_tab() {
-        // Given orb under niri and zellij.
-        let runner = FakeRunner::new(WINDOWS);
-
-        // When the click takes the user back to orb on an unknown tab.
-        focus_orb(&click(true), None, &runner);
-
-        // Then zellij focuses the pane without going to a tab.
-        assert_eq!(
-            runner.calls(),
-            vec![list_windows(), focus_window(), focus_pane()],
-            "the click's steps without a tab"
-        );
-    }
-
-    #[rstest::rstest]
-    fn niri_window_is_picked_by_zellij_session_title() {
-        // Given niri's window list with a browser titled with " | " first.
-        // When looking for the window showing zellij session tremendous-panda.
-        let window = niri_window(WINDOWS, "tremendous-panda");
+    fn niri_window_is_the_one_holding_orb() {
+        // Given niri's window list with orb's kitty last.
+        // When looking for the window whose process is one of orb's ancestors.
+        let window = niri_window(WINDOWS, &ANCESTORS);
 
         // Then it's orb's kitty window.
-        assert_eq!(window, Some(6), "the window showing the session");
+        assert_eq!(window, Some(6), "the window orb runs in");
     }
 
     #[rstest::rstest]
-    fn niri_lookup_with_no_matching_window_skips_focus() {
-        // Given niri's window list without a window showing orb's session.
-        let runner = FakeRunner::new(r#"[{"id": 2, "title": "other | orb ~"}]"#);
+    fn niri_window_is_none_without_orbs_process() {
+        // Given niri's window list where no window belongs to orb's processes.
+        // When looking for orb's window.
+        let window = niri_window(WINDOWS, &[1200, 1100, 1]);
 
-        // When the click takes the user back to orb on tab 3.
-        focus_orb(&click(true), Some(3), &runner);
+        // Then there is none.
+        assert_eq!(window, None, "no window holds orb");
+    }
 
-        // Then no window is focused, and zellij's steps still run.
-        assert_eq!(
-            runner.calls(),
-            vec![list_windows(), go_to_tab(), focus_pane()],
-            "the click's steps without a matching window"
-        );
+    #[rstest::rstest]
+    fn click_without_niri_runs_nothing() {
+        // Given orb outside niri.
+        let runner = FakeRunner::new(WINDOWS);
+
+        // When the click takes the user back to orb.
+        focus_orb(&ClickTarget::default(), &runner);
+
+        // Then no step runs.
+        assert!(runner.calls().is_empty(), "nothing to raise without niri");
     }
 }

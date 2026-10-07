@@ -2,7 +2,8 @@
 //!
 //! Everything orb does differently per harness (starting and listing
 //! sessions, reading transcripts, trusting a folder, the models on offer,
-//! and how to resume a conversation) lives in that harness's implementation.
+//! how to resume a conversation, and where its status comes from) lives in
+//! that harness's implementation.
 //! Each draft, group and thread stores the id of its harness, and shared
 //! code picks the harness by it.
 
@@ -187,6 +188,12 @@ pub trait Harness: SessionHost + TranscriptFormat {
     /// The command typed into a pane's fresh shell to bring conversation
     /// `session_id` back.
     fn resume_command(&self, session_id: &str) -> String;
+
+    /// Whether the agent's status comes from the reports orb's integration
+    /// writes to its pane file, rather than from the host's records.
+    fn reports_status(&self) -> bool {
+        false
+    }
 }
 
 /// Every harness orb knows, in registration order; the first is the default.
@@ -269,11 +276,25 @@ pub(crate) mod fake {
     pub(crate) struct FakeHarness {
         id: &'static str,
         host: Arc<dyn SessionHost>,
+        /// What [`Harness::reports_status`] answers.
+        reports: bool,
     }
 
     impl FakeHarness {
         pub(crate) fn new(id: &'static str, host: Arc<dyn SessionHost>) -> Self {
-            Self { id, host }
+            Self {
+                id,
+                host,
+                reports: false,
+            }
+        }
+
+        /// A harness like pi, whose status comes from its pane reports.
+        pub(crate) fn reporting(id: &'static str, host: Arc<dyn SessionHost>) -> Self {
+            Self {
+                reports: true,
+                ..Self::new(id, host)
+            }
         }
     }
 
@@ -359,6 +380,10 @@ pub(crate) mod fake {
 
         fn resume_command(&self, session_id: &str) -> String {
             format!("{} --resume {session_id}", self.id)
+        }
+
+        fn reports_status(&self) -> bool {
+            self.reports
         }
     }
 }

@@ -10,7 +10,7 @@ use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::PickerState;
 use crate::feat::search::state::SearchProgress;
-use crate::feat::sessions::state::{SessionId, Sessions, ThreadId};
+use crate::feat::sessions::state::{SessionId, Sessions, Thread, ThreadId};
 use crate::feat::sidebar::state::{Rename, SidebarView};
 use crate::feat::worktrees::state::Worktrees;
 
@@ -94,6 +94,22 @@ impl AppState {
     /// means the start screen.
     pub fn shown_layout(&self) -> Option<&SessionLayout> {
         self.layouts.get(self.shown_session()?)
+    }
+
+    /// The threads running in session `session`'s panes (its agent panes'
+    /// conversations), leaving out those being deleted.
+    pub fn session_threads(&self, session: SessionId) -> Vec<&Thread> {
+        self.sessions
+            .threads()
+            .filter(|thread| !self.sessions.deleting.contains(&thread.id))
+            .filter(|thread| {
+                thread
+                    .pane
+                    .as_ref()
+                    .and_then(|pane| self.layouts.owner_of(pane.pane))
+                    == Some(session)
+            })
+            .collect()
     }
 
     /// What the frontend knows about harness `id`.
@@ -224,19 +240,18 @@ mod tests {
         );
     }
 
-    /// Thread 1 selected, running in pane 10 of session 1; attached when
-    /// `attached`.
-    fn selecting_thread(attached: bool) -> AppState {
-        let thread = Thread {
+    /// Idle thread `id`, running in pane `pane` when it has one.
+    fn thread_in(id: i64, pane: Option<i64>) -> Thread {
+        Thread {
             harness: HarnessId::new("claude"),
-            id: ThreadId(1),
+            id: ThreadId(id),
             title: None,
             cwd: "/tmp".into(),
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            pane: Some(PaneLaunch {
-                pane: PaneId(10),
+            pane: pane.map(|pane| PaneLaunch {
+                pane: PaneId(pane),
                 command: vec![],
             }),
             branch: None,
@@ -249,10 +264,15 @@ mod tests {
             group: None,
             model: None,
             permission: None,
-        };
+        }
+    }
+
+    /// Thread 1 selected, running in pane 10 of session 1; attached when
+    /// `attached`.
+    fn selecting_thread(attached: bool) -> AppState {
         let mut state = drafting("claude");
         if let Some(project) = state.sessions.projects.first_mut() {
-            project.threads = vec![thread];
+            project.threads = vec![thread_in(1, Some(10))];
         }
         state.sessions.cursor = Some(SidebarItem::Thread(ThreadId(1)));
         state.layouts.insert(
@@ -300,6 +320,44 @@ mod tests {
         assert!(
             shown.is_none(),
             "an unattached thread shows the start screen"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_threads_are_the_threads_in_its_panes() {
+        // Given thread 1 in session 1's pane 10, thread 2 in session 2's
+        // pane 20, and thread 3 with no pane.
+        let mut state = selecting_thread(false);
+        if let Some(project) = state.sessions.projects.first_mut() {
+            project
+                .threads
+                .extend([thread_in(2, Some(20)), thread_in(3, None)]);
+        }
+        state.layouts.insert(
+            SessionId(2),
+            SessionLayout::of(PaneEntry {
+                id: PaneId(20),
+                zmx: ZmxSession {
+                    name: "orb-p20".into(),
+                    dir: "/tmp/zmx".into(),
+                },
+                cwd: "/tmp".into(),
+                name: None,
+            }),
+        );
+
+        // When listing session 1's threads.
+        let threads: Vec<ThreadId> = state
+            .session_threads(SessionId(1))
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect();
+
+        // Then only thread 1 runs there.
+        assert_eq!(
+            threads,
+            [ThreadId(1)],
+            "a session's threads are those in its panes"
         );
     }
 }

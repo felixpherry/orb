@@ -47,13 +47,19 @@ pub struct AttachStart<'a> {
     pub has_transcript: bool,
 }
 
-/// One session the host knows about.
+/// One session the host knows about: one it runs itself, by its id, or one
+/// the user started in a terminal, by its process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
-    pub short_id: String,
-    /// The harness's session id, which names the transcript file.
+    /// The id the host runs the session by; `None` for one the user started.
+    pub short_id: Option<String>,
+    /// The harness's session id, which names the transcript file; `None` for
+    /// one the user started, whose identity comes from orb's hook.
     pub session_id: Option<String>,
     pub status: ThreadStatus,
+    /// For one the user started: its process, then each parent up to the
+    /// first process. Empty otherwise.
+    pub ancestry: Vec<u32>,
 }
 
 /// Runs sessions in the background, independent of orb.
@@ -73,7 +79,7 @@ pub trait SessionHost: Send + Sync {
     ) -> Result<CreatedSession, Report<SessionHostError>>;
 
     /// The sessions among `short_ids` the host knows about, and any others
-    /// it reports.
+    /// it reports, including sessions users started in a terminal.
     ///
     /// # Errors
     ///

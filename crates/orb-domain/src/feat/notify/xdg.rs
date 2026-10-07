@@ -102,7 +102,6 @@ impl Notifier for XdgNotifier {
         body: &str,
         urgency: Urgency,
         thread: ThreadId,
-        tab: Option<u64>,
     ) -> Result<(), Report<NotifyError>> {
         let (replaces, generation) = {
             let mut ledger = self.shown.lock().unwrap_or_else(PoisonError::into_inner);
@@ -124,7 +123,7 @@ impl Notifier for XdgNotifier {
                     .get(&thread)
                     .is_some_and(|shown| shown.generation == generation);
                 if latest {
-                    focus_orb(&click, tab, runner.as_ref());
+                    focus_orb(&click, runner.as_ref());
                 }
             })
         };
@@ -208,7 +207,7 @@ mod tests {
     use error_stack::Report;
 
     use super::{Desktop, XdgNotification, XdgNotifier};
-    use crate::feat::notify::click::{ClickRunner, ClickTarget, ZellijTarget};
+    use crate::feat::notify::click::{ClickRunner, ClickTarget, NiriTarget};
     use crate::feat::notify::notifier::{Notifier, NotifierService, NotifyError, Urgency};
     use crate::feat::sessions::state::{Notice, NoticeKind, ThreadId};
 
@@ -287,7 +286,8 @@ mod tests {
         }
     }
 
-    /// A click runner that records every run.
+    /// A click runner that records every run and answers each with niri's
+    /// list of one window, 6, owned by process 900.
     #[derive(Default)]
     struct RecordingRunner {
         calls: Mutex<Vec<Call>>,
@@ -316,20 +316,18 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push((program.to_owned(), args));
-            Some(String::new())
+            Some(r#"[{"id": 6, "pid": 900}]"#.to_owned())
         }
     }
 
-    /// orb's pane 4 in zellij session `tremendous-panda`, without niri.
+    /// orb under niri, its terminal process 900.
     fn click_target() -> ClickTarget {
         ClickTarget {
             kitty: None,
-            zellij: Some(ZellijTarget {
-                zellij: PathBuf::from("/z/zellij"),
-                session: "tremendous-panda".to_owned(),
-                pane: 4,
+            niri: Some(NiriTarget {
+                niri: PathBuf::from("/n/niri"),
+                ancestors: vec![1200, 900, 1],
             }),
-            niri: None,
         }
     }
 
@@ -346,18 +344,12 @@ mod tests {
         }
     }
 
-    fn focus_pane() -> Call {
+    fn focus_window() -> Call {
         (
-            PathBuf::from("/z/zellij"),
-            [
-                "--session",
-                "tremendous-panda",
-                "action",
-                "focus-pane-id",
-                "terminal_4",
-            ]
-            .map(str::to_owned)
-            .to_vec(),
+            PathBuf::from("/n/niri"),
+            ["msg", "action", "focus-window", "--id", "6"]
+                .map(str::to_owned)
+                .to_vec(),
         )
     }
 
@@ -369,7 +361,7 @@ mod tests {
         let service = NotifierService::new(Arc::new(notifier(&desktop, &runner)));
 
         // When announcing that orb's "Parser fix" thread finished.
-        service.announce(&notice(NoticeKind::Finished), None)?;
+        service.announce(&notice(NoticeKind::Finished))?;
 
         // Then the desktop shows one notification titled by project and
         // thread, saying the turn finished.
@@ -392,16 +384,10 @@ mod tests {
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
         let notifier = notifier(&desktop, &runner);
-        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(1), None)?;
+        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(1))?;
 
         // When notifying about thread 1 again.
-        notifier.notify(
-            "orb · x",
-            "Needs input",
-            Urgency::Critical,
-            ThreadId(1),
-            None,
-        )?;
+        notifier.notify("orb · x", "Needs input", Urgency::Critical, ThreadId(1))?;
 
         // Then the second notification replaces the first.
         let replaces = desktop.shown().get(1).and_then(|shown| shown.replaces);
@@ -415,10 +401,10 @@ mod tests {
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
         let notifier = notifier(&desktop, &runner);
-        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(1), None)?;
+        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(1))?;
 
         // When notifying about thread 2.
-        notifier.notify("orb · y", "Finished", Urgency::Normal, ThreadId(2), None)?;
+        notifier.notify("orb · y", "Finished", Urgency::Normal, ThreadId(2))?;
 
         // Then the second notification replaces nothing.
         let shown = desktop.shown();
@@ -434,21 +420,15 @@ mod tests {
         // Given an xdg notifier that has shown a notification about thread 1.
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
-        notifier(&desktop, &runner).notify(
-            "orb · x",
-            "Finished",
-            Urgency::Normal,
-            ThreadId(1),
-            None,
-        )?;
+        notifier(&desktop, &runner).notify("orb · x", "Finished", Urgency::Normal, ThreadId(1))?;
 
         // When the user clicks it.
         desktop.click(0);
 
-        // Then orb's zellij pane is focused.
+        // Then orb's niri window is focused.
         assert!(
-            runner.calls().contains(&focus_pane()),
-            "a click should focus orb's pane: {:?}",
+            runner.calls().contains(&focus_window()),
+            "a click should focus orb's window: {:?}",
             runner.calls()
         );
         Ok(())
@@ -459,13 +439,7 @@ mod tests {
         // Given an xdg notifier that has shown a notification about thread 1.
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
-        notifier(&desktop, &runner).notify(
-            "orb · x",
-            "Finished",
-            Urgency::Normal,
-            ThreadId(1),
-            None,
-        )?;
+        notifier(&desktop, &runner).notify("orb · x", "Finished", Urgency::Normal, ThreadId(1))?;
 
         // When the user dismisses it.
         desktop.drop_click(0);
@@ -485,13 +459,8 @@ mod tests {
         let runner = Arc::new(RecordingRunner::default());
 
         // When notifying about thread 1.
-        let result = notifier(&desktop, &runner).notify(
-            "orb · x",
-            "Finished",
-            Urgency::Normal,
-            ThreadId(1),
-            None,
-        );
+        let result =
+            notifier(&desktop, &runner).notify("orb · x", "Finished", Urgency::Normal, ThreadId(1));
 
         // Then it reports the failure and runs no click step.
         assert!(
@@ -507,14 +476,8 @@ mod tests {
         let desktop = Arc::new(FakeDesktop::default());
         let runner = Arc::new(RecordingRunner::default());
         let notifier = notifier(&desktop, &runner);
-        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(1), None)?;
-        notifier.notify(
-            "orb · x",
-            "Needs input",
-            Urgency::Critical,
-            ThreadId(1),
-            None,
-        )?;
+        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(1))?;
+        notifier.notify("orb · x", "Needs input", Urgency::Critical, ThreadId(1))?;
 
         // When the first notification's click arrives.
         desktop.click(0);

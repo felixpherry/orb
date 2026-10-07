@@ -4,7 +4,9 @@
 //! `--permission-mode` when a session asks for them, `claude agents --json --all` reports
 //! what every session is doing, `claude stop <id>` stops one and keeps its
 //! conversation, `claude rm <id>` deletes one, and `claude attach <id>`
-//! attaches to one, resuming it if it was stopped. Every `claude` process runs
+//! attaches to one, resuming it if it was stopped. `claude agents` also
+//! reports the Claudes users start in panes, by process; `ps` gives each one's
+//! parents, which tell the pane it runs in. Every `claude` process runs
 //! with orb's child environment and no stdin, and is killed if it outlives its
 //! time limit. When `claude` fails, the first line it printed becomes the
 //! reason.
@@ -20,6 +22,7 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::common::{ancestry, parse_parents};
 use crate::feat::sessions::session_host::{
     AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
     WorkspaceUntrusted,
@@ -53,7 +56,13 @@ impl ClaudeSupervisor {
     }
 
     fn claude(&self, args: &[&str]) -> Command {
-        let mut command = Command::new("claude");
+        self.command("claude", args)
+    }
+
+    /// `program` with `args`, orb's child environment and no stdin, killed
+    /// when dropped.
+    fn command(&self, program: &str, args: &[&str]) -> Command {
+        let mut command = Command::new(program);
         command
             .args(args)
             .env_clear()
@@ -86,13 +95,32 @@ impl SessionHost for ClaudeSupervisor {
     }
 
     /// `claude agents --all` lists every session, so the ids aren't needed.
+    /// Each interactive record's ancestry comes from one `ps` call.
     async fn list(
         &self,
         _short_ids: &[String],
     ) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
         let command = self.claude(&["agents", "--json", "--all"]);
         let text = run(command, "claude agents", LIST_TIMEOUT).await?;
-        parse_agents(&text)
+        let mut records = parse_agents(&text)?;
+        if records.iter().any(|record| !record.ancestry.is_empty()) {
+            // ponytail: a failed `ps` leaves each record its own pid, which
+            // still matches a Claude that is its zmx session's program.
+            let parents = run(
+                self.command("ps", &["-A", "-o", "pid=,ppid="]),
+                "ps",
+                LIST_TIMEOUT,
+            )
+            .await
+            .map(|text| parse_parents(&text))
+            .unwrap_or_default();
+            for record in &mut records {
+                if let Some(&pid) = record.ancestry.first() {
+                    record.ancestry = ancestry(pid, &parents);
+                }
+            }
+        }
+        Ok(records)
     }
 
     async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
@@ -193,14 +221,18 @@ fn parse_backgrounded(text: &str) -> Result<String, Report<SessionHostError>> {
 #[serde(rename_all = "camelCase")]
 struct AgentRecord {
     id: Option<String>,
+    pid: Option<u32>,
+    kind: Option<String>,
     session_id: Option<String>,
     status: Option<String>,
     waiting_for: Option<String>,
     state: Option<String>,
 }
 
-/// The sessions in `claude agents --json`'s array. Records without an `id`
-/// (interactive sessions) can't be attached to and are skipped.
+/// The sessions in `claude agents --json`'s array: background sessions by
+/// their `id`, and interactive ones (`kind` `interactive`) by their `pid`.
+/// Anything else is skipped. An interactive record's own `sessionId` is
+/// ignored; orb's hook says which conversation runs where.
 fn parse_agents(json: &str) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
     let records: Vec<AgentRecord> = serde_json::from_str(json)
         .change_context(SessionHostError)
@@ -209,11 +241,21 @@ fn parse_agents(json: &str) -> Result<Vec<SessionRecord>, Report<SessionHostErro
         .into_iter()
         .filter_map(|record| {
             let status = status_of(&record);
-            Some(SessionRecord {
-                short_id: record.id?,
-                session_id: record.session_id,
-                status,
-            })
+            match (record.id, record.kind.as_deref(), record.pid) {
+                (Some(id), _, _) => Some(SessionRecord {
+                    short_id: Some(id),
+                    session_id: record.session_id,
+                    status,
+                    ancestry: Vec::new(),
+                }),
+                (None, Some("interactive"), Some(pid)) => Some(SessionRecord {
+                    short_id: None,
+                    session_id: None,
+                    status,
+                    ancestry: vec![pid],
+                }),
+                _ => None,
+            }
         })
         .collect())
 }
@@ -393,6 +435,22 @@ mod tests {
     #[case(r#"{"id":"28bf38e2","state":"done"}"#, ThreadStatus::Stopped)]
     #[case(r#"{"id":"28bf38e2","state":"blocked"}"#, ThreadStatus::Stopped)]
     #[case(r#"{"id":"28bf38e2"}"#, ThreadStatus::Stopped)]
+    #[case(
+        r#"{"pid":1,"kind":"interactive","status":"busy"}"#,
+        ThreadStatus::Working
+    )]
+    #[case(
+        r#"{"pid":1,"kind":"interactive","status":"waiting","waitingFor":"permission prompt"}"#,
+        ThreadStatus::NeedsApproval
+    )]
+    #[case(
+        r#"{"pid":1,"kind":"interactive","status":"waiting","waitingFor":"dialog open"}"#,
+        ThreadStatus::NeedsInput
+    )]
+    #[case(
+        r#"{"pid":1,"kind":"interactive","status":"idle"}"#,
+        ThreadStatus::Idle
+    )]
     fn agent_record_maps_to_thread_status(
         #[case] record: &str,
         #[case] expected: ThreadStatus,
@@ -410,7 +468,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn interactive_records_are_skipped() -> Result<(), Report<SessionHostError>> {
+    fn interactive_record_is_kept_by_its_pid() -> Result<(), Report<SessionHostError>> {
         // Given a background record and an interactive one, which has no id.
         let json = r#"[
           {"pid":960,"id":"28bf38e2","cwd":"/Users/felixpherry/dev/orb","kind":"background",
@@ -423,15 +481,51 @@ mod tests {
         // When parsing them.
         let records = parse_agents(json)?;
 
-        // Then only the background session is listed.
-        let ids: Vec<&str> = records
+        // Then the background one is kept by its id and the interactive one by its pid.
+        let kept: Vec<(Option<&str>, &[u32])> = records
             .iter()
-            .map(|record| record.short_id.as_str())
+            .map(|record| (record.short_id.as_deref(), record.ancestry.as_slice()))
             .collect();
         assert_eq!(
-            ids,
-            ["28bf38e2"],
-            "the interactive record should be skipped"
+            kept,
+            [(Some("28bf38e2"), &[][..]), (None, &[63163][..])],
+            "both records should be listed, the interactive one by its pid"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn interactive_record_without_a_pid_is_skipped() -> Result<(), Report<SessionHostError>> {
+        // Given an interactive record with no pid.
+        let json = r#"[{"kind":"interactive","status":"idle"}]"#;
+
+        // When parsing it.
+        let records = parse_agents(json)?;
+
+        // Then nothing is listed.
+        assert!(records.is_empty(), "a record with no pid can't be matched");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn interactive_record_carries_no_session_id() -> Result<(), Report<SessionHostError>> {
+        // Given an interactive record as Claude 2.1.292 prints it, sessionId included.
+        let json = r#"[{"pid":60745,"cwd":"/Users/felixpherry","kind":"interactive",
+          "startedAt":1791277239194,"sessionId":"e80e4172-0000-0000-0000-000000000000",
+          "name":"felixpherry-6c","status":"idle"}]"#;
+
+        // When parsing it.
+        let records = parse_agents(json)?;
+
+        // Then its session id is left to orb's hook.
+        let session_ids: Vec<Option<&str>> = records
+            .iter()
+            .map(|record| record.session_id.as_deref())
+            .collect();
+        assert_eq!(
+            session_ids,
+            [None],
+            "an interactive record's sessionId should be ignored"
         );
         Ok(())
     }

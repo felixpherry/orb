@@ -1,10 +1,12 @@
 //! Binary entry point for orb. This is the only place that reads process state
 //! (the environment).
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
@@ -17,7 +19,7 @@ use orb_domain::feat::harness::claude::trust::{ClaudeConfigTrust, claude_config_
 use orb_domain::feat::harness::pi::Pi;
 use orb_domain::feat::harness::pi::runner::ProcessRunner;
 use orb_domain::feat::integration::{self, IntegrationPaths};
-use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, ZellijTarget, on_path};
+use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::child_env::child_env;
@@ -30,7 +32,7 @@ use orb_domain::feat::zellij::zellij_cli::ZellijCli;
 use orb_domain::feat::zellij::zellij_service::ZellijService;
 use orb_domain::feat::zmx::zmx_cli::ZmxCli;
 use orb_domain::feat::zmx::zmx_service::ZmxService;
-use orb_domain::{AppState, Services, State};
+use orb_domain::{AppState, Finished, Services, State, ancestry, parse_parents, run_within};
 use orb_tui::Frontend;
 use wherror::Error;
 
@@ -61,7 +63,7 @@ fn main() -> Result<(), Report<OrbError>> {
     let pane = std::env::var("ZELLIJ_PANE_ID")
         .ok()
         .and_then(|id| id.parse().ok());
-    let notifier = desktop_notifier(session.clone(), pane);
+    let notifier = desktop_notifier();
     let zellij = session.map(|_| {
         let shell = std::env::var_os("SHELL").unwrap_or_else(|| "sh".into());
         let cli = ZellijCli::new(std::env::var_os("NO_COLOR"));
@@ -173,8 +175,8 @@ fn install_integrations(
 }
 
 /// Desktop notices, clicked back to orb's window (kitty on macOS, niri on
-/// Linux) and zellij pane when orb runs in them.
-fn desktop_notifier(session: Option<OsString>, pane: Option<u32>) -> NotifierService {
+/// Linux).
+fn desktop_notifier() -> NotifierService {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let kitty = {
         let kitten = std::env::var_os("KITTY_INSTALLATION_DIR")
@@ -192,27 +194,25 @@ fn desktop_notifier(session: Option<OsString>, pane: Option<u32>) -> NotifierSer
             window,
         })
     };
-    let zellij = {
-        let session = session.and_then(|name| name.into_string().ok());
-        let zellij = on_path("zellij", &path);
-        match (zellij, session, pane) {
-            (Some(zellij), Some(session), Some(pane)) => Some(ZellijTarget {
-                zellij,
-                session,
-                pane,
-            }),
-            _ => None,
-        }
-    };
     let niri = std::env::var_os("NIRI_SOCKET")
         .and_then(|_| on_path("niri", &path))
-        .map(|niri| NiriTarget { niri });
-    NotifierService::desktop(
-        &path,
-        ClickTarget {
-            kitty,
-            zellij,
+        .map(|niri| NiriTarget {
             niri,
-        },
-    )
+            ancestors: own_ancestry(),
+        });
+    NotifierService::desktop(&path, ClickTarget { kitty, niri })
+}
+
+/// orb's process and its parents, for finding the window it runs in; just
+/// orb when `ps` can't say.
+fn own_ancestry() -> Vec<u32> {
+    let parents = {
+        let mut command = std::process::Command::new("ps");
+        command.args(["-A", "-o", "pid=,ppid="]);
+        match run_within(command, Duration::from_secs(2)) {
+            Ok(Finished::Exited(output)) => parse_parents(&String::from_utf8_lossy(&output.stdout)),
+            _ => HashMap::new(),
+        }
+    };
+    ancestry(std::process::id(), &parents)
 }

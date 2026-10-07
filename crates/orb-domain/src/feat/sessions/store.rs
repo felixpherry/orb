@@ -167,7 +167,7 @@ pub struct InsertedThread {
     pub pane: PaneId,
 }
 
-/// A saved session: what its layout needs.
+/// A saved session: what its layout needs, and its settle lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
     pub id: SessionId,
@@ -175,6 +175,12 @@ pub struct SessionRow {
     pub dir: PathBuf,
     /// The position of the tab it shows.
     pub active_tab: usize,
+    pub pinned_at: Option<i64>,
+    pub settled_override: Option<SettledOverride>,
+    pub settled_at: Option<i64>,
+    pub unsettled_at: Option<i64>,
+    /// When a turn last ended in one of its agent panes.
+    pub last_activity_at: i64,
 }
 
 /// A saved tab of a session.
@@ -642,12 +648,22 @@ impl Store {
     pub fn layouts(&self) -> Result<SavedLayouts, Report<StoreError>> {
         let sessions = self
             .query(
-                "SELECT id, dir, active_tab FROM sessions ORDER BY id",
+                "SELECT id, dir, active_tab, pinned_at, settled_override, settled_at,
+                        unsettled_at, last_activity_at
+                 FROM sessions ORDER BY id",
                 |row| {
                     Ok(SessionRow {
                         id: SessionId(row.get(0)?),
                         dir: PathBuf::from(row.get::<_, String>(1)?),
                         active_tab: row.get::<_, Option<usize>>(2)?.unwrap_or(0),
+                        pinned_at: row.get(3)?,
+                        settled_override: row
+                            .get::<_, Option<String>>(4)?
+                            .as_deref()
+                            .and_then(SettledOverride::parse),
+                        settled_at: row.get(5)?,
+                        unsettled_at: row.get(6)?,
+                        last_activity_at: row.get(7)?,
                     })
                 },
             )
@@ -690,6 +706,31 @@ impl Store {
             tabs,
             panes,
         })
+    }
+
+    /// Saves session `row`'s pin, settle and activity state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be written.
+    pub fn save_session(&self, row: &SessionRow) -> Result<(), Report<StoreError>> {
+        self.conn
+            .execute(
+                "UPDATE sessions SET pinned_at = ?2, settled_override = ?3, settled_at = ?4,
+                        unsettled_at = ?5, last_activity_at = ?6
+                 WHERE id = ?1",
+                params![
+                    row.id.0,
+                    row.pinned_at,
+                    row.settled_override.map(SettledOverride::as_str),
+                    row.settled_at,
+                    row.unsettled_at,
+                    row.last_activity_at,
+                ],
+            )
+            .change_context(StoreError)
+            .attach("failed to save the session")?;
+        Ok(())
     }
 
     /// Saves a new pane running a shell in `cwd` in `session`.
@@ -1909,8 +1950,8 @@ mod tests {
     use super::{
         DraftRow, DraftWorkspace, GroupDraft, GroupId, GroupKind, GroupRow, LastUsed,
         LastWorkspace, MIGRATIONS, NewGroup, NewPaneThread, NewThread, Own, PaneId, ProjectId,
-        ProjectKind, SavedLayouts, SessionId, SettledOverride, SidebarItem, Store, StoreError,
-        TabRow, ThreadId, ThreadRow, TileLayout, Ui,
+        ProjectKind, SavedLayouts, SessionId, SessionRow, SettledOverride, SidebarItem, Store,
+        StoreError, TabRow, ThreadId, ThreadRow, TileLayout, Ui,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -3939,6 +3980,40 @@ mod tests {
             (layouts.tabs, active, names),
             (tabs, vec![1], vec![None, Some("logs".to_owned())]),
             "the saved layout should load back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saved_session_lifecycle_is_loaded_back() -> Result<(), Report<StoreError>> {
+        // Given a thread's session.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let before = store
+            .layouts()?
+            .sessions
+            .into_iter()
+            .find(|row| row.id == inserted.session)
+            .ok_or_else(|| Report::new(StoreError).attach("the session isn't saved"))?;
+
+        // When saving it pinned, settled and with new activity.
+        let changed = SessionRow {
+            pinned_at: Some(1_000),
+            settled_override: Some(SettledOverride::Settled),
+            settled_at: Some(2_000),
+            unsettled_at: Some(1_500),
+            last_activity_at: 3_000,
+            ..before
+        };
+        store.save_session(&changed)?;
+
+        // Then it loads back as saved.
+        assert_eq!(
+            store.layouts()?.sessions,
+            vec![changed],
+            "the session's lifecycle should load back"
         );
         Ok(())
     }

@@ -34,6 +34,8 @@ pub struct ZmxEntry {
     pub pid: Option<u32>,
     /// How many clients are attached (`clients=`).
     pub clients: Option<u32>,
+    /// When the session was made, in unix seconds (`created=`).
+    pub created: Option<i64>,
 }
 
 /// What a finished zmx command left behind.
@@ -119,6 +121,7 @@ pub fn parse_list(stdout: &str) -> Vec<ZmxEntry> {
                     name: name.to_owned(),
                     pid: value("pid").and_then(|pid| pid.parse().ok()),
                     clients: value("clients").and_then(|clients| clients.parse().ok()),
+                    created: value("created").and_then(|created| created.parse().ok()),
                 }),
                 _ => None,
             }
@@ -377,9 +380,25 @@ mod tests {
                 name: "probe".to_owned(),
                 pid: Some(46886),
                 clients: Some(0),
+                created: Some(1_791_299_028),
             }],
             "one running session"
         );
+    }
+
+    #[rstest::rstest]
+    fn list_line_reads_the_created_time() {
+        // Given a session made at 1791332500.
+        let stdout = "  name=p\tpid=1\tclients=0\tcreated=1791332500\n";
+
+        // When parsing it.
+        let created: Vec<Option<i64>> = parse_list(stdout)
+            .into_iter()
+            .map(|entry| entry.created)
+            .collect();
+
+        // Then its creation time is read in unix seconds.
+        assert_eq!(created, [Some(1_791_332_500)], "created= should be read");
     }
 
     #[rstest::rstest]

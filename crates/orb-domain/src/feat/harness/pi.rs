@@ -55,7 +55,7 @@ impl Pi {
             .into_iter()
             .find(|program| on_path(program, path).is_none());
         Self {
-            host: ZmxHost::new(runner.clone(), socket_dir, sessions_dir.clone()),
+            host: ZmxHost::new(runner.clone(), socket_dir),
             runner,
             sessions_dir,
             missing,
@@ -152,6 +152,11 @@ impl Harness for Pi {
     }
     fn resume_command(&self, session_id: &str) -> String {
         format!("pi --session-id {session_id}")
+    }
+
+    /// pi reports each turn to its pane file through orb's extension.
+    fn reports_status(&self) -> bool {
+        true
     }
 }
 

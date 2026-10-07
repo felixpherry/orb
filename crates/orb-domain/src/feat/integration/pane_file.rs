@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use crate::feat::sessions::state::PaneId;
+use crate::feat::sessions::state::{PaneId, ThreadStatus};
 
 /// What the agent in a pane reported last.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -34,6 +34,18 @@ pub enum AgentEvent {
     Working,
     Idle,
     End,
+}
+
+impl AgentEvent {
+    /// The status a pane reporting this reads as: a fresh agent that hasn't
+    /// run a turn is idle, and one that quit is stopped.
+    pub fn status(self) -> ThreadStatus {
+        match self {
+            Self::Working => ThreadStatus::Working,
+            Self::Start | Self::Idle => ThreadStatus::Idle,
+            Self::End => ThreadStatus::Stopped,
+        }
+    }
 }
 
 impl AgentReport {
@@ -113,7 +125,7 @@ mod tests {
 
     use super::{AgentEvent, AgentReport, PaneFiles};
     use crate::feat::integration::IntegrationError;
-    use crate::feat::sessions::state::PaneId;
+    use crate::feat::sessions::state::{PaneId, ThreadStatus};
 
     type TestResult = Result<(), Report<IntegrationError>>;
 
@@ -242,5 +254,19 @@ mod tests {
 
         // Then nothing comes back.
         assert_eq!(changed, Vec::new(), "a missing folder should give nothing");
+    }
+
+    #[rstest::rstest]
+    #[case(AgentEvent::Start, ThreadStatus::Idle)]
+    #[case(AgentEvent::Working, ThreadStatus::Working)]
+    #[case(AgentEvent::Idle, ThreadStatus::Idle)]
+    #[case(AgentEvent::End, ThreadStatus::Stopped)]
+    fn agent_event_reads_as_a_status(#[case] event: AgentEvent, #[case] expected: ThreadStatus) {
+        // Given a pane's latest event.
+        // When reading it as a status.
+        let status = event.status();
+
+        // Then it maps per the pane-report table.
+        assert_eq!(status, expected, "{event:?} should read as {expected:?}");
     }
 }

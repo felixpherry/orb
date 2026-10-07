@@ -205,6 +205,30 @@ impl Thread {
             cwd: self.cwd.clone(),
         })
     }
+
+    /// How urgently the thread needs the user, lowest first: an approval,
+    /// an answer, a failure or lost session, a running turn, a turn done
+    /// since the user last looked, then idle, then stopped.
+    pub fn urgency(&self) -> u8 {
+        match self.status {
+            ThreadStatus::NeedsApproval => 0,
+            ThreadStatus::NeedsInput => 1,
+            ThreadStatus::Failed | ThreadStatus::Gone => 2,
+            ThreadStatus::Working => 3,
+            ThreadStatus::Idle if self.unseen => 4,
+            ThreadStatus::Idle | ThreadStatus::Unknown => 5,
+            ThreadStatus::Stopped => 6,
+        }
+    }
+}
+
+/// The thread among `threads` that most needs the user (see
+/// [`Thread::urgency`]); a session's or group's status is its.
+pub fn most_urgent<'a, I>(threads: I) -> Option<&'a Thread>
+where
+    I: IntoIterator<Item = &'a Thread>,
+{
+    threads.into_iter().min_by_key(|thread| thread.urgency())
 }
 
 /// Where a draft's session will run.
@@ -1336,7 +1360,7 @@ mod tests {
     use super::{
         Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, PaneId,
         Project, ProjectId, ProjectKind, Search, Sessions, SidebarItem, SidebarRow, Thread,
-        ThreadId, ThreadStatus,
+        ThreadId, ThreadStatus, most_urgent,
     };
     use crate::TextInput;
     use crate::feat::sidebar::state::SidebarLayout;
@@ -1378,6 +1402,45 @@ mod tests {
             model: None,
             permission: None,
         }
+    }
+
+    /// Thread `id` with `status`, its latest turn `unseen` or not.
+    fn with_status(id: i64, status: ThreadStatus, unseen: bool) -> Thread {
+        Thread {
+            status,
+            unseen,
+            ..thread(id)
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(ThreadStatus::NeedsApproval, false, ThreadStatus::Working, false)]
+    #[case(ThreadStatus::NeedsInput, false, ThreadStatus::Failed, false)]
+    #[case(ThreadStatus::Gone, false, ThreadStatus::Working, false)]
+    #[case(ThreadStatus::Working, false, ThreadStatus::Idle, true)]
+    #[case(ThreadStatus::Idle, true, ThreadStatus::Idle, false)]
+    #[case(ThreadStatus::Idle, false, ThreadStatus::Stopped, false)]
+    fn most_urgent_follows_the_rank_order(
+        #[case] urgent: ThreadStatus,
+        #[case] urgent_unseen: bool,
+        #[case] other: ThreadStatus,
+        #[case] other_unseen: bool,
+    ) {
+        // Given a thread that needs the user more than another, listed second.
+        let threads = [
+            with_status(1, other, other_unseen),
+            with_status(2, urgent, urgent_unseen),
+        ];
+
+        // When picking the most urgent.
+        let picked = most_urgent(&threads).map(|thread| thread.id);
+
+        // Then it is the more urgent one.
+        assert_eq!(
+            picked,
+            Some(ThreadId(2)),
+            "{urgent:?} should outrank {other:?}"
+        );
     }
 
     /// Thread `id`, active since second `secs`.

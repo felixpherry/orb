@@ -26,7 +26,7 @@ use std::time::{Duration, SystemTime};
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::sessions::state::{
     Draft, DraftWorkspace, Group, GroupKind, NEW_THREAD, Project, Sessions, SidebarItem,
-    SidebarRow, Thread, ThreadId, ThreadStatus,
+    SidebarRow, Thread, ThreadId, ThreadStatus, most_urgent,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use ratatui::buffer::Buffer;
@@ -633,7 +633,7 @@ fn render_group_card(
 ) {
     let [heading, place_area, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
     let threads = members(sessions, project, group);
-    let urgent = threads.iter().copied().min_by_key(|thread| rank(thread));
+    let urgent = most_urgent(threads.iter().copied());
     let (glyph, word, colour) = urgent.map_or((PENCIL, Some("draft"), YELLOW), |thread| {
         status(thread, attached.contains(&thread.id), now)
     });
@@ -710,19 +710,6 @@ fn members<'a>(sessions: &Sessions, project: &'a Project, group: &Group) -> Vec<
         .iter()
         .filter(|thread| thread.group == Some(group.id) && !sessions.deleting.contains(&thread.id))
         .collect()
-}
-
-/// How urgent a child's status is for its group's card; the lowest wins.
-fn rank(thread: &Thread) -> u8 {
-    match thread.status {
-        ThreadStatus::NeedsApproval => 0,
-        ThreadStatus::NeedsInput => 1,
-        ThreadStatus::Failed | ThreadStatus::Gone => 2,
-        ThreadStatus::Working => 3,
-        ThreadStatus::Idle if thread.unseen => 4,
-        ThreadStatus::Idle | ThreadStatus::Unknown => 5,
-        ThreadStatus::Stopped => 6,
-    }
 }
 
 /// Where a group's sessions run: a Feature's branch, else its folder under

@@ -16,6 +16,7 @@
 //! the user's trust in the harness's own config.
 
 pub mod child_env;
+pub mod pane_status;
 pub mod session_host;
 pub mod sessions_actor;
 pub mod state;
