@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use orb_domain::AppState;
-use orb_domain::feat::layout::state::{Placement, SessionLayout};
+use orb_domain::feat::layout::state::{Placement, SessionLayout, StackList};
 use orb_domain::feat::sessions::state::PaneId;
 use orb_term::Pane;
 use ratatui::buffer::Buffer;
@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
 
 use crate::mouse::HitMap;
+use crate::session_picker::cut_right;
 use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER};
 
 /// The widest a stack's list gets, frame included.
@@ -95,24 +96,40 @@ pub(crate) fn render(
             .render(place.area, buf);
     }
     if let Some(stack) = &placement.stack {
-        Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(GUTTER))
-            .render(stack.area, buf);
-        for (pane, row) in &stack.rows {
-            buf.set_stringn(
-                row.x,
-                row.y,
-                pane_title(state, *pane),
-                usize::from(row.width),
-                Style::new().fg(DARK3),
-            );
-            if *pane != stack.shown {
-                hits.record_pane(*row, *pane, true);
-            }
-        }
+        let lit = keys_in_pane
+            && placement
+                .panes
+                .iter()
+                .any(|place| place.pane == stack.shown && place.focused);
+        stack_list(state, stack, lit, buf, hits);
     }
     cursor
+}
+
+/// Draws `stack`'s list: a dim frame with a row per pane that fits, the
+/// shown pane's as `> name`, bold blue while `lit`. Names too long for the
+/// row end in `…`. Records every other row in `hits`, reading the mouse so
+/// a click focuses its pane without starting a selection.
+fn stack_list(state: &AppState, stack: &StackList, lit: bool, buf: &mut Buffer, hits: &mut HitMap) {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(GUTTER))
+        .render(stack.area, buf);
+    for (pane, row) in &stack.rows {
+        let (mark, style) = match (*pane == stack.shown, lit) {
+            (true, true) => ("> ", Style::new().fg(BLUE).add_modifier(Modifier::BOLD)),
+            (true, false) => ("> ", Style::new().fg(FG_DARK)),
+            (false, _) => ("  ", Style::new().fg(DARK3)),
+        };
+        let text = cut_right(
+            &format!("{mark}{}", pane_title(state, *pane)),
+            usize::from(row.width),
+        );
+        buf.set_stringn(row.x, row.y, text, usize::from(row.width), style);
+        if *pane != stack.shown {
+            hits.record_pane(*row, *pane, true);
+        }
+    }
 }
 
 /// What orb calls pane `pane` in its frame and the stack list: its name,

@@ -1386,70 +1386,164 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case("api")]
-    #[case("Fix the bug")]
-    #[case("shell")]
-    fn stack_title_row_names_its_pane(#[case] title: &str) {
-        // Given a stack of a named pane, an agent's pane and a shell.
+    #[case("  api")]
+    #[case("  Fix the bug")]
+    #[case("  shell")]
+    fn stack_list_names_every_stacked_pane(#[case] row: &str) {
+        // Given a stack of a named pane, an agent's pane and shells.
         let state = stacked();
 
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the stack's list reads its name, else its agent's title, else shell.
+        // Then the list has a row reading its name, else its agent's title, else shell.
         let right = right_side(&buffer);
-        assert!(right.contains(title), "right side was\n{right}");
+        assert!(right.contains(row), "right side was\n{right}");
     }
 
     #[rstest::rstest]
-    fn click_on_a_stack_title_focuses_its_pane() {
-        // Given a stack drawn with pane 3 expanded and focused.
+    fn stack_list_marks_the_shown_pane() {
+        // Given a stack of four panes, the shell pane 3 shown.
         let state = stacked();
-        let mut hits = HitMap::default();
-        let buffer = {
-            let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-            let keys = Keys::new(keymap(), Scope::Sidebar);
-            let Ok(_) = terminal.draw(|frame| {
-                render(
-                    frame,
-                    &state,
-                    &HashMap::new(),
-                    None,
-                    &keys,
-                    SystemTime::UNIX_EPOCH,
-                    &TimeZone::UTC,
-                    &mut SidebarScroll::default(),
-                    &mut PickerScroll::default(),
-                    &mut hits,
-                );
-            });
-            terminal.backend().buffer().clone()
-        };
-        let title = find(&buffer, "api");
 
-        // When clicking pane 2's title with the keys in pane 3.
-        let route = title.map(|at| {
-            let event = MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: at.x,
-                row: at.y,
-                modifiers: KeyModifiers::NONE,
-            };
-            mouse::route(
-                event,
-                &hits,
-                Focus::Pane,
-                Some(PaneId(3)),
-                &mut Clicks::default(),
-                Instant::now(),
-            )
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then its row reads `> shell`.
+        let right = right_side(&buffer);
+        assert!(right.contains("> shell"), "right side was\n{right}");
+    }
+
+    /// `stacked()` with pane 2 named `name`.
+    fn stacked_naming(name: &str) -> AppState {
+        let mut state = stacked();
+        state
+            .layouts
+            .rename_pane(PaneId(2), Some(name.to_owned()));
+        state
+    }
+
+    /// How wide the stack's list is: from the tab body's left edge to the
+    /// first top-right corner.
+    fn list_width(buffer: &Buffer) -> Option<u16> {
+        let right = right_of(buffer);
+        (right.x..right.right())
+            .find(|x| {
+                buffer
+                    .cell((*x, right.y + 1))
+                    .is_some_and(|cell| cell.symbol() == "╮")
+            })
+            .map(|x| x - right.x + 1)
+    }
+
+    #[rstest::rstest]
+    fn stack_list_cuts_long_names() {
+        // Given a stacked pane named with 30 letters.
+        let state = stacked_naming("abcdefghijklmnopqrstuvwxyzabcd");
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then its row ends in `…`.
+        let right = right_side(&buffer);
+        assert!(right.contains("  abcdefghijklmnopqrs…"), "right side was\n{right}");
+    }
+
+    #[rstest::rstest]
+    fn stack_list_is_as_wide_as_its_longest_name() {
+        // Given a stack whose longest title is the 11-column "Fix the bug".
+        let state = stacked();
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the list is the name plus its frame, mark and a space.
+        assert_eq!(list_width(&buffer), Some(16), "11 columns of name and 5 of chrome");
+    }
+
+    #[rstest::rstest]
+    fn stack_list_stops_at_24_columns() {
+        // Given a stacked pane named with 30 letters.
+        let state = stacked_naming("abcdefghijklmnopqrstuvwxyzabcd");
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the list is 24 columns wide.
+        assert_eq!(list_width(&buffer), Some(24), "the list's cap");
+    }
+
+    /// Draws `state` on an 80x8 screen, returning the buffer and the hit map.
+    fn draw_hits(state: &AppState) -> (Buffer, HitMap) {
+        let mut hits = HitMap::default();
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
+        let keys = Keys::new(keymap(), Scope::Sidebar);
+        let Ok(_) = terminal.draw(|frame| {
+            render(
+                frame,
+                state,
+                &HashMap::new(),
+                None,
+                &keys,
+                SystemTime::UNIX_EPOCH,
+                &TimeZone::UTC,
+                &mut SidebarScroll::default(),
+                &mut PickerScroll::default(),
+                &mut hits,
+            );
         });
+        (terminal.backend().buffer().clone(), hits)
+    }
+
+    /// Where a left click at `at` goes with the keys in pane 3.
+    fn click_in_stack(hits: &HitMap, at: Position) -> MouseRoute {
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        mouse::route(
+            event,
+            hits,
+            Focus::Pane,
+            Some(PaneId(3)),
+            &mut Clicks::default(),
+            Instant::now(),
+        )
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_stack_list_row_focuses_its_pane() {
+        // Given a stack drawn with pane 3 shown and focused.
+        let (buffer, hits) = draw_hits(&stacked());
+        let row = find(&buffer, "api");
+
+        // When clicking pane 2's row with the keys in pane 3.
+        let route = row.map(|at| click_in_stack(&hits, at));
 
         // Then pane 2 takes the focus without starting a selection.
         assert_eq!(
             route,
             Some(MouseRoute::Intents(vec![Intent::FocusPane(PaneId(2))])),
-            "a click on a title row should focus its pane"
+            "a click on a list row should focus its pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_the_shown_stack_row_does_nothing() {
+        // Given a stack drawn with pane 3 shown and focused.
+        let (buffer, hits) = draw_hits(&stacked());
+        let row = find(&buffer, "> shell");
+
+        // When clicking the shown pane's row.
+        let route = row.map(|at| click_in_stack(&hits, at));
+
+        // Then nothing happens.
+        assert_eq!(
+            route,
+            Some(MouseRoute::Nothing),
+            "the shown row isn't a click target"
         );
     }
 

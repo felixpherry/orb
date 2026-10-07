@@ -1073,6 +1073,26 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn stack_list_scrolls_to_keep_the_shown_row() {
+        // Given eleven tiled panes, the last stacked pane 17 shown.
+        let layouts = tiled(17);
+
+        // When placing them in a body whose list fits four rows.
+        let rows: Vec<PaneId> = layouts
+            .get(OWNER)
+            .and_then(|layout| layout.placed(Rect::new(0, 0, 80, 6), 10).stack)
+            .map(|stack| stack.rows.into_iter().map(|(pane, _)| pane).collect())
+            .unwrap_or_default();
+
+        // Then the list shows the last four stacked panes, pane 17 among them.
+        assert_eq!(
+            rows,
+            vec![PaneId(14), PaneId(15), PaneId(16), PaneId(17)],
+            "the list scrolls to the shown pane"
+        );
+    }
+
+    #[rstest::rstest]
     fn add_tiled_shows_every_pane_of_a_zoomed_tab() {
         // Given a zoomed two-pane tab.
         let mut layouts = split_right();
