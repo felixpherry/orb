@@ -24,10 +24,6 @@ pub enum Intent {
     SelectHalfPageDown,
     /// Move the sidebar's cursor up half its visible height.
     SelectHalfPageUp,
-    /// Move the keys to the right-hand area.
-    FocusRight,
-    /// Move the keys to the sidebar.
-    FocusSidebar,
     /// Select this sidebar row (a click). During a search, end it on that
     /// row as `⏎` does.
     SelectRow(SidebarItem),
@@ -40,10 +36,6 @@ pub enum Intent {
     /// Hide the sidebar, giving the right side the full width, or show it
     /// again.
     ToggleSidebar,
-    /// Widen the focused side: the sidebar, or the right side.
-    WidenFocused,
-    /// Narrow the focused side: the sidebar, or the right side.
-    NarrowFocused,
     /// Move the focus to the pane that way; from the leftmost pane to the
     /// sidebar, from the rightmost to the next tab, and from the sidebar
     /// (`Right`) into the shown layout.
@@ -81,13 +73,11 @@ pub enum Intent {
     /// Attach to the selected session (un-settling a settled one), or open or
     /// close the Settled shelf on its header.
     Attach,
-    /// Return from the attached session to the sidebar.
-    Detach,
-    /// Leave the attached session for the sidebar, keeping its pane shown.
+    /// Move the keys from a pane to the sidebar, keeping the panes shown.
     LeavePane,
-    /// Detach the selected session from its panes, keeping the keys where
-    /// they are.
-    DetachSelected,
+    /// Send Ctrl g to the focused pane's program (`<C-g> <C-g>`, since
+    /// `<C-g>` alone is orb's leader).
+    SendCtrlG,
     /// Move back to the previous row in the jump list.
     JumpBack,
     /// Move forward to the next row in the jump list, after a jump back.
@@ -194,13 +184,10 @@ impl fmt::Display for Intent {
             Self::SelectNext | Self::SelectWheelNext => "next session",
             Self::SelectPrev | Self::SelectWheelPrev => "previous session",
             Self::SelectRow(_) | Self::PickerSelectRow(_) => "select",
-            Self::FocusRight | Self::MoveFocus(NavDirection::Right) => "focus right",
-            Self::FocusSidebar => "focus sidebar",
+            Self::MoveFocus(NavDirection::Right) => "focus right",
             Self::PickerNext | Self::PickerWheelNext => "next item",
             Self::PickerPrev | Self::PickerWheelPrev => "previous item",
             Self::ToggleSidebar | Self::LeavePane => "sidebar",
-            Self::WidenFocused => "widen",
-            Self::NarrowFocused => "narrow",
             Self::MoveFocus(NavDirection::Left) => "focus left",
             Self::MoveFocus(NavDirection::Up) => "focus up",
             Self::MoveFocus(NavDirection::Down) => "focus down",
@@ -220,9 +207,8 @@ impl fmt::Display for Intent {
             Self::MoveTabLeft => "move tab left",
             Self::MoveTabRight => "move tab right",
             Self::FocusPane(_) => "focus pane",
+            Self::SendCtrlG => "send ctrl g",
             Self::Attach => "attach",
-            Self::Detach => "back to orb",
-            Self::DetachSelected => "detach",
             Self::JumpBack => "jump back",
             Self::JumpForward => "jump forward",
             Self::NewSession => "new session",
@@ -290,6 +276,7 @@ mod tests {
     #[case(Intent::MoveTabLeft, "move tab left")]
     #[case(Intent::MoveTabRight, "move tab right")]
     #[case(Intent::FocusPane(PaneId(-1)), "focus pane")]
+    #[case(Intent::SendCtrlG, "send ctrl g")]
     fn layout_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the layout intent.
         assert_eq!(intent.to_string(), expected, "which-key label");
@@ -330,16 +317,6 @@ mod tests {
     fn open_search_displays_as_grep() {
         // Given / When / Then: which-key labels OpenSearch "grep".
         assert_eq!(Intent::OpenSearch.to_string(), "grep", "which-key label");
-    }
-
-    #[rstest::rstest]
-    fn detach_selected_displays_as_detach() {
-        // Given / When / Then: which-key labels DetachSelected "detach".
-        assert_eq!(
-            Intent::DetachSelected.to_string(),
-            "detach",
-            "which-key label"
-        );
     }
 
     #[rstest::rstest]

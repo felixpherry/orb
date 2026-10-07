@@ -31,18 +31,18 @@ pub enum PickTarget {
 /// What an open picker picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerKind {
-    /// `␣n`: pick the project of a new session.
+    /// `<C-g> n`: pick the project of a new session.
     Projects,
-    /// `␣p`: pick a directory to add as a project. `listed` is the directory
+    /// `<C-g> a`: pick a directory to add as a project. `listed` is the directory
     /// text (e.g. `~/dev/`) the items were read from; `None` while the input
     /// isn't a path.
     Directories { listed: Option<String> },
-    /// `␣w`: pick where `target`'s session runs.
+    /// `<C-g> w`: pick where `target`'s session runs.
     Workspace { target: PickTarget },
     /// A new worktree's base for `target`: the refs of the project's `root`,
     /// the default branch first, none disabled.
     Base { target: PickTarget, root: PathBuf },
-    /// `␣b`: pick a branch for `session`, whose refs are listed in `cwd`,
+    /// `<C-g> b`: pick a branch for `session`, whose refs are listed in `cwd`,
     /// its directory. `unstarted` is whether it has had no agent turn yet, so
     /// it can still follow a branch into another worktree.
     Branches {
@@ -50,9 +50,9 @@ pub enum PickerKind {
         cwd: PathBuf,
         unstarted: bool,
     },
-    /// `␣w` or `␣b` where the project isn't a git repository: make it one.
+    /// `<C-g> w` or `<C-g> b` where the project isn't a git repository: make it one.
     InitGit { project: ProjectId },
-    /// `␣f`: pick the project the sidebar is filtered to, or all of them.
+    /// `<C-g> f`: pick the project the sidebar is filtered to, or all of them.
     ProjectFilter,
     /// `<C-x>` in the project filter: confirm removing `project`.
     RemoveProject { project: ProjectId },
@@ -61,15 +61,15 @@ pub enum PickerKind {
     /// `d` on a session: confirm deleting it. `folder` says its Research or
     /// Learn folder goes too.
     DeleteSession { session: SessionId, folder: bool },
-    /// `␣␣`/`<C-Space>`: pick a thread to jump into. `settled` is whether
+    /// `<C-g> Space`: pick a thread to jump into. `settled` is whether
     /// settled threads are listed; `<C-s>` flips it.
     Sessions { settled: bool },
-    /// `␣sw`: orb's worktrees, to look over and delete.
+    /// `<C-g> W`: orb's worktrees, to look over and delete.
     Worktrees,
     /// `<C-x>` in the worktree picker: confirm force-removing the worktree at
     /// `path`. `dirty` is whether it has uncommitted changes.
     DeleteWorktree { path: PathBuf, dirty: bool },
-    /// `␣sg`: messages across every thread's transcripts that match the typed
+    /// `<C-g> /`: messages across every thread's transcripts that match the typed
     /// text. `overflow` is whether more matched than are listed.
     Search { overflow: bool },
 }
@@ -1179,7 +1179,7 @@ mod tests {
     /// Session 1's branch picker in [`CWD`], showing `refs`.
     fn branches_listing(unstarted: bool, refs: Vec<GitRef>) -> PickerState {
         let mut picker =
-            PickerState::branches(SessionId(1), CWD.into(), unstarted, None, Focus::Dashboard);
+            PickerState::branches(SessionId(1), CWD.into(), unstarted, None, Focus::Sidebar);
         picker.show_branches(Path::new(CWD), refs);
         picker
     }

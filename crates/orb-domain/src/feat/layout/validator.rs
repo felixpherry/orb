@@ -23,7 +23,7 @@ pub enum PaneActionError {
 /// Returns [`PaneActionError::NotInPane`] when the keys are elsewhere, and
 /// [`PaneActionError::NoLayout`] when no layout is shown.
 pub fn validate_pane_action(state: &AppState) -> Result<(), PaneActionError> {
-    if state.focus != Focus::Attached {
+    if state.focus != Focus::Pane {
         return Err(PaneActionError::NotInPane);
     }
     state
@@ -171,7 +171,7 @@ mod tests {
     #[rstest::rstest]
     fn pane_action_is_refused_without_a_layout() {
         // Given the keys in a pane but no layout open.
-        let state = selected(Focus::Attached, false);
+        let state = selected(Focus::Pane, false);
 
         // When validating a pane action.
         let result = validate_pane_action(&state);
@@ -187,7 +187,7 @@ mod tests {
     #[rstest::rstest]
     fn pane_action_is_allowed_in_a_shown_pane() {
         // Given the keys in a pane of the shown layout.
-        let state = selected(Focus::Attached, true);
+        let state = selected(Focus::Pane, true);
 
         // When validating a pane action.
         let result = validate_pane_action(&state);

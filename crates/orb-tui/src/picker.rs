@@ -830,7 +830,7 @@ mod tests {
         "New worktree from"
     )]
     #[case(
-        PickerState::init_git(ProjectId(1), Focus::Dashboard),
+        PickerState::init_git(ProjectId(1), Focus::Sidebar),
         "Not a git repository"
     )]
     #[case(
@@ -1018,7 +1018,7 @@ mod tests {
         "⏎ confirm · Esc cancel"
     )]
     #[case(
-        PickerState::init_git(ProjectId(1), Focus::Dashboard),
+        PickerState::init_git(ProjectId(1), Focus::Sidebar),
         "⏎ confirm · Esc cancel"
     )]
     #[case(
@@ -1149,7 +1149,7 @@ mod tests {
                     branch: Some("orb/fix-login".to_owned()),
                 }),
             ],
-            Focus::Dashboard,
+            Focus::Sidebar,
         )
     }
 
@@ -1179,7 +1179,7 @@ mod tests {
             "/tmp/repo".into(),
             false,
             None,
-            Focus::Dashboard,
+            Focus::Sidebar,
         );
 
         // When drawing it.
@@ -1209,7 +1209,7 @@ mod tests {
     /// A branch picker in `REPO` listing `refs`, after the first prompt.
     fn branches(refs: Vec<GitRef>) -> PickerState {
         let mut picker =
-            PickerState::branches(SessionId(1), REPO.into(), false, None, Focus::Dashboard);
+            PickerState::branches(SessionId(1), REPO.into(), false, None, Focus::Sidebar);
         picker.show_branches(Path::new(REPO), refs);
         picker
     }
@@ -1334,8 +1334,8 @@ mod tests {
 
     #[rstest::rstest]
     fn init_git_picker_offers_initialize_git() {
-        // Given the picker a non-git session's ␣w or ␣b opens.
-        let picker = PickerState::init_git(ProjectId(1), Focus::Dashboard);
+        // Given the picker a non-git session's `<C-g> w` or `<C-g> b` opens.
+        let picker = PickerState::init_git(ProjectId(1), Focus::Sidebar);
 
         // When drawing it.
         let buf = draw(&picker, 60, 20);

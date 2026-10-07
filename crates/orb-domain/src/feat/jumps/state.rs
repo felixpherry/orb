@@ -1,5 +1,5 @@
 //! The jump list: the sidebar rows the user jumped between, and where
-//! `<C-o>`/`<C-i>` last landed among them.
+//! `<C-[>`/`<C-]>` last landed among them.
 
 use crate::feat::sessions::state::SidebarItem;
 
@@ -7,12 +7,12 @@ use crate::feat::sessions::state::SidebarItem;
 pub const JUMP_LIMIT: usize = 20;
 
 /// The rows the user jumped between, oldest first, each at most once, and
-/// the one the last `<C-o>`/`<C-i>` landed on.
+/// the one the last `<C-[>`/`<C-]>` landed on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JumpList {
     /// Oldest first; at most [`JUMP_LIMIT`], never the Settled header.
     entries: Vec<SidebarItem>,
-    /// The entry the last `<C-o>`/`<C-i>` landed on; `None` while the user
+    /// The entry the last `<C-[>`/`<C-]>` landed on; `None` while the user
     /// isn't moving through the list.
     at: Option<usize>,
 }
@@ -50,8 +50,8 @@ impl JumpList {
     }
 
     /// Records entering `item`'s pane, unless it's the row the last
-    /// `<C-o>`/`<C-i>` landed on: coming back into that pane keeps the place
-    /// in the list, so `<C-i>` still goes forward. Returns whether it
+    /// `<C-[>`/`<C-]>` landed on: coming back into that pane keeps the place
+    /// in the list, so `<C-]>` still goes forward. Returns whether it
     /// recorded.
     pub fn enter(&mut self, item: SidebarItem) -> bool {
         let browsing = self.at.and_then(|at| self.entries.get(at)) == Some(&item);
@@ -86,7 +86,7 @@ impl JumpList {
 
     /// Where [`forward`](Self::forward) would land from `current`: the
     /// nearest newer row that's `reachable` and isn't `current`; nothing
-    /// unless a `<C-o>` went back first.
+    /// unless a `<C-[>` went back first.
     pub fn peek_forward<F>(&self, current: Option<SidebarItem>, reachable: F) -> Option<SidebarItem>
     where
         F: Fn(SidebarItem) -> bool,
@@ -98,8 +98,8 @@ impl JumpList {
             .find(|&entry| Some(entry) != current && reachable(entry))
     }
 
-    /// `<C-o>`: the nearest older `reachable` row other than `current`. The
-    /// first one records `current`, so `<C-i>` can come back to it. With no
+    /// `<C-[>`: the nearest older `reachable` row other than `current`. The
+    /// first one records `current`, so `<C-]>` can come back to it. With no
     /// such row, nothing changes.
     pub fn back<F>(&mut self, current: Option<SidebarItem>, reachable: F) -> Option<SidebarItem>
     where
@@ -111,8 +111,8 @@ impl JumpList {
         Some(target)
     }
 
-    /// `<C-i>`: the nearest newer `reachable` row other than `current`,
-    /// after a `<C-o>`. With no such row, nothing changes.
+    /// `<C-]>`: the nearest newer `reachable` row other than `current`,
+    /// after a `<C-[>`. With no such row, nothing changes.
     pub fn forward<F>(&mut self, current: Option<SidebarItem>, reachable: F) -> Option<SidebarItem>
     where
         F: Fn(SidebarItem) -> bool,
@@ -136,8 +136,8 @@ impl JumpList {
         };
     }
 
-    /// The list as a `<C-o>` from `current` sees it: with `current`
-    /// recorded as the newest row unless a `<C-o>` already went back.
+    /// The list as a `<C-[>` from `current` sees it: with `current`
+    /// recorded as the newest row unless a `<C-[>` already went back.
     fn seen_from(&self, current: Option<SidebarItem>) -> Self {
         let mut list = self.clone();
         if let (None, Some(current)) = (self.at, current) {
@@ -224,7 +224,7 @@ mod tests {
         let forward = list.forward(back, anywhere);
 
         // Then it's back on thread 3.
-        assert_eq!(forward, Some(on(3)), "<C-i> should undo <C-o>");
+        assert_eq!(forward, Some(on(3)), "<C-]> should undo <C-[>");
     }
 
     #[rstest::rstest]
@@ -248,19 +248,19 @@ mod tests {
         let target = list.back(Some(on(2)), anywhere);
 
         // Then it lands on thread 1.
-        assert_eq!(target, Some(on(1)), "<C-o> should never land in place");
+        assert_eq!(target, Some(on(1)), "<C-[> should never land in place");
     }
 
     #[rstest::rstest]
     fn forward_while_not_moving_through_the_list_finds_nothing() {
-        // Given threads 1 and 2, and no <C-o> yet.
+        // Given threads 1 and 2, and no <C-[> yet.
         let mut list = list_of(&[1, 2]);
 
         // When going forward.
         let target = list.forward(Some(on(2)), anywhere);
 
         // Then there's nowhere to go.
-        assert_eq!(target, None, "<C-i> needs a <C-o> first");
+        assert_eq!(target, None, "<C-]> needs a <C-[> first");
     }
 
     #[rstest::rstest]
@@ -272,7 +272,7 @@ mod tests {
         list.back(Some(on(1)), anywhere);
 
         // Then the list is unchanged.
-        assert_eq!(list, list_of(&[1]), "a failed <C-o> should change nothing");
+        assert_eq!(list, list_of(&[1]), "a failed <C-[> should change nothing");
     }
 
     #[rstest::rstest]
@@ -284,7 +284,7 @@ mod tests {
         let target = list.back(Some(on(21)), |item| item == on(1));
 
         // Then there's nowhere to go: recording thread 21 drops thread 1.
-        assert_eq!(target, None, "<C-o> must not land on a dropped row");
+        assert_eq!(target, None, "<C-[> must not land on a dropped row");
     }
 
     #[rstest::rstest]
@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(
             list.forward(Some(on(2)), anywhere),
             Some(on(3)),
-            "re-entering the landed row should keep <C-i>"
+            "re-entering the landed row should keep <C-]>"
         );
     }
 
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(
             list.forward(Some(on(3)), anywhere),
             Some(on(4)),
-            "<C-i> should still undo the <C-o>"
+            "<C-]> should still undo the <C-[>"
         );
     }
 

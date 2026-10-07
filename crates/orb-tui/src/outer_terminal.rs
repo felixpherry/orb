@@ -129,4 +129,19 @@ mod tests {
             "enable should capture the mouse"
         );
     }
+
+    #[rstest::rstest]
+    fn enable_asks_for_disambiguated_keys() {
+        // Given an empty output.
+        let mut out = Vec::new();
+
+        // When switching on orb's terminal modes.
+        let _ = enable(&mut out);
+
+        // Then it pushes kitty's disambiguate and alternate-key flags (1 | 4).
+        assert!(
+            String::from_utf8_lossy(&out).contains("\x1b[>5u"),
+            "enable should push kitty flags 5, so Ctrl+[ and Super arrive distinct"
+        );
+    }
 }

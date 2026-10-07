@@ -1,35 +1,25 @@
 //! Key routing: which keys do what in each focus. Only keys the user has
 //! defined are bound.
 //!
-//! In the sidebar, keys go through a which-key keymap whose scope is the
-//! focus and what the sidebar cursor is on; `<Space>` is the leader and shows
-//! a popup. A key that does nothing for the selection isn't bound there
-//! (`p`/`s`/`r`/`d` off a session, `␣w`/`␣b` and the tool keys
-//! `␣t`/`␣gg`/`␣v` with nothing selected), so the popups don't offer it.
-//! `<C-Right>`/`<C-Left>` resize the focused side outside which-key, which
-//! can't name them, and `<C-o>`/`<C-i>` move back and forward through the
-//! jump list, also outside which-key. In the sidebar, `<C-\>` detaches the
-//! selected attached session, outside which-key too. While attached, every
-//! key goes to the attached program except `<C-\>`, `<C-h>`, `<C-b>`,
-//! `<C-Space>`, which opens the session picker, the jump keys, and the resize
-//! keys, which resize the pane. An open picker takes typed characters as
-//! filter text and has its own fixed keys, `<C-x>` among them for removing a
-//! project from the project filter and `<C-s>` for showing or hiding settled
-//! sessions in the session picker. The rename box (`r`) and the sidebar
-//! search (`/` or `i`) use the picker's keys. `␣␣` opens the session picker
-//! in every scope. `␣i` makes an Incognito session in every scope. `l`/`h`
-//! open and close the Settled shelf. `␣gr`/`␣gl` name a new Research or
-//! Learn session in every scope. The Cmd keys (focus
-//! moves, split, close, grow and shrink, tab moves) work in the sidebar and
-//! in panes, outside which-key, which has no Super modifier. On Incognito,
-//! Research and Learn sessions, `␣w`/`␣b` aren't bound: every other key is
-//! the same as on any session.
+//! The Cmd keys (focus moves, split, close, grow and shrink, tab moves) and
+//! `<C-[>`/`<C-]>` (back and forward through the jump list) come first, in
+//! the sidebar and in panes, outside which-key: it has no Super modifier,
+//! and Ctrl+[ must never match a plain Esc. `<C-g>` is the which-key leader
+//! in both; its popup lists only the keys that do something for the
+//! selection (`<C-g> w`/`<C-g> b` not on Incognito, Research and Learn
+//! sessions, `<C-g> p` and `<C-g> <C-g>` only in a pane, `<C-g> t` only with
+//! a session selected, `<C-g> f` only in the sidebar). The sidebar's own
+//! keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`, `q`, `/` and `i`, `l`/`h`,
+//! and `r`/`p`/`s`/`d` on a session) go through the same keymap. In a pane
+//! every other key goes to its program. An open picker, the rename box and
+//! the sidebar search take typed characters and have their own fixed keys,
+//! `<C-x>` among them for removing a project from the project filter and
+//! `<C-s>` for showing or hiding settled sessions in the session picker.
 
 use std::fmt;
 
 use orb_domain::feat::layout::tree::{NavDirection, Split};
 use orb_domain::feat::sessions::state::{FolderKind, SessionKind, Sessions};
-use orb_domain::feat::zellij::zellij_service::Tool;
 use orb_domain::{AppState, Focus, Intent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_which_key::{Keymap, WhichKeyState};
@@ -41,7 +31,6 @@ pub(crate) enum KeyCategory {
     Navigation,
     Sessions,
     Threads,
-    Tools,
 }
 
 impl fmt::Display for KeyCategory {
@@ -51,7 +40,6 @@ impl fmt::Display for KeyCategory {
             Self::Navigation => "navigation",
             Self::Sessions => "sessions",
             Self::Threads => "threads",
-            Self::Tools => "tools",
         })
     }
 }
@@ -87,34 +75,33 @@ pub(crate) enum Scope {
     /// The sidebar with no session selected.
     SidebarEmpty,
     /// The sidebar on an Incognito, Research or Learn session:
-    /// [`Scope::Sidebar`]'s keys but `␣w`/`␣b`.
+    /// [`Scope::Sidebar`]'s keys but `<C-g> w`/`<C-g> b`.
     SidebarIncognito,
-    /// The dashboard on a session.
-    Dashboard,
-    /// The dashboard with no session selected.
-    DashboardEmpty,
-    /// The dashboard on an Incognito, Research or Learn session:
-    /// [`Scope::Dashboard`]'s keys but `␣w`/`␣b`.
-    DashboardIncognito,
+    /// A pane of the shown session.
+    Pane,
+    /// A pane of an Incognito, Research or Learn session: [`Scope::Pane`]'s
+    /// keys but `<C-g> w`/`<C-g> b`.
+    PaneIncognito,
 }
 
 impl Scope {
-    /// The scope for keys in `focus` with `selection`.
+    /// The scope for keys in `focus` with `selection`. A pane focus with
+    /// nothing selected doesn't last (the keys leave once no layout is
+    /// shown), so it reads as [`Scope::Pane`].
     pub(crate) fn new(focus: Focus, selection: Selection) -> Self {
         match (focus, selection) {
-            (Focus::Dashboard, Selection::Session) => Self::Dashboard,
-            (Focus::Dashboard, Selection::Nothing) => Self::DashboardEmpty,
-            (Focus::Dashboard, Selection::OwnFolderSession) => Self::DashboardIncognito,
+            (Focus::Pane, Selection::OwnFolderSession) => Self::PaneIncognito,
+            (Focus::Pane, Selection::Session | Selection::Nothing) => Self::Pane,
             (
-                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::Session,
             ) => Self::Sidebar,
             (
-                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::Nothing,
             ) => Self::SidebarEmpty,
             (
-                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
+                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::OwnFolderSession,
             ) => Self::SidebarIncognito,
         }
@@ -129,22 +116,28 @@ impl Scope {
 /// The keymap with its current scope and pending key sequence.
 pub(crate) type Keys = WhichKeyState<KeyEvent, Scope, Intent, KeyCategory>;
 
-/// The sidebar and dashboard bindings, scoped by focus and selection.
+/// orb's which-key leader in the sidebar and in panes.
+pub(crate) const LEADER: KeyEvent = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+
+/// The sidebar and pane bindings, scoped by focus and selection.
 #[expect(
     clippy::too_many_lines,
     reason = "one binding per key keeps the whole keymap in one place"
 )]
 pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     const SIDEBAR: [Scope; 3] = [Scope::Sidebar, Scope::SidebarEmpty, Scope::SidebarIncognito];
-    const DASHBOARD: [Scope; 3] = [
-        Scope::Dashboard,
-        Scope::DashboardEmpty,
-        Scope::DashboardIncognito,
+    const PANE: [Scope; 2] = [Scope::Pane, Scope::PaneIncognito];
+    const SESSION: [Scope; 4] = [
+        Scope::Sidebar,
+        Scope::SidebarIncognito,
+        Scope::Pane,
+        Scope::PaneIncognito,
     ];
-    let mut keymap = Keymap::new();
+    let mut keymap = Keymap::new().with_leader(LEADER);
     keymap.describe_group("<leader>", "leader");
-    keymap.describe_group("<leader>g", "group");
-    keymap.describe_group("<leader>s", "search");
+    keymap.describe_group("<leader>p", "pane");
+    keymap.describe_group("<leader>t", "tab");
+    keymap.describe_group("<leader>g", "new");
     for scope in SIDEBAR {
         keymap
             .bind("j", Intent::SelectNext, KeyCategory::Navigation, scope)
@@ -163,23 +156,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 KeyCategory::Navigation,
                 scope,
             )
-            .bind("<c-l>", Intent::FocusRight, KeyCategory::Navigation, scope)
             .bind("<enter>", Intent::Attach, KeyCategory::Sessions, scope)
             .bind("q", Intent::Quit, KeyCategory::General, scope)
             .bind("/", Intent::Search, KeyCategory::Navigation, scope)
             .bind("i", Intent::Search, KeyCategory::Navigation, scope)
-            .bind(
-                "<leader>n",
-                Intent::NewSession,
-                KeyCategory::Sessions,
-                scope,
-            )
-            .bind(
-                "<leader>p",
-                Intent::AddProject,
-                KeyCategory::Sessions,
-                scope,
-            )
+            .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
+            .bind("h", Intent::CloseShelf, KeyCategory::Navigation, scope)
             .bind(
                 "<leader>f",
                 Intent::FilterProjects,
@@ -187,25 +169,24 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             );
     }
-    for scope in [Scope::Sidebar, Scope::SidebarEmpty, Scope::SidebarIncognito] {
-        keymap
-            .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
-            .bind("h", Intent::CloseShelf, KeyCategory::Navigation, scope);
-    }
     for scope in [Scope::Sidebar, Scope::SidebarIncognito] {
         keymap
             .bind("r", Intent::Rename, KeyCategory::Threads, scope)
             .bind("p", Intent::TogglePin, KeyCategory::Threads, scope)
-            .bind("s", Intent::ToggleSettle, KeyCategory::Threads, scope);
+            .bind("s", Intent::ToggleSettle, KeyCategory::Threads, scope)
+            .bind("d", Intent::Delete, KeyCategory::Threads, scope);
     }
-    for scope in [Scope::Sidebar, Scope::SidebarIncognito] {
-        keymap.bind("d", Intent::Delete, KeyCategory::Threads, scope);
-    }
-    for scope in DASHBOARD {
+    for scope in SIDEBAR.into_iter().chain(PANE) {
         keymap
             .bind(
-                "<c-h>",
-                Intent::FocusSidebar,
+                "<leader>s",
+                Intent::ToggleSidebar,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader><space>",
+                Intent::OpenSessionPicker,
                 KeyCategory::Navigation,
                 scope,
             )
@@ -216,36 +197,9 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind(
-                "<leader>p",
+                "<leader>a",
                 Intent::AddProject,
                 KeyCategory::Sessions,
-                scope,
-            );
-    }
-    for scope in SIDEBAR.into_iter().chain(DASHBOARD) {
-        keymap
-            .bind(
-                "<leader><leader>",
-                Intent::OpenSessionPicker,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>sw",
-                Intent::OpenWorktreePicker,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>sg",
-                Intent::OpenSearch,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<leader>e",
-                Intent::ToggleSidebar,
-                KeyCategory::Navigation,
                 scope,
             )
             .bind(
@@ -265,9 +219,21 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 Intent::NewFolder(FolderKind::Learn),
                 KeyCategory::Sessions,
                 scope,
+            )
+            .bind(
+                "<leader>/",
+                Intent::OpenSearch,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>W",
+                Intent::OpenWorktreePicker,
+                KeyCategory::Navigation,
+                scope,
             );
     }
-    for scope in [Scope::Sidebar, Scope::Dashboard] {
+    for scope in [Scope::Sidebar, Scope::Pane] {
         keymap
             .bind(
                 "<leader>w",
@@ -282,29 +248,66 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             );
     }
-    for scope in [
-        Scope::Sidebar,
-        Scope::SidebarIncognito,
-        Scope::Dashboard,
-        Scope::DashboardIncognito,
-    ] {
+    for scope in SESSION {
+        keymap
+            .bind("<leader>tn", Intent::NewTab, KeyCategory::Navigation, scope)
+            .bind(
+                "<leader>tx",
+                Intent::CloseTab,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>tr",
+                Intent::RenameTab,
+                KeyCategory::Navigation,
+                scope,
+            );
+        for n in 1..=9 {
+            keymap.bind(
+                &format!("<leader>t{n}"),
+                Intent::GoToTab(n),
+                KeyCategory::Navigation,
+                scope,
+            );
+        }
+    }
+    for scope in PANE {
         keymap
             .bind(
-                "<leader>t",
-                Intent::OpenTool(Tool::Shell),
-                KeyCategory::Tools,
+                "<leader>pd",
+                Intent::SplitPane(Split::Down),
+                KeyCategory::Navigation,
                 scope,
             )
             .bind(
-                "<leader>gg",
-                Intent::OpenTool(Tool::Lazygit),
-                KeyCategory::Tools,
+                "<leader>pr",
+                Intent::SplitPane(Split::Right),
+                KeyCategory::Navigation,
                 scope,
             )
             .bind(
-                "<leader>v",
-                Intent::OpenTool(Tool::Nvim),
-                KeyCategory::Tools,
+                "<leader>pf",
+                Intent::ToggleZoom,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>px",
+                Intent::ClosePane,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>pc",
+                Intent::RenamePane,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader><c-g>",
+                Intent::SendCtrlG,
+                KeyCategory::Navigation,
                 scope,
             );
     }
@@ -324,53 +327,43 @@ pub(crate) fn press(keys: &mut Keys, key: KeyEvent) -> Option<Intent> {
     keys.handle_key(KeyEvent::new(key.code, modifiers))
 }
 
-/// Where a key goes while attached.
+/// Where a key goes in the sidebar or a pane.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Route {
-    /// The key is bound to an intent.
+    /// A Cmd key or a jump key: run this intent.
     Intent(Intent),
-    /// The key goes to the attached program.
+    /// Feed it to the which-key keymap.
+    Keymap,
+    /// Write it to the focused pane's program.
     Forward,
 }
 
-/// Where `key` goes while attached.
-pub(crate) fn attached_route(key: KeyEvent) -> Route {
-    match (key.code, key.modifiers) {
-        // `<C-\>` as the kitty protocol reports it, and as crossterm parses
-        // its legacy byte 0x1C.
-        (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Route::Intent(Intent::Detach),
-        // The attached program can't bind `<C-h>`: it's Backspace in a legacy terminal.
-        (KeyCode::Char('h'), KeyModifiers::CONTROL) => Route::Intent(Intent::LeavePane),
-        // The attached program backgrounds a task with `Ctrl+X Ctrl+B`, not `<C-b>`.
-        (KeyCode::Char('b'), KeyModifiers::CONTROL) => Route::Intent(Intent::ToggleSidebar),
-        // `<C-Space>` as the kitty protocol reports it, and as crossterm
-        // parses its legacy NUL byte.
-        (KeyCode::Char(' '), KeyModifiers::CONTROL) => Route::Intent(Intent::OpenSessionPicker),
-        _ => jump_route(key)
-            .or_else(|| layout_route(key))
-            .map_or(Route::Forward, Route::Intent),
+/// Where `key` goes in the sidebar, or in a pane when `in_pane`, with a
+/// which-key sequence `pending` or not: the Cmd keys, then the jump keys,
+/// then the keymap. In a pane only `<C-g>` and the rest of the sequence it
+/// starts go to the keymap; every other key goes to its program.
+pub(crate) fn route(key: KeyEvent, in_pane: bool, pending: bool) -> Route {
+    match cmd_route(key).or_else(|| jump_route(key)) {
+        Some(intent) => Route::Intent(intent),
+        None if !in_pane || pending || is_leader(key) => Route::Keymap,
+        None => Route::Forward,
     }
 }
 
-/// The jump `key` asks for in the sidebar, the dashboard or the attached
-/// pane: `<C-o>` goes back through the jump list and `<C-i>` forward. Only
-/// bare Ctrl matches, so `ctrl+shift+o` and Tab still reach the attached program. `None`
-/// for any other key.
-pub(crate) fn jump_route(key: KeyEvent) -> Option<Intent> {
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('o'), KeyModifiers::CONTROL) => Some(Intent::JumpBack),
-        (KeyCode::Char('i'), KeyModifiers::CONTROL) => Some(Intent::JumpForward),
-        _ => None,
-    }
+/// Whether `key` is `<C-g>`, whatever its kind or lock state.
+fn is_leader(key: KeyEvent) -> bool {
+    (key.code, key.modifiers) == (LEADER.code, LEADER.modifiers)
 }
 
-/// The resize `key` asks for in the sidebar, the dashboard or the attached
-/// pane: `<C-Right>` widens the focused side and `<C-Left>` narrows it.
-/// `None` for any other key.
-pub(crate) fn layout_route(key: KeyEvent) -> Option<Intent> {
+/// The jump `key` asks for: `<C-[>` goes back through the jump list and
+/// `<C-]>` forward, as kitty reports them under the disambiguate flag
+/// (`CSI 91;5u`, `CSI 93;5u`). A plain Esc, which is what Ctrl+[ sends
+/// without that flag, never matches; nor does the legacy `<C-]>` byte,
+/// which crossterm reads as Ctrl+5.
+fn jump_route(key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
-        (KeyCode::Right, KeyModifiers::CONTROL) => Some(Intent::WidenFocused),
-        (KeyCode::Left, KeyModifiers::CONTROL) => Some(Intent::NarrowFocused),
+        (KeyCode::Char('['), KeyModifiers::CONTROL) => Some(Intent::JumpBack),
+        (KeyCode::Char(']'), KeyModifiers::CONTROL) => Some(Intent::JumpForward),
         _ => None,
     }
 }
@@ -379,7 +372,7 @@ pub(crate) fn layout_route(key: KeyEvent) -> Option<Intent> {
 /// Super through kitty's `map cmd+<key> send_key super+<key>`. Shift is
 /// ignored so `Cmd +` matches however kitty reports it. `None` for any other
 /// key, Cmd or not.
-pub(crate) fn cmd_route(key: KeyEvent) -> Option<Intent> {
+fn cmd_route(key: KeyEvent) -> Option<Intent> {
     if key.modifiers - KeyModifiers::SHIFT != KeyModifiers::SUPER {
         return None;
     }
@@ -397,16 +390,6 @@ pub(crate) fn cmd_route(key: KeyEvent) -> Option<Intent> {
         KeyCode::Char(']') => Some(Intent::NextTab),
         KeyCode::Char('i') => Some(Intent::MoveTabLeft),
         KeyCode::Char('o') => Some(Intent::MoveTabRight),
-        _ => None,
-    }
-}
-
-/// What `key` does in the sidebar outside which-key: `<C-\>` (the kitty
-/// `Char('\\')` and the legacy `Char('4')` forms) detaches the selected
-/// session. `None` for any other key.
-pub(crate) fn sidebar_route(key: KeyEvent) -> Option<Intent> {
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Some(Intent::DetachSelected),
         _ => None,
     }
 }
@@ -448,14 +431,12 @@ mod tests {
         FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
         SidebarItem, Thread, ThreadId, ThreadStatus,
     };
-    use orb_domain::feat::zellij::zellij_service::Tool;
     use orb_domain::{Focus, Intent};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use ratatui_which_key::NodeResult;
+    use ratatui_which_key::{Key, NodeResult};
 
     use super::{
-        Keys, Route, Scope, Selection, attached_route, cmd_route, jump_route, keymap, layout_route,
-        picker_route, press, sidebar_route,
+        Keys, LEADER, Route, Scope, Selection, cmd_route, keymap, picker_route, press, route,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
 
@@ -465,111 +446,6 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-    }
-
-    #[rstest::rstest]
-    fn space_opens_the_leader_popup_in_the_sidebar() {
-        // Given the keymap in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
-
-        // When pressing Space.
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // Then the which-key popup waits for the next key.
-        assert!(keys.is_pending(), "Space should open the leader popup");
-    }
-
-    #[rstest::rstest]
-    fn space_then_n_starts_a_session_in_the_sidebar() {
-        // Given Space already pressed in Sidebar focus.
-        let mut keys = Keys::new(keymap(), Scope::Sidebar);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing `n`.
-        let intent = press(&mut keys, key(KeyCode::Char('n')));
-
-        // Then it starts a session.
-        assert_eq!(
-            intent,
-            Some(Intent::NewSession),
-            "Space n should start a session"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(Scope::Sidebar)]
-    #[case(Scope::Dashboard)]
-    fn space_then_p_adds_a_project(#[case] scope: Scope) {
-        // Given Space already pressed.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing `p`.
-        let intent = press(&mut keys, key(KeyCode::Char('p')));
-
-        // Then it opens the directory picker.
-        assert_eq!(
-            intent,
-            Some(Intent::AddProject),
-            "Space p should add a project in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_w_on_the_dashboard_changes_workspace() {
-        // Given Space already pressed on a thread's dashboard.
-        let mut keys = Keys::new(keymap(), Scope::Dashboard);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing `w`.
-        let intent = press(&mut keys, key(KeyCode::Char('w')));
-
-        // Then it opens the workspace picker.
-        assert_eq!(
-            intent,
-            Some(Intent::ChangeWorkspace),
-            "Space w should change the workspace"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_b_on_the_dashboard_switches_branch() {
-        // Given Space already pressed on a thread's dashboard.
-        let mut keys = Keys::new(keymap(), Scope::Dashboard);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing `b`.
-        let intent = press(&mut keys, key(KeyCode::Char('b')));
-
-        // Then it opens the branch picker.
-        assert_eq!(
-            intent,
-            Some(Intent::SwitchBranch),
-            "Space b should switch the branch"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(Scope::Sidebar, 'w', Intent::ChangeWorkspace)]
-    #[case(Scope::Sidebar, 'b', Intent::SwitchBranch)]
-    fn leader_keys_open_the_session_setup_pickers(
-        #[case] scope: Scope,
-        #[case] pressed: char,
-        #[case] expected: Intent,
-    ) {
-        // Given Space already pressed.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing the key.
-        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
-
-        // Then it yields its picker's intent.
-        assert_eq!(
-            intent.as_ref(),
-            Some(&expected),
-            "Space {pressed} in {scope:?}"
-        );
     }
 
     #[rstest::rstest]
@@ -620,54 +496,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_f_filters_projects_in_the_sidebar(
-        #[values(Scope::Sidebar, Scope::SidebarEmpty)] scope: Scope,
-    ) {
-        // Given Space already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing `f`.
-        let intent = press(&mut keys, key(KeyCode::Char('f')));
-
-        // Then it opens the project filter.
-        assert_eq!(
-            intent,
-            Some(Intent::FilterProjects),
-            "␣f should filter projects in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_popup_lists_no_filter_on_the_dashboard(
-        #[values(Scope::Dashboard, Scope::DashboardEmpty)] scope: Scope,
-    ) {
-        // Given the leader popup's keys in a dashboard scope.
-        let keys = leader_popup(scope);
-
-        // When looking for `f`.
-        let found = keys.contains(&key(KeyCode::Char('f')));
-
-        // Then it isn't listed.
-        assert!(!found, "␣f is sidebar-only, not in {scope:?}");
-    }
-
-    #[rstest::rstest]
-    fn o_is_unbound_on_the_dashboard_with_nothing_selected() {
-        // Given the keymap on the dashboard with no session selected.
-        let mut keys = Keys::new(keymap(), Scope::DashboardEmpty);
-
-        // When pressing `o`.
-        let intent = press(&mut keys, key(KeyCode::Char('o')));
-
-        // Then nothing happens.
-        assert_eq!(intent, None, "o has nothing to open or start");
-    }
-
-    #[rstest::rstest]
     #[case(key(KeyCode::Char('j')), Intent::SelectNext)]
     #[case(key(KeyCode::Char('k')), Intent::SelectPrev)]
-    #[case(ctrl('l'), Intent::FocusRight)]
     #[case(key(KeyCode::Enter), Intent::Attach)]
     #[case(key(KeyCode::Char('q')), Intent::Quit)]
     #[case(key(KeyCode::Char('p')), Intent::TogglePin)]
@@ -715,7 +545,7 @@ mod tests {
             (vec![key(KeyCode::Char('g')), key(KeyCode::Char('g'))], Intent::SelectFirst),
             (vec![KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)], Intent::SelectLast),
             (vec![ctrl('d')], Intent::SelectHalfPageDown),
-            (vec![ctrl('u')], Intent::SelectHalfPageUp),
+            (vec![ctrl('u')], Intent::SelectHalfPageUp)
         )]
         binding: (Vec<KeyEvent>, Intent),
     ) {
@@ -739,250 +569,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_i_opens_incognito_in_every_scope(
-        #[values(
-            Scope::Sidebar,
-            Scope::SidebarEmpty,
-            Scope::SidebarIncognito,
-            Scope::Dashboard,
-            Scope::DashboardEmpty,
-            Scope::DashboardIncognito
-        )]
-        scope: Scope,
-    ) {
-        // Given Space already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing `i`.
-        let intent = press(&mut keys, key(KeyCode::Char('i')));
-
-        // Then it makes an Incognito session.
-        assert_eq!(
-            intent,
-            Some(Intent::NewIncognito),
-            "␣i should open incognito in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_leader_opens_the_session_picker_in_every_scope(
-        #[values(
-            Scope::Sidebar,
-            Scope::SidebarEmpty,
-            Scope::SidebarIncognito,
-            Scope::Dashboard,
-            Scope::DashboardEmpty,
-            Scope::DashboardIncognito
-        )]
-        scope: Scope,
-    ) {
-        // Given Space already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing Space again.
-        let intent = press(&mut keys, key(KeyCode::Char(' ')));
-
-        // Then it opens the session picker.
-        assert_eq!(
-            intent,
-            Some(Intent::OpenSessionPicker),
-            "␣␣ should open the session picker in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_s_w_opens_the_worktree_picker(
-        #[values(
-            Scope::Sidebar,
-            Scope::SidebarEmpty,
-            Scope::Dashboard,
-            Scope::DashboardEmpty
-        )]
-        scope: Scope,
-    ) {
-        // Given Space and `s` already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-        press(&mut keys, key(KeyCode::Char('s')));
-
-        // When pressing `w`.
-        let intent = press(&mut keys, key(KeyCode::Char('w')));
-
-        // Then it opens the worktree picker.
-        assert_eq!(
-            intent,
-            Some(Intent::OpenWorktreePicker),
-            "␣sw should open the worktree picker in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_s_g_opens_the_search_picker(
-        #[values(
-            Scope::Sidebar,
-            Scope::SidebarEmpty,
-            Scope::Dashboard,
-            Scope::DashboardEmpty
-        )]
-        scope: Scope,
-    ) {
-        // Given Space and `s` already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-        press(&mut keys, key(KeyCode::Char('s')));
-
-        // When pressing `g`.
-        let intent = press(&mut keys, key(KeyCode::Char('g')));
-
-        // Then it opens the search picker.
-        assert_eq!(
-            intent,
-            Some(Intent::OpenSearch),
-            "␣sg should open the search picker in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_s_g_is_forwarded_while_attached(#[values(' ', 's', 'g')] c: char) {
-        // Given one key of `␣sg`.
-        let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it goes to Claude, so `␣sg` never opens the search picker there.
-        assert_eq!(
-            routed,
-            Route::Forward,
-            "{c:?} of ␣sg should be forwarded while attached"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_e_toggles_the_sidebar(
-        #[values(
-            Scope::Sidebar,
-            Scope::SidebarEmpty,
-            Scope::Dashboard,
-            Scope::DashboardEmpty
-        )]
-        scope: Scope,
-    ) {
-        // Given Space already pressed in `scope`.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing `e`.
-        let intent = press(&mut keys, key(KeyCode::Char('e')));
-
-        // Then it hides or shows the sidebar.
-        assert_eq!(
-            intent,
-            Some(Intent::ToggleSidebar),
-            "␣e should toggle the sidebar in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(KeyCode::Right, Intent::WidenFocused)]
-    #[case(KeyCode::Left, Intent::NarrowFocused)]
-    fn ctrl_arrows_resize_the_focused_side(#[case] code: KeyCode, #[case] expected: Intent) {
-        // Given Ctrl with an arrow.
-        let pressed = KeyEvent::new(code, KeyModifiers::CONTROL);
-
-        // When routing it in the sidebar or dashboard.
-        let intent = layout_route(pressed);
-
-        // Then it resizes.
-        assert_eq!(intent, Some(expected), "<C-{code}> should resize");
-    }
-
-    #[rstest::rstest]
-    #[case(key(KeyCode::Right))]
-    #[case(key(KeyCode::Left))]
-    #[case(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL))]
-    #[case(ctrl('h'))]
-    #[case(ctrl('l'))]
-    #[case(key(KeyCode::Char('j')))]
-    fn other_keys_do_not_resize(#[case] pressed: KeyEvent) {
-        // Given a key other than Ctrl+Left/Right.
-
-        // When routing it in the sidebar or dashboard.
-        let intent = layout_route(pressed);
-
-        // Then it's left to the keymap.
-        assert_eq!(intent, None, "{pressed:?} shouldn't resize");
-    }
-
-    #[rstest::rstest]
-    #[case('\\')]
-    #[case('4')]
-    fn ctrl_backslash_detaches_the_selected_thread_in_the_sidebar(#[case] c: char) {
-        // Given `<C-\>` in one of its two forms.
-        let pressed = ctrl(c);
-
-        // When routing it in the sidebar.
-        let intent = sidebar_route(pressed);
-
-        // Then it detaches the selected thread.
-        assert_eq!(
-            intent,
-            Some(Intent::DetachSelected),
-            "{pressed:?} should detach the selected thread"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(ctrl('h'))]
-    #[case(key(KeyCode::Char('\\')))]
-    #[case(key(KeyCode::Char('4')))]
-    fn other_keys_do_not_detach_in_the_sidebar(#[case] pressed: KeyEvent) {
-        // Given a key other than `<C-\>`.
-
-        // When routing it in the sidebar.
-        let intent = sidebar_route(pressed);
-
-        // Then it's left to the keymap.
-        assert_eq!(intent, None, "{pressed:?} shouldn't detach");
-    }
-
-    #[rstest::rstest]
-    #[case(vec![ctrl('h')], Intent::FocusSidebar)]
-    fn dashboard_keys_map_to_their_intents(
-        #[case] pressed: Vec<KeyEvent>,
-        #[case] expected: Intent,
-    ) {
-        // Given the keymap on a thread's dashboard.
-        let mut keys = Keys::new(keymap(), Scope::Dashboard);
-
-        // When pressing the keys in order.
-        let intent = pressed
-            .into_iter()
-            .map(|pressed| press(&mut keys, pressed))
-            .last()
-            .flatten();
-
-        // Then it yields its intent.
-        assert_eq!(
-            intent.as_ref(),
-            Some(&expected),
-            "the key for {expected} on the dashboard"
-        );
-    }
-
-    #[rstest::rstest]
     #[case(Focus::Sidebar, Selection::Session, Scope::Sidebar)]
     #[case(Focus::Sidebar, Selection::Nothing, Scope::SidebarEmpty)]
-    #[case(Focus::Dashboard, Selection::Session, Scope::Dashboard)]
-    #[case(Focus::Dashboard, Selection::Nothing, Scope::DashboardEmpty)]
     #[case(Focus::Sidebar, Selection::OwnFolderSession, Scope::SidebarIncognito)]
-    #[case(
-        Focus::Dashboard,
-        Selection::OwnFolderSession,
-        Scope::DashboardIncognito
-    )]
+    #[case(Focus::Pane, Selection::Session, Scope::Pane)]
+    #[case(Focus::Pane, Selection::OwnFolderSession, Scope::PaneIncognito)]
     fn scope_follows_focus_and_the_selection(
         #[case] focus: Focus,
         #[case] selection: Selection,
@@ -1093,14 +684,17 @@ mod tests {
         assert_eq!(intent, None, "n in {scope:?}");
     }
 
-    /// The keys the leader popup lists in `scope`.
-    fn leader_popup(scope: Scope) -> Vec<KeyEvent> {
-        keymap()
-            .get_children_at_path(&[key(KeyCode::Char(' '))], &scope)
+    /// The keys the popup lists in `scope` after `<C-g>` and `then`, as
+    /// which-key names them, sorted.
+    fn leader_popup(scope: Scope, then: &[KeyEvent]) -> Vec<String> {
+        let mut keys: Vec<String> = keymap()
+            .get_children_at_path(&[&[LEADER], then].concat(), &scope)
             .unwrap_or_default()
             .into_iter()
-            .map(|(key, _)| key)
-            .collect()
+            .map(|(key, _)| key.display())
+            .collect();
+        keys.sort_unstable();
+        keys
     }
 
     /// Every key sequence bound in `scope` with its intent, sorted by sequence.
@@ -1126,218 +720,6 @@ mod tests {
         }
         found.sort_by_key(|(path, _)| format!("{path:?}"));
         found
-    }
-
-    #[rstest::rstest]
-    fn leader_w_and_b_are_unbound_on_incognito_rows(
-        #[values(Scope::SidebarIncognito, Scope::DashboardIncognito)] scope: Scope,
-        #[values('w', 'b')] pressed: char,
-    ) {
-        // Given the leader popup's keys on an Incognito row.
-        let keys = leader_popup(scope);
-
-        // When looking for the key.
-        let found = keys.contains(&key(KeyCode::Char(pressed)));
-
-        // Then it isn't listed.
-        assert!(!found, "{pressed} in the {scope:?} leader popup");
-    }
-
-    #[rstest::rstest]
-    fn w_and_b_are_unbound_on_an_incognito_dashboard(
-        #[values(Scope::DashboardIncognito)] scope: Scope,
-        #[values('w', 'b')] pressed: char,
-    ) {
-        // Given the keymap on the dashboard of an Incognito row.
-        let mut keys = Keys::new(keymap(), scope);
-
-        // When pressing the key.
-        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
-
-        // Then nothing happens.
-        assert_eq!(intent, None, "{pressed} in {scope:?}");
-    }
-
-    #[rstest::rstest]
-    #[case(Scope::Sidebar, Scope::SidebarIncognito)]
-    #[case(Scope::Dashboard, Scope::DashboardIncognito)]
-    fn incognito_scope_binds_its_base_scopes_keys_but_w_and_b(
-        #[case] base: Scope,
-        #[case] incognito: Scope,
-    ) {
-        // Given the bindings of the base scope, less ␣w, ␣b, w and b.
-        let expected: Vec<(Vec<KeyEvent>, Intent)> = {
-            let unbound = [[' ', 'w'].as_slice(), &[' ', 'b'], &['w'], &['b']].map(|keys| {
-                keys.iter()
-                    .map(|&c| key(KeyCode::Char(c)))
-                    .collect::<Vec<_>>()
-            });
-            bindings(base)
-                .into_iter()
-                .filter(|(path, _)| !unbound.contains(path))
-                .collect()
-        };
-
-        // When listing the incognito scope's bindings.
-        let found = bindings(incognito);
-
-        // Then they are the same, key for key and intent for intent.
-        assert_eq!(found, expected, "{incognito:?} against {base:?}");
-    }
-
-    #[rstest::rstest]
-    #[case(Scope::SidebarEmpty, false)]
-    #[case(Scope::DashboardEmpty, false)]
-    #[case(Scope::Sidebar, true)]
-    #[case(Scope::Dashboard, true)]
-    fn leader_popup_lists_workspace_and_branch_only_with_a_selection(
-        #[case] scope: Scope,
-        #[case] listed: bool,
-    ) {
-        // Given the leader popup's keys in the scope.
-        let keys = leader_popup(scope);
-
-        // When looking for `w` and `b`.
-        let found = [
-            keys.contains(&key(KeyCode::Char('w'))),
-            keys.contains(&key(KeyCode::Char('b'))),
-        ];
-
-        // Then both are listed exactly when a session is selected.
-        assert_eq!(found, [listed; 2], "w/b in the {scope:?} leader popup");
-    }
-
-    #[rstest::rstest]
-    fn leader_keys_open_tools(
-        #[values(Scope::Sidebar, Scope::Dashboard)] scope: Scope,
-        #[values(('t', Tool::Shell), ('v', Tool::Nvim))] binding: (char, Tool),
-    ) {
-        // Given Space already pressed.
-        let (pressed, tool) = binding;
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing the tool's key.
-        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
-
-        // Then it opens that tool.
-        assert_eq!(
-            intent,
-            Some(Intent::OpenTool(tool)),
-            "Space {pressed} in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(Scope::SidebarEmpty, false)]
-    #[case(Scope::DashboardEmpty, false)]
-    #[case(Scope::Sidebar, true)]
-    #[case(Scope::Dashboard, true)]
-    fn leader_popup_lists_tools_only_with_a_selection(#[case] scope: Scope, #[case] listed: bool) {
-        // Given the leader popup's keys in the scope.
-        let keys = leader_popup(scope);
-
-        // When looking for `t` and `v`.
-        let found = ['t', 'v'].map(|c| keys.contains(&key(KeyCode::Char(c))));
-
-        // Then both are listed exactly when a session is selected.
-        assert_eq!(found, [listed; 2], "t/v in the {scope:?} leader popup");
-    }
-
-    #[rstest::rstest]
-    fn leader_gg_opens_lazygit(#[values(Scope::Sidebar, Scope::Dashboard)] scope: Scope) {
-        // Given Space and `g` already pressed.
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-        press(&mut keys, key(KeyCode::Char('g')));
-
-        // When pressing `g` again.
-        let intent = press(&mut keys, key(KeyCode::Char('g')));
-
-        // Then it opens lazygit.
-        assert_eq!(
-            intent,
-            Some(Intent::OpenTool(Tool::Lazygit)),
-            "Space g g in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_g_new_folder_keys_yield_their_kind(
-        #[values(Scope::SidebarEmpty)] scope: Scope,
-        #[values(('r', FolderKind::Research), ('l', FolderKind::Learn))] binding: (
-            char,
-            FolderKind,
-        ),
-    ) {
-        // Given Space and `g` already pressed.
-        let (pressed, kind) = binding;
-        let mut keys = Keys::new(keymap(), scope);
-        press(&mut keys, key(KeyCode::Char(' ')));
-        press(&mut keys, key(KeyCode::Char('g')));
-
-        // When pressing the kind's key.
-        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
-
-        // Then it names a new session of that kind.
-        assert_eq!(
-            intent,
-            Some(Intent::NewFolder(kind)),
-            "Space g {pressed} in {scope:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(Scope::SidebarEmpty, &['l', 'r'])]
-    #[case(Scope::DashboardEmpty, &['l', 'r'])]
-    #[case(Scope::Sidebar, &['g', 'l', 'r'])]
-    #[case(Scope::Dashboard, &['g', 'l', 'r'])]
-    fn leader_g_popup_lists_the_scopes_group_keys(#[case] scope: Scope, #[case] expected: &[char]) {
-        // Given orb's keymap in the scope.
-        let keymap = keymap();
-
-        // When listing the keys under Space g.
-        let mut found: Vec<char> = keymap
-            .get_children_at_path(&[key(KeyCode::Char(' ')), key(KeyCode::Char('g'))], &scope)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(key, _)| match key.code {
-                KeyCode::Char(c) => Some(c),
-                _ => None,
-            })
-            .collect();
-        found.sort_unstable();
-
-        // Then they are the scope's group keys.
-        assert_eq!(found, expected, "Space g keys in {scope:?}");
-    }
-
-    #[rstest::rstest]
-    #[case(Scope::Sidebar, " befginpstvw")]
-    #[case(Scope::SidebarEmpty, " efginps")]
-    #[case(Scope::Dashboard, " beginpstvw")]
-    #[case(Scope::DashboardEmpty, " eginps")]
-    #[case(Scope::SidebarIncognito, " efginpstv")]
-    #[case(Scope::DashboardIncognito, " eginpstv")]
-    fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
-        // Given orb's keymap in the scope.
-        let popup = leader_popup(scope);
-
-        // When listing the leader popup's keys, sorted.
-        let found: String = {
-            let mut chars: Vec<char> = popup
-                .into_iter()
-                .filter_map(|key| match key.code {
-                    KeyCode::Char(c) => Some(c),
-                    _ => None,
-                })
-                .collect();
-            chars.sort_unstable();
-            chars.into_iter().collect()
-        };
-
-        // Then they are the scope's row of the spec's scope table.
-        assert_eq!(found, expected, "Space keys in {scope:?}");
     }
 
     #[rstest::rstest]
@@ -1409,206 +791,6 @@ mod tests {
         );
     }
 
-    #[rstest::rstest]
-    #[case(KeyCode::Char('\\'), KeyModifiers::CONTROL)]
-    #[case(KeyCode::Char('4'), KeyModifiers::CONTROL)]
-    fn ctrl_backslash_detaches_while_attached(
-        #[case] code: KeyCode,
-        #[case] modifiers: KeyModifiers,
-    ) {
-        // Given `<C-\>` in one of its two forms.
-        let key = KeyEvent::new(code, modifiers);
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it detaches.
-        assert_eq!(
-            routed,
-            Route::Intent(Intent::Detach),
-            "{code} with {modifiers} should detach"
-        );
-    }
-
-    #[rstest::rstest]
-    fn ctrl_h_leaves_the_pane_while_attached() {
-        // Given `<C-h>`.
-        let key = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it leaves the pane for the sidebar instead of reaching Claude.
-        assert_eq!(
-            routed,
-            Route::Intent(Intent::LeavePane),
-            "<C-h> should leave the pane"
-        );
-    }
-
-    #[rstest::rstest]
-    fn ctrl_b_toggles_the_sidebar_while_attached() {
-        // Given `<C-b>`.
-        let key = ctrl('b');
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it hides or shows the sidebar instead of reaching Claude.
-        assert_eq!(
-            routed,
-            Route::Intent(Intent::ToggleSidebar),
-            "<C-b> should toggle the sidebar while attached"
-        );
-    }
-
-    #[rstest::rstest]
-    fn ctrl_space_opens_the_session_picker_while_attached() {
-        // Given `<C-Space>`, the form both kitty's `CSI 32;5u` and the legacy
-        // NUL byte parse to.
-        let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it opens the session picker instead of reaching Claude.
-        assert_eq!(
-            routed,
-            Route::Intent(Intent::OpenSessionPicker),
-            "<C-Space> should open the session picker while attached"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case('b')]
-    #[case('B')]
-    fn ctrl_shift_b_is_forwarded_while_attached(#[case] c: char) {
-        // Given `ctrl+shift+b` in either of its kitty forms.
-        let key = KeyEvent::new(
-            KeyCode::Char(c),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        );
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it goes to Claude.
-        assert_eq!(routed, Route::Forward, "ctrl+shift+{c} should be forwarded");
-    }
-
-    #[rstest::rstest]
-    #[case(KeyCode::Right, Intent::WidenFocused)]
-    #[case(KeyCode::Left, Intent::NarrowFocused)]
-    fn ctrl_arrows_resize_while_attached(#[case] code: KeyCode, #[case] expected: Intent) {
-        // Given a Ctrl-modified arrow.
-        let key = KeyEvent::new(code, KeyModifiers::CONTROL);
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it resizes instead of reaching Claude.
-        assert_eq!(
-            routed,
-            Route::Intent(expected),
-            "<C-{code}> should resize while attached"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case('o', Intent::JumpBack)]
-    #[case('i', Intent::JumpForward)]
-    fn ctrl_o_and_ctrl_i_jump_while_attached(#[case] c: char, #[case] expected: Intent) {
-        // Given `<C-o>` or `<C-i>`.
-        let key = ctrl(c);
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it moves through the jump list instead of reaching Claude.
-        assert_eq!(
-            routed,
-            Route::Intent(expected),
-            "<C-{c}> should jump while attached"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(KeyCode::Tab, KeyModifiers::NONE)]
-    #[case(KeyCode::Char('o'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)]
-    #[case(KeyCode::Char('O'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)]
-    fn tab_and_ctrl_shift_o_are_forwarded_while_attached(
-        #[case] code: KeyCode,
-        #[case] modifiers: KeyModifiers,
-    ) {
-        // Given Tab or `ctrl+shift+o` in either of its kitty forms.
-        let key = KeyEvent::new(code, modifiers);
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it goes to Claude.
-        assert_eq!(
-            routed,
-            Route::Forward,
-            "{code} with {modifiers} should be forwarded"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case('o', Intent::JumpBack)]
-    #[case('i', Intent::JumpForward)]
-    fn ctrl_o_and_ctrl_i_jump_in_the_sidebar_and_dashboard(
-        #[case] c: char,
-        #[case] expected: Intent,
-    ) {
-        // Given `<C-o>` or `<C-i>`.
-        let pressed = ctrl(c);
-
-        // When routing it in the sidebar or dashboard.
-        let intent = jump_route(pressed);
-
-        // Then it moves through the jump list.
-        assert_eq!(intent, Some(expected), "<C-{c}> should jump");
-    }
-
-    #[rstest::rstest]
-    #[case(key(KeyCode::Tab))]
-    #[case(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL | KeyModifiers::SHIFT))]
-    #[case(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::CONTROL | KeyModifiers::SHIFT))]
-    #[case(key(KeyCode::Char('o')))]
-    #[case(key(KeyCode::Char('i')))]
-    fn other_keys_do_not_jump(#[case] pressed: KeyEvent) {
-        // Given a key other than `<C-o>` and `<C-i>`.
-
-        // When routing it in the sidebar or dashboard.
-        let intent = jump_route(pressed);
-
-        // Then it's left to the keymap.
-        assert_eq!(intent, None, "{pressed:?} shouldn't jump");
-    }
-
-    #[rstest::rstest]
-    #[case(KeyCode::Char('q'), KeyModifiers::NONE)]
-    #[case(KeyCode::Enter, KeyModifiers::NONE)]
-    #[case(KeyCode::Esc, KeyModifiers::NONE)]
-    #[case(KeyCode::Char('a'), KeyModifiers::NONE)]
-    #[case(KeyCode::Char(' '), KeyModifiers::NONE)]
-    #[case(KeyCode::Backspace, KeyModifiers::NONE)]
-    fn keys_are_forwarded_while_attached(#[case] code: KeyCode, #[case] modifiers: KeyModifiers) {
-        // Given a key other than `<C-\>` and `<C-h>`.
-        let key = KeyEvent::new(code, modifiers);
-
-        // When routing it while attached.
-        let routed = attached_route(key);
-
-        // Then it goes to Claude.
-        assert_eq!(
-            routed,
-            Route::Forward,
-            "{code} with {modifiers} should be forwarded"
-        );
-    }
-
     fn cmd(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SUPER)
     }
@@ -1636,12 +818,20 @@ mod tests {
     #[case(KeyCode::Char(']'), Intent::NextTab)]
     #[case(KeyCode::Char('i'), Intent::MoveTabLeft)]
     #[case(KeyCode::Char('o'), Intent::MoveTabRight)]
-    fn cmd_keys_route_to_their_intents(#[case] code: KeyCode, #[case] expected: Intent) {
-        // Given / When routing Cmd with `code`.
-        let intent = cmd_route(cmd(code));
+    fn cmd_keys_route_to_their_intents(
+        #[case] code: KeyCode,
+        #[case] expected: Intent,
+        #[values(false, true)] in_pane: bool,
+    ) {
+        // Given / When routing Cmd with `code` in the sidebar or a pane.
+        let routed = route(cmd(code), in_pane, false);
 
         // Then it asks for its intent.
-        assert_eq!(intent, Some(expected), "Cmd {code} should route");
+        assert_eq!(
+            routed,
+            Route::Intent(expected),
+            "Cmd {code} should route (in a pane: {in_pane})"
+        );
     }
 
     #[rstest::rstest]
@@ -1672,14 +862,422 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn cmd_f_is_unbound() {
+    #[case(false, Route::Keymap)]
+    #[case(true, Route::Forward)]
+    fn cmd_f_is_unbound(#[case] in_pane: bool, #[case] expected: Route) {
         // Given Cmd f, reserved for floating panes.
         let pressed = cmd(KeyCode::Char('f'));
 
-        // When routing it.
-        let intent = cmd_route(pressed);
+        // When routing it in the sidebar or a pane.
+        let routed = route(pressed, in_pane, false);
 
-        // Then nothing is asked for.
-        assert_eq!(intent, None, "Cmd f stays unbound");
+        // Then orb asks for nothing: a pane gets it, the sidebar's keymap
+        // has no binding for it.
+        assert_eq!(
+            routed, expected,
+            "Cmd f stays unbound (in a pane: {in_pane})"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case('[', Intent::JumpBack)]
+    #[case(']', Intent::JumpForward)]
+    fn ctrl_brackets_jump_in_the_sidebar_and_in_a_pane(
+        #[case] c: char,
+        #[case] expected: Intent,
+        #[values(false, true)] in_pane: bool,
+    ) {
+        // Given `<C-[>` or `<C-]>` as kitty reports it under the disambiguate
+        // flag.
+        let pressed = ctrl(c);
+
+        // When routing it in the sidebar or a pane.
+        let routed = route(pressed, in_pane, false);
+
+        // Then it moves through the jump list.
+        assert_eq!(
+            routed,
+            Route::Intent(expected),
+            "<C-{c}> should jump (in a pane: {in_pane})"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL | KeyModifiers::SHIFT))]
+    #[case(key(KeyCode::Char('[')))]
+    #[case(key(KeyCode::Char(']')))]
+    fn jump_keys_need_bare_ctrl(#[case] pressed: KeyEvent) {
+        // Given a bracket without bare Ctrl.
+
+        // When routing it in a pane.
+        let routed = route(pressed, true, false);
+
+        // Then the pane's program gets it.
+        assert_eq!(routed, Route::Forward, "{pressed:?} shouldn't jump");
+    }
+
+    #[rstest::rstest]
+    fn esc_is_forwarded_in_a_pane() {
+        // Given a plain Esc, which is also what Ctrl+[ sends without the
+        // kitty protocol.
+        let pressed = key(KeyCode::Esc);
+
+        // When routing it in a pane.
+        let routed = route(pressed, true, false);
+
+        // Then the pane's program gets it.
+        assert_eq!(routed, Route::Forward, "Esc should reach the pane");
+    }
+
+    #[rstest::rstest]
+    fn esc_never_jumps_in_the_sidebar() {
+        // Given a plain Esc.
+        let pressed = key(KeyCode::Esc);
+
+        // When routing it in the sidebar.
+        let routed = route(pressed, false, false);
+
+        // Then it goes to the keymap, not the jump list.
+        assert_eq!(routed, Route::Keymap, "Esc should never jump");
+    }
+
+    #[rstest::rstest]
+    fn legacy_ctrl_right_bracket_is_not_a_jump() {
+        // Given Ctrl+5, which is also how crossterm reads the legacy `<C-]>`
+        // byte.
+        let pressed = ctrl('5');
+
+        // When routing it in a pane.
+        let routed = route(pressed, true, false);
+
+        // Then the pane's program gets it.
+        assert_eq!(routed, Route::Forward, "Ctrl+5 shouldn't jump forward");
+    }
+
+    #[rstest::rstest]
+    #[case(ctrl('\\'))]
+    #[case(ctrl('4'))]
+    #[case(ctrl('h'))]
+    #[case(ctrl('b'))]
+    #[case(ctrl(' '))]
+    #[case(ctrl('o'))]
+    #[case(ctrl('i'))]
+    #[case(ctrl('l'))]
+    #[case(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL))]
+    #[case(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL))]
+    fn old_direct_keys_are_forwarded_in_a_pane(#[case] pressed: KeyEvent) {
+        // Given a Ctrl key orb took from the pane before.
+
+        // When routing it in a pane.
+        let routed = route(pressed, true, false);
+
+        // Then the pane's program gets it.
+        assert_eq!(routed, Route::Forward, "{pressed:?} should reach the pane");
+    }
+
+    #[rstest::rstest]
+    #[case(key(KeyCode::Char('q')))]
+    #[case(key(KeyCode::Enter))]
+    #[case(key(KeyCode::Char('a')))]
+    #[case(key(KeyCode::Char(' ')))]
+    #[case(key(KeyCode::Backspace))]
+    #[case(key(KeyCode::Tab))]
+    fn plain_keys_are_forwarded_in_a_pane(#[case] pressed: KeyEvent) {
+        // Given a plain key.
+
+        // When routing it in a pane.
+        let routed = route(pressed, true, false);
+
+        // Then the pane's program gets it.
+        assert_eq!(routed, Route::Forward, "{pressed:?} should reach the pane");
+    }
+
+    #[rstest::rstest]
+    fn old_direct_keys_are_unbound_in_the_sidebar(
+        #[values(Scope::Sidebar, Scope::SidebarEmpty)] scope: Scope,
+        #[values(
+            ctrl('\\'),
+            ctrl('4'),
+            ctrl('l'),
+            ctrl('o'),
+            ctrl('i'),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)
+        )]
+        pressed: KeyEvent,
+    ) {
+        // Given the keymap in a sidebar scope.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing a Ctrl key orb bound before.
+        let intent = press(&mut keys, pressed);
+
+        // Then nothing happens and no sequence starts.
+        assert_eq!(
+            (intent, keys.is_pending()),
+            (None, false),
+            "{pressed:?} should do nothing in {scope:?}"
+        );
+    }
+
+    /// The key that types `c`: a capital with Shift, as kitty reports it,
+    /// and BEL (`\x07`) as `<C-g>`.
+    fn typed(c: char) -> KeyEvent {
+        match c {
+            '\x07' => LEADER,
+            c if c.is_uppercase() => KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT),
+            c => key(KeyCode::Char(c)),
+        }
+    }
+
+    #[rstest::rstest]
+    fn ctrl_g_opens_the_leader_popup(
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarEmpty,
+            Scope::SidebarIncognito,
+            Scope::Pane,
+            Scope::PaneIncognito
+        )]
+        scope: Scope,
+    ) {
+        // Given the keymap in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing `<C-g>`.
+        press(&mut keys, LEADER);
+
+        // Then the which-key popup waits for the next key.
+        assert!(
+            keys.is_pending(),
+            "<C-g> should open the popup in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn space_is_unbound_in_the_sidebar() {
+        // Given the keymap in the sidebar on a session.
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+
+        // When pressing Space.
+        let intent = press(&mut keys, key(KeyCode::Char(' ')));
+
+        // Then nothing happens and no sequence starts.
+        assert_eq!(
+            (intent, keys.is_pending()),
+            (None, false),
+            "Space is no longer a leader"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::Pane, "s", Intent::ToggleSidebar)]
+    #[case(Scope::Sidebar, "s", Intent::ToggleSidebar)]
+    #[case(Scope::Pane, " ", Intent::OpenSessionPicker)]
+    #[case(Scope::SidebarEmpty, " ", Intent::OpenSessionPicker)]
+    #[case(Scope::Sidebar, "n", Intent::NewSession)]
+    #[case(Scope::Pane, "n", Intent::NewSession)]
+    #[case(Scope::SidebarEmpty, "a", Intent::AddProject)]
+    #[case(Scope::Pane, "a", Intent::AddProject)]
+    #[case(Scope::Sidebar, "f", Intent::FilterProjects)]
+    #[case(Scope::SidebarEmpty, "f", Intent::FilterProjects)]
+    #[case(Scope::PaneIncognito, "i", Intent::NewIncognito)]
+    #[case(Scope::SidebarEmpty, "i", Intent::NewIncognito)]
+    #[case(Scope::Sidebar, "w", Intent::ChangeWorkspace)]
+    #[case(Scope::Pane, "w", Intent::ChangeWorkspace)]
+    #[case(Scope::Sidebar, "b", Intent::SwitchBranch)]
+    #[case(Scope::Pane, "b", Intent::SwitchBranch)]
+    #[case(Scope::SidebarEmpty, "gr", Intent::NewFolder(FolderKind::Research))]
+    #[case(Scope::Pane, "gl", Intent::NewFolder(FolderKind::Learn))]
+    #[case(Scope::Sidebar, "/", Intent::OpenSearch)]
+    #[case(Scope::Pane, "/", Intent::OpenSearch)]
+    #[case(Scope::SidebarEmpty, "W", Intent::OpenWorktreePicker)]
+    #[case(Scope::Pane, "W", Intent::OpenWorktreePicker)]
+    #[case(Scope::Pane, "pd", Intent::SplitPane(Split::Down))]
+    #[case(Scope::Pane, "pr", Intent::SplitPane(Split::Right))]
+    #[case(Scope::Pane, "pf", Intent::ToggleZoom)]
+    #[case(Scope::Pane, "px", Intent::ClosePane)]
+    #[case(Scope::Pane, "pc", Intent::RenamePane)]
+    #[case(Scope::Pane, "tn", Intent::NewTab)]
+    #[case(Scope::Sidebar, "tn", Intent::NewTab)]
+    #[case(Scope::Pane, "tx", Intent::CloseTab)]
+    #[case(Scope::Sidebar, "tx", Intent::CloseTab)]
+    #[case(Scope::Pane, "tr", Intent::RenameTab)]
+    #[case(Scope::Sidebar, "tr", Intent::RenameTab)]
+    #[case(Scope::Pane, "t1", Intent::GoToTab(1))]
+    #[case(Scope::Sidebar, "t6", Intent::GoToTab(6))]
+    #[case(Scope::Pane, "t9", Intent::GoToTab(9))]
+    #[case(Scope::Pane, "\x07", Intent::SendCtrlG)]
+    fn leader_keys_yield_their_intents(
+        #[case] scope: Scope,
+        #[case] then: &str,
+        #[case] expected: Intent,
+    ) {
+        // Given `<C-g>` pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, LEADER);
+
+        // When typing the rest of the sequence.
+        let intent = then
+            .chars()
+            .map(|c| press(&mut keys, typed(c)))
+            .last()
+            .flatten();
+
+        // Then it yields its intent.
+        assert_eq!(
+            intent.as_ref(),
+            Some(&expected),
+            "<C-g> {then:?} in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::Sidebar, "/ Space W a b f g i n s t w")]
+    #[case(Scope::SidebarEmpty, "/ Space W a f g i n s")]
+    #[case(Scope::SidebarIncognito, "/ Space W a f g i n s t")]
+    #[case(Scope::Pane, "/ <C-g> Space W a b g i n p s t w")]
+    #[case(Scope::PaneIncognito, "/ <C-g> Space W a g i n p s t")]
+    fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
+        // Given orb's keymap in the scope.
+
+        // When listing the keys after `<C-g>`, sorted.
+        let found = leader_popup(scope, &[]).join(" ");
+
+        // Then they are the scope's row of the key table.
+        assert_eq!(found, expected, "<C-g> keys in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    fn leader_p_popup_lists_the_pane_keys() {
+        // Given orb's keymap in a pane.
+
+        // When listing the keys after `<C-g> p`.
+        let found = leader_popup(Scope::Pane, &[key(KeyCode::Char('p'))]).join(" ");
+
+        // Then they are the pane keys.
+        assert_eq!(found, "c d f r x", "<C-g> p keys in a pane");
+    }
+
+    #[rstest::rstest]
+    fn leader_t_popup_lists_the_tab_keys(#[values(Scope::Sidebar, Scope::Pane)] scope: Scope) {
+        // Given orb's keymap with a session selected.
+
+        // When listing the keys after `<C-g> t`.
+        let found = leader_popup(scope, &[key(KeyCode::Char('t'))]).join(" ");
+
+        // Then they are the tab keys.
+        assert_eq!(
+            found, "1 2 3 4 5 6 7 8 9 n r x",
+            "<C-g> t keys in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn leader_g_popup_lists_research_and_learn(
+        #[values(
+            Scope::Sidebar,
+            Scope::SidebarEmpty,
+            Scope::SidebarIncognito,
+            Scope::Pane,
+            Scope::PaneIncognito
+        )]
+        scope: Scope,
+    ) {
+        // Given orb's keymap in `scope`.
+
+        // When listing the keys after `<C-g> g`.
+        let found = leader_popup(scope, &[key(KeyCode::Char('g'))]).join(" ");
+
+        // Then they are the Research and Learn keys.
+        assert_eq!(found, "l r", "<C-g> g keys in {scope:?}");
+    }
+
+    #[rstest::rstest]
+    #[case(Scope::Sidebar, Scope::SidebarIncognito)]
+    #[case(Scope::Pane, Scope::PaneIncognito)]
+    fn incognito_scope_binds_its_base_scopes_keys_but_w_and_b(
+        #[case] base: Scope,
+        #[case] incognito: Scope,
+    ) {
+        // Given the bindings of the base scope, less `<C-g> w` and `<C-g> b`.
+        let expected: Vec<(Vec<KeyEvent>, Intent)> = {
+            let unbound = ['w', 'b'].map(|c| vec![LEADER, key(KeyCode::Char(c))]);
+            bindings(base)
+                .into_iter()
+                .filter(|(path, _)| !unbound.contains(path))
+                .collect()
+        };
+
+        // When listing the incognito scope's bindings.
+        let found = bindings(incognito);
+
+        // Then they are the same, key for key and intent for intent.
+        assert_eq!(found, expected, "{incognito:?} against {base:?}");
+    }
+
+    #[rstest::rstest]
+    fn ctrl_g_goes_to_the_keymap_in_a_pane() {
+        // Given `<C-g>`.
+
+        // When routing it in a pane with no sequence pending.
+        let routed = route(LEADER, true, false);
+
+        // Then it goes to the keymap instead of the pane.
+        assert_eq!(
+            routed,
+            Route::Keymap,
+            "<C-g> should open which-key in a pane"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(key(KeyCode::Char('j')))]
+    #[case(key(KeyCode::Esc))]
+    #[case(key(KeyCode::Char(' ')))]
+    fn keys_go_to_the_keymap_while_a_sequence_is_pending_in_a_pane(#[case] pressed: KeyEvent) {
+        // Given a `<C-g>` sequence pending in a pane.
+
+        // When routing the next key.
+        let routed = route(pressed, true, true);
+
+        // Then the keymap gets it, not the pane.
+        assert_eq!(
+            routed,
+            Route::Keymap,
+            "{pressed:?} should continue the sequence"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_keys_still_win_while_a_sequence_is_pending() {
+        // Given a `<C-g>` sequence pending in a pane.
+
+        // When routing Cmd h.
+        let routed = route(cmd(KeyCode::Char('h')), true, true);
+
+        // Then it moves the focus.
+        assert_eq!(
+            routed,
+            Route::Intent(Intent::MoveFocus(NavDirection::Left)),
+            "Cmd h should win over a pending sequence"
+        );
+    }
+
+    #[rstest::rstest]
+    fn ctrl_g_ctrl_g_sends_ctrl_g_in_a_pane() {
+        // Given `<C-g>` pressed in a pane.
+        let mut keys = Keys::new(keymap(), Scope::Pane);
+        press(&mut keys, LEADER);
+
+        // When pressing `<C-g>` again.
+        let intent = press(&mut keys, LEADER);
+
+        // Then it sends Ctrl g to the pane.
+        assert_eq!(
+            intent,
+            Some(Intent::SendCtrlG),
+            "<C-g> <C-g> should send Ctrl g"
+        );
     }
 }

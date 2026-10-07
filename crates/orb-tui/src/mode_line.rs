@@ -69,8 +69,8 @@ pub(crate) fn render(
 /// The mode's name and colour.
 fn mode(state: &AppState) -> (&'static str, Color) {
     match state.focus {
-        Focus::Attached => ("ATTACHED", GREEN1),
-        Focus::Sidebar | Focus::Dashboard => ("NORMAL", BLUE),
+        Focus::Pane => ("ATTACHED", GREEN1),
+        Focus::Sidebar => ("NORMAL", BLUE),
         Focus::Picker => ("PICKER", YELLOW),
         Focus::Rename | Focus::Search => ("INSERT", GREEN),
     }
@@ -355,7 +355,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case::normal(Focus::Sidebar, BLUE)]
-    #[case::attached(Focus::Attached, GREEN1)]
+    #[case::pane(Focus::Pane, GREEN1)]
     #[case::picker(Focus::Picker, YELLOW)]
     #[case::search(Focus::Search, GREEN)]
     #[case::rename(Focus::Rename, GREEN)]
@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::attached(Focus::Attached, " ATTACHED ")]
+    #[case::pane(Focus::Pane, " ATTACHED ")]
     #[case::picker(Focus::Picker, " PICKER ")]
     fn mode_line_names_the_focus_mode(#[case] focus: Focus, #[case] block: &str) {
         // Given a selected thread with that focus.

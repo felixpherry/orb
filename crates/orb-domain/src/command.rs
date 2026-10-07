@@ -1,5 +1,6 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
-//! has updated [`AppState`](crate::AppState). Pane commands,
+//! has updated [`AppState`](crate::AppState). Pane commands (`Attach`,
+//! `Detach`, `SendCtrlG`),
 //! `ListDirectories`, `ListBranches`, `LoadPreview` and `OpenTool` are carried
 //! out by the frontend loop; session commands (new sessions, add or remove a
 //! project, move a session to another workspace, switch a session's branch,
@@ -25,6 +26,8 @@ pub enum Command {
     Attach(SessionId),
     /// Stop sending input to the terminal pane.
     Detach,
+    /// Write Ctrl g to the focused pane.
+    SendCtrlG,
     /// Split `session`'s focused pane `split`; the sessions actor makes the pane.
     SplitPane { session: SessionId, split: Split },
     /// Open a tab of one new pane in `session`.
@@ -88,7 +91,7 @@ pub enum Command {
     SaveUi,
     /// Save the jump list as it now is in the app state.
     SaveJumps,
-    /// Remove the project from `␣n` and the project filter; its sessions
+    /// Remove the project from `<C-g> n` and the project filter; its sessions
     /// stay.
     RemoveProject(ProjectId),
     /// Make a `kind` session in orb's own folder `name` (a slug), with one

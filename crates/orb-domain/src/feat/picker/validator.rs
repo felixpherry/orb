@@ -389,7 +389,7 @@ mod tests {
 
     #[rstest::rstest]
     fn remove_project_is_refused_outside_the_project_filter() {
-        // Given the ␣n project picker with alpha highlighted.
+        // Given the `<C-g> n` project picker with alpha highlighted.
         let state = AppState {
             picker: Some(PickerState::projects(vec![alpha()], Focus::Sidebar)),
             ..AppState::default()

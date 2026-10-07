@@ -21,19 +21,17 @@
 //! orb was down), then every unsettled session with a pane whose zmx session
 //! still runs is attached again. A client
 //! that dies while zmx still lists its session is attached again once; a
-//! second death closes the pane with an error on the mode line. While a pane has the keys, input goes straight to its program,
-//! except the Cmd keys ([`keymap::cmd_route`]) and the resize keys;
-//! otherwise keys go through the Cmd keys, the resize keys, then the
-//! [`keymap`]. The loop itself reads the directory picker's listings, the
-//! branch picker's refs and the session picker's preview, re-reading the
+//! second death closes the pane with an error on the mode line. While a pane
+//! has the keys, input goes straight to its program except orb's Cmd keys,
+//! `<C-[>`/`<C-]>` and a `<C-g>` sequence (see [`keymap::route`]). The loop
+//! itself reads the directory picker's listings, the branch picker's refs and the session picker's preview, re-reading the
 //! preview whenever the selected thread's transcript changes length, and
 //! hands tools to zellij, since each takes milliseconds.
 //!
-//! `<C-h>` moves the keys from the pane to the sidebar and leaves it drawn,
-//! so `<C-l>` goes back into it; `<C-\>`, in the pane or on the session in
-//! the sidebar, detaches it, and settling or deleting the session ends its
-//! panes' clients too. A pane whose program exits within a second of
-//! attaching leaves `session exited at start` on the start screen.
+//! A click on the sidebar or `Cmd h` from the leftmost pane moves the keys to
+//! the sidebar and leaves the panes drawn, so `Cmd l` goes back in. Settling
+//! or deleting a session ends its panes' clients. A pane whose program exits
+//! within a second of attaching leaves `session exited at start` on the start screen.
 //!
 //! When a thread finishes a turn or starts needing an approval or an answer
 //! while orb's terminal isn't focused, the loop sends it as a desktop
@@ -88,7 +86,9 @@ use orb_domain::{AppState, Command, Focus, Intent, IntentHandler, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
-use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEvent};
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
+};
 use ratatui::layout::Rect;
 use wherror::Error;
 
@@ -220,8 +220,8 @@ fn started_attach(
 ) -> StartedAttach {
     match focus {
         _ if started.is_none() || started != selected => StartedAttach::Drop,
-        Focus::Picker | Focus::Rename | Focus::Search | Focus::Attached => StartedAttach::Wait,
-        Focus::Sidebar | Focus::Dashboard => StartedAttach::Attach { keep_keys: waited },
+        Focus::Picker | Focus::Rename | Focus::Search | Focus::Pane => StartedAttach::Wait,
+        Focus::Sidebar => StartedAttach::Attach { keep_keys: waited },
     }
 }
 
@@ -360,11 +360,11 @@ where
 }
 
 /// Where the keys go once the pane is gone: from the pane to the sidebar;
-/// anywhere else (the sidebar after `<C-h>`, a text input) they stay.
+/// anywhere else (the sidebar after a click on it, a text input) they stay.
 fn after_pane(focus: Focus) -> Focus {
     match focus {
-        Focus::Attached => Focus::Sidebar,
-        Focus::Sidebar | Focus::Dashboard | Focus::Picker | Focus::Rename | Focus::Search => focus,
+        Focus::Pane => Focus::Sidebar,
+        Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search => focus,
     }
 }
 
@@ -375,10 +375,10 @@ fn after_pane(focus: Focus) -> Focus {
 /// default while attached without a pane.
 fn cursor_style(focus: Focus, pane: Option<SetCursorStyle>) -> SetCursorStyle {
     match (focus, pane) {
-        (Focus::Sidebar | Focus::Dashboard, _) => SetCursorStyle::SteadyBlock,
+        (Focus::Sidebar, _) => SetCursorStyle::SteadyBlock,
         (Focus::Picker | Focus::Rename | Focus::Search, _) => SetCursorStyle::SteadyBar,
-        (Focus::Attached, Some(style)) => style,
-        (Focus::Attached, None) => SetCursorStyle::DefaultUserShape,
+        (Focus::Pane, Some(style)) => style,
+        (Focus::Pane, None) => SetCursorStyle::DefaultUserShape,
     }
 }
 
@@ -607,10 +607,8 @@ impl App {
     fn attached_id(&self) -> Option<PaneId> {
         let state = self.state.read();
         match state.focus {
-            Focus::Attached => state.shown_layout()?.focused(),
-            Focus::Sidebar | Focus::Dashboard | Focus::Picker | Focus::Rename | Focus::Search => {
-                None
-            }
+            Focus::Pane => state.shown_layout()?.focused(),
+            Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search => None,
         }
     }
 
@@ -689,32 +687,16 @@ impl App {
             LoopEvent::Input(Event::Key(key)) if key.kind != KeyEventKind::Release => {
                 let focus = self.state.read().focus;
                 let intent = match focus {
-                    Focus::Attached => match keymap::cmd_route(key)
-                        .map_or_else(|| keymap::attached_route(key), Route::Intent)
-                    {
-                        Route::Intent(intent) => Some(intent),
-                        Route::Forward => {
-                            if let Some(pane) = self.attached_pane() {
-                                pane.key(&key);
-                            }
-                            None
-                        }
-                    },
-                    Focus::Sidebar | Focus::Dashboard => {
-                        match keymap::layout_route(key)
-                            .or_else(|| keymap::jump_route(key))
-                            .or_else(|| keymap::cmd_route(key))
-                            .or(match focus {
-                                Focus::Sidebar => keymap::sidebar_route(key),
-                                _ => None,
-                            }) {
-                            Some(intent) => {
-                                // A resize, a jump, a Cmd key or a detach ends any key
-                                // sequence in progress.
+                    // The rename box and the search take the picker's keys.
+                    Focus::Picker | Focus::Rename | Focus::Search => keymap::picker_route(key),
+                    Focus::Sidebar | Focus::Pane => {
+                        match keymap::route(key, focus == Focus::Pane, self.keys.is_pending()) {
+                            Route::Intent(intent) => {
+                                // A Cmd key or a jump ends any key sequence in progress.
                                 self.keys.dismiss();
                                 Some(intent)
                             }
-                            None => {
+                            Route::Keymap => {
                                 // Focus and the selection also change outside
                                 // intents (the pane exits, a new session attaches).
                                 let scope = Scope::of(focus, &self.state.read());
@@ -723,10 +705,14 @@ impl App {
                                 }
                                 keymap::press(&mut self.keys, key)
                             }
+                            Route::Forward => {
+                                if let Some(pane) = self.attached_pane() {
+                                    pane.key(&key);
+                                }
+                                None
+                            }
                         }
                     }
-                    // The rename box and the search take the picker's keys.
-                    Focus::Picker | Focus::Rename | Focus::Search => keymap::picker_route(key),
                 };
                 if let Some(intent) = intent {
                     let commands = IntentHandler::handle(&intent, &mut self.state.write());
@@ -824,6 +810,11 @@ impl App {
                     .try_send();
             }
             Command::Detach => self.sync_focus(),
+            Command::SendCtrlG => {
+                if let Some(pane) = self.attached_pane() {
+                    pane.key(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+                }
+            }
             Command::NewSession { project, workspace } => {
                 let _ = self
                     .sessions
@@ -1127,7 +1118,7 @@ impl App {
             }
         }
         let mut app = self.state.write();
-        if app.focus == Focus::Attached && app.shown_layout().is_none() {
+        if app.focus == Focus::Pane && app.shown_layout().is_none() {
             app.focus = after_pane(app.focus);
         }
     }
@@ -1135,7 +1126,7 @@ impl App {
     /// Attaches to a new session's request while it's still selected, as
     /// [`started_attach`] decides: at once, or, if the user was typing or in
     /// a pane when it came up, once the keys are back in the sidebar or the
-    /// dashboard, leaving them there with the pane drawn (as `<C-h>` does). A
+    /// dashboard, leaving them there with the pane drawn (as a click on the sidebar does). A
     /// request whose session is no longer selected is dropped for good. A
     /// failure the start still reported (saving the store) stays on the mode
     /// line.
@@ -1171,7 +1162,7 @@ impl App {
             self.execute(command);
         }
         if keep_keys {
-            // The pane loses the keys, as on `<C-h>`.
+            // The pane loses the keys, as on a click on the sidebar.
             self.execute(&Command::Detach);
         }
     }
@@ -1521,12 +1512,11 @@ mod tests {
     #[case::picker_bar(Focus::Picker, None, SetCursorStyle::SteadyBar)]
     #[case::rename_bar(Focus::Rename, None, SetCursorStyle::SteadyBar)]
     #[case::search_bar(Focus::Search, None, SetCursorStyle::SteadyBar)]
-    #[case::attached_follows_the_pane(
-        Focus::Attached,
+    #[case::pane_follows_its_program(
+        Focus::Pane,
         Some(SetCursorStyle::BlinkingUnderScore),
         SetCursorStyle::BlinkingUnderScore
     )]
-    #[case::dashboard_block(Focus::Dashboard, None, SetCursorStyle::SteadyBlock)]
     fn cursor_shape_follows_where_the_keys_are(
         #[case] focus: Focus,
         #[case] pane: Option<SetCursorStyle>,
@@ -1631,14 +1621,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Attached, Focus::Sidebar)]
+    #[case(Focus::Pane, Focus::Sidebar)]
     #[case(Focus::Sidebar, Focus::Sidebar)]
-    #[case(Focus::Dashboard, Focus::Dashboard)]
     #[case(Focus::Picker, Focus::Picker)]
     fn keys_leave_a_gone_pane_for_the_sidebar_only_from_the_pane(
         #[case] focus: Focus,
         #[case] expected: Focus,
     ) {
+        // Given / When / Then only a pane focus moves to the sidebar once the
+        // pane is gone.
         assert_eq!(
             after_pane(focus),
             expected,
@@ -1647,14 +1638,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Sidebar)]
-    #[case(Focus::Dashboard)]
-    fn started_session_still_selected_is_attached(#[case] focus: Focus) {
+    fn started_session_still_selected_is_attached() {
         // Given new session 1 still selected.
         let started = Some(SessionId(1));
 
-        // When deciding what to do in `focus`.
-        let decision = started_attach(started, started, focus, false);
+        // When deciding what to do in the sidebar.
+        let decision = started_attach(started, started, Focus::Sidebar, false);
 
         // Then orb attaches, taking the keys into the pane.
         assert_eq!(
@@ -1684,7 +1673,7 @@ mod tests {
     #[case(Focus::Picker)]
     #[case(Focus::Rename)]
     #[case(Focus::Search)]
-    #[case(Focus::Attached)]
+    #[case(Focus::Pane)]
     fn started_session_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
         // Given new session 1 still selected. e.g. while
         // a picker has the keys.
@@ -1702,15 +1691,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Sidebar)]
-    #[case(Focus::Dashboard)]
-    fn waited_started_thread_attaches_once_the_keys_are_back(#[case] focus: Focus) {
+    fn waited_started_thread_attaches_once_the_keys_are_back() {
         // Given thread 1's attach request waited while the user was in a
         // picker, and the thread is still selected.
         let started = Some(SessionId(1));
 
-        // When deciding what to do once the keys are back in `focus`.
-        let decision = started_attach(started, started, focus, true);
+        // When deciding what to do once the keys are back in the sidebar.
+        let decision = started_attach(started, started, Focus::Sidebar, true);
 
         // Then orb attaches and leaves the keys there.
         assert_eq!(

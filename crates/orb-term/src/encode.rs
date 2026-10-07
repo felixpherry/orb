@@ -177,6 +177,7 @@ mod tests {
     #[rstest::rstest]
     #[case(KeyCode::BackTab, KeyModifiers::SHIFT, b"\x1b[Z")]
     #[case(KeyCode::Char('h'), KeyModifiers::CONTROL, b"\x08")]
+    #[case(KeyCode::Char('g'), KeyModifiers::CONTROL, b"\x07")]
     #[case(KeyCode::Backspace, KeyModifiers::NONE, b"\x7f")]
     #[case(KeyCode::Up, KeyModifiers::NONE, b"\x1b[A")]
     #[case(KeyCode::Enter, KeyModifiers::NONE, b"\r")]

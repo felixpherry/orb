@@ -100,7 +100,7 @@ pub(crate) fn render(
     };
     match state.shown_layout() {
         Some(layout) => {
-            let keys_in_pane = state.focus == Focus::Attached;
+            let keys_in_pane = state.focus == Focus::Pane;
             if let Some(cursor) =
                 tabs::render(layout, panes, keys_in_pane, right, frame.buffer_mut(), hits)
             {
@@ -241,11 +241,9 @@ mod tests {
 
     use super::{BACKGROUND, layout, render};
     use crate::sidebar::{BLUE, DARK3};
-    use ratatui::crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-    use crate::keymap::{Keys, Scope, keymap, press};
+    use crate::keymap::{Keys, LEADER, Scope, keymap, press};
     use crate::mouse::{self, Clicks, HitMap, MouseRoute};
     use crate::picker::PickerScroll;
     use crate::sidebar::SidebarScroll;
@@ -313,7 +311,7 @@ mod tests {
 
     /// Draws `state` on an 80x40 screen, tall enough for the whole dashboard.
     fn draw_tall(state: &AppState, pane_error: Option<&str>) -> Buffer {
-        let keys = Keys::new(keymap(), Scope::Dashboard);
+        let keys = Keys::new(keymap(), Scope::Sidebar);
         frame(state, pane_error, &keys, 40)
             .backend()
             .buffer()
@@ -707,7 +705,7 @@ mod tests {
     fn attached_pane_default_background_gets_orbs() {
         // Given a live pane that printed text with no background colour.
         let panes = thread_pane();
-        let state = shown(Focus::Attached);
+        let state = shown(Focus::Pane);
 
         // When drawing a frame while attached.
         let buffer = panes.as_ref().map(|panes| draw_with_pane(&state, panes));
@@ -766,13 +764,10 @@ mod tests {
 
     #[rstest::rstest]
     fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
-        // Given Space pressed on a two-row screen, too short for the popup.
+        // Given `<C-g>` pressed on a two-row screen, too short for the popup.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 2));
         let mut keys = Keys::new(keymap(), Scope::Sidebar);
-        press(
-            &mut keys,
-            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-        );
+        press(&mut keys, LEADER);
 
         // When drawing a frame.
         let state = AppState::default();
@@ -801,13 +796,10 @@ mod tests {
 
     #[rstest::rstest]
     fn leader_popup_sits_above_the_mode_line() {
-        // Given Space pressed on a 20-row screen.
+        // Given `<C-g>` pressed on a 20-row screen.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
         let mut keys = Keys::new(keymap(), Scope::Sidebar);
-        press(
-            &mut keys,
-            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-        );
+        press(&mut keys, LEADER);
 
         // When drawing a frame.
         let state = AppState::default();
@@ -836,7 +828,7 @@ mod tests {
     fn attached_focus_draws_the_live_pane() {
         // Given a live pane for the selected thread, attached.
         let panes = thread_pane();
-        let state = shown(Focus::Attached);
+        let state = shown(Focus::Pane);
 
         // When drawing a frame.
         let right = panes
@@ -997,7 +989,7 @@ mod tests {
     fn attached_focus_puts_the_cursor_in_the_focused_pane() {
         // Given a live pane for the selected thread, attached.
         let panes = thread_pane();
-        let state = shown(Focus::Attached);
+        let state = shown(Focus::Pane);
 
         // When drawing a frame.
         let cursor = panes.as_ref().and_then(|panes| cursor_of(&state, panes));
@@ -1084,7 +1076,7 @@ mod tests {
     fn hidden_sidebar_draws_the_attached_pane_from_the_left_edge() {
         // Given a live pane for the selected thread, attached, with the sidebar hidden.
         let panes = thread_pane();
-        let state = hidden(shown(Focus::Attached));
+        let state = hidden(shown(Focus::Pane));
 
         // When drawing a frame.
         let row = panes.as_ref().map(|panes| {
@@ -1214,7 +1206,7 @@ mod tests {
     #[rstest::rstest]
     fn hidden_sidebar_returns_no_layout() {
         // Given a selected thread with the sidebar hidden.
-        let state = hidden(selected(Focus::Dashboard));
+        let state = hidden(selected(Focus::Sidebar));
 
         // When drawing a frame.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
@@ -1225,7 +1217,7 @@ mod tests {
                 &state,
                 &HashMap::new(),
                 None,
-                &Keys::new(keymap(), Scope::Dashboard),
+                &Keys::new(keymap(), Scope::Sidebar),
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
                 &mut SidebarScroll::default(),

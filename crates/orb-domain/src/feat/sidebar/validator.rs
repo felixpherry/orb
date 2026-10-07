@@ -34,7 +34,7 @@ pub enum FocusSidebarError {
     Hidden,
 }
 
-/// Allow focusing the sidebar only while it's shown; `␣e` shows it.
+/// Allow focusing the sidebar only while it's shown; `<C-g> s` shows it.
 ///
 /// # Errors
 ///

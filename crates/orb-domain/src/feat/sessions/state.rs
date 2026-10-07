@@ -276,7 +276,7 @@ pub struct Project {
     /// Whether its root is in a git repository, as the sessions actor last
     /// found; never for orb's own projects. Not saved.
     pub repo: bool,
-    /// Removed from `␣n` and the project filter; its sessions stay.
+    /// Removed from `<C-g> n` and the project filter; its sessions stay.
     pub removed: bool,
     pub kind: ProjectKind,
 }

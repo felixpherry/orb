@@ -1,4 +1,4 @@
-//! Checks whether `<C-o>`/`<C-i>` can move through the jump list.
+//! Checks whether `<C-[>`/`<C-]>` can move through the jump list.
 
 use wherror::Error;
 
@@ -12,7 +12,7 @@ pub enum JumpError {
     NoTarget,
 }
 
-/// Allow `<C-o>` while an older reachable row is listed.
+/// Allow `<C-[>` while an older reachable row is listed.
 ///
 /// # Errors
 ///
@@ -25,7 +25,7 @@ pub fn validate_jump_back(state: &AppState) -> Result<(), JumpError> {
         .ok_or(JumpError::NoTarget)
 }
 
-/// Allow `<C-i>` after a `<C-o>` while a newer reachable row is listed.
+/// Allow `<C-]>` after a `<C-[>` while a newer reachable row is listed.
 ///
 /// # Errors
 ///
@@ -115,7 +115,7 @@ mod tests {
         let result = validate_jump_back(&state);
 
         // Then there's nowhere to go.
-        assert_eq!(result, Err(JumpError::NoTarget), "<C-o> needs an older row");
+        assert_eq!(result, Err(JumpError::NoTarget), "<C-[> needs an older row");
     }
 
     #[rstest::rstest]
@@ -127,6 +127,6 @@ mod tests {
         let result = validate_jump_back(&state);
 
         // Then the jump can go ahead.
-        assert_eq!(result, Ok(()), "<C-o> onto thread 1 should be allowed");
+        assert_eq!(result, Ok(()), "<C-[> onto thread 1 should be allowed");
     }
 }

@@ -266,7 +266,7 @@ pub(crate) fn route(
     let on_focused = focused
         .and_then(|id| hits.pane_area(id))
         .is_some_and(|area| area.contains(at));
-    if focus == Focus::Attached && on_focused {
+    if focus == Focus::Pane && on_focused {
         return MouseRoute::Forward;
     }
     let action = match event.kind {
@@ -358,8 +358,7 @@ fn route_click(
                 (None, None, false) => MouseRoute::Nothing,
             };
         }
-        Focus::Attached => Some(Intent::LeavePane),
-        Focus::Dashboard => Some(Intent::FocusSidebar),
+        Focus::Pane => Some(Intent::LeavePane),
         Focus::Sidebar | Focus::Picker | Focus::Rename => None,
     };
     if hits.on_sidebar_input(at) {
@@ -460,7 +459,7 @@ mod tests {
     fn click_on_a_row_from_the_pane_leaves_it_first() {
         // Given the attached pane has the keys.
         // When clicking thread 1's row.
-        let routed = route_once(left_click(5, 4), Focus::Attached);
+        let routed = route_once(left_click(5, 4), Focus::Pane);
 
         // Then the pane is left, then the row is selected.
         assert_eq!(
@@ -505,7 +504,7 @@ mod tests {
     fn click_on_the_focused_pane_while_attached_is_forwarded() {
         // Given thread 1's focused pane has the keys.
         // When clicking inside it.
-        let routed = route_once(left_click(40, 5), Focus::Attached);
+        let routed = route_once(left_click(40, 5), Focus::Pane);
 
         // Then the click goes to the pane.
         assert_eq!(
@@ -519,7 +518,7 @@ mod tests {
     fn click_on_another_pane_while_attached_focuses_it() {
         // Given thread 1's focused pane has the keys.
         // When clicking pane -1.
-        let routed = route_once(left_click(60, 5), Focus::Attached);
+        let routed = route_once(left_click(60, 5), Focus::Pane);
 
         // Then pane -1 takes the focus.
         assert_eq!(
@@ -533,7 +532,7 @@ mod tests {
     fn click_on_another_pane_while_attached_is_not_forwarded() {
         // Given thread 1's focused pane has the keys.
         // When clicking pane -1.
-        let routed = route_once(left_click(60, 5), Focus::Attached);
+        let routed = route_once(left_click(60, 5), Focus::Pane);
 
         // Then the click doesn't reach any program.
         assert_ne!(
@@ -608,7 +607,7 @@ mod tests {
     fn wheel_over_the_sidebar_from_the_pane_scrolls_its_view() {
         // Given the attached pane has the keys.
         // When wheeling down over the sidebar.
-        let routed = route_once(mouse(MouseEventKind::ScrollDown, 5, 10), Focus::Attached);
+        let routed = route_once(mouse(MouseEventKind::ScrollDown, 5, 10), Focus::Pane);
 
         // Then the sidebar's view scrolls three lines.
         assert_eq!(
@@ -620,8 +619,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case::sidebar(Focus::Sidebar)]
-    #[case::attached(Focus::Attached)]
-    #[case::dashboard(Focus::Dashboard)]
+    #[case::pane(Focus::Pane)]
     fn click_on_the_input_box_starts_a_search(#[case] focus: Focus) {
         // Given `focus` has the keys.
         // When clicking the sidebar's input box.

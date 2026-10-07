@@ -152,7 +152,7 @@ fn look(intent: &Intent) -> (&'static str, Color) {
     }
 }
 
-/// The pending path, e.g. `␣` or `g`.
+/// The pending path, e.g. `<C-g>` or `<C-g> t`.
 fn path(keys: &Keys) -> String {
     keys.current_sequence
         .iter()
@@ -215,21 +215,18 @@ mod tests {
     use ratatui_which_key::Keymap;
 
     use super::render;
-    use crate::keymap::{KeyCategory, Keys, Scope, keymap, press};
+    use crate::keymap::{KeyCategory, Keys, LEADER, Scope, keymap, press};
     use crate::sidebar::{BLUE2, PURPLE};
 
     const SCREEN: Rect = Rect::new(0, 0, 80, 20);
 
-    /// `keys` with Space pressed.
+    /// `keys` with `<C-g>` pressed.
     fn leader(mut keys: Keys) -> Keys {
-        press(
-            &mut keys,
-            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-        );
+        press(&mut keys, LEADER);
         keys
     }
 
-    /// orb's keymap on a thread with Space pressed.
+    /// orb's keymap on a thread with `<C-g>` pressed.
     fn leader_on_thread() -> Keys {
         leader(Keys::new(keymap(), Scope::Sidebar))
     }
@@ -256,9 +253,9 @@ mod tests {
 
     #[rstest::rstest]
     fn popup_rows_are_in_which_key_order() {
-        // Given a keymap with `␣/`, `␣B`, `␣b`, `␣a` and `␣1`, and Space pressed.
+        // Given a keymap with `<C-g> /`, `B`, `b`, `a` and `1`, and `<C-g>` pressed.
         let keys = {
-            let mut km = Keymap::new();
+            let mut km = Keymap::new().with_leader(LEADER);
             for key in ["/", "B", "b", "a", "1"] {
                 km.bind(
                     &format!("<leader>{key}"),
@@ -284,24 +281,24 @@ mod tests {
 
     #[rstest::rstest]
     fn popup_top_border_shows_the_pending_path() {
-        // Given Space pressed on a thread.
+        // Given `<C-g>` pressed on a thread.
         let keys = leader_on_thread();
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
 
-        // Then the top border carries ` ␣ `.
+        // Then the top border carries ` <C-g> `.
         let lines = lines(&buffer);
         let top = lines.iter().find(|line| line.contains('╭'));
         assert!(
-            top.is_some_and(|line| line.contains("╭ ␣ ")),
+            top.is_some_and(|line| line.contains("╭ <C-g> ")),
             "the top border was {top:?}"
         );
     }
 
     #[rstest::rstest]
     fn leaf_row_reads_key_arrow_icon_desc() {
-        // Given Space pressed on a thread.
+        // Given `<C-g>` pressed on a thread.
         let keys = leader_on_thread();
 
         // When drawing the popup.
@@ -319,9 +316,9 @@ mod tests {
 
     #[rstest::rstest]
     fn group_row_reads_plus_name() {
-        // Given a keymap with a `␣x` group named `extra`, and Space pressed.
+        // Given a keymap with a `<C-g> x` group named `extra`, and `<C-g>` pressed.
         let keys = {
-            let mut km = Keymap::new();
+            let mut km = Keymap::new().with_leader(LEADER);
             km.describe_group("<leader>x", "extra");
             km.bind(
                 "<leader>xa",
@@ -347,7 +344,7 @@ mod tests {
 
     #[rstest::rstest]
     fn popup_foot_shows_the_help() {
-        // Given Space pressed on a thread.
+        // Given `<C-g>` pressed on a thread.
         let keys = leader_on_thread();
 
         // When drawing the popup.
@@ -367,7 +364,7 @@ mod tests {
 
     #[rstest::rstest]
     fn popup_sits_bottom_right_on_the_area_bottom() {
-        // Given Space pressed on a thread, and an area smaller than the screen.
+        // Given `<C-g>` pressed on a thread, and an area smaller than the screen.
         let keys = leader_on_thread();
         let area = Rect::new(0, 0, 60, 16);
 
@@ -384,7 +381,7 @@ mod tests {
 
     #[rstest::rstest]
     fn too_tall_popup_is_cut_off_keeping_the_foot() {
-        // Given Space pressed on a thread, and an area 7 rows tall.
+        // Given `<C-g>` pressed on a thread, and an area 7 rows tall.
         let keys = leader_on_thread();
         let area = Rect::new(0, 0, 80, 7);
 
@@ -417,37 +414,36 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leader_popup_shows_g_as_the_group_group() {
-        // Given Space pressed on a thread.
+    fn leader_popup_shows_g_as_the_new_group() {
+        // Given `<C-g>` pressed on a thread.
         let keys = leader_on_thread();
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
 
-        // Then the `g` row reads `g ➜ <folder> +group`.
+        // Then the `g` row reads `g ➜ <folder> +new`.
         let lines = lines(&buffer);
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("│ g ➜ \u{f07b} +group")),
+                .any(|line| line.contains("│ g ➜ \u{f07b} +new")),
             "the screen was {lines:#?}"
         );
     }
 
     #[rstest::rstest]
-    fn leader_popup_lists_the_search_group() {
-        // Given Space pressed on a thread.
-        let keys = leader_on_thread();
+    fn leader_popup_in_a_pane_lists_the_pane_and_tab_groups() {
+        // Given `<C-g>` pressed in a pane.
+        let keys = leader(Keys::new(keymap(), Scope::Pane));
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
 
-        // Then the `s` row reads `s ➜ <folder> +search`.
+        // Then it has the `p ➜ <folder> +pane` and `t ➜ <folder> +tab` rows.
         let lines = lines(&buffer);
+        let listed = |row: &str| lines.iter().any(|line| line.contains(row));
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("│ s ➜ \u{f07b} +search")),
+            listed("p ➜ \u{f07b} +pane") && listed("t ➜ \u{f07b} +tab"),
             "the screen was {lines:#?}"
         );
     }
@@ -460,7 +456,7 @@ mod tests {
         #[case] icon: &str,
         #[case] colour: Color,
     ) {
-        // Given Space and `g` pressed on a thread.
+        // Given `<C-g>` and `g` pressed on a thread.
         let keys = {
             let mut keys = leader_on_thread();
             press(

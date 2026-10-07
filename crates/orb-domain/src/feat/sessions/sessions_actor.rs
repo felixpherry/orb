@@ -62,7 +62,7 @@
 //! template for the kind; orb writes that template from its built-in default
 //! when it's missing, and never overwrites a folder that already exists.
 //!
-//! It adds projects and removes them: a removed project leaves `␣n` and the
+//! It adds projects and removes them: a removed project leaves `<C-g> n` and the
 //! project filter, its sessions stay, and adding it again
 //! restores it.
 //!
@@ -301,7 +301,7 @@ pub struct SaveUi;
 #[derive(Debug)]
 pub struct SaveJumps;
 
-/// Remove a project from `␣n` and the project filter.
+/// Remove a project from `<C-g> n` and the project filter.
 #[derive(Debug)]
 pub struct RemoveProject(pub ProjectId);
 
@@ -1804,7 +1804,7 @@ impl SessionsActor {
         }
     }
 
-    /// Removes project `id` from `␣n` and the project filter once the store
+    /// Removes project `id` from `<C-g> n` and the project filter once the store
     /// has; its sessions stay.
     fn remove_project(&mut self, id: ProjectId) {
         let removed = self.store.remove_project(id, now_ms());
@@ -6101,7 +6101,7 @@ mod tests {
         assert_eq!(
             removed_of(&state, id),
             Some(true),
-            "a removed project should leave ␣n and the filter"
+            "a removed project should leave <C-g> n and the filter"
         );
         Ok(())
     }
@@ -6245,7 +6245,7 @@ mod tests {
         assert_eq!(
             removed_of(&state, id),
             Some(false),
-            "␣p on a removed project's directory should restore it"
+            "<C-g> a on a removed project's directory should restore it"
         );
         Ok(())
     }

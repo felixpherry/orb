@@ -17,13 +17,11 @@ use crate::feat::worktrees::state::Worktrees;
 /// which-key scopes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Focus {
-    /// Keys move through the sidebar's threads.
+    /// Keys move through the sidebar's sessions.
     #[default]
     Sidebar,
-    /// Nothing sets it any more; the start screen takes no keys.
-    Dashboard,
     /// Keys go to the shown layout's focused pane.
-    Attached,
+    Pane,
     /// Keys edit the open picker's filter and move its selection.
     Picker,
     /// Keys edit the name in the rename box.
@@ -44,7 +42,8 @@ pub struct AppState {
     /// The sidebar's width, visibility and last layout.
     pub sidebar: SidebarView,
     /// The sessions orb holds pane clients for: added on `⏎`, removed by
-    /// `<C-\>`, settling, deleting, a failed spawn and the layout emptying.
+    /// settling, deleting, a workspace change, a failed spawn and the layout
+    /// emptying.
     /// Every pane of a session in here has a client, and the right-hand area
     /// shows the selected session while it is in here. Written by the intent
     /// handler, the frontend, and the sessions actor (which drops a session it
@@ -60,7 +59,7 @@ pub struct AppState {
     pub rename: Option<Rename>,
     /// The user's home directory; what the directory picker's `~/` means.
     pub home: PathBuf,
-    /// The rows `<C-o>`/`<C-i>` move between. Written by the intent handler
+    /// The rows `<C-[>`/`<C-]>` move between. Written by the intent handler
     /// (recording jumps, moving through the list, dropping a deleted
     /// session) and by the sessions actor, its owner (restoring the saved
     /// list).
