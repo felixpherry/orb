@@ -2,8 +2,9 @@
 //!
 //! Every visible cell of the emulated terminal becomes a ratatui cell with the
 //! same character, colors, and attributes. Named colors stay palette indices so
-//! the user's terminal theme applies. The renderer also reports where the
-//! child's cursor is and which shape the child asked for.
+//! the user's terminal theme applies. Selected text is drawn in reverse
+//! video. The renderer also reports where the child's cursor is and which
+//! shape the child asked for.
 
 use std::iter::once;
 
@@ -22,13 +23,15 @@ use ratatui::style::{Color, Modifier, Style};
 const DIM_BLACK: usize = NamedColor::DimBlack as usize;
 const DIM_WHITE: usize = NamedColor::DimWhite as usize;
 
-/// Draws the child's screen into `area` of `buf` and returns where the cursor
-/// is, or `None` when the child hid it or it's outside the area.
+/// Draws the child's screen, at its scroll offset and with the selection in
+/// reverse video, into `area` of `buf`; returns where the cursor is, or
+/// `None` when the child hid it or it's outside the area.
 pub(crate) fn render_term<L>(term: &Term<L>, area: Rect, buf: &mut Buffer) -> Option<Position>
 where
     L: EventListener,
 {
     let content = term.renderable_content();
+    let selection = content.selection;
     for indexed in content.display_iter {
         let cell = indexed.cell;
         if cell
@@ -49,11 +52,12 @@ where
             }
             None => target.set_char(c),
         };
+        let selected = selection.is_some_and(|range| range.contains(indexed.point));
         target.set_style(
             Style::new()
                 .fg(color(cell.fg))
                 .bg(color(cell.bg))
-                .add_modifier(modifiers(cell.flags)),
+                .add_modifier(modifiers(cell.flags, selected)),
         );
     }
     match content.cursor.shape {
@@ -102,8 +106,9 @@ fn color(color: AnsiColor) -> Color {
     }
 }
 
-/// The ratatui modifiers for a cell's attributes.
-fn modifiers(flags: Flags) -> Modifier {
+/// The ratatui modifiers for a cell's attributes, with reverse video toggled
+/// for a selected cell.
+fn modifiers(flags: Flags, selected: bool) -> Modifier {
     [
         (Flags::BOLD, Modifier::BOLD),
         (Flags::DIM, Modifier::DIM),
@@ -116,11 +121,18 @@ fn modifiers(flags: Flags) -> Modifier {
     .into_iter()
     .filter(|(cell, _)| flags.intersects(*cell))
     .fold(Modifier::empty(), |mods, (_, modifier)| mods | modifier)
+        ^ if selected {
+            Modifier::REVERSED
+        } else {
+            Modifier::empty()
+        }
 }
 
 #[cfg(test)]
 mod tests {
     use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::index::{Column, Line, Point, Side};
+    use alacritty_terminal::selection::{Selection, SelectionType};
     use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::term::{Config, Term};
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
@@ -139,6 +151,25 @@ mod tests {
         let mut term = Term::new(Config::default(), &TermSize::new(20, 5), VoidListener);
         Processor::<StdSyncHandler>::new().advance(&mut term, output.as_bytes());
         term
+    }
+
+    /// `term` with its first row selected from column 0 up to, not
+    /// including, column `end`.
+    fn select_first_row(mut term: Term<VoidListener>, end: usize) -> Term<VoidListener> {
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(0), Column(0)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(0), Column(end)), Side::Left);
+        term.selection = Some(selection);
+        term
+    }
+
+    /// Whether cell `x` of row 0 is drawn in reverse video.
+    fn reversed(buf: &Buffer, x: u16) -> bool {
+        buf.cell((x, 0))
+            .is_some_and(|cell| cell.modifier.contains(Modifier::REVERSED))
     }
 
     /// Draws `term` into `area` of a 30×10 buffer; returns the buffer and the
@@ -292,5 +323,36 @@ mod tests {
 
         // Then it maps to the matching outer-terminal style.
         assert_eq!(style, expected, "style for {}", output.escape_debug());
+    }
+
+    #[rstest::rstest]
+    fn selected_cells_are_reversed() {
+        // Given `abc` with `ab` selected.
+        let term = select_first_row(term_with("abc"), 2);
+
+        // When rendering its screen.
+        let (buf, _) = render(&term, AREA);
+
+        // Then `a` and `b` are reversed and `c` isn't.
+        assert_eq!(
+            [reversed(&buf, 0), reversed(&buf, 1), reversed(&buf, 2)],
+            [true, true, false],
+            "reverse video over the selection only"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selected_inverse_cells_show_plain() {
+        // Given inverse text `abc` with `ab` selected.
+        let term = select_first_row(term_with("\x1b[7mabc"), 2);
+
+        // When rendering its screen.
+        let (buf, _) = render(&term, AREA);
+
+        // Then the selected inverse cell is drawn without reverse video.
+        assert!(
+            !reversed(&buf, 0),
+            "selection should flip inverse text back"
+        );
     }
 }

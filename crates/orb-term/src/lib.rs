@@ -7,6 +7,9 @@
 //! events, and focus changes are encoded for whatever terminal modes the child
 //! has switched on and written straight to it. The owner is told when the
 //! screen changed, when the child copied to the clipboard, and when it exited.
+//!
+//! The pane keeps a history the owner can scroll with the wheel, and a text
+//! selection the owner drives with the mouse and copies on release.
 
 mod emulator;
 mod encode;

@@ -23,8 +23,9 @@ pub(crate) fn areas(right: Rect) -> [Rect; 2] {
 
 /// Draws `layout` into `right`: the tab bar (` 1 name  2  3 …`, the shown
 /// tab in reverse blue), border lines, and each placed pane that has a
-/// client in `panes`. Records each pane's area in `hits`. Returns the
-/// focused pane's cursor while `keys_in_pane`.
+/// client in `panes`. Records each pane's area, and whether its program
+/// reads the mouse, in `hits`. Returns the focused pane's cursor while
+/// `keys_in_pane`.
 pub(crate) fn render(
     layout: &SessionLayout,
     panes: &HashMap<PaneId, Pane>,
@@ -50,7 +51,8 @@ pub(crate) fn render(
                 buf.set_string(x, area.y - 1, "─", line);
             }
         }
-        hits.record_pane(area, place.pane);
+        let reads_mouse = panes.get(&place.pane).is_some_and(Pane::reads_mouse);
+        hits.record_pane(area, place.pane, reads_mouse);
         let drawn = panes
             .get(&place.pane)
             .and_then(|pane| pane.render(area, buf));

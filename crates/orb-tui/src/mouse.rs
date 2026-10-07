@@ -1,14 +1,21 @@
 //! The mouse in orb's own UI: a click on the sidebar moves the keys there,
 //! a click on a row selects it and a double-click attaches, and a click on
-//! the sidebar's input box starts a search. A click on a pane focuses it and
-//! moves the keys there without reaching its program; while the keys are in
-//! a pane, events over that pane go to its program. The tab bar, the borders
-//! and the start screen take no clicks. The wheel moves the sidebar's
-//! selection while it has the keys, and otherwise scrolls its view. In a
+//! the sidebar's input box starts a search. The tab bar, the borders and the
+//! start screen take no clicks. The wheel moves the sidebar's selection
+//! while it has the keys, and otherwise scrolls its view. In a
 //! picker a click selects a row, a double-click picks it and the wheel over
 //! its list moves the selection; a click outside a picker or the rename box
 //! closes it like `Esc`. A click in the text of the sidebar search, a
 //! picker's input or the rename box moves its cursor there.
+//!
+//! Panes follow zellij's rules. The wheel over any pane goes to its program
+//! while the program reads the mouse, sends arrow keys while it's on the
+//! alternate screen, and otherwise scrolls the pane's history. A left press
+//! on the focused pane goes to its program while it reads the mouse, and
+//! otherwise starts a selection that the drag extends and the release
+//! copies. A press on another pane focuses it without reaching its program,
+//! and starts a selection there unless its program reads the mouse. The
+//! press decides who gets the drag and the release that follow it.
 //!
 //! Each frame records where it drew what a click can land on, and a mouse
 //! event is mapped back through that record.
@@ -39,8 +46,9 @@ pub(crate) struct HitMap {
     sidebar_input: Option<Rect>,
     /// Each on-screen sidebar row's visible lines.
     sidebar_rows: Vec<(Rect, SidebarItem)>,
-    /// Each shown pane's content area.
-    panes: Vec<(Rect, PaneId)>,
+    /// Each shown pane's content area, and whether its program read the
+    /// mouse when it was drawn.
+    panes: Vec<(Rect, PaneId, bool)>,
     /// The open picker's or rename box's popup.
     overlay: Option<Rect>,
     /// Where the wheel moves the open picker's selection: its popup, or the
@@ -91,25 +99,33 @@ impl HitMap {
         self.sidebar_rows.push((area, item));
     }
 
-    /// Records where pane `id` was drawn.
-    pub(crate) fn record_pane(&mut self, area: Rect, id: PaneId) {
-        self.panes.push((area, id));
+    /// Records where pane `id` was drawn and whether its program read the
+    /// mouse.
+    pub(crate) fn record_pane(&mut self, area: Rect, id: PaneId, reads_mouse: bool) {
+        self.panes.push((area, id, reads_mouse));
     }
 
     /// The pane drawn at `at`, if any.
     pub(crate) fn pane_at(&self, at: Position) -> Option<PaneId> {
         self.panes
             .iter()
-            .find(|(area, _)| area.contains(at))
-            .map(|&(_, id)| id)
+            .find(|(area, ..)| area.contains(at))
+            .map(|&(_, id, _)| id)
     }
 
     /// Where pane `id` was drawn, if it was.
     pub(crate) fn pane_area(&self, id: PaneId) -> Option<Rect> {
         self.panes
             .iter()
-            .find(|(_, pane)| *pane == id)
-            .map(|&(area, _)| area)
+            .find(|(_, pane, _)| *pane == id)
+            .map(|&(area, ..)| area)
+    }
+
+    /// Whether pane `id`'s program read the mouse when it was drawn.
+    fn reads_mouse(&self, id: PaneId) -> bool {
+        self.panes
+            .iter()
+            .any(|&(_, pane, reads)| pane == id && reads)
     }
 
     /// The sidebar row drawn at `at`, if any.
@@ -203,10 +219,25 @@ pub(crate) enum Click {
     Double,
 }
 
-/// The last click, for telling a double-click.
+/// The last click, for telling a double-click, and the left-button drag in
+/// progress.
 #[derive(Debug, Default)]
 pub(crate) struct Clicks {
     last: Option<(Instant, ClickTarget)>,
+    gesture: Option<Gesture>,
+}
+
+/// Who owns a left-button drag: decided at its press, kept until release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gesture {
+    /// The focused pane's program reads the mouse; the drag and release go
+    /// to it.
+    Program,
+    /// orb is selecting in this pane.
+    Select(PaneId),
+    /// The press acted on orb (focus, a sidebar row, a picker); its drag and
+    /// release do nothing.
+    Orb,
 }
 
 impl Clicks {
@@ -239,6 +270,14 @@ pub(crate) enum MouseRoute {
     /// Scroll the sidebar's view this many lines (up when negative) without
     /// moving its selection.
     ScrollSidebar(i16),
+    /// Run these intents, then start a selection in this pane at the event.
+    Select(Vec<Intent>, PaneId),
+    /// Extend this pane's selection to the event.
+    Extend(PaneId),
+    /// End this pane's selection and copy its text.
+    Copy(PaneId),
+    /// A wheel notch over this pane.
+    Wheel(PaneId),
     /// Ignore it.
     Nothing,
 }
@@ -251,9 +290,10 @@ enum Action {
 
 /// Maps a mouse event to what the loop does with it, given where the last
 /// frame drew things (`hits`), who has the keys, and the shown layout's
-/// `focused` pane. Every event over the focused pane while the keys are in
-/// it goes to it; other than that, only left clicks and the vertical wheel
-/// act.
+/// `focused` pane. The left press decides who gets the drag and release
+/// after it; the wheel over a pane goes to that pane. Other events over the
+/// focused pane while the keys are in it go to it; other than that, only
+/// left clicks and the vertical wheel act.
 pub(crate) fn route(
     event: MouseEvent,
     hits: &HitMap,
@@ -263,10 +303,27 @@ pub(crate) fn route(
     now: Instant,
 ) -> MouseRoute {
     let at = Position::new(event.column, event.row);
+    if let Some(routed) = follow_gesture(event.kind, clicks) {
+        return routed;
+    }
     let on_focused = focused
         .and_then(|id| hits.pane_area(id))
         .is_some_and(|area| area.contains(at));
-    if focus == Focus::Pane && on_focused {
+    let in_pane = focus == Focus::Pane && on_focused;
+    match (event.kind, focused) {
+        (MouseEventKind::Down(MouseButton::Left), Some(id)) if in_pane => {
+            return press_in_pane(id, hits, clicks);
+        }
+        (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown, _)
+            if !matches!(focus, Focus::Picker | Focus::Rename) =>
+        {
+            if let Some(id) = hits.pane_at(at) {
+                return MouseRoute::Wheel(id);
+            }
+        }
+        _ => {}
+    }
+    if in_pane {
         return MouseRoute::Forward;
     }
     let action = match event.kind {
@@ -286,8 +343,72 @@ pub(crate) fn route(
         (_, Action::Click) => {
             let row = hits.row_at(at);
             let click = clicks.click(row.map(ClickTarget::Row), now);
-            route_click(at, hits, focus, row, click)
+            let routed = route_click(at, hits, focus, row, click);
+            if let MouseRoute::Select(_, id) = routed {
+                clicks.gesture = Some(Gesture::Select(id));
+            }
+            routed
         }
+    }
+}
+
+/// Routes a left drag or release by the gesture its press started, and
+/// forgets the gesture on release; `None` when the gesture doesn't decide.
+/// A left press starts a new gesture (owned by orb until a pane takes it),
+/// dropping one whose release never came. While orb selects, nothing else
+/// acts.
+fn follow_gesture(kind: MouseEventKind, clicks: &mut Clicks) -> Option<MouseRoute> {
+    let gesture = clicks.gesture;
+    match (kind, gesture) {
+        (MouseEventKind::Down(MouseButton::Left), _) => {
+            clicks.gesture = Some(Gesture::Orb);
+            None
+        }
+        (MouseEventKind::Up(MouseButton::Left), _) => {
+            clicks.gesture = None;
+            match gesture {
+                Some(Gesture::Select(id)) => Some(MouseRoute::Copy(id)),
+                Some(Gesture::Orb) => Some(MouseRoute::Nothing),
+                Some(Gesture::Program) | None => None,
+            }
+        }
+        (MouseEventKind::Drag(MouseButton::Left), Some(Gesture::Select(id))) => {
+            Some(MouseRoute::Extend(id))
+        }
+        (MouseEventKind::Drag(MouseButton::Left), Some(Gesture::Orb))
+        | (_, Some(Gesture::Select(_))) => Some(MouseRoute::Nothing),
+        _ => None,
+    }
+}
+
+/// A left press on the focused pane while it has the keys: its program's
+/// when it reads the mouse, else the start of orb's selection.
+fn press_in_pane(id: PaneId, hits: &HitMap, clicks: &mut Clicks) -> MouseRoute {
+    if hits.reads_mouse(id) {
+        clicks.gesture = Some(Gesture::Program);
+        MouseRoute::Forward
+    } else {
+        clicks.gesture = Some(Gesture::Select(id));
+        MouseRoute::Select(Vec::new(), id)
+    }
+}
+
+/// `lead`, then a focus on the pane at `at`, which also starts a selection
+/// there unless its program reads the mouse; just `lead` off any pane.
+fn focus_pane_at(at: Position, hits: &HitMap, lead: Vec<Intent>) -> MouseRoute {
+    let Some(id) = hits.pane_at(at) else {
+        return if lead.is_empty() {
+            MouseRoute::Nothing
+        } else {
+            MouseRoute::Intents(lead)
+        };
+    };
+    let mut intents = lead;
+    intents.push(Intent::FocusPane(id));
+    if hits.reads_mouse(id) {
+        MouseRoute::Intents(intents)
+    } else {
+        MouseRoute::Select(intents, id)
     }
 }
 
@@ -335,7 +456,8 @@ fn route_overlay(
 }
 
 /// Where a left click at `at` sends the keys and what it selects; `row` is
-/// the sidebar row under it. A click on a pane focuses it.
+/// the sidebar row under it. A click on a pane focuses it, and starts a
+/// selection there unless its program reads the mouse.
 fn route_click(
     at: Position,
     hits: &HitMap,
@@ -351,10 +473,7 @@ fn route_click(
                 (None, Some(grapheme), _) => {
                     MouseRoute::Intents(vec![Intent::PickerCursorTo(grapheme)])
                 }
-                (None, None, true) => intents([
-                    Some(Intent::PickerConfirm),
-                    hits.pane_at(at).map(Intent::FocusPane),
-                ]),
+                (None, None, true) => focus_pane_at(at, hits, vec![Intent::PickerConfirm]),
                 (None, None, false) => MouseRoute::Nothing,
             };
         }
@@ -367,10 +486,7 @@ fn route_click(
     if let Some(item) = row {
         return intents([lead, Some(Intent::SelectRow(item)), attach]);
     }
-    match hits.pane_at(at) {
-        Some(id) => MouseRoute::Intents(vec![Intent::FocusPane(id)]),
-        None => MouseRoute::Nothing,
-    }
+    focus_pane_at(at, hits, Vec::new())
 }
 
 /// The intents that are there, in order.
@@ -397,13 +513,24 @@ mod tests {
     /// A 30-column sidebar and a 50-column right side, 20 lines tall over the
     /// mode line: the input box on lines 0 to 2 and thread 1 on lines 3 to 5;
     /// on the right a tab bar on line 0, then thread 1's pane in columns 30
-    /// to 54 and pane -1 in columns 56 to 79.
+    /// to 54 and pane -1 in columns 56 to 79, both running programs that
+    /// read the mouse.
     fn hits() -> HitMap {
+        hits_reading(true)
+    }
+
+    /// `hits()` with both panes running shells, which don't read the mouse.
+    fn shell_hits() -> HitMap {
+        hits_reading(false)
+    }
+
+    /// `hits()` with both panes' programs reading the mouse or not.
+    fn hits_reading(reads_mouse: bool) -> HitMap {
         let mut hits = HitMap::new(Rect::new(0, 0, 30, 20), Rect::new(30, 0, 50, 20));
         hits.record_sidebar_input(Rect::new(0, 0, 29, 3));
         hits.record_row(Rect::new(0, 3, 29, 3), THREAD_1);
-        hits.record_pane(Rect::new(30, 1, 25, 19), PaneId(1));
-        hits.record_pane(Rect::new(56, 1, 24, 19), PaneId(-1));
+        hits.record_pane(Rect::new(30, 1, 25, 19), PaneId(1), reads_mouse);
+        hits.record_pane(Rect::new(56, 1, 24, 19), PaneId(-1), reads_mouse);
         hits
     }
 
@@ -433,11 +560,30 @@ mod tests {
         )
     }
 
+    /// Routes `event` over `hits` with `focus`, thread 1's pane focused and
+    /// the gesture so far in `clicks`.
+    fn route_with(
+        event: MouseEvent,
+        hits: &HitMap,
+        focus: Focus,
+        clicks: &mut Clicks,
+    ) -> MouseRoute {
+        route(event, hits, focus, Some(PaneId(1)), clicks, Instant::now())
+    }
+
+    fn left_drag(column: u16, row: u16) -> MouseEvent {
+        mouse(MouseEventKind::Drag(MouseButton::Left), column, row)
+    }
+
+    fn left_release(column: u16, row: u16) -> MouseEvent {
+        mouse(MouseEventKind::Up(MouseButton::Left), column, row)
+    }
+
     /// The intents a route runs; empty for any other route.
     fn intents_of(route: MouseRoute) -> Vec<Intent> {
         match route {
             MouseRoute::Intents(intents) => intents,
-            MouseRoute::Forward | MouseRoute::ScrollSidebar(_) | MouseRoute::Nothing => vec![],
+            _ => vec![],
         }
     }
 
@@ -502,7 +648,8 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_the_focused_pane_while_attached_is_forwarded() {
-        // Given thread 1's focused pane has the keys.
+        // Given thread 1's focused pane has the keys and its program reads
+        // the mouse.
         // When clicking inside it.
         let routed = route_once(left_click(40, 5), Focus::Pane);
 
@@ -516,7 +663,8 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_another_pane_while_attached_focuses_it() {
-        // Given thread 1's focused pane has the keys.
+        // Given thread 1's focused pane has the keys and pane -1's program
+        // reads the mouse.
         // When clicking pane -1.
         let routed = route_once(left_click(60, 5), Focus::Pane);
 
@@ -577,7 +725,8 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_a_pane_from_the_sidebar_focuses_it() {
-        // Given the sidebar has the keys.
+        // Given the sidebar has the keys and thread 1's pane's program reads
+        // the mouse.
         // When clicking thread 1's pane.
         let routed = route_once(left_click(35, 5), Focus::Sidebar);
 
@@ -1049,5 +1198,240 @@ mod tests {
 
         // Then it's a single click.
         assert_eq!(click, Click::Single, "the third quick click");
+    }
+
+    #[rstest::rstest]
+    fn press_on_the_focused_shell_pane_starts_a_selection() {
+        // Given thread 1's focused shell pane has the keys.
+        // When pressing inside it.
+        let routed = route_with(
+            left_click(40, 5),
+            &shell_hits(),
+            Focus::Pane,
+            &mut Clicks::default(),
+        );
+
+        // Then a selection starts there.
+        assert_eq!(
+            routed,
+            MouseRoute::Select(vec![], PaneId(1)),
+            "a press in a shell should start a selection"
+        );
+    }
+
+    #[rstest::rstest]
+    fn drag_after_a_selecting_press_extends_the_selection() {
+        // Given a press that started a selection in thread 1's shell pane.
+        let (hits, mut clicks) = (shell_hits(), Clicks::default());
+        route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
+
+        // When dragging.
+        let routed = route_with(left_drag(45, 6), &hits, Focus::Pane, &mut clicks);
+
+        // Then the selection grows.
+        assert_eq!(
+            routed,
+            MouseRoute::Extend(PaneId(1)),
+            "the drag should extend the selection"
+        );
+    }
+
+    #[rstest::rstest]
+    fn release_after_a_selecting_press_copies() {
+        // Given a press that started a selection in thread 1's shell pane.
+        let (hits, mut clicks) = (shell_hits(), Clicks::default());
+        route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
+
+        // When releasing.
+        let routed = route_with(left_release(45, 6), &hits, Focus::Pane, &mut clicks);
+
+        // Then the selection is copied.
+        assert_eq!(
+            routed,
+            MouseRoute::Copy(PaneId(1)),
+            "the release should copy the selection"
+        );
+    }
+
+    #[rstest::rstest]
+    fn drag_past_the_pane_keeps_extending_the_selection() {
+        // Given a press that started a selection in thread 1's shell pane.
+        let (hits, mut clicks) = (shell_hits(), Clicks::default());
+        route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
+
+        // When dragging over the sidebar.
+        let routed = route_with(left_drag(10, 5), &hits, Focus::Pane, &mut clicks);
+
+        // Then the pane's selection still grows.
+        assert_eq!(
+            routed,
+            MouseRoute::Extend(PaneId(1)),
+            "the drag should stay with the selecting pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn press_in_a_mouse_tracking_program_is_forwarded() {
+        // Given thread 1's focused pane has the keys and its program reads
+        // the mouse.
+        // When pressing inside it.
+        let routed = route_with(
+            left_click(40, 5),
+            &hits(),
+            Focus::Pane,
+            &mut Clicks::default(),
+        );
+
+        // Then the press goes to the program.
+        assert_eq!(
+            routed,
+            MouseRoute::Forward,
+            "the program should get the press"
+        );
+    }
+
+    #[rstest::rstest]
+    fn drag_in_a_mouse_tracking_program_is_forwarded() {
+        // Given a press forwarded to thread 1's mouse-reading program.
+        let (hits, mut clicks) = (hits(), Clicks::default());
+        route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
+
+        // When dragging inside the pane.
+        let routed = route_with(left_drag(45, 6), &hits, Focus::Pane, &mut clicks);
+
+        // Then the drag goes to the program.
+        assert_eq!(
+            routed,
+            MouseRoute::Forward,
+            "the program should get the drag"
+        );
+    }
+
+    #[rstest::rstest]
+    fn release_in_a_mouse_tracking_program_is_forwarded() {
+        // Given a press forwarded to thread 1's mouse-reading program.
+        let (hits, mut clicks) = (hits(), Clicks::default());
+        route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
+
+        // When releasing inside the pane.
+        let routed = route_with(left_release(45, 6), &hits, Focus::Pane, &mut clicks);
+
+        // Then the release goes to the program.
+        assert_eq!(
+            routed,
+            MouseRoute::Forward,
+            "the program should get the release"
+        );
+    }
+
+    #[rstest::rstest]
+    fn press_on_another_shell_pane_focuses_it_and_starts_a_selection() {
+        // Given thread 1's focused pane has the keys and pane -1 runs a shell.
+        // When pressing pane -1.
+        let routed = route_with(
+            left_click(60, 5),
+            &shell_hits(),
+            Focus::Pane,
+            &mut Clicks::default(),
+        );
+
+        // Then pane -1 takes the focus and a selection starts there.
+        assert_eq!(
+            routed,
+            MouseRoute::Select(vec![Intent::FocusPane(PaneId(-1))], PaneId(-1)),
+            "a press on another shell should focus it and select"
+        );
+    }
+
+    #[rstest::rstest]
+    fn press_on_a_shell_pane_from_the_sidebar_focuses_it_and_starts_a_selection() {
+        // Given the sidebar has the keys and thread 1's pane runs a shell.
+        // When pressing thread 1's pane.
+        let routed = route_with(
+            left_click(40, 5),
+            &shell_hits(),
+            Focus::Sidebar,
+            &mut Clicks::default(),
+        );
+
+        // Then the pane takes the focus and a selection starts there.
+        assert_eq!(
+            routed,
+            MouseRoute::Select(vec![Intent::FocusPane(PaneId(1))], PaneId(1)),
+            "a press on a shell from the sidebar should focus it and select"
+        );
+    }
+
+    #[rstest::rstest]
+    fn release_after_a_focusing_press_is_not_forwarded() {
+        // Given a press that focused pane -1, whose program reads the mouse.
+        let (hits, mut clicks) = (hits(), Clicks::default());
+        route_with(left_click(60, 5), &hits, Focus::Pane, &mut clicks);
+
+        // When releasing over thread 1's focused pane while it has the keys.
+        let routed = route_with(left_release(40, 5), &hits, Focus::Pane, &mut clicks);
+
+        // Then nothing happens.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "a focusing press's release shouldn't reach a program"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::focused_pane(Focus::Pane, 40, PaneId(1))]
+    #[case::other_pane(Focus::Pane, 60, PaneId(-1))]
+    #[case::from_the_sidebar(Focus::Sidebar, 40, PaneId(1))]
+    fn wheel_over_a_pane_goes_to_that_pane(
+        #[case] focus: Focus,
+        #[case] column: u16,
+        #[case] expected: PaneId,
+    ) {
+        // Given `focus` has the keys.
+        // When wheeling up over the pane at `column`.
+        let routed = route_once(mouse(MouseEventKind::ScrollUp, column, 5), focus);
+
+        // Then the notch goes to that pane.
+        assert_eq!(routed, MouseRoute::Wheel(expected), "the wheel's pane");
+    }
+
+    #[rstest::rstest]
+    fn wheel_during_a_selection_does_nothing() {
+        // Given a press that started a selection in thread 1's shell pane.
+        let (hits, mut clicks) = (shell_hits(), Clicks::default());
+        route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
+
+        // When wheeling over the pane.
+        let routed = route_with(
+            mouse(MouseEventKind::ScrollUp, 40, 5),
+            &hits,
+            Focus::Pane,
+            &mut clicks,
+        );
+
+        // Then nothing happens.
+        assert_eq!(
+            routed,
+            MouseRoute::Nothing,
+            "the wheel waits for the release"
+        );
+    }
+
+    #[rstest::rstest]
+    fn press_after_a_lost_release_starts_a_new_selection() {
+        // Given a selection in thread 1's shell pane whose release never came.
+        let (hits, mut clicks) = (shell_hits(), Clicks::default());
+        route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
+
+        // When pressing in the pane again.
+        let routed = route_with(left_click(42, 7), &hits, Focus::Pane, &mut clicks);
+
+        // Then a new selection starts.
+        assert_eq!(
+            routed,
+            MouseRoute::Select(vec![], PaneId(1)),
+            "a new press should start over"
+        );
     }
 }

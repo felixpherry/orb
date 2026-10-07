@@ -51,9 +51,12 @@
 //! it instead, leaving the keys in the sidebar, and attaches the same way
 //! once it's back.
 //!
-//! orb captures the mouse throughout. While a pane has the keys, mouse events
-//! over it go to its program; the rest are mapped through the last frame's
-//! hit map to intents or a scroll of the sidebar's view (see [`mouse`]).
+//! orb captures the mouse throughout and maps each event through the last
+//! frame's hit map, following zellij's rules (see [`mouse`]). The wheel
+//! scrolls a pane's history unless its program reads the mouse or is on the
+//! alternate screen. A drag in a pane whose program doesn't read the mouse
+//! selects its text, and the release copies it to the clipboard through
+//! OSC 52.
 //!
 //! After each frame the outer terminal's cursor takes the shape of where the
 //! keys are: a block in the sidebar, a bar in a text input, the attached
@@ -93,7 +96,7 @@ use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use wherror::Error;
 
 use crate::keymap::{self, Keys, Route, Scope};
@@ -683,9 +686,14 @@ impl App {
     }
 
     /// Acts on a mouse event: forwards it to the focused pane, runs the
-    /// intents it maps to (ending any key sequence in progress), or scrolls
-    /// the sidebar's view.
-    fn mouse(&mut self, mouse: MouseEvent) {
+    /// intents it maps to (ending any key sequence in progress), scrolls the
+    /// sidebar's view, sends a wheel notch to a pane, or starts, extends or
+    /// copies a pane's selection, writing the copy to the clipboard through
+    /// `out`.
+    fn mouse<W>(&mut self, mouse: MouseEvent, out: &mut W) -> io::Result<()>
+    where
+        W: Write,
+    {
         let (focus, focused, cursor) = {
             let state = self.state.read();
             (
@@ -694,36 +702,62 @@ impl App {
                 state.sessions.cursor,
             )
         };
-        let route = mouse::route(
-            mouse,
-            &self.hits,
-            focus,
-            focused,
-            &mut self.clicks,
-            Instant::now(),
-        );
+        let now = Instant::now();
+        let route = mouse::route(mouse, &self.hits, focus, focused, &mut self.clicks, now);
+        let at = Position::new(mouse.column, mouse.row);
         match route {
             MouseRoute::Forward => {
-                let pane = self
-                    .attached_id()
-                    .and_then(|id| Some((self.panes.get(&id)?, self.hits.pane_area(id)?)));
-                if let Some((pane, area)) = pane {
+                if let Some((pane, area)) = self.attached_id().and_then(|id| self.pane_and_area(id))
+                {
                     pane.mouse(mouse, area);
                 }
             }
-            MouseRoute::Intents(intents) => {
-                self.keys.dismiss();
-                for intent in &intents {
-                    let commands = IntentHandler::handle(intent, &mut self.state.write());
-                    for command in &commands {
-                        self.execute(command);
-                    }
+            MouseRoute::Intents(intents) => self.run_mouse_intents(&intents),
+            MouseRoute::Select(intents, id) => {
+                self.run_mouse_intents(&intents);
+                if let Some((pane, area)) = self.pane_and_area(id) {
+                    pane.select_start(at, area, now);
+                }
+            }
+            MouseRoute::Extend(id) => {
+                if let Some((pane, area)) = self.pane_and_area(id) {
+                    pane.select_update(at, area, now);
+                }
+            }
+            MouseRoute::Copy(id) => {
+                if let Some(text) = self.panes.get(&id).and_then(Pane::select_finish) {
+                    outer_terminal::copy_to_clipboard(out, &text)?;
+                }
+            }
+            MouseRoute::Wheel(id) => {
+                if let Some((pane, area)) = self.pane_and_area(id) {
+                    pane.wheel(mouse, area);
                 }
             }
             MouseRoute::ScrollSidebar(lines) => {
                 self.sidebar_scroll.scroll_free(lines, cursor);
             }
             MouseRoute::Nothing => {}
+        }
+        Ok(())
+    }
+
+    /// Pane `id` and where the last frame drew it.
+    fn pane_and_area(&self, id: PaneId) -> Option<(&Pane, Rect)> {
+        Some((self.panes.get(&id)?, self.hits.pane_area(id)?))
+    }
+
+    /// Runs a mouse event's intents, ending any key sequence in progress.
+    fn run_mouse_intents(&mut self, intents: &[Intent]) {
+        if intents.is_empty() {
+            return;
+        }
+        self.keys.dismiss();
+        for intent in intents {
+            let commands = IntentHandler::handle(intent, &mut self.state.write());
+            for command in &commands {
+                self.execute(command);
+            }
         }
     }
 
@@ -774,7 +808,7 @@ impl App {
                     pane.paste(&text);
                 }
             }
-            LoopEvent::Input(Event::Mouse(mouse)) => self.mouse(mouse),
+            LoopEvent::Input(Event::Mouse(mouse)) => self.mouse(mouse, out)?,
             LoopEvent::Input(Event::FocusGained) => {
                 self.focused = true;
                 if let Some(pane) = self.attached_pane() {

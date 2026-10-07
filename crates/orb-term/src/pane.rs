@@ -85,7 +85,8 @@ pub struct PaneError;
 
 /// A running child in a PTY. Its output is parsed on a background thread, so
 /// the screen is current whenever the owner draws; the owner is notified of
-/// output, clipboard copies, and exit.
+/// output, clipboard copies, and exit. The pane keeps 10 000 lines of history
+/// for the wheel to scroll back through.
 ///
 /// Dropping the pane kills the child.
 pub struct Pane {
@@ -173,12 +174,14 @@ impl Pane {
         self.has_exited() && self.started.elapsed() < within
     }
 
-    /// Sends `key` to the child, encoded for its current keyboard modes.
+    /// Sends `key` to the child, encoded for its current keyboard modes,
+    /// after returning the view to the bottom and clearing the selection.
     pub fn key(&self, key: &KeyEvent) {
         lock(&self.emulator).key(key);
     }
 
-    /// Sends pasted `text` to the child.
+    /// Sends pasted `text` to the child, after returning the view to the
+    /// bottom and clearing the selection.
     pub fn paste(&self, text: &str) {
         lock(&self.emulator).paste(text);
     }
@@ -189,9 +192,41 @@ impl Pane {
     }
 
     /// Sends a mouse event to the child if it asked for mouse reports and the
-    /// event happened over the pane drawn at `area`.
+    /// event happened over the pane drawn at `area`. A press clears the
+    /// selection.
     pub fn mouse(&self, event: MouseEvent, area: Rect) {
         lock(&self.emulator).mouse(event, area);
+    }
+
+    /// Whether the child asked for mouse reports.
+    pub fn reads_mouse(&self) -> bool {
+        lock(&self.emulator).reads_mouse()
+    }
+
+    /// A wheel notch over the pane drawn at `area`: to the child while it
+    /// reads the mouse, as arrow keys on the alternate screen, else a
+    /// scroll of the pane's history.
+    pub fn wheel(&self, event: MouseEvent, area: Rect) {
+        lock(&self.emulator).wheel(event, area);
+    }
+
+    /// Starts a selection at `at` in the pane drawn at `area`: a word on the
+    /// second quick press on the same cell, its line on the third, else a
+    /// plain selection.
+    pub fn select_start(&self, at: Position, area: Rect, now: Instant) {
+        lock(&self.emulator).select_start(at, area, now);
+    }
+
+    /// Extends the selection to `at`; past the top or bottom edge of `area`
+    /// the view scrolls a line that way.
+    pub fn select_update(&self, at: Position, area: Rect, now: Instant) {
+        lock(&self.emulator).select_update(at, area, now);
+    }
+
+    /// Ends the selection, which stays highlighted, and returns its text;
+    /// `None` when nothing is selected.
+    pub fn select_finish(&self) -> Option<String> {
+        lock(&self.emulator).select_finish()
     }
 
     /// Tells the child the pane gained or lost focus, if it asked to know.
