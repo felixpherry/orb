@@ -381,7 +381,7 @@ fn cmd_route(key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('j') | KeyCode::Down => Some(Intent::MoveFocus(NavDirection::Down)),
         KeyCode::Char('k') | KeyCode::Up => Some(Intent::MoveFocus(NavDirection::Up)),
         KeyCode::Char('l') | KeyCode::Right => Some(Intent::MoveFocus(NavDirection::Right)),
-        KeyCode::Char('n') => Some(Intent::SplitPane(Split::Right)),
+        KeyCode::Char('n') => Some(Intent::AddPane),
         KeyCode::Char('x') => Some(Intent::ClosePane),
         KeyCode::Char('+' | '=') => Some(Intent::GrowFocused),
         KeyCode::Char('-') => Some(Intent::ShrinkFocused),
@@ -787,7 +787,7 @@ mod tests {
     #[case(KeyCode::Down, Intent::MoveFocus(NavDirection::Down))]
     #[case(KeyCode::Up, Intent::MoveFocus(NavDirection::Up))]
     #[case(KeyCode::Right, Intent::MoveFocus(NavDirection::Right))]
-    #[case(KeyCode::Char('n'), Intent::SplitPane(Split::Right))]
+    #[case(KeyCode::Char('n'), Intent::AddPane)]
     #[case(KeyCode::Char('x'), Intent::ClosePane)]
     #[case(KeyCode::Char('+'), Intent::GrowFocused)]
     #[case(KeyCode::Char('='), Intent::GrowFocused)]

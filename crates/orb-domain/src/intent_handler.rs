@@ -144,6 +144,10 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
+            Intent::AddPane => match (validate_pane_action(state), state.shown_session()) {
+                (Ok(()), Some(session)) => vec![Command::AddPane(session)],
+                _ => vec![],
+            },
             Intent::ClosePane => close_pane(state),
             Intent::SendCtrlG => match validate_pane_action(state) {
                 Ok(()) => vec![Command::SendCtrlG],
@@ -6707,6 +6711,37 @@ mod tests {
 
         // Then nothing is asked for.
         assert!(commands.is_empty(), "a split needs the keys in a pane");
+    }
+
+    #[rstest::rstest]
+    fn add_pane_asks_the_sessions_actor_for_a_pane() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Pane);
+
+        // When adding a pane.
+        let commands = IntentHandler::handle(&Intent::AddPane, &mut state);
+
+        // Then the sessions actor is asked to add one to session 1.
+        assert_eq!(
+            commands,
+            vec![Command::AddPane(SessionId(1))],
+            "adding goes through the sessions actor, which makes the pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_pane_outside_a_pane_does_nothing() {
+        // Given thread 1's layout shown while the sidebar has the keys.
+        let mut state = with_layout(Focus::Sidebar);
+
+        // When adding a pane.
+        let commands = IntentHandler::handle(&Intent::AddPane, &mut state);
+
+        // Then nothing is asked for.
+        assert!(
+            commands.is_empty(),
+            "adding a pane needs the keys in a pane"
+        );
     }
 
     #[rstest::rstest]

@@ -92,7 +92,7 @@ Full key table:
 | Key | Action |
 |---|---|
 | `Cmd h/j/k/l`, Cmd arrows | Move focus; leftmost `Cmd h` → sidebar; `Cmd l` from sidebar → panes; rightmost `Cmd l` → next tab |
-| `Cmd n` | Split right |
+| `Cmd n` | Add a pane (re-tiles the tab) |
 | `Cmd x` | Close pane |
 | `Cmd +`/`Cmd =`, `Cmd -` | Grow / shrink focused pane or sidebar |
 | `Cmd 1` to `Cmd 5` | Go to tab N |

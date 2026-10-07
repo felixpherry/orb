@@ -29,6 +29,9 @@ pub enum Command {
     SendCtrlG,
     /// Split `session`'s focused pane `split`; the sessions actor makes the pane.
     SplitPane { session: SessionId, split: Split },
+    /// Add a shell to `session`'s shown tab and re-tile it; the sessions
+    /// actor makes the pane.
+    AddPane(SessionId),
     /// Open a tab of one new pane in `session`.
     NewTab(SessionId),
     /// Save `session`'s tabs, splits, focus and pane names as the app state

@@ -19,7 +19,7 @@ Then:
 1. `<C-g> a` adds a project from a directory picker (`Tab` opens a folder, `⏎` adds it).
 2. `<C-g> n` picks a project, then a workspace (the checkout, a new worktree, or a worktree the project used before) and, for a new worktree, its base branch. The session opens with one shell.
 3. Type `claude` or `pi` in the shell. The pane becomes an agent row under the session's card.
-4. `Cmd n` splits the pane right, `<C-g> p d` splits it down, and `<C-g> t n` opens a tab.
+4. `Cmd n` adds a pane and re-tiles the tab, `<C-g> p r`/`p d` split the pane right/down, and `<C-g> t n` opens a tab.
 5. `q` in the sidebar quits orb. Every pane keeps running under zmx, and orb reattaches them when it starts again.
 
 The Cmd keys reach orb only through kitty `map` lines in `kitty.conf`:
@@ -91,7 +91,7 @@ The demo shows, in order:
 | Key | Action |
 | --- | --- |
 | `Cmd h/j/k/l`, Cmd arrows | Move focus between panes; `Cmd h` from the leftmost pane goes to the sidebar, `Cmd l` from the sidebar goes back, and `Cmd l` from the rightmost pane goes to the next tab |
-| `Cmd n` | Split right |
+| `Cmd n` | Add a pane (re-tiles the tab) |
 | `Cmd x` | Close the pane |
 | `Cmd +` / `Cmd =`, `Cmd -` | Grow / shrink the focused pane or the sidebar |
 | `Cmd 1` to `Cmd 5` | Go to tab N |

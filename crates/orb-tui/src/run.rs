@@ -871,6 +871,12 @@ impl App {
                     })
                     .try_send();
             }
+            Command::AddPane(session) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::AddPane(*session))
+                    .try_send();
+            }
             Command::NewTab(session) => {
                 let _ = self
                     .sessions

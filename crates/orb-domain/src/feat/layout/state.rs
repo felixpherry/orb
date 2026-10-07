@@ -231,8 +231,8 @@ pub enum FocusMove {
 }
 
 /// Every session's tabs and splits. Written by the sessions actor (loading
-/// them at start, adding a pane on split, new tab or a new session, pointing
-/// a moved session's panes at its new directory, dropping a deleted
+/// them at start, adding a pane on add, split, new tab or a new session,
+/// pointing a moved session's panes at its new directory, dropping a deleted
 /// session), the intent handler (focus, resize, zoom, tab moves,
 /// renames, closes) and the frontend (closing panes whose program ended, the
 /// tab body's size).
@@ -320,6 +320,19 @@ impl Layouts {
         }
     }
 
+    /// Adds `pane` to the shown tab and re-tiles the tab by pane count;
+    /// `pane` takes the focus and the tab shows every pane again.
+    pub fn add_tiled(&mut self, owner: SessionId, pane: PaneEntry) {
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return;
+        };
+        if let Some(tab) = layout.tab_mut() {
+            tab.tree.add_tiled(pane.id);
+            tab.zoomed = false;
+            layout.panes.insert(pane.id, pane);
+        }
+    }
+
     /// Appends a tab of the one pane `pane` and shows it.
     pub fn new_tab(&mut self, owner: SessionId, pane: PaneEntry) {
         if let Some(layout) = self.sessions.get_mut(&owner) {
@@ -329,8 +342,9 @@ impl Layouts {
         }
     }
 
-    /// Closes `pane` wherever it is. A tab left without panes goes, and the
-    /// tab before it is shown; a layout left without tabs goes.
+    /// Closes `pane` wherever it is. The tab it leaves is re-tiled by pane
+    /// count; a tab left without panes goes, and the tab before it is shown;
+    /// a layout left without tabs goes.
     pub fn close_pane(&mut self, pane: PaneId) {
         let Some(owner) = self.owner_of(pane) else {
             return;
@@ -343,7 +357,11 @@ impl Layouts {
         };
         let emptied = layout.tabs.get_mut(index).is_some_and(|tab| {
             tab.zoomed = false;
-            !tab.tree.close_pane(pane)
+            let closed = tab.tree.close_pane(pane);
+            if closed {
+                tab.tree.tile();
+            }
+            !closed
         });
         if emptied {
             layout.remove_tab(index);
@@ -708,6 +726,52 @@ mod tests {
             placed(&layouts).len(),
             3,
             "a split should show every pane again"
+        );
+    }
+
+    /// Session 1's layout of panes 7 to `last`, each added with `add_tiled`.
+    fn tiled(last: i64) -> Layouts {
+        let mut layouts = opened();
+        for id in 8..=last {
+            layouts.add_tiled(OWNER, entry(id));
+        }
+        layouts
+    }
+
+    /// How many placed panes each column holds, left to right.
+    fn shape(layouts: &Layouts) -> Vec<usize> {
+        placed(layouts)
+            .chunk_by(|a, b| a.area.x == b.area.x)
+            .map(<[Placed]>::len)
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn closing_a_pane_re_tiles_the_tab() {
+        // Given seven tiled panes, laid out [1][4][2].
+        let mut layouts = tiled(13);
+
+        // When closing pane 9.
+        layouts.close_pane(PaneId(9));
+
+        // Then the six left are laid out [2][4].
+        assert_eq!(shape(&layouts), vec![2, 4], "six panes re-tile to [2][4]");
+    }
+
+    #[rstest::rstest]
+    fn add_tiled_shows_every_pane_of_a_zoomed_tab() {
+        // Given a zoomed two-pane tab.
+        let mut layouts = split_right();
+        layouts.toggle_zoom(OWNER);
+
+        // When adding a tiled pane.
+        layouts.add_tiled(OWNER, entry(9));
+
+        // Then the tab isn't zoomed.
+        assert_eq!(
+            placed(&layouts).len(),
+            3,
+            "adding a pane should show every pane again"
         );
     }
 

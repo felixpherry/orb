@@ -41,6 +41,9 @@ pub enum Intent {
     MoveFocus(NavDirection),
     /// Split the focused pane, the new shell taking the focus.
     SplitPane(Split),
+    /// Add a shell to the shown tab and re-tile it by pane count, the new
+    /// shell taking the focus.
+    AddPane,
     /// Close the focused pane; on the thread's own pane, detach the thread.
     ClosePane,
     /// Show only the focused pane over its tab, or every pane again.
@@ -190,6 +193,7 @@ impl fmt::Display for Intent {
             Self::MoveFocus(NavDirection::Down) => "focus down",
             Self::SplitPane(Split::Right) => "split right",
             Self::SplitPane(Split::Down) => "split down",
+            Self::AddPane => "add pane",
             Self::ClosePane => "close pane",
             Self::ToggleZoom => "zoom",
             Self::GrowFocused => "grow",
@@ -257,6 +261,7 @@ mod tests {
     #[case(Intent::MoveFocus(NavDirection::Down), "focus down")]
     #[case(Intent::SplitPane(Split::Right), "split right")]
     #[case(Intent::SplitPane(Split::Down), "split down")]
+    #[case(Intent::AddPane, "add pane")]
     #[case(Intent::ClosePane, "close pane")]
     #[case(Intent::ToggleZoom, "zoom")]
     #[case(Intent::GrowFocused, "grow")]

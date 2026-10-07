@@ -126,6 +126,27 @@ impl TileLayout {
         }
     }
 
+    /// Rebuilds the tree from the template for its pane count, panes in their
+    /// current tree order. Focus and its history stay.
+    pub fn tile(&mut self) {
+        if let Some(root) = template(&self.pane_ids()) {
+            self.root = root;
+        }
+    }
+
+    /// Adds pane `id` last in reading order, re-tiles, and focuses it.
+    pub fn add_tiled(&mut self, id: PaneId) {
+        let ids = {
+            let mut ids = self.pane_ids();
+            ids.push(id);
+            ids
+        };
+        if let Some(root) = template(&ids) {
+            self.root = root;
+            self.set_focus(id);
+        }
+    }
+
     /// Close the focused pane, returning focus to the pane it came from when
     /// that pane is still open. Returns false if it's the last pane.
     pub fn close_focused(&mut self) -> bool {
@@ -366,6 +387,65 @@ fn range_center_distance(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> 
 
 // --- Tree operations ---
 
+/// Column sizes for `n` panes, first column first; the flag says the last
+/// column is a stack (`n > 10`).
+fn columns(n: usize) -> (Vec<usize>, bool) {
+    match n {
+        0 => (vec![], false),
+        1 => (vec![1], false),
+        11.. => (vec![1, n - 1], true),
+        _ => {
+            let cols = {
+                let mut cols = vec![1];
+                let mut rest = n - 1;
+                while rest > 0 {
+                    let take = rest.min(4);
+                    cols.push(take);
+                    rest -= take;
+                }
+                if cols.len() > 2 && cols.last() == Some(&1) {
+                    cols.pop();
+                    if let Some(first) = cols.first_mut() {
+                        *first += 1;
+                    }
+                }
+                cols
+            };
+            (cols, false)
+        }
+    }
+}
+
+/// `nodes` side by side (`Right`) or top to bottom (`Down`) in equal
+/// shares: a chain whose ratios run 1/m, 1/(m-1), …, 1/2.
+fn even_chain(mut nodes: Vec<Node>, split: Split) -> Option<Node> {
+    let last = nodes.pop()?;
+    Some(
+        nodes
+            .into_iter()
+            .rev()
+            .enumerate()
+            .fold(last, |second, (i, first)| Node::Split {
+                split,
+                ratio: 1.0 / (i as f32 + 2.0),
+                first: Box::new(first),
+                second: Box::new(second),
+            }),
+    )
+}
+
+/// The template tree for `ids` in reading order: columns from [`columns`],
+/// filled top to bottom, first column first. `None` for no ids.
+fn template(ids: &[PaneId]) -> Option<Node> {
+    let (cols, _stacked) = columns(ids.len());
+    let mut rest = ids.iter().copied().map(Node::Pane);
+    let columns = cols
+        .iter()
+        .filter_map(|&k| even_chain(rest.by_ref().take(k).collect(), Split::Down))
+        .collect();
+    even_chain(columns, Split::Right)
+}
+
 fn count_panes(node: &Node) -> usize {
     match node {
         Node::Pane(_) => 1,
@@ -505,7 +585,7 @@ fn split_rect(area: Rect, split: Split, ratio: f32) -> (Rect, Rect) {
 mod tests {
     use ratatui::layout::Rect;
 
-    use super::{NavDirection, Node, PaneInfo, Split, TileLayout, find_in_direction};
+    use super::{NavDirection, Node, PaneInfo, Split, TileLayout, columns, find_in_direction};
     use crate::feat::sessions::state::PaneId;
 
     const AREA: Rect = Rect::new(0, 0, 100, 40);
@@ -563,6 +643,36 @@ mod tests {
             Node::Split { ratio, .. } => Some(ratio),
             Node::Pane(_) => None,
         }
+    }
+
+    /// A layout of panes 1 to `n`, each added with `add_tiled`.
+    fn tiled(n: i64) -> TileLayout {
+        let mut layout = TileLayout::new(pane(1));
+        for id in 2..=n {
+            layout.add_tiled(pane(id));
+        }
+        layout
+    }
+
+    /// The pane rects in `area`, one list per column, left to right.
+    fn columns_of(layout: &TileLayout, area: Rect) -> Vec<Vec<Rect>> {
+        layout
+            .panes(area)
+            .chunk_by(|a, b| a.rect.x == b.rect.x)
+            .map(|column| column.iter().map(|info| info.rect).collect())
+            .collect()
+    }
+
+    /// How many panes each column holds, left to right.
+    fn shape(layout: &TileLayout, area: Rect) -> Vec<usize> {
+        columns_of(layout, area).iter().map(Vec::len).collect()
+    }
+
+    /// The biggest gap between any two of `sizes`.
+    fn spread(sizes: &[u16]) -> u16 {
+        let max = sizes.iter().max().copied().unwrap_or_default();
+        let min = sizes.iter().min().copied().unwrap_or_default();
+        max - min
     }
 
     fn info(layout: &TileLayout, id: i64) -> Option<PaneInfo> {
@@ -890,5 +1000,112 @@ mod tests {
 
         // Then it is refused.
         assert!(loaded.is_err(), "a non-tree should be rejected");
+    }
+
+    #[rstest::rstest]
+    #[case(1, vec![1])]
+    #[case(2, vec![1, 1])]
+    #[case(3, vec![1, 2])]
+    #[case(4, vec![1, 3])]
+    #[case(5, vec![1, 4])]
+    #[case(6, vec![2, 4])]
+    #[case(7, vec![1, 4, 2])]
+    #[case(8, vec![1, 4, 3])]
+    #[case(9, vec![1, 4, 4])]
+    #[case(10, vec![2, 4, 4])]
+    fn columns_follow_the_template_table(#[case] n: usize, #[case] expected: Vec<usize>) {
+        // Given / When / Then the column sizes for n panes match the table.
+        assert_eq!(columns(n), (expected, false), "columns for {n} panes");
+    }
+
+    #[rstest::rstest]
+    fn tiled_columns_share_the_width_evenly() {
+        // Given seven tiled panes.
+        let layout = tiled(7);
+
+        // When laying them out in a 120×40 area.
+        let widths: Vec<u16> = columns_of(&layout, Rect::new(0, 0, 120, 40))
+            .iter()
+            .filter_map(|column| column.first().map(|rect| rect.width))
+            .collect();
+
+        // Then the column widths differ by at most one cell.
+        assert!(spread(&widths) <= 1, "uneven column widths {widths:?}");
+    }
+
+    #[rstest::rstest]
+    fn tiled_column_rows_share_the_height_evenly() {
+        // Given five tiled panes, one column then four.
+        let layout = tiled(5);
+
+        // When laying them out in a 40-row area.
+        let heights: Vec<u16> = columns_of(&layout, AREA)
+            .get(1)
+            .map(|column| column.iter().map(|rect| rect.height).collect())
+            .unwrap_or_default();
+
+        // Then the second column's four heights differ by at most one row.
+        assert!(
+            heights.len() == 4 && spread(&heights) <= 1,
+            "uneven row heights {heights:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_tiled_lays_six_panes_out_two_and_four() {
+        // Given five tiled panes.
+        let mut layout = tiled(5);
+
+        // When adding pane 6.
+        layout.add_tiled(pane(6));
+
+        // Then two panes sit in the first column and four in the second.
+        assert_eq!(shape(&layout, AREA), vec![2, 4], "six panes tile [2][4]");
+    }
+
+    #[rstest::rstest]
+    fn add_tiled_focuses_the_new_pane() {
+        // Given five tiled panes.
+        let mut layout = tiled(5);
+
+        // When adding pane 6.
+        layout.add_tiled(pane(6));
+
+        // Then pane 6 has the focus.
+        assert_eq!(
+            layout.focused(),
+            pane(6),
+            "the added pane should be focused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_tiled_evens_out_a_resized_tab() {
+        // Given three tiled panes with the focused pane's border moved.
+        let mut layout = tiled(3);
+        layout.resize_focused(true, 10, AREA);
+
+        // When adding pane 4.
+        layout.add_tiled(pane(4));
+
+        // Then the tab is one column then three, every size even again.
+        let columns = columns_of(&layout, AREA);
+        let widths: Vec<u16> = columns
+            .iter()
+            .filter_map(|column| column.first().map(|rect| rect.width))
+            .collect();
+        let heights: Vec<u16> = columns
+            .get(1)
+            .map(|column| column.iter().map(|rect| rect.height).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            (
+                shape(&layout, AREA),
+                spread(&widths) <= 1,
+                spread(&heights) <= 1
+            ),
+            (vec![1, 3], true, true),
+            "the re-tiled tab should be [1][3] with even sizes, widths {widths:?}, heights {heights:?}"
+        );
     }
 }

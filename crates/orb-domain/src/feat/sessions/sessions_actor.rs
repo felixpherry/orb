@@ -202,6 +202,11 @@ pub struct SplitPane {
     pub split: Split,
 }
 
+/// Add a shell pane to `session`'s shown tab, re-tile the tab, and save the
+/// layout.
+#[derive(Debug)]
+pub struct AddPane(pub SessionId);
+
 /// Open a tab of one new shell pane in a session, its first when it has no
 /// layout, and save the layout.
 #[derive(Debug)]
@@ -369,7 +374,15 @@ impl Message<SplitPane> for SessionsActor {
         msg: SplitPane,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.add_pane(msg.session, Some(msg.split));
+        self.add_pane(msg.session, Placement::Split(msg.split));
+    }
+}
+
+impl Message<AddPane> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(&mut self, msg: AddPane, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.add_pane(msg.0, Placement::Tile);
     }
 }
 
@@ -377,7 +390,7 @@ impl Message<NewTab> for SessionsActor {
     type Reply = ();
 
     async fn handle(&mut self, msg: NewTab, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.add_pane(msg.0, None);
+        self.add_pane(msg.0, Placement::Tab);
     }
 }
 
@@ -639,6 +652,17 @@ impl Message<RestoreWorktree> for SessionsActor {
     ) -> Self::Reply {
         self.restore_worktree(id);
     }
+}
+
+/// Where [`SessionsActor::add_pane`] puts the new shell.
+#[derive(Debug, Clone, Copy)]
+enum Placement {
+    /// In the shown tab, re-tiled by pane count.
+    Tile,
+    /// Splitting the shown tab's focused pane.
+    Split(Split),
+    /// In a new tab, or the first tab of a session without a layout.
+    Tab,
 }
 
 impl SessionsActor {
@@ -2006,17 +2030,18 @@ impl SessionsActor {
         }
     }
 
-    /// Adds a shell pane in `session`'s directory: splitting its focused pane
-    /// `split`, or in a new tab when `None`; a session with no layout (its
-    /// last pane closed) gets a first tab of that shell and is attached once
-    /// it's saved. Then saves the layout. A split of a session with no layout
-    /// does nothing; a pane that can't be saved shows why.
-    fn add_pane(&mut self, session: SessionId, split: Option<Split>) {
+    /// Adds a shell pane in `session`'s directory where `placement` says: in
+    /// the shown tab re-tiled by pane count, splitting the focused pane, or
+    /// in a new tab. A session with no layout (its last pane closed) gets a
+    /// first tab of that shell from [`Placement::Tab`] and is attached once
+    /// it's saved; the other placements do nothing there. Then saves the
+    /// layout. A pane that can't be saved shows why.
+    fn add_pane(&mut self, session: SessionId, placement: Placement) {
         let Some(dir) = self.sessions.get(&session).map(|row| row.dir.clone()) else {
             return;
         };
         let first = self.state.read().layouts.get(session).is_none();
-        if first && split.is_some() {
+        if first && !matches!(placement, Placement::Tab) {
             return;
         }
         let Ok(id) = self.store.insert_pane(session, &dir) else {
@@ -2037,13 +2062,14 @@ impl SessionsActor {
         self.panes.insert(id, row);
         {
             let mut app = self.state.write();
-            match split {
-                Some(split) => app.layouts.split(session, split, entry),
-                None if first => {
+            match placement {
+                Placement::Tile => app.layouts.add_tiled(session, entry),
+                Placement::Split(split) => app.layouts.split(session, split, entry),
+                Placement::Tab if first => {
                     app.layouts.insert(session, SessionLayout::of(entry));
                     app.sessions.attach = Some(session);
                 }
-                None => app.layouts.new_tab(session, entry),
+                Placement::Tab => app.layouts.new_tab(session, entry),
             }
         }
         self.save_layout(session);
@@ -2861,7 +2887,7 @@ mod tests {
     use error_stack::{Report, ResultExt};
 
     use super::{
-        FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms,
+        FAST_POLL, Placement, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms,
         settle_session_row,
     };
     use crate::Focus;
@@ -4312,7 +4338,7 @@ mod tests {
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When splitting it right.
-        actor.add_pane(inserted.session, Some(Split::Right));
+        actor.add_pane(inserted.session, Placement::Split(Split::Right));
 
         // Then the store has a second pane, which the tab focuses.
         let saved = actor.store.layouts()?;
@@ -4339,7 +4365,7 @@ mod tests {
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When opening a tab.
-        actor.add_pane(inserted.session, None);
+        actor.add_pane(inserted.session, Placement::Tab);
 
         // Then the store has two tabs, the second shown.
         let saved = actor.store.layouts()?;
@@ -4371,7 +4397,7 @@ mod tests {
         let (mut actor, state, inserted) = emptied_session()?;
 
         // When opening a tab.
-        actor.add_pane(inserted.session, None);
+        actor.add_pane(inserted.session, Placement::Tab);
 
         // Then the session's layout holds one pane.
         assert_eq!(
@@ -4388,7 +4414,7 @@ mod tests {
         let (mut actor, state, inserted) = emptied_session()?;
 
         // When opening a tab.
-        actor.add_pane(inserted.session, None);
+        actor.add_pane(inserted.session, Placement::Tab);
 
         // Then the frontend is asked to attach it.
         assert_eq!(
@@ -4405,7 +4431,7 @@ mod tests {
         let (mut actor, state, inserted) = emptied_session()?;
 
         // When splitting its pane.
-        actor.add_pane(inserted.session, Some(Split::Right));
+        actor.add_pane(inserted.session, Placement::Split(Split::Right));
 
         // Then it still has no layout and no saved pane.
         assert_eq!(
@@ -4415,6 +4441,54 @@ mod tests {
             ),
             (true, 0),
             "there is no pane to split"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn tiled_add_pane_lays_the_tab_out_by_count() -> Result<(), Report<StoreError>> {
+        // Given a thread's one-pane session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When adding two tiled panes.
+        actor.add_pane(inserted.session, Placement::Tile);
+        actor.add_pane(inserted.session, Placement::Tile);
+
+        // Then the shown tab holds one column then two, where two right
+        // splits would make three columns.
+        let columns: Vec<usize> = state
+            .read()
+            .layouts
+            .get(inserted.session)
+            .map(|layout| layout.placed(ratatui::layout::Rect::new(0, 0, 80, 24)))
+            .unwrap_or_default()
+            .chunk_by(|a, b| a.area.x == b.area.x)
+            .map(<[_]>::len)
+            .collect();
+        assert_eq!(columns, vec![1, 2], "three panes should tile [1][2]");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn tiled_add_pane_on_a_session_without_a_layout_does_nothing() -> Result<(), Report<StoreError>>
+    {
+        // Given a session whose last pane closed.
+        let (mut actor, state, inserted) = emptied_session()?;
+
+        // When adding a tiled pane.
+        actor.add_pane(inserted.session, Placement::Tile);
+
+        // Then it still has no layout and no saved pane.
+        assert_eq!(
+            (
+                state.read().layouts.get(inserted.session).is_none(),
+                actor.store.layouts()?.panes.len()
+            ),
+            (true, 0),
+            "there is no tab to add a pane to"
         );
         Ok(())
     }
