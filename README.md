@@ -63,19 +63,20 @@ map ctrl+shift+l no_op
 
 The demo shows, in order:
 
-1. The sidebar and the dashboard start screen, then the which-key popup and its `+group` menu.
-2. Approving a tool call and answering Claude's question, with both sessions attached at once.
-3. Jumping back with `<C-o>`.
-4. Search, rename and pin.
-5. A Feature group: its card, folding it, and a new thread started with `n`.
-6. Settling (with its `No`/`Yes` confirm), the Settled shelf, and deleting.
-7. Hiding and resizing the sidebar.
-8. Adding a project, and the `Initialize Git` offer for a folder that isn't a git repository.
-9. Starting a session in a new worktree through the model, permission, workspace and branch pickers.
-10. Lazygit, a shell and Neovim opened in that worktree.
-11. Making a Feature group and a Research group, and starting the Research group's draft.
-12. An Incognito session, with its `Trust /tmp/orb-incognito?` confirm.
-13. The project filter (with Research and Incognito listed), removing a project, and filtering to one.
+1. Session cards in the sidebar with their agents (`✳` Claude Code, `π` pi) and each one's status, then the which-key popup and its `+new` group.
+2. Approving a tool call in the agent that asked for it.
+3. Panes: moving focus with Cmd keys, a shell, a new pane with Claude started in it, the `+pane` menu and zoom, a new tab, and a click on the tab bar.
+4. Searching the sidebar and answering an agent's question.
+5. Folding a card's agent rows and renaming a session.
+6. The session picker, the transcript search, and jumping back with `<C-[>`.
+7. Settling a session (with its `No`/`Yes` confirm), the Settled shelf, and resuming a session settled 4 days ago.
+8. A new session in a new worktree with Claude and pi side by side, and its branch renamed after the agent's title.
+9. A Research session and an Incognito session.
+10. Adding a project, the worktree picker, and hiding and resizing the sidebar.
+11. Filtering the sidebar to one project.
+12. Quitting orb and starting it again, with every pane and agent still running.
+
+The recording comes from a scripted environment of dummy repos and stand-in agents; `docs/demo/kit/` has it and the steps to re-record.
 
 ## Features
 
