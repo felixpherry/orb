@@ -1146,7 +1146,9 @@ fn attach_session(state: &mut AppState) -> Vec<Command> {
 
 /// Attaches to the selected session, adding it to the attached sessions and
 /// showing its layout with the keys in its focused pane, unless it can't be
-/// attached to or has no layout. A settled session is un-settled first.
+/// attached to. A settled session is un-settled first. A session with no
+/// layout (its last pane closed) gets a tab of one shell; the sessions actor
+/// then asks to attach it, and the keys stay in the sidebar until then.
 fn show_pane(state: &mut AppState) -> Vec<Command> {
     let selected = state
         .sessions
@@ -1162,6 +1164,11 @@ fn show_pane(state: &mut AppState) -> Vec<Command> {
                 .chain([Command::Attach(id), Command::RefreshSessions])
                 .collect()
         }
+        (Ok(()), Some((id, settled))) => settled
+            .then_some(Command::UnsettleSession(id))
+            .into_iter()
+            .chain([Command::NewTab(id)])
+            .collect(),
         _ => vec![],
     }
 }
@@ -2002,6 +2009,52 @@ mod tests {
                 ][..]
             ),
             "⏎ on a settled session should bring it back and attach"
+        );
+    }
+
+    /// Settled session 1 selected in the sidebar, its last pane closed.
+    fn settled_without_layout() -> AppState {
+        AppState {
+            focus: Focus::Sidebar,
+            layouts: Layouts::default(),
+            ..state_with(vec![settled(1)], 1)
+        }
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_settled_session_without_a_layout_opens_a_shell_tab() {
+        // Given a selected settled session whose last pane closed.
+        let mut state = settled_without_layout();
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then it is un-settled, then gets a tab of one shell.
+        assert_eq!(
+            commands.get(..2),
+            Some(
+                &[
+                    Command::UnsettleSession(SessionId(1)),
+                    Command::NewTab(SessionId(1))
+                ][..]
+            ),
+            "⏎ on an emptied session should open a shell in it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_session_without_a_layout_keeps_the_keys_in_the_sidebar() {
+        // Given a selected settled session whose last pane closed.
+        let mut state = settled_without_layout();
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the keys stay in the sidebar and nothing is attached yet.
+        assert_eq!(
+            (state.focus, state.attached.is_empty()),
+            (Focus::Sidebar, true),
+            "the attach waits for the new tab"
         );
     }
 

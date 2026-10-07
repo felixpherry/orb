@@ -425,6 +425,7 @@ mod tests {
             },
             cwd: "/tmp".into(),
             name: None,
+            resume: None,
         }
     }
 

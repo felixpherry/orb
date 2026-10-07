@@ -202,7 +202,8 @@ pub struct SplitPane {
     pub split: Split,
 }
 
-/// Open a tab of one new shell pane in a session, and save the layout.
+/// Open a tab of one new shell pane in a session, its first when it has no
+/// layout, and save the layout.
 #[derive(Debug)]
 pub struct NewTab(pub SessionId);
 
@@ -213,6 +214,8 @@ pub struct SaveLayout(pub SessionId);
 
 /// Stop the Claude `--bg` sessions the store's migration to sessions turned
 /// into panes, so they don't fight the `claude --resume` those panes run.
+/// orb waits for it before the frontend starts, so no pane types
+/// `claude --resume` while its `--bg` session still runs.
 #[derive(Debug)]
 pub struct StopMigrated;
 
@@ -341,7 +344,6 @@ impl Actor for SessionsActor {
         {
             let actor_ref = actor_ref.clone();
             tokio::spawn(async move {
-                let _ = actor_ref.tell(StopMigrated).await;
                 let _ = actor_ref.tell(KillSettled).await;
             });
         }
@@ -966,7 +968,8 @@ impl SessionsActor {
         Ok(())
     }
 
-    /// Saves pane `pane`'s resume command, unless it already has it.
+    /// Saves pane `pane`'s resume command, unless it already has it, and
+    /// shows it in the pane's layout entry.
     fn set_resume(&mut self, pane: PaneId, resume: Option<&str>) -> Result<(), Report<StoreError>> {
         let Some(row) = self.panes.get_mut(&pane) else {
             return Ok(());
@@ -974,6 +977,10 @@ impl SessionsActor {
         if row.resume.as_deref() != resume {
             self.store.set_pane_resume(pane, resume)?;
             row.resume = resume.map(str::to_owned);
+            self.state
+                .write()
+                .layouts
+                .remember_resume(pane, row.resume.clone());
         }
         Ok(())
     }
@@ -2005,14 +2012,16 @@ impl SessionsActor {
     }
 
     /// Adds a shell pane in `session`'s directory: splitting its focused pane
-    /// `split`, or in a new tab when `None`. Then saves the layout. Nothing
-    /// happens once the session's layout is gone; a pane that can't be saved
-    /// shows why.
+    /// `split`, or in a new tab when `None`; a session with no layout (its
+    /// last pane closed) gets a first tab of that shell and is attached once
+    /// it's saved. Then saves the layout. A split of a session with no layout
+    /// does nothing; a pane that can't be saved shows why.
     fn add_pane(&mut self, session: SessionId, split: Option<Split>) {
         let Some(dir) = self.sessions.get(&session).map(|row| row.dir.clone()) else {
             return;
         };
-        if self.state.read().layouts.get(session).is_none() {
+        let first = self.state.read().layouts.get(session).is_none();
+        if first && split.is_some() {
             return;
         }
         let Ok(id) = self.store.insert_pane(session, &dir) else {
@@ -2035,6 +2044,10 @@ impl SessionsActor {
             let mut app = self.state.write();
             match split {
                 Some(split) => app.layouts.split(session, split, entry),
+                None if first => {
+                    app.layouts.insert(session, SessionLayout::of(entry));
+                    app.sessions.attach = Some(session);
+                }
                 None => app.layouts.new_tab(session, entry),
             }
         }
@@ -2645,6 +2658,7 @@ fn pane_entry(services: &Services, orb_root: &Path, row: &PaneRow) -> PaneEntry 
         zmx,
         cwd: row.cwd.clone(),
         name: row.name.clone(),
+        resume: row.resume.clone(),
     }
 }
 
@@ -2856,6 +2870,7 @@ mod tests {
     use crate::feat::harness::fake::FakeHarness;
     use crate::feat::harness::{Harness, Harnesses, RunningAgent};
     use crate::feat::jumps::state::JumpList;
+    use crate::feat::layout::state::test_entry;
     use crate::feat::layout::tree::Split;
     use crate::feat::sessions::state::{
         FolderKind, Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind,
@@ -4328,6 +4343,73 @@ mod tests {
             (saved.tabs.len(), active),
             (2, vec![1]),
             "a new tab should be saved and shown"
+        );
+        Ok(())
+    }
+
+    /// A thread's session whose last pane closed and was saved, so it has no
+    /// layout.
+    fn emptied_session() -> Result<(SessionsActor, State, Seeded), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().layouts.close_pane(inserted.pane);
+        actor.save_layout(inserted.session);
+        Ok((actor, state, inserted))
+    }
+
+    #[rstest::rstest]
+    fn new_tab_on_a_session_without_a_layout_opens_one_shell_tab() -> Result<(), Report<StoreError>>
+    {
+        // Given a session whose last pane closed.
+        let (mut actor, state, inserted) = emptied_session()?;
+
+        // When opening a tab.
+        actor.add_pane(inserted.session, None);
+
+        // Then the session's layout holds one pane.
+        assert_eq!(
+            state.read().layouts.session_panes(inserted.session).len(),
+            1,
+            "an emptied session should get one shell"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_tab_on_a_session_without_a_layout_asks_to_attach_it() -> Result<(), Report<StoreError>> {
+        // Given a session whose last pane closed.
+        let (mut actor, state, inserted) = emptied_session()?;
+
+        // When opening a tab.
+        actor.add_pane(inserted.session, None);
+
+        // Then the frontend is asked to attach it.
+        assert_eq!(
+            state.read().sessions.attach,
+            Some(inserted.session),
+            "the new shell should be attached"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn split_on_a_session_without_a_layout_does_nothing() -> Result<(), Report<StoreError>> {
+        // Given a session whose last pane closed.
+        let (mut actor, state, inserted) = emptied_session()?;
+
+        // When splitting its pane.
+        actor.add_pane(inserted.session, Some(Split::Right));
+
+        // Then it still has no layout and no saved pane.
+        assert_eq!(
+            (
+                state.read().layouts.get(inserted.session).is_none(),
+                actor.store.layouts()?.panes.len()
+            ),
+            (true, 0),
+            "there is no pane to split"
         );
         Ok(())
     }
@@ -8332,6 +8414,82 @@ mod tests {
             fx.resume(fx.thread.pane)?,
             None,
             "an ended conversation shouldn't be resumed"
+        );
+        Ok(())
+    }
+
+    /// Pane `pane`'s resume command, as its layout entry shows it.
+    fn layout_resume(state: &State, pane: PaneId) -> Option<String> {
+        state
+            .read()
+            .layouts
+            .entry(pane)
+            .and_then(|entry| entry.resume.clone())
+    }
+
+    #[rstest::rstest]
+    fn restored_pane_entry_carries_its_resume_command() -> Result<(), Report<StoreError>> {
+        // Given a saved thread whose pane resumes aa.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        store.set_pane_resume(inserted.pane, Some("claude --resume aa"))?;
+        let host = listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then the pane's layout entry carries the resume command.
+        assert_eq!(
+            layout_resume(&state, inserted.pane).as_deref(),
+            Some("claude --resume aa"),
+            "the restored entry should know how to resume its pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_start_shows_the_resume_command_in_the_layout()
+    -> Result<(), Report<StoreError>> {
+        // Given the shell pane open in a tab of its own, and Claude started
+        // conversation s-new in it.
+        let mut fx = PaneReports::new()?;
+        fx.state
+            .write()
+            .layouts
+            .new_tab(fx.thread.session, test_entry(fx.shell.0));
+        fx.report(fx.shell, "start", "s-new", Some("startup"))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then the shell pane's layout entry resumes s-new.
+        assert_eq!(
+            layout_resume(&fx.state, fx.shell).as_deref(),
+            Some("claude --resume s-new"),
+            "the layout should carry the pane's new resume command"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_end_clears_the_resume_command_in_the_layout()
+    -> Result<(), Report<StoreError>> {
+        // Given aa's pane resumes aa, and aa's conversation ended.
+        let mut fx = PaneReports::with(|store, thread| {
+            store.set_pane_resume(thread.pane, Some("claude --resume aa"))
+        })?;
+        fx.report(fx.thread.pane, "end", "aa", None)?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then the pane's layout entry has nothing to resume.
+        assert_eq!(
+            layout_resume(&fx.state, fx.thread.pane),
+            None,
+            "an ended conversation shouldn't be resumed from the layout"
         );
         Ok(())
     }

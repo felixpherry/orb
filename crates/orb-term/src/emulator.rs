@@ -110,6 +110,12 @@ impl Emulator {
         self.write(&encode_paste(text, *self.term.mode()));
     }
 
+    /// Types `line` and Enter into the child as raw input, never as a
+    /// bracketed paste, so a shell runs it.
+    pub(crate) fn type_line(&self, line: &str) {
+        self.write(format!("{line}\r").as_bytes());
+    }
+
     /// Sends a mouse event over the pane drawn at `area` to the child.
     pub(crate) fn mouse(&self, event: MouseEvent, area: Rect) {
         self.write(&encode_mouse(event, area, *self.term.mode()));
@@ -222,6 +228,31 @@ mod tests {
 
         // Then the child receives a VT102 reply.
         assert_eq!(input.contents(), b"\x1b[?6c", "DA1 reply");
+    }
+
+    #[rstest::rstest]
+    fn typed_line_reaches_the_child_with_enter() {
+        // Given a fresh emulator.
+        let (emulator, input, _) = emulator();
+
+        // When typing a resume command.
+        emulator.type_line("claude --resume aa");
+
+        // Then the child receives the line and a carriage return.
+        assert_eq!(input.contents(), b"claude --resume aa\r", "typed line");
+    }
+
+    #[rstest::rstest]
+    fn typed_line_ignores_bracketed_paste() {
+        // Given a child that turned bracketed paste on.
+        let (mut emulator, input, _) = emulator();
+        emulator.feed(b"\x1b[?2004h");
+
+        // When typing a resume command.
+        emulator.type_line("claude --resume aa");
+
+        // Then the line reaches the child unwrapped.
+        assert_eq!(input.contents(), b"claude --resume aa\r", "unwrapped line");
     }
 
     #[rstest::rstest]

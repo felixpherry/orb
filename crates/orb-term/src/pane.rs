@@ -183,6 +183,11 @@ impl Pane {
         lock(&self.emulator).paste(text);
     }
 
+    /// Types `line` and Enter into the child (see [`Emulator::type_line`]).
+    pub fn type_line(&self, line: &str) {
+        lock(&self.emulator).type_line(line);
+    }
+
     /// Sends a mouse event to the child if it asked for mouse reports and the
     /// event happened over the pane drawn at `area`.
     pub fn mouse(&self, event: MouseEvent, area: Rect) {

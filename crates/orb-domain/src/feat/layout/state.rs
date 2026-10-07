@@ -11,14 +11,17 @@ use crate::feat::sessions::state::{PaneId, SessionId};
 use crate::feat::sidebar::state::STEP;
 use crate::feat::zmx::zmx_service::ZmxSession;
 
-/// Where a pane's program runs: its zmx session and directory, and the name
-/// the user gave it.
+/// Where a pane's program runs: its zmx session and directory, the name the
+/// user gave it, and the command that brings its conversation back in a
+/// fresh shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneEntry {
     pub id: PaneId,
     pub zmx: ZmxSession,
     pub cwd: PathBuf,
     pub name: Option<String>,
+    /// Typed into the pane's shell when zmx has to make its session anew.
+    pub resume: Option<String>,
 }
 
 /// One tab: its name, its panes' tree, and whether it shows only the focused pane.
@@ -467,6 +470,18 @@ impl Layouts {
         }
     }
 
+    /// Remembers the command that brings pane `pane`'s conversation back in
+    /// a fresh shell, wherever the pane is; `None` when it has none.
+    pub fn remember_resume(&mut self, pane: PaneId, resume: Option<String>) {
+        if let Some(entry) = self
+            .sessions
+            .values_mut()
+            .find_map(|layout| layout.panes.get_mut(&pane))
+        {
+            entry.resume = resume;
+        }
+    }
+
     /// Points every pane of `owner`'s layout at `dir`, where they start next.
     pub fn move_session(&mut self, owner: SessionId, dir: &Path) {
         if let Some(layout) = self.sessions.get_mut(&owner) {
@@ -513,6 +528,7 @@ pub(crate) fn test_entry(id: i64) -> PaneEntry {
         },
         cwd: "/work".into(),
         name: None,
+        resume: None,
     }
 }
 
@@ -1000,6 +1016,24 @@ mod tests {
             label.as_deref(),
             Some("1 server"),
             "pane name labels the tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn remembered_resume_shows_in_the_panes_entry() {
+        // Given session 1's layout holding pane 7.
+        let mut layouts = opened();
+
+        // When remembering pane 7's resume command.
+        layouts.remember_resume(PaneId(7), Some("claude --resume aa".into()));
+
+        // Then pane 7's entry carries it.
+        assert_eq!(
+            layouts
+                .entry(PaneId(7))
+                .and_then(|entry| entry.resume.as_deref()),
+            Some("claude --resume aa"),
+            "resume command in the entry"
         );
     }
 }

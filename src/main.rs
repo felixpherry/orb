@@ -21,7 +21,9 @@ use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::child_env::child_env;
-use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
+use orb_domain::feat::sessions::sessions_actor::{
+    SessionsActorDeps, StopMigrated, spawn_sessions_actor,
+};
 use orb_domain::feat::sessions::store::Store;
 use orb_domain::feat::worktrees::worktrees_actor::{
     SWEEP_EVERY, WorktreesActorDeps, spawn_worktrees_actor,
@@ -99,6 +101,8 @@ fn main() -> Result<(), Report<OrbError>> {
         integration_missing: !integrations.any_installed(),
     });
     runtime.block_on(sessions.wait_for_startup());
+    // Stop migrated `--bg` sessions before any pane resumes them.
+    let _ = runtime.block_on(async { sessions.ask(StopMigrated).await });
     let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
         git: git.clone(),
         state: state.clone(),

@@ -18,8 +18,11 @@
 //! with `zmx kill`. A pane of an attached session whose program ended closes
 //! in its layout. At start every `orb-p*` session on orb's pane dir that no
 //! pane names is killed (left by earlier versions, or by panes closed while
-//! orb was down), then every unsettled session with a pane whose zmx session
-//! still runs is attached again. A client
+//! orb was down), then every unsettled session is attached again (one whose
+//! directory is gone only if a pane still runs). A pane whose zmx session is
+//! gone gets a fresh shell, and orb types its resume command
+//! (`claude --resume <id>`, `pi --session-id <id>`) once the client first
+//! prints. A client
 //! that dies while zmx still lists its session is attached again once; a
 //! second death closes the pane with an error on the mode line. While a pane
 //! has the keys, input goes straight to its program except orb's Cmd keys,
@@ -30,7 +33,8 @@
 //!
 //! A click on the sidebar or `Cmd h` from the leftmost pane moves the keys to
 //! the sidebar and leaves the panes drawn, so `Cmd l` goes back in. Settling
-//! or deleting a session ends its panes' clients. A pane whose program exits
+//! or deleting a session ends its panes' clients; `⏎` on a settled session
+//! brings its panes back the way start-up does. A pane whose program exits
 //! within a second of attaching leaves `session exited at start` on the start screen.
 //!
 //! When a thread finishes a turn or starts needing an approval or an answer
@@ -315,6 +319,47 @@ fn to_spawn<P>(keep: &HashSet<PaneId>, live: &HashMap<PaneId, P>) -> Vec<PaneId>
         .collect()
 }
 
+/// What to type into each pane about to get a client, given as (pane, its
+/// zmx session, its resume command): the resume command, for each pane whose
+/// session zmx didn't list, since the attach then makes a fresh shell.
+/// `listed` maps each socket dir to the names zmx listed there, or to `None`
+/// when it couldn't list it; nothing is typed there, since a live agent
+/// would take the text as a prompt. A command with a control character is
+/// never typed.
+fn resume_plan(
+    spawning: &[(PaneId, ZmxSession, Option<String>)],
+    listed: &HashMap<PathBuf, Option<HashSet<String>>>,
+) -> HashMap<PaneId, String> {
+    spawning
+        .iter()
+        .filter_map(|(id, zmx, resume)| {
+            let resume = resume.as_ref()?;
+            let names = listed.get(&zmx.dir)?.as_ref()?;
+            (!names.contains(&zmx.name) && !resume.chars().any(char::is_control))
+                .then(|| (*id, resume.clone()))
+        })
+        .collect()
+}
+
+/// The sessions start-up attaches, from `panes` (each pane of an unsettled
+/// session, see [`reattachable`]): each with a pane zmx still runs
+/// (`running`), so its program shows again, and each whose directory is
+/// there (`present`), so panes whose zmx session died while orb was down
+/// come back as fresh shells and resume. A session whose directory is gone
+/// and that runs nothing waits for `⏎`, which recreates an orb worktree
+/// first.
+fn attach_at_start(
+    panes: &[(SessionId, ZmxSession)],
+    running: &HashSet<ZmxSession>,
+    present: &HashSet<SessionId>,
+) -> HashSet<SessionId> {
+    panes
+        .iter()
+        .filter(|(owner, zmx)| running.contains(zmx) || present.contains(owner))
+        .map(|(owner, _)| *owner)
+        .collect()
+}
+
 /// The sessions on orb's pane dir to kill at start: every `orb-p*` name no
 /// pane names (`owned`). Other names are left alone.
 fn stale_sessions(listed: Vec<String>, owned: &HashSet<String>) -> Vec<String> {
@@ -409,6 +454,8 @@ struct App {
     exited: Vec<PaneId>,
     /// Panes already attached again once after their client died.
     respawned: HashSet<PaneId>,
+    /// Resume commands waiting for their fresh pane's first output.
+    typing: HashMap<PaneId, String>,
     /// Shown on the right when a thread's attach command couldn't start.
     pane_error: Option<String>,
     /// A new session's attach request is waiting for the keys to come back
@@ -473,6 +520,7 @@ impl App {
             focused_pane: None,
             exited: Vec::new(),
             respawned: HashSet::new(),
+            typing: HashMap::new(),
             pane_error: None,
             attach_waited: false,
             env,
@@ -741,9 +789,8 @@ impl App {
             }
             // Resize and the rest: the next iteration lays out and redraws;
             // `reconcile` sweeps exited thread panes.
-            LoopEvent::Input(_)
-            | LoopEvent::Pane(_, PaneEvent::Output)
-            | LoopEvent::StateChanged => {}
+            LoopEvent::Pane(id, PaneEvent::Output) => self.type_resume(id),
+            LoopEvent::Input(_) | LoopEvent::StateChanged => {}
             LoopEvent::Pane(id, PaneEvent::Exited) => self.exited.push(id),
             LoopEvent::InputFailed(error) => return Err(error),
             LoopEvent::Pane(_, PaneEvent::Clipboard(text)) => {
@@ -1094,8 +1141,12 @@ impl App {
             self.panes.remove(id);
             self.pane_sessions.remove(id);
             self.respawned.remove(id);
+            self.typing.remove(id);
         }
-        for id in to_spawn(&keep, &self.panes) {
+        let spawning = to_spawn(&keep, &self.panes);
+        let plan = self.plan_resumes(&spawning);
+        self.typing.extend(plan);
+        for id in spawning {
             let spawned = self.pane_launch(id).and_then(|(session, cwd)| {
                 self.spawn_pane(id, &session, &cwd)
                     .map(|pane| (pane, session))
@@ -1109,6 +1160,7 @@ impl App {
                     self.pane_sessions.insert(id, session);
                 }
                 None => {
+                    self.typing.remove(&id);
                     self.pane_error = Some("couldn't start zmx attach".to_owned());
                     let mut app = self.state.write();
                     if let Some(owner) = app.layouts.owner_of(id) {
@@ -1120,6 +1172,48 @@ impl App {
         let mut app = self.state.write();
         if app.focus == Focus::Pane && app.shown_layout().is_none() {
             app.focus = after_pane(app.focus);
+        }
+    }
+
+    /// [`resume_plan`] for `spawning`, listing once each socket dir that
+    /// holds a pane with a resume command.
+    fn plan_resumes(&self, spawning: &[PaneId]) -> HashMap<PaneId, String> {
+        let spawning: Vec<(PaneId, ZmxSession, Option<String>)> = {
+            let state = self.state.read();
+            spawning
+                .iter()
+                .filter_map(|&id| {
+                    let entry = state.layouts.entry(id)?;
+                    Some((id, entry.zmx.clone(), entry.resume.clone()))
+                })
+                .collect()
+        };
+        let listed = spawning
+            .iter()
+            .filter(|(_, _, resume)| resume.is_some())
+            .map(|(_, zmx, _)| zmx.dir.clone())
+            .collect::<HashSet<PathBuf>>()
+            .into_iter()
+            .map(|dir| {
+                let names = self
+                    .zmx
+                    .list(&dir)
+                    .ok()
+                    .map(|entries| entries.into_iter().map(|entry| entry.name).collect());
+                (dir, names)
+            })
+            .collect();
+        resume_plan(&spawning, &listed)
+    }
+
+    /// Types pane `id`'s waiting resume command, once, now that its client
+    /// printed: zmx's `session "…" created` banner comes before the shell
+    /// starts, and the shell reads the line at its first prompt.
+    fn type_resume(&mut self, id: PaneId) {
+        if let Some(line) = self.typing.remove(&id)
+            && let Some(pane) = self.panes.get(&id)
+        {
+            pane.type_line(&line);
         }
     }
 
@@ -1217,10 +1311,13 @@ impl App {
     }
 
     /// Kills every `orb-p*` session on orb's pane dir that no pane names
-    /// (see [`stale_sessions`]), then attaches every unsettled session with a
-    /// pane whose zmx session still runs and gives its panes their clients,
-    /// so programs left running when orb quit show again. Each socket dir the
-    /// panes use is listed once; a dir zmx can't list brings nothing back.
+    /// (see [`stale_sessions`]), then attaches every unsettled session whose
+    /// directory is there or that has a pane zmx still runs (see
+    /// [`attach_at_start`]) and gives its panes their clients, so programs
+    /// left running when orb quit show again and panes whose zmx session died
+    /// while orb was down come back with their agents resumed (see
+    /// [`resume_plan`]). Each socket dir the panes use is listed once; a dir
+    /// zmx can't list brings no running program back.
     fn reattach_live(&mut self) {
         let owned: HashSet<String> = {
             let state = self.state.read();
@@ -1259,12 +1356,21 @@ impl App {
                 })
                 .collect()
         };
-        self.state.write().attached.extend(
+        let present: HashSet<SessionId> = {
+            let state = self.state.read();
             panes
-                .into_iter()
-                .filter(|(_, zmx)| running.contains(zmx))
-                .map(|(owner, _)| owner),
-        );
+                .iter()
+                .map(|(owner, _)| *owner)
+                .filter(|owner| {
+                    state
+                        .sessions
+                        .session(*owner)
+                        .is_some_and(|session| session.dir.is_dir())
+                })
+                .collect()
+        };
+        let owners = attach_at_start(&panes, &running, &present);
+        self.state.write().attached.extend(owners);
         self.reconcile();
     }
 
@@ -1404,9 +1510,10 @@ mod tests {
     use ratatui::crossterm::cursor::SetCursorStyle;
 
     use super::{
-        AttachPlan, PaneExit, StartedAttach, after_pane, attach_or_restore, classify_exit,
-        closed_in_layouts, cursor_style, list_directories, pane_error_after, reattachable,
-        stale_preview, stale_sessions, started_attach, to_drop, to_kill, to_spawn,
+        AttachPlan, PaneExit, StartedAttach, after_pane, attach_at_start, attach_or_restore,
+        classify_exit, closed_in_layouts, cursor_style, list_directories, pane_error_after,
+        reattachable, resume_plan, stale_preview, stale_sessions, started_attach, to_drop, to_kill,
+        to_spawn,
     };
 
     /// Pane `id`, a shell in `orb-p<id>`.
@@ -1419,6 +1526,7 @@ mod tests {
             },
             cwd: "/tmp".into(),
             name: None,
+            resume: None,
         }
     }
 
@@ -1812,6 +1920,154 @@ mod tests {
             vec![PaneId(7)],
             "a kept pane without a client starts"
         );
+    }
+
+    /// Pane `id` about to get a client, in `orb-p<id>` on `/zmx`, with
+    /// `resume` as its resume command.
+    fn spawning(id: i64, resume: Option<&str>) -> (PaneId, ZmxSession, Option<String>) {
+        (
+            PaneId(id),
+            ZmxSession {
+                name: format!("orb-p{id}"),
+                dir: "/zmx".into(),
+            },
+            resume.map(str::to_owned),
+        )
+    }
+
+    /// zmx listing `names` on `/zmx`.
+    fn zmx_lists(names: &[&str]) -> HashMap<PathBuf, Option<HashSet<String>>> {
+        HashMap::from([(
+            PathBuf::from("/zmx"),
+            Some(names.iter().map(|name| (*name).to_owned()).collect()),
+        )])
+    }
+
+    #[rstest::rstest]
+    fn resume_plan_types_a_panes_resume_when_zmx_no_longer_runs_it() {
+        // Given pane 1 resuming aa, and zmx running nothing on its dir.
+        let panes = [spawning(1, Some("claude --resume aa"))];
+
+        // When planning what to type.
+        let plan = resume_plan(&panes, &zmx_lists(&[]));
+
+        // Then pane 1's fresh shell gets its resume command.
+        assert_eq!(
+            plan,
+            HashMap::from([(PaneId(1), "claude --resume aa".to_owned())]),
+            "a fresh shell resumes its pane's conversation"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resume_plan_types_nothing_into_a_running_session() {
+        // Given pane 1 resuming aa, and zmx still running orb-p1.
+        let panes = [spawning(1, Some("claude --resume aa"))];
+
+        // When planning what to type.
+        let plan = resume_plan(&panes, &zmx_lists(&["orb-p1"]));
+
+        // Then nothing is typed.
+        assert!(
+            plan.is_empty(),
+            "a running program must not get the command"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resume_plan_types_nothing_into_a_pane_without_a_resume_command() {
+        // Given pane 1 with nothing to resume, and zmx running nothing.
+        let panes = [spawning(1, None)];
+
+        // When planning what to type.
+        let plan = resume_plan(&panes, &zmx_lists(&[]));
+
+        // Then nothing is typed.
+        assert!(plan.is_empty(), "a plain shell stays plain");
+    }
+
+    #[rstest::rstest]
+    fn resume_plan_types_nothing_where_zmx_couldnt_list() {
+        // Given pane 1 resuming aa, and zmx failing to list its dir.
+        let panes = [spawning(1, Some("claude --resume aa"))];
+        let listed = HashMap::from([(PathBuf::from("/zmx"), None)]);
+
+        // When planning what to type.
+        let plan = resume_plan(&panes, &listed);
+
+        // Then nothing is typed.
+        assert!(plan.is_empty(), "an unknown session might be running");
+    }
+
+    #[rstest::rstest]
+    fn resume_plan_never_types_a_command_with_a_control_character() {
+        // Given pane 1 whose resume command holds a newline.
+        let panes = [spawning(1, Some("claude --resume aa\nrm -rf ~"))];
+
+        // When planning what to type.
+        let plan = resume_plan(&panes, &zmx_lists(&[]));
+
+        // Then nothing is typed.
+        assert!(
+            plan.is_empty(),
+            "a control character could run a second command"
+        );
+    }
+
+    /// Session 1's pane 1, in `orb-p1` on `/zmx`.
+    fn start_pane() -> [(SessionId, ZmxSession); 1] {
+        [(
+            SessionId(1),
+            ZmxSession {
+                name: "orb-p1".into(),
+                dir: "/zmx".into(),
+            },
+        )]
+    }
+
+    #[rstest::rstest]
+    fn start_attaches_a_session_whose_panes_all_died() {
+        // Given session 1's directory there and its pane no longer running.
+        let panes = start_pane();
+
+        // When choosing what to attach at start.
+        let owners = attach_at_start(&panes, &HashSet::new(), &HashSet::from([SessionId(1)]));
+
+        // Then session 1 is attached.
+        assert_eq!(
+            owners,
+            HashSet::from([SessionId(1)]),
+            "dead panes come back as fresh shells"
+        );
+    }
+
+    #[rstest::rstest]
+    fn start_attaches_a_session_with_a_running_pane_whose_directory_is_gone() {
+        // Given session 1's pane still running and its directory gone.
+        let panes = start_pane();
+        let running = HashSet::from([panes[0].1.clone()]);
+
+        // When choosing what to attach at start.
+        let owners = attach_at_start(&panes, &running, &HashSet::new());
+
+        // Then session 1 is attached.
+        assert_eq!(
+            owners,
+            HashSet::from([SessionId(1)]),
+            "a running program shows again"
+        );
+    }
+
+    #[rstest::rstest]
+    fn start_leaves_a_session_with_its_directory_gone_and_nothing_running() {
+        // Given session 1's directory gone and nothing of it running.
+        let panes = start_pane();
+
+        // When choosing what to attach at start.
+        let owners = attach_at_start(&panes, &HashSet::new(), &HashSet::new());
+
+        // Then session 1 waits for ⏎.
+        assert!(owners.is_empty(), "⏎ recreates its worktree first");
     }
 
     #[rstest::rstest]
