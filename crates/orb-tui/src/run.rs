@@ -546,7 +546,7 @@ impl App {
                 let state = self.state.read();
                 state
                     .shown_layout()
-                    .map(|layout| layout.placed(self.pane_area).panes)
+                    .map(|layout| tabs::placement(&state, layout, self.pane_area).panes)
                     .unwrap_or_default()
             };
             for place in &placed {
@@ -1430,8 +1430,7 @@ impl App {
             state
                 .shown_layout()
                 .and_then(|layout| {
-                    layout
-                        .placed(self.pane_area)
+                    tabs::placement(&state, layout, self.pane_area)
                         .panes
                         .into_iter()
                         .find(|place| place.pane == id)

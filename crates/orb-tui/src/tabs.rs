@@ -3,13 +3,14 @@
 //! with its name. The frame shows where the focus is: blue while the pane
 //! has the keys, grey while it has the focus and the keys are elsewhere,
 //! dim otherwise. A zoomed tab shows only its focused pane. A stack is a
-//! list naming its panes, one plain row each, above the shown one.
+//! centred list naming its panes, one row each between two dim bars, above
+//! the shown one.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
 use orb_domain::AppState;
-use orb_domain::feat::layout::state::{SessionLayout, StackList};
+use orb_domain::feat::layout::state::{Placement, SessionLayout, StackList, Tab};
 use orb_domain::feat::sessions::state::PaneId;
 use orb_term::Pane;
 use ratatui::buffer::Buffer;
@@ -47,7 +48,7 @@ pub(crate) fn render(
 ) -> Option<Position> {
     let [bar, body] = areas(right);
     tab_bar(state, layout, bar, buf, hits);
-    let placement = layout.placed(body);
+    let placement = placement(state, layout, body);
     let mut cursor = None;
     for place in &placement.panes {
         let lit = place.focused && keys_in_pane;
@@ -82,15 +83,38 @@ pub(crate) fn render(
                 .iter()
                 .any(|place| place.pane == stack.shown && place.focused);
         stack_list(state, stack, lit, buf, hits);
+        let order = layout.active_tab().map(Tab::stacked).unwrap_or_default();
+        hits.record_stack(stack.area, order, stack.shown);
     }
     cursor
 }
 
-/// Draws `stack`'s list: a plain row per pane that fits, the shown pane's
-/// as `> name`, bold blue while `lit`. Names too long for the
-/// row end in `…`. Records every other row in `hits`, reading the mouse so
-/// a click focuses its pane without starting a selection.
+/// Where `layout`'s shown tab draws its panes in `body`, its stack's list as
+/// wide as the longest stacked pane's title plus its bars and `> `. Every
+/// caller places panes through here so drawing, resizing and spawning agree.
+pub(crate) fn placement(state: &AppState, layout: &SessionLayout, body: Rect) -> Placement {
+    let longest = layout
+        .active_tab()
+        .map(Tab::stacked)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|pane| Span::raw(pane_title(state, pane)).width())
+        .max();
+    let list_width = longest.map_or(0, |longest| u16::try_from(longest + 4).unwrap_or(u16::MAX));
+    layout.placed(body, list_width)
+}
+
+/// Draws `stack`'s list: a dim bar down each side, and between them a row
+/// per pane that fits, the shown pane's as `> name`, bold blue while `lit`.
+/// Names too long for the row end in `…`. Records every other row in
+/// `hits`, reading the mouse so a click focuses its pane without starting a
+/// selection.
 fn stack_list(state: &AppState, stack: &StackList, lit: bool, buf: &mut Buffer, hits: &mut HitMap) {
+    let bar = Style::new().fg(GUTTER);
+    for y in stack.area.rows().map(|row| row.y) {
+        buf.set_string(stack.area.x, y, "│", bar);
+        buf.set_string(stack.area.right().saturating_sub(1), y, "│", bar);
+    }
     for (pane, row) in &stack.rows {
         let (mark, style) = match (*pane == stack.shown, lit) {
             (true, true) => ("> ", Style::new().fg(BLUE).add_modifier(Modifier::BOLD)),

@@ -4485,7 +4485,7 @@ mod tests {
             .get(inserted.session)
             .map(|layout| {
                 layout
-                    .placed(ratatui::layout::Rect::new(0, 0, 80, 24))
+                    .placed(ratatui::layout::Rect::new(0, 0, 80, 24), 0)
                     .panes
             })
             .unwrap_or_default()

@@ -1545,9 +1545,9 @@ mod tests {
 
         // Then its row ends in `…`.
         let right = right_side(&buffer);
-        let row = right.lines().find(|line| line.starts_with("  abcdefghij"));
+        let row = right.lines().find(|line| line.contains("│  abcdefghij"));
         assert!(
-            row.is_some_and(|row| row.trim_end().ends_with('…')),
+            row.is_some_and(|row| row.trim_end().ends_with("…│")),
             "right side was\n{right}"
         );
     }
@@ -1585,10 +1585,47 @@ mod tests {
             .cell((right.x, right.y + 5))
             .map(|cell| cell.symbol().to_owned());
         assert_eq!(
-            (first.trim_end().to_owned(), corner),
-            ("  Fix the bug".to_owned(), Some("╭".to_owned())),
+            (first.trim().to_owned(), corner),
+            ("│  Fix the bug│".to_owned(), Some("╭".to_owned())),
             "the list is on top, the shown pane below"
         );
+    }
+
+    #[rstest::rstest]
+    fn stack_list_rows_have_a_bar_on_each_side() {
+        // Given a stack of four panes.
+        let state = stacked();
+
+        // When drawing a frame tall enough for every row.
+        let buffer = draw_tall(&state, None);
+
+        // Then each of the four list rows starts and ends with a bar.
+        let right = right_of(&buffer);
+        let rows: Vec<String> = (1..=4)
+            .map(|y| text(&buffer, Rect::new(right.x, right.y + y, right.width, 1)))
+            .collect();
+        assert!(
+            rows.iter()
+                .all(|row| row.trim().starts_with('│') && row.trim().ends_with('│')),
+            "list rows were {rows:#?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn stack_list_is_centred() {
+        // Given a stack of four panes.
+        let state = stacked();
+
+        // When drawing a frame tall enough for every row.
+        let buffer = draw_tall(&state, None);
+
+        // Then the first list row has as much space on its left as on its
+        // right, give or take a column.
+        let right = right_of(&buffer);
+        let row = text(&buffer, Rect::new(right.x, right.y + 1, right.width, 1));
+        let left = row.len() - row.trim_start().len();
+        let after = row.len() - row.trim_end().len();
+        assert!(left.abs_diff(after) <= 1, "row was {row:?}");
     }
 
     /// Draws `state` on an 80x8 screen, returning the buffer and the hit map.
@@ -1645,6 +1682,37 @@ mod tests {
             route,
             Some(MouseRoute::Intents(vec![Intent::FocusPane(PaneId(2))])),
             "a click on a list row should focus its pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn wheel_down_over_the_drawn_stack_list_shows_the_next_pane() {
+        // Given a stack drawn with pane 3 of panes 1 to 4 shown and focused.
+        let (buffer, hits) = draw_hits(&stacked());
+        let row = find(&buffer, "api");
+
+        // When wheeling down over pane 2's row with the keys in pane 3.
+        let route = row.map(|at| {
+            mouse::route(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: at.x,
+                    row: at.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &hits,
+                Focus::Pane,
+                Some(PaneId(3)),
+                &mut Clicks::default(),
+                Instant::now(),
+            )
+        });
+
+        // Then pane 4, the one after the shown pane, is shown.
+        assert_eq!(
+            route,
+            Some(MouseRoute::Intents(vec![Intent::ShowStacked(PaneId(4))])),
+            "the wheel over the list steps the shown pane"
         );
     }
 

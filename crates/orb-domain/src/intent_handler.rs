@@ -142,11 +142,6 @@ impl IntentHandler {
                 Focus::Sidebar => focus_right(state),
                 _ => vec![],
             },
-            Intent::SwapFocus => match state.focus {
-                Focus::Pane => leave_pane(state),
-                Focus::Sidebar => focus_right(state),
-                _ => vec![],
-            },
             Intent::MoveFocus(nav) => match state.focus {
                 Focus::Pane => move_focus(state, *nav),
                 _ => vec![],
@@ -198,6 +193,15 @@ impl IntentHandler {
                         let mut commands = attach_session(state);
                         commands.push(Command::SaveLayout(owner));
                         commands
+                    }
+                    _ => vec![],
+                }
+            }
+            Intent::ShowStacked(pane) => {
+                match (validate_focus_pane(state, *pane), state.shown_session()) {
+                    (Ok(()), Some(owner)) => {
+                        state.layouts.focus_pane(owner, *pane);
+                        vec![Command::SaveLayout(owner)]
                     }
                     _ => vec![],
                 }
@@ -6882,7 +6886,7 @@ mod tests {
 
     fn pane_count(state: &AppState) -> usize {
         state.shown_layout().map_or(0, |layout| {
-            layout.placed(Rect::new(0, 0, 80, 24)).panes.len()
+            layout.placed(Rect::new(0, 0, 80, 24), 0).panes.len()
         })
     }
 
@@ -7120,30 +7124,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn swap_focus_from_a_pane_focuses_the_sidebar() {
-        // Given thread 1's pane with the keys.
-        let mut state = with_layout(Focus::Pane);
-
-        // When handling SwapFocus (`<C-g> e`).
-        IntentHandler::handle(&Intent::SwapFocus, &mut state);
-
-        // Then the sidebar has the keys.
-        assert_eq!(state.focus, Focus::Sidebar, "<C-g> e leaves the pane");
-    }
-
-    #[rstest::rstest]
-    fn swap_focus_from_the_sidebar_enters_the_shown_layout() {
-        // Given thread 1's layout shown while the sidebar has the keys.
-        let mut state = with_layout(Focus::Sidebar);
-
-        // When handling SwapFocus (`<C-g> e`).
-        IntentHandler::handle(&Intent::SwapFocus, &mut state);
-
-        // Then the keys are in the pane.
-        assert_eq!(state.focus, Focus::Pane, "<C-g> e enters the layout");
-    }
-
-    #[rstest::rstest]
     fn send_ctrl_g_in_a_pane_returns_send_ctrl_g() {
         // Given the keys in session 1's pane.
         let mut state = with_layout(Focus::Pane);
@@ -7178,7 +7158,7 @@ mod tests {
         let width = |state: &AppState| {
             state
                 .shown_layout()?
-                .placed(Rect::new(0, 0, 80, 24))
+                .placed(Rect::new(0, 0, 80, 24), 0)
                 .panes
                 .into_iter()
                 .find(|place| place.pane == PaneId(50))
@@ -7735,5 +7715,51 @@ mod tests {
 
         // Then the keys are in the pane.
         assert_eq!(state.focus, Focus::Pane, "a click moves the keys in");
+    }
+
+    #[rstest::rstest]
+    fn show_stacked_focuses_the_pane() {
+        // Given shell pane 50 split off and focused, the sidebar with the keys.
+        let mut state = split_layout();
+        state.focus = Focus::Sidebar;
+
+        // When the wheel shows thread 1's pane.
+        IntentHandler::handle(&Intent::ShowStacked(PaneId(1)), &mut state);
+
+        // Then thread 1's pane has the tab's focus.
+        assert_eq!(
+            shown_focus(&state),
+            Some(PaneId(1)),
+            "the wheel shows the next stacked pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn show_stacked_leaves_the_keys_where_they_are() {
+        // Given shell pane 50 split off and focused, the sidebar with the keys.
+        let mut state = split_layout();
+        state.focus = Focus::Sidebar;
+
+        // When the wheel shows thread 1's pane.
+        IntentHandler::handle(&Intent::ShowStacked(PaneId(1)), &mut state);
+
+        // Then the sidebar keeps the keys.
+        assert_eq!(state.focus, Focus::Sidebar, "a wheel notch is not a click");
+    }
+
+    #[rstest::rstest]
+    fn show_stacked_ignores_a_pane_outside_the_shown_tab() {
+        // Given shell pane 50 split off and focused.
+        let mut state = split_layout();
+
+        // When asked to show pane 99, which no tab holds.
+        let commands = IntentHandler::handle(&Intent::ShowStacked(PaneId(99)), &mut state);
+
+        // Then nothing happens.
+        assert_eq!(
+            (shown_focus(&state), commands),
+            (Some(PaneId(50)), vec![]),
+            "only the shown tab's panes can be shown"
+        );
     }
 }

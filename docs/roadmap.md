@@ -71,7 +71,7 @@ Sidebar on the left, the selected session's tabs on the right (or the start scre
 - Each session is a card: its most urgent agent pane's status icon and its title, with the pin and the time on the right; `├╴` + the project's folder and name, with the status word on the right; `├╴` + the branch (a Research or Learn session's folder and kind icon); then one line per agent pane, `├╴`/`└╴` + its status icon and title, with its harness mark on the right (`✳` Claude, `π` pi). Shells, nvim and other programs get no line; they show in the tab bar. The selected card's first line gets the explorer's cursorline (`bg_visual`), and the sidebar scrolls to keep the whole card in view.
 - The Settled shelf sits at the bottom, a folder (open or closed) + `Settled` with its count on the right. While it's open, each settled session is a one-line row on a `├╴`/`└╴` guide.
 - Status (icon and word, tokyonight colours): a braille spinner + `working` (blue; ten frames a second) · `⚠` + `approval` (yellow) · `?` + `input` (magenta) · `✓` + `done` (green; the turn ended after the user last focused the pane) · `✗` + `failed` / `⊘` + `gone` (red) · `■` + `stopped` · otherwise `○` and no word, filled while orb holds the session's panes.
-- The sidebar is 32 columns wide until resized with `Cmd +`/`Cmd -`, and always between 24 and 80. `<C-g> s` hides it, and the panes take the full width. The width persists; the hidden state doesn't.
+- The sidebar is 32 columns wide until resized with `Cmd +`/`Cmd -`, and always between 24 and 80. `<C-g> e` hides it, and the panes take the full width. The width persists; the hidden state doesn't.
 - While a project filter is set (`<C-g> f`), the input box shows the project after the `>` prompt, and only that project's sessions and Settled shelf are listed.
 - Search (`/` or `i`): the keys move to the input box, and the list keeps only sessions whose title or an agent pane's title fuzzy-matches, settled ones included, with the matched characters blue and bold.
 - Rename (`r` on a session): a LazyVim/snacks-style input box titled ` Rename Session `. The name is orb's own and beats every other title; Claude's and pi's own session names don't change.
@@ -101,9 +101,8 @@ Full key table:
 | `Cmd f` | Unbound (reserved for floating panes) |
 | `<C-[>` / `<C-]>` | Jump list back / forward |
 | `<C-S-h>` / `<C-S-l>` | Keys to the sidebar (showing it) / into the shown session's panes |
-| `<C-g> e` | Keys to the sidebar or into the panes, whichever they aren't in |
+| `<C-g> e` | Hide/show the sidebar |
 | `<C-g> q` | Quit orb |
-| `<C-g> s` | Toggle sidebar |
 | `<C-g> p d/r/s/f/x/c` | Pane: split down, split right, stack, zoom, close, rename |
 | `<C-g> t n/x/r/1-9` | Tab: new, close, rename, go to N |
 | `<C-g> ␣` | Session picker |

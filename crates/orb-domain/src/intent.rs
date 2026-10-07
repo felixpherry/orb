@@ -75,6 +75,9 @@ pub enum Intent {
     MoveTabRight,
     /// Focus this pane of the shown tab and move the keys there (a click).
     FocusPane(PaneId),
+    /// Show this stacked pane of the shown tab below the stack's list,
+    /// leaving the keys where they are (the wheel over the list).
+    ShowStacked(PaneId),
     /// Attach to the selected session (un-settling a settled one), or open or
     /// close the Settled shelf on its header.
     Attach,
@@ -83,9 +86,6 @@ pub enum Intent {
     LeavePane,
     /// Move the keys from the sidebar into the shown session's panes.
     FocusPanes,
-    /// Move the keys from a pane to the sidebar, or from the sidebar into
-    /// the shown session's panes.
-    SwapFocus,
     /// Send Ctrl g to the focused pane's program (`<C-g> <C-g>`, since
     /// `<C-g>` alone is orb's leader).
     SendCtrlG,
@@ -198,7 +198,6 @@ impl fmt::Display for Intent {
             Self::PickerPrev | Self::PickerWheelPrev => "previous item",
             Self::ToggleSidebar | Self::LeavePane => "sidebar",
             Self::FocusPanes => "panes",
-            Self::SwapFocus => "switch focus",
             Self::StackPane => "stack",
             Self::MoveFocus(NavDirection::Left) => "focus left",
             Self::MoveFocus(NavDirection::Up) => "focus up",
@@ -220,6 +219,7 @@ impl fmt::Display for Intent {
             Self::MoveTabLeft => "move tab left",
             Self::MoveTabRight => "move tab right",
             Self::FocusPane(_) => "focus pane",
+            Self::ShowStacked(_) => "show pane",
             Self::SendCtrlG => "send ctrl g",
             Self::Attach => "attach",
             Self::JumpBack => "jump back",
@@ -288,6 +288,7 @@ mod tests {
     #[case(Intent::MoveTabLeft, "move tab left")]
     #[case(Intent::MoveTabRight, "move tab right")]
     #[case(Intent::FocusPane(PaneId(-1)), "focus pane")]
+    #[case(Intent::ShowStacked(PaneId(-1)), "show pane")]
     #[case(Intent::SendCtrlG, "send ctrl g")]
     fn layout_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the layout intent.

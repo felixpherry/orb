@@ -161,8 +161,10 @@ impl SessionLayout {
     /// its whole tree cell. A zoomed tab places only its focused pane, over
     /// all of `body`. A stack becomes a list of its panes, one row each, at
     /// the top of its area and at most half its height, and its expanded
-    /// pane below it.
-    pub fn placed(&self, body: Rect) -> Placement {
+    /// pane below it at the stack's full width. The list is `list_width`
+    /// wide (at least 3, at most the stack's width), bars included, and
+    /// centred.
+    pub fn placed(&self, body: Rect, list_width: u16) -> Placement {
         let Some(tab) = self.active_tab() else {
             return Placement::default();
         };
@@ -199,7 +201,11 @@ impl SessionLayout {
                 .min(usize::from(stack.area.height / 2))
                 .max(1);
             let rows = u16::try_from(fits).unwrap_or(u16::MAX);
-            let area = Rect::new(stack.area.x, stack.area.y, stack.area.width, rows);
+            let area = {
+                let width = list_width.max(3).min(stack.area.width);
+                let x = stack.area.x + (stack.area.width - width) / 2;
+                Rect::new(x, stack.area.y, width, rows)
+            };
             panes.push(Placed {
                 pane: stack.expanded,
                 area: Rect::new(
@@ -224,7 +230,7 @@ impl SessionLayout {
                 .panes
                 .iter()
                 .skip(start)
-                .zip(area.rows())
+                .zip(inside_bars(area).rows())
                 .map(|(id, row)| (*id, row))
                 .collect();
             StackList {
@@ -287,13 +293,23 @@ impl Placed {
     }
 }
 
-/// A stack's list of panes: its rect, one row per pane that fits, and the
-/// pane shown below it.
+/// A stack's list of panes: its rect (bars included), one row per pane that
+/// fits (between the bars), and the pane shown below it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackList {
     pub area: Rect,
     pub rows: Vec<(PaneId, Rect)>,
     pub shown: PaneId,
+}
+
+/// A stack list's `area` less its bar column on each side.
+fn inside_bars(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y,
+        area.width.saturating_sub(2),
+        area.height,
+    )
 }
 
 /// `area` less one cell on every side.
@@ -729,10 +745,17 @@ mod tests {
         layouts
     }
 
+    /// The width the tests' stack lists ask for.
+    const LIST_WIDTH: u16 = 20;
+
     fn placement(layouts: &Layouts) -> Placement {
+        placement_with(layouts, LIST_WIDTH)
+    }
+
+    fn placement_with(layouts: &Layouts, list_width: u16) -> Placement {
         layouts
             .get(OWNER)
-            .map(|layout| layout.placed(BODY))
+            .map(|layout| layout.placed(BODY, list_width))
             .unwrap_or_default()
     }
 
@@ -1090,18 +1113,56 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn stack_list_sits_at_the_top_of_the_stack_at_full_width() {
+    fn stack_list_is_centred_at_the_top_of_the_stack() {
         // Given eleven tiled panes, one stack over the whole body.
         let layouts = tiled(17);
 
-        // When placing them.
+        // When placing them with a 20-column list.
         let list = placement(&layouts).stack.map(|stack| stack.area);
 
-        // Then the list takes the body's top eleven rows, full width.
+        // Then the list takes the body's top eleven rows, 20 columns wide and centred.
         assert_eq!(
             list,
-            Some(Rect::new(0, 0, 80, 11)),
-            "the list is a row per pane on top"
+            Some(Rect::new(30, 0, 20, 11)),
+            "the list is a centred row per pane on top"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(0, 3)]
+    #[case(1, 3)]
+    #[case(200, 80)]
+    fn stack_list_width_stays_between_three_and_the_stack(
+        #[case] list_width: u16,
+        #[case] expected: u16,
+    ) {
+        // Given eleven tiled panes, one stack 80 columns wide.
+        let layouts = tiled(17);
+
+        // When placing them with a list `list_width` wide.
+        let width = placement_with(&layouts, list_width)
+            .stack
+            .map(|stack| stack.area.width);
+
+        // Then the list is clamped to fit two bars and a column, and the stack.
+        assert_eq!(width, Some(expected), "list width for {list_width}");
+    }
+
+    #[rstest::rstest]
+    fn stack_list_rows_sit_between_the_bars() {
+        // Given eleven tiled panes, one stack over the whole body.
+        let layouts = tiled(17);
+
+        // When placing them with a 20-column list.
+        let first = placement(&layouts)
+            .stack
+            .and_then(|stack| stack.rows.first().map(|(_, row)| *row));
+
+        // Then the first name's row leaves a column for each bar.
+        assert_eq!(
+            first,
+            Some(Rect::new(31, 0, 18, 1)),
+            "names go inside the bars"
         );
     }
 
@@ -1145,7 +1206,7 @@ mod tests {
         // When placing them in an 8-row body, whose list fits four rows.
         let rows: Vec<PaneId> = layouts
             .get(OWNER)
-            .and_then(|layout| layout.placed(Rect::new(0, 0, 80, 8)).stack)
+            .and_then(|layout| layout.placed(Rect::new(0, 0, 80, 8), LIST_WIDTH).stack)
             .map(|stack| stack.rows.into_iter().map(|(pane, _)| pane).collect())
             .unwrap_or_default();
 

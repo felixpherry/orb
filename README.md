@@ -105,9 +105,8 @@ The demo shows, in order:
 | `Cmd i` / `Cmd o` | Move the tab left / right |
 | `<C-[>` / `<C-]>` | Jump back / forward through the jump list |
 | `<C-S-h>` / `<C-S-l>` | Move the keys to the sidebar (showing it if hidden) / into the shown session's panes |
-| `<C-g> e` | Move the keys to the sidebar or into the panes, whichever they aren't in |
+| `<C-g> e` | Hide or show the sidebar |
 | `<C-g> q` | Quit orb (every pane keeps running) |
-| `<C-g> s` | Hide or show the sidebar |
 | `<C-g> p d/r/s/f/x/c` | In a pane: split down, split right, stack, zoom, close, rename |
 | `<C-g> t n/x/r/1-9` | Tab: new, close, rename, go to N |
 | `<C-g> Space` | Session picker (`<C-s>` shows or hides settled sessions) |
@@ -134,7 +133,7 @@ In the sidebar:
 | `/` or `i` | Search |
 | `l` / `h` | Open / close the Settled shelf |
 
-`<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎`, `<C-S-l>` or `<C-g> e` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
+`<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎` or `<C-S-l>` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
 
 ## Mouse
 
@@ -143,6 +142,7 @@ orb captures the mouse from the moment it starts.
 - A click selects a sidebar or picker row. A double-click, two clicks on the same row within 500 ms, acts as `⏎`.
 - A click on a pane focuses it, and the click doesn't reach the pane's program.
 - A click on a tab in the tab bar shows it with the keys in its focused pane, a click on a `← +N` or `+N →` chip shows the nearest hidden tab on that side, and a click on `+` opens a tab. The wheel over the bar shows the next tab on a scroll up and the previous one on a scroll down, without wrapping.
+- The wheel over a stack's list shows the next stacked pane on a scroll down and the previous one on a scroll up, without wrapping, and leaves the keys where they are.
 - The wheel over a pane goes to its program if the program tracks the mouse. Otherwise it sends arrow keys on the alternate screen, and scrolls the pane's history everywhere else. History holds 10 000 lines, from what orb saw after it attached.
 - A left drag in a pane whose program doesn't track the mouse (a shell, plain `claude`, plain `pi`) selects text, and the release copies it through OSC 52. A double-click selects a word and a triple-click a line. Dragging past the top or bottom edge scrolls while selecting.
 - In a program that tracks the mouse, like lazygit or a fullscreen Claude, clicks and drags go to the program.

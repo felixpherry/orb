@@ -9,11 +9,12 @@
 //! match a plain Esc. `<C-g>` is the which-key leader in both; its popup
 //! lists only the keys that do something for the selection (`<C-g> w`/`<C-g>
 //! b` not on Incognito, Research and Learn sessions, `<C-g> p` and `<C-g>
-//! <C-g>` only in a pane, `<C-g> t` and `<C-g> e` only with a session
-//! selected, `<C-g> f` only in the sidebar); `<C-g> q` quits. The sidebar's
-//! own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`, `/` and `i`, `l`/`h`,
-//! `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent row) go through the same keymap. In a pane
-//! every other key goes to its program. An open picker, the rename box and
+//! <C-g>` only in a pane, `<C-g> t` only with a session selected, `<C-g> f`
+//! only in the sidebar); `<C-g> e` hides or shows the sidebar and `<C-g> q`
+//! quits. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
+//! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
+//! row) go through the same keymap. In a pane every other key goes to its
+//! program. An open picker, the rename box and
 //! the sidebar search take typed characters and have their own fixed keys,
 //! `<C-x>` among them for removing a project from the project filter and
 //! `<C-s>` for showing or hiding settled sessions in the session picker.
@@ -215,7 +216,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
         keymap
             .bind("<leader>q", Intent::Quit, KeyCategory::General, scope)
             .bind(
-                "<leader>s",
+                "<leader>e",
                 Intent::ToggleSidebar,
                 KeyCategory::Navigation,
                 scope,
@@ -286,12 +287,6 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     }
     for scope in SESSION {
         keymap
-            .bind(
-                "<leader>e",
-                Intent::SwapFocus,
-                KeyCategory::Navigation,
-                scope,
-            )
             .bind("<leader>tn", Intent::NewTab, KeyCategory::Navigation, scope)
             .bind(
                 "<leader>tx",
@@ -1227,6 +1222,23 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn leader_s_is_unbound(#[values(Scope::Sidebar, Scope::Pane)] scope: Scope) {
+        // Given `<C-g>` pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, LEADER);
+
+        // When pressing `s`.
+        let intent = press(&mut keys, key(KeyCode::Char('s')));
+
+        // Then nothing happens and no sequence is left waiting.
+        assert_eq!(
+            (intent, keys.is_pending()),
+            (None, false),
+            "<C-g> s should do nothing in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
     fn space_is_unbound_in_the_sidebar() {
         // Given the keymap in the sidebar on a session.
         let mut keys = Keys::new(keymap(), Scope::Sidebar);
@@ -1243,8 +1255,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Pane, "s", Intent::ToggleSidebar)]
-    #[case(Scope::Sidebar, "s", Intent::ToggleSidebar)]
+    #[case(Scope::Pane, "e", Intent::ToggleSidebar)]
+    #[case(Scope::Sidebar, "e", Intent::ToggleSidebar)]
     #[case(Scope::Pane, " ", Intent::OpenSessionPicker)]
     #[case(Scope::SidebarEmpty, " ", Intent::OpenSessionPicker)]
     #[case(Scope::Sidebar, "n", Intent::NewSession)]
@@ -1281,8 +1293,6 @@ mod tests {
     #[case(Scope::Sidebar, "t6", Intent::GoToTab(6))]
     #[case(Scope::Pane, "t9", Intent::GoToTab(9))]
     #[case(Scope::Pane, "\x07", Intent::SendCtrlG)]
-    #[case(Scope::Pane, "e", Intent::SwapFocus)]
-    #[case(Scope::Sidebar, "e", Intent::SwapFocus)]
     #[case(Scope::Pane, "q", Intent::Quit)]
     #[case(Scope::Sidebar, "q", Intent::Quit)]
     #[case(Scope::SidebarEmpty, "q", Intent::Quit)]
@@ -1311,13 +1321,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, "/ Space W a b e f g i n q s t w")]
-    #[case(Scope::SidebarEmpty, "/ Space W a f g i n q s")]
-    #[case(Scope::SidebarIncognito, "/ Space W a e f g i n q s t")]
-    #[case(Scope::Pane, "/ <C-g> Space W a b e g i n p q s t w")]
-    #[case(Scope::PaneIncognito, "/ <C-g> Space W a e g i n p q s t")]
-    #[case(Scope::SidebarAgent, "/ Space W a b e f g i n q s t w")]
-    #[case(Scope::SidebarAgentIncognito, "/ Space W a e f g i n q s t")]
+    #[case(Scope::Sidebar, "/ Space W a b e f g i n q t w")]
+    #[case(Scope::SidebarEmpty, "/ Space W a e f g i n q")]
+    #[case(Scope::SidebarIncognito, "/ Space W a e f g i n q t")]
+    #[case(Scope::Pane, "/ <C-g> Space W a b e g i n p q t w")]
+    #[case(Scope::PaneIncognito, "/ <C-g> Space W a e g i n p q t")]
+    #[case(Scope::SidebarAgent, "/ Space W a b e f g i n q t w")]
+    #[case(Scope::SidebarAgentIncognito, "/ Space W a e f g i n q t")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 

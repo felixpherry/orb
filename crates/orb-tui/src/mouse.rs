@@ -3,8 +3,11 @@
 //! the sidebar's input box starts a search. A click on a tab in the tab bar,
 //! or on a chip counting hidden tabs, shows that tab with the keys in its
 //! focused pane, and a click on its `+` opens a tab; the wheel over the bar
-//! shows the next tab on a scroll up and the previous on a scroll down. The
-//! pane frames and the start screen take no clicks. The wheel moves the
+//! shows the next tab on a scroll up and the previous on a scroll down. A
+//! click on a row of a stack's list focuses its pane, and the wheel over the
+//! list shows the next stacked pane on a scroll down and the previous on a
+//! scroll up, leaving the keys where they are. The pane frames and the start
+//! screen take no clicks. The wheel moves the
 //! sidebar's selection while it has the keys, and otherwise scrolls its view. In a
 //! picker a click selects a row, a double-click picks it and the wheel over
 //! its list moves the selection; a click outside a picker or the rename box
@@ -70,6 +73,8 @@ pub(crate) struct HitMap {
     tab_targets: Vec<(Rect, usize, PaneId)>,
     /// The tab bar's `+` chevron.
     new_tab: Option<Rect>,
+    /// The stack's list, every stacked pane in order and the shown one.
+    stack: Option<(Rect, Vec<PaneId>, PaneId)>,
 }
 
 /// The text line of the input that has the keys, and what `visible` drew
@@ -166,6 +171,12 @@ impl HitMap {
     /// Records the tab bar's `+` chevron.
     pub(crate) fn record_new_tab(&mut self, area: Rect) {
         self.new_tab = Some(area);
+    }
+
+    /// Records the stack's list `area`, its panes in stack `order` and the
+    /// `shown` one.
+    pub(crate) fn record_stack(&mut self, area: Rect, order: Vec<PaneId>, shown: PaneId) {
+        self.stack = Some((area, order, shown));
     }
 
     /// Records where the open picker or rename box was drawn.
@@ -344,6 +355,9 @@ pub(crate) fn route(
         (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown, _)
             if !matches!(focus, Focus::Picker | Focus::Rename) =>
         {
+            if let Some(routed) = route_stack(at, hits, event.kind) {
+                return routed;
+            }
             if let Some(id) = hits.pane_at(at) {
                 return MouseRoute::Wheel(id);
             }
@@ -380,6 +394,24 @@ pub(crate) fn route(
             routed
         }
     }
+}
+
+/// Where a wheel notch over the stack's list goes: the next stacked pane on
+/// a scroll down, the previous on a scroll up, nothing at either end. `None`
+/// off the list.
+fn route_stack(at: Position, hits: &HitMap, kind: MouseEventKind) -> Option<MouseRoute> {
+    let (_, order, shown) = hits.stack.as_ref().filter(|(area, ..)| area.contains(at))?;
+    let next = order
+        .iter()
+        .position(|id| id == shown)
+        .and_then(|at| match kind {
+            MouseEventKind::ScrollDown => at.checked_add(1),
+            _ => at.checked_sub(1),
+        })
+        .and_then(|at| order.get(at));
+    Some(next.map_or(MouseRoute::Nothing, |&pane| {
+        MouseRoute::Intents(vec![Intent::ShowStacked(pane)])
+    }))
 }
 
 /// Where a click or wheel notch on the tab bar goes, as zellij's tab bar
@@ -1592,6 +1624,76 @@ mod tests {
 
         // Then the notch goes to that pane.
         assert_eq!(routed, MouseRoute::Wheel(expected), "the wheel's pane");
+    }
+
+    /// A right side holding one stack of panes 2, 3 and 4 showing `shown`:
+    /// the list in columns 40 to 59 on lines 1 to 3, a row per pane between
+    /// its bars, the other rows recorded as their panes, and the shown pane
+    /// below it.
+    fn stack_hits(shown: i64) -> HitMap {
+        let mut hits = HitMap::new(Rect::new(0, 0, 30, 20), Rect::new(30, 0, 50, 20));
+        for (pane, y) in [(2, 1), (3, 2), (4, 3)] {
+            if pane != shown {
+                hits.record_pane(Rect::new(41, y, 18, 1), PaneId(pane), true);
+            }
+        }
+        hits.record_pane(Rect::new(31, 5, 48, 14), PaneId(shown), true);
+        hits.record_stack(
+            Rect::new(40, 1, 20, 3),
+            vec![PaneId(2), PaneId(3), PaneId(4)],
+            PaneId(shown),
+        );
+        hits
+    }
+
+    #[rstest::rstest]
+    #[case::down_shows_the_next(MouseEventKind::ScrollDown, 3, MouseRoute::Intents(vec![Intent::ShowStacked(PaneId(4))]))]
+    #[case::up_shows_the_previous(MouseEventKind::ScrollUp, 3, MouseRoute::Intents(vec![Intent::ShowStacked(PaneId(2))]))]
+    #[case::down_on_the_last_stops(MouseEventKind::ScrollDown, 4, MouseRoute::Nothing)]
+    #[case::up_on_the_first_stops(MouseEventKind::ScrollUp, 2, MouseRoute::Nothing)]
+    fn wheel_over_the_stack_list_steps_the_shown_pane(
+        #[case] kind: MouseEventKind,
+        #[case] shown: i64,
+        #[case] expected: MouseRoute,
+    ) {
+        // Given a stack of panes 2, 3 and 4 showing `shown`, the keys in it.
+        let hits = stack_hits(shown);
+
+        // When turning the wheel over the list's bar.
+        let routed = route(
+            mouse(kind, 40, 2),
+            &hits,
+            Focus::Pane,
+            Some(PaneId(shown)),
+            &mut Clicks::default(),
+            Instant::now(),
+        );
+
+        // Then the stacked pane beside the shown one is shown, stopping at the ends.
+        assert_eq!(routed, expected, "the wheel over the stack's list");
+    }
+
+    #[rstest::rstest]
+    fn wheel_over_a_stack_row_skips_its_hidden_pane() {
+        // Given a stack of panes 2, 3 and 4 showing pane 4.
+        let hits = stack_hits(4);
+
+        // When wheeling down over pane 2's row.
+        let routed = route(
+            mouse(MouseEventKind::ScrollDown, 45, 1),
+            &hits,
+            Focus::Pane,
+            Some(PaneId(4)),
+            &mut Clicks::default(),
+            Instant::now(),
+        );
+
+        // Then pane 2's hidden program gets nothing.
+        assert_ne!(
+            routed,
+            MouseRoute::Wheel(PaneId(2)),
+            "a list row doesn't forward the wheel"
+        );
     }
 
     #[rstest::rstest]
