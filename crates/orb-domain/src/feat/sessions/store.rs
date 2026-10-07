@@ -25,7 +25,7 @@ use wherror::Error;
 
 use super::state::{PaneId, ProjectId, ProjectKind, SessionId, SessionKind, SidebarItem, ThreadId};
 use crate::feat::harness::HarnessId;
-use crate::feat::layout::tree::{Node, Split, TileLayout};
+use crate::feat::layout::tree::{Node, TileLayout};
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -1022,9 +1022,10 @@ fn back_up_before_sessions(conn: &Connection, path: &Path) -> Result<(), Report<
         .attach_with(|| format!("failed to move the backup to {}", backup.display()))
 }
 
-/// Turns every group, and every thread outside a group (or in a group that is
-/// gone), into a session with one tab, each thread in a pane of its own.
-/// Thread ids don't change. Pane
+/// Turns every group into a session with a tab for each of its threads,
+/// newest first, and every thread outside a group (or in a group that is
+/// gone) into a session with one tab. Each thread gets a pane of its own,
+/// alone in its tab. Thread ids don't change. Pane
 /// ids start above every thread id, since earlier versions named zmx sessions
 /// `orb-p<thread id>`. The `groups` and `drafts` tables and the threads' old
 /// columns stay.
@@ -1261,9 +1262,8 @@ fn migrated_pane_at(row: &Row<'_>, at: usize) -> rusqlite::Result<NewPane> {
     })
 }
 
-/// Inserts `session` with `panes` in one tab, side by side in a right-split
-/// chain of equal widths with the first focused, and points each pane's
-/// thread at its pane. `panes` is never empty.
+/// Inserts `session` with a tab for each of `panes`, in order, the first tab
+/// active, and points each pane's thread at its pane.
 fn insert_session(
     conn: &Connection,
     session: &NewSession,
@@ -1311,36 +1311,18 @@ fn insert_session(
                 params![thread, pane_id.0, id.0],
             )?;
         }
+        conn.execute(
+            "INSERT INTO tabs (session_id, position, layout, focus_pane) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                id.0,
+                ids.len(),
+                TileLayout::from_saved(Node::Pane(pane_id), pane_id).to_json(),
+                pane_id.0
+            ],
+        )?;
         ids.push(pane_id);
     }
-    let Some(&first) = ids.first() else {
-        return Err(rusqlite::Error::InvalidQuery);
-    };
-    let layout = TileLayout::from_saved(side_by_side(&ids), first).to_json();
-    conn.execute(
-        "INSERT INTO tabs (session_id, position, layout, focus_pane) VALUES (?1, 0, ?2, ?3)",
-        params![id.0, layout, first.0],
-    )?;
     Ok((id, ids))
-}
-
-/// `panes` side by side, equal widths: each split gives its first pane
-/// `1/n` of what is left.
-fn side_by_side(panes: &[PaneId]) -> Node {
-    match panes {
-        [] => Node::Pane(PaneId(0)),
-        [only] => Node::Pane(*only),
-        [first, rest @ ..] => {
-            #[expect(clippy::cast_precision_loss, reason = "a tab holds a handful of panes")]
-            let ratio = 1.0 / panes.len() as f32;
-            Node::Split {
-                split: Split::Right,
-                ratio,
-                first: Box::new(Node::Pane(*first)),
-                second: Box::new(side_by_side(rest)),
-            }
-        }
-    }
 }
 
 fn utf8(path: &Path) -> Result<&str, Report<StoreError>> {
@@ -1466,7 +1448,7 @@ mod tests {
     use super::{
         MIGRATIONS, NewPaneThread, PaneId, ProjectId, ProjectKind, SavedLayouts, SessionId,
         SessionKind, SessionRow, SettledOverride, SidebarItem, Store, StoreError, TabRow,
-        ThreadRow, TileLayout, Ui,
+        ThreadRow, Ui,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -2837,44 +2819,79 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn migrating_v10_puts_a_groups_threads_in_one_session_newest_first()
+    fn migrating_v10_puts_a_groups_threads_in_one_session() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading the sessions of group 1's threads.
+        let sessions: Vec<i64> = [6, 7, 8]
+            .into_iter()
+            .map(|thread| session_of(&path, thread))
+            .collect::<Result<_, _>>()?;
+
+        // Then all three are in the same session.
+        assert!(
+            sessions.windows(2).all(|pair| pair.first() == pair.last()),
+            "a group's threads should share one session, got {sessions:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_gives_each_of_a_groups_threads_a_tab_newest_first()
     -> Result<(), Report<StoreError>> {
         // Given a migrated v10 database.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let path = migrated_v10(dir.path())?;
 
-        // When reading the tabs of group 1's threads' sessions.
-        let sessions: Vec<i64> = [6, 7, 8]
-            .into_iter()
-            .map(|thread| session_of(&path, thread))
-            .collect::<Result<_, _>>()?;
-        let session = sessions.first().copied().unwrap_or_default();
-        let (layout, focus): (String, i64) = Connection::open(&path)
-            .and_then(|conn| {
-                conn.query_row(
-                    &format!("SELECT layout, focus_pane FROM tabs WHERE session_id = {session}"),
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-            })
-            .change_context(StoreError)?;
-        let tree = TileLayout::from_json(&layout, PaneId(focus)).change_context(StoreError)?;
-
-        // Then all three share one tab, newest thread first and focused.
-        let panes: Vec<PaneId> = [8, 7, 6]
-            .into_iter()
-            .map(|thread| pane_of(&path, thread).map(PaneId))
-            .collect::<Result<_, _>>()?;
-        let first = panes.first().copied();
-        assert_eq!(
-            (
-                sessions.iter().all(|id| *id == session),
-                tree.pane_ids(),
-                Some(tree.focused())
+        // When reading the tabs of group 1's session.
+        let session = session_of(&path, 6)?;
+        let found = rows(
+            &path,
+            &format!(
+                "SELECT position, name, layout, focus_pane FROM tabs
+                 WHERE session_id = {session} ORDER BY position"
             ),
-            (true, panes, first),
-            "a group should become one session of side-by-side panes, newest first"
+        )?;
+
+        // Then each thread's pane is alone in its own unnamed tab, newest thread first.
+        let expected: Vec<Vec<String>> = [8, 7, 6]
+            .into_iter()
+            .enumerate()
+            .map(|(position, thread)| {
+                pane_of(&path, thread).map(|pane| {
+                    vec![
+                        format!("Integer({position})"),
+                        "Null".to_owned(),
+                        format!("Text(\"{{\\\"pane\\\":{pane}}}\")"),
+                        format!("Integer({pane})"),
+                    ]
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            found, expected,
+            "a group should become one tab per thread, newest first"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_opens_a_groups_session_on_its_first_tab() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading group 1's session's active tab.
+        let session = session_of(&path, 6)?;
+        let active: i64 = value(
+            &path,
+            &format!("SELECT active_tab FROM sessions WHERE id = {session}"),
+        )?;
+
+        // Then it is the first tab, the newest thread's.
+        assert_eq!(active, 0, "a group's session should open on its first tab");
         Ok(())
     }
 
