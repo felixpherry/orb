@@ -75,7 +75,7 @@ Sidebar on the left, the selected session's tabs on the right (or the start scre
 - While a project filter is set (`<C-g> f`), the input box shows the project after the `>` prompt, and only that project's sessions and Settled shelf are listed.
 - Search (`/` or `i`): the keys move to the input box, and the list keeps only sessions whose title or an agent pane's title fuzzy-matches, settled ones included, with the matched characters blue and bold.
 - Rename (`r` on a session): a LazyVim/snacks-style input box titled ` Rename Session `. The name is orb's own and beats every other title; Claude's and pi's own session names don't change.
-- The right-hand area shows the selected session's tab bar (`1 name  2 name`) over its shown tab's panes, each with a border, while orb holds that session's panes; otherwise the start screen.
+- The right-hand area shows the selected session's tab bar, zellij's chevron tabs after the session's name in tokyonight-moon, over its shown tab's panes, each in a rounded frame titled with its name, while orb holds that session's panes; otherwise the start screen.
 - The mode line is drawn like LazyVim's lualine in tokyonight-moon, on `bg_statusline`. On the left: the mode in a block of its colour (`NORMAL` blue, `PANE` teal, `PICKER` yellow, `INSERT` green; `INSERT` while typing in the rename box or the search), the selected session's branch and project, and the latest error in red. On the right: `N running` (or `fetching origin/<base>…`), the approval and input counts over every agent pane, the selected row's `at/shown` position and the local time. There are no key hints.
 
 ### Keys
@@ -343,7 +343,8 @@ Redraw is event-driven (PTY output / actor state changes wake the loop), unlike 
 | Dashboard | A start screen (banner and counts) with no menu and no keys, shown only while no session is selected. | The menu: a session always has at least one shell, so its actions moved to keys. |
 | Floating panes | Backlog, with `Cmd f` reserved. | Building them now: the core model doesn't need them. |
 | Identity / rebrand | The name stays orb; it's repositioned as a terminal multiplexer that is mission control for your agents (T3's sidebar with herdr's panes). | Renaming. |
-| Panes' look | A plain tab bar and borders first; the look goes through `/prototype` afterwards, as with earlier milestones. | Designing the look in the overhaul's plan. |
+| Panes' look | A plain tab bar and borders first; the look goes through `/prototype` afterwards, as with earlier milestones. *The look was chosen in a later prototype (see Multiplexer look).* | Designing the look in the overhaul's plan. |
+| Multiplexer look | zellij's chevron tab bar and rounded, titled pane frames in tokyonight-moon (herdr's colours): the shown tab and the frame with the keys blue, the rest muted slate; a stack is a list of its panes beside the shown one. Chosen from a prototype on branch `orb/tabs-prototype` | current (plain bar and lines); herdr (fixed-width block tabs); zellij (the same shapes with a green focus and lavender tabs); bufferline (LazyVim bufferline tabs, no boxes, lit lines around the focused pane). |
 
 ## Milestones
 
