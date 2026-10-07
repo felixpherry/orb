@@ -5,14 +5,16 @@
 //! search has the keys, the filtered project after the `>` prompt, and how
 //! many sessions are listed out of all of them. Below it, pinned sessions
 //! come first, then active ones, each a card: its most urgent agent's
-//! status icon and its title, then the project and status, then the branch
-//! (a Research or Learn session's folder as a `~/…` path), then one row per
-//! agent pane hanging one level under that line, with its status, name or title and harness
-//! mark. A card with agent rows ends its last line with `⌄`; folded, it
-//! hides them and shows `›` after one status icon per agent. The selected
-//! row's first line is highlighted. Settled sessions fold into a shelf at
-//! the bottom, drawn as one-line rows while it's open. The sidebar scrolls to keep the whole selected row in view,
-//! unless the wheel scrolled it while the keys are elsewhere.
+//! status icon and its title, then the project (behind a Research or Learn
+//! session's kind icon) and status, then the branch (a Research or Learn
+//! session's folder as a `~/…` path) with one status icon per agent, then
+//! one row per agent pane hanging one level under that line, with its
+//! status, name or title and harness mark. A card with agent rows ends its
+//! last line with `⌄`, or with `›` while folded and its rows hidden. The
+//! selected row's first line is highlighted. Settled sessions fold into a
+//! shelf at the bottom, drawn as one-line rows while it's open. The sidebar
+//! scrolls to keep the whole selected row in view, unless the wheel
+//! scrolled it while the keys are elsewhere.
 //!
 //! While the user searches, the typed text follows the prompt, and only
 //! the sessions whose title or an agent's title matches it are
@@ -471,10 +473,10 @@ fn render_row(
 
 /// A session's card: its most urgent agent's status icon (the idle circle
 /// without one, filled while `attached`), its title, pin and time; the
-/// project and the status word; the branch, or for a Research or Learn
-/// session its folder as a `~/…` path and its kind icon. With agent rows,
-/// the last line ends with `⌄` while they show and `›` while folded, after
-/// one status icon per agent (at most 8, then `+N`).
+/// project (behind a Research or Learn session's kind icon) and the status
+/// word; the branch, or a Research or Learn session's folder as a `~/…`
+/// path. With agent rows, the last line ends with one status icon per agent
+/// (at most 8, then `+N`) and `⌄` while they show or `›` while folded.
 #[expect(
     clippy::too_many_arguments,
     reason = "the card's parts plus the frame inputs every node takes"
@@ -512,8 +514,9 @@ fn render_card(
         line(0),
         buf,
     );
+    let look = session_look(session.kind);
     render_split(
-        project_line(project),
+        project_line(project, look),
         word.map(|word| Line::from(span(word, colour)))
             .unwrap_or_default(),
         line(1),
@@ -521,23 +524,19 @@ fn render_card(
     );
     let rows = sessions.agent_rows(session.id);
     let folded = sessions.hides_agents(session.id);
-    let (place, kind) = match session_look(session.kind) {
-        Some(look) => (
-            format!("{FOLDER} {}", tilde(&session.dir, home)),
-            Some(look),
-        ),
+    let place = match look {
+        Some(_) => format!("{FOLDER} {}", tilde(&session.dir, home)),
         None => {
             let branch = agents
                 .first()
                 .and_then(|thread| thread.branch.as_deref())
                 .or(session.branch.as_deref())
                 .unwrap_or("—");
-            (format!("{BRANCH} {branch}"), None)
+            format!("{BRANCH} {branch}")
         }
     };
     let icons: Vec<_> = rows
         .iter()
-        .filter(|_| folded)
         .map(|(thread, _)| status(thread, attached, now))
         .collect();
     let rest = icons.len().saturating_sub(AGENT_ICONS);
@@ -549,14 +548,10 @@ fn render_card(
     render_split(
         Line::from(vec![span(LAST_GUIDE, GUTTER), span(place, COMMENT)]),
         Line::from(
-            kind.map(|(icon, colour)| span(format!("{icon} "), colour))
+            icons
                 .into_iter()
-                .chain(
-                    icons
-                        .into_iter()
-                        .take(AGENT_ICONS)
-                        .map(|(glyph, _, colour)| span(format!("{glyph} "), colour)),
-                )
+                .take(AGENT_ICONS)
+                .map(|(glyph, _, colour)| span(format!("{glyph} "), colour))
                 .chain((rest > 0).then(|| span(format!("+{rest} "), COMMENT)))
                 .chain(chevron.map(|chevron| span(chevron, DARK3)))
                 .collect::<Vec<_>>(),
@@ -624,12 +619,13 @@ fn session_look(kind: SessionKind) -> Option<(&'static str, Color)> {
     }
 }
 
-/// A node's middle line: the project's folder in its badge colour, and its
-/// name.
-fn project_line(project: &Project) -> Line<'_> {
+/// A node's middle line: the project's folder in its badge colour, or the
+/// kind's `look` (icon and colour), and the project's name.
+fn project_line<'a>(project: &'a Project, look: Option<(&'static str, Color)>) -> Line<'a> {
+    let (icon, colour) = look.unwrap_or_else(|| (FOLDER, project_colour(&project.title)));
     Line::from(vec![
         span(GUIDE, GUTTER),
-        span(format!("{FOLDER} "), project_colour(&project.title)),
+        span(format!("{icon} "), colour),
         span(project.title.as_str(), FG_DARK),
     ])
 }
@@ -2376,11 +2372,15 @@ mod tests {
         // When drawing the sidebar.
         let buf = draw(&sessions, at(1000), 12);
 
-        // Then the third line shows the kind's icon in its colour.
-        let shown = (0..buf.area.width)
-            .filter_map(|x| glyph(&buf, x, 5))
-            .any(|(symbol, fg)| symbol.trim() != "" && fg == colour);
-        assert!(shown, "the {kind:?} icon's colour on '{}'", line(&buf, 5));
+        // Then the second line's icon, after its guide, is the kind's in its
+        // colour.
+        let icon = glyph(&buf, 3, 4);
+        assert_eq!(
+            icon.map(|(_, fg)| fg),
+            Some(colour),
+            "the {kind:?} icon's colour on '{}'",
+            line(&buf, 4)
+        );
     }
 
     /// Session 1 holding `count` stopped agents, each in its own pane, its
@@ -2403,16 +2403,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn open_card_ends_its_last_line_with_the_down_chevron() {
-        // Given session 1's open card over two agents.
+    fn open_card_shows_a_status_icon_per_agent_then_the_down_chevron() {
+        // Given session 1's open card over two stopped agents.
         let sessions = card_of(2, false);
 
         // When drawing the sidebar.
         let buf = draw(&sessions, at(1000), 12);
 
-        // Then its third line ends with the down chevron.
+        // Then its third line ends with two stop icons and the down chevron.
         assert!(
-            line(&buf, 5).trim_end().ends_with(FOLD_OPEN),
+            line(&buf, 5)
+                .trim_end()
+                .ends_with(&format!("{STOPPED_ICON} {STOPPED_ICON} {FOLD_OPEN}")),
             "line was '{}'",
             line(&buf, 5)
         );

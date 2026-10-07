@@ -160,7 +160,8 @@ Entries are added or amended **only with human approval**.
 - (sidebar) Making a group outside the project filter clears the filter; a refused name leaves it set.
 - (sidebar) `l` on a session card shows its agent rows and `h` folds them away.
 - (sidebar) `h` on an agent row folds its card and moves the cursor to the card.
-- (sidebar) A card's third line ends with `⌄` while open and `›` while folded, and a folded card shows one status icon per agent there.
+- (sidebar) A card's third line ends with one status icon per agent, then `⌄` while open or `›` while folded.
+- (sidebar) A Research or Learn card's second line shows its kind icon before the project's name.
 - (sidebar) Every card starts open, and fold state is kept in memory only.
 - (sidebar) While a search has text, a folded card lists its agent rows as if open.
 - (sidebar) A cursor that lands on an agent row of a folded card, as when a search ends on one, unfolds the card.
