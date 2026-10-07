@@ -260,3 +260,8 @@ Entries are added or amended **only with human approval**.
 - (sidebar) A lone thread's node ends its third line with its harness's icon: `✳` for Claude, nothing for pi.
 - (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
 - (search) `␣sg` indexes pi threads' session files alongside Claude transcripts.
+- (layout) Adding a pane with `Cmd n` or closing one re-tiles the tab by pane count: `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
+- (layout) From 11 panes a tab shows its first pane on the left and the rest in a stack, where one pane is expanded and the others are one-row title bars.
+- (layout) `<C-g> p r` and `<C-g> p d` split the focused pane and share the space evenly among the panes split in that direction, until the next add or close re-tiles the tab.
+- (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab with the keys in its pane.
+- (sidebar) On an agent row, `r` renames the agent's pane and `d` closes it after a confirm.

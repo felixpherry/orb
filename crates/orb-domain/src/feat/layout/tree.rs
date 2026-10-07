@@ -1264,6 +1264,55 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case(1, vec![1])]
+    #[case(2, vec![1, 1])]
+    #[case(3, vec![1, 2])]
+    #[case(4, vec![1, 3])]
+    #[case(5, vec![1, 4])]
+    #[case(6, vec![2, 4])]
+    #[case(7, vec![1, 4, 2])]
+    #[case(8, vec![1, 4, 3])]
+    #[case(9, vec![1, 4, 4])]
+    #[case(10, vec![2, 4, 4])]
+    fn panes_added_one_at_a_time_follow_the_template_table(
+        #[case] n: i64,
+        #[case] expected: Vec<usize>,
+    ) {
+        // Given panes added one at a time up to n.
+        let layout = tiled(n);
+
+        // When laying them out.
+        let shape = shape(&layout, AREA);
+
+        // Then each column holds the table's pane count.
+        assert_eq!(shape, expected, "shape for {n} panes");
+    }
+
+    #[rstest::rstest]
+    fn panes_added_one_at_a_time_keep_even_sizes(#[values(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)] n: i64) {
+        // Given panes added one at a time up to n.
+        let layout = tiled(n);
+
+        // When laying them out.
+        let columns = columns_of(&layout, AREA);
+
+        // Then column widths differ by at most one cell, and so do the row
+        // heights within each column.
+        let widths: Vec<u16> = columns
+            .iter()
+            .filter_map(|column| column.first().map(|rect| rect.width))
+            .collect();
+        let heights: Vec<Vec<u16>> = columns
+            .iter()
+            .map(|column| column.iter().map(|rect| rect.height).collect())
+            .collect();
+        assert!(
+            spread(&widths) <= 1 && heights.iter().all(|column| spread(column) <= 1),
+            "uneven sizes for {n} panes, widths {widths:?}, heights {heights:?}"
+        );
+    }
+
+    #[rstest::rstest]
     fn tiled_columns_share_the_width_evenly() {
         // Given seven tiled panes.
         let layout = tiled(7);

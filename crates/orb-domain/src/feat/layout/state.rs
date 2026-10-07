@@ -778,6 +778,39 @@ mod tests {
         assert_eq!(shape(&layouts), vec![2, 4], "six panes re-tile to [2][4]");
     }
 
+    #[rstest::rstest]
+    #[case(8, vec![1])]
+    #[case(9, vec![1, 1])]
+    #[case(12, vec![1, 4])]
+    #[case(13, vec![2, 4])]
+    #[case(14, vec![1, 4, 2])]
+    #[case(16, vec![1, 4, 4])]
+    #[case(17, vec![2, 4, 4])]
+    #[case(18, vec![1, 10])]
+    #[case(19, vec![1, 11])]
+    fn closing_any_pane_re_tiles_to_the_template_for_one_fewer(
+        #[case] last: i64,
+        #[case] expected: Vec<usize>,
+    ) {
+        // Given panes 7 to `last` tiled.
+        let tab = || tiled(last);
+
+        // When closing each pane in turn, on its own copy of the tab.
+        let shapes: Vec<Vec<usize>> = (7..=last)
+            .map(|closed| {
+                let mut layouts = tab();
+                layouts.close_pane(PaneId(closed));
+                shape(&layouts)
+            })
+            .collect();
+
+        // Then every close leaves the template shape for the new count.
+        assert!(
+            shapes.iter().all(|shape| *shape == expected),
+            "closing any of panes 7..={last} should give {expected:?}, got {shapes:?}"
+        );
+    }
+
     /// The stacked pane placed with rows of its own: the first placement
     /// right of the first column that isn't a title.
     fn expanded(layouts: &Layouts) -> Option<PaneId> {
