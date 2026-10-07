@@ -13,7 +13,7 @@
 //! session is attached, each of its panes has a client. The right side shows
 //! the selected session, a tab bar over its shown tab's panes, while it is
 //! attached, else the start screen. Each frame resizes every visible pane to
-//! its own rect; panes of hidden tabs and other sessions keep their size. A
+//! the inside of its frame; panes of hidden tabs and other sessions keep their size. A
 //! pane that leaves every layout (closed, or its session deleted) is killed
 //! with `zmx kill`. A pane of an attached session whose program ended closes
 //! in its layout. At start every `orb-p*` session on orb's pane dir that no
@@ -96,7 +96,7 @@ use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::{Margin, Position, Rect};
 use wherror::Error;
 
 use crate::keymap::{self, Keys, Route, Scope};
@@ -541,15 +541,16 @@ impl App {
         self.reattach_live();
         loop {
             self.measure(terminal.size()?.into());
-            let placed = self
-                .state
-                .read()
-                .shown_layout()
-                .map(|layout| layout.placed(self.pane_area))
-                .unwrap_or_default();
-            for place in placed.iter().filter(|place| !place.collapsed) {
+            let placed = {
+                let state = self.state.read();
+                state
+                    .shown_layout()
+                    .map(|layout| tabs::placement(&state, layout, self.pane_area).panes)
+                    .unwrap_or_default()
+            };
+            for place in &placed {
                 if let Some(pane) = self.panes.get_mut(&place.pane) {
-                    pane.resize(PaneSize::from(place.area));
+                    pane.resize(PaneSize::from(place.content()));
                 }
             }
             let now = SystemTime::now();
@@ -1406,8 +1407,8 @@ impl App {
 
     /// Runs `zmx attach` on `session` for pane `id`, in `cwd`, which starts
     /// the user's shell when zmx makes the session,
-    /// sized to its place in the shown layout (else, or when it's a stack's
-    /// title, the whole pane area),
+    /// sized to the inside of its frame in the shown layout (else to the
+    /// inside of a frame over the whole pane area),
     /// with orb's child environment and the pane's `ORB_PANE_ID`; `None` if
     /// it can't start.
     fn spawn_pane(&self, id: PaneId, session: &ZmxSession, cwd: &Path) -> Option<Pane> {
@@ -1417,17 +1418,20 @@ impl App {
             cwd: cwd.to_owned(),
             env: pane_env(&self.env, id),
         };
-        let area = self
-            .state
-            .read()
-            .shown_layout()
-            .and_then(|layout| {
-                layout
-                    .placed(self.pane_area)
-                    .into_iter()
-                    .find(|place| place.pane == id && !place.collapsed)
-            })
-            .map_or(self.pane_area, |place| place.area);
+        let area = {
+            let state = self.state.read();
+            state
+                .shown_layout()
+                .and_then(|layout| {
+                    tabs::placement(&state, layout, self.pane_area)
+                        .panes
+                        .into_iter()
+                        .find(|place| place.pane == id)
+                })
+                .map_or(self.pane_area.inner(Margin::new(1, 1)), |place| {
+                    place.content()
+                })
+        };
         Pane::spawn(&command, PaneSize::from(area), move |event| {
             let _ = tx.send(LoopEvent::Pane(id, event));
         })

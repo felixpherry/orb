@@ -67,6 +67,15 @@ impl Tab {
         self.tree.focused()
     }
 
+    /// The panes of the tab's stack, in stack order; empty without one, or
+    /// while the tab is zoomed.
+    pub fn stacked(&self) -> Vec<PaneId> {
+        match self.zoomed {
+            true => vec![],
+            false => self.tree.stacked_ids(),
+        }
+    }
+
     /// The tab's tree, as the store saves it.
     pub fn layout_json(&self) -> String {
         self.tree.to_json()
@@ -147,41 +156,75 @@ impl SessionLayout {
         }
     }
 
-    /// Where the shown tab's panes are drawn in `body`. A zoomed tab places
-    /// only its focused pane, over all of `body`; otherwise each pane gives
-    /// up its left column and top row to the border when one runs there; a
-    /// stack's title rows keep their row and give up only the left column.
-    pub fn placed(&self, body: Rect) -> Vec<Placed> {
+    /// Where the shown tab's panes are drawn in `body`: each pane's frame on
+    /// its whole tree cell. A zoomed tab places only its focused pane, over
+    /// all of `body`. A stack becomes a list `list_width` columns wide (at
+    /// most half the stack) on its left, and its expanded pane beside it at
+    /// full height.
+    pub fn placed(&self, body: Rect, list_width: u16) -> Placement {
         let Some(tab) = self.active_tab() else {
-            return vec![];
+            return Placement::default();
         };
         if tab.zoomed {
-            return vec![Placed {
-                pane: tab.tree.focused(),
-                area: body,
-                focused: true,
-                collapsed: false,
-            }];
+            return Placement {
+                panes: vec![Placed {
+                    pane: tab.tree.focused(),
+                    area: body,
+                    focused: true,
+                }],
+                stack: None,
+            };
         }
-        tab.tree
+        let stack = tab.tree.stack(body);
+        let mut panes: Vec<Placed> = tab
+            .tree
             .panes(body)
             .into_iter()
-            .map(|info| {
-                let left = u16::from(info.rect.x > body.x);
-                let top = u16::from(!info.collapsed && info.rect.y > body.y);
-                Placed {
-                    pane: info.id,
-                    area: Rect::new(
-                        info.rect.x + left,
-                        info.rect.y + top,
-                        info.rect.width.saturating_sub(left),
-                        info.rect.height.saturating_sub(top),
-                    ),
-                    focused: info.is_focused,
-                    collapsed: info.collapsed,
-                }
+            .filter(|info| stack.as_ref().is_none_or(|stack| !stack.panes.contains(&info.id)))
+            .map(|info| Placed {
+                pane: info.id,
+                area: info.rect,
+                focused: info.is_focused,
             })
-            .collect()
+            .collect();
+        let stack = stack.map(|stack| {
+            let width = list_width.min(stack.area.width / 2);
+            let area = Rect::new(stack.area.x, stack.area.y, width, stack.area.height);
+            panes.push(Placed {
+                pane: stack.expanded,
+                area: Rect::new(
+                    stack.area.x + width,
+                    stack.area.y,
+                    stack.area.width - width,
+                    stack.area.height,
+                ),
+                focused: tab.tree.focused() == stack.expanded,
+            });
+            let inner = inside(area);
+            let fits = usize::from(inner.height);
+            let start = match stack.panes.len() > fits {
+                true => stack
+                    .panes
+                    .iter()
+                    .position(|id| *id == stack.expanded)
+                    .unwrap_or_default()
+                    .saturating_sub(fits.saturating_sub(1)),
+                false => 0,
+            };
+            let rows = stack
+                .panes
+                .iter()
+                .skip(start)
+                .zip(inner.rows())
+                .map(|(id, row)| (*id, row))
+                .collect();
+            StackList {
+                area,
+                rows,
+                shown: stack.expanded,
+            }
+        });
+        Placement { panes, stack }
     }
 
     fn holds(&self, pane: PaneId) -> bool {
@@ -213,15 +256,45 @@ impl SessionLayout {
     }
 }
 
-/// Where a pane is drawn: its content area (borders already taken off) and
-/// whether it has the layout's focus.
+/// Where the shown tab draws its panes, and its stack's list if it has one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Placement {
+    pub panes: Vec<Placed>,
+    pub stack: Option<StackList>,
+}
+
+/// A pane with a frame: the frame's outer rect and whether it has the focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placed {
     pub pane: PaneId,
     pub area: Rect,
     pub focused: bool,
-    /// A stack's one-row title, drawn in place of the pane's screen.
-    pub collapsed: bool,
+}
+
+impl Placed {
+    /// Where the pane's screen goes: `area` less one cell on every side.
+    pub fn content(&self) -> Rect {
+        inside(self.area)
+    }
+}
+
+/// A stack's list of panes: its frame's outer rect, one row per pane that
+/// fits, and the pane shown beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackList {
+    pub area: Rect,
+    pub rows: Vec<(PaneId, Rect)>,
+    pub shown: PaneId,
+}
+
+/// `area` less one cell on every side.
+fn inside(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
 }
 
 /// What a focus move did.
@@ -576,7 +649,7 @@ mod tests {
 
     use ratatui::layout::Rect;
 
-    use super::{FocusMove, Layouts, Placed, SessionLayout, Tab, test_entry as entry};
+    use super::{FocusMove, Layouts, Placed, Placement, SessionLayout, Tab, test_entry as entry};
     use crate::feat::layout::tree::{NavDirection, Split, TileLayout};
     use crate::feat::sessions::state::{PaneId, SessionId};
 
@@ -599,11 +672,15 @@ mod tests {
         layouts
     }
 
-    fn placed(layouts: &Layouts) -> Vec<Placed> {
+    fn placement(layouts: &Layouts, list_width: u16) -> Placement {
         layouts
             .get(OWNER)
-            .map(|layout| layout.placed(BODY))
+            .map(|layout| layout.placed(BODY, list_width))
             .unwrap_or_default()
+    }
+
+    fn placed(layouts: &Layouts) -> Vec<Placed> {
+        placement(layouts, 0).panes
     }
 
     fn focused(layouts: &Layouts) -> Option<PaneId> {
@@ -758,12 +835,22 @@ mod tests {
         layouts
     }
 
-    /// How many placed panes each column holds, left to right.
+    /// How many panes each column holds, left to right, a stack counting
+    /// every pane its list names.
     fn shape(layouts: &Layouts) -> Vec<usize> {
-        placed(layouts)
-            .chunk_by(|a, b| a.area.x == b.area.x)
-            .map(<[Placed]>::len)
-            .collect()
+        let placement = placement(layouts, 0);
+        let mut columns: Vec<(u16, usize)> = Vec::new();
+        for place in &placement.panes {
+            let count = match &placement.stack {
+                Some(stack) if stack.shown == place.pane => stack.rows.len(),
+                _ => 1,
+            };
+            match columns.last_mut() {
+                Some((x, n)) if *x == place.area.x => *n += count,
+                _ => columns.push((place.area.x, count)),
+            }
+        }
+        columns.into_iter().map(|(_, n)| n).collect()
     }
 
     #[rstest::rstest]
@@ -811,20 +898,16 @@ mod tests {
         );
     }
 
-    /// The stacked pane placed with rows of its own: the first placement
-    /// right of the first column that isn't a title.
+    /// The stacked pane shown beside the stack's list.
     fn expanded(layouts: &Layouts) -> Option<PaneId> {
-        placed(layouts)
-            .into_iter()
-            .find(|place| place.area.x > BODY.x && !place.collapsed)
-            .map(|place| place.pane)
+        placement(layouts, 0).stack.map(|stack| stack.shown)
     }
 
-    fn collapsed_count(layouts: &Layouts) -> usize {
-        placed(layouts)
-            .iter()
-            .filter(|place| place.collapsed)
-            .count()
+    /// How many panes the stack's list names besides the shown one.
+    fn listed_others(layouts: &Layouts) -> usize {
+        placement(layouts, 0)
+            .stack
+            .map_or(0, |stack| stack.rows.len().saturating_sub(1))
     }
 
     #[rstest::rstest]
@@ -835,9 +918,9 @@ mod tests {
         // When splitting the focused pane right with pane 18.
         layouts.split(OWNER, Split::Right, entry(18));
 
-        // Then the tab is a main pane and a stack of eleven, ten of them titles.
+        // Then the tab is a main pane and a stack of eleven, ten beside the shown one.
         assert_eq!(
-            (shape(&layouts), collapsed_count(&layouts)),
+            (shape(&layouts), listed_others(&layouts)),
             (vec![1, 11], 10),
             "a split in a stacked tab should add the pane and re-tile"
         );
@@ -937,29 +1020,56 @@ mod tests {
         // When revealing the collapsed pane 12.
         layouts.reveal(OWNER, PaneId(12));
 
-        // Then pane 12 is placed with rows of its own.
-        assert!(
-            placed(&layouts)
-                .iter()
-                .any(|place| place.pane == PaneId(12) && !place.collapsed),
+        // Then pane 12 is the stack's shown pane.
+        assert_eq!(
+            expanded(&layouts),
+            Some(PaneId(12)),
             "reveal should expand a stacked pane"
         );
     }
 
     #[rstest::rstest]
-    fn placed_stack_titles_are_collapsed_rows_one_high() {
-        // Given eleven tiled panes.
+    fn stack_shown_pane_takes_the_stacks_full_height() {
+        // Given eleven tiled panes, a main pane and a stack of ten.
         let layouts = tiled(17);
 
         // When placing them.
-        let titles: Vec<u16> = placed(&layouts)
+        let height = placement(&layouts, 10)
+            .panes
             .iter()
-            .filter(|place| place.collapsed)
-            .map(|place| place.area.height)
-            .collect();
+            .find(|place| Some(place.pane) == expanded(&layouts))
+            .map(|place| place.area.height);
 
-        // Then nine are titles, each one row high.
-        assert_eq!(titles, vec![1; 9], "the stack's titles are single rows");
+        // Then the shown stacked pane is as tall as the body.
+        assert_eq!(height, Some(BODY.height), "the shown pane takes the stack's height");
+    }
+
+    #[rstest::rstest]
+    fn stack_list_sits_on_the_stacks_left_at_the_list_width() {
+        // Given eleven tiled panes, the stack in the right half.
+        let layouts = tiled(17);
+
+        // When placing them with a 10-column list.
+        let list = placement(&layouts, 10).stack.map(|stack| stack.area);
+
+        // Then the list starts at the stack's left edge, 10 columns wide.
+        assert_eq!(
+            list,
+            Some(Rect::new(40, 0, 10, 24)),
+            "the list takes the stack's first 10 columns"
+        );
+    }
+
+    #[rstest::rstest]
+    fn stack_list_is_at_most_half_the_stack() {
+        // Given eleven tiled panes, the stack 40 columns wide.
+        let layouts = tiled(17);
+
+        // When placing them with a list wider than half the stack.
+        let width = placement(&layouts, 30).stack.map(|stack| stack.area.width);
+
+        // Then the list is half the stack.
+        assert_eq!(width, Some(20), "the list stops at half the stack");
     }
 
     #[rstest::rstest]
@@ -1045,13 +1155,15 @@ mod tests {
 
         // Then only the focused pane is placed, over the whole body.
         assert_eq!(
-            placed(&layouts),
-            vec![Placed {
-                pane: PaneId(8),
-                area: BODY,
-                focused: true,
-                collapsed: false,
-            }],
+            placement(&layouts, 0),
+            Placement {
+                panes: vec![Placed {
+                    pane: PaneId(8),
+                    area: BODY,
+                    focused: true,
+                }],
+                stack: None,
+            },
             "a zoomed tab shows its focused pane alone"
         );
     }
@@ -1070,23 +1182,23 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn placed_panes_leave_a_column_for_the_border_between_them() {
+    fn split_right_places_each_pane_on_its_whole_tree_cell() {
         // Given two panes side by side over an 80-column body.
         let layouts = split_right();
 
         // When placing them.
         let areas: Vec<Rect> = placed(&layouts).iter().map(|place| place.area).collect();
 
-        // Then the right pane starts one column after the left one ends.
+        // Then each pane's frame takes its half.
         assert_eq!(
             areas,
-            vec![Rect::new(0, 0, 40, 24), Rect::new(41, 0, 39, 24)],
-            "column 40 is the border"
+            vec![Rect::new(0, 0, 40, 24), Rect::new(40, 0, 40, 24)],
+            "the frames touch at column 40"
         );
     }
 
     #[rstest::rstest]
-    fn placed_panes_leave_a_row_for_the_border_between_them() {
+    fn split_down_places_each_pane_on_its_whole_tree_cell() {
         // Given two stacked panes over a 24-row body.
         let mut layouts = opened();
         layouts.split(OWNER, Split::Down, entry(8));
@@ -1094,12 +1206,28 @@ mod tests {
         // When placing them.
         let areas: Vec<Rect> = placed(&layouts).iter().map(|place| place.area).collect();
 
-        // Then the bottom pane starts one row after the top one ends.
+        // Then each pane's frame takes its half.
         assert_eq!(
             areas,
-            vec![Rect::new(0, 0, 80, 12), Rect::new(0, 13, 80, 11)],
-            "row 12 is the border"
+            vec![Rect::new(0, 0, 80, 12), Rect::new(0, 12, 80, 12)],
+            "the frames touch at row 12"
         );
+    }
+
+    #[rstest::rstest]
+    fn content_is_the_cell_less_one_cell_on_each_side() {
+        // Given a pane placed on a 40×24 cell.
+        let place = Placed {
+            pane: PaneId(7),
+            area: Rect::new(0, 0, 40, 24),
+            focused: false,
+        };
+
+        // When asking where its screen goes.
+        let content = place.content();
+
+        // Then the frame takes one cell on every side.
+        assert_eq!(content, Rect::new(1, 1, 38, 22), "the frame is one cell thick");
     }
 
     #[rstest::rstest]

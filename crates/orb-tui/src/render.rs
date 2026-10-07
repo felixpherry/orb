@@ -103,9 +103,9 @@ pub(crate) fn render(
         Some(layout) => {
             let keys_in_pane = state.focus == Focus::Pane;
             if let Some(cursor) = tabs::render(
+                state,
                 layout,
                 panes,
-                &|pane| pane_title(state, pane),
                 keys_in_pane,
                 right,
                 frame.buffer_mut(),
@@ -218,28 +218,6 @@ fn render_picker(
     }
 }
 
-/// What a stack's title row calls pane `pane`: its name, else the title of
-/// the agent running in it, else `shell`.
-fn pane_title(state: &AppState, pane: PaneId) -> String {
-    state
-        .layouts
-        .entry(pane)
-        .and_then(|entry| entry.name.clone())
-        .or_else(|| {
-            state
-                .sessions
-                .threads()
-                .find(|thread| {
-                    thread
-                        .pane
-                        .as_ref()
-                        .is_some_and(|launch| launch.pane == pane)
-                })
-                .and_then(|thread| thread.title.clone())
-        })
-        .unwrap_or_else(|| "shell".to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use orb_domain::feat::harness::HarnessId;
@@ -268,9 +246,10 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
+    use ratatui::style::Color;
 
     use super::{BACKGROUND, layout, render};
-    use crate::sidebar::{BLUE, DARK3};
+    use crate::sidebar::{BLUE, COMMENT, GUTTER};
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
     use crate::keymap::{Keys, LEADER, Scope, keymap, press};
@@ -1107,10 +1086,10 @@ mod tests {
         // When drawing a frame.
         let row = panes.as_ref().map(|panes| {
             let buffer = draw_with_pane(&state, panes);
-            text(&buffer, Rect::new(0, 1, 80, 1))
+            text(&buffer, Rect::new(1, 2, 79, 1))
         });
 
-        // Then the pane's output starts in the first column, under the tab bar.
+        // Then the pane's output starts inside its frame, under the tab bar.
         assert!(
             row.as_deref()
                 .is_some_and(|row| row.starts_with("PANE-TEXT")),
@@ -1186,31 +1165,94 @@ mod tests {
         );
     }
 
-    #[rstest::rstest]
-    fn split_right_draws_a_line_between_the_panes() {
-        // Given thread 1's pane split right, neither pane running yet.
-        let state = laid_out(|state| state.layouts.split(SessionId(1), Split::Right, entry(2)));
-
-        // When drawing a frame on the 48-column right side.
-        let buffer = draw(&state);
-
-        // Then column 24 of the tab body is a line all the way down.
-        let right = right_of(&buffer);
-        let column: Vec<(Option<&str>, Option<_>)> = (right.y + 1..right.bottom())
-            .map(|y| {
-                let cell = buffer.cell((right.x + 24, y));
-                (cell.map(Cell::symbol), cell.map(|cell| cell.fg))
-            })
-            .collect();
-        assert_eq!(
-            column,
-            vec![(Some("│"), Some(DARK3)); 6],
-            "the border between the panes"
-        );
+    /// The colour of the top-left corner of the frame at column `x` of the
+    /// tab body.
+    fn corner_fg(buffer: &Buffer, x: u16) -> Option<Color> {
+        let right = right_of(buffer);
+        buffer
+            .cell((right.x + x, right.y + 1))
+            .filter(|cell| cell.symbol() == "╭")
+            .map(|cell| cell.fg)
     }
 
     #[rstest::rstest]
-    fn zoomed_tab_draws_no_border() {
+    fn pane_with_the_keys_has_a_blue_frame() {
+        // Given thread 1's pane shown with the keys in it.
+        let state = shown(Focus::Pane);
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the pane's frame is blue.
+        assert_eq!(corner_fg(&buffer, 0), Some(BLUE), "the lit frame");
+    }
+
+    #[rstest::rstest]
+    fn focused_pane_while_the_sidebar_has_the_keys_has_a_grey_frame() {
+        // Given thread 1's pane shown while the sidebar has the keys.
+        let state = shown(Focus::Sidebar);
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the pane's frame is grey.
+        assert_eq!(corner_fg(&buffer, 0), Some(COMMENT), "the focused frame");
+    }
+
+    #[rstest::rstest]
+    fn unfocused_pane_has_a_dim_frame() {
+        // Given thread 1's pane split right, the new right pane focused.
+        let mut state = laid_out(|state| state.layouts.split(SessionId(1), Split::Right, entry(2)));
+        state.focus = Focus::Pane;
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the left pane's frame is dim.
+        assert_eq!(corner_fg(&buffer, 0), Some(GUTTER), "the unfocused frame");
+    }
+
+    /// `shown(Focus::Sidebar)` with pane 1 named `server`.
+    fn named_pane() -> AppState {
+        laid_out(|state| {
+            state
+                .layouts
+                .rename_pane(PaneId(1), Some("server".to_owned()));
+        })
+    }
+
+    /// `shown(Focus::Sidebar)` with thread 1 no longer running in pane 1.
+    fn shell_pane() -> AppState {
+        let mut state = shown(Focus::Sidebar);
+        for thread in state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| &mut project.threads)
+        {
+            thread.pane = None;
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    #[case::name(named_pane(), " server ")]
+    #[case::agent_title(shown(Focus::Sidebar), " Fix the bug ")]
+    #[case::shell(shell_pane(), " shell ")]
+    fn frame_title_names_the_pane(#[case] state: AppState, #[case] title: &str) {
+        // Given pane 1 with a name, an agent's title, or neither.
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the frame's top edge reads its name, else its agent's title, else shell.
+        let right = right_of(&buffer);
+        let top = text(&buffer, Rect::new(right.x, right.y + 1, right.width, 1));
+        assert!(top.contains(title), "top edge was '{top}'");
+    }
+
+    #[rstest::rstest]
+    fn zoomed_tab_draws_one_frame() {
         // Given thread 1's pane split right, then zoomed.
         let state = laid_out(|state| {
             state.layouts.split(SessionId(1), Split::Right, entry(2));
@@ -1220,13 +1262,13 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the tab body has no line in it.
+        // Then the tab body holds a single frame.
         let right = right_of(&buffer);
         let body = text(
             &buffer,
             Rect::new(right.x, right.y + 1, right.width, right.height - 1),
         );
-        assert!(!body.contains('│'), "body was\n{body}");
+        assert_eq!(body.matches('╭').count(), 1, "body was\n{body}");
     }
 
     /// Thread 1's session showing one tab of panes 1 to 4 stacked, pane 3
@@ -1257,26 +1299,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn stack_draws_a_title_row_for_each_collapsed_pane() {
-        // Given a stack of four panes, pane 3 expanded.
-        let state = stacked();
-
-        // When drawing a frame.
-        let buffer = draw(&state);
-
-        // Then the right side has three title rows.
-        let right = right_side(&buffer);
-        assert_eq!(
-            right.lines().filter(|line| line.contains('▸')).count(),
-            3,
-            "one title row per collapsed pane, right side was\n{right}"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(" ▸ api")]
-    #[case(" ▸ Fix the bug")]
-    #[case(" ▸ shell")]
+    #[case("api")]
+    #[case("Fix the bug")]
+    #[case("shell")]
     fn stack_title_row_names_its_pane(#[case] title: &str) {
         // Given a stack of a named pane, an agent's pane and a shell.
         let state = stacked();
@@ -1284,7 +1309,7 @@ mod tests {
         // When drawing a frame.
         let buffer = draw(&state);
 
-        // Then the pane's title row reads its name, else its agent's title, else shell.
+        // Then the stack's list reads its name, else its agent's title, else shell.
         let right = right_side(&buffer);
         assert!(right.contains(title), "right side was\n{right}");
     }
@@ -1313,7 +1338,7 @@ mod tests {
             });
             terminal.backend().buffer().clone()
         };
-        let title = find(&buffer, "▸ api");
+        let title = find(&buffer, "api");
 
         // When clicking pane 2's title with the keys in pane 3.
         let route = title.map(|at| {

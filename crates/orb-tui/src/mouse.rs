@@ -1,7 +1,7 @@
 //! The mouse in orb's own UI: a click on the sidebar moves the keys there,
 //! a click on a row selects it and a double-click attaches, and a click on
-//! the sidebar's input box starts a search. The tab bar, the borders and the
-//! start screen take no clicks. The wheel moves the sidebar's selection
+//! the sidebar's input box starts a search. The tab bar, the pane frames and
+//! the start screen take no clicks. The wheel moves the sidebar's selection
 //! while it has the keys, and otherwise scrolls its view. In a
 //! picker a click selects a row, a double-click picks it and the wheel over
 //! its list moves the selection; a click outside a picker or the rename box
@@ -698,6 +698,16 @@ mod tests {
 
         // Then nothing happens.
         assert_eq!(routed, MouseRoute::Nothing, "the tab bar takes no clicks");
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_pane_frame_does_nothing() {
+        // Given the keys in pane 1, its frame and pane -1's meeting at column 55.
+        // When clicking that column.
+        let routed = route_once(left_click(55, 5), Focus::Pane);
+
+        // Then nothing happens.
+        assert_eq!(routed, MouseRoute::Nothing, "a pane's frame takes no clicks");
     }
 
     #[rstest::rstest]

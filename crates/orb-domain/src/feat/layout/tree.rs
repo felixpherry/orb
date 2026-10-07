@@ -47,6 +47,15 @@ pub struct PaneInfo {
     pub collapsed: bool,
 }
 
+/// A stack in an area: the rect it takes, its panes in order and the one
+/// expanded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackInfo {
+    pub area: Rect,
+    pub panes: Vec<PaneId>,
+    pub expanded: PaneId,
+}
+
 /// A node of the tree: one pane, a split holding two subtrees, or a stack
 /// of panes sharing one area.
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +131,18 @@ impl TileLayout {
         let mut result = Vec::new();
         collect_panes(&self.root, area, self.focus, &mut result);
         result
+    }
+
+    /// The tree's stack and the area it takes in `area`.
+    pub fn stack(&self, area: Rect) -> Option<StackInfo> {
+        stack_in(&self.root, area)
+    }
+
+    /// The panes of the tree's stack, in stack order; empty without one.
+    pub fn stacked_ids(&self) -> Vec<PaneId> {
+        self.stack(Rect::default())
+            .map(|stack| stack.panes)
+            .unwrap_or_default()
     }
 
     /// Every pane id, in tree order.
@@ -641,6 +662,26 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
                 y = y.saturating_add(rows);
             }
         }
+    }
+}
+
+fn stack_in(node: &Node, area: Rect) -> Option<StackInfo> {
+    match node {
+        Node::Pane(_) => None,
+        Node::Split {
+            split,
+            ratio,
+            first,
+            second,
+        } => {
+            let (a, b) = split_rect(area, *split, *ratio);
+            stack_in(first, a).or_else(|| stack_in(second, b))
+        }
+        Node::Stack { panes, expanded } => Some(StackInfo {
+            area,
+            panes: panes.clone(),
+            expanded: *expanded,
+        }),
     }
 }
 
