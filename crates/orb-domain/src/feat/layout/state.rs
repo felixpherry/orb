@@ -149,7 +149,8 @@ impl SessionLayout {
 
     /// Where the shown tab's panes are drawn in `body`. A zoomed tab places
     /// only its focused pane, over all of `body`; otherwise each pane gives
-    /// up its left column and top row to the border when one runs there.
+    /// up its left column and top row to the border when one runs there; a
+    /// stack's title rows keep their row and give up only the left column.
     pub fn placed(&self, body: Rect) -> Vec<Placed> {
         let Some(tab) = self.active_tab() else {
             return vec![];
@@ -159,6 +160,7 @@ impl SessionLayout {
                 pane: tab.tree.focused(),
                 area: body,
                 focused: true,
+                collapsed: false,
             }];
         }
         tab.tree
@@ -166,7 +168,7 @@ impl SessionLayout {
             .into_iter()
             .map(|info| {
                 let left = u16::from(info.rect.x > body.x);
-                let top = u16::from(info.rect.y > body.y);
+                let top = u16::from(!info.collapsed && info.rect.y > body.y);
                 Placed {
                     pane: info.id,
                     area: Rect::new(
@@ -176,6 +178,7 @@ impl SessionLayout {
                         info.rect.height.saturating_sub(top),
                     ),
                     focused: info.is_focused,
+                    collapsed: info.collapsed,
                 }
             })
             .collect()
@@ -217,6 +220,8 @@ pub struct Placed {
     pub pane: PaneId,
     pub area: Rect,
     pub focused: bool,
+    /// A stack's one-row title, drawn in place of the pane's screen.
+    pub collapsed: bool,
 }
 
 /// What a focus move did.
@@ -308,8 +313,9 @@ impl Layouts {
     }
 
     /// Splits the shown tab's focused pane `split` with `pane`, which takes
-    /// the focus, sharing the space evenly along that direction; the tab shows
-    /// every pane again.
+    /// the focus, sharing the space evenly along that direction; a tab holding
+    /// a stack re-tiles with `pane` added instead. The tab shows every pane
+    /// again.
     pub fn split(&mut self, owner: SessionId, split: Split, pane: PaneEntry) {
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
@@ -759,6 +765,123 @@ mod tests {
         assert_eq!(shape(&layouts), vec![2, 4], "six panes re-tile to [2][4]");
     }
 
+    /// The stacked pane placed with rows of its own: the first placement
+    /// right of the first column that isn't a title.
+    fn expanded(layouts: &Layouts) -> Option<PaneId> {
+        placed(layouts)
+            .into_iter()
+            .find(|place| place.area.x > BODY.x && !place.collapsed)
+            .map(|place| place.pane)
+    }
+
+    fn collapsed_count(layouts: &Layouts) -> usize {
+        placed(layouts)
+            .iter()
+            .filter(|place| place.collapsed)
+            .count()
+    }
+
+    #[rstest::rstest]
+    fn split_in_a_stacked_tab_re_tiles_with_the_new_pane() {
+        // Given eleven tiled panes, a main pane and a stack of ten.
+        let mut layouts = tiled(17);
+
+        // When splitting the focused pane right with pane 18.
+        layouts.split(OWNER, Split::Right, entry(18));
+
+        // Then the tab is a main pane and a stack of eleven, ten of them titles.
+        assert_eq!(
+            (shape(&layouts), collapsed_count(&layouts)),
+            (vec![1, 11], 10),
+            "a split in a stacked tab should add the pane and re-tile"
+        );
+    }
+
+    #[rstest::rstest]
+    fn split_in_a_stacked_tab_focuses_the_new_pane() {
+        // Given eleven tiled panes with pane 12 focused.
+        let mut layouts = tiled(17);
+        layouts.focus_pane(OWNER, PaneId(12));
+
+        // When splitting the focused pane right with pane 18.
+        layouts.split(OWNER, Split::Right, entry(18));
+
+        // Then pane 18 has the focus.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(18)),
+            "the split's new pane should be focused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_focus_down_in_a_stack_expands_the_pane_below() {
+        // Given eleven tiled panes with the stacked pane 12 focused.
+        let mut layouts = tiled(17);
+        layouts.focus_pane(OWNER, PaneId(12));
+
+        // When moving the focus down.
+        layouts.move_focus(OWNER, NavDirection::Down);
+
+        // Then pane 13 is focused and expanded.
+        assert_eq!(
+            (focused(&layouts), expanded(&layouts)),
+            (Some(PaneId(13)), Some(PaneId(13))),
+            "the pane below should take the focus and the rows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_moving_to_the_main_pane_keeps_the_stack_expanded() {
+        // Given eleven tiled panes with the stacked pane 12 focused.
+        let mut layouts = tiled(17);
+        layouts.focus_pane(OWNER, PaneId(12));
+
+        // When moving the focus left to the main pane.
+        layouts.move_focus(OWNER, NavDirection::Left);
+
+        // Then pane 12 stays expanded.
+        assert_eq!(
+            expanded(&layouts),
+            Some(PaneId(12)),
+            "leaving the stack should keep its expanded pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn closing_a_pane_keeps_the_stack_expanded() {
+        // Given twelve tiled panes, pane 12 expanded and the main pane focused.
+        let mut layouts = tiled(18);
+        layouts.focus_pane(OWNER, PaneId(12));
+        layouts.move_focus(OWNER, NavDirection::Left);
+
+        // When closing the stacked pane 15.
+        layouts.close_pane(PaneId(15));
+
+        // Then the re-tiled stack still expands pane 12.
+        assert_eq!(
+            expanded(&layouts),
+            Some(PaneId(12)),
+            "re-tiling should keep the expanded pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn placed_stack_titles_are_collapsed_rows_one_high() {
+        // Given eleven tiled panes.
+        let layouts = tiled(17);
+
+        // When placing them.
+        let titles: Vec<u16> = placed(&layouts)
+            .iter()
+            .filter(|place| place.collapsed)
+            .map(|place| place.area.height)
+            .collect();
+
+        // Then nine are titles, each one row high.
+        assert_eq!(titles, vec![1; 9], "the stack's titles are single rows");
+    }
+
     #[rstest::rstest]
     fn add_tiled_shows_every_pane_of_a_zoomed_tab() {
         // Given a zoomed two-pane tab.
@@ -847,6 +970,7 @@ mod tests {
                 pane: PaneId(8),
                 area: BODY,
                 focused: true,
+                collapsed: false,
             }],
             "a zoomed tab shows its focused pane alone"
         );

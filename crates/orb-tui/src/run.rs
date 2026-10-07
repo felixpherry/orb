@@ -547,7 +547,7 @@ impl App {
                 .shown_layout()
                 .map(|layout| layout.placed(self.pane_area))
                 .unwrap_or_default();
-            for place in &placed {
+            for place in placed.iter().filter(|place| !place.collapsed) {
                 if let Some(pane) = self.panes.get_mut(&place.pane) {
                     pane.resize(PaneSize::from(place.area));
                 }
@@ -1406,7 +1406,8 @@ impl App {
 
     /// Runs `zmx attach` on `session` for pane `id`, in `cwd`, which starts
     /// the user's shell when zmx makes the session,
-    /// sized to its place in the shown layout (else the whole pane area),
+    /// sized to its place in the shown layout (else, or when it's a stack's
+    /// title, the whole pane area),
     /// with orb's child environment and the pane's `ORB_PANE_ID`; `None` if
     /// it can't start.
     fn spawn_pane(&self, id: PaneId, session: &ZmxSession, cwd: &Path) -> Option<Pane> {
@@ -1424,7 +1425,7 @@ impl App {
                 layout
                     .placed(self.pane_area)
                     .into_iter()
-                    .find(|place| place.pane == id)
+                    .find(|place| place.pane == id && !place.collapsed)
             })
             .map_or(self.pane_area, |place| place.area);
         Pane::spawn(&command, PaneSize::from(area), move |event| {

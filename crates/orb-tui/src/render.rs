@@ -101,9 +101,15 @@ pub(crate) fn render(
     match state.shown_layout() {
         Some(layout) => {
             let keys_in_pane = state.focus == Focus::Pane;
-            if let Some(cursor) =
-                tabs::render(layout, panes, keys_in_pane, right, frame.buffer_mut(), hits)
-            {
+            if let Some(cursor) = tabs::render(
+                layout,
+                panes,
+                &|pane| pane_title(state, pane),
+                keys_in_pane,
+                right,
+                frame.buffer_mut(),
+                hits,
+            ) {
                 frame.set_cursor_position(cursor);
             }
         }
@@ -210,6 +216,28 @@ fn render_picker(
     }
 }
 
+/// What a stack's title row calls pane `pane`: its name, else the title of
+/// the agent running in it, else `shell`.
+fn pane_title(state: &AppState, pane: PaneId) -> String {
+    state
+        .layouts
+        .entry(pane)
+        .and_then(|entry| entry.name.clone())
+        .or_else(|| {
+            state
+                .sessions
+                .threads()
+                .find(|thread| {
+                    thread
+                        .pane
+                        .as_ref()
+                        .is_some_and(|launch| launch.pane == pane)
+                })
+                .and_then(|thread| thread.title.clone())
+        })
+        .unwrap_or_else(|| "shell".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use orb_domain::feat::harness::HarnessId;
@@ -221,8 +249,8 @@ mod tests {
     use crate::test_support::sessions_for;
     use jiff::tz::TimeZone;
     use orb_domain::Intent;
-    use orb_domain::feat::layout::state::{PaneEntry, SessionLayout};
-    use orb_domain::feat::layout::tree::Split;
+    use orb_domain::feat::layout::state::{PaneEntry, SessionLayout, Tab};
+    use orb_domain::feat::layout::tree::{Node, Split, TileLayout};
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::search::state::SearchProgress;
@@ -1197,6 +1225,118 @@ mod tests {
             Rect::new(right.x, right.y + 1, right.width, right.height - 1),
         );
         assert!(!body.contains('│'), "body was\n{body}");
+    }
+
+    /// Thread 1's session showing one tab of panes 1 to 4 stacked, pane 3
+    /// expanded and focused. Pane 1 runs thread 1 ("Fix the bug"), pane 2 is
+    /// named `api` and pane 4 is a plain shell.
+    fn stacked() -> AppState {
+        laid_out(|state| {
+            let tree = TileLayout::from_saved(
+                Node::Stack {
+                    panes: (1..=4).map(PaneId).collect(),
+                    expanded: PaneId(3),
+                },
+                PaneId(3),
+            );
+            let api = PaneEntry {
+                name: Some("api".to_owned()),
+                ..entry(2)
+            };
+            state.layouts.insert(
+                SessionId(1),
+                SessionLayout::restore(
+                    vec![Tab::restore(None, tree)],
+                    0,
+                    vec![entry(1), api, entry(3), entry(4)],
+                ),
+            );
+        })
+    }
+
+    #[rstest::rstest]
+    fn stack_draws_a_title_row_for_each_collapsed_pane() {
+        // Given a stack of four panes, pane 3 expanded.
+        let state = stacked();
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the right side has three title rows.
+        let right = right_side(&buffer);
+        assert_eq!(
+            right.lines().filter(|line| line.contains('▸')).count(),
+            3,
+            "one title row per collapsed pane, right side was\n{right}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(" ▸ api")]
+    #[case(" ▸ Fix the bug")]
+    #[case(" ▸ shell")]
+    fn stack_title_row_names_its_pane(#[case] title: &str) {
+        // Given a stack of a named pane, an agent's pane and a shell.
+        let state = stacked();
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the pane's title row reads its name, else its agent's title, else shell.
+        let right = right_side(&buffer);
+        assert!(right.contains(title), "right side was\n{right}");
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_stack_title_focuses_its_pane() {
+        // Given a stack drawn with pane 3 expanded and focused.
+        let state = stacked();
+        let mut hits = HitMap::default();
+        let buffer = {
+            let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
+            let keys = Keys::new(keymap(), Scope::Sidebar);
+            let Ok(_) = terminal.draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &HashMap::new(),
+                    None,
+                    &keys,
+                    SystemTime::UNIX_EPOCH,
+                    &TimeZone::UTC,
+                    &mut SidebarScroll::default(),
+                    &mut PickerScroll::default(),
+                    &mut hits,
+                );
+            });
+            terminal.backend().buffer().clone()
+        };
+        let title = find(&buffer, "▸ api");
+
+        // When clicking pane 2's title with the keys in pane 3.
+        let route = title.map(|at| {
+            let event = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: at.x,
+                row: at.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            mouse::route(
+                event,
+                &hits,
+                Focus::Pane,
+                Some(PaneId(3)),
+                &mut Clicks::default(),
+                Instant::now(),
+            )
+        });
+
+        // Then pane 2 takes the focus without starting a selection.
+        assert_eq!(
+            route,
+            Some(MouseRoute::Intents(vec![Intent::FocusPane(PaneId(2))])),
+            "a click on a title row should focus its pane"
+        );
     }
 
     #[rstest::rstest]
