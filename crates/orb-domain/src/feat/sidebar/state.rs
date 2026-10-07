@@ -1,5 +1,6 @@
 //! The sidebar's size and visibility, the last frame's row layout, and the
-//! name box, which names a session, a new session's folder, a tab or a pane.
+//! name box, which names a session, a new session's folder, a tab, a pane
+//! or an agent's pane.
 
 use crate::TextInput;
 use crate::feat::sessions::state::{FolderKind, PaneId, SessionId};
@@ -64,8 +65,8 @@ impl SidebarView {
     }
 }
 
-/// What the name box names: a session, a new session's folder, a tab or a
-/// pane.
+/// What the name box names: a session, a new session's folder, a tab, a
+/// pane, or an agent's pane from its sidebar row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameTarget {
     /// The session being renamed.
@@ -76,6 +77,9 @@ pub enum RenameTarget {
     Tab { owner: SessionId, tab: usize },
     /// A pane of the shown layout.
     Pane(PaneId),
+    /// An agent's pane, renamed from its sidebar row; the keys go back to the
+    /// sidebar.
+    Agent(PaneId),
 }
 
 /// The name box: what it names, and the name typed so far.

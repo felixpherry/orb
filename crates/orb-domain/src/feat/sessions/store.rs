@@ -1417,11 +1417,12 @@ fn session_kind(text: &str) -> SessionKind {
     }
 }
 
-/// How a jump-list row is saved: its kind and id; the Settled header isn't.
+/// How a jump-list row is saved: its kind and id; the Settled header and
+/// agent rows aren't.
 fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
     match item {
         SidebarItem::Session(id) => Some(("session", id.0)),
-        SidebarItem::SettledShelf => None,
+        SidebarItem::SettledShelf | SidebarItem::Agent { .. } => None,
     }
 }
 
@@ -2453,6 +2454,29 @@ mod tests {
             store.jumps()?,
             jumps,
             "the saved jump list should read back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saved_jumps_skip_agent_rows() -> Result<(), Report<StoreError>> {
+        // Given a fresh store.
+        let store = Store::open_in_memory()?;
+
+        // When saving an agent row and a session row.
+        store.save_jumps(&[
+            SidebarItem::Agent {
+                session: SessionId(1),
+                pane: PaneId(1),
+            },
+            SidebarItem::Session(SessionId(2)),
+        ])?;
+
+        // Then only the session row reads back.
+        assert_eq!(
+            store.jumps()?,
+            vec![SidebarItem::Session(SessionId(2))],
+            "agent rows should not be saved in the jump list"
         );
         Ok(())
     }

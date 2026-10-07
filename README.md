@@ -116,12 +116,12 @@ In the sidebar:
 
 | Key | Action |
 | --- | --- |
-| `j` / `k`, `gg` / `G`, `<C-d>` / `<C-u>` | Move |
-| `⏎` | Focus the session's panes, resuming it if it was settled |
-| `p` | Pin or unpin |
-| `s` | Settle (after a `No`/`Yes` confirm) or un-settle |
-| `d` | Delete the session after a `No`/`Yes` confirm: its panes are killed, transcripts stay |
-| `r` | Rename the session |
+| `j` / `k`, `gg` / `G`, `<C-d>` / `<C-u>` | Move (session cards and their agent rows) |
+| `⏎` | Focus the session's panes, resuming it if it was settled. On an agent row: show its tab with the keys in its pane |
+| `p` | Pin or unpin (sessions only) |
+| `s` | Settle (after a `No`/`Yes` confirm) or un-settle (sessions only) |
+| `d` | Delete the session after a `No`/`Yes` confirm: its panes are killed, transcripts stay. On an agent row: close its pane after a `No`/`Yes` confirm |
+| `r` | Rename the session, or name the agent's pane on an agent row |
 | `/` or `i` | Search |
 | `l` / `h` | Open / close the Settled shelf |
 | `q` | Quit orb (every pane keeps running) |

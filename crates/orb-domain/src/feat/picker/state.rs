@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList};
 use crate::feat::sessions::state::{
-    NEW_THREAD, Project, ProjectId, Session, SessionId, Sessions, Thread, ThreadId,
+    NEW_THREAD, PaneId, Project, ProjectId, Session, SessionId, Sessions, Thread, ThreadId,
 };
 use crate::feat::sessions::transcript::{Exchange, Role};
 use crate::feat::worktrees::state::{User, order, users};
@@ -61,6 +61,8 @@ pub enum PickerKind {
     /// `d` on a session: confirm deleting it. `folder` says its Research or
     /// Learn folder goes too.
     DeleteSession { session: SessionId, folder: bool },
+    /// `d` on an agent row: confirm closing its pane.
+    ClosePane { pane: PaneId, session: SessionId },
     /// `<C-g> Space`: pick a thread to jump into. `settled` is whether
     /// settled threads are listed; `<C-s>` flips it.
     Sessions { settled: bool },
@@ -206,6 +208,12 @@ impl PickerState {
     /// `folder`), with `No` selected.
     pub fn delete_session(session: SessionId, folder: bool, return_to: Focus) -> Self {
         Self::confirm(PickerKind::DeleteSession { session, folder }, return_to)
+    }
+
+    /// The `No`/`Yes` confirm for closing agent pane `pane` of `session`,
+    /// with `No` selected.
+    pub fn close_pane(pane: PaneId, session: SessionId, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::ClosePane { pane, session }, return_to)
     }
 
     /// The `No`/`Yes` confirm for deleting the worktree at `path`, with `No`

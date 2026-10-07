@@ -6,8 +6,9 @@
 //! many sessions are listed out of all of them. Below it, pinned sessions
 //! come first, then active ones, each a card: its most urgent agent's status icon and its
 //! title, then the project and status, then the branch (a Research or Learn
-//! session's folder), then one line per agent pane with its status, title
-//! and harness mark. The selected row's first line is highlighted. Settled
+//! session's folder), then one row per agent pane under the card, with its
+//! status, name or title and harness mark. The selected row's first line is
+//! highlighted. Settled
 //! sessions fold into a shelf at the bottom, drawn as one-line rows while
 //! it's open. The sidebar scrolls to keep the whole selected row in view,
 //! unless the wheel scrolled it while the keys are elsewhere.
@@ -22,6 +23,7 @@ use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use orb_domain::feat::harness::HarnessInfo;
+use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::sessions::state::{
     FolderKind, NEW_THREAD, Project, Session, SessionId, SessionKind, Sessions, SidebarItem,
     SidebarRow, Thread, ThreadStatus, most_urgent,
@@ -94,8 +96,9 @@ impl SidebarScroll {
 /// input box, then the list, scrolled so the cursor's row is in view. Returns
 /// the y of the selected row's first line when it's on screen, the list's
 /// layout, and the search text's cursor while there is a search. An idle
-/// agent of a session in `attached` shows a filled circle; an agent row ends
-/// with its harness's mark from `harnesses`.
+/// agent of a session in `attached` shows a filled circle; an agent row reads
+/// its pane's name from `layouts` and ends with its harness's mark from
+/// `harnesses`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the sidebar's inputs plus the scroll and hit map it updates"
@@ -104,6 +107,7 @@ pub(crate) fn render(
     sessions: &Sessions,
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
+    layouts: &Layouts,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -121,10 +125,10 @@ pub(crate) fn render(
     let search_cursor = render_input(sessions, &rows, input, buf, hits);
     let layout = SidebarLayout {
         rows: list.height,
-        heights: rows.iter().map(|row| height(sessions, row)).collect(),
+        heights: rows.iter().map(height).collect(),
     };
     let selected_y = render_list(
-        sessions, attached, harnesses, rows, now, list, buf, scroll, hits,
+        sessions, attached, harnesses, layouts, rows, now, list, buf, scroll, hits,
     );
     (selected_y, layout, search_cursor)
 }
@@ -218,11 +222,16 @@ fn prompt<'a>(
 }
 
 /// `shown/total`, like snacks' match count: the sessions listed, out of
-/// every session not being deleted.
+/// every session not being deleted. Agent rows aren't counted.
 fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
     let shown = rows
         .iter()
-        .filter(|row| !matches!(row, SidebarRow::ShelfHeader { .. }))
+        .filter(|row| {
+            !matches!(
+                row,
+                SidebarRow::ShelfHeader { .. } | SidebarRow::Agent { .. }
+            )
+        })
         .count();
     let live = sessions
         .sessions
@@ -244,6 +253,7 @@ fn render_list(
     sessions: &Sessions,
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
+    layouts: &Layouts,
     rows: Vec<SidebarRow<'_>>,
     now: SystemTime,
     area: Rect,
@@ -251,11 +261,12 @@ fn render_list(
     scroll: &mut SidebarScroll,
     hits: &mut HitMap,
 ) -> Option<u16> {
-    let (placed, total) = place(sessions, rows, area.height);
+    let (placed, total) = place(rows, area.height);
+    let cursor = sessions.cursor_row();
     let selected = placed
         .iter()
-        .find(|(row, _)| Some(row.item()) == sessions.cursor)
-        .map(|(row, top)| (*top, height(sessions, row)));
+        .find(|(row, _)| Some(row.item()) == cursor)
+        .map(|(row, top)| (*top, height(row)));
     let free = scroll.stays_free(sessions.cursor);
     if let (false, Some((top, rows))) = (free, selected) {
         scroll.offset = scroll
@@ -282,21 +293,14 @@ fn render_list(
             .max(top.saturating_add(rows).saturating_sub(area.height - 1));
     }
     let sticky = below(scroll.offset);
-    record_rows(
-        sessions,
-        &placed,
-        scroll.offset,
-        sticky.is_some(),
-        area,
-        hits,
-    );
+    record_rows(&placed, scroll.offset, sticky.is_some(), area, hits);
     // The whole list, then the lines in view.
     let list = {
         let mut list = Buffer::empty(Rect::new(area.x, 0, area.width, total));
         list.set_style(list.area, Style::new().bg(BG_DARK).fg(FG));
         for (index, (row, top)) in placed.iter().enumerate() {
-            let row_area = Rect::new(area.x, *top, area.width, height(sessions, row));
-            if Some(row.item()) == sessions.cursor {
+            let row_area = Rect::new(area.x, *top, area.width, height(row));
+            if Some(row.item()) == cursor {
                 list.set_style(
                     Rect {
                         height: 1,
@@ -309,7 +313,7 @@ fn render_list(
                 .get(index + 1)
                 .is_some_and(|(row, _)| matches!(row, SidebarRow::Settled { .. }));
             render_row(
-                sessions, attached, harnesses, row, ends_shelf, now, row_area, &mut list,
+                sessions, attached, harnesses, layouts, row, ends_shelf, now, row_area, &mut list,
             );
         }
         list
@@ -341,7 +345,6 @@ fn render_list(
 /// line `offset` down, and the bottom line as the shelf while the header is
 /// `sticky` there. Blank gap lines map to nothing.
 fn record_rows(
-    sessions: &Sessions,
     placed: &[(SidebarRow<'_>, u16)],
     offset: u16,
     sticky: bool,
@@ -352,7 +355,7 @@ fn record_rows(
     for (row, top) in placed {
         let start = (*top).max(offset);
         let end = top
-            .saturating_add(height(sessions, row))
+            .saturating_add(height(row))
             .min(offset.saturating_add(shown));
         if start < end {
             hits.record_row(
@@ -376,15 +379,8 @@ fn record_rows(
 /// Each row with its top line in the list, and the list's height. Blank lines
 /// above the shelf header keep the shelf at the bottom of `lines` while the
 /// list is short.
-fn place<'a>(
-    sessions: &Sessions,
-    rows: Vec<SidebarRow<'a>>,
-    lines: u16,
-) -> (Vec<(SidebarRow<'a>, u16)>, u16) {
-    let content = rows
-        .iter()
-        .map(|row| height(sessions, row))
-        .fold(0, u16::saturating_add);
+fn place(rows: Vec<SidebarRow<'_>>, lines: u16) -> (Vec<(SidebarRow<'_>, u16)>, u16) {
+    let content = rows.iter().map(height).fold(0, u16::saturating_add);
     let gap = lines.saturating_sub(content);
     let mut top = 0_u16;
     let placed = rows
@@ -394,21 +390,18 @@ fn place<'a>(
                 top = top.saturating_add(gap);
             }
             let row_top = top;
-            top = top.saturating_add(height(sessions, &row));
+            top = top.saturating_add(height(&row));
             (row, row_top)
         })
         .collect();
     (placed, top)
 }
 
-/// How many lines a row takes: a session's card 3 and one per agent pane,
-/// else 1.
-fn height(sessions: &Sessions, row: &SidebarRow<'_>) -> u16 {
+/// How many lines a row takes: a session's card 3, any other row 1.
+fn height(row: &SidebarRow<'_>) -> u16 {
     match row {
-        SidebarRow::Card { session, .. } => u16::try_from(sessions.agents(session.id).len())
-            .unwrap_or(u16::MAX)
-            .saturating_add(3),
-        SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } => 1,
+        SidebarRow::Card { .. } => 3,
+        SidebarRow::ShelfHeader { .. } | SidebarRow::Settled { .. } | SidebarRow::Agent { .. } => 1,
     }
 }
 
@@ -422,6 +415,7 @@ fn render_row(
     sessions: &Sessions,
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
+    layouts: &Layouts,
     row: &SidebarRow<'_>,
     ends_shelf: bool,
     now: SystemTime,
@@ -431,7 +425,6 @@ fn render_row(
     match row {
         SidebarRow::Card { project, session } => render_card(
             sessions,
-            harnesses,
             project,
             session,
             attached.contains(&session.id),
@@ -443,21 +436,37 @@ fn render_row(
         SidebarRow::Settled { session, .. } => {
             render_settled(sessions, session, ends_shelf, now, area, buf);
         }
+        SidebarRow::Agent {
+            session,
+            thread,
+            pane,
+            last,
+        } => {
+            let label = layouts
+                .entry(*pane)
+                .and_then(|entry| entry.name.as_deref())
+                .unwrap_or_else(|| title_of(thread));
+            render_agent(
+                sessions,
+                harnesses,
+                thread,
+                label,
+                *last,
+                attached.contains(&session.id),
+                now,
+                area,
+                buf,
+            );
+        }
     }
 }
 
 /// A session's card: its most urgent agent's status icon (the idle circle
 /// without one, filled while `attached`), its title, pin and time; the
 /// project and the status word; the branch, or for a Research or Learn
-/// session its folder and kind icon. Then one line per agent pane: its
-/// status icon, title and harness mark.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the card's parts plus the frame inputs every node takes"
-)]
+/// session its folder and kind icon.
 fn render_card(
     sessions: &Sessions,
-    harnesses: &[HarnessInfo],
     project: &Project,
     session: &Session,
     attached: bool,
@@ -466,7 +475,7 @@ fn render_card(
     buf: &mut Buffer,
 ) {
     let agents = sessions.agents(session.id);
-    let lines = Layout::vertical(vec![Constraint::Length(1); agents.len() + 3]).split(area);
+    let lines = Layout::vertical(vec![Constraint::Length(1); 3]).split(area);
     let line = |index: usize| lines.get(index).copied().unwrap_or_default();
     let urgent = most_urgent(agents.iter().copied());
     let (glyph, word, colour) = session_status(&agents, attached, now);
@@ -516,27 +525,44 @@ fn render_card(
         line(2),
         buf,
     );
-    let count = agents.len();
-    for (at, thread) in agents.into_iter().enumerate() {
-        let guide = if at + 1 == count { LAST_GUIDE } else { GUIDE };
-        let (glyph, _, colour) = status(thread, attached, now);
-        let matched = sessions.title_matches(title_of(thread)).unwrap_or_default();
-        let mark = harnesses
-            .iter()
-            .find(|info| info.id == thread.harness)
-            .and_then(|info| info.icon.clone());
-        render_split(
-            Line::from(
-                [span(guide, GUTTER), span(format!("{glyph} "), colour)]
-                    .into_iter()
-                    .chain(highlight(title_of(thread), &matched, |_| FG))
-                    .collect::<Vec<_>>(),
-            ),
-            Line::from(mark.map(|mark| span(mark, LOGO)).unwrap_or_default()),
-            line(at + 3),
-            buf,
-        );
-    }
+}
+
+/// An agent pane's row under its card: the tree guide (`└╴` on the last),
+/// its status icon (the idle circle filled while `attached`), `label` with
+/// where the search matched it, and its harness mark on the right.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the row's parts plus the frame inputs every node takes"
+)]
+fn render_agent(
+    sessions: &Sessions,
+    harnesses: &[HarnessInfo],
+    thread: &Thread,
+    label: &str,
+    last: bool,
+    attached: bool,
+    now: SystemTime,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let guide = if last { LAST_GUIDE } else { GUIDE };
+    let (glyph, _, colour) = status(thread, attached, now);
+    let matched = sessions.title_matches(label).unwrap_or_default();
+    let mark = harnesses
+        .iter()
+        .find(|info| info.id == thread.harness)
+        .and_then(|info| info.icon.clone());
+    render_split(
+        Line::from(
+            [span(guide, GUTTER), span(format!("{glyph} "), colour)]
+                .into_iter()
+                .chain(highlight(label, &matched, |_| FG))
+                .collect::<Vec<_>>(),
+        ),
+        Line::from(mark.map(|mark| span(mark, LOGO)).unwrap_or_default()),
+        area,
+        buf,
+    );
 }
 
 /// The name of a Research or Learn session's folder.
@@ -941,8 +967,10 @@ const LAST_GUIDE: &str = " └╴";
 mod tests {
     use orb_domain::feat::harness::claude::info;
     use orb_domain::feat::harness::{HarnessId, HarnessInfo};
+    use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
+    use orb_domain::feat::zmx::zmx_service::ZmxSession;
     use std::collections::HashSet;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
     use orb_domain::TextInput;
     use orb_domain::feat::sessions::state::{
@@ -950,7 +978,9 @@ mod tests {
         Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::SidebarLayout;
+    use orb_domain::{Focus, Intent};
     use ratatui::buffer::{Buffer, Cell};
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::{Position, Rect};
     use ratatui::style::{Color, Modifier};
 
@@ -960,7 +990,7 @@ mod tests {
         IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PIN, PURPLE, RED, STOPPED_ICON,
         SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
     };
-    use crate::mouse::HitMap;
+    use crate::mouse::{Clicks, HitMap, MouseRoute};
     use crate::test_support::sessions_for;
 
     fn at(secs: u64) -> SystemTime {
@@ -1063,6 +1093,7 @@ mod tests {
             sessions,
             &HashSet::new(),
             &[info()],
+            &Layouts::default(),
             now,
             buf.area,
             &mut buf,
@@ -1095,6 +1126,7 @@ mod tests {
             sessions,
             &attached,
             &[info()],
+            &Layouts::default(),
             now,
             buf.area,
             &mut buf,
@@ -1348,6 +1380,7 @@ mod tests {
             &sessions,
             &HashSet::new(),
             &[info()],
+            &Layouts::default(),
             at(1000),
             buf.area,
             &mut buf,
@@ -1372,6 +1405,7 @@ mod tests {
             &sessions,
             &HashSet::new(),
             &[info()],
+            &Layouts::default(),
             at(1000),
             buf.area,
             &mut buf,
@@ -1442,6 +1476,7 @@ mod tests {
             &sessions,
             &HashSet::new(),
             &[info()],
+            &Layouts::default(),
             at(1000),
             buf.area,
             &mut buf,
@@ -1737,6 +1772,7 @@ mod tests {
             sessions,
             &HashSet::new(),
             harnesses,
+            &Layouts::default(),
             at(1000),
             buf.area,
             &mut buf,
@@ -2026,7 +2062,7 @@ mod tests {
             layout,
             SidebarLayout {
                 rows: 7,
-                heights: vec![4, 4, 1],
+                heights: vec![3, 1, 3, 1, 1],
             },
             "the layout should be the list height and one height per row"
         );
@@ -2048,8 +2084,8 @@ mod tests {
         // When rendering the sidebar.
         let (_, selected_y, _) = render_sized(&sessions, at(1000), 32, 8);
 
-        // Then its card, one agent row included, fills the last four lines.
-        assert_eq!(selected_y, Some(4), "the selected node's first line");
+        // Then its card's three lines fill the last three lines.
+        assert_eq!(selected_y, Some(5), "the selected node's first line");
     }
 
     /// `active` idle threads, 1 to `active`, and the threads `settled_ids`
@@ -2087,10 +2123,10 @@ mod tests {
         // When rendering the sidebar.
         let (buf, selected_y, _) = render_sized(&sessions, at(1000), 32, 10);
 
-        // Then the card fills lines 5 to 8, right above the header's line.
+        // Then the card fills lines 6 to 8, right above the header's line.
         assert_eq!(
             (selected_y, line(&buf, 9).contains(" Settled ")),
-            (Some(5), true),
+            (Some(6), true),
             "thread {selected}'s first line, and the header on the last"
         );
     }
@@ -2312,6 +2348,7 @@ mod tests {
             sessions,
             &HashSet::new(),
             &[info()],
+            &Layouts::default(),
             at(1000),
             buf.area,
             &mut buf,
@@ -2426,10 +2463,14 @@ mod tests {
         // When rendering the sidebar.
         let (_, hits) = render_with(&sessions, &mut scroll, 8);
 
-        // Then the last line shows the list's last row, thread 1.
+        // Then the last line shows the list's last row, thread 1's agent
+        // row.
         assert_eq!(
             hits.row_at(Position::new(1, 7)),
-            Some(SidebarItem::Session(SessionId(1))),
+            Some(SidebarItem::Agent {
+                session: SessionId(1),
+                pane: PaneId(1),
+            }),
             "the row on the bottom line"
         );
     }
@@ -2462,5 +2503,173 @@ mod tests {
 
         // Then the view follows the selection to the top of the list.
         assert_eq!(selected_y, Some(3), "the selected row's first line");
+    }
+
+    /// Thread 1's agent row.
+    fn agent_one() -> SidebarItem {
+        SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        }
+    }
+
+    /// Draws a 32-column sidebar 10 lines tall with pane names from
+    /// `layouts`. Thread 1's card takes lines 3 to 5, its agent row line 6.
+    fn draw_with_layouts(sessions: &Sessions, layouts: &Layouts) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
+        render(
+            sessions,
+            &HashSet::new(),
+            &[info()],
+            layouts,
+            at(1000),
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+            &mut HitMap::default(),
+        );
+        buf
+    }
+
+    #[rstest::rstest]
+    fn agent_row_reads_its_panes_name() {
+        // Given thread 1 running in pane 1, named "api".
+        let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+        let layouts = {
+            let mut layouts = Layouts::default();
+            layouts.insert(
+                SessionId(1),
+                SessionLayout::of(PaneEntry {
+                    id: PaneId(1),
+                    zmx: ZmxSession {
+                        name: "orb-p1".into(),
+                        dir: "/tmp/zmx".into(),
+                    },
+                    cwd: "/tmp".into(),
+                    name: Some("api".into()),
+                    resume: None,
+                }),
+            );
+            layouts
+        };
+
+        // When rendering the sidebar.
+        let agent = line(&draw_with_layouts(&sessions, &layouts), 6);
+
+        // Then the agent row shows the pane's name.
+        assert!(agent.contains("api"), "line was '{agent}'");
+    }
+
+    #[rstest::rstest]
+    fn agent_row_falls_back_to_its_threads_title() {
+        // Given thread 1 running in an unnamed pane.
+        let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+
+        // When rendering the sidebar.
+        let agent = line(&draw_with_layouts(&sessions, &Layouts::default()), 6);
+
+        // Then the agent row shows the thread's title.
+        assert!(agent.contains("Thread 1"), "line was '{agent}'");
+    }
+
+    #[rstest::rstest]
+    fn selected_agent_row_has_the_visual_background() {
+        // Given the cursor on thread 1's agent row.
+        let sessions = Sessions {
+            cursor: Some(agent_one()),
+            ..sessions(vec![thread(1, ThreadStatus::Idle)])
+        };
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 10);
+
+        // Then the agent row's line has the selection background.
+        assert_eq!(
+            buf.cell((1, 6)).map(|cell| cell.bg),
+            Some(VISUAL),
+            "the agent row's line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn vanished_agent_cursor_highlights_its_card() {
+        // Given the cursor on an agent row of session 1 whose pane 99 is gone.
+        let sessions = Sessions {
+            cursor: Some(SidebarItem::Agent {
+                session: SessionId(1),
+                pane: PaneId(99),
+            }),
+            ..sessions(vec![thread(1, ThreadStatus::Idle)])
+        };
+
+        // When rendering the sidebar.
+        let buf = draw(&sessions, at(1000), 10);
+
+        // Then the card's first line has the selection background.
+        assert_eq!(
+            buf.cell((1, 3)).map(|cell| cell.bg),
+            Some(VISUAL),
+            "the card's first line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn agent_line_records_its_row_in_the_hit_map() {
+        // Given thread 1 on a 10-line sidebar.
+        let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+
+        // When rendering the sidebar.
+        let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 10);
+
+        // Then a click on the agent's line lands on its agent row.
+        assert_eq!(
+            hits.row_at(Position::new(1, 6)),
+            Some(agent_one()),
+            "the row at the agent's line"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_an_agent_line_selects_its_row() {
+        // Given thread 1 drawn on a 10-line sidebar that has the keys.
+        let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+        let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 10);
+
+        // When clicking the agent's line.
+        let routed = crate::mouse::route(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            },
+            &hits,
+            Focus::Sidebar,
+            None,
+            &mut Clicks::default(),
+            Instant::now(),
+        );
+
+        // Then the agent row is selected.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::SelectRow(agent_one())]),
+            "a click on an agent line should select its row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn input_box_counts_sessions_not_agent_rows() {
+        // Given two sessions, each running one agent.
+        let sessions = sessions(vec![
+            thread(1, ThreadStatus::Idle),
+            thread(2, ThreadStatus::Idle),
+        ]);
+
+        // When rendering the sidebar.
+        let prompt = line(&draw(&sessions, at(1000), 12), 1);
+
+        // Then the count is two sessions out of two.
+        assert!(prompt.trim_end().ends_with("2/2│"), "line was '{prompt}'");
     }
 }

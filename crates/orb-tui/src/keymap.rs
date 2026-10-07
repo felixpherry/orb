@@ -10,7 +10,7 @@
 //! sessions, `<C-g> p` and `<C-g> <C-g>` only in a pane, `<C-g> t` only with
 //! a session selected, `<C-g> f` only in the sidebar). The sidebar's own
 //! keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`, `q`, `/` and `i`, `l`/`h`,
-//! and `r`/`p`/`s`/`d` on a session) go through the same keymap. In a pane
+//! `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent row) go through the same keymap. In a pane
 //! every other key goes to its program. An open picker, the rename box and
 //! the sidebar search take typed characters and have their own fixed keys,
 //! `<C-x>` among them for removing a project from the project filter and
@@ -51,6 +51,10 @@ pub(crate) enum Selection {
     Session,
     /// An Incognito, Research or Learn session, whose folder is orb's own.
     OwnFolderSession,
+    /// An agent row of a session in a project's checkout or worktree.
+    Agent,
+    /// An agent row of an Incognito, Research or Learn session.
+    OwnFolderAgent,
     /// No row, or the settled shelf's header.
     Nothing,
 }
@@ -58,10 +62,13 @@ pub(crate) enum Selection {
 impl Selection {
     /// What `sessions`' cursor is on.
     pub(crate) fn of(sessions: &Sessions) -> Self {
-        match sessions.selected_session() {
-            Some(session) if session.kind != SessionKind::Plain => Self::OwnFolderSession,
-            Some(_) => Self::Session,
-            None => Self::Nothing,
+        let agent = sessions.selected_agent().is_some();
+        match (sessions.selected_session(), agent) {
+            (Some(session), true) if session.kind != SessionKind::Plain => Self::OwnFolderAgent,
+            (Some(_), true) => Self::Agent,
+            (Some(session), false) if session.kind != SessionKind::Plain => Self::OwnFolderSession,
+            (Some(_), false) => Self::Session,
+            (None, _) => Self::Nothing,
         }
     }
 }
@@ -82,6 +89,11 @@ pub(crate) enum Scope {
     /// A pane of an Incognito, Research or Learn session: [`Scope::Pane`]'s
     /// keys but `<C-g> w`/`<C-g> b`.
     PaneIncognito,
+    /// The sidebar on an agent row: [`Scope::Sidebar`]'s keys but `p`/`s`.
+    SidebarAgent,
+    /// The sidebar on an agent row of an Incognito, Research or Learn
+    /// session: [`Scope::SidebarAgent`]'s keys but `<C-g> w`/`<C-g> b`.
+    SidebarAgentIncognito,
 }
 
 impl Scope {
@@ -90,8 +102,10 @@ impl Scope {
     /// shown), so it reads as [`Scope::Pane`].
     pub(crate) fn new(focus: Focus, selection: Selection) -> Self {
         match (focus, selection) {
-            (Focus::Pane, Selection::OwnFolderSession) => Self::PaneIncognito,
-            (Focus::Pane, Selection::Session | Selection::Nothing) => Self::Pane,
+            (Focus::Pane, Selection::OwnFolderSession | Selection::OwnFolderAgent) => {
+                Self::PaneIncognito
+            }
+            (Focus::Pane, Selection::Session | Selection::Agent | Selection::Nothing) => Self::Pane,
             (
                 Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::Session,
@@ -104,6 +118,13 @@ impl Scope {
                 Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::OwnFolderSession,
             ) => Self::SidebarIncognito,
+            (Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search, Selection::Agent) => {
+                Self::SidebarAgent
+            }
+            (
+                Focus::Sidebar | Focus::Picker | Focus::Rename | Focus::Search,
+                Selection::OwnFolderAgent,
+            ) => Self::SidebarAgentIncognito,
         }
     }
 
@@ -125,11 +146,19 @@ pub(crate) const LEADER: KeyEvent = KeyEvent::new(KeyCode::Char('g'), KeyModifie
     reason = "one binding per key keeps the whole keymap in one place"
 )]
 pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
-    const SIDEBAR: [Scope; 3] = [Scope::Sidebar, Scope::SidebarEmpty, Scope::SidebarIncognito];
+    const SIDEBAR: [Scope; 5] = [
+        Scope::Sidebar,
+        Scope::SidebarEmpty,
+        Scope::SidebarIncognito,
+        Scope::SidebarAgent,
+        Scope::SidebarAgentIncognito,
+    ];
     const PANE: [Scope; 2] = [Scope::Pane, Scope::PaneIncognito];
-    const SESSION: [Scope; 4] = [
+    const SESSION: [Scope; 6] = [
         Scope::Sidebar,
         Scope::SidebarIncognito,
+        Scope::SidebarAgent,
+        Scope::SidebarAgentIncognito,
         Scope::Pane,
         Scope::PaneIncognito,
     ];
@@ -174,6 +203,11 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             .bind("r", Intent::Rename, KeyCategory::Threads, scope)
             .bind("p", Intent::TogglePin, KeyCategory::Threads, scope)
             .bind("s", Intent::ToggleSettle, KeyCategory::Threads, scope)
+            .bind("d", Intent::Delete, KeyCategory::Threads, scope);
+    }
+    for scope in [Scope::SidebarAgent, Scope::SidebarAgentIncognito] {
+        keymap
+            .bind("r", Intent::Rename, KeyCategory::Threads, scope)
             .bind("d", Intent::Delete, KeyCategory::Threads, scope);
     }
     for scope in SIDEBAR.into_iter().chain(PANE) {
@@ -233,7 +267,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             );
     }
-    for scope in [Scope::Sidebar, Scope::Pane] {
+    for scope in [Scope::Sidebar, Scope::SidebarAgent, Scope::Pane] {
         keymap
             .bind(
                 "<leader>w",
@@ -574,6 +608,14 @@ mod tests {
     #[case(Focus::Sidebar, Selection::OwnFolderSession, Scope::SidebarIncognito)]
     #[case(Focus::Pane, Selection::Session, Scope::Pane)]
     #[case(Focus::Pane, Selection::OwnFolderSession, Scope::PaneIncognito)]
+    #[case(Focus::Sidebar, Selection::Agent, Scope::SidebarAgent)]
+    #[case(
+        Focus::Sidebar,
+        Selection::OwnFolderAgent,
+        Scope::SidebarAgentIncognito
+    )]
+    #[case(Focus::Pane, Selection::Agent, Scope::Pane)]
+    #[case(Focus::Pane, Selection::OwnFolderAgent, Scope::PaneIncognito)]
     fn scope_follows_focus_and_the_selection(
         #[case] focus: Focus,
         #[case] selection: Selection,
@@ -637,6 +679,16 @@ mod tests {
         SidebarItem::Session(SessionId(1)),
         Selection::OwnFolderSession
     )]
+    #[case::normal_agent(
+        ProjectKind::Normal,
+        SidebarItem::Agent { session: SessionId(1), pane: PaneId(1) },
+        Selection::Agent
+    )]
+    #[case::incognito_agent(
+        ProjectKind::Incognito,
+        SidebarItem::Agent { session: SessionId(1), pane: PaneId(1) },
+        Selection::OwnFolderAgent
+    )]
     fn selection_follows_the_lone_rows_project_kind(
         #[case] kind: ProjectKind,
         #[case] cursor: SidebarItem,
@@ -652,6 +704,51 @@ mod tests {
         assert_eq!(
             selection, expected,
             "the selection on {cursor:?} in a {kind:?} project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn agent_rows_leave_p_and_s_unbound(
+        #[values(Scope::SidebarAgent, Scope::SidebarAgentIncognito)] scope: Scope,
+        #[values('p', 's')] pressed: char,
+    ) {
+        // Given the keymap on an agent row.
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing the key.
+        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
+
+        // Then nothing happens and no sequence starts.
+        assert_eq!(
+            (intent, keys.is_pending()),
+            (None, false),
+            "`{pressed}` should do nothing in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn agent_row_keys_map_to_their_intents(
+        #[values(Scope::SidebarAgent, Scope::SidebarAgentIncognito)] scope: Scope,
+        #[values(
+            (KeyCode::Char('r'), Intent::Rename),
+            (KeyCode::Char('d'), Intent::Delete),
+            (KeyCode::Char('j'), Intent::SelectNext),
+            (KeyCode::Enter, Intent::Attach)
+        )]
+        binding: (KeyCode, Intent),
+    ) {
+        // Given the keymap on an agent row.
+        let (pressed, expected) = binding;
+        let mut keys = Keys::new(keymap(), scope);
+
+        // When pressing the key.
+        let intent = press(&mut keys, key(pressed));
+
+        // Then it yields its intent.
+        assert_eq!(
+            intent.as_ref(),
+            Some(&expected),
+            "the key for {expected} in {scope:?}"
         );
     }
 
@@ -1121,6 +1218,8 @@ mod tests {
     #[case(Scope::SidebarIncognito, "/ Space W a f g i n s t")]
     #[case(Scope::Pane, "/ <C-g> Space W a b g i n p s t w")]
     #[case(Scope::PaneIncognito, "/ <C-g> Space W a g i n p s t")]
+    #[case(Scope::SidebarAgent, "/ Space W a b f g i n s t w")]
+    #[case(Scope::SidebarAgentIncognito, "/ Space W a f g i n s t")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 

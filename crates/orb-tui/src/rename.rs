@@ -1,6 +1,6 @@
 //! The name box: a LazyVim-style input centred at the top of the screen,
 //! where the user types orb's own name for a session (`Rename Session`), a
-//! tab or a pane, or the folder name of a new Research or Learn session
+//! tab, a pane or an agent's pane (`Rename Agent`), or the folder name of a new Research or Learn session
 //! (`New Research session`).
 
 use crate::mouse::HitMap;
@@ -76,6 +76,7 @@ fn title(target: RenameTarget) -> &'static str {
         RenameTarget::NewFolder(FolderKind::Learn) => " New Learn session ",
         RenameTarget::Tab { .. } => " Rename Tab ",
         RenameTarget::Pane(_) => " Rename Pane ",
+        RenameTarget::Agent(_) => " Rename Agent ",
     }
 }
 
@@ -142,6 +143,7 @@ mod tests {
     #[case(RenameTarget::Session(SessionId(1)), " Rename Session ")]
     #[case(RenameTarget::Tab { owner: SessionId(1), tab: 0 }, " Rename Tab ")]
     #[case(RenameTarget::Pane(PaneId(1)), " Rename Pane ")]
+    #[case(RenameTarget::Agent(PaneId(1)), " Rename Agent ")]
     #[case(
         RenameTarget::NewFolder(FolderKind::Research),
         " New Research session "

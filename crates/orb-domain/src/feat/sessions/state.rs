@@ -277,13 +277,14 @@ pub enum SidebarItem {
     Session(SessionId),
     /// The Settled shelf's header.
     SettledShelf,
+    /// An agent's line under its session's card, keyed by the agent's pane.
+    Agent { session: SessionId, pane: PaneId },
 }
 
 /// One sidebar row, in display order.
 #[derive(Debug, Clone, Copy)]
 pub enum SidebarRow<'a> {
-    /// A pinned or active session: a three-line card and one line per agent
-    /// pane.
+    /// A pinned or active session's three-line card.
     Card {
         project: &'a Project,
         session: &'a Session,
@@ -301,6 +302,14 @@ pub enum SidebarRow<'a> {
         project: &'a Project,
         session: &'a Session,
     },
+    /// An agent pane's line under its session's card; `last` is the card's
+    /// last agent.
+    Agent {
+        session: &'a Session,
+        thread: &'a Thread,
+        pane: PaneId,
+        last: bool,
+    },
 }
 
 impl SidebarRow<'_> {
@@ -311,6 +320,10 @@ impl SidebarRow<'_> {
                 SidebarItem::Session(session.id)
             }
             Self::ShelfHeader { .. } => SidebarItem::SettledShelf,
+            Self::Agent { session, pane, .. } => SidebarItem::Agent {
+                session: session.id,
+                pane: *pane,
+            },
         }
     }
 }
@@ -466,7 +479,7 @@ impl Sessions {
     }
 
     /// The sidebar's rows: pinned sessions (newest pin first), active sessions (newest created or
-    /// un-settled first), then, if any is settled, the shelf header and the
+    /// un-settled first), each card followed by one row per agent pane, then, if any is settled, the shelf header and the
     /// settled sessions (newest settle first). A collapsed shelf still lists
     /// the cursor's settled session. Ties go to the higher id. Sessions being
     /// deleted aren't listed. While a project filter is set, only that
@@ -485,11 +498,24 @@ impl Sessions {
         pinned.sort_by_key(|(_, session)| Reverse((session.pinned_at, session.id.0)));
         active.sort_by_key(|(_, session)| Reverse((session.active_since, session.id.0)));
         settled.sort_by_key(|(_, session)| Reverse((session.settled_at, session.id.0)));
-        let mut rows: Vec<SidebarRow<'_>> = pinned
-            .into_iter()
-            .chain(active)
-            .map(|(project, session)| SidebarRow::Card { project, session })
-            .collect();
+        let mut rows: Vec<SidebarRow<'_>> = Vec::new();
+        for (project, session) in pinned.into_iter().chain(active) {
+            rows.push(SidebarRow::Card { project, session });
+            let agents: Vec<(&Thread, PaneId)> = self
+                .agents(session.id)
+                .into_iter()
+                .filter_map(|thread| Some((thread, thread.pane.as_ref()?.pane)))
+                .collect();
+            let count = agents.len();
+            rows.extend(agents.into_iter().enumerate().map(|(at, (thread, pane))| {
+                SidebarRow::Agent {
+                    session,
+                    thread,
+                    pane,
+                    last: at + 1 == count,
+                }
+            }));
+        }
         if !settled.is_empty() {
             let open = self.shelf_open || self.searching();
             rows.push(SidebarRow::ShelfHeader {
@@ -574,13 +600,56 @@ impl Sessions {
         }
     }
 
-    /// The session under the cursor, if it still exists and isn't being
-    /// deleted.
+    /// The session under the cursor, or whose agent row it's on, if it still
+    /// exists and isn't being deleted.
     pub fn selected_session(&self) -> Option<&Session> {
         match self.cursor? {
-            SidebarItem::Session(id) if !self.deleting.contains(&id) => self.session(id),
+            SidebarItem::Session(id) | SidebarItem::Agent { session: id, .. }
+                if !self.deleting.contains(&id) =>
+            {
+                self.session(id)
+            }
             _ => None,
         }
+    }
+
+    /// The agent row under the cursor, as its session and pane, while that
+    /// pane still runs one of the session's agents.
+    pub fn selected_agent(&self) -> Option<(SessionId, PaneId)> {
+        match self.cursor? {
+            SidebarItem::Agent { session, pane }
+                if self.agents(session).into_iter().any(|thread| {
+                    thread
+                        .pane
+                        .as_ref()
+                        .is_some_and(|launch| launch.pane == pane)
+                }) =>
+            {
+                Some((session, pane))
+            }
+            _ => None,
+        }
+    }
+
+    /// The row the cursor reads as: its own, or its session's card once the
+    /// agent row it was on is gone.
+    pub fn cursor_row(&self) -> Option<SidebarItem> {
+        match self.cursor? {
+            SidebarItem::Agent { session, .. } if self.selected_agent().is_none() => {
+                Some(SidebarItem::Session(session))
+            }
+            item => Some(item),
+        }
+    }
+
+    /// The thread running in pane `pane`, if any.
+    pub fn agent_in(&self, pane: PaneId) -> Option<&Thread> {
+        self.threads().find(|thread| {
+            thread
+                .pane
+                .as_ref()
+                .is_some_and(|launch| launch.pane == pane)
+        })
     }
 
     /// The selected session's lead thread: its oldest agent pane's.
@@ -709,18 +778,23 @@ impl Sessions {
     }
 
     /// Where the cursor goes when `item` is deleted: the next row below,
-    /// else the nearest one above, skipping shelf headers; else the shelf
-    /// header if another session is settled.
+    /// else the nearest one above, skipping shelf headers and agent rows;
+    /// else the shelf header if another session is settled.
     pub fn row_neighbour(&self, item: SidebarItem) -> Option<SidebarItem> {
-        self.neighbour(item, |row| !matches!(row, SidebarRow::ShelfHeader { .. }))
-            .or_else(|| {
-                self.listed_sessions()
-                    .into_iter()
-                    .any(|(_, session)| {
-                        SidebarItem::Session(session.id) != item && session.settled_at.is_some()
-                    })
-                    .then_some(SidebarItem::SettledShelf)
-            })
+        self.neighbour(item, |row| {
+            !matches!(
+                row,
+                SidebarRow::ShelfHeader { .. } | SidebarRow::Agent { .. }
+            )
+        })
+        .or_else(|| {
+            self.listed_sessions()
+                .into_iter()
+                .any(|(_, session)| {
+                    SidebarItem::Session(session.id) != item && session.settled_at.is_some()
+                })
+                .then_some(SidebarItem::SettledShelf)
+        })
     }
 
     /// Filters the sidebar to `filter`'s project, or to all projects; a
@@ -745,7 +819,8 @@ impl Sessions {
     }
 
     /// Whether a jump can land on `item`: it still exists, isn't being
-    /// deleted, and the project filter lists it. Never the Settled header.
+    /// deleted, and the project filter lists it. Never the Settled header or
+    /// an agent row.
     pub fn jumpable(&self, item: SidebarItem) -> bool {
         let mut projects = self.listed_projects();
         match item {
@@ -755,7 +830,7 @@ impl Sessions {
                         projects.any(|project| project.id == session.project)
                     })
             }
-            SidebarItem::SettledShelf => false,
+            SidebarItem::SettledShelf | SidebarItem::Agent { .. } => false,
         }
     }
 
@@ -828,11 +903,11 @@ impl Sessions {
     }
 
     /// The sessions listed, in display order: every row but the shelf
-    /// header.
+    /// header and agent rows.
     fn matches(&self) -> Vec<SidebarItem> {
         self.items()
             .into_iter()
-            .filter(|&item| item != SidebarItem::SettledShelf)
+            .filter(|item| matches!(item, SidebarItem::Session(_)))
             .collect()
     }
 
@@ -841,9 +916,10 @@ impl Sessions {
         self.sidebar().iter().map(SidebarRow::item).collect()
     }
 
-    /// Where the cursor is in `items`, if it's on one of them.
+    /// Where the cursor is in `items`, if it's on one of them; a cursor on
+    /// a vanished agent row is on its session's card.
     fn position(&self, items: &[SidebarItem]) -> Option<usize> {
-        let cursor = self.cursor?;
+        let cursor = self.cursor_row()?;
         items.iter().position(|&item| item == cursor)
     }
 
@@ -1266,21 +1342,29 @@ mod tests {
         }
     }
 
-    /// What each sidebar row's cursor rests on, in display order.
+    /// The session and shelf rows, in display order; agent rows left out.
     fn items(sessions: &Sessions) -> Vec<SidebarItem> {
-        sessions.sidebar().iter().map(SidebarRow::item).collect()
+        sessions
+            .sidebar()
+            .iter()
+            .map(SidebarRow::item)
+            .filter(|item| !matches!(item, SidebarItem::Agent { .. }))
+            .collect()
     }
 
     fn on(id: i64) -> SidebarItem {
         SidebarItem::Session(SessionId(id))
     }
 
-    /// Seven cards, listed 7 down to 1, with the cursor on thread `cursor`.
+    /// Seven cards with no agents, listed 7 down to 1, with the cursor on
+    /// session `cursor`.
     fn seven_cards(cursor: i64) -> Sessions {
-        sessions(
-            (1..=7).map(|id| active(id, id.unsigned_abs())).collect(),
-            Some(on(cursor)),
-        )
+        Sessions {
+            projects: vec![project(1, vec![])],
+            sessions: (1..=7).map(session).collect(),
+            cursor: Some(on(cursor)),
+            ..Sessions::default()
+        }
     }
 
     /// A sidebar `rows` lines tall showing seven 4-line cards.
@@ -1479,10 +1563,17 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn select_next_from_the_last_card_selects_the_shelf() {
-        // Given an active thread 1, selected, and a settled thread 2.
+    fn select_next_from_the_last_live_row_selects_the_shelf() {
+        // Given an active thread 1 with its agent row selected, and a
+        // settled thread 2.
         let mut sessions = settling(
-            sessions(vec![active(1, 10), thread(2)], Some(on(1))),
+            sessions(
+                vec![active(1, 10), thread(2)],
+                Some(SidebarItem::Agent {
+                    session: SessionId(1),
+                    pane: PaneId(1),
+                }),
+            ),
             &[(2, 20)],
         );
 
@@ -1523,13 +1614,17 @@ mod tests {
     #[rstest::rstest]
     fn select_next_lands_on_a_thread_across_projects() {
         // Given project 1 with threads active since 30 s and 10 s, project 2
-        // with one active since 20 s, and the newest selected.
+        // with one active since 20 s, and the newest one's agent row
+        // selected.
         let mut sessions = fill(Sessions {
             projects: vec![
                 project(1, vec![active(3, 30), active(1, 10)]),
                 project(2, vec![active(2, 20)]),
             ],
-            cursor: Some(on(3)),
+            cursor: Some(SidebarItem::Agent {
+                session: SessionId(3),
+                pane: PaneId(3),
+            }),
             ..Sessions::default()
         });
 
@@ -2572,5 +2667,224 @@ mod tests {
 
         // Then it is.
         assert!(jumpable, "a listed thread is a jump target");
+    }
+
+    /// The agent row of pane `pane` in session `session`.
+    fn agent_row(session: i64, pane: i64) -> SidebarItem {
+        SidebarItem::Agent {
+            session: SessionId(session),
+            pane: PaneId(pane),
+        }
+    }
+
+    /// Session 1 (newer) running thread 1 in pane 1, and session 2 running
+    /// thread 2 in pane 2, with the cursor on `cursor`.
+    fn two_sessions(cursor: SidebarItem) -> Sessions {
+        sessions(vec![active(1, 20), active(2, 10)], Some(cursor))
+    }
+
+    #[rstest::rstest]
+    fn sidebar_lists_one_agent_row_per_agent_after_its_card() {
+        // Given session 1 running agents 1 and 2.
+        let sessions = holding(vec![agent(1, 1, 0), agent(2, 1, 5)], vec![session(1)]);
+
+        // When listing the sidebar's rows.
+        let items: Vec<SidebarItem> = sessions.sidebar().iter().map(SidebarRow::item).collect();
+
+        // Then the card comes first, then one row per agent.
+        assert_eq!(
+            items,
+            vec![on(1), agent_row(1, 1), agent_row(1, 2)],
+            "each agent should get its own row after its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn last_agent_row_of_a_card_is_marked_last() {
+        // Given session 1 running agents 1 and 2.
+        let sessions = holding(vec![agent(1, 1, 0), agent(2, 1, 5)], vec![session(1)]);
+
+        // When reading which agent rows are marked last.
+        let lasts: Vec<bool> = sessions
+            .sidebar()
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Agent { last, .. } => Some(*last),
+                _ => None,
+            })
+            .collect();
+
+        // Then only the final one is.
+        assert_eq!(
+            lasts,
+            vec![false, true],
+            "only the card's final agent row should be last"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_next_from_a_card_selects_its_first_agent_row() {
+        // Given two sessions with the cursor on session 1's card.
+        let mut sessions = two_sessions(on(1));
+
+        // When selecting the next row.
+        sessions.select_next();
+
+        // Then session 1's agent row is selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(agent_row(1, 1)),
+            "the row after a card is its first agent"
+        );
+    }
+
+    #[rstest::rstest]
+    fn selected_session_on_an_agent_row_is_its_session() {
+        // Given the cursor on session 2's agent row.
+        let sessions = two_sessions(agent_row(2, 2));
+
+        // When asking for the selected session.
+        let selected = sessions.selected_session().map(|session| session.id);
+
+        // Then it is session 2.
+        assert_eq!(
+            selected,
+            Some(SessionId(2)),
+            "an agent row selects its session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_next_from_a_vanished_agent_row_moves_past_its_card() {
+        // Given the cursor on an agent row of session 1 whose pane 99 is
+        // gone.
+        let mut sessions = two_sessions(agent_row(1, 99));
+
+        // When selecting the next row.
+        sessions.select_next();
+
+        // Then the row after session 1's card is selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(agent_row(1, 1)),
+            "a vanished agent row should read as its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cursor_row_of_a_vanished_agent_is_its_card() {
+        // Given the cursor on an agent row of session 1 whose pane 99 is
+        // gone.
+        let sessions = two_sessions(agent_row(1, 99));
+
+        // When reading the cursor's row.
+        let row = sessions.cursor_row();
+
+        // Then it is session 1's card.
+        assert_eq!(row, Some(on(1)), "a vanished agent row reads as its card");
+    }
+
+    #[rstest::rstest]
+    fn row_neighbour_of_a_session_skips_its_agent_rows() {
+        // Given two sessions, each running one agent.
+        let sessions = two_sessions(on(1));
+
+        // When finding where the cursor goes after deleting session 1.
+        let next = sessions.row_neighbour(on(1));
+
+        // Then it is session 2's card, past session 1's agent row.
+        assert_eq!(
+            next,
+            Some(on(2)),
+            "a deleted session's agent rows go with it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_prev_from_a_card_selects_the_agent_row_above() {
+        // Given two sessions with the cursor on session 2's card.
+        let mut sessions = two_sessions(on(2));
+
+        // When selecting the previous row.
+        sessions.select_prev();
+
+        // Then session 1's agent row, the row above the card, is selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(agent_row(1, 1)),
+            "the row above a card is the agent row of the card before it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn select_last_selects_the_last_cards_last_agent_row() {
+        // Given two sessions with the cursor on session 1's card.
+        let mut sessions = two_sessions(on(1));
+
+        // When selecting the last row.
+        sessions.select_last();
+
+        // Then session 2's agent row is selected.
+        assert_eq!(
+            sessions.cursor,
+            Some(agent_row(2, 2)),
+            "the last row is the last card's last agent row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn half_page_down_counts_agent_rows_as_stops() {
+        // Given two sessions on a 10-line sidebar (3-line cards, 1-line
+        // agent rows) with the cursor on session 1's card.
+        let mut sessions = two_sessions(on(1));
+        let layout = SidebarLayout {
+            rows: 10,
+            heights: vec![3, 1, 3, 1],
+        };
+
+        // When moving half a page (5 lines) down.
+        sessions.half_page_down(&layout);
+
+        // Then the cursor lands on session 2's agent row, three rows on.
+        assert_eq!(
+            sessions.cursor,
+            Some(agent_row(2, 2)),
+            "half a page should step through agent rows"
+        );
+    }
+
+    #[rstest::rstest]
+    fn agent_rows_are_not_jumpable() {
+        // Given session 1 running agent 1.
+        let sessions = two_sessions(on(1));
+
+        // When asking whether its agent row is jumpable.
+        let jumpable = sessions.jumpable(agent_row(1, 1));
+
+        // Then it isn't.
+        assert!(!jumpable, "a jump lands on sessions, not agent rows");
+    }
+
+    #[rstest::rstest]
+    fn select_next_match_skips_agent_rows() {
+        // Given "fix" matching cards 3 and 1 and settled 4, with the cursor on
+        // card 3.
+        let mut sessions = searching(
+            Sessions {
+                cursor: Some(on(3)),
+                ..four_titles()
+            },
+            "fix",
+        );
+
+        // When selecting the next match.
+        sessions.select_next_match();
+
+        // Then it lands on card 1, past card 3's agent row.
+        assert_eq!(
+            sessions.cursor,
+            Some(on(1)),
+            "search matches step from session to session"
+        );
     }
 }

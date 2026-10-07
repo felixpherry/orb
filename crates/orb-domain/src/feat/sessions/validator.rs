@@ -1,7 +1,8 @@
 //! Checks whether the user's sidebar actions can proceed: making a new
 //! session, naming a new Research or Learn session's folder, pinning,
-//! settling or deleting the selected session, opening or closing the Settled
-//! shelf, and making an Incognito session.
+//! settling or deleting the selected session (pin and settle are refused on
+//! an agent row), opening or closing the Settled shelf, and making an
+//! Incognito session.
 
 use wherror::Error;
 
@@ -75,6 +76,8 @@ pub fn validate_new_folder(state: &AppState) -> Result<(), NewFolderError> {
 pub enum ToggleSettleError {
     /// The cursor isn't on a session.
     NoSession,
+    /// The cursor is on an agent row; pin and settle are per session.
+    OnAgent,
     /// One of the session's agent panes is running a turn or waiting on the
     /// user.
     InProgress,
@@ -89,11 +92,15 @@ pub const SETTLE_IN_PROGRESS: &str = "Can't settle while a session is working";
 ///
 /// # Errors
 ///
-/// Returns [`ToggleSettleError::NoSession`] without a selected session, and
+/// Returns [`ToggleSettleError::OnAgent`] with the cursor on an agent row,
+/// [`ToggleSettleError::NoSession`] without a selected session, and
 /// [`ToggleSettleError::InProgress`] if it isn't settled and one of its
 /// agents has a turn underway.
 pub fn validate_toggle_settle(state: &AppState) -> Result<(), ToggleSettleError> {
     let sessions = &state.sessions;
+    if sessions.selected_agent().is_some() {
+        return Err(ToggleSettleError::OnAgent);
+    }
     match sessions.selected_session() {
         None => Err(ToggleSettleError::NoSession),
         Some(session)
@@ -115,17 +122,24 @@ pub fn validate_toggle_settle(state: &AppState) -> Result<(), ToggleSettleError>
 pub enum TogglePinError {
     /// The cursor isn't on a session.
     NoSession,
+    /// The cursor is on an agent row; pin and settle are per session.
+    OnAgent,
 }
 
 /// Allow pinning or unpinning the selected session.
 ///
 /// # Errors
 ///
-/// Returns [`TogglePinError::NoSession`] without a selected session.
+/// Returns [`TogglePinError::OnAgent`] with the cursor on an agent row, and
+/// [`TogglePinError::NoSession`] without a selected session.
 pub fn validate_toggle_pin(state: &AppState) -> Result<(), TogglePinError> {
-    match state.sessions.selected_session() {
-        Some(_) => Ok(()),
-        None => Err(TogglePinError::NoSession),
+    match (
+        state.sessions.selected_agent(),
+        state.sessions.selected_session(),
+    ) {
+        (Some(_), _) => Err(TogglePinError::OnAgent),
+        (None, Some(_)) => Ok(()),
+        (None, None) => Err(TogglePinError::NoSession),
     }
 }
 
@@ -451,6 +465,48 @@ mod tests {
             result,
             Err(TogglePinError::NoSession),
             "a session being deleted can't be pinned"
+        );
+    }
+
+    /// [`on_session`] with the cursor on session 1's agent row for pane 1.
+    fn on_agent_row() -> AppState {
+        let mut state = on_session(ThreadStatus::Idle);
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        });
+        state
+    }
+
+    #[rstest::rstest]
+    fn toggle_pin_rejected_on_an_agent_row() {
+        // Given the cursor on an agent row.
+        let state = on_agent_row();
+
+        // When validating a pin.
+        let result = validate_toggle_pin(&state);
+
+        // Then validation fails with OnAgent.
+        assert_eq!(
+            result,
+            Err(TogglePinError::OnAgent),
+            "pin is per session, not per agent"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_settle_rejected_on_an_agent_row() {
+        // Given the cursor on an agent row.
+        let state = on_agent_row();
+
+        // When validating a settle.
+        let result = validate_toggle_settle(&state);
+
+        // Then validation fails with OnAgent.
+        assert_eq!(
+            result,
+            Err(ToggleSettleError::OnAgent),
+            "settle is per session, not per agent"
         );
     }
 

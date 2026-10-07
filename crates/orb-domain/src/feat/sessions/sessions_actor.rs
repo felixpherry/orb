@@ -1074,7 +1074,7 @@ impl SessionsActor {
     fn apply(&mut self, listed: &HashMap<HarnessId, Vec<RunningAgent>>, live: &Live) {
         let now = now_ms();
         let selected = match self.state.read().sessions.cursor {
-            Some(SidebarItem::Session(id)) => Some(id),
+            Some(SidebarItem::Session(id) | SidebarItem::Agent { session: id, .. }) => Some(id),
             _ => None,
         };
         let mut statuses = Vec::with_capacity(self.rows.len());
@@ -2647,7 +2647,7 @@ fn show_session(row: &SessionRow) -> Session {
 fn exists(sessions: &HashMap<SessionId, SessionRow>, item: SidebarItem) -> bool {
     match item {
         SidebarItem::Session(id) => sessions.contains_key(&id),
-        SidebarItem::SettledShelf => false,
+        SidebarItem::SettledShelf | SidebarItem::Agent { .. } => false,
     }
 }
 

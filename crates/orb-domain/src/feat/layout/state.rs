@@ -426,6 +426,19 @@ impl Layouts {
         }
     }
 
+    /// Shows the tab of `owner`'s layout holding `pane` and focuses `pane` in
+    /// it, expanding it when it's stacked; nothing when no tab holds it. A
+    /// zoomed tab stays zoomed.
+    pub fn reveal(&mut self, owner: SessionId, pane: PaneId) {
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return;
+        };
+        if let Some(index) = layout.tabs.iter().position(|tab| tab.holds(pane)) {
+            layout.active = index;
+            self.focus_pane(owner, pane);
+        }
+    }
+
     /// Shows only the focused pane over the shown tab, or every pane again.
     pub fn toggle_zoom(&mut self, owner: SessionId) {
         if let Some(tab) = self.tab_mut(owner) {
@@ -863,6 +876,40 @@ mod tests {
             expanded(&layouts),
             Some(PaneId(12)),
             "re-tiling should keep the expanded pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reveal_shows_and_focuses_the_pane_in_its_tab() {
+        // Given panes 7 and 8 split in tab 1, pane 8 focused, and tab 2 shown.
+        let mut layouts = split_right();
+        layouts.new_tab(OWNER, entry(9));
+
+        // When revealing pane 7.
+        layouts.reveal(OWNER, PaneId(7));
+
+        // Then tab 1 is shown with pane 7 focused.
+        assert_eq!(
+            (active(&layouts), focused(&layouts)),
+            (Some(0), Some(PaneId(7))),
+            "reveal should show the pane's tab and focus it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reveal_expands_a_stacked_pane() {
+        // Given eleven tiled panes with pane 17 expanded in the stack.
+        let mut layouts = tiled(17);
+
+        // When revealing the collapsed pane 12.
+        layouts.reveal(OWNER, PaneId(12));
+
+        // Then pane 12 is placed with rows of its own.
+        assert!(
+            placed(&layouts)
+                .iter()
+                .any(|place| place.pane == PaneId(12) && !place.collapsed),
+            "reveal should expand a stacked pane"
         );
     }
 

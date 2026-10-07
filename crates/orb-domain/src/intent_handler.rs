@@ -24,7 +24,7 @@ use crate::feat::picker::validator::{
     validate_pick_project, validate_pick_session, validate_remove_project,
 };
 use crate::feat::sessions::state::{
-    FolderKind, Project, ProjectId, ProjectKind, Search, SessionId, SessionKind, Sessions,
+    FolderKind, PaneId, Project, ProjectId, ProjectKind, Search, SessionId, SessionKind, Sessions,
     SidebarItem, ThreadId, folder_slug,
 };
 use crate::feat::sessions::validator::{
@@ -128,7 +128,15 @@ impl IntentHandler {
                 }
                 vec![]
             }
-            Intent::Attach => attach_session(state),
+            Intent::Attach => match state.sessions.selected_agent() {
+                Some((session, pane)) => {
+                    state.layouts.reveal(session, pane);
+                    let mut commands = attach_session(state);
+                    commands.push(Command::SaveLayout(session));
+                    commands
+                }
+                None => attach_session(state),
+            },
             Intent::LeavePane => leave_pane(state),
             Intent::MoveFocus(nav) => match (state.focus, nav) {
                 (Focus::Sidebar, NavDirection::Right) => focus_right(state),
@@ -521,6 +529,16 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
+                Some(&PickerKind::ClosePane { pane, session }) => {
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Confirm(true))
+                            if state.sessions.selected_agent() == Some((session, pane)) =>
+                        {
+                            close_agent_pane(state, session, pane)
+                        }
+                        _ => vec![],
+                    }
+                }
                 Some(PickerKind::ProjectFilter) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::AllProjects) => filter_to(state, None),
@@ -618,8 +636,27 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
-            Intent::Rename => match (validate_rename(state), state.sessions.selected_session()) {
-                (Ok(()), Some(session)) => {
+            Intent::Rename => match (
+                validate_rename(state),
+                state.sessions.selected_agent(),
+                state.sessions.selected_session(),
+            ) {
+                (Ok(()), Some((_, pane)), _) => {
+                    let name = state
+                        .layouts
+                        .entry(pane)
+                        .and_then(|entry| entry.name.clone())
+                        .or_else(|| state.sessions.agent_in(pane)?.title.clone())
+                        .unwrap_or_default();
+                    state.rename = Some(Rename {
+                        target: RenameTarget::Agent(pane),
+                        input: TextInput::new(&name),
+                        creating: false,
+                    });
+                    state.focus = Focus::Rename;
+                    vec![]
+                }
+                (Ok(()), None, Some(session)) => {
                     let rename = Rename {
                         target: RenameTarget::Session(session.id),
                         input: TextInput::new(&state.sessions.title(session)),
@@ -659,7 +696,11 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
-            Intent::Delete => match (validate_delete(state), state.sessions.cursor) {
+            Intent::Delete => match (validate_delete(state), state.sessions.cursor_row()) {
+                (Ok(()), Some(SidebarItem::Agent { session, pane })) => {
+                    open_picker(state, PickerState::close_pane(pane, session, state.focus));
+                    vec![]
+                }
                 (Ok(()), Some(SidebarItem::Session(id))) => {
                     let folder = state.sessions.session(id).is_some_and(|session| {
                         matches!(session.kind, SessionKind::Research | SessionKind::Learn)
@@ -807,7 +848,17 @@ fn settle_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
 /// Whether `item`, answered `Yes` in its delete or discard confirm, is still
 /// under the cursor and can still be deleted.
 fn still_deletable(state: &AppState, item: SidebarItem) -> bool {
-    state.sessions.cursor == Some(item) && validate_delete(state).is_ok()
+    state.sessions.cursor_row() == Some(item) && validate_delete(state).is_ok()
+}
+
+/// Closes agent pane `pane` of `session`, answered `Yes` in its confirm:
+/// the tab it leaves re-tiles, the cursor goes to the session's card, and
+/// the layout is saved (the frontend kills the pane's program; a session
+/// whose last pane closed settles when its layout is saved).
+fn close_agent_pane(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Command> {
+    state.layouts.close_pane(pane);
+    state.sessions.cursor = Some(SidebarItem::Session(session));
+    vec![Command::SaveLayout(session)]
 }
 
 /// Hides `session` at once, detaches it, drops it from the jump list, moves
@@ -1361,6 +1412,16 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
                     commands.extend(state.layouts.owner_of(pane).map(Command::SaveLayout));
                     commands
                 }
+                // The keys stay in the sidebar.
+                RenameTarget::Agent(pane) => {
+                    state.layouts.rename_pane(pane, name);
+                    state
+                        .layouts
+                        .owner_of(pane)
+                        .map(Command::SaveLayout)
+                        .into_iter()
+                        .collect()
+                }
             };
         }
         (Intent::PickerCancel, _) => {
@@ -1727,11 +1788,16 @@ mod tests {
 
     #[rstest::rstest]
     fn select_next_on_last_thread_wraps_to_the_first() {
-        // Given threads 2 and 1 in sidebar order, with the last one selected.
+        // Given threads 2 and 1 in sidebar order, with the last row (thread
+        // 1's agent row) selected.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
             1,
         );
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        });
 
         // When handling SelectNext.
         IntentHandler::handle(&Intent::SelectNext, &mut state);
@@ -1983,6 +2049,69 @@ mod tests {
                 Command::SaveJumps,
             ],
             "Attach should target the selected thread, then refresh"
+        );
+    }
+
+    /// Session 1 not attached, its agent row (pane 1, in tab 1) under the
+    /// cursor, while a second tab of pane 60 is shown.
+    fn on_agent_in_another_tab() -> AppState {
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        state.layouts.new_tab(SessionId(1), test_entry(60));
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        });
+        state
+    }
+
+    #[rstest::rstest]
+    fn enter_on_an_agent_row_shows_its_tab_and_focuses_its_pane() {
+        // Given an agent row whose pane is in tab 1 while tab 2 is shown.
+        let mut state = on_agent_in_another_tab();
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then tab 1 is shown with the agent's pane focused.
+        let layout = state.layouts.get(SessionId(1));
+        assert_eq!(
+            (
+                layout.map(SessionLayout::active),
+                layout.and_then(SessionLayout::focused)
+            ),
+            (Some(0), Some(PaneId(1))),
+            "Enter on an agent row should show its tab and focus its pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_an_agent_row_attaches_with_the_keys_in_the_pane() {
+        // Given an agent row of a session that isn't attached.
+        let mut state = on_agent_in_another_tab();
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the session is attached with the keys in the pane.
+        assert_eq!(
+            (state.focus, state.attached.contains(&SessionId(1))),
+            (Focus::Pane, true),
+            "Enter on an agent row should attach its session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_an_agent_row_saves_the_layout() {
+        // Given an agent row whose pane is in another tab.
+        let mut state = on_agent_in_another_tab();
+
+        // When handling Attach.
+        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the session's layout is saved.
+        assert!(
+            commands.contains(&Command::SaveLayout(SessionId(1))),
+            "Enter on an agent row should save the revealed layout"
         );
     }
 
@@ -3441,7 +3570,7 @@ mod tests {
     #[rstest::rstest]
     #[case(Intent::SelectFirst, 3)]
     #[case(Intent::SelectLast, 1)]
-    #[case(Intent::SelectHalfPageDown, 1)]
+    #[case(Intent::SelectHalfPageDown, 2)]
     #[case(Intent::SelectHalfPageUp, 3)]
     fn sidebar_jumps_show_and_visit_the_thread_they_land_on(
         #[case] intent: Intent,
@@ -3488,18 +3617,29 @@ mod tests {
             .collect();
         assert_eq!(
             listed,
-            vec![SidebarItem::Session(SessionId(2))],
+            vec![
+                SidebarItem::Session(SessionId(2)),
+                SidebarItem::Agent {
+                    session: SessionId(2),
+                    pane: PaneId(2),
+                }
+            ],
             "a deleted thread should leave the sidebar at once"
         );
     }
 
     #[rstest::rstest]
     fn select_next_returns_visit() {
-        // Given threads 2 and 1 in sidebar order, with thread 2 selected.
+        // Given threads 2 and 1 in sidebar order, with thread 2's agent row
+        // selected.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
             2,
         );
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(2),
+            pane: PaneId(2),
+        });
 
         // When handling SelectNext.
         let commands = IntentHandler::handle(&Intent::SelectNext, &mut state);
@@ -5930,17 +6070,22 @@ mod tests {
 
     #[rstest::rstest]
     fn select_wheel_next_on_the_last_row_stays_there() {
-        // Given threads listed 3, 2, 1 with the cursor on the last, thread 1.
+        // Given threads listed 3, 2, 1 with the cursor on the last row,
+        // thread 1's agent row.
         let mut state = three_titles();
-        state.sessions.cursor = Some(on_thread(1));
+        let last = SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        };
+        state.sessions.cursor = Some(last);
 
         // When handling SelectWheelNext (the wheel down).
         IntentHandler::handle(&Intent::SelectWheelNext, &mut state);
 
-        // Then the cursor stays on thread 1.
+        // Then the cursor stays on thread 1's agent row.
         assert_eq!(
             state.sessions.cursor,
-            Some(on_thread(1)),
+            Some(last),
             "the wheel shouldn't wrap past the last row"
         );
     }
@@ -7188,6 +7333,224 @@ mod tests {
 
         // Then the keys are back in the pane.
         assert_eq!(state.focus, Focus::Pane, "the panes get the keys back");
+    }
+
+    /// The rename box target and text, if the box is open.
+    fn rename_box(state: &AppState) -> Option<(RenameTarget, String)> {
+        state
+            .rename
+            .as_ref()
+            .map(|rename| (rename.target, rename.input.text().to_owned()))
+    }
+
+    #[rstest::rstest]
+    fn rename_on_an_agent_row_opens_the_box_on_its_pane() {
+        // Given the cursor on the agent row of pane 1, named "api".
+        let mut state = on_agent_in_another_tab();
+        state.layouts.rename_pane(PaneId(1), Some("api".into()));
+
+        // When handling Rename.
+        IntentHandler::handle(&Intent::Rename, &mut state);
+
+        // Then the box names the agent's pane, holding its name.
+        assert_eq!(
+            rename_box(&state),
+            Some((RenameTarget::Agent(PaneId(1)), "api".to_owned())),
+            "r on an agent row should rename its pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_on_an_unnamed_agent_row_starts_from_its_title() {
+        // Given the cursor on the agent row of unnamed pane 1, whose thread is
+        // titled "fix login".
+        let mut state = state_with(
+            vec![Thread {
+                title: Some("fix login".into()),
+                ..thread(1, ThreadStatus::Idle)
+            }],
+            1,
+        );
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        });
+
+        // When handling Rename.
+        IntentHandler::handle(&Intent::Rename, &mut state);
+
+        // Then the box holds the agent's title.
+        assert_eq!(
+            rename_box(&state),
+            Some((RenameTarget::Agent(PaneId(1)), "fix login".to_owned())),
+            "an unnamed agent's box should start from its title"
+        );
+    }
+
+    /// The rename box opened from the agent row of pane 1, holding `name`.
+    fn renaming_agent(name: &str) -> AppState {
+        let mut state = on_agent_in_another_tab();
+        state.focus = Focus::Rename;
+        state.rename = Some(Rename {
+            target: RenameTarget::Agent(PaneId(1)),
+            input: TextInput::new(name),
+            creating: false,
+        });
+        state
+    }
+
+    #[rstest::rstest]
+    fn rename_agent_confirm_names_the_pane() {
+        // Given the agent's rename box holding "api".
+        let mut state = renaming_agent("api");
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then pane 1 is named api.
+        assert_eq!(
+            state
+                .layouts
+                .entry(PaneId(1))
+                .and_then(|entry| entry.name.clone()),
+            Some("api".to_owned()),
+            "the agent's pane takes the name"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_agent_confirm_gives_the_sidebar_the_keys() {
+        // Given the agent's rename box holding "api".
+        let mut state = renaming_agent("api");
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sidebar has the keys.
+        assert_eq!(state.focus, Focus::Sidebar, "the keys stay in the sidebar");
+    }
+
+    #[rstest::rstest]
+    fn rename_agent_confirm_saves_the_layout() {
+        // Given the agent's rename box holding "api".
+        let mut state = renaming_agent("api");
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then session 1's layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "an agent's new name should be saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn rename_agent_cancel_gives_the_sidebar_the_keys() {
+        // Given the agent's rename box holding "api".
+        let mut state = renaming_agent("api");
+
+        // When cancelling.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the sidebar has the keys.
+        assert_eq!(state.focus, Focus::Sidebar, "the keys stay in the sidebar");
+    }
+
+    #[rstest::rstest]
+    fn delete_on_an_agent_row_opens_the_close_pane_confirm() {
+        // Given the cursor on the agent row of pane 1.
+        let mut state = on_agent_in_another_tab();
+
+        // When handling Delete.
+        IntentHandler::handle(&Intent::Delete, &mut state);
+
+        // Then the confirm for closing pane 1 is open with No selected.
+        assert_eq!(
+            open_confirm(&state),
+            Some((
+                &PickerKind::ClosePane {
+                    pane: PaneId(1),
+                    session: SessionId(1)
+                },
+                Some(&PickerItem::Confirm(false))
+            )),
+            "d on an agent row should ask to close its pane"
+        );
+    }
+
+    /// The agent row of pane 1 (in tab 1, beside tab 2's pane 60), with Yes
+    /// highlighted in its close confirm.
+    fn closing_agent() -> AppState {
+        let mut state = on_agent_in_another_tab();
+        answer_yes(&Intent::Delete, &mut state);
+        state
+    }
+
+    #[rstest::rstest]
+    fn close_pane_confirm_yes_closes_the_pane() {
+        // Given Yes highlighted in pane 1's close confirm.
+        let mut state = closing_agent();
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then pane 1 is gone from the layout.
+        assert_eq!(
+            state.layouts.owner_of(PaneId(1)),
+            None,
+            "Yes should close the agent's pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_pane_confirm_yes_saves_the_layout() {
+        // Given Yes highlighted in pane 1's close confirm.
+        let mut state = closing_agent();
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then session 1's layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "a closed agent pane should be saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_pane_confirm_yes_moves_the_cursor_to_the_card() {
+        // Given Yes highlighted in pane 1's close confirm.
+        let mut state = closing_agent();
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the cursor is on session 1's card.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Session(SessionId(1))),
+            "the cursor should leave the closed agent's row for its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_pane_confirm_no_keeps_the_pane() {
+        // Given pane 1's close confirm, with No selected.
+        let mut state = on_agent_in_another_tab();
+        IntentHandler::handle(&Intent::Delete, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then pane 1 is still in session 1's layout.
+        assert_eq!(
+            state.layouts.owner_of(PaneId(1)),
+            Some(SessionId(1)),
+            "No should keep the agent's pane"
+        );
     }
 
     #[rstest::rstest]

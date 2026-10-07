@@ -158,18 +158,25 @@ fn activity(sessions: &Sessions, now: SystemTime) -> Option<String> {
     }
 }
 
-/// The cursor's row, 1-based, among the listed sessions (not the
-/// Settled header), and how many are listed.
+/// The cursor's session, 1-based, among the listed sessions (not the
+/// Settled header or agent rows), and how many are listed.
 fn position(sessions: &Sessions) -> Option<(usize, usize)> {
     let items: Vec<SidebarItem> = sessions
         .sidebar()
         .iter()
-        .filter(|row| !matches!(row, SidebarRow::ShelfHeader { .. }))
+        .filter(|row| {
+            !matches!(
+                row,
+                SidebarRow::ShelfHeader { .. } | SidebarRow::Agent { .. }
+            )
+        })
         .map(SidebarRow::item)
         .collect();
-    let at = items
-        .iter()
-        .position(|&item| Some(item) == sessions.cursor)?;
+    let cursor = match sessions.cursor_row()? {
+        SidebarItem::Agent { session, .. } => SidebarItem::Session(session),
+        item => item,
+    };
+    let at = items.iter().position(|&item| item == cursor)?;
     Some((at + 1, items.len()))
 }
 
@@ -734,6 +741,25 @@ mod tests {
         let buffer = draw(&state);
 
         // Then the position reads 3/7.
+        let text = text(&buffer);
+        assert!(text.contains(" 3/7 "), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn position_on_an_agent_row_reads_as_its_session() {
+        // Given seven threads with the cursor on thread 5's agent row.
+        let state = with_sessions(Sessions {
+            cursor: Some(SidebarItem::Agent {
+                session: SessionId(5),
+                pane: PaneId(5),
+            }),
+            ..sessions((1..=7).map(|id| thread(id, ThreadStatus::Idle)).collect())
+        });
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the position reads 3/7, its session's.
         let text = text(&buffer);
         assert!(text.contains(" 3/7 "), "mode line was '{text}'");
     }

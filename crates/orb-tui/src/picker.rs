@@ -24,11 +24,12 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use orb_domain::feat::git::git_service::GitRef;
+use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::picker::list::{
     ALL_PROJECTS, BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
-use orb_domain::feat::sessions::state::{ProjectKind, Sessions};
+use orb_domain::feat::sessions::state::{NEW_THREAD, ProjectKind, Sessions};
 use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -72,7 +73,8 @@ impl PickerScroll {
 }
 
 /// Draws `picker` in a popup over `area`; paths under `home` show as `~/`,
-/// and a confirm names its session as `sessions` titles it. Records the
+/// and a confirm names its session or agent, as `sessions` titles it and
+/// `layouts` names its pane. Records the
 /// popup, as the wheel's area too, and each selectable row in `hits`.
 /// Returns how many rows fit, and where the terminal cursor goes in the
 /// input.
@@ -80,12 +82,16 @@ pub(crate) fn render(
     picker: &PickerState,
     home: &Path,
     sessions: &Sessions,
+    layouts: &Layouts,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
     hits: &mut HitMap,
 ) -> (usize, Position) {
-    let title = Line::from(span(format!(" {} ", title(picker.kind(), sessions)), BLUE));
+    let title = Line::from(span(
+        format!(" {} ", title(picker.kind(), sessions, layouts)),
+        BLUE,
+    ));
     let popup = {
         let lines = |count: usize| u16::try_from(count).unwrap_or(u16::MAX);
         let title = u16::try_from(title.width()).unwrap_or(u16::MAX);
@@ -141,8 +147,9 @@ fn popup_rect(area: Rect, title: u16, shown: u16, total: u16) -> Rect {
 
 /// The picker's name, centred in its top border; paths under `home` show as
 /// `~/`. A settle or delete confirm names its session by its title in
-/// `sessions` (`session` once it is gone).
-fn title(kind: &PickerKind, sessions: &Sessions) -> Cow<'static, str> {
+/// `sessions` (`session` once it is gone); a close-pane confirm names its
+/// agent by its pane's name in `layouts`, else the agent's title.
+fn title(kind: &PickerKind, sessions: &Sessions, layouts: &Layouts) -> Cow<'static, str> {
     let named = |id| {
         sessions
             .session(id)
@@ -160,6 +167,14 @@ fn title(kind: &PickerKind, sessions: &Sessions) -> Cow<'static, str> {
             session,
             folder: true,
         } => return Cow::Owned(format!("Delete {} and its folder?", named(*session))),
+        PickerKind::ClosePane { pane, .. } => {
+            let label = layouts
+                .entry(*pane)
+                .and_then(|entry| entry.name.clone())
+                .or_else(|| sessions.agent_in(*pane)?.title.clone())
+                .unwrap_or_else(|| NEW_THREAD.to_owned());
+            return Cow::Owned(format!("Close {label}?"));
+        }
         PickerKind::Projects => "Projects",
         PickerKind::Sessions { .. } => "Sessions",
         PickerKind::Worktrees => "Worktrees",
@@ -188,6 +203,7 @@ fn hints(kind: &PickerKind) -> Line<'static> {
         PickerKind::RemoveProject { .. }
         | PickerKind::SettleSession { .. }
         | PickerKind::DeleteSession { .. }
+        | PickerKind::ClosePane { .. }
         | PickerKind::DeleteWorktree { .. }
         | PickerKind::InitGit { .. } => &[("⏎", "confirm"), ("Esc", "cancel")],
         _ => &[("⏎", "select"), ("Esc", "close")],
@@ -542,11 +558,15 @@ mod tests {
 
     use orb_domain::Focus;
     use orb_domain::feat::git::git_service::GitRef;
+    use orb_domain::feat::harness::HarnessId;
+    use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::{PickTarget, PickerState};
     use orb_domain::feat::sessions::state::{
-        ProjectId, ProjectKind, Session, SessionId, SessionKind, Sessions,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Session, SessionId, SessionKind,
+        Sessions, Thread, ThreadId, ThreadStatus,
     };
+    use orb_domain::feat::zmx::zmx_service::ZmxSession;
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
     use ratatui::style::Modifier;
@@ -576,6 +596,7 @@ mod tests {
             picker,
             Path::new(HOME),
             &Sessions::default(),
+            &Layouts::default(),
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
@@ -593,6 +614,7 @@ mod tests {
             picker,
             Path::new(HOME),
             &Sessions::default(),
+            &Layouts::default(),
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
@@ -805,6 +827,7 @@ mod tests {
             &picker,
             Path::new(HOME),
             &sessions,
+            &Layouts::default(),
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
@@ -812,6 +835,87 @@ mod tests {
         );
 
         // Then its top border names the session.
+        let top = border_rows(&buf).map(|(top, _)| top);
+        let at = find(&buf, &format!(" {title} ")).map(|(_, y)| y);
+        assert_eq!(at, top, "the row of the title {title:?}");
+    }
+
+    /// Session 1's agent `fix login`, running in pane 1, which is named
+    /// `name`.
+    fn fix_login_in_pane_one(name: Option<&str>) -> (Sessions, Layouts) {
+        let thread = Thread {
+            id: ThreadId(1),
+            title: Some("fix login".to_owned()),
+            cwd: PathBuf::from("/code/orb"),
+            transcript: None,
+            status: ThreadStatus::Idle,
+            turn_started_at: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(1),
+                session: SessionId(1),
+            }),
+            last_session: None,
+            branch: None,
+            created_at: UNIX_EPOCH,
+            last_activity_at: UNIX_EPOCH,
+            unseen: false,
+            model: None,
+            harness: HarnessId::new("claude"),
+        };
+        let sessions = Sessions {
+            projects: vec![Project {
+                id: ProjectId(1),
+                title: "orb".to_owned(),
+                root: PathBuf::from("/code/orb"),
+                created_at: UNIX_EPOCH,
+                threads: vec![thread],
+                repo: true,
+                removed: false,
+                kind: ProjectKind::Normal,
+            }],
+            ..named_login()
+        };
+        let layouts = {
+            let mut layouts = Layouts::default();
+            layouts.insert(
+                SessionId(1),
+                SessionLayout::of(PaneEntry {
+                    id: PaneId(1),
+                    zmx: ZmxSession {
+                        name: "orb-p1".into(),
+                        dir: "/tmp/zmx".into(),
+                    },
+                    cwd: "/code/orb".into(),
+                    name: name.map(str::to_owned),
+                    resume: None,
+                }),
+            );
+            layouts
+        };
+        (sessions, layouts)
+    }
+
+    #[rstest::rstest]
+    #[case::pane_name(Some("api"), "Close api?")]
+    #[case::agent_title(None, "Close fix login?")]
+    fn close_pane_confirm_names_the_agent(#[case] name: Option<&str>, #[case] title: &str) {
+        // Given agent `fix login` in pane 1, named `name`.
+        let (sessions, layouts) = fix_login_in_pane_one(name);
+
+        // When drawing the confirm for closing pane 1.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 40));
+        render(
+            &PickerState::close_pane(PaneId(1), SessionId(1), Focus::Sidebar),
+            Path::new(HOME),
+            &sessions,
+            &layouts,
+            buf.area,
+            &mut buf,
+            &mut PickerScroll::default(),
+            &mut HitMap::default(),
+        );
+
+        // Then its top border names the agent.
         let top = border_rows(&buf).map(|(top, _)| top);
         let at = find(&buf, &format!(" {title} ")).map(|(_, y)| y);
         assert_eq!(at, top, "the row of the title {title:?}");
@@ -1454,6 +1558,7 @@ mod tests {
             &picker,
             Path::new(HOME),
             &Sessions::default(),
+            &Layouts::default(),
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
