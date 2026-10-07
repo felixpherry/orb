@@ -1,7 +1,7 @@
 //! The start screen: what the right-hand area shows while no session is
 //! shown. The word ORB in shadowed block letters fading from blue to violet
-//! with its moons and stars, and under it a footer counting working threads,
-//! threads and projects; why a session couldn't start shows under the
+//! with its moons and stars, and under it a footer counting working agents,
+//! sessions and projects; why a session couldn't start shows under the
 //! footer. No menu and no keys.
 
 use std::borrow::Cow;
@@ -92,7 +92,7 @@ fn banner(x: u16, top: u16, area: Rect, buf: &mut Buffer) {
     }
 }
 
-/// `✳ 2 working · 14 threads · 4 projects`, numbers in magenta, after the
+/// `✳ 2 working · 14 sessions · 4 projects`, numbers in magenta, after the
 /// first registered harness's mark.
 fn stats(state: &AppState) -> Line<'static> {
     let (glyph, fg) = mark(
@@ -102,7 +102,11 @@ fn stats(state: &AppState) -> Line<'static> {
             .and_then(|info| info.icon.as_deref()),
     );
     let sessions = &state.sessions;
-    let threads = sessions.threads().count();
+    let live = sessions
+        .sessions
+        .iter()
+        .filter(|session| !sessions.deleting.contains(&session.id))
+        .count();
     let projects = sessions
         .projects
         .iter()
@@ -112,8 +116,8 @@ fn stats(state: &AppState) -> Line<'static> {
         span(format!("{glyph} "), fg),
         span(sessions.working_count().to_string(), MAGENTA),
         span(" working · ", BLUE),
-        span(threads.to_string(), MAGENTA),
-        span(format!(" {} · ", plural(threads, "thread")), BLUE),
+        span(live.to_string(), MAGENTA),
+        span(format!(" {} · ", plural(live, "session")), BLUE),
         span(projects.to_string(), MAGENTA),
         span(format!(" {}", plural(projects, "project")), BLUE),
     ])
@@ -167,10 +171,12 @@ mod tests {
     use orb_domain::feat::harness::HarnessId;
     use std::time::SystemTime;
 
+    use crate::test_support::sessions_for;
     use orb_domain::AppState;
     use orb_domain::feat::harness::claude::models::info;
     use orb_domain::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
+        Thread, ThreadId, ThreadStatus,
     };
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
@@ -178,8 +184,17 @@ mod tests {
     use super::{SHADOW, render};
     use crate::sidebar::ORANGE;
 
+    /// `sessions` with the sessions its projects' threads run in.
+    fn fill(sessions: Sessions) -> Sessions {
+        Sessions {
+            sessions: sessions_for(&sessions.projects),
+            ..sessions
+        }
+    }
+
     fn thread(id: i64) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: Some("Fix the bug".to_owned()),
@@ -187,7 +202,11 @@ mod tests {
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                session: SessionId(id),
+                command: vec![],
+            }),
             branch: Some("main".to_owned()),
             pinned_at: None,
             settled_at: None,
@@ -204,7 +223,7 @@ mod tests {
     /// orb holding `threads`, thread 1 selected.
     fn state(threads: Vec<Thread>) -> AppState {
         AppState {
-            sessions: Sessions {
+            sessions: fill(Sessions {
                 projects: vec![Project {
                     id: ProjectId(1),
                     title: "orb".to_owned(),
@@ -216,9 +235,9 @@ mod tests {
                     groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
-                cursor: Some(SidebarItem::Thread(ThreadId(1))),
+                cursor: Some(SidebarItem::Session(SessionId(1))),
                 ..Sessions::default()
-            },
+            }),
             home: "/Users/me".into(),
             ..AppState::default()
         }
@@ -290,7 +309,7 @@ mod tests {
 
     #[rstest::rstest]
     fn wide_area_draws_the_footer_counts() {
-        // Given orb with two threads, the first selected.
+        // Given orb with two sessions, the first selected.
         let state = AppState {
             harnesses: vec![info()],
             ..state(vec![thread(1), thread(2)])
@@ -299,27 +318,27 @@ mod tests {
         // When drawing the start screen 80×40.
         let buf = draw(&state, None, 80, 40);
 
-        // Then the footer counts working threads, threads and projects.
+        // Then the footer counts working agents, sessions and projects.
         let footer = line_with(&buf, "working");
         assert_eq!(
             footer.trim(),
-            "✳ 0 working · 2 threads · 1 project",
+            "✳ 0 working · 2 sessions · 1 project",
             "the footer"
         );
     }
 
     #[rstest::rstest]
-    fn one_thread_and_one_project_are_counted_in_the_singular() {
-        // Given orb with one thread.
+    fn one_session_and_one_project_are_counted_in_the_singular() {
+        // Given orb with one session.
         let state = selected_thread();
 
         // When drawing the start screen 80×40.
         let buf = draw(&state, None, 80, 40);
 
-        // Then the footer says 1 thread and 1 project.
+        // Then the footer says 1 session and 1 project.
         let footer = line_with(&buf, "working");
         assert!(
-            footer.contains(" 1 thread · 1 project"),
+            footer.contains(" 1 session · 1 project"),
             "footer was '{footer}'"
         );
     }

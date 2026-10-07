@@ -8,19 +8,18 @@
 //! and a working thread's elapsed time counts up.
 //!
 //! Each pane is a `zmx attach` client: its program runs in a zmx session, so
-//! dropping the pane (a detach, or its session losing its last attached
-//! thread) leaves the program running. Every session's layout (tabs of split
-//! panes) is kept and saved; while one of a session's threads is attached,
-//! each of its panes has a client. The right side shows the selected
-//! thread's session, a tab bar over its shown tab's panes, while that thread
-//! is attached, else the start screen. Each frame resizes every visible pane
-//! to its own rect; panes of hidden tabs and other sessions keep their size.
-//! A pane that leaves every layout (closed, or its session deleted) is killed
-//! with `zmx kill`. A pane whose program ended closes in its layout, unless a
-//! thread runs in it: that thread is detached instead. At start every
-//! `orb-p*` session on orb's pane dir that no pane names is killed (left by
-//! earlier versions, or by panes closed while orb was down), then every
-//! thread whose pane's zmx session still runs is attached again. A client
+//! dropping the pane (a detach of its session) leaves the program running.
+//! Every session's layout (tabs of split panes) is kept and saved; while a
+//! session is attached, each of its panes has a client. The right side shows
+//! the selected session, a tab bar over its shown tab's panes, while it is
+//! attached, else the start screen. Each frame resizes every visible pane to
+//! its own rect; panes of hidden tabs and other sessions keep their size. A
+//! pane that leaves every layout (closed, or its session deleted) is killed
+//! with `zmx kill`. A pane of an attached session whose program ended closes
+//! in its layout. At start every `orb-p*` session on orb's pane dir that no
+//! pane names is killed (left by earlier versions, or by panes closed while
+//! orb was down), then every unsettled session with a pane whose zmx session
+//! still runs is attached again. A client
 //! that dies while zmx still lists its session is attached again once; a
 //! second death closes the pane with an error on the mode line. While a pane has the keys, input goes straight to its program,
 //! except the Cmd keys ([`keymap::cmd_route`]) and the resize keys;
@@ -31,10 +30,10 @@
 //! hands tools to zellij, since each takes milliseconds.
 //!
 //! `<C-h>` moves the keys from the pane to the sidebar and leaves it drawn,
-//! so `<C-l>` goes back into it; `<C-\>`, in the pane or on the thread in the
-//! sidebar, detaches it, and settling or deleting the thread or its
-//! attached program exiting ends the pane too, with `session exited at start`
-//! on the start screen when that happens within a second of attaching.
+//! so `<C-l>` goes back into it; `<C-\>`, in the pane or on the session in
+//! the sidebar, detaches it, and settling or deleting the session ends its
+//! panes' clients too. A pane whose program exits within a second of
+//! attaching leaves `session exited at start` on the start screen.
 //!
 //! When a thread finishes a turn or starts needing an approval or an answer
 //! while orb's terminal isn't focused, the loop sends it as a desktop
@@ -44,13 +43,14 @@
 //! When a session start waits for the user to trust a folder, the loop asks
 //! with a `No`/`Yes` confirm naming it, in place of any picker, the rename box
 //! or the sidebar search; a thread's pane that had the keys loses them, as on
-//! `<C-h>`. When a started draft's thread comes up still selected, the loop
+//! `<C-h>`. When a started draft's session comes up still selected, the loop
 //! attaches to it. If the user is typing in a picker, the rename box or the
 //! sidebar search, or is in a pane, it waits, and attaches once the keys are
 //! back in the sidebar, leaving them there with the pane drawn, as long as
-//! the thread is still selected. Attaching to a thread whose orb worktree is
-//! gone asks the sessions actor to recreate it instead, leaving the keys in
-//! the sidebar, and attaches the same way once it's back.
+//! the session is still selected. Attaching to a session whose orb worktree
+//! is gone (none of its panes running) asks the sessions actor to recreate
+//! it instead, leaving the keys in the sidebar, and attaches the same way
+//! once it's back.
 //!
 //! orb captures the mouse throughout. While a pane has the keys, mouse events
 //! over it go to its program; the rest are mapped through the last frame's
@@ -77,7 +77,7 @@ use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::Harnesses;
-use orb_domain::feat::layout::state::SessionLayout;
+use orb_domain::feat::layout::state::{Layouts, SessionLayout};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::search_actor::{self, SearchActor};
@@ -219,10 +219,10 @@ fn trust_return_to(focus: Focus, replaced: Option<Focus>) -> Focus {
     }
 }
 
-/// What the loop does with a started draft's request to attach to its thread.
+/// What the loop does with a started draft's request to attach to its session.
 #[derive(Debug, PartialEq, Eq)]
 enum StartedAttach {
-    /// There's no request, or its thread is no longer selected: drop it.
+    /// There's no request, or its session is no longer selected: drop it.
     Drop,
     /// The user is typing (a picker, the rename box, the search) or in a
     /// pane: keep the request until the keys are back.
@@ -232,11 +232,11 @@ enum StartedAttach {
     Attach { keep_keys: bool },
 }
 
-/// What to do with `started`, a started draft's thread, given the selection,
-/// where the keys are, and whether the request has `waited` already.
+/// What to do with `started`, a started draft's session, given the selected
+/// session, where the keys are, and whether the request has `waited` already.
 fn started_attach(
-    started: Option<ThreadId>,
-    selected: Option<ThreadId>,
+    started: Option<SessionId>,
+    selected: Option<SessionId>,
     focus: Focus,
     waited: bool,
 ) -> StartedAttach {
@@ -265,6 +265,45 @@ fn attach_or_restore(cwd: &Path, worktrees_root: &Path) -> AttachPlan {
     } else {
         AttachPlan::Restore
     }
+}
+
+/// Each pane of an unsettled session, with its owner and zmx session: what
+/// start-up attaches again when zmx still runs it.
+fn reattachable(state: &AppState) -> Vec<(SessionId, ZmxSession)> {
+    state
+        .layouts
+        .pane_ids()
+        .into_iter()
+        .filter_map(|id| {
+            let owner = state.layouts.owner_of(id)?;
+            let unsettled = state
+                .sessions
+                .session(owner)
+                .is_some_and(|session| session.settled_at.is_none());
+            unsettled.then(|| Some((owner, state.layouts.entry(id)?.zmx.clone())))?
+        })
+        .collect()
+}
+
+/// Closes each `ended` pane of an `attached` session in its layout; returns
+/// the sessions whose layouts changed. Panes of other sessions ended because
+/// orb killed them, so their layouts keep them.
+fn closed_in_layouts(
+    layouts: &mut Layouts,
+    attached: &HashSet<SessionId>,
+    ended: &HashSet<PaneId>,
+) -> HashSet<SessionId> {
+    let mut edited = HashSet::new();
+    for &id in ended {
+        match layouts.owner_of(id) {
+            Some(owner) if attached.contains(&owner) => {
+                layouts.close_pane(id);
+                edited.insert(owner);
+            }
+            _ => {}
+        }
+    }
+    edited
 }
 
 /// The panes to drop, given each as (pane, ended): the ended ones, and
@@ -757,17 +796,31 @@ impl App {
     #[expect(clippy::too_many_lines, reason = "one arm per command")]
     fn execute(&mut self, command: &Command) {
         match command {
-            Command::Attach(target) => {
-                if self.panes.get(&target.pane).is_none_or(Pane::has_exited)
-                    && attach_or_restore(&target.cwd, &self.worktrees_root) == AttachPlan::Restore
+            Command::Attach(session) => {
+                let (dir, panes) = {
+                    let app = self.state.read();
+                    (
+                        app.sessions
+                            .session(*session)
+                            .map(|shown| shown.dir.clone()),
+                        app.layouts.session_panes(*session),
+                    )
+                };
+                let live = panes
+                    .iter()
+                    .any(|id| self.panes.get(id).is_some_and(|pane| !pane.has_exited()));
+                if !live
+                    && dir.is_some_and(|dir| {
+                        attach_or_restore(&dir, &self.worktrees_root) == AttachPlan::Restore
+                    })
                 {
                     let _ = self
                         .sessions
-                        .tell(sessions_actor::RestoreWorktree(target.thread))
+                        .tell(sessions_actor::RestoreWorktree(*session))
                         .try_send();
                     let mut app = self.state.write();
                     app.focus = Focus::Sidebar;
-                    app.attached.remove(&target.thread);
+                    app.attached.remove(session);
                     app.sessions.starting = true;
                     return;
                 }
@@ -963,29 +1016,44 @@ impl App {
                     .tell(sessions_actor::RefreshSessions)
                     .try_send();
             }
-            Command::Pin(id) => {
-                let _ = self.sessions.tell(sessions_actor::Pin(*id)).try_send();
-            }
-            Command::Unpin(id) => {
-                let _ = self.sessions.tell(sessions_actor::Unpin(*id)).try_send();
-            }
-            Command::RenameThread { thread, title } => {
+            Command::PinSession(id) => {
                 let _ = self
                     .sessions
-                    .tell(sessions_actor::RenameThread {
-                        thread: *thread,
-                        title: title.clone(),
+                    .tell(sessions_actor::PinSession(*id))
+                    .try_send();
+            }
+            Command::UnpinSession(id) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::UnpinSession(*id))
+                    .try_send();
+            }
+            Command::RenameSession { session, name } => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::RenameSession {
+                        session: *session,
+                        name: name.clone(),
                     })
                     .try_send();
             }
-            Command::Settle(id) => {
-                let _ = self.sessions.tell(sessions_actor::Settle(*id)).try_send();
+            Command::SettleSession(id) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::SettleSession(*id))
+                    .try_send();
             }
-            Command::Unsettle(id) => {
-                let _ = self.sessions.tell(sessions_actor::Unsettle(*id)).try_send();
+            Command::UnsettleSession(id) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::UnsettleSession(*id))
+                    .try_send();
             }
-            Command::Delete(id) => {
-                let _ = self.sessions.tell(sessions_actor::Delete(*id)).try_send();
+            Command::DeleteSession(id) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::DeleteSession(*id))
+                    .try_send();
             }
             Command::Visit(id) => {
                 let _ = self.sessions.tell(sessions_actor::Visit(*id)).try_send();
@@ -1026,36 +1094,6 @@ impl App {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::SaveGroupDraft(*group))
-                    .try_send();
-            }
-            Command::PinGroup(group) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::PinGroup(*group))
-                    .try_send();
-            }
-            Command::UnpinGroup(group) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::UnpinGroup(*group))
-                    .try_send();
-            }
-            Command::SettleGroup(group) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::SettleGroup(*group))
-                    .try_send();
-            }
-            Command::UnsettleGroup(group) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::UnsettleGroup(*group))
-                    .try_send();
-            }
-            Command::DeleteGroup(group) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::DeleteGroup(*group))
                     .try_send();
             }
         }
@@ -1108,49 +1146,28 @@ impl App {
     }
 
     /// Drops the panes whose program ended or whose client died for good
-    /// (see [`Self::classify_exits`]) and those whose session has no
-    /// attached thread, which ends their `zmx attach` client. A thread whose
-    /// pane ended leaves `attached`; any other pane that ended closes in its
-    /// layout, which is saved. A dropped pane no layout holds any more that
-    /// didn't end is killed with `zmx kill`. A pane that ended within
-    /// [`EARLY_EXIT`] of starting leaves `session exited at start` on the
-    /// start screen. Every pane of a session with an attached thread gets a
-    /// client; when one can't start, its session's threads leave `attached`
-    /// and `couldn't start zmx attach` shows on the start screen. If the
-    /// keys were in a pane and no layout is shown any more, they go to the
-    /// sidebar.
+    /// (see [`Self::classify_exits`]) and those of sessions no longer
+    /// attached, which ends their `zmx attach` client. A pane of an attached
+    /// session that ended closes in its layout, which is saved; a session
+    /// whose layout emptied leaves `attached`. A dropped pane no layout holds
+    /// any more that didn't end is killed with `zmx kill`. A pane that ended
+    /// within [`EARLY_EXIT`] of starting leaves `session exited at start` on
+    /// the start screen. Every pane of an attached session gets a client;
+    /// when one can't start, its session leaves `attached` and `couldn't
+    /// start zmx attach` shows on the start screen. If the keys were in a
+    /// pane and no layout is shown any more, they go to the sidebar.
     fn reconcile(&mut self) {
         let ended = self.classify_exits();
         let (keep, all, edited) = {
             let mut app = self.state.write();
-            let thread_panes: HashMap<ThreadId, PaneId> = app
-                .sessions
-                .threads()
-                .filter_map(|thread| Some((thread.id, thread.pane.as_ref()?.pane)))
-                .collect();
-            let mut edited = HashSet::new();
-            for &id in &ended {
-                let threads: Vec<ThreadId> = thread_panes
-                    .iter()
-                    .filter(|(_, pane)| **pane == id)
-                    .map(|(thread, _)| *thread)
-                    .collect();
-                if threads.is_empty() {
-                    if let Some(owner) = app.layouts.owner_of(id) {
-                        app.layouts.close_pane(id);
-                        edited.insert(owner);
-                    }
-                } else {
-                    app.attached.retain(|thread| !threads.contains(thread));
-                }
-            }
+            let app = &mut *app;
+            let edited = closed_in_layouts(&mut app.layouts, &app.attached, &ended);
+            app.attached
+                .retain(|owner| app.layouts.get(*owner).is_some());
             let keep: HashSet<PaneId> = app
                 .attached
                 .iter()
-                .filter_map(|thread| app.layouts.owner_of(*thread_panes.get(thread)?))
-                .collect::<HashSet<SessionId>>()
-                .into_iter()
-                .flat_map(|owner| app.layouts.session_panes(owner))
+                .flat_map(|owner| app.layouts.session_panes(*owner))
                 .collect();
             (keep, app.layouts.pane_ids(), edited)
         };
@@ -1193,19 +1210,9 @@ impl App {
                 None => {
                     self.pane_error = Some("couldn't start zmx attach".to_owned());
                     let mut app = self.state.write();
-                    let app = &mut *app;
-                    let owner = app.layouts.owner_of(id);
-                    let threads: Vec<ThreadId> =
-                        app.sessions
-                            .threads()
-                            .filter(|thread| {
-                                thread.pane.as_ref().is_some_and(|launch| {
-                                    app.layouts.owner_of(launch.pane) == owner
-                                })
-                            })
-                            .map(|thread| thread.id)
-                            .collect();
-                    app.attached.retain(|thread| !threads.contains(thread));
+                    if let Some(owner) = app.layouts.owner_of(id) {
+                        app.attached.remove(&owner);
+                    }
                 }
             }
         }
@@ -1245,11 +1252,11 @@ impl App {
         }
     }
 
-    /// Attaches to a started draft's thread while it's still selected, as
+    /// Attaches to a started draft's session while it's still selected, as
     /// [`started_attach`] decides: at once, or, if the user was typing or in
     /// a pane when it came up, once the keys are back in the sidebar or the
     /// dashboard, leaving them there with the pane drawn (as `<C-h>` does). A
-    /// request whose thread is no longer selected is dropped for good. A
+    /// request whose session is no longer selected is dropped for good. A
     /// failure the start still reported (saving the store) stays on the mode
     /// line.
     fn open_started(&mut self) {
@@ -1257,7 +1264,7 @@ impl App {
             let mut state = self.state.write();
             let decision = started_attach(
                 state.sessions.attach,
-                state.sessions.selected_id(),
+                state.sessions.selected_session().map(|session| session.id),
                 state.focus,
                 self.attach_waited,
             );
@@ -1339,9 +1346,9 @@ impl App {
     }
 
     /// Kills every `orb-p*` session on orb's pane dir that no pane names
-    /// (see [`stale_sessions`]), then attaches every thread whose pane's zmx
-    /// session still runs and gives its session's panes their clients, so
-    /// programs left running when orb quit show again. Each socket dir the
+    /// (see [`stale_sessions`]), then attaches every unsettled session with a
+    /// pane whose zmx session still runs and gives its panes their clients,
+    /// so programs left running when orb quit show again. Each socket dir the
     /// panes use is listed once; a dir zmx can't list brings nothing back.
     fn reattach_live(&mut self) {
         let owned: HashSet<String> = {
@@ -1365,19 +1372,9 @@ impl App {
         for name in stale_sessions(listed, &owned) {
             let _ = self.zmx.kill(&self.zmx.session(name));
         }
-        let threads: Vec<(ThreadId, ZmxSession)> = {
-            let state = self.state.read();
-            state
-                .sessions
-                .threads()
-                .filter_map(|thread| {
-                    let entry = state.layouts.entry(thread.pane.as_ref()?.pane)?;
-                    Some((thread.id, entry.zmx.clone()))
-                })
-                .collect()
-        };
+        let panes = reattachable(&self.state.read());
         let running: HashSet<ZmxSession> = {
-            let dirs: HashSet<&Path> = threads.iter().map(|(_, zmx)| zmx.dir.as_path()).collect();
+            let dirs: HashSet<&Path> = panes.iter().map(|(_, zmx)| zmx.dir.as_path()).collect();
             dirs.into_iter()
                 .flat_map(|dir| {
                     self.zmx
@@ -1392,10 +1389,10 @@ impl App {
                 .collect()
         };
         self.state.write().attached.extend(
-            threads
+            panes
                 .into_iter()
                 .filter(|(_, zmx)| running.contains(zmx))
-                .map(|(thread, _)| thread),
+                .map(|(owner, _)| owner),
         );
         self.reconcile();
     }
@@ -1536,19 +1533,122 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::UNIX_EPOCH;
 
+    use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
+    use orb_domain::feat::layout::tree::Split;
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::sessions::state::{
-        PaneId, Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+        PaneId, Project, ProjectId, ProjectKind, Session, SessionId, SessionKind, Sessions, Thread,
+        ThreadId, ThreadStatus,
     };
+    use orb_domain::feat::zmx::zmx_service::ZmxSession;
     use orb_domain::{AppState, Focus};
     use ratatui::crossterm::cursor::SetCursorStyle;
 
     use super::{
         AttachPlan, PaneExit, StartedAttach, after_pane, attach_or_restore, classify_exit,
-        cursor_style, list_directories, pane_error_after, stale_preview, stale_sessions,
-        started_attach, to_drop, to_kill, to_spawn, trust_return_to, trust_to_open,
+        closed_in_layouts, cursor_style, list_directories, pane_error_after, reattachable,
+        stale_preview, stale_sessions, started_attach, to_drop, to_kill, to_spawn, trust_return_to,
+        trust_to_open,
     };
+
+    /// Pane `id`, a shell in `orb-p<id>`.
+    fn entry(id: i64) -> PaneEntry {
+        PaneEntry {
+            id: PaneId(id),
+            zmx: ZmxSession {
+                name: format!("orb-p{id}"),
+                dir: "/zmx".into(),
+            },
+            cwd: "/tmp".into(),
+            name: None,
+        }
+    }
+
+    /// Session 1 holding panes 1 and 2 side by side.
+    fn split_session() -> Layouts {
+        let mut layouts = Layouts::default();
+        layouts.insert(SessionId(1), SessionLayout::of(entry(1)));
+        layouts.split(SessionId(1), Split::Right, entry(2));
+        layouts
+    }
+
+    #[rstest::rstest]
+    fn ended_pane_of_an_attached_session_closes_in_its_layout() {
+        // Given attached session 1 with panes 1 and 2.
+        let mut layouts = split_session();
+        let attached = HashSet::from([SessionId(1)]);
+
+        // When pane 2 ends.
+        closed_in_layouts(&mut layouts, &attached, &HashSet::from([PaneId(2)]));
+
+        // Then only pane 1 is left in its layout.
+        assert_eq!(
+            layouts.session_panes(SessionId(1)),
+            [PaneId(1)],
+            "an attached session's ended pane closes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn ended_pane_of_an_unattached_session_stays_in_its_layout() {
+        // Given session 1 with panes 1 and 2, not attached.
+        let mut layouts = split_session();
+
+        // When pane 2 ends.
+        closed_in_layouts(&mut layouts, &HashSet::new(), &HashSet::from([PaneId(2)]));
+
+        // Then both panes are still in its layout.
+        assert_eq!(
+            layouts.session_panes(SessionId(1)).len(),
+            2,
+            "orb killed it, so the layout keeps it"
+        );
+    }
+
+    /// Session `id` of project 1, settled at `settled`.
+    fn session(id: i64, settled: bool) -> Session {
+        Session {
+            id: SessionId(id),
+            project: ProjectId(1),
+            kind: SessionKind::Plain,
+            dir: "/tmp".into(),
+            name: None,
+            branch: None,
+            created_at: UNIX_EPOCH,
+            pinned_at: None,
+            settled_at: settled.then_some(UNIX_EPOCH),
+            active_since: UNIX_EPOCH,
+            last_activity_at: UNIX_EPOCH,
+        }
+    }
+
+    #[rstest::rstest]
+    fn reattach_skips_settled_sessions() {
+        // Given unsettled session 1 with pane 1 and settled session 2 with
+        // pane 2.
+        let mut state = AppState::default();
+        state.sessions.sessions = vec![session(1, false), session(2, true)];
+        state
+            .layouts
+            .insert(SessionId(1), SessionLayout::of(entry(1)));
+        state
+            .layouts
+            .insert(SessionId(2), SessionLayout::of(entry(2)));
+
+        // When picking what start-up attaches again.
+        let owners: Vec<SessionId> = reattachable(&state)
+            .into_iter()
+            .map(|(owner, _)| owner)
+            .collect();
+
+        // Then only session 1 is.
+        assert_eq!(
+            owners,
+            [SessionId(1)],
+            "a settled session's panes stay down"
+        );
+    }
 
     #[rstest::rstest]
     #[case::sidebar_block(Focus::Sidebar, None, SetCursorStyle::SteadyBlock)]
@@ -1588,6 +1688,7 @@ mod tests {
                     root: PathBuf::from("/repo"),
                     created_at: UNIX_EPOCH,
                     threads: vec![Thread {
+                        last_session: None,
                         harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
@@ -1733,9 +1834,9 @@ mod tests {
     #[rstest::rstest]
     #[case(Focus::Sidebar)]
     #[case(Focus::Dashboard)]
-    fn started_thread_still_selected_is_attached(#[case] focus: Focus) {
+    fn started_session_still_selected_is_attached(#[case] focus: Focus) {
         // Given thread 1 started from a draft and still selected.
-        let started = Some(ThreadId(1));
+        let started = Some(SessionId(1));
 
         // When deciding what to do in `focus`.
         let decision = started_attach(started, started, focus, false);
@@ -1749,12 +1850,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn started_thread_is_dropped_after_the_selection_moved() {
+    fn started_session_is_dropped_after_the_selection_moved() {
         // Given thread 1 started from a draft while thread 2 is selected.
-        let started = Some(ThreadId(1));
+        let started = Some(SessionId(1));
 
         // When deciding what to do.
-        let decision = started_attach(started, Some(ThreadId(2)), Focus::Sidebar, false);
+        let decision = started_attach(started, Some(SessionId(2)), Focus::Sidebar, false);
 
         // Then the request is dropped.
         assert_eq!(
@@ -1769,10 +1870,10 @@ mod tests {
     #[case(Focus::Rename)]
     #[case(Focus::Search)]
     #[case(Focus::Attached)]
-    fn started_thread_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
+    fn started_session_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
         // Given thread 1 started from a draft and still selected, e.g. while
         // a picker has the keys.
-        let started = Some(ThreadId(1));
+        let started = Some(SessionId(1));
 
         // When deciding what to do in `focus`.
         let decision = started_attach(started, started, focus, false);
@@ -1791,7 +1892,7 @@ mod tests {
     fn waited_started_thread_attaches_once_the_keys_are_back(#[case] focus: Focus) {
         // Given thread 1's attach request waited while the user was in a
         // picker, and the thread is still selected.
-        let started = Some(ThreadId(1));
+        let started = Some(SessionId(1));
 
         // When deciding what to do once the keys are back in `focus`.
         let decision = started_attach(started, started, focus, true);

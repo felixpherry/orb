@@ -32,7 +32,7 @@ use orb_domain::feat::picker::list::{
     ALL_PROJECTS, BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
-use orb_domain::feat::sessions::state::{GroupKind, ProjectKind};
+use orb_domain::feat::sessions::state::{ProjectKind, Sessions};
 use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -77,19 +77,24 @@ impl PickerScroll {
     }
 }
 
-/// Draws `picker` in a popup over `area`; paths under `home` show as `~/`.
-/// Records the popup, as the wheel's area too, and each selectable row in
-/// `hits`. Returns how many
-/// rows fit, and where the terminal cursor goes in the input.
+/// Draws `picker` in a popup over `area`; paths under `home` show as `~/`,
+/// and a confirm names its session as `sessions` titles it. Records the
+/// popup, as the wheel's area too, and each selectable row in `hits`.
+/// Returns how many rows fit, and where the terminal cursor goes in the
+/// input.
 pub(crate) fn render(
     picker: &PickerState,
     home: &Path,
+    sessions: &Sessions,
     area: Rect,
     buf: &mut Buffer,
     scroll: &mut PickerScroll,
     hits: &mut HitMap,
 ) -> (usize, Position) {
-    let title = Line::from(span(format!(" {} ", title(picker.kind(), home)), BLUE));
+    let title = Line::from(span(
+        format!(" {} ", title(picker.kind(), home, sessions)),
+        BLUE,
+    ));
     let popup = {
         let lines = |count: usize| u16::try_from(count).unwrap_or(u16::MAX);
         let title = u16::try_from(title.width()).unwrap_or(u16::MAX);
@@ -143,12 +148,30 @@ fn popup_rect(area: Rect, title: u16, shown: u16, total: u16) -> Rect {
     )
 }
 
-/// The picker's name, centred in its top border; paths under `home` show as `~/`.
-fn title(kind: &PickerKind, home: &Path) -> Cow<'static, str> {
+/// The picker's name, centred in its top border; paths under `home` show as
+/// `~/`. A settle or delete confirm names its session by its title in
+/// `sessions` (`session` once it is gone).
+fn title(kind: &PickerKind, home: &Path, sessions: &Sessions) -> Cow<'static, str> {
+    let named = |id| {
+        sessions
+            .session(id)
+            .map_or_else(|| "session".to_owned(), |session| sessions.title(session))
+    };
     let name = match kind {
         PickerKind::TrustWorkspace { dir } => {
             return Cow::Owned(format!("Trust {}?", tilde(dir, home)));
         }
+        PickerKind::SettleSession { session } => {
+            return Cow::Owned(format!("Settle {}?", named(*session)));
+        }
+        PickerKind::DeleteSession {
+            session,
+            folder: false,
+        } => return Cow::Owned(format!("Delete {}?", named(*session))),
+        PickerKind::DeleteSession {
+            session,
+            folder: true,
+        } => return Cow::Owned(format!("Delete {} and its folder?", named(*session))),
         PickerKind::Projects | PickerKind::GroupProject => "Projects",
         PickerKind::Sessions { .. } => "Sessions",
         PickerKind::Worktrees => "Worktrees",
@@ -162,16 +185,7 @@ fn title(kind: &PickerKind, home: &Path) -> Cow<'static, str> {
         PickerKind::Permission { .. } => "Permission mode",
         PickerKind::InitGit { .. } => "Not a git repository",
         PickerKind::RemoveProject { .. } => "Remove project?",
-        PickerKind::SettleThread { .. } => "Settle thread?",
-        PickerKind::DeleteThread { .. } => "Delete thread?",
         PickerKind::DiscardDraft { .. } | PickerKind::DiscardGroupDraft { .. } => "Discard draft?",
-        PickerKind::SettleGroup { .. } => "Settle group?",
-        PickerKind::DeleteGroup { dir: None, .. } => "Delete group?",
-        PickerKind::DeleteGroup {
-            dir: Some(GroupKind::Feature),
-            ..
-        } => "Delete group and its worktree?",
-        PickerKind::DeleteGroup { dir: Some(_), .. } => "Delete group and its folder?",
         PickerKind::DeleteWorktree { dirty: false, .. } => "Delete worktree?",
         PickerKind::DeleteWorktree { dirty: true, .. } => {
             "Delete worktree and its uncommitted changes?"
@@ -187,12 +201,10 @@ fn hints(kind: &PickerKind) -> Line<'static> {
         PickerKind::Directories { .. } => &[("⏎", "add"), ("Tab", "open"), ("Esc", "close")],
         PickerKind::ProjectFilter => &[("⏎", "filter"), ("<C-x>", "remove"), ("Esc", "close")],
         PickerKind::RemoveProject { .. }
-        | PickerKind::SettleThread { .. }
-        | PickerKind::DeleteThread { .. }
+        | PickerKind::SettleSession { .. }
+        | PickerKind::DeleteSession { .. }
         | PickerKind::DiscardDraft { .. }
         | PickerKind::DiscardGroupDraft { .. }
-        | PickerKind::SettleGroup { .. }
-        | PickerKind::DeleteGroup { .. }
         | PickerKind::TrustWorkspace { .. }
         | PickerKind::DeleteWorktree { .. }
         | PickerKind::InitGit { .. } => &[("⏎", "confirm"), ("Esc", "cancel")],
@@ -403,7 +415,7 @@ fn row_content(
             None,
         ),
         PickerItem::Confirm(yes) => (highlight(confirm_label(*yes), &matches.name, |_| FG), None),
-        PickerItem::Thread { label, .. }
+        PickerItem::Session { label, .. }
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (highlight(label, &matches.name, |_| FG), None),
     }
@@ -603,10 +615,13 @@ mod tests {
     use orb_domain::feat::harness::{HarnessId, HarnessInfo};
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::{DraftTarget, PickTarget, PickerState};
-    use orb_domain::feat::sessions::state::{GroupId, GroupKind, ProjectId, ProjectKind, ThreadId};
+    use orb_domain::feat::sessions::state::{
+        ProjectId, ProjectKind, Session, SessionId, SessionKind, Sessions, ThreadId,
+    };
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
     use ratatui::style::Modifier;
+    use std::time::UNIX_EPOCH;
     use unicode_segmentation::UnicodeSegmentation;
 
     use super::{FOLDER, GIT, HISTORY, PLUG, PickerScroll, SHIELD, grapheme_at, render};
@@ -631,6 +646,7 @@ mod tests {
         render(
             picker,
             Path::new(HOME),
+            &Sessions::default(),
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
@@ -647,6 +663,7 @@ mod tests {
         let (_, cursor) = render(
             picker,
             Path::new(HOME),
+            &Sessions::default(),
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),
@@ -816,6 +833,61 @@ mod tests {
         );
     }
 
+    /// Session 1, in project 1, which the user named `login`.
+    fn named_login() -> Sessions {
+        Sessions {
+            sessions: vec![Session {
+                id: SessionId(1),
+                project: ProjectId(1),
+                kind: SessionKind::Plain,
+                dir: PathBuf::from("/code/orb"),
+                name: Some("login".to_owned()),
+                branch: None,
+                created_at: UNIX_EPOCH,
+                pinned_at: None,
+                settled_at: None,
+                active_since: UNIX_EPOCH,
+                last_activity_at: UNIX_EPOCH,
+            }],
+            ..Sessions::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::settle(
+        PickerState::settle_session(SessionId(1), Focus::Sidebar),
+        "Settle login?"
+    )]
+    #[case::delete(
+        PickerState::delete_session(SessionId(1), false, Focus::Sidebar),
+        "Delete login?"
+    )]
+    #[case::delete_folder(
+        PickerState::delete_session(SessionId(1), true, Focus::Sidebar),
+        "Delete login and its folder?"
+    )]
+    fn session_confirm_names_the_session(#[case] picker: PickerState, #[case] title: &str) {
+        // Given session 1, named `login`.
+        let sessions = named_login();
+
+        // When drawing its confirm.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 40));
+        render(
+            &picker,
+            Path::new(HOME),
+            &sessions,
+            buf.area,
+            &mut buf,
+            &mut PickerScroll::default(),
+            &mut HitMap::default(),
+        );
+
+        // Then its top border names the session.
+        let top = border_rows(&buf).map(|(top, _)| top);
+        let at = find(&buf, &format!(" {title} ")).map(|(_, y)| y);
+        assert_eq!(at, top, "the row of the title {title:?}");
+    }
+
     #[rstest::rstest]
     #[case(
         PickerState::directories(PathBuf::from(HOME), Focus::Sidebar).0,
@@ -842,29 +914,20 @@ mod tests {
         "Remove project?"
     )]
     #[case(
-        PickerState::settle_thread(ThreadId(1), Focus::Sidebar),
-        "Settle thread?"
+        PickerState::settle_session(SessionId(1), Focus::Sidebar),
+        "Settle session?"
     )]
     #[case(
-        PickerState::delete_thread(ThreadId(1), Focus::Sidebar),
-        "Delete thread?"
+        PickerState::delete_session(SessionId(1), false, Focus::Sidebar),
+        "Delete session?"
+    )]
+    #[case(
+        PickerState::delete_session(SessionId(1), true, Focus::Sidebar),
+        "Delete session and its folder?"
     )]
     #[case(
         PickerState::discard_draft(ProjectId(1), Focus::Sidebar),
         "Discard draft?"
-    )]
-    #[case(PickerState::settle_group(GroupId(9), Focus::Sidebar), "Settle group?")]
-    #[case(
-        PickerState::delete_group(GroupId(9), None, Focus::Sidebar),
-        "Delete group?"
-    )]
-    #[case(
-        PickerState::delete_group(GroupId(9), Some(GroupKind::Feature), Focus::Sidebar),
-        "Delete group and its worktree?"
-    )]
-    #[case(
-        PickerState::delete_group(GroupId(9), Some(GroupKind::Research), Focus::Sidebar),
-        "Delete group and its folder?"
     )]
     #[case::trust(
         PickerState::trust_workspace(PathBuf::from("/Users/me/dev/orb"), Focus::Sidebar),
@@ -1070,11 +1133,11 @@ mod tests {
         "⏎ confirm · Esc cancel"
     )]
     #[case(
-        PickerState::settle_thread(ThreadId(1), Focus::Sidebar),
+        PickerState::settle_session(SessionId(1), Focus::Sidebar),
         "⏎ confirm · Esc cancel"
     )]
     #[case(
-        PickerState::delete_thread(ThreadId(1), Focus::Sidebar),
+        PickerState::delete_session(SessionId(1), false, Focus::Sidebar),
         "⏎ confirm · Esc cancel"
     )]
     #[case(
@@ -1703,6 +1766,7 @@ mod tests {
         let (_, cursor) = render(
             &picker,
             Path::new(HOME),
+            &Sessions::default(),
             buf.area,
             &mut buf,
             &mut PickerScroll::default(),

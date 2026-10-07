@@ -21,7 +21,7 @@ use crate::AppState;
 use crate::common::{State, Wake};
 use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::picker::list::PickerItem;
-use crate::feat::picker::state::{PickerState, thread_label};
+use crate::feat::picker::state::{PickerState, hit_label};
 use crate::feat::sessions::sessions_actor::to_ms;
 use crate::feat::sessions::state::{Project, Sessions, Thread};
 
@@ -318,7 +318,7 @@ fn catch_up(
 /// creation time) isn't live any more is left out.
 fn rows(app: &AppState, hits: Vec<Hit>) -> Vec<PickerItem> {
     let labels: HashMap<ThreadKey, (String, usize)> = live(&app.sessions)
-        .map(|(project, thread)| (key(thread), thread_label(project, thread)))
+        .map(|(project, thread)| (key(thread), hit_label(&app.sessions, project, thread)))
         .collect();
     hits.into_iter()
         .filter_map(|hit| {
@@ -351,7 +351,7 @@ fn live(sessions: &Sessions) -> impl Iterator<Item = (&Project, &Thread)> {
         .projects
         .iter()
         .flat_map(|project| project.threads.iter().map(move |thread| (project, thread)))
-        .filter(|(_, thread)| !sessions.deleting.contains(&thread.id))
+        .filter(|(_, thread)| !sessions.is_deleting(thread))
 }
 
 /// What went wrong opening the index, for the picker's error line.
@@ -394,7 +394,8 @@ mod tests {
     use crate::feat::picker::state::PickerState;
     use crate::feat::search::index::SearchIndex;
     use crate::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
+        ThreadStatus, sessions_for,
     };
     use crate::feat::sessions::transcript::Role;
     use crate::{AppState, Focus};
@@ -426,6 +427,7 @@ mod tests {
     /// `last_chat_secs`.
     fn thread(id: i64, born_ms: u64, transcript: Option<PathBuf>, last_chat_secs: u64) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
@@ -433,7 +435,11 @@ mod tests {
             transcript,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                session: SessionId(id),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -790,14 +796,20 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
-    async fn query_labels_a_hit_with_its_project_and_thread_title() -> io::Result<()> {
-        // Given a backfilled thread titled `fix` in project `orb`.
+    async fn query_labels_a_hit_with_its_project_and_session_title() -> io::Result<()> {
+        // Given a backfilled thread titled `fix` in project `orb`, running in
+        // a session the user named `login`.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("some words")])?;
-        let state = State::new(app(vec![Thread {
+        let mut app = app(vec![Thread {
             title: Some("fix".to_owned()),
             ..thread(1, 1_000, Some(a), 20)
-        }]));
+        }]);
+        app.sessions.sessions = sessions_for(&app.sessions.projects);
+        for session in &mut app.sessions.sessions {
+            session.name = Some("login".to_owned());
+        }
+        let state = State::new(app);
         let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
         let done = backfilled(&state).await;
         searching(&state, "words");
@@ -805,7 +817,7 @@ mod tests {
         // When searching.
         search(&actor, "words").await?;
 
-        // Then the row is labelled `orb/fix` with the title after `orb/`.
+        // Then the row is labelled `orb/login` with the title after `orb/`.
         let label = state
             .read()
             .picker
@@ -816,8 +828,8 @@ mod tests {
                 _ => None,
             });
         assert!(
-            done && label == Some(("orb/fix".to_owned(), 4)),
-            "the hit should be labelled with its project and title, saw {label:?}"
+            done && label == Some(("orb/login".to_owned(), 4)),
+            "the hit should be labelled with its project and session title, saw {label:?}"
         );
         Ok(())
     }
@@ -1031,7 +1043,7 @@ mod tests {
         let index_path = dir.path().join("search.sqlite");
         let actor = spawn_search_actor(deps(&state, index_path.clone()));
         let done = backfilled(&state).await;
-        state.write().sessions.deleting.insert(ThreadId(2));
+        state.write().sessions.deleting.insert(SessionId(2));
         searching(&state, "shared");
 
         // When searching.

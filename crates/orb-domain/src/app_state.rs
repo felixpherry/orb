@@ -4,13 +4,12 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::feat::dashboard::state::DashboardCursor;
 use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::PickerState;
 use crate::feat::search::state::SearchProgress;
-use crate::feat::sessions::state::{SessionId, Sessions, Thread, ThreadId};
+use crate::feat::sessions::state::{SessionId, Sessions};
 use crate::feat::sidebar::state::{Rename, SidebarView};
 use crate::feat::worktrees::state::Worktrees;
 
@@ -42,17 +41,15 @@ pub struct AppState {
     pub focus: Focus,
     /// orb's projects and their sessions.
     pub sessions: Sessions,
-    /// The dashboard's highlighted menu item.
-    pub dashboard: DashboardCursor,
     /// The sidebar's width, visibility and last layout.
     pub sidebar: SidebarView,
-    /// The threads orb holds live panes for: added on attach, removed by
-    /// `<C-\>`, settling, deleting, the pane's exit and a failed spawn. While
-    /// one of a session's threads is in here, every pane of that session has
-    /// a client, and the right-hand area shows the selected thread's session.
-    /// Written by the intent handler, the frontend, and the sessions actor
-    /// (which detaches a group it goes ahead deleting).
-    pub attached: HashSet<ThreadId>,
+    /// The sessions orb holds pane clients for: added on `⏎`, removed by
+    /// `<C-\>`, settling, deleting, a failed spawn and the layout emptying.
+    /// Every pane of a session in here has a client, and the right-hand area
+    /// shows the selected session while it is in here. Written by the intent
+    /// handler, the frontend, and the sessions actor (which drops a session it
+    /// deletes).
+    pub attached: HashSet<SessionId>,
     /// Every session's tabs and splits, saved in the store as they change
     /// (see [`Layouts`]).
     pub layouts: Layouts,
@@ -80,36 +77,17 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The session the right-hand area shows: the selected thread's, while
-    /// that thread is attached.
+    /// The session the right-hand area shows: the selected one, while it is
+    /// attached and has a layout.
     pub fn shown_session(&self) -> Option<SessionId> {
-        let thread = self.sessions.selected_thread()?;
-        if !self.attached.contains(&thread.id) {
-            return None;
-        }
-        self.layouts.owner_of(thread.pane.as_ref()?.pane)
+        let id = self.sessions.selected_session()?.id;
+        (self.attached.contains(&id) && self.layouts.get(id).is_some()).then_some(id)
     }
 
     /// The layout the right-hand area shows: the shown session's. `None`
     /// means the start screen.
     pub fn shown_layout(&self) -> Option<&SessionLayout> {
         self.layouts.get(self.shown_session()?)
-    }
-
-    /// The threads running in session `session`'s panes (its agent panes'
-    /// conversations), leaving out those being deleted.
-    pub fn session_threads(&self, session: SessionId) -> Vec<&Thread> {
-        self.sessions
-            .threads()
-            .filter(|thread| !self.sessions.deleting.contains(&thread.id))
-            .filter(|thread| {
-                thread
-                    .pane
-                    .as_ref()
-                    .and_then(|pane| self.layouts.owner_of(pane.pane))
-                    == Some(session)
-            })
-            .collect()
     }
 
     /// What the frontend knows about harness `id`.
@@ -139,7 +117,7 @@ mod tests {
     use crate::feat::sessions::state::{
         Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, PaneId,
         PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus,
+        ThreadId, ThreadStatus, sessions_for,
     };
     use crate::feat::zmx::zmx_service::ZmxSession;
 
@@ -240,9 +218,10 @@ mod tests {
         );
     }
 
-    /// Idle thread `id`, running in pane `pane` when it has one.
+    /// Idle thread `id`, running in pane `pane` of session 1 when it has one.
     fn thread_in(id: i64, pane: Option<i64>) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
@@ -252,6 +231,7 @@ mod tests {
             turn_started_at: None,
             pane: pane.map(|pane| PaneLaunch {
                 pane: PaneId(pane),
+                session: SessionId(1),
                 command: vec![],
             }),
             branch: None,
@@ -274,7 +254,8 @@ mod tests {
         if let Some(project) = state.sessions.projects.first_mut() {
             project.threads = vec![thread_in(1, Some(10))];
         }
-        state.sessions.cursor = Some(SidebarItem::Thread(ThreadId(1)));
+        state.sessions.cursor = Some(SidebarItem::Session(SessionId(1)));
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
         state.layouts.insert(
             SessionId(1),
             SessionLayout::of(PaneEntry {
@@ -288,7 +269,7 @@ mod tests {
             }),
         );
         if attached {
-            state.attached.insert(ThreadId(1));
+            state.attached.insert(SessionId(1));
         }
         state
     }
@@ -320,44 +301,6 @@ mod tests {
         assert!(
             shown.is_none(),
             "an unattached thread shows the start screen"
-        );
-    }
-
-    #[rstest::rstest]
-    fn session_threads_are_the_threads_in_its_panes() {
-        // Given thread 1 in session 1's pane 10, thread 2 in session 2's
-        // pane 20, and thread 3 with no pane.
-        let mut state = selecting_thread(false);
-        if let Some(project) = state.sessions.projects.first_mut() {
-            project
-                .threads
-                .extend([thread_in(2, Some(20)), thread_in(3, None)]);
-        }
-        state.layouts.insert(
-            SessionId(2),
-            SessionLayout::of(PaneEntry {
-                id: PaneId(20),
-                zmx: ZmxSession {
-                    name: "orb-p20".into(),
-                    dir: "/tmp/zmx".into(),
-                },
-                cwd: "/tmp".into(),
-                name: None,
-            }),
-        );
-
-        // When listing session 1's threads.
-        let threads: Vec<ThreadId> = state
-            .session_threads(SessionId(1))
-            .into_iter()
-            .map(|thread| thread.id)
-            .collect();
-
-        // Then only thread 1 runs there.
-        assert_eq!(
-            threads,
-            [ThreadId(1)],
-            "a session's threads are those in its panes"
         );
     }
 }

@@ -6,13 +6,13 @@
 //! how many worktrees are shown out of those listed, over an orange rule.
 //! Each row is the worktree's icon, its dim `<repo>/` and its `orb-<hex>`
 //! name, an orange count of uncommitted changes, and on the right what uses
-//! it: `active ·` and the title of the newest open thread, how long since it
-//! settled, or `no thread`.
+//! it: `active ·` and the title of the newest open session, how long since it
+//! settled, or `no session`.
 //!
 //! The preview box is titled with the selected row's label. It shows the
 //! worktree's state, branch and size, then its path, branch, size, changes,
 //! last commit, last use and what the next sweep does with it, then one line
-//! per thread, group or draft using it. Facts git hasn't reported yet show as
+//! per session or draft using it. Facts git hasn't reported yet show as
 //! `…`. There are no key hints.
 
 use std::path::Path;
@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime};
 use orb_domain::AppState;
 use orb_domain::feat::picker::list::{Matches, PickerItem};
 use orb_domain::feat::picker::state::PickerState;
-use orb_domain::feat::sessions::state::{NEW_THREAD, Thread};
+use orb_domain::feat::sessions::state::Sessions;
 use orb_domain::feat::worktrees::state::{
     RowState, User, Verdict, Worktree, last_used, row_state, users, verdict,
 };
@@ -37,10 +37,10 @@ use crate::picker::{PickerScroll, WORKTREE, cut_left, highlight, span};
 use crate::session_picker::{big, boxed, boxes, cut_right, render_input};
 use crate::sidebar::{
     BG_DARK, BLUE, BRANCH, COMMENT, COMPLETED_ICON, DARK3, DARK5, FG, FG_DARK, GREEN, GUTTER,
-    ORANGE, RED, VISUAL, YELLOW, ago_label, render_split, status,
+    ORANGE, RED, VISUAL, YELLOW, ago_label, render_split, session_status,
 };
 
-/// A draft's icon, and a group's with no thread yet.
+/// A draft's icon.
 const DRAFT_ICON: &str = "\u{f044}";
 
 /// Draws the worktree picker over `area`: `picker`'s rows with live facts,
@@ -112,11 +112,14 @@ impl<'a> Row<'a> {
         })
     }
 
-    /// The row's icon: the lead thread's status while active (a pencil for a
-    /// draft), a dim check once settled, a dim fork with nothing using it.
+    /// The row's icon: the lead session's status while active (a pencil for
+    /// a draft), a dim check once settled, a dim fork with nothing using it.
     fn icon(&self, app: &AppState, now: SystemTime) -> Span<'static> {
-        match (self.state, self.lead().and_then(user_thread)) {
-            (RowState::Active, Some(thread)) => user_icon(thread, app, now),
+        match (
+            self.state,
+            self.lead().and_then(|user| user_status(user, app, now)),
+        ) {
+            (RowState::Active, Some(status)) => user_icon(status),
             (RowState::Active, None) => span(format!("{DRAFT_ICON} "), DARK5),
             (RowState::Settled, _) => span(format!("{COMPLETED_ICON} "), DARK3),
             (RowState::Orphan, _) => span(format!("{WORKTREE} "), DARK3),
@@ -132,35 +135,38 @@ impl<'a> Row<'a> {
 /// When `user` was settled; `None` while it's open, and always for a draft.
 fn settled_at(user: &User<'_>) -> Option<SystemTime> {
     match user {
-        User::Thread(_, thread) => thread.settled_at,
-        User::Group(_, group, _) => group.settled_at,
+        User::Session(_, session, _) => session.settled_at,
         User::Draft(_) => None,
     }
 }
 
-/// The thread whose status stands for `user`: the thread itself, or a
-/// group's most recently chatted one.
-fn user_thread<'a>(user: &User<'a>) -> Option<&'a Thread> {
+/// A session user's status glyph, word and colour (see [`session_status`]);
+/// `None` for a draft.
+fn user_status(
+    user: &User<'_>,
+    app: &AppState,
+    now: SystemTime,
+) -> Option<(&'static str, Option<&'static str>, Color)> {
     match user {
-        User::Thread(_, thread) => Some(thread),
-        User::Group(_, _, threads) => threads.iter().copied().max_by_key(|t| t.last_chat()),
+        User::Session(_, session, agents) => Some(session_status(
+            agents,
+            app.attached.contains(&session.id),
+            now,
+        )),
         User::Draft(_) => None,
     }
 }
 
-/// `user`'s title: the thread's, the group's name, or `draft`.
-fn user_title<'a>(user: &User<'a>) -> &'a str {
+/// `user`'s title: the session's, or `draft`.
+fn user_title(user: &User<'_>, sessions: &Sessions) -> String {
     match user {
-        User::Thread(_, thread) => thread.title.as_deref().unwrap_or(NEW_THREAD),
-        User::Group(_, group, _) => &group.name,
-        User::Draft(_) => "draft",
+        User::Session(_, session, _) => sessions.title(session),
+        User::Draft(_) => "draft".to_owned(),
     }
 }
 
-/// `thread`'s sidebar status glyph in its colour; attached fills the idle
-/// circle.
-fn user_icon(thread: &Thread, app: &AppState, now: SystemTime) -> Span<'static> {
-    let (glyph, _, fg) = status(thread, app.attached.contains(&thread.id), now);
+/// A status glyph in its colour.
+fn user_icon((glyph, _, fg): (&str, Option<&str>, Color)) -> Span<'static> {
     span(format!("{glyph} "), fg)
 }
 
@@ -172,10 +178,10 @@ fn ago(now: SystemTime, at: SystemTime) -> String {
 /// What the next sweep does with a worktree, and the colour to say it in.
 fn sweep(verdict: Verdict) -> (String, Color) {
     let (text, fg) = match verdict {
-        Verdict::Attached => ("kept: a thread in it is attached", DARK5),
-        Verdict::MidTurn => ("kept: a thread in it is mid-turn", DARK5),
+        Verdict::Attached => ("kept: a session in it is attached", DARK5),
+        Verdict::MidTurn => ("kept: an agent in it is mid-turn", DARK5),
         Verdict::Draft => ("kept: a draft starts here", DARK5),
-        Verdict::Active => ("kept: a thread in it is active", DARK5),
+        Verdict::Active => ("kept: a session in it is active", DARK5),
         Verdict::Dirty => ("kept: uncommitted changes", ORANGE),
         Verdict::Unknown => ("…", DARK5),
         Verdict::PruneNow => ("prunes at next sweep", RED),
@@ -291,14 +297,17 @@ fn render_row(
         RowState::Active => {
             let active = span("active · ", GREEN);
             let room = usize::from(area.width).saturating_sub(left.width() + 2 + active.width());
-            let title = row.lead().map(user_title).unwrap_or_default();
-            Line::from(vec![active, span(cut_right(title, room), FG_DARK)])
+            let title = row
+                .lead()
+                .map(|user| user_title(user, &state.sessions))
+                .unwrap_or_default();
+            Line::from(vec![active, span(cut_right(&title, room), FG_DARK)])
         }
         RowState::Settled => {
             let ago = row.settled().map(|at| ago(now, at)).unwrap_or_default();
             Line::from(span(format!("settled {ago}"), COMMENT))
         }
-        RowState::Orphan => Line::from(span("no thread", DARK3)),
+        RowState::Orphan => Line::from(span("no session", DARK3)),
     };
     render_split(left, right, area, buf);
 }
@@ -397,7 +406,7 @@ fn meta(row: &Row<'_>, app: &AppState, now: SystemTime, size: &str) -> Line<'sta
     let (word, fg) = match row.state {
         RowState::Active => ("active", GREEN),
         RowState::Settled => ("settled", COMMENT),
-        RowState::Orphan => ("no thread", DARK5),
+        RowState::Orphan => ("no session", DARK5),
     };
     let mut spans = vec![Span::raw(" "), row.icon(app, now), span(word, fg)];
     if let Some(branch) = row
@@ -422,38 +431,29 @@ fn field(name: &str, value: Vec<Span<'static>>) -> Line<'static> {
 }
 
 /// One `Used by` line `width` wide: the user's icon, its dim `<project>/`
-/// and bright title (a group's thread count after it), and on the right its
-/// status and how long since its last chat, or how long since it settled.
+/// and bright title, and on the right its status and how long since its
+/// last chat, or how long since it settled.
 fn user_line(user: &User<'_>, app: &AppState, now: SystemTime, width: usize) -> Line<'static> {
-    let (icon, when) = match (settled_at(user), user_thread(user)) {
+    let (icon, when) = match (settled_at(user), user_status(user, app, now)) {
         (Some(at), _) => (
             span(format!("{COMPLETED_ICON} "), DARK3),
             format!("settled {}", ago(now, at)),
         ),
-        (None, Some(thread)) => {
-            let (_, word, _) = status(thread, app.attached.contains(&thread.id), now);
+        (None, Some(status)) => {
+            let last = last_used(std::slice::from_ref(user), None).unwrap_or(now);
             (
-                user_icon(thread, app, now),
-                format!(
-                    "{} · {}",
-                    word.unwrap_or("idle"),
-                    ago(now, thread.last_chat())
-                ),
+                user_icon(status),
+                format!("{} · {}", status.1.unwrap_or("idle"), ago(now, last)),
             )
         }
         (None, None) => (span(format!("{DRAFT_ICON} "), DARK5), "draft".to_owned()),
     };
-    let (User::Thread(project, _) | User::Group(project, _, _) | User::Draft(project)) = user;
-    let count = match user {
-        User::Group(_, _, threads) => format!(" ({} threads)", threads.len()),
-        User::Thread(..) | User::Draft(_) => String::new(),
-    };
+    let (User::Session(project, ..) | User::Draft(project)) = user;
     let mut line = Line::from(vec![
         Span::raw("   "),
         icon,
         span(format!("{}/", project.title), DARK5),
-        span(user_title(user).to_owned(), FG),
-        span(count, DARK3),
+        span(user_title(user, &app.sessions), FG),
     ]);
     let gap = width.saturating_sub(line.width() + Line::raw(when.as_str()).width() + 1);
     line.spans.push(Span::raw(" ".repeat(gap.max(1))));
@@ -471,8 +471,8 @@ mod tests {
     use orb_domain::feat::git::git_service::WorktreeFacts;
     use orb_domain::feat::picker::state::{PickerState, worktree_items};
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId,
-        ThreadStatus,
+        Draft, DraftWorkspace, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId,
+        Sessions, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::worktrees::state::{Worktree, Worktrees};
     use orb_domain::{AppState, Focus};
@@ -485,6 +485,7 @@ mod tests {
     use crate::mouse::HitMap;
     use crate::picker::PickerScroll;
     use crate::sidebar::{DARK5, GREEN, ORANGE, RED, YELLOW};
+    use crate::test_support::sessions_for;
 
     /// The clock every picker is drawn at.
     fn now() -> SystemTime {
@@ -500,6 +501,7 @@ mod tests {
     /// five minutes before [`now`].
     fn thread(id: i64, title: &str, name: &str) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: Some(title.to_owned()),
@@ -507,7 +509,11 @@ mod tests {
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                session: SessionId(id),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -550,22 +556,25 @@ mod tests {
         }
     }
 
-    /// `threads` in one project, `orb`, over `worktrees`.
+    /// `threads` in one project, `orb`, each in its own session, over
+    /// `worktrees`.
     fn app(threads: Vec<Thread>, worktrees: Vec<Worktree>) -> AppState {
+        let projects = vec![Project {
+            id: ProjectId(1),
+            title: "orb".to_owned(),
+            root: "/Users/me/dev/orb".into(),
+            created_at: UNIX_EPOCH,
+            removed: false,
+            draft: None,
+            threads,
+            groups: vec![],
+            kind: ProjectKind::Normal,
+        }];
         AppState {
             home: "/Users/me".into(),
             sessions: Sessions {
-                projects: vec![Project {
-                    id: ProjectId(1),
-                    title: "orb".to_owned(),
-                    root: "/Users/me/dev/orb".into(),
-                    created_at: UNIX_EPOCH,
-                    removed: false,
-                    draft: None,
-                    threads,
-                    groups: vec![],
-                    kind: ProjectKind::Normal,
-                }],
+                sessions: sessions_for(&projects),
+                projects,
                 ..Sessions::default()
             },
             worktrees: Worktrees {
@@ -717,15 +726,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn orphan_row_shows_no_thread() {
+    fn orphan_row_shows_no_session() {
         // Given the fixture, `orb-dddd` used by nothing.
 
         // When drawing the picker.
         let buf = stacked();
 
-        // Then its row reads `no thread`.
+        // Then its row reads `no session`.
         let row = line_of(&buf, "orb-dddd");
-        assert!(row.contains("no thread"), "row was {row}");
+        assert!(row.contains("no session"), "row was {row}");
     }
 
     #[rstest::rstest]
@@ -874,7 +883,7 @@ mod tests {
     /// `app` with thread 1 attached.
     fn attached(app: AppState) -> AppState {
         AppState {
-            attached: HashSet::from([ThreadId(1)]),
+            attached: HashSet::from([SessionId(1)]),
             ..app
         }
     }
@@ -907,12 +916,12 @@ mod tests {
     #[rstest::rstest]
     #[case::attached(
         attached(lone(Some(solo()), Some(facts(0)))),
-        "kept: a thread in it is attached",
+        "kept: a session in it is attached",
         DARK5
     )]
     #[case::mid_turn(
         lone(Some(Thread { status: ThreadStatus::Working, ..solo() }), Some(facts(0))),
-        "kept: a thread in it is mid-turn",
+        "kept: an agent in it is mid-turn",
         DARK5
     )]
     #[case::draft(
@@ -922,7 +931,7 @@ mod tests {
     )]
     #[case::active(
         lone(Some(solo()), Some(facts(0))),
-        "kept: a thread in it is active",
+        "kept: a session in it is active",
         DARK5
     )]
     #[case::unknown(lone(Some(settled_for(Duration::from_hours(1))), None), "…", DARK5)]

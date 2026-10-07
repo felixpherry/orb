@@ -198,7 +198,15 @@ fn render_picker(
         PickerKind::Search { .. } => {
             search_picker::render(picker, state, now, area, buf, scroll, hits)
         }
-        _ => picker::render(picker, &state.home, area, buf, scroll, hits),
+        _ => picker::render(
+            picker,
+            &state.home,
+            &state.sessions,
+            area,
+            buf,
+            scroll,
+            hits,
+        ),
     }
 }
 
@@ -210,6 +218,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime};
 
+    use crate::test_support::sessions_for;
     use jiff::tz::TimeZone;
     use orb_domain::Intent;
     use orb_domain::feat::layout::state::{PaneEntry, SessionLayout};
@@ -241,8 +250,17 @@ mod tests {
     use crate::picker::PickerScroll;
     use crate::sidebar::SidebarScroll;
 
+    /// `sessions` with the sessions its projects' threads run in.
+    fn fill(sessions: Sessions) -> Sessions {
+        Sessions {
+            sessions: sessions_for(&sessions.projects),
+            ..sessions
+        }
+    }
+
     fn thread(id: i64, status: ThreadStatus) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: Some("Fix the bug".to_owned()),
@@ -250,7 +268,11 @@ mod tests {
             transcript: None,
             status,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                session: SessionId(id),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -265,7 +287,7 @@ mod tests {
     }
 
     fn sessions(threads: Vec<Thread>) -> Sessions {
-        Sessions {
+        fill(Sessions {
             projects: vec![Project {
                 id: ProjectId(1),
                 title: "orb".to_owned(),
@@ -278,7 +300,7 @@ mod tests {
                 kind: ProjectKind::Normal,
             }],
             ..Sessions::default()
-        }
+        })
     }
 
     /// Draws `state` on an 80x8 screen.
@@ -390,7 +412,7 @@ mod tests {
         AppState {
             focus,
             sessions: Sessions {
-                cursor: Some(SidebarItem::Thread(ThreadId(1))),
+                cursor: Some(SidebarItem::Session(SessionId(1))),
                 ..sessions(vec![thread(1, ThreadStatus::Idle)])
             },
             ..AppState::default()
@@ -414,7 +436,7 @@ mod tests {
     /// session 1, with the given focus.
     fn shown(focus: Focus) -> AppState {
         let mut state = selected(focus);
-        state.attached.insert(ThreadId(1));
+        state.attached.insert(SessionId(1));
         if let Some(thread) = state
             .sessions
             .projects
@@ -423,9 +445,11 @@ mod tests {
         {
             thread.pane = Some(PaneLaunch {
                 pane: PaneId(1),
+                session: SessionId(1),
                 command: vec![],
             });
         }
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
         state
             .layouts
             .insert(SessionId(1), SessionLayout::of(entry(1)));
@@ -723,7 +747,7 @@ mod tests {
     fn renaming(focus: Focus) -> AppState {
         AppState {
             rename: Some(Rename {
-                target: RenameTarget::Thread(ThreadId(1)),
+                target: RenameTarget::Session(SessionId(1)),
                 input: TextInput::new("Fix"),
                 creating: false,
             }),
@@ -855,7 +879,7 @@ mod tests {
     /// Thread 1, selected in the sidebar and attached.
     fn left_pane() -> AppState {
         AppState {
-            attached: HashSet::from([ThreadId(1)]),
+            attached: HashSet::from([SessionId(1)]),
             ..selected(Focus::Sidebar)
         }
     }

@@ -28,7 +28,7 @@ use wherror::Error;
 
 use super::state::{
     DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, PaneId, ProjectId, ProjectKind, SessionId,
-    SidebarItem, ThreadId,
+    SessionKind, SidebarItem, ThreadId,
 };
 use crate::feat::harness::HarnessId;
 use crate::feat::layout::tree::{Node, Split, TileLayout};
@@ -101,6 +101,9 @@ pub struct ThreadRow {
     pub harness: HarnessId,
     /// The pane it runs in; `None` once it has ended.
     pub pane_id: Option<PaneId>,
+    /// The session it runs in, or ran in before it ended; `None` until it
+    /// first runs in a pane.
+    pub orb_session: Option<SessionId>,
 }
 
 /// A thread's settle state as set by the user, auto-settle, or activity.
@@ -171,6 +174,13 @@ pub struct InsertedThread {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
     pub id: SessionId,
+    pub project_id: ProjectId,
+    pub kind: SessionKind,
+    /// The name the user gave with `r`.
+    pub name: Option<String>,
+    /// The branch it was last recorded on.
+    pub branch: Option<String>,
+    pub created_at: i64,
     /// The directory its panes start in.
     pub dir: PathBuf,
     /// The position of the tab it shows.
@@ -502,7 +512,7 @@ impl Store {
                         transcript_offset, created_at, turn_started_at, custom_title,
                         branch, pinned_at, settled_override, settled_at, unsettled_at,
                         last_activity_at, last_visited_at, ai_titled, model, permission_mode,
-                        renamed_title, group_id, harness, pane_id
+                        renamed_title, group_id, harness, pane_id, orb_session_id
                  FROM threads ORDER BY created_at DESC, id DESC",
                 thread_row,
             )
@@ -596,7 +606,8 @@ impl Store {
                 |row| row.get(0),
             )?);
             let kind: String = tx.query_row(
-                "SELECT CASE kind WHEN 'incognito' THEN 'incognito' ELSE 'plain' END
+                "SELECT CASE kind WHEN 'incognito' THEN 'incognito' WHEN 'research' THEN 'research'
+                                  WHEN 'learn' THEN 'learn' ELSE 'plain' END
                  FROM projects WHERE id = ?1",
                 [row.project_id.0],
                 |row| row.get(0),
@@ -649,7 +660,8 @@ impl Store {
         let sessions = self
             .query(
                 "SELECT id, dir, active_tab, pinned_at, settled_override, settled_at,
-                        unsettled_at, last_activity_at
+                        unsettled_at, last_activity_at, project_id, kind, name, branch,
+                        created_at
                  FROM sessions ORDER BY id",
                 |row| {
                     Ok(SessionRow {
@@ -664,6 +676,11 @@ impl Store {
                         settled_at: row.get(5)?,
                         unsettled_at: row.get(6)?,
                         last_activity_at: row.get(7)?,
+                        project_id: ProjectId(row.get(8)?),
+                        kind: session_kind(&row.get::<_, String>(9)?),
+                        name: row.get(10)?,
+                        branch: row.get(11)?,
+                        created_at: row.get(12)?,
                     })
                 },
             )
@@ -708,7 +725,7 @@ impl Store {
         })
     }
 
-    /// Saves session `row`'s pin, settle and activity state.
+    /// Saves session `row`'s name, pin, settle and activity state.
     ///
     /// # Errors
     ///
@@ -717,7 +734,7 @@ impl Store {
         self.conn
             .execute(
                 "UPDATE sessions SET pinned_at = ?2, settled_override = ?3, settled_at = ?4,
-                        unsettled_at = ?5, last_activity_at = ?6
+                        unsettled_at = ?5, last_activity_at = ?6, name = ?7
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -726,6 +743,7 @@ impl Store {
                     row.settled_at,
                     row.unsettled_at,
                     row.last_activity_at,
+                    row.name,
                 ],
             )
             .change_context(StoreError)
@@ -828,8 +846,8 @@ impl Store {
         Ok(dropped)
     }
 
-    /// Deletes `session` with its tabs and panes; a thread that ran in one of
-    /// them no longer has a pane.
+    /// Deletes `session` with its tabs and panes, and the threads that run
+    /// or ran in it.
     ///
     /// # Errors
     ///
@@ -841,8 +859,9 @@ impl Store {
             .change_context(StoreError)
             .attach("failed to start deleting the session")?;
         [
-            "UPDATE threads SET pane_id = NULL
-              WHERE pane_id IN (SELECT id FROM panes WHERE session_id = ?1)",
+            "DELETE FROM threads
+              WHERE orb_session_id = ?1
+                 OR pane_id IN (SELECT id FROM panes WHERE session_id = ?1)",
             "DELETE FROM tabs WHERE session_id = ?1",
             "DELETE FROM panes WHERE session_id = ?1",
             "DELETE FROM sessions WHERE id = ?1",
@@ -873,8 +892,8 @@ impl Store {
             .query_row(
                 "INSERT INTO threads
                    (project_id, short_id, session_id, cwd, transcript_path, created_at,
-                    last_activity_at, last_visited_at, harness, pane_id)
-                 SELECT s.project_id, ?2, ?2, ?3, ?4, ?5, ?5, ?5, ?6, p.id
+                    last_activity_at, last_visited_at, harness, pane_id, orb_session_id)
+                 SELECT s.project_id, ?2, ?2, ?3, ?4, ?5, ?5, ?5, ?6, p.id, s.id
                    FROM panes p JOIN sessions s ON s.id = p.session_id
                   WHERE p.id = ?1
                  RETURNING id, project_id",
@@ -949,7 +968,7 @@ impl Store {
                         branch = ?8, pinned_at = ?9, settled_override = ?10, settled_at = ?11,
                         unsettled_at = ?12, last_activity_at = ?13, last_visited_at = ?14,
                         short_id = ?15, cwd = ?16, ai_titled = ?17, renamed_title = ?18,
-                        pane_id = ?19
+                        pane_id = ?19, orb_session_id = ?20
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -971,6 +990,7 @@ impl Store {
                     row.ai_titled,
                     row.renamed_title,
                     row.pane_id.map(|pane| pane.0),
+                    row.orb_session.map(|session| session.0),
                 ],
             )
             .change_context(StoreError)
@@ -1441,6 +1461,7 @@ fn v11(conn: &Connection) -> rusqlite::Result<()> {
           cwd TEXT NOT NULL, zmx_name TEXT, zmx_dir TEXT, resume TEXT, migrated_bg TEXT,
           name TEXT);
         ALTER TABLE threads ADD COLUMN pane_id INTEGER REFERENCES panes(id);
+        ALTER TABLE threads ADD COLUMN orb_session_id INTEGER REFERENCES sessions(id);
         INSERT INTO sqlite_sequence (name, seq)
         VALUES ('panes', (SELECT COALESCE(MAX(id), 0) FROM threads));
         ",
@@ -1700,8 +1721,8 @@ fn insert_session(
         )?);
         if let Some(thread) = pane.thread {
             conn.execute(
-                "UPDATE threads SET pane_id = ?2 WHERE id = ?1",
-                params![thread, pane_id.0],
+                "UPDATE threads SET pane_id = ?2, orb_session_id = ?3 WHERE id = ?1",
+                params![thread, pane_id.0, id.0],
             )?;
         }
         ids.push(pane_id);
@@ -1864,6 +1885,7 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         group_id: row.get::<_, Option<i64>>(22)?.map(GroupId),
         harness: HarnessId::new(row.get::<_, String>(23)?),
         pane_id: row.get::<_, Option<i64>>(24)?.map(PaneId),
+        orb_session: row.get::<_, Option<i64>>(25)?.map(SessionId),
     })
 }
 
@@ -1899,12 +1921,21 @@ fn ui_row(row: &Row<'_>) -> rusqlite::Result<Ui> {
     })
 }
 
+/// The session kind saved as `text`; anything orb doesn't know is Plain.
+fn session_kind(text: &str) -> SessionKind {
+    match text {
+        "research" => SessionKind::Research,
+        "learn" => SessionKind::Learn,
+        "incognito" => SessionKind::Incognito,
+        _ => SessionKind::Plain,
+    }
+}
+
 /// How a jump-list row is saved: its kind and id; the Settled header isn't.
 fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
     match item {
-        SidebarItem::Thread(id) => Some(("thread", id.0)),
+        SidebarItem::Session(id) => Some(("session", id.0)),
         SidebarItem::Draft(id) => Some(("draft", id.0)),
-        SidebarItem::Group(id) => Some(("group", id.0)),
         SidebarItem::GroupDraft(id) => Some(("group_draft", id.0)),
         SidebarItem::SettledShelf => None,
     }
@@ -1913,9 +1944,8 @@ fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
 /// The jump-list row saved as `kind` and `id`; `None` for an unknown kind.
 fn jump_item(kind: &str, id: i64) -> Option<SidebarItem> {
     match kind {
-        "thread" => Some(SidebarItem::Thread(ThreadId(id))),
+        "session" => Some(SidebarItem::Session(SessionId(id))),
         "draft" => Some(SidebarItem::Draft(ProjectId(id))),
-        "group" => Some(SidebarItem::Group(GroupId(id))),
         "group_draft" => Some(SidebarItem::GroupDraft(GroupId(id))),
         _ => None,
     }
@@ -1950,8 +1980,8 @@ mod tests {
     use super::{
         DraftRow, DraftWorkspace, GroupDraft, GroupId, GroupKind, GroupRow, LastUsed,
         LastWorkspace, MIGRATIONS, NewGroup, NewPaneThread, NewThread, Own, PaneId, ProjectId,
-        ProjectKind, SavedLayouts, SessionId, SessionRow, SettledOverride, SidebarItem, Store,
-        StoreError, TabRow, ThreadId, ThreadRow, TileLayout, Ui,
+        ProjectKind, SavedLayouts, SessionId, SessionKind, SessionRow, SettledOverride,
+        SidebarItem, Store, StoreError, TabRow, ThreadRow, TileLayout, Ui,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -2419,6 +2449,7 @@ mod tests {
             harness: HarnessId::new("claude"),
             id: inserted.thread,
             pane_id: Some(inserted.pane),
+            orb_session: Some(inserted.session),
             project_id,
             short_id: "28bf38e2".to_owned(),
             session_id: None,
@@ -2844,6 +2875,7 @@ mod tests {
 
         // When saving its session id, titles, transcript cursor, and turn start.
         let updated = ThreadRow {
+            orb_session: None,
             harness: HarnessId::new("claude"),
             id: inserted.thread,
             pane_id: Some(inserted.pane),
@@ -3211,16 +3243,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn saved_jumps_read_back() -> Result<(), Report<StoreError>> {
+    fn jumps_round_trip_session_rows() -> Result<(), Report<StoreError>> {
         // Given a fresh store.
         let store = Store::open_in_memory()?;
 
         // When saving a jump list of every kind of row.
         let jumps = vec![
-            SidebarItem::Thread(ThreadId(3)),
+            SidebarItem::Session(SessionId(3)),
             SidebarItem::GroupDraft(GroupId(9)),
             SidebarItem::Draft(ProjectId(1)),
-            SidebarItem::Group(GroupId(9)),
         ];
         store.save_jumps(&jumps)?;
 
@@ -3235,18 +3266,18 @@ mod tests {
 
     #[rstest::rstest]
     fn saving_jumps_again_replaces_them() -> Result<(), Report<StoreError>> {
-        // Given a store with threads 1 and 2 saved as the jump list.
+        // Given a store with sessions 1 and 2 saved as the jump list.
         let store = Store::open_in_memory()?;
         store.save_jumps(&[
-            SidebarItem::Thread(ThreadId(1)),
-            SidebarItem::Thread(ThreadId(2)),
+            SidebarItem::Session(SessionId(1)),
+            SidebarItem::Session(SessionId(2)),
         ])?;
 
-        // When saving thread 3 alone.
-        let jumps = vec![SidebarItem::Thread(ThreadId(3))];
+        // When saving session 3 alone.
+        let jumps = vec![SidebarItem::Session(SessionId(3))];
         store.save_jumps(&jumps)?;
 
-        // Then only thread 3 reads back.
+        // Then only session 3 reads back.
         assert_eq!(
             store.jumps()?,
             jumps,
@@ -3481,6 +3512,27 @@ mod tests {
         assert_eq!(
             threads, expected,
             "every thread should keep its id and get a pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_v10_records_each_threads_session() -> Result<(), Report<StoreError>> {
+        // Given a migrated v10 database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = migrated_v10(dir.path())?;
+
+        // When reading which threads' session differs from their pane's.
+        let mismatched = rows(
+            &path,
+            "SELECT t.id FROM threads t LEFT JOIN panes p ON p.id = t.pane_id
+             WHERE t.orb_session_id IS NOT p.session_id OR t.orb_session_id IS NULL",
+        )?;
+
+        // Then every thread records the session of its pane.
+        assert!(
+            mismatched.is_empty(),
+            "every migrated thread should record its pane's session: {mismatched:?}"
         );
         Ok(())
     }
@@ -3998,8 +4050,9 @@ mod tests {
             .find(|row| row.id == inserted.session)
             .ok_or_else(|| Report::new(StoreError).attach("the session isn't saved"))?;
 
-        // When saving it pinned, settled and with new activity.
+        // When saving it named, pinned, settled and with new activity.
         let changed = SessionRow {
+            name: Some("auth".to_owned()),
             pinned_at: Some(1_000),
             settled_override: Some(SettledOverride::Settled),
             settled_at: Some(2_000),
@@ -4069,6 +4122,197 @@ mod tests {
             SavedLayouts::default(),
             "a deleted session should take its tabs and panes"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn deleted_session_takes_its_threads() -> Result<(), Report<StoreError>> {
+        // Given a thread's session.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+
+        // When deleting the session.
+        store.delete_session(inserted.session)?;
+
+        // Then the thread that ran in it is gone too.
+        let (_, threads, ..) = store.load()?;
+        assert!(
+            threads.is_empty(),
+            "a deleted session should take the threads in its panes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn deleted_session_takes_its_ended_threads() -> Result<(), Report<StoreError>> {
+        // Given a thread whose pane ended, out of its session.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let mut row = store
+            .load()?
+            .1
+            .into_iter()
+            .find(|row| row.id == inserted.thread)
+            .ok_or_else(|| Report::new(StoreError))?;
+        row.pane_id = None;
+        store.save_thread(&row)?;
+
+        // When deleting the session.
+        store.delete_session(inserted.session)?;
+
+        // Then the ended thread is gone too.
+        let (_, threads, ..) = store.load()?;
+        assert!(
+            threads.is_empty(),
+            "a deleted session should take the threads that ended in it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn inserted_thread_loads_its_session() -> Result<(), Report<StoreError>> {
+        // Given a project.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+
+        // When inserting a thread.
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+
+        // Then it loads back in its new session.
+        let sessions: Vec<Option<SessionId>> = store
+            .load()?
+            .1
+            .into_iter()
+            .map(|row| row.orb_session)
+            .collect();
+        assert_eq!(
+            sessions,
+            vec![Some(inserted.session)],
+            "a new thread should know its session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn ended_thread_keeps_its_session() -> Result<(), Report<StoreError>> {
+        // Given a thread in its session.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let mut row = store
+            .load()?
+            .1
+            .into_iter()
+            .find(|row| row.id == inserted.thread)
+            .ok_or_else(|| Report::new(StoreError))?;
+
+        // When its pane ends.
+        row.pane_id = None;
+        store.save_thread(&row)?;
+
+        // Then it still loads with that session.
+        let sessions: Vec<Option<SessionId>> = store
+            .load()?
+            .1
+            .into_iter()
+            .map(|row| row.orb_session)
+            .collect();
+        assert_eq!(
+            sessions,
+            vec![Some(inserted.session)],
+            "an ended thread should keep its session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pane_thread_loads_the_session_of_its_pane() -> Result<(), Report<StoreError>> {
+        // Given a pane in a session of the orb project.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let pane = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
+
+        // When a report starts a thread in that pane.
+        let (thread, _) = store.insert_pane_thread(&NewPaneThread {
+            pane,
+            session_id: "s-new".to_owned(),
+            transcript_path: None,
+            harness: HarnessId::new("claude"),
+            cwd: PathBuf::from("/tmp/orb"),
+            created_at: 2_000,
+        })?;
+
+        // Then it loads with the pane's session.
+        let session = store
+            .load()?
+            .1
+            .into_iter()
+            .find(|row| row.id == thread)
+            .and_then(|row| row.orb_session);
+        assert_eq!(
+            session,
+            Some(inserted.session),
+            "a pane's thread should know the pane's session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn inserted_threads_session_loads_its_project_and_creation() -> Result<(), Report<StoreError>> {
+        // Given a thread inserted at 1000 in project orb.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        store.insert_thread(&new_thread(project_id))?;
+
+        // When loading the sessions.
+        let found: Vec<(ProjectId, SessionKind, i64)> = store
+            .layouts()?
+            .sessions
+            .into_iter()
+            .map(|row| (row.project_id, row.kind, row.created_at))
+            .collect();
+
+        // Then its session is a plain one of that project, made at 1000.
+        assert_eq!(
+            found,
+            [(project_id, SessionKind::Plain, 1_000)],
+            "a session loads its project, kind and creation time"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(ProjectKind::Research, SessionKind::Research)]
+    #[case(ProjectKind::Learn, SessionKind::Learn)]
+    #[case(ProjectKind::Incognito, SessionKind::Incognito)]
+    fn inserted_thread_in_an_own_project_gets_its_kind(
+        #[case] project: ProjectKind,
+        #[case] expected: SessionKind,
+    ) -> Result<(), Report<StoreError>> {
+        // Given one of orb's own projects.
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(Path::new("/tmp/own"), "own", project, 500)?;
+
+        // When inserting a thread in it.
+        store.insert_thread(&new_thread(project_id))?;
+
+        // Then its session has the project's kind.
+        let kinds: Vec<SessionKind> = store
+            .layouts()?
+            .sessions
+            .into_iter()
+            .map(|row| row.kind)
+            .collect();
+        assert_eq!(kinds, [expected], "{project:?} gives {expected:?} sessions");
         Ok(())
     }
 

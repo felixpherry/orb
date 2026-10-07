@@ -13,7 +13,7 @@ use crate::feat::git::git_service::GitRef;
 use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList, setting_label};
 use crate::feat::sessions::state::{
-    GroupId, GroupKind, NEW_THREAD, Project, ProjectId, Sessions, Thread, ThreadId, ThreadStatus,
+    GroupId, NEW_THREAD, Project, ProjectId, Session, SessionId, Sessions, Thread, ThreadId,
 };
 use crate::feat::sessions::transcript::{Exchange, Role};
 use crate::feat::worktrees::state::{User, order, users};
@@ -76,24 +76,15 @@ pub enum PickerKind {
     ProjectFilter,
     /// `<C-x>` in the project filter: confirm removing `project`.
     RemoveProject { project: ProjectId },
-    /// `s` on a thread: confirm settling it.
-    SettleThread { thread: ThreadId },
-    /// `d` on a thread: confirm deleting it.
-    DeleteThread { thread: ThreadId },
+    /// `s` on a session: confirm settling it.
+    SettleSession { session: SessionId },
+    /// `d` on a session: confirm deleting it. `folder` says its Research or
+    /// Learn folder goes too.
+    DeleteSession { session: SessionId, folder: bool },
     /// `d` on a draft: confirm discarding it.
     DiscardDraft { project: ProjectId },
     /// `d` on a group's draft: confirm discarding it.
     DiscardGroupDraft { group: GroupId },
-    /// `s` on a group's card: confirm settling it.
-    SettleGroup { group: GroupId },
-    /// `d` on a group's card: confirm deleting it, its threads and its
-    /// directory. `dir` is the group's kind when it has a directory on disk
-    /// (a Feature group's worktree once started, a Research/Learn folder),
-    /// else `None`.
-    DeleteGroup {
-        group: GroupId,
-        dir: Option<GroupKind>,
-    },
     /// A harness refused a session start in `dir`, the folder it names for
     /// it: confirm trusting it.
     TrustWorkspace { dir: PathBuf },
@@ -242,14 +233,15 @@ impl PickerState {
         Self::confirm(PickerKind::RemoveProject { project }, return_to)
     }
 
-    /// The `No`/`Yes` confirm for settling `thread`, with `No` selected.
-    pub fn settle_thread(thread: ThreadId, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::SettleThread { thread }, return_to)
+    /// The `No`/`Yes` confirm for settling `session`, with `No` selected.
+    pub fn settle_session(session: SessionId, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::SettleSession { session }, return_to)
     }
 
-    /// The `No`/`Yes` confirm for deleting `thread`, with `No` selected.
-    pub fn delete_thread(thread: ThreadId, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::DeleteThread { thread }, return_to)
+    /// The `No`/`Yes` confirm for deleting `session` (and its folder when
+    /// `folder`), with `No` selected.
+    pub fn delete_session(session: SessionId, folder: bool, return_to: Focus) -> Self {
+        Self::confirm(PickerKind::DeleteSession { session, folder }, return_to)
     }
 
     /// The `No`/`Yes` confirm for discarding `project`'s draft, with `No`
@@ -262,17 +254,6 @@ impl PickerState {
     /// selected.
     pub fn discard_group_draft(group: GroupId, return_to: Focus) -> Self {
         Self::confirm(PickerKind::DiscardGroupDraft { group }, return_to)
-    }
-
-    /// The `No`/`Yes` confirm for settling `group`, with `No` selected.
-    pub fn settle_group(group: GroupId, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::SettleGroup { group }, return_to)
-    }
-
-    /// The `No`/`Yes` confirm for deleting `group` and, when `dir` is some,
-    /// its directory of that kind, with `No` selected.
-    pub fn delete_group(group: GroupId, dir: Option<GroupKind>, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::DeleteGroup { group, dir }, return_to)
     }
 
     /// The `No`/`Yes` confirm for trusting `dir`, with `No` selected.
@@ -607,11 +588,25 @@ impl PickerState {
         self.list.set_items(items, &pattern);
     }
 
-    /// The selected row's thread: a thread row's, or a search hit's.
-    /// `None` for any other row.
+    /// The selected row's thread: a session row's previewed agent's, or a
+    /// search hit's. `None` for any other row.
     pub fn selected_thread(&self) -> Option<ThreadId> {
         match self.list.selected() {
-            Some(&PickerItem::Thread { id, .. } | &PickerItem::Hit { thread: id, .. }) => Some(id),
+            Some(&PickerItem::Session { thread, .. }) => thread,
+            Some(&PickerItem::Hit { thread, .. }) => Some(thread),
+            _ => None,
+        }
+    }
+
+    /// The session the selected row opens: a session row's, or the one a
+    /// hit's thread runs or last ran in. `None` for any other row.
+    pub fn picked_session(&self, sessions: &Sessions) -> Option<SessionId> {
+        match *self.list.selected()? {
+            PickerItem::Session { id, .. } => Some(id),
+            PickerItem::Hit { thread, .. } => sessions
+                .threads()
+                .find(|shown| shown.id == thread)
+                .and_then(Thread::home),
             _ => None,
         }
     }
@@ -750,7 +745,7 @@ impl PickerState {
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
-                | PickerItem::Thread { .. }
+                | PickerItem::Session { .. }
                 | PickerItem::Worktree { .. }
                 | PickerItem::Hit { .. },
             ) => None,
@@ -914,39 +909,39 @@ pub fn expand(dir_text: &str, home: &Path) -> PathBuf {
     path.components().collect()
 }
 
-/// The session picker's rows: the threads of every project inside the
-/// project filter (removed projects too), newest chat first by the later of
-/// the current turn's start and the last turn's end, ties to the higher id.
-/// The selected thread is listed like any other. Threads being deleted,
-/// `Gone` threads, and settled threads (or threads of a settled group) unless
-/// `settled`, are left out.
+/// The session picker's rows: the sessions of every project inside the
+/// project filter (removed projects too), newest chat first by the latest
+/// chat of its agents, else its own last activity, ties to the higher id. The
+/// selected session is listed like any other. Sessions being deleted, and
+/// settled sessions unless `settled`, are left out. Each row previews its
+/// most recently active agent.
 pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
     let mut rows: Vec<(SystemTime, i64, PickerItem)> = sessions
-        .projects
+        .sessions
         .iter()
-        .filter(|project| sessions.filter.is_none_or(|filter| filter == project.id))
-        .flat_map(|project| project.threads.iter().map(move |thread| (project, thread)))
-        .filter_map(|(project, thread)| {
-            let group = thread
-                .group
-                .and_then(|id| project.groups.iter().find(|group| group.id == id));
-            let is_settled = thread.settled_at.is_some()
-                || group.is_some_and(|group| group.settled_at.is_some());
-            let left_out = sessions.deleting.contains(&thread.id)
-                || thread.status == ThreadStatus::Gone
-                || (is_settled && !settled);
-            if left_out {
-                return None;
-            }
-            let (label, split) = thread_label(project, thread);
+        .filter(|session| {
+            sessions
+                .filter
+                .is_none_or(|filter| filter == session.project)
+        })
+        .filter(|session| !sessions.deleting.contains(&session.id))
+        .filter(|session| settled || session.settled_at.is_none())
+        .filter_map(|session| {
+            let project = sessions.project(session.project)?;
+            let lead = sessions
+                .agents(session.id)
+                .into_iter()
+                .max_by_key(|thread| (thread.last_chat(), thread.id.0));
+            let (label, split) = session_label(sessions, project, session);
             Some((
-                thread.last_chat(),
-                thread.id.0,
-                PickerItem::Thread {
-                    id: thread.id,
+                lead.map_or(session.last_activity_at, Thread::last_chat),
+                session.id.0,
+                PickerItem::Session {
+                    id: session.id,
+                    thread: lead.map(|thread| thread.id),
                     label,
                     split,
-                    settled: is_settled,
+                    settled: session.settled_at.is_some(),
                 },
             ))
         })
@@ -955,15 +950,28 @@ pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
     rows.into_iter().map(|(_, _, item)| item).collect()
 }
 
-/// A thread's picker label, `<project>/title` or `<group>/title` for a
-/// group's thread, and the byte offset where the title starts.
-pub fn thread_label(project: &Project, thread: &Thread) -> (String, usize) {
-    let group = thread
-        .group
-        .and_then(|id| project.groups.iter().find(|group| group.id == id));
-    let prefix = group.map_or(project.title.as_str(), |group| group.name.as_str());
-    let title = thread.title.as_deref().unwrap_or(NEW_THREAD);
-    (format!("{prefix}/{title}"), prefix.len() + 1)
+/// A session's picker label, `<project>/title`, and the byte offset where
+/// the title starts.
+pub fn session_label(sessions: &Sessions, project: &Project, session: &Session) -> (String, usize) {
+    (
+        format!("{}/{}", project.title, sessions.title(session)),
+        project.title.len() + 1,
+    )
+}
+
+/// A search hit's label in `thread`: its session's label while that session
+/// exists, else `<project>/<thread title>`.
+pub fn hit_label(sessions: &Sessions, project: &Project, thread: &Thread) -> (String, usize) {
+    match thread.home().and_then(|id| sessions.session(id)) {
+        Some(session) => session_label(sessions, project, session),
+        None => {
+            let title = thread.title.as_deref().unwrap_or(NEW_THREAD);
+            (
+                format!("{}/{title}", project.title),
+                project.title.len() + 1,
+            )
+        }
+    }
 }
 
 /// The worktree picker's rows: `app`'s worktrees in [`order`], each labelled
@@ -985,8 +993,7 @@ pub fn worktree_items(app: &AppState) -> Vec<PickerItem> {
                 .and_then(|facts| facts.branch.as_deref());
             let users = users(app, &worktree.path);
             let titles = users.iter().filter_map(|user| match user {
-                User::Thread(_, thread) => thread.title.as_deref(),
-                User::Group(_, group, _) => Some(group.name.as_str()),
+                User::Session(_, session, _) => Some(app.sessions.title(session)),
                 User::Draft(_) => None,
             });
             PickerItem::Worktree {
@@ -994,6 +1001,7 @@ pub fn worktree_items(app: &AppState) -> Vec<PickerItem> {
                 label: format!("{repo}/{name}"),
                 split: repo.len() + 1,
                 extra: branch
+                    .map(str::to_owned)
                     .into_iter()
                     .chain(titles)
                     .collect::<Vec<_>>()
@@ -1010,7 +1018,9 @@ mod tests {
 
     use std::time::UNIX_EPOCH;
 
-    use super::{DraftTarget, PickTarget, PickerState, expand, split_path, thread_label};
+    use super::{
+        DraftTarget, PickTarget, PickerState, expand, hit_label, session_items, split_path,
+    };
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
     use crate::feat::harness::HarnessInfo;
@@ -1018,10 +1028,11 @@ mod tests {
     use crate::feat::harness::fake::pi_like;
     use crate::feat::picker::list::{PickerItem, setting_label};
     use crate::feat::sessions::state::{
-        Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId, ProjectKind, Thread,
-        ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
+        ThreadStatus, sessions_for,
     };
     use crate::feat::sessions::transcript::Exchange;
+    use std::time::Duration;
 
     const HOME: &str = "/home/u";
 
@@ -1696,9 +1707,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn settle_group_confirm_starts_on_no() {
-        // Given / When opening the confirm for settling group 9.
-        let picker = PickerState::settle_group(GroupId(9), Focus::Sidebar);
+    fn settle_session_confirm_starts_on_no() {
+        // Given / When opening the confirm for settling session 9.
+        let picker = PickerState::settle_session(SessionId(9), Focus::Sidebar);
 
         // Then No is highlighted, so ⏎ alone settles nothing.
         assert_eq!(
@@ -1721,11 +1732,13 @@ mod tests {
         );
     }
 
-    /// The session picker over threads 1 (`work/alpha`) and 2 (`work/zulu`),
-    /// with thread 1 selected.
+    /// The session picker over sessions 1 (`work/alpha`) and 2
+    /// (`work/zulu`), each previewing its own thread, with session 1
+    /// selected.
     fn two_threads() -> PickerState {
-        let row = |id, title: &str| PickerItem::Thread {
-            id: ThreadId(id),
+        let row = |id, title: &str| PickerItem::Session {
+            id: SessionId(id),
+            thread: Some(ThreadId(id)),
             label: format!("work/{title}"),
             split: 5,
             settled: false,
@@ -1872,66 +1885,189 @@ mod tests {
         assert_eq!(picker.total(), 0, "a stale result should be ignored");
     }
 
-    #[rstest::rstest]
-    fn thread_label_names_a_group_thread_by_its_group() {
-        // Given project `orb` with group `GT-514-login` holding thread `api`.
-        let group = Group {
-            id: GroupId(1),
-            kind: GroupKind::Feature,
-            name: "GT-514-login".to_owned(),
-            dir: None,
-            branch: None,
-            created_at: UNIX_EPOCH,
-            pinned_at: None,
-            settled_at: None,
-            active_since: UNIX_EPOCH,
-            defaults: GroupDefaults {
-                harness: HarnessId::new("claude"),
-                model: None,
-                permission: None,
-            },
-            draft: None,
-        };
-        let thread = Thread {
+    /// Thread `id` titled `title`, in session `id`, its last chat at second
+    /// `secs`, settled when `settled`.
+    fn agent(id: i64, title: &str, secs: u64, settled: bool) -> Thread {
+        let at = UNIX_EPOCH + Duration::from_secs(secs);
+        Thread {
             harness: HarnessId::new("claude"),
-            id: ThreadId(1),
-            title: Some("api".to_owned()),
-            cwd: PathBuf::from("/code/orb"),
+            id: ThreadId(id),
+            title: Some(title.to_owned()),
+            cwd: PathBuf::from(format!("/code/{id}")),
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                session: SessionId(id),
+                command: vec![],
+            }),
+            last_session: Some(SessionId(id)),
             branch: None,
             pinned_at: None,
-            settled_at: None,
+            settled_at: settled.then_some(at),
             active_since: UNIX_EPOCH,
             created_at: UNIX_EPOCH,
-            last_activity_at: UNIX_EPOCH,
+            last_activity_at: at,
             unseen: false,
-            group: Some(GroupId(1)),
+            group: None,
             model: None,
             permission: None,
-        };
-        let project = Project {
+        }
+    }
+
+    /// Project `orb` holding `threads`, each in its own session.
+    fn orb_sessions(threads: Vec<Thread>) -> Sessions {
+        let projects = vec![Project {
             id: ProjectId(1),
             title: "orb".to_owned(),
             root: PathBuf::from("/code/orb"),
             created_at: UNIX_EPOCH,
-            threads: vec![thread.clone()],
+            threads,
             draft: None,
             removed: false,
             kind: ProjectKind::Normal,
-            groups: vec![group],
-        };
+            groups: vec![],
+        }];
+        Sessions {
+            sessions: sessions_for(&projects),
+            projects,
+            ..Sessions::default()
+        }
+    }
 
-        // When labelling the thread.
-        let label = thread_label(&project, &thread);
+    /// The session ids of `items`, in order.
+    fn session_ids(items: &[PickerItem]) -> Vec<SessionId> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                PickerItem::Session { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
 
-        // Then the group names it and the title starts after its slash.
+    #[rstest::rstest]
+    fn session_items_list_sessions_newest_chat_first() {
+        // Given sessions 1 and 2, session 2's agent chatting last.
+        let sessions = orb_sessions(vec![agent(1, "api", 10, false), agent(2, "ui", 20, false)]);
+
+        // When listing the session picker's rows.
+        let items = session_items(&sessions, false);
+
+        // Then session 2 comes first.
+        assert_eq!(
+            session_ids(&items),
+            vec![SessionId(2), SessionId(1)],
+            "the newest chat should lead"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::hidden(false, vec![SessionId(1)])]
+    #[case::shown(true, vec![SessionId(2), SessionId(1)])]
+    fn session_items_leave_out_settled_sessions_until_shown(
+        #[case] settled: bool,
+        #[case] expected: Vec<SessionId>,
+    ) {
+        // Given session 1 and settled session 2.
+        let sessions = orb_sessions(vec![agent(1, "api", 10, false), agent(2, "ui", 20, true)]);
+
+        // When listing the rows with settled sessions `settled`.
+        let items = session_items(&sessions, settled);
+
+        // Then the settled session shows only when asked for.
+        assert_eq!(session_ids(&items), expected, "settled shown: {settled}");
+    }
+
+    #[rstest::rstest]
+    fn session_row_previews_its_agent() {
+        // Given session 1 running thread 1.
+        let sessions = orb_sessions(vec![agent(1, "api", 10, false)]);
+
+        // When opening the session picker over its rows.
+        let picker = PickerState::sessions(session_items(&sessions, false), Focus::Sidebar);
+
+        // Then the selected row previews thread 1.
+        assert_eq!(
+            picker.selected_thread(),
+            Some(ThreadId(1)),
+            "a session row should preview its agent"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_label_names_a_threads_session() {
+        // Given thread 1 in session 1, which the user named `login`.
+        let mut sessions = orb_sessions(vec![agent(1, "api", 10, false)]);
+        if let Some(session) = sessions.sessions.first_mut() {
+            session.name = Some("login".to_owned());
+        }
+
+        // When labelling a hit in thread 1.
+        let label = sessions
+            .projects
+            .first()
+            .zip(sessions.threads().next())
+            .map(|(project, thread)| hit_label(&sessions, project, thread));
+
+        // Then the session names it and the title starts after its slash.
         assert_eq!(
             label,
-            ("GT-514-login/api".to_owned(), 13),
-            "a group thread should be labelled by its group"
+            Some(("orb/login".to_owned(), 4)),
+            "a hit should be labelled by its session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hit_label_falls_back_to_the_threads_title() {
+        // Given thread 1 that never ran in a session.
+        let sessions = orb_sessions(vec![Thread {
+            pane: None,
+            last_session: None,
+            ..agent(1, "api", 10, false)
+        }]);
+
+        // When labelling a hit in thread 1.
+        let label = sessions
+            .projects
+            .first()
+            .zip(sessions.threads().next())
+            .map(|(project, thread)| hit_label(&sessions, project, thread));
+
+        // Then the thread's title names it.
+        assert_eq!(
+            label,
+            Some(("orb/api".to_owned(), 4)),
+            "a hit without a session should be labelled by its thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picked_session_of_a_hit_is_its_ended_threads_session() {
+        // Given thread 1 that ended in session 1, and the search picker over a
+        // hit in it.
+        let sessions = {
+            let mut sessions = orb_sessions(vec![agent(1, "api", 10, false)]);
+            if let Some(thread) = sessions
+                .projects
+                .first_mut()
+                .and_then(|p| p.threads.first_mut())
+            {
+                thread.pane = None;
+            }
+            sessions
+        };
+        let picker = searching(vec![hit(1, 1)]);
+
+        // When asking which session the pick opens.
+        let session = picker.picked_session(&sessions);
+
+        // Then it is the session the thread ran in.
+        assert_eq!(
+            session,
+            Some(SessionId(1)),
+            "a hit on an ended thread should open its session"
         );
     }
 }

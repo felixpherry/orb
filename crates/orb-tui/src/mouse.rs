@@ -386,14 +386,14 @@ where
 mod tests {
     use std::time::{Duration, Instant};
 
-    use orb_domain::feat::sessions::state::{PaneId, SidebarItem, ThreadId};
+    use orb_domain::feat::sessions::state::{PaneId, SessionId, SidebarItem};
     use orb_domain::{Focus, Intent};
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
 
     use super::{Click, ClickTarget, Clicks, HitMap, MouseRoute, route};
 
-    const THREAD_1: SidebarItem = SidebarItem::Thread(ThreadId(1));
+    const THREAD_1: SidebarItem = SidebarItem::Session(SessionId(1));
 
     /// A 30-column sidebar and a 50-column right side, 20 lines tall over the
     /// mode line: the input box on lines 0 to 2 and thread 1 on lines 3 to 5;
@@ -1031,7 +1031,7 @@ mod tests {
 
         // When clicking thread 2's row 100 ms later.
         let click = clicks.click(
-            Some(ClickTarget::Row(SidebarItem::Thread(ThreadId(2)))),
+            Some(ClickTarget::Row(SidebarItem::Session(SessionId(2)))),
             now + Duration::from_millis(100),
         );
 

@@ -2,18 +2,19 @@
 //! a float over the sidebar and the right side holding a list box and a
 //! preview box, side by side from 120 columns and stacked below that.
 //!
-//! The list box is titled `Sessions`, with a lit `s` while settled threads
-//! show. Its input row holds the typed text and how many threads are shown
-//! out of those listed, over an orange rule. Each row is a thread's status
-//! icon, its dim `<project|group>/` and bright title, and how long it has
-//! worked or since its last chat; status and time are drawn live. Settled
-//! rows are dimmed behind a check. Nothing matched leaves the list empty.
+//! The list box is titled `Sessions`, with a lit `s` while settled sessions
+//! show. Its input row holds the typed text and how many sessions are shown
+//! out of those listed, over an orange rule. Each row is a session's status
+//! icon (its most urgent agent's), its dim `<project>/` and bright title,
+//! and how long its agent has worked or since its last chat; status and time
+//! are drawn live. Settled rows are dimmed behind a check. Nothing matched
+//! leaves the list empty.
 //!
-//! The preview box is titled with the selected row's label and shows the
-//! thread's status, branch and model, then its latest exchanges from the
-//! transcript: up to two earlier ones in brief while there is room, and the
-//! newest with the prompt, the tools it ran, and the end of its last reply
-//! as a small Markdown subset.
+//! The preview box is titled with the selected row's label and shows its
+//! most recently active agent's status, branch and model, then its latest
+//! exchanges from the transcript: up to two earlier ones in brief while
+//! there is room, and the newest with the prompt, the tools it ran, and the
+//! end of its last reply as a small Markdown subset.
 
 use std::collections::HashSet;
 use std::time::SystemTime;
@@ -21,7 +22,7 @@ use std::time::SystemTime;
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::picker::list::{Matches, PickerItem};
 use orb_domain::feat::picker::state::{PickerKind, PickerState};
-use orb_domain::feat::sessions::state::{Sessions, Thread, ThreadId, ThreadStatus};
+use orb_domain::feat::sessions::state::{Session, SessionId, Sessions, Thread, ThreadStatus};
 use orb_domain::feat::sessions::transcript::Exchange;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -34,12 +35,13 @@ use crate::mouse::HitMap;
 use crate::picker::{PickerScroll, cut_left, highlight, span, visible};
 use crate::sidebar::{
     BG_DARK, BLACK, BLUE, BORDER, BRANCH, COMMENT, COMPLETED_ICON, CYAN, DARK3, DARK5, FG, FG_DARK,
-    GREEN1, GUTTER, ORANGE, VISUAL, ago_label, mark, render_split, status, working_label,
+    GREEN1, GUTTER, ORANGE, VISUAL, ago_label, mark, render_split, session_status, status,
+    working_label,
 };
 
 /// Draws the session picker over `area`: the list of `picker`'s rows with
-/// live status from `sessions` (`attached` threads fill the idle circle),
-/// and the selected thread's preview with its harness's mark and name from
+/// live status from `sessions` (`attached` sessions fill the idle circle),
+/// and the selected row's agent preview with its harness's mark and name from
 /// `harnesses`. Returns how many rows the list fits, and where the terminal
 /// cursor goes in the input. Records the popup, the list box as the wheel's
 /// area and the list's rows in `hits`; the preview maps to no row and takes
@@ -51,7 +53,7 @@ use crate::sidebar::{
 pub(crate) fn render(
     picker: &PickerState,
     sessions: &Sessions,
-    attached: &HashSet<ThreadId>,
+    attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     now: SystemTime,
     area: Rect,
@@ -138,7 +140,7 @@ fn title(settled: bool) -> Line<'static> {
 fn render_list(
     picker: &PickerState,
     sessions: &Sessions,
-    attached: &HashSet<ThreadId>,
+    attached: &HashSet<SessionId>,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -209,41 +211,43 @@ pub(crate) fn render_input(
     Position::new(area.x + x, area.y)
 }
 
-/// One thread row: its status icon (a dim check when settled), its label
+/// One session row: its status icon (a dim check when settled), its label
 /// with the prefix dim and the matches lit, and its time on the right. A
-/// thread gone from `sessions` shows only its label, dim.
+/// session gone from `sessions` shows only its label, dim.
 fn render_row(
     item: &PickerItem,
     matches: &Matches,
     sessions: &Sessions,
-    attached: &HashSet<ThreadId>,
+    attached: &HashSet<SessionId>,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let PickerItem::Thread {
+    let PickerItem::Session {
         id,
         label,
         split,
         settled,
+        ..
     } = item
     else {
         return;
     };
-    let thread = sessions.threads().find(|thread| thread.id == *id);
-    let (icon, (dim, bright), time) = match (thread, settled) {
+    let session = sessions.session(*id);
+    let agents = sessions.agents(*id);
+    let (icon, (dim, bright), time) = match (session, settled) {
         (None, _) => (Span::raw("  "), (DARK3, DARK3), String::new()),
-        (Some(thread), true) => (
+        (Some(session), true) => (
             span(format!("{COMPLETED_ICON} "), DARK3),
             (DARK3, COMMENT),
-            when(thread, now),
+            session_when(session, &agents, now),
         ),
-        (Some(thread), false) => {
-            let (glyph, _, fg) = status(thread, attached.contains(id), now);
+        (Some(session), false) => {
+            let (glyph, _, fg) = session_status(&agents, attached.contains(id), now);
             (
                 span(format!("{glyph} "), fg),
                 (DARK5, FG),
-                when(thread, now),
+                session_when(session, &agents, now),
             )
         }
     };
@@ -264,6 +268,22 @@ fn render_row(
     );
 }
 
+/// How long its working agent's turn has run, else how long since its
+/// agents' last chat, else since the session's last activity.
+fn session_when(session: &Session, agents: &[&Thread], now: SystemTime) -> String {
+    match agents
+        .iter()
+        .find(|thread| thread.status == ThreadStatus::Working)
+        .or_else(|| agents.iter().max_by_key(|thread| thread.last_chat()))
+    {
+        Some(thread) => when(thread, now),
+        None => ago_label(
+            now.duration_since(session.last_activity_at)
+                .unwrap_or_default(),
+        ),
+    }
+}
+
 /// How long the turn has run while working, else how long since the last
 /// chat.
 fn when(thread: &Thread, now: SystemTime) -> String {
@@ -280,20 +300,23 @@ fn when(thread: &Thread, now: SystemTime) -> String {
 fn render_preview(
     picker: &PickerState,
     sessions: &Sessions,
-    attached: &HashSet<ThreadId>,
+    attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let Some(PickerItem::Thread { id, label, .. }) = picker.selected() else {
+    let Some(PickerItem::Session {
+        id, thread, label, ..
+    }) = picker.selected()
+    else {
         boxed(None).render(area, buf);
         return;
     };
     let block = boxed(Some(Line::from(span(format!(" {label} "), BLUE))));
     let inner = block.inner(area);
     block.render(area, buf);
-    let thread = sessions.threads().find(|thread| thread.id == *id);
+    let thread = thread.and_then(|thread| sessions.threads().find(|shown| shown.id == thread));
     let info = thread.and_then(|thread| harnesses.iter().find(|info| info.id == thread.harness));
     let meta = thread.map_or_else(Line::default, |thread| {
         meta(thread, info, attached.contains(id), now)
@@ -658,7 +681,8 @@ mod tests {
     use orb_domain::Focus;
     use orb_domain::feat::picker::state::{PickerState, session_items};
     use orb_domain::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
+        ThreadStatus,
     };
     use orb_domain::feat::sessions::transcript::Exchange;
     use ratatui::buffer::{Buffer, Cell};
@@ -670,15 +694,18 @@ mod tests {
     use crate::mouse::HitMap;
     use crate::picker::PickerScroll;
     use crate::sidebar::{BLACK, BRANCH, COMPLETED_ICON, DARK3, DARK5, VISUAL};
+    use crate::test_support::sessions_for;
 
     /// The clock every picker is drawn at.
     fn now() -> SystemTime {
         UNIX_EPOCH + Duration::from_hours(240)
     }
 
-    /// Thread `id` titled `title`, last active five minutes before [`now`].
+    /// Thread `id` titled `title`, alone in session `id`, last active five
+    /// minutes before [`now`].
     fn thread(id: i64, title: &str, status: ThreadStatus) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: Some(title.to_owned()),
@@ -686,7 +713,11 @@ mod tests {
             transcript: None,
             status,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                session: SessionId(id),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -708,20 +739,22 @@ mod tests {
         }
     }
 
-    /// `threads` in one project, `orb`.
+    /// `threads` in one project, `orb`, each in its own session.
     fn sessions(threads: Vec<Thread>) -> Sessions {
+        let projects = vec![Project {
+            id: ProjectId(1),
+            title: "orb".to_owned(),
+            root: "/Users/me/dev/orb".into(),
+            created_at: UNIX_EPOCH,
+            removed: false,
+            draft: None,
+            threads,
+            groups: vec![],
+            kind: ProjectKind::Normal,
+        }];
         Sessions {
-            projects: vec![Project {
-                id: ProjectId(1),
-                title: "orb".to_owned(),
-                root: "/Users/me/dev/orb".into(),
-                created_at: UNIX_EPOCH,
-                removed: false,
-                draft: None,
-                threads,
-                groups: vec![],
-                kind: ProjectKind::Normal,
-            }],
+            sessions: sessions_for(&projects),
+            projects,
             ..Sessions::default()
         }
     }

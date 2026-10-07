@@ -1,7 +1,7 @@
 //! Checks whether the open picker's keys can proceed: `⏎` picking a project
 //! or adding a directory, `Tab` opening one, `<C-x>` removing a project,
-//! `⏎` picking a thread in the session picker, and `<C-x>` deleting a
-//! worktree.
+//! `⏎` picking a session in the session or search picker, and `<C-x>`
+//! deleting a worktree.
 
 use std::time::SystemTime;
 
@@ -11,7 +11,6 @@ use wherror::Error;
 
 use crate::AppState;
 use crate::feat::picker::state::PickerKind;
-use crate::feat::sessions::state::ThreadStatus;
 use crate::feat::worktrees::state::{Verdict, users, verdict};
 
 /// Why picking a project can't proceed.
@@ -125,49 +124,57 @@ pub fn validate_remove_project(state: &AppState) -> Result<(), RemoveProjectErro
     }
 }
 
-/// Why picking a thread in the session picker can't proceed.
+/// Why picking a session in the session or search picker can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum PickSessionError {
     /// No session picker is open.
     NoPicker,
-    /// No thread is highlighted.
-    NoThread,
-    /// The thread was deleted, or is being deleted, since the picker opened.
+    /// No session or hit is highlighted.
+    NoSelection,
+    /// The session, or the hit's thread, was deleted or is being deleted
+    /// since the picker opened.
     Deleted,
-    /// Its harness no longer knows the thread's session.
-    Gone,
+    /// The hit's thread never ran in a session.
+    NoSession,
 }
 
-/// Allow jumping into the thread highlighted in the session picker, or the
-/// thread of the hit highlighted in the search picker.
+/// Allow jumping to the session highlighted in the session picker, or the
+/// session of the hit highlighted in the search picker.
 ///
 /// # Errors
 ///
 /// Returns [`PickSessionError::NoPicker`] unless the session or search
-/// picker is open, [`PickSessionError::NoThread`] when no thread or hit is
-/// highlighted, [`PickSessionError::Deleted`] when the thread is gone from
-/// the sidebar or being deleted, and [`PickSessionError::Gone`] when its
-/// session is `Gone`.
+/// picker is open, [`PickSessionError::NoSelection`] when no session or hit
+/// is highlighted, [`PickSessionError::NoSession`] when the hit's thread
+/// never ran in a session, and [`PickSessionError::Deleted`] when the
+/// session or the hit's thread is gone or being deleted.
 pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
-    let id = match &state.picker {
+    let picker = match &state.picker {
         Some(picker)
             if matches!(
                 picker.kind(),
                 PickerKind::Sessions { .. } | PickerKind::Search { .. }
             ) =>
         {
-            picker.selected_thread().ok_or(PickSessionError::NoThread)?
+            picker
         }
         _ => return Err(PickSessionError::NoPicker),
     };
-    if state.sessions.deleting.contains(&id) {
-        return Err(PickSessionError::Deleted);
-    }
-    match state.sessions.threads().find(|thread| thread.id == id) {
-        None => Err(PickSessionError::Deleted),
-        Some(thread) if thread.status == ThreadStatus::Gone => Err(PickSessionError::Gone),
-        Some(_) => Ok(()),
+    let session = match picker.selected() {
+        Some(&PickerItem::Session { id, .. }) => id,
+        Some(&PickerItem::Hit { thread, .. }) => state
+            .sessions
+            .threads()
+            .find(|shown| shown.id == thread)
+            .ok_or(PickSessionError::Deleted)?
+            .home()
+            .ok_or(PickSessionError::NoSession)?,
+        _ => return Err(PickSessionError::NoSelection),
+    };
+    match state.sessions.session(session) {
+        Some(_) if !state.sessions.deleting.contains(&session) => Ok(()),
+        _ => Err(PickSessionError::Deleted),
     }
 }
 
@@ -179,9 +186,9 @@ pub enum DeleteWorktreeError {
     NoPicker,
     /// No worktree row is highlighted.
     NoSelection,
-    /// A thread in the worktree is attached.
+    /// A session in the worktree is attached.
     Attached,
-    /// A thread in the worktree has a turn underway.
+    /// An agent in the worktree has a turn underway.
     MidTurn,
 }
 
@@ -191,8 +198,8 @@ pub enum DeleteWorktreeError {
 ///
 /// Returns [`DeleteWorktreeError::NoPicker`] unless the worktree picker is
 /// open, [`DeleteWorktreeError::NoSelection`] when no row is highlighted,
-/// [`DeleteWorktreeError::Attached`] when a thread in it is attached, and
-/// [`DeleteWorktreeError::MidTurn`] when a thread in it has a turn underway.
+/// [`DeleteWorktreeError::Attached`] when a session in it is attached, and
+/// [`DeleteWorktreeError::MidTurn`] when an agent in it has a turn underway.
 pub fn validate_delete_worktree(state: &AppState) -> Result<(), DeleteWorktreeError> {
     let path = match &state.picker {
         Some(picker) if *picker.kind() == PickerKind::Worktrees => picker
@@ -235,7 +242,8 @@ mod tests {
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
     use crate::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
+        ThreadStatus, sessions_for,
     };
     use crate::{AppState, Focus};
 
@@ -250,11 +258,12 @@ mod tests {
         }
     }
 
-    /// The session picker over one row, thread 1.
+    /// The session picker over one row, session 1 running thread 1.
     fn picking_thread_1() -> PickerState {
         PickerState::sessions(
-            vec![PickerItem::Thread {
-                id: ThreadId(1),
+            vec![PickerItem::Session {
+                id: SessionId(1),
+                thread: Some(ThreadId(1)),
                 label: "work/New thread".into(),
                 split: 5,
                 settled: false,
@@ -421,13 +430,11 @@ mod tests {
     fn pick_session_is_refused_for_a_thread_being_deleted() {
         // Given thread 1 highlighted in the session picker while it's being
         // deleted.
-        let state = AppState {
-            picker: Some(picking_thread_1()),
-            sessions: Sessions {
-                deleting: [ThreadId(1)].into(),
-                ..Sessions::default()
-            },
-            ..AppState::default()
+        let state = {
+            let mut state = deleting(ThreadStatus::Idle);
+            state.picker = Some(picking_thread_1());
+            state.sessions.deleting.insert(SessionId(1));
+            state
         };
 
         // When validating a pick.
@@ -480,6 +487,72 @@ mod tests {
         );
     }
 
+    /// The search picker over one hit, in thread 1, over `state`.
+    fn searching_thread_1(state: AppState) -> AppState {
+        let mut picker = PickerState::search(Focus::Sidebar);
+        picker.show_hits(
+            "",
+            vec![PickerItem::Hit {
+                id: 1,
+                thread: ThreadId(1),
+                label: "alpha/New thread".into(),
+                split: 6,
+                snippet: "fix the bug".into(),
+                lit: vec![],
+                text_lit: vec![],
+                path: "/t/1.jsonl".into(),
+                prompt_offset: 0,
+            }],
+            false,
+        );
+        AppState {
+            picker: Some(picker),
+            ..state
+        }
+    }
+
+    /// `state` with thread 1 out of its pane, as `last_session` left it.
+    fn ended(mut state: AppState, last_session: Option<SessionId>) -> AppState {
+        for thread in state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| project.threads.iter_mut())
+        {
+            thread.pane = None;
+            thread.last_session = last_session;
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn pick_session_allows_a_hit_in_an_ended_thread() {
+        // Given a hit in thread 1, which ended in session 1.
+        let state = searching_thread_1(ended(deleting(ThreadStatus::Idle), Some(SessionId(1))));
+
+        // When validating a pick.
+        let result = validate_pick_session(&state);
+
+        // Then it is allowed: the pick opens session 1.
+        assert_eq!(result, Ok(()), "an ended thread's session can be opened");
+    }
+
+    #[rstest::rstest]
+    fn pick_session_is_refused_for_a_hit_without_a_session() {
+        // Given a hit in thread 1, which never ran in a session.
+        let state = searching_thread_1(ended(deleting(ThreadStatus::Idle), None));
+
+        // When validating a pick.
+        let result = validate_pick_session(&state);
+
+        // Then validation fails with NoSession.
+        assert_eq!(
+            result,
+            Err(PickSessionError::NoSession),
+            "a hit with no session has nothing to open"
+        );
+    }
+
     #[rstest::rstest]
     fn pick_session_is_refused_for_a_thread_no_longer_listed() {
         // Given thread 1 highlighted in the session picker, but no longer in
@@ -505,6 +578,7 @@ mod tests {
     /// The worktree picker over `WORKTREE`, where thread 1, `status`, runs.
     fn deleting(status: ThreadStatus) -> AppState {
         let thread = Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(1),
             title: None,
@@ -512,7 +586,11 @@ mod tests {
             transcript: None,
             status,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(1),
+                session: SessionId(1),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -530,20 +608,22 @@ mod tests {
             split: 6,
             extra: String::new(),
         };
+        let projects = vec![Project {
+            id: ProjectId(1),
+            title: "alpha".into(),
+            root: "/alpha".into(),
+            created_at: SystemTime::UNIX_EPOCH,
+            removed: false,
+            draft: None,
+            threads: vec![thread],
+            groups: vec![],
+            kind: ProjectKind::Normal,
+        }];
         AppState {
             picker: Some(PickerState::worktrees(vec![row], Focus::Sidebar)),
             sessions: Sessions {
-                projects: vec![Project {
-                    id: ProjectId(1),
-                    title: "alpha".into(),
-                    root: "/alpha".into(),
-                    created_at: SystemTime::UNIX_EPOCH,
-                    removed: false,
-                    draft: None,
-                    threads: vec![thread],
-                    groups: vec![],
-                    kind: ProjectKind::Normal,
-                }],
+                sessions: sessions_for(&projects),
+                projects,
                 ..Sessions::default()
             },
             ..AppState::default()
@@ -576,7 +656,7 @@ mod tests {
     fn delete_worktree_rejected_while_a_thread_in_it_is_attached() {
         // Given a worktree whose thread is attached.
         let state = AppState {
-            attached: [ThreadId(1)].into(),
+            attached: [SessionId(1)].into(),
             ..deleting(ThreadStatus::Idle)
         };
 

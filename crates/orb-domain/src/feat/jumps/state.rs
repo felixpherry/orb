@@ -155,10 +155,10 @@ impl JumpList {
 #[cfg(test)]
 mod tests {
     use super::{JUMP_LIMIT, JumpList};
-    use crate::feat::sessions::state::{SidebarItem, ThreadId};
+    use crate::feat::sessions::state::{SessionId, SidebarItem};
 
     fn on(id: i64) -> SidebarItem {
-        SidebarItem::Thread(ThreadId(id))
+        SidebarItem::Session(SessionId(id))
     }
 
     /// A list holding threads `ids`, oldest first.

@@ -1,31 +1,26 @@
-//! Checks whether the user can attach to the selected thread's session, or
-//! detach it from its pane.
+//! Checks whether the user can attach to the selected session, or detach it
+//! from its panes.
 
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::ThreadStatus;
 
 /// Why attaching can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum AttachError {
-    /// No thread is selected.
+    /// No session is selected, or it is being deleted.
     NoSelection,
-    /// Its harness no longer knows the selected thread's session.
-    Gone,
 }
 
-/// Allow attaching only to a selected thread whose session still exists.
+/// Allow attaching only to a selected session that isn't being deleted.
 ///
 /// # Errors
 ///
-/// Returns [`AttachError::NoSelection`] without a selected thread, and
-/// [`AttachError::Gone`] if the selected thread's session is gone.
+/// Returns [`AttachError::NoSelection`] without such a session.
 pub fn validate_attach(state: &AppState) -> Result<(), AttachError> {
-    match state.sessions.selected_thread() {
+    match state.sessions.selected_session() {
         None => Err(AttachError::NoSelection),
-        Some(thread) if thread.status == ThreadStatus::Gone => Err(AttachError::Gone),
         Some(_) => Ok(()),
     }
 }
@@ -34,20 +29,20 @@ pub fn validate_attach(state: &AppState) -> Result<(), AttachError> {
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum DetachError {
-    /// No thread is selected.
+    /// No session is selected.
     NoSelection,
-    /// The selected thread has no pane.
+    /// The selected session isn't attached.
     NotAttached,
 }
 
-/// Allow detaching only a selected thread that is attached.
+/// Allow detaching only a selected session that is attached.
 ///
 /// # Errors
 ///
-/// Returns [`DetachError::NoSelection`] without a selected thread, and
-/// [`DetachError::NotAttached`] if the selected thread isn't attached.
+/// Returns [`DetachError::NoSelection`] without a selected session, and
+/// [`DetachError::NotAttached`] if the selected session isn't attached.
 pub fn validate_detach(state: &AppState) -> Result<(), DetachError> {
-    match state.sessions.selected_id() {
+    match state.sessions.selected_session().map(|session| session.id) {
         None => Err(DetachError::NoSelection),
         Some(id) if !state.attached.contains(&id) => Err(DetachError::NotAttached),
         Some(_) => Ok(()),
@@ -62,7 +57,8 @@ mod tests {
     use super::{AttachError, DetachError, validate_attach, validate_detach};
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
+        Thread, ThreadId, ThreadStatus, sessions_for,
     };
 
     #[rstest::rstest]
@@ -100,7 +96,7 @@ mod tests {
     #[rstest::rstest]
     fn detach_rejected_when_not_attached() {
         // Given thread 1 selected but not attached.
-        let state = AppState {
+        let mut state = AppState {
             sessions: Sessions {
                 projects: vec![Project {
                     id: ProjectId(1),
@@ -110,6 +106,7 @@ mod tests {
                     removed: false,
                     draft: None,
                     threads: vec![Thread {
+                        last_session: None,
                         harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
@@ -117,7 +114,11 @@ mod tests {
                         transcript: None,
                         status: ThreadStatus::Idle,
                         turn_started_at: None,
-                        pane: None,
+                        pane: Some(PaneLaunch {
+                            pane: PaneId(1),
+                            session: SessionId(1),
+                            command: vec![],
+                        }),
                         branch: None,
                         pinned_at: None,
                         settled_at: None,
@@ -132,11 +133,13 @@ mod tests {
                     groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
-                cursor: Some(SidebarItem::Thread(ThreadId(1))),
+                cursor: Some(SidebarItem::Session(SessionId(1))),
                 ..Sessions::default()
             },
             ..AppState::default()
         };
+
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
 
         // When validating detach.
         let result = validate_detach(&state);

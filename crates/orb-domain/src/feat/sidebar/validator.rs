@@ -1,5 +1,5 @@
 //! Checks whether the user can resize the sidebar or move the keys to it
-//! (neither while it's hidden), or rename the selected row (only a thread).
+//! (neither while it's hidden), or rename the selected row (only a session).
 
 use wherror::Error;
 
@@ -51,19 +51,19 @@ pub fn validate_focus_sidebar(state: &AppState) -> Result<(), FocusSidebarError>
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum RenameError {
-    /// The cursor isn't on a thread.
-    NoThread,
+    /// The cursor isn't on a session.
+    NoSession,
 }
 
-/// Allow renaming only the selected thread: not a draft or the Settled
+/// Allow renaming only the selected session: not a draft or the Settled
 /// header.
 ///
 /// # Errors
 ///
-/// Returns [`RenameError::NoThread`] without a selected thread.
+/// Returns [`RenameError::NoSession`] without a selected session.
 pub fn validate_rename(state: &AppState) -> Result<(), RenameError> {
-    match state.sessions.selected_thread() {
-        None => Err(RenameError::NoThread),
+    match state.sessions.selected_session() {
+        None => Err(RenameError::NoSession),
         Some(_) => Ok(()),
     }
 }
@@ -123,7 +123,7 @@ mod tests {
     #[rstest::rstest]
     #[case::draft(SidebarItem::Draft(ProjectId(1)))]
     #[case::shelf_header(SidebarItem::SettledShelf)]
-    fn rename_rejected_without_a_selected_thread(#[case] cursor: SidebarItem) {
+    fn rename_rejected_without_a_selected_session(#[case] cursor: SidebarItem) {
         // Given the cursor on a draft or the Settled header.
         let state = AppState {
             sessions: Sessions {
@@ -136,11 +136,11 @@ mod tests {
         // When validating a rename.
         let result = validate_rename(&state);
 
-        // Then validation fails with NoThread.
+        // Then validation fails with NoSession.
         assert_eq!(
             result,
-            Err(RenameError::NoThread),
-            "only a thread can be renamed"
+            Err(RenameError::NoSession),
+            "only a session can be renamed"
         );
     }
 }

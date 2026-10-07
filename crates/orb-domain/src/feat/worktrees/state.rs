@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::AppState;
 use crate::feat::git::git_service::WorktreeFacts;
-use crate::feat::sessions::state::{DraftWorkspace, Group, GroupKind, Project, Thread, ThreadId};
+use crate::feat::sessions::state::{DraftWorkspace, Project, Session, SessionId, Thread};
 
 /// How long after the newest settle a worktree is pruned.
 pub const PRUNE_AFTER: Duration = Duration::from_hours(7 * 24);
@@ -40,10 +40,8 @@ pub struct Worktree {
 /// Something in orb that runs in a worktree, or will.
 #[derive(Debug, Clone)]
 pub enum User<'a> {
-    /// A thread outside any group whose session runs there.
-    Thread(&'a Project, &'a Thread),
-    /// A Feature group that lives there, with its threads.
-    Group(&'a Project, &'a Group, Vec<&'a Thread>),
+    /// A session whose directory it is, with its agents.
+    Session(&'a Project, &'a Session, Vec<&'a Thread>),
     /// A project's draft pointed at the worktree.
     Draft(&'a Project),
 }
@@ -51,13 +49,13 @@ pub enum User<'a> {
 /// What the next sweep does with a worktree, and why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// Kept: a thread in it is attached.
+    /// Kept: a session in it is attached.
     Attached,
-    /// Kept: a thread in it is mid-turn.
+    /// Kept: an agent in it is mid-turn.
     MidTurn,
     /// Kept: a draft starts there.
     Draft,
-    /// Kept: a thread or group in it is active.
+    /// Kept: a session in it isn't settled.
     Active,
     /// Kept: git's facts aren't known yet, or can't be read.
     Unknown,
@@ -80,85 +78,62 @@ pub enum RowState {
     Orphan,
 }
 
-/// Everything in orb that uses the worktree at `path`: lone threads whose
-/// session runs there, Feature groups that live there (with their threads),
-/// and drafts pointed at it. Removed projects count, since their threads
-/// still run. Paths match exactly as stored.
+/// Everything in orb that uses the worktree at `path`: sessions whose
+/// directory it is (with their agents), then drafts pointed at it. Sessions
+/// of removed projects count, since their panes still run; sessions being
+/// deleted don't. Paths match exactly as stored.
 #[must_use]
 pub fn users<'a>(app: &'a AppState, path: &Path) -> Vec<User<'a>> {
-    app.sessions
-        .projects
+    let sessions = &app.sessions;
+    let in_use = sessions
+        .sessions
         .iter()
-        .flat_map(|project| {
-            let threads = project
-                .threads
-                .iter()
-                .filter(|thread| thread.group.is_none() && thread.cwd == path)
-                .map(|thread| User::Thread(project, thread));
-            let groups = project
-                .groups
-                .iter()
-                .filter(|group| group.kind == GroupKind::Feature && group.dir.as_deref() == Some(path))
-                .map(|group| {
-                    let threads = project
-                        .threads
-                        .iter()
-                        .filter(|thread| thread.group == Some(group.id))
-                        .collect();
-                    User::Group(project, group, threads)
-                });
-            let draft = project
-                .draft
-                .as_ref()
-                .filter(|draft| matches!(&draft.workspace, DraftWorkspace::Existing(dir) if dir == path))
-                .map(|_| User::Draft(project));
-            threads.chain(groups).chain(draft)
-        })
-        .collect()
-}
-
-/// The threads among `users`: lone threads and every group's threads.
-fn user_threads<'a>(users: &[User<'a>]) -> Vec<&'a Thread> {
-    users
-        .iter()
-        .flat_map(|user| match user {
-            User::Thread(_, thread) => vec![*thread],
-            User::Group(_, _, threads) => threads.clone(),
-            User::Draft(_) => Vec::new(),
-        })
-        .collect()
+        .filter(|session| session.dir == path && !sessions.deleting.contains(&session.id))
+        .filter_map(|session| {
+            let project = sessions.project(session.project)?;
+            Some(User::Session(project, session, sessions.agents(session.id)))
+        });
+    let drafts = sessions.projects.iter().filter_map(|project| {
+        project
+            .draft
+            .as_ref()
+            .filter(
+                |draft| matches!(&draft.workspace, DraftWorkspace::Existing(dir) if dir == path),
+            )
+            .map(|_| User::Draft(project))
+    });
+    in_use.chain(drafts).collect()
 }
 
 /// What the sweep does with a worktree that has these `users` and `facts`,
-/// checked in order: kept while a thread in it is attached or mid-turn, a
-/// draft starts there, a user is active, its facts are unknown or it has
-/// changes; otherwise pruned now with no users, or [`PRUNE_AFTER`] after the
-/// newest settle.
+/// checked in order: kept while a session in it is attached or an agent in
+/// it is mid-turn, a draft starts there, a session in it isn't settled, its
+/// facts are unknown or it has changes; otherwise pruned now with no users,
+/// or [`PRUNE_AFTER`] after the newest settle.
 #[must_use]
 pub fn verdict(
     users: &[User<'_>],
     facts: Option<&WorktreeFacts>,
-    attached: &HashSet<ThreadId>,
+    attached: &HashSet<SessionId>,
     now: SystemTime,
 ) -> Verdict {
-    let threads = user_threads(users);
-    if threads.iter().any(|thread| attached.contains(&thread.id)) {
+    let sessions = || {
+        users.iter().filter_map(|user| match user {
+            User::Session(_, session, agents) => Some((*session, agents)),
+            User::Draft(_) => None,
+        })
+    };
+    if sessions().any(|(session, _)| attached.contains(&session.id)) {
         return Verdict::Attached;
     }
-    if threads.iter().any(|thread| thread.status.in_progress()) {
+    if sessions().any(|(_, agents)| agents.iter().any(|thread| thread.status.in_progress())) {
         return Verdict::MidTurn;
     }
     if users.iter().any(|user| matches!(user, User::Draft(_))) {
         return Verdict::Draft;
     }
-    let settles: Vec<Option<SystemTime>> = users
-        .iter()
-        .filter_map(|user| match user {
-            User::Thread(_, thread) => Some(thread.settled_at),
-            User::Group(_, group, _) => Some(group.settled_at),
-            User::Draft(_) => None,
-        })
-        .collect();
+    let settles: Vec<Option<SystemTime>> =
+        sessions().map(|(session, _)| session.settled_at).collect();
     if settles.iter().any(Option::is_none) {
         return Verdict::Active;
     }
@@ -189,9 +164,10 @@ pub fn row_state(users: &[User<'_>], verdict: Verdict) -> RowState {
     }
 }
 
-/// When the worktree was last used: the newest chat among its users' threads
-/// (a group without threads counts from its creation, a draft from its
-/// own), or with no users, its last commit. `None` reads as never.
+/// When the worktree was last used: the newest chat among its sessions'
+/// agents (a session without agents counts from its last activity, a draft
+/// from its creation), or with no users, its last commit. `None` reads as
+/// never.
 #[must_use]
 pub fn last_used(users: &[User<'_>], facts: Option<&WorktreeFacts>) -> Option<SystemTime> {
     match users {
@@ -201,13 +177,12 @@ pub fn last_used(users: &[User<'_>], facts: Option<&WorktreeFacts>) -> Option<Sy
         users => users
             .iter()
             .filter_map(|user| match user {
-                User::Thread(_, thread) => Some(thread.last_chat()),
-                User::Group(_, group, threads) => Some(
-                    threads
+                User::Session(_, session, agents) => Some(
+                    agents
                         .iter()
                         .map(|thread| thread.last_chat())
                         .max()
-                        .unwrap_or(group.created_at),
+                        .unwrap_or(session.last_activity_at),
                 ),
                 User::Draft(project) => project.draft.as_ref().map(|draft| draft.created_at),
             })
@@ -248,8 +223,8 @@ mod tests {
     use crate::AppState;
     use crate::feat::git::git_service::WorktreeFacts;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
-        ProjectKind, Sessions, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, PaneId, PaneLaunch, Project, ProjectId, ProjectKind,
+        SessionId, Sessions, Thread, ThreadId, ThreadStatus, sessions_for,
     };
 
     const WT: &str = "/w/orb/orb-1";
@@ -266,6 +241,7 @@ mod tests {
     /// An idle, unsettled thread outside any group, running in `cwd`.
     fn thread(id: i64, cwd: &str) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
@@ -273,7 +249,11 @@ mod tests {
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                session: SessionId(id),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -303,35 +283,6 @@ mod tests {
         }
     }
 
-    /// `thread`, in group `id`.
-    fn grouped(thread: Thread, id: i64) -> Thread {
-        Thread {
-            group: Some(GroupId(id)),
-            ..thread
-        }
-    }
-
-    /// An unsettled Feature group living in `dir`.
-    fn group(id: i64, dir: &str) -> Group {
-        Group {
-            id: GroupId(id),
-            kind: GroupKind::Feature,
-            name: format!("group-{id}"),
-            dir: Some(PathBuf::from(dir)),
-            branch: None,
-            created_at: UNIX_EPOCH,
-            pinned_at: None,
-            settled_at: None,
-            active_since: UNIX_EPOCH,
-            defaults: GroupDefaults {
-                harness: HarnessId::new("claude"),
-                model: None,
-                permission: None,
-            },
-            draft: None,
-        }
-    }
-
     fn project(threads: Vec<Thread>, groups: Vec<Group>) -> Project {
         Project {
             id: ProjectId(1),
@@ -346,9 +297,11 @@ mod tests {
         }
     }
 
+    /// `projects`, each thread's session in its directory.
     fn app(projects: Vec<Project>) -> AppState {
         AppState {
             sessions: Sessions {
+                sessions: sessions_for(&projects),
                 projects,
                 ..Sessions::default()
             },
@@ -382,7 +335,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn verdict_after_eight_settled_days_is_prune_now() {
+    fn worktree_whose_sessions_settled_a_week_ago_is_prunable() {
         // Given a thread in the worktree settled eight days ago.
         let app = app(vec![project(vec![settled(thread(1, WT), 8)], vec![])]);
 
@@ -433,7 +386,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn verdict_with_an_active_user_is_active() {
+    fn worktree_of_an_unsettled_session_is_kept() {
         // Given an unsettled, idle thread in the worktree.
         let app = app(vec![project(vec![thread(1, WT)], vec![])]);
 
@@ -445,10 +398,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn verdict_with_an_attached_settled_thread_is_attached() {
+    fn worktree_of_an_attached_session_is_kept() {
         // Given a thread settled eight days ago that is attached.
         let app = AppState {
-            attached: HashSet::from([ThreadId(1)]),
+            attached: HashSet::from([SessionId(1)]),
             ..app(vec![project(vec![settled(thread(1, WT), 8)], vec![])])
         };
 
@@ -524,58 +477,26 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn verdict_of_a_feature_group_settled_eight_days_is_prune_now() {
-        // Given a Feature group in the worktree settled eight days ago, with an
-        // idle thread.
-        let app = app(vec![project(
-            vec![grouped(thread(1, WT), 7)],
-            vec![Group {
-                settled_at: Some(now() - days(8)),
-                ..group(7, WT)
-            }],
-        )]);
-
-        // When judging it with clean facts.
-        let verdict = verdict_at(&app, Some(&facts(0)));
-
-        // Then it prunes now.
-        assert_eq!(
-            verdict,
-            Verdict::PruneNow,
-            "the group's settle should count"
-        );
-    }
-
-    #[rstest::rstest]
-    fn verdict_of_an_active_feature_group_with_idle_threads_is_active() {
-        // Given an unsettled Feature group in the worktree with an idle thread.
-        let app = app(vec![project(
-            vec![grouped(thread(1, WT), 7)],
-            vec![group(7, WT)],
-        )]);
-
-        // When judging it with clean facts.
-        let verdict = verdict_at(&app, Some(&facts(0)));
-
-        // Then it's kept as active.
-        assert_eq!(verdict, Verdict::Active, "an unsettled group keeps it");
-    }
-
-    #[rstest::rstest]
-    fn users_ignore_threads_inside_a_group_as_lone_users() {
-        // Given a Feature group in the worktree whose thread also runs there.
-        let app = app(vec![project(
-            vec![grouped(thread(1, WT), 7)],
-            vec![group(7, WT)],
-        )]);
+    fn users_list_a_session_once_with_its_agents() {
+        // Given threads 1 and 2 both running in session 1 in the worktree.
+        let second = Thread {
+            pane: Some(PaneLaunch {
+                pane: PaneId(2),
+                session: SessionId(1),
+                command: vec![],
+            }),
+            ..thread(2, WT)
+        };
+        let app = app(vec![project(vec![thread(1, WT), second], vec![])]);
 
         // When listing the worktree's users.
         let users = users(&app, Path::new(WT));
 
-        // Then the thread comes only through its group.
+        // Then session 1 is the one user, holding both agents.
         assert!(
-            matches!(users.as_slice(), [User::Group(_, _, threads)] if threads.len() == 1),
-            "expected one group user holding the thread, got {users:?}"
+            matches!(users.as_slice(), [User::Session(_, session, agents)]
+                if session.id == SessionId(1) && agents.len() == 2),
+            "expected session 1 with two agents, got {users:?}"
         );
     }
 
@@ -686,8 +607,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn users_include_threads_of_removed_projects() {
-        // Given a removed project with a thread in the worktree.
+    fn users_include_sessions_of_removed_projects() {
+        // Given a removed project with a session in the worktree.
         let app = app(vec![Project {
             removed: true,
             ..project(vec![thread(1, WT)], vec![])
@@ -696,10 +617,10 @@ mod tests {
         // When listing the worktree's users.
         let users = users(&app, Path::new(WT));
 
-        // Then the thread is one of them.
+        // Then the session is one of them.
         assert!(
-            matches!(users.as_slice(), [User::Thread(_, thread)] if thread.id == ThreadId(1)),
-            "a removed project's thread should count, got {users:?}"
+            matches!(users.as_slice(), [User::Session(_, session, _)] if session.id == SessionId(1)),
+            "a removed project's session should count, got {users:?}"
         );
     }
 }

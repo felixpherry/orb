@@ -1,53 +1,36 @@
 //! Key routing: which keys do what in each focus. Only keys the user has
 //! defined are bound.
 //!
-//! In the sidebar and the dashboard, keys go through a which-key keymap whose
-//! scope is the focus and what the sidebar cursor is on; `<Space>` is the
-//! leader and shows a popup. A key that does nothing for the selection isn't
-//! bound there (`␣h`/`␣m`/`␣a` on a thread, `␣a` and the dashboard's `a`
-//! where the selection's harness has no permission modes, `p`/`s` off a lone thread or a
-//! group's card, `r` off a thread, `␣w`/`␣b`
-//! and the tool keys `␣t`/`␣gg`/`␣v` with nothing selected, and the
-//! dashboard's `h`/`m`/`a` off a draft or a group's card and
-//! `o`/`w`/`b`/`t`/`g`/`v` with nothing selected), so the popups don't offer
-//! it. On the dashboard each menu item's
-//! letter runs it, `j`/`k` or `↓`/`↑` move the menu cursor, and `⏎` runs the
-//! highlighted item. `<C-Right>`/`<C-Left>` resize the focused side
-//! outside which-key, which can't name them, and `<C-o>`/`<C-i>` move back
-//! and forward through the jump list, also outside which-key. In the
-//! sidebar, `<C-\>` detaches the selected attached thread, outside which-key
-//! too. While attached, every key goes to the attached program except `<C-\>`, `<C-h>`,
-//! `<C-b>`, `<C-Space>`, which opens the session picker, the jump keys, and
-//! the resize keys, which resize the pane as they do the dashboard. An open
-//! picker takes typed characters as filter text and has its own fixed keys,
-//! `<C-x>` among them for removing a project from the project filter and
-//! `<C-s>` for showing or hiding settled threads in the session picker. The
-//! rename box (`r`) and the sidebar search (`/` or `i`) use the picker's keys.
-//! `␣␣` opens the session picker in every scope. `␣i` opens orb's Incognito
-//! draft in every scope; on the dashboard, `i` does too. On a
-//! group's card, draft or threads, `l`/`h` open and close the group. `␣w` isn't bound
-//! on them, and `␣b` (the dashboard's `b` too) only on the card of a Feature
-//! group whose worktree exists, where it switches that worktree's branch.
-//! `␣h`/`␣m`/`␣a` on a card pick the group's default harness, model and
-//! permission, and on a group's draft that draft's own. `n` on a group's card
-//! or thread opens the group's draft, making one when it has none; `d` on a
-//! card deletes the group.
-//! `␣gf`/`␣gr`/`␣gl` add a Feature, Research or Learn group in every scope.
-//! The Cmd keys (focus moves, split, close, grow and shrink, tab moves) work
-//! in the sidebar and in panes, outside which-key, which has no Super
-//! modifier.
-//! On orb's Incognito draft and its threads, `␣w`/`␣b` and the dashboard's
-//! `w`/`b` aren't bound: every other key is the same as on any draft or
-//! thread.
+//! In the sidebar, keys go through a which-key keymap whose scope is the
+//! focus and what the sidebar cursor is on; `<Space>` is the leader and shows
+//! a popup. A key that does nothing for the selection isn't bound there
+//! (`␣h`/`␣m`/`␣a` off a draft, `␣a` where the selection's harness has no
+//! permission modes, `p`/`s`/`r` off a session, `␣w`/`␣b` and the tool keys
+//! `␣t`/`␣gg`/`␣v` with nothing selected), so the popups don't offer it.
+//! `<C-Right>`/`<C-Left>` resize the focused side outside which-key, which
+//! can't name them, and `<C-o>`/`<C-i>` move back and forward through the
+//! jump list, also outside which-key. In the sidebar, `<C-\>` detaches the
+//! selected attached session, outside which-key too. While attached, every
+//! key goes to the attached program except `<C-\>`, `<C-h>`, `<C-b>`,
+//! `<C-Space>`, which opens the session picker, the jump keys, and the resize
+//! keys, which resize the pane. An open picker takes typed characters as
+//! filter text and has its own fixed keys, `<C-x>` among them for removing a
+//! project from the project filter and `<C-s>` for showing or hiding settled
+//! sessions in the session picker. The rename box (`r`) and the sidebar
+//! search (`/` or `i`) use the picker's keys. `␣␣` opens the session picker
+//! in every scope. `␣i` opens orb's Incognito draft in every scope. `l`/`h`
+//! open and close the Settled shelf. On a group's draft, `␣h`/`␣m`/`␣a` pick
+//! the draft's own harness, model and permission. `␣gf`/`␣gr`/`␣gl` add a
+//! Feature, Research or Learn group in every scope. The Cmd keys (focus
+//! moves, split, close, grow and shrink, tab moves) work in the sidebar and
+//! in panes, outside which-key, which has no Super modifier. On orb's
+//! Incognito draft and on Incognito, Research and Learn sessions, `␣w`/`␣b`
+//! aren't bound: every other key is the same as on any draft or session.
 
 use std::fmt;
 
-use orb_domain::feat::dashboard::DashboardItem::{
-    AddProject, Branch, FilterProjects, Harness, Incognito, Lazygit, Model, Neovim, NewSession,
-    Open, Permission, Quit, Shell, Start, Workspace,
-};
 use orb_domain::feat::layout::tree::{NavDirection, Split};
-use orb_domain::feat::sessions::state::{GroupKind, ProjectKind, Sessions};
+use orb_domain::feat::sessions::state::{GroupKind, ProjectKind, SessionKind, Sessions};
 use orb_domain::feat::zellij::zellij_service::Tool;
 use orb_domain::{AppState, Focus, Intent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -78,19 +61,13 @@ impl fmt::Display for KeyCategory {
 /// What the sidebar cursor is on, which decides the keys that do something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Selection {
-    Thread,
+    /// A session in a project's checkout or worktree.
+    Session,
+    /// An Incognito, Research or Learn session, whose folder is orb's own.
+    OwnFolderSession,
     Draft,
-    /// A thread of orb's Incognito project, outside a group.
-    IncognitoThread,
     /// orb's Incognito project's draft.
     IncognitoDraft,
-    /// A group's card with no worktree: a Research or Learn group, or a
-    /// Feature group before its draft starts.
-    GroupCard,
-    /// A Feature group's card once its worktree exists.
-    WorktreeCard,
-    /// A thread in a group.
-    GroupThread,
     /// A group's draft.
     GroupDraft,
     /// No row, or the settled shelf's header.
@@ -103,30 +80,18 @@ impl Selection {
         match (
             sessions.selected_draft(),
             sessions.selected_group_draft(),
-            sessions.selected_thread(),
-            sessions.selected_group(),
+            sessions.selected_session(),
         ) {
-            (Some((project, _)), _, _, _) if project.kind == ProjectKind::Incognito => {
+            (Some((project, _)), _, _) if project.kind == ProjectKind::Incognito => {
                 Self::IncognitoDraft
             }
-            (Some(_), _, _, _) => Self::Draft,
-            (None, Some(_), _, _) => Self::GroupDraft,
-            (None, None, Some(_), Some(_)) => Self::GroupThread,
-            (None, None, Some(_), None)
-                if sessions
-                    .selected_project()
-                    .is_some_and(|project| project.kind == ProjectKind::Incognito) =>
-            {
-                Self::IncognitoThread
+            (Some(_), _, _) => Self::Draft,
+            (None, Some(_), _) => Self::GroupDraft,
+            (None, None, Some(session)) if session.kind != SessionKind::Plain => {
+                Self::OwnFolderSession
             }
-            (None, None, Some(_), None) => Self::Thread,
-            (None, None, None, Some((_, group)))
-                if group.kind == GroupKind::Feature && group.dir.is_some() =>
-            {
-                Self::WorktreeCard
-            }
-            (None, None, None, Some(_)) => Self::GroupCard,
-            (None, None, None, None) => Self::Nothing,
+            (None, None, Some(_)) => Self::Session,
+            (None, None, None) => Self::Nothing,
         }
     }
 }
@@ -135,50 +100,34 @@ impl Selection {
 /// for the selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Scope {
-    /// The sidebar on a thread.
+    /// The sidebar on a session.
     Sidebar,
     /// The sidebar on a draft: no pin or settle, but its setting pickers.
     SidebarDraft,
-    /// The sidebar with no thread or draft selected.
+    /// The sidebar with no session or draft selected.
     SidebarEmpty,
-    /// The sidebar on a group's card: fold keys, pin, settle, delete and
-    /// `n`, but no rename.
-    SidebarGroup,
-    /// The sidebar on a started Feature group's card: [`Scope::SidebarGroup`]'s
-    /// keys and its worktree's branch.
-    SidebarWorktreeGroup,
-    /// The sidebar on a thread in a group: fold keys, rename, delete and
-    /// `n`; no pin or settle.
-    SidebarGroupThread,
-    /// The sidebar on a group's draft: fold keys, its setting pickers, and
-    /// `d`, which discards it once the group has a thread.
+    /// The sidebar on a group's draft: its setting pickers, and `d`, which
+    /// discards it.
     SidebarGroupDraft,
-    /// The sidebar on an Incognito thread: [`Scope::Sidebar`]'s keys but
-    /// `␣w`/`␣b`.
+    /// The sidebar on an Incognito, Research or Learn session:
+    /// [`Scope::Sidebar`]'s keys but `␣w`/`␣b`.
     SidebarIncognito,
     /// The sidebar on the Incognito draft: [`Scope::SidebarDraft`]'s keys but
     /// `␣w`/`␣b`.
     SidebarIncognitoDraft,
-    /// The dashboard on a thread.
+    /// The dashboard on a session.
     Dashboard,
     /// The dashboard on a draft: its setting pickers too.
     DashboardDraft,
-    /// The dashboard with no thread or draft selected.
+    /// The dashboard with no session or draft selected.
     DashboardEmpty,
-    /// The dashboard on a group's card: the tools only.
-    DashboardGroup,
-    /// The dashboard on a started Feature group's card: its worktree's branch
-    /// and the tools.
-    DashboardWorktreeGroup,
-    /// The dashboard on a thread in a group: no workspace or branch.
-    DashboardGroupThread,
     /// The dashboard on a group's draft: its setting pickers too.
     DashboardGroupDraft,
-    /// The dashboard on an Incognito thread: [`Scope::Dashboard`]'s keys but
-    /// `␣w`/`␣b`/`w`/`b`.
+    /// The dashboard on an Incognito, Research or Learn session:
+    /// [`Scope::Dashboard`]'s keys but `␣w`/`␣b`.
     DashboardIncognito,
     /// The dashboard on the Incognito draft: [`Scope::DashboardDraft`]'s keys
-    /// but `␣w`/`␣b`/`w`/`b`.
+    /// but `␣w`/`␣b`.
     DashboardIncognitoDraft,
 }
 
@@ -186,18 +135,15 @@ impl Scope {
     /// The scope for keys in `focus` with `selection`.
     pub(crate) fn new(focus: Focus, selection: Selection) -> Self {
         match (focus, selection) {
-            (Focus::Dashboard, Selection::Thread) => Self::Dashboard,
+            (Focus::Dashboard, Selection::Session) => Self::Dashboard,
             (Focus::Dashboard, Selection::Draft) => Self::DashboardDraft,
             (Focus::Dashboard, Selection::Nothing) => Self::DashboardEmpty,
-            (Focus::Dashboard, Selection::GroupCard) => Self::DashboardGroup,
-            (Focus::Dashboard, Selection::WorktreeCard) => Self::DashboardWorktreeGroup,
-            (Focus::Dashboard, Selection::GroupThread) => Self::DashboardGroupThread,
             (Focus::Dashboard, Selection::GroupDraft) => Self::DashboardGroupDraft,
-            (Focus::Dashboard, Selection::IncognitoThread) => Self::DashboardIncognito,
+            (Focus::Dashboard, Selection::OwnFolderSession) => Self::DashboardIncognito,
             (Focus::Dashboard, Selection::IncognitoDraft) => Self::DashboardIncognitoDraft,
             (
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::Thread,
+                Selection::Session,
             ) => Self::Sidebar,
             (
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
@@ -209,23 +155,11 @@ impl Scope {
             ) => Self::SidebarEmpty,
             (
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::GroupCard,
-            ) => Self::SidebarGroup,
-            (
-                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::WorktreeCard,
-            ) => Self::SidebarWorktreeGroup,
-            (
-                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::GroupThread,
-            ) => Self::SidebarGroupThread,
-            (
-                Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
                 Selection::GroupDraft,
             ) => Self::SidebarGroupDraft,
             (
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
-                Selection::IncognitoThread,
+                Selection::OwnFolderSession,
             ) => Self::SidebarIncognito,
             (
                 Focus::Sidebar | Focus::Attached | Focus::Picker | Focus::Rename | Focus::Search,
@@ -235,8 +169,8 @@ impl Scope {
     }
 }
 
-/// Which bindings apply: [`Scope`]'s, with `␣a` and the dashboard's `a`
-/// only while the selection's harness lists permission modes.
+/// Which bindings apply: [`Scope`]'s, with `␣a` only while the selection's
+/// harness lists permission modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct KeyScope {
     scope: Scope,
@@ -304,36 +238,18 @@ pub(crate) type Keys = WhichKeyState<KeyEvent, KeyScope, Intent, KeyCategory>;
     reason = "one binding per key keeps the whole keymap in one place"
 )]
 pub(crate) fn keymap() -> Keymap<KeyEvent, KeyScope, Intent, KeyCategory> {
-    const SIDEBAR_GROUPS: [Scope; 4] = [
-        Scope::SidebarGroup,
-        Scope::SidebarWorktreeGroup,
-        Scope::SidebarGroupThread,
-        Scope::SidebarGroupDraft,
-    ];
-    const DASHBOARD_GROUPS: [Scope; 4] = [
-        Scope::DashboardGroup,
-        Scope::DashboardWorktreeGroup,
-        Scope::DashboardGroupThread,
-        Scope::DashboardGroupDraft,
-    ];
-    const SIDEBAR: [Scope; 9] = [
+    const SIDEBAR: [Scope; 6] = [
         Scope::Sidebar,
         Scope::SidebarDraft,
         Scope::SidebarEmpty,
-        Scope::SidebarGroup,
-        Scope::SidebarWorktreeGroup,
-        Scope::SidebarGroupThread,
         Scope::SidebarGroupDraft,
         Scope::SidebarIncognito,
         Scope::SidebarIncognitoDraft,
     ];
-    const DASHBOARD: [Scope; 9] = [
+    const DASHBOARD: [Scope; 6] = [
         Scope::Dashboard,
         Scope::DashboardDraft,
         Scope::DashboardEmpty,
-        Scope::DashboardGroup,
-        Scope::DashboardWorktreeGroup,
-        Scope::DashboardGroupThread,
         Scope::DashboardGroupDraft,
         Scope::DashboardIncognito,
         Scope::DashboardIncognitoDraft,
@@ -395,71 +311,26 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, KeyScope, Intent, KeyCategory> {
             .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
             .bind("h", Intent::CloseShelf, KeyCategory::Navigation, scope);
     }
-    for scope in SIDEBAR_GROUPS {
+    for scope in [Scope::Sidebar, Scope::SidebarIncognito] {
         keymap
-            .bind("l", Intent::OpenGroup, KeyCategory::Navigation, scope)
-            .bind("h", Intent::CloseGroup, KeyCategory::Navigation, scope);
-    }
-    for scope in [
-        Scope::Sidebar,
-        Scope::SidebarGroupThread,
-        Scope::SidebarIncognito,
-    ] {
-        keymap.bind("r", Intent::Rename, KeyCategory::Threads, scope);
-    }
-    for scope in [
-        Scope::Sidebar,
-        Scope::SidebarGroup,
-        Scope::SidebarWorktreeGroup,
-        Scope::SidebarIncognito,
-    ] {
-        keymap
+            .bind("r", Intent::Rename, KeyCategory::Threads, scope)
             .bind("p", Intent::TogglePin, KeyCategory::Threads, scope)
             .bind("s", Intent::ToggleSettle, KeyCategory::Threads, scope);
     }
     for scope in [
-        Scope::SidebarGroup,
-        Scope::SidebarWorktreeGroup,
-        Scope::SidebarGroupThread,
-    ] {
-        keymap.bind("n", Intent::OpenGroupDraft, KeyCategory::Sessions, scope);
-    }
-    for scope in [
         Scope::Sidebar,
         Scope::SidebarDraft,
+        Scope::SidebarGroupDraft,
         Scope::SidebarIncognito,
         Scope::SidebarIncognitoDraft,
-    ]
-    .into_iter()
-    .chain(SIDEBAR_GROUPS)
-    {
-        keymap.bind("d", Intent::DeleteThread, KeyCategory::Threads, scope);
+    ] {
+        keymap.bind("d", Intent::Delete, KeyCategory::Threads, scope);
     }
     for scope in DASHBOARD {
         keymap
             .bind(
                 "<c-h>",
                 Intent::FocusSidebar,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind("j", Intent::DashboardNext, KeyCategory::Navigation, scope)
-            .bind(
-                "<down>",
-                Intent::DashboardNext,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind("k", Intent::DashboardPrev, KeyCategory::Navigation, scope)
-            .bind(
-                "<up>",
-                Intent::DashboardPrev,
-                KeyCategory::Navigation,
-                scope,
-            )
-            .bind(
-                "<enter>",
-                Intent::DashboardRun,
                 KeyCategory::Navigation,
                 scope,
             )
@@ -475,53 +346,6 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, KeyScope, Intent, KeyCategory> {
                 KeyCategory::Sessions,
                 scope,
             );
-    }
-    for (scope, items) in [
-        (
-            Scope::Dashboard,
-            &[Open, Workspace, Branch, Shell, Lazygit, Neovim][..],
-        ),
-        (
-            Scope::DashboardDraft,
-            &[
-                Start, Workspace, Branch, Harness, Model, Permission, Shell, Lazygit, Neovim,
-            ],
-        ),
-        (Scope::DashboardEmpty, &[]),
-        (
-            Scope::DashboardGroup,
-            &[Harness, Model, Permission, Shell, Lazygit, Neovim],
-        ),
-        (
-            Scope::DashboardWorktreeGroup,
-            &[Branch, Harness, Model, Permission, Shell, Lazygit, Neovim],
-        ),
-        (Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim]),
-        (
-            Scope::DashboardGroupDraft,
-            &[Start, Harness, Model, Permission, Shell, Lazygit, Neovim],
-        ),
-        (Scope::DashboardIncognito, &[Open, Shell, Lazygit, Neovim]),
-        (
-            Scope::DashboardIncognitoDraft,
-            &[Start, Harness, Model, Permission, Shell, Lazygit, Neovim],
-        ),
-    ] {
-        for item in items
-            .iter()
-            .chain(&[NewSession, Incognito, AddProject, FilterProjects, Quit])
-        {
-            let category = match item {
-                Shell | Lazygit | Neovim => KeyCategory::Tools,
-                Quit => KeyCategory::General,
-                _ => KeyCategory::Sessions,
-            };
-            let key = item.key().to_string();
-            match item {
-                Permission => keymap.bind_permissions(&key, item.intent(), category, scope),
-                _ => keymap.bind(&key, item.intent(), category, scope),
-            };
-        }
     }
     for scope in SIDEBAR.into_iter().chain(DASHBOARD) {
         keymap
@@ -580,42 +404,32 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, KeyScope, Intent, KeyCategory> {
         Scope::Dashboard,
         Scope::DashboardDraft,
     ] {
-        keymap.bind(
-            "<leader>w",
-            Intent::ChangeWorkspace,
-            KeyCategory::Sessions,
-            scope,
-        );
+        keymap
+            .bind(
+                "<leader>w",
+                Intent::ChangeWorkspace,
+                KeyCategory::Sessions,
+                scope,
+            )
+            .bind(
+                "<leader>b",
+                Intent::SwitchBranch,
+                KeyCategory::Sessions,
+                scope,
+            );
     }
     for scope in [
         Scope::Sidebar,
         Scope::SidebarDraft,
-        Scope::SidebarWorktreeGroup,
-        Scope::Dashboard,
-        Scope::DashboardDraft,
-        Scope::DashboardWorktreeGroup,
-    ] {
-        keymap.bind(
-            "<leader>b",
-            Intent::SwitchBranch,
-            KeyCategory::Sessions,
-            scope,
-        );
-    }
-    for scope in [
-        Scope::Sidebar,
-        Scope::SidebarDraft,
-        Scope::Dashboard,
-        Scope::DashboardDraft,
+        Scope::SidebarGroupDraft,
         Scope::SidebarIncognito,
         Scope::SidebarIncognitoDraft,
+        Scope::Dashboard,
+        Scope::DashboardDraft,
+        Scope::DashboardGroupDraft,
         Scope::DashboardIncognito,
         Scope::DashboardIncognitoDraft,
-    ]
-    .into_iter()
-    .chain(SIDEBAR_GROUPS)
-    .chain(DASHBOARD_GROUPS)
-    {
+    ] {
         keymap
             .bind(
                 "<leader>t",
@@ -641,10 +455,6 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, KeyScope, Intent, KeyCategory> {
         Scope::DashboardDraft,
         Scope::SidebarGroupDraft,
         Scope::DashboardGroupDraft,
-        Scope::SidebarGroup,
-        Scope::SidebarWorktreeGroup,
-        Scope::DashboardGroup,
-        Scope::DashboardWorktreeGroup,
         Scope::SidebarIncognitoDraft,
         Scope::DashboardIncognitoDraft,
     ] {
@@ -758,7 +568,7 @@ pub(crate) fn cmd_route(key: KeyEvent) -> Option<Intent> {
 
 /// What `key` does in the sidebar outside which-key: `<C-\>` (the kitty
 /// `Char('\\')` and the legacy `Char('4')` forms) detaches the selected
-/// thread. `None` for any other key.
+/// session. `None` for any other key.
 pub(crate) fn sidebar_route(key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('\\' | '4'), KeyModifiers::CONTROL) => Some(Intent::DetachSelected),
@@ -795,16 +605,14 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
 
 #[cfg(test)]
 mod tests {
-    use orb_domain::feat::dashboard::DashboardItem::{
-        self, AddProject, Branch, FilterProjects, Harness, Incognito, Lazygit, Model, Neovim,
-        NewSession, Open, Permission, Quit, Shell, Start, Workspace,
-    };
     use orb_domain::feat::harness::HarnessId;
     use std::time::SystemTime;
 
+    use crate::test_support::sessions_for;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Project,
-        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, PaneId,
+        PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus,
     };
     use orb_domain::feat::zellij::zellij_service::Tool;
     use orb_domain::{Focus, Intent};
@@ -914,10 +722,6 @@ mod tests {
     #[case(Scope::SidebarDraft, 'b', Intent::SwitchBranch)]
     #[case(Scope::SidebarDraft, 'm', Intent::PickModel)]
     #[case(Scope::SidebarDraft, 'a', Intent::PickPermission)]
-    #[case(Scope::SidebarGroup, 'm', Intent::PickModel)]
-    #[case(Scope::SidebarGroup, 'a', Intent::PickPermission)]
-    #[case(Scope::SidebarWorktreeGroup, 'm', Intent::PickModel)]
-    #[case(Scope::SidebarWorktreeGroup, 'a', Intent::PickPermission)]
     fn leader_keys_open_the_session_setup_pickers(
         #[case] scope: Scope,
         #[case] pressed: char,
@@ -1019,102 +823,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn q_quits_on_the_dashboard(
-        #[values(Scope::Dashboard, Scope::DashboardDraft, Scope::DashboardEmpty)] scope: Scope,
-    ) {
-        // Given the keymap in a dashboard scope.
-        let mut keys = Keys::new(keymap(), scope.into());
-
-        // When pressing `q`.
-        let intent = press(&mut keys, key(KeyCode::Char('q')));
-
-        // Then orb quits.
-        assert_eq!(intent, Some(Intent::Quit), "q should quit in {scope:?}");
-    }
-
-    #[rstest::rstest]
-    fn dashboard_movement_keys_move_the_menu_cursor(
-        #[values(Scope::Dashboard, Scope::DashboardDraft, Scope::DashboardEmpty)] scope: Scope,
-        #[values(
-            (key(KeyCode::Char('j')), Intent::DashboardNext),
-            (key(KeyCode::Down), Intent::DashboardNext),
-            (key(KeyCode::Char('k')), Intent::DashboardPrev),
-            (key(KeyCode::Up), Intent::DashboardPrev),
-            (key(KeyCode::Enter), Intent::DashboardRun),
-        )]
-        binding: (KeyEvent, Intent),
-    ) {
-        // Given the keymap in a dashboard scope.
-        let (pressed, expected) = binding;
-        let mut keys = Keys::new(keymap(), scope.into());
-
-        // When pressing the key.
-        let intent = press(&mut keys, pressed);
-
-        // Then it moves the cursor or runs the highlighted item.
-        assert_eq!(intent.as_ref(), Some(&expected), "{pressed:?} in {scope:?}");
-    }
-
-    #[rstest::rstest]
-    #[case::general_on_a_thread(Scope::Dashboard, &[NewSession, Incognito, AddProject, FilterProjects, Quit])]
-    #[case::general_on_a_draft(Scope::DashboardDraft, &[NewSession, Incognito, AddProject, FilterProjects, Quit])]
-    #[case::general_on_nothing(Scope::DashboardEmpty, &[NewSession, Incognito, AddProject, FilterProjects, Quit])]
-    #[case::thread(Scope::Dashboard, &[Open, Workspace, Branch, Shell, Lazygit, Neovim])]
-    #[case::draft(
-        Scope::DashboardDraft,
-        &[Start, Workspace, Branch, Harness, Model, Permission, Shell, Lazygit, Neovim]
-    )]
-    #[case::group(Scope::DashboardGroup, &[Harness, Model, Permission, Shell, Lazygit, Neovim])]
-    #[case::worktree_group(
-        Scope::DashboardWorktreeGroup,
-        &[Branch, Harness, Model, Permission, Shell, Lazygit, Neovim]
-    )]
-    #[case::group_thread(Scope::DashboardGroupThread, &[Open, Shell, Lazygit, Neovim])]
-    #[case::group_draft(
-        Scope::DashboardGroupDraft,
-        &[Start, Harness, Model, Permission, Shell, Lazygit, Neovim]
-    )]
-    #[case::incognito_thread(Scope::DashboardIncognito, &[Open, Shell, Lazygit, Neovim])]
-    #[case::incognito_draft(
-        Scope::DashboardIncognitoDraft,
-        &[Start, Harness, Model, Permission, Shell, Lazygit, Neovim]
-    )]
-    #[case::general_on_an_incognito_thread(Scope::DashboardIncognito, &[NewSession, Incognito, AddProject, FilterProjects, Quit])]
-    fn dashboard_item_keys_run_their_items(#[case] scope: Scope, #[case] items: &[DashboardItem]) {
-        // Given the keymap in a dashboard scope.
-        let mut keys = Keys::new(keymap(), scope.into());
-
-        // When pressing each item's key.
-        let intents: Vec<Option<Intent>> = items
-            .iter()
-            .map(|item| press(&mut keys, key(KeyCode::Char(item.key()))))
-            .collect();
-
-        // Then each yields its item's intent.
-        let expected: Vec<Option<Intent>> = items.iter().map(|item| Some(item.intent())).collect();
-        assert_eq!(intents, expected, "the item keys in {scope:?}");
-    }
-
-    #[rstest::rstest]
-    #[case(Scope::DashboardDraft, Some(Intent::PickModel))]
-    #[case(Scope::DashboardGroup, Some(Intent::PickModel))]
-    #[case(Scope::Dashboard, None)]
-    #[case(Scope::DashboardGroupThread, None)]
-    fn m_picks_the_model_only_on_a_drafts_dashboard(
-        #[case] scope: Scope,
-        #[case] expected: Option<Intent>,
-    ) {
-        // Given the keymap in a dashboard scope.
-        let mut keys = Keys::new(keymap(), scope.into());
-
-        // When pressing `m`.
-        let intent = press(&mut keys, key(KeyCode::Char('m')));
-
-        // Then it opens the model picker only on a draft.
-        assert_eq!(intent, expected, "m in {scope:?}");
-    }
-
-    #[rstest::rstest]
     fn o_is_unbound_on_the_dashboard_with_nothing_selected() {
         // Given the keymap on the dashboard with no thread or draft selected.
         let mut keys = Keys::new(keymap(), Scope::DashboardEmpty.into());
@@ -1157,9 +865,6 @@ mod tests {
             Scope::Sidebar,
             Scope::SidebarDraft,
             Scope::SidebarEmpty,
-            Scope::SidebarGroup,
-            Scope::SidebarWorktreeGroup,
-            Scope::SidebarGroupThread,
             Scope::SidebarGroupDraft,
             Scope::SidebarIncognito,
             Scope::SidebarIncognitoDraft
@@ -1217,18 +922,12 @@ mod tests {
             Scope::Sidebar,
             Scope::SidebarDraft,
             Scope::SidebarEmpty,
-            Scope::SidebarGroup,
-            Scope::SidebarWorktreeGroup,
-            Scope::SidebarGroupThread,
             Scope::SidebarGroupDraft,
             Scope::SidebarIncognito,
             Scope::SidebarIncognitoDraft,
             Scope::Dashboard,
             Scope::DashboardDraft,
             Scope::DashboardEmpty,
-            Scope::DashboardGroup,
-            Scope::DashboardWorktreeGroup,
-            Scope::DashboardGroupThread,
             Scope::DashboardGroupDraft,
             Scope::DashboardIncognito,
             Scope::DashboardIncognitoDraft
@@ -1256,18 +955,12 @@ mod tests {
             Scope::Sidebar,
             Scope::SidebarDraft,
             Scope::SidebarEmpty,
-            Scope::SidebarGroup,
-            Scope::SidebarWorktreeGroup,
-            Scope::SidebarGroupThread,
             Scope::SidebarGroupDraft,
             Scope::SidebarIncognito,
             Scope::SidebarIncognitoDraft,
             Scope::Dashboard,
             Scope::DashboardDraft,
             Scope::DashboardEmpty,
-            Scope::DashboardGroup,
-            Scope::DashboardWorktreeGroup,
-            Scope::DashboardGroupThread,
             Scope::DashboardGroupDraft,
             Scope::DashboardIncognito,
             Scope::DashboardIncognitoDraft
@@ -1294,10 +987,8 @@ mod tests {
         #[values(
             Scope::Sidebar,
             Scope::SidebarEmpty,
-            Scope::SidebarGroup,
             Scope::Dashboard,
-            Scope::DashboardEmpty,
-            Scope::DashboardGroup
+            Scope::DashboardEmpty
         )]
         scope: Scope,
     ) {
@@ -1322,10 +1013,8 @@ mod tests {
         #[values(
             Scope::Sidebar,
             Scope::SidebarEmpty,
-            Scope::SidebarGroup,
             Scope::Dashboard,
-            Scope::DashboardEmpty,
-            Scope::DashboardGroup
+            Scope::DashboardEmpty
         )]
         scope: Scope,
     ) {
@@ -1358,35 +1047,6 @@ mod tests {
             routed,
             Route::Forward,
             "{c:?} of ␣sg should be forwarded while attached"
-        );
-    }
-
-    #[rstest::rstest]
-    fn i_opens_incognito_on_the_dashboard(
-        #[values(
-            Scope::Dashboard,
-            Scope::DashboardDraft,
-            Scope::DashboardEmpty,
-            Scope::DashboardGroup,
-            Scope::DashboardWorktreeGroup,
-            Scope::DashboardGroupThread,
-            Scope::DashboardGroupDraft,
-            Scope::DashboardIncognito,
-            Scope::DashboardIncognitoDraft
-        )]
-        scope: Scope,
-    ) {
-        // Given the keymap in a dashboard scope.
-        let mut keys = Keys::new(keymap(), scope.into());
-
-        // When pressing `i`.
-        let intent = press(&mut keys, key(KeyCode::Char('i')));
-
-        // Then it opens the incognito draft.
-        assert_eq!(
-            intent,
-            Some(Intent::NewIncognito),
-            "i should open incognito in {scope:?}"
         );
     }
 
@@ -1482,7 +1142,6 @@ mod tests {
 
     #[rstest::rstest]
     #[case(vec![ctrl('h')], Intent::FocusSidebar)]
-    #[case(vec![key(KeyCode::Enter)], Intent::DashboardRun)]
     fn dashboard_keys_map_to_their_intents(
         #[case] pressed: Vec<KeyEvent>,
         #[case] expected: Intent,
@@ -1506,25 +1165,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Sidebar, Selection::Thread, Scope::Sidebar)]
+    #[case(Focus::Sidebar, Selection::Session, Scope::Sidebar)]
     #[case(Focus::Sidebar, Selection::Draft, Scope::SidebarDraft)]
     #[case(Focus::Sidebar, Selection::Nothing, Scope::SidebarEmpty)]
-    #[case(Focus::Dashboard, Selection::Thread, Scope::Dashboard)]
+    #[case(Focus::Dashboard, Selection::Session, Scope::Dashboard)]
     #[case(Focus::Dashboard, Selection::Draft, Scope::DashboardDraft)]
     #[case(Focus::Dashboard, Selection::Nothing, Scope::DashboardEmpty)]
-    #[case(Focus::Sidebar, Selection::GroupCard, Scope::SidebarGroup)]
-    #[case(Focus::Sidebar, Selection::WorktreeCard, Scope::SidebarWorktreeGroup)]
-    #[case(Focus::Sidebar, Selection::GroupThread, Scope::SidebarGroupThread)]
     #[case(Focus::Sidebar, Selection::GroupDraft, Scope::SidebarGroupDraft)]
-    #[case(Focus::Dashboard, Selection::GroupCard, Scope::DashboardGroup)]
-    #[case(
-        Focus::Dashboard,
-        Selection::WorktreeCard,
-        Scope::DashboardWorktreeGroup
-    )]
-    #[case(Focus::Dashboard, Selection::GroupThread, Scope::DashboardGroupThread)]
     #[case(Focus::Dashboard, Selection::GroupDraft, Scope::DashboardGroupDraft)]
-    #[case(Focus::Sidebar, Selection::IncognitoThread, Scope::SidebarIncognito)]
+    #[case(Focus::Sidebar, Selection::OwnFolderSession, Scope::SidebarIncognito)]
     #[case(
         Focus::Sidebar,
         Selection::IncognitoDraft,
@@ -1532,7 +1181,7 @@ mod tests {
     )]
     #[case(
         Focus::Dashboard,
-        Selection::IncognitoThread,
+        Selection::OwnFolderSession,
         Scope::DashboardIncognito
     )]
     #[case(
@@ -1586,6 +1235,7 @@ mod tests {
                 removed: false,
                 draft: None,
                 threads: vec![Thread {
+                    last_session: None,
                     harness: HarnessId::new("claude"),
                     id: ThreadId(1),
                     title: None,
@@ -1593,7 +1243,11 @@ mod tests {
                     transcript: None,
                     status: ThreadStatus::Idle,
                     turn_started_at: None,
-                    pane: None,
+                    pane: Some(PaneLaunch {
+                        pane: PaneId(1),
+                        session: SessionId(1),
+                        command: vec![],
+                    }),
                     branch: None,
                     pinned_at: None,
                     settled_at: None,
@@ -1620,25 +1274,6 @@ mod tests {
         }
     }
 
-    #[rstest::rstest]
-    #[case::card(SidebarItem::Group(GroupId(9)), Selection::GroupCard)]
-    #[case::worktree_card(SidebarItem::Group(GroupId(11)), Selection::WorktreeCard)]
-    #[case::grouped_thread(SidebarItem::Thread(ThreadId(1)), Selection::GroupThread)]
-    #[case::group_draft(SidebarItem::GroupDraft(GroupId(10)), Selection::GroupDraft)]
-    fn selection_follows_the_cursors_group_row(
-        #[case] cursor: SidebarItem,
-        #[case] expected: Selection,
-    ) {
-        // Given the cursor on a group's row.
-        let sessions = grouped(cursor);
-
-        // When reading the selection.
-        let selection = Selection::of(&sessions);
-
-        // Then it names the kind of group row.
-        assert_eq!(selection, expected, "the selection on {cursor:?}");
-    }
-
     /// `grouped(cursor)` as a project of `kind` with no groups: thread 1
     /// outside any group, and a non-git draft.
     fn lone(kind: ProjectKind, cursor: SidebarItem) -> Sessions {
@@ -1661,14 +1296,15 @@ mod tests {
                 from: None,
             });
         });
+        sessions.sessions = sessions_for(&sessions.projects);
         sessions
     }
 
     #[rstest::rstest]
     #[case::normal_thread(
         ProjectKind::Normal,
-        SidebarItem::Thread(ThreadId(1)),
-        Selection::Thread
+        SidebarItem::Session(SessionId(1)),
+        Selection::Session
     )]
     #[case::normal_draft(
         ProjectKind::Normal,
@@ -1677,8 +1313,8 @@ mod tests {
     )]
     #[case::incognito_thread(
         ProjectKind::Incognito,
-        SidebarItem::Thread(ThreadId(1)),
-        Selection::IncognitoThread
+        SidebarItem::Session(SessionId(1)),
+        Selection::OwnFolderSession
     )]
     #[case::incognito_draft(
         ProjectKind::Incognito,
@@ -1704,34 +1340,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::SidebarGroup, KeyCode::Char('j'), Intent::SelectNext)]
-    #[case(Scope::SidebarGroup, KeyCode::Enter, Intent::Attach)]
-    #[case(Scope::SidebarGroup, KeyCode::Char('l'), Intent::OpenGroup)]
-    #[case(Scope::SidebarGroup, KeyCode::Char('h'), Intent::CloseGroup)]
-    #[case(Scope::SidebarGroup, KeyCode::Char('p'), Intent::TogglePin)]
-    #[case(Scope::SidebarGroup, KeyCode::Char('s'), Intent::ToggleSettle)]
-    #[case(Scope::SidebarGroup, KeyCode::Char('d'), Intent::DeleteThread)]
-    #[case(Scope::SidebarGroupThread, KeyCode::Char('d'), Intent::DeleteThread)]
-    #[case(Scope::SidebarGroupDraft, KeyCode::Char('d'), Intent::DeleteThread)]
-    #[case(Scope::SidebarGroup, KeyCode::Char('n'), Intent::OpenGroupDraft)]
-    #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('l'), Intent::OpenGroup)]
-    #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('p'), Intent::TogglePin)]
-    #[case(Scope::SidebarWorktreeGroup, KeyCode::Char('d'), Intent::DeleteThread)]
-    #[case(
-        Scope::SidebarWorktreeGroup,
-        KeyCode::Char('n'),
-        Intent::OpenGroupDraft
-    )]
-    #[case(Scope::SidebarGroupThread, KeyCode::Char('n'), Intent::OpenGroupDraft)]
-    #[case(Scope::SidebarGroupThread, KeyCode::Char('j'), Intent::SelectNext)]
-    #[case(Scope::SidebarGroupThread, KeyCode::Enter, Intent::Attach)]
-    #[case(Scope::SidebarGroupThread, KeyCode::Char('l'), Intent::OpenGroup)]
-    #[case(Scope::SidebarGroupThread, KeyCode::Char('h'), Intent::CloseGroup)]
-    #[case(Scope::SidebarGroupThread, KeyCode::Char('r'), Intent::Rename)]
+    #[case(Scope::SidebarGroupDraft, KeyCode::Char('d'), Intent::Delete)]
     #[case(Scope::SidebarGroupDraft, KeyCode::Char('j'), Intent::SelectNext)]
     #[case(Scope::SidebarGroupDraft, KeyCode::Enter, Intent::Attach)]
-    #[case(Scope::SidebarGroupDraft, KeyCode::Char('l'), Intent::OpenGroup)]
-    #[case(Scope::SidebarGroupDraft, KeyCode::Char('h'), Intent::CloseGroup)]
     fn group_scope_keys_map_to_their_intents(
         #[case] scope: Scope,
         #[case] code: KeyCode,
@@ -1745,20 +1356,6 @@ mod tests {
 
         // Then it yields its intent.
         assert_eq!(intent.as_ref(), Some(&expected), "{code:?} in {scope:?}");
-    }
-
-    #[rstest::rstest]
-    #[case('p')]
-    #[case('s')]
-    fn pin_and_settle_are_unbound_on_a_grouped_thread(#[case] pressed: char) {
-        // Given the keymap on a thread in a group.
-        let mut keys = Keys::new(keymap(), Scope::SidebarGroupThread.into());
-
-        // When pressing `p` or `s`.
-        let intent = press(&mut keys, key(KeyCode::Char(pressed)));
-
-        // Then nothing happens: its group is pinned and settled instead.
-        assert_eq!(intent, None, "{pressed} on a grouped thread");
     }
 
     #[rstest::rstest]
@@ -1779,68 +1376,6 @@ mod tests {
 
         // Then nothing happens.
         assert_eq!(intent, None, "n in {scope:?}");
-    }
-
-    #[rstest::rstest]
-    fn leader_w_is_unbound_in_group_scopes(
-        #[values(
-            Scope::SidebarGroup,
-            Scope::SidebarWorktreeGroup,
-            Scope::SidebarGroupThread,
-            Scope::SidebarGroupDraft,
-            Scope::DashboardGroup,
-            Scope::DashboardWorktreeGroup,
-            Scope::DashboardGroupThread,
-            Scope::DashboardGroupDraft
-        )]
-        scope: Scope,
-    ) {
-        // Given the leader popup's keys in a group scope.
-        let keys = leader_popup(scope);
-
-        // When looking for `w`.
-        let found = keys.contains(&key(KeyCode::Char('w')));
-
-        // Then it isn't listed.
-        assert!(!found, "w in the {scope:?} leader popup");
-    }
-
-    #[rstest::rstest]
-    fn leader_b_is_unbound_on_group_rows_without_a_worktree(
-        #[values(
-            Scope::SidebarGroup,
-            Scope::SidebarGroupThread,
-            Scope::SidebarGroupDraft,
-            Scope::DashboardGroup,
-            Scope::DashboardGroupThread,
-            Scope::DashboardGroupDraft
-        )]
-        scope: Scope,
-    ) {
-        // Given the leader popup's keys on a group's thread, draft, or a card
-        // with no worktree.
-        let keys = leader_popup(scope);
-
-        // When looking for `b`.
-        let found = keys.contains(&key(KeyCode::Char('b')));
-
-        // Then it isn't listed.
-        assert!(!found, "b in the {scope:?} leader popup");
-    }
-
-    #[rstest::rstest]
-    fn leader_b_switches_branch_on_a_worktree_card(
-        #[values(Scope::SidebarWorktreeGroup, Scope::DashboardWorktreeGroup)] scope: Scope,
-    ) {
-        // Given Space already pressed on a started Feature group's card.
-        let mut keys = Keys::new(keymap(), scope.into());
-        press(&mut keys, key(KeyCode::Char(' ')));
-
-        // When pressing `b`.
-        let intent = press(&mut keys, key(KeyCode::Char('b')));
-
-        // Then it switches the worktree's branch.
-        assert_eq!(intent, Some(Intent::SwitchBranch), "Space b in {scope:?}");
     }
 
     /// The keys the leader popup lists in `scope`.
@@ -1974,10 +1509,6 @@ mod tests {
             Scope::DashboardDraft,
             Scope::SidebarGroupDraft,
             Scope::DashboardGroupDraft,
-            Scope::SidebarGroup,
-            Scope::SidebarWorktreeGroup,
-            Scope::DashboardGroup,
-            Scope::DashboardWorktreeGroup,
             Scope::SidebarIncognitoDraft,
             Scope::DashboardIncognitoDraft
         )]
@@ -2128,13 +1659,7 @@ mod tests {
             Scope::SidebarDraft,
             Scope::Dashboard,
             Scope::DashboardDraft,
-            Scope::SidebarGroup,
-            Scope::SidebarWorktreeGroup,
-            Scope::SidebarGroupThread,
             Scope::SidebarGroupDraft,
-            Scope::DashboardGroup,
-            Scope::DashboardWorktreeGroup,
-            Scope::DashboardGroupThread,
             Scope::DashboardGroupDraft
         )]
         scope: Scope,
@@ -2157,7 +1682,7 @@ mod tests {
 
     #[rstest::rstest]
     fn leader_g_new_group_keys_yield_their_kind(
-        #[values(Scope::SidebarEmpty, Scope::DashboardGroup)] scope: Scope,
+        #[values(Scope::SidebarEmpty)] scope: Scope,
         #[values(
             ('f', GroupKind::Feature),
             ('r', GroupKind::Research),
@@ -2215,16 +1740,10 @@ mod tests {
     #[case(Scope::Sidebar, " befginpstvw")]
     #[case(Scope::SidebarDraft, " abefghimnpstvw")]
     #[case(Scope::SidebarEmpty, " efginps")]
-    #[case(Scope::SidebarGroup, " aefghimnpstv")]
-    #[case(Scope::SidebarWorktreeGroup, " abefghimnpstv")]
-    #[case(Scope::SidebarGroupThread, " efginpstv")]
     #[case(Scope::SidebarGroupDraft, " aefghimnpstv")]
     #[case(Scope::Dashboard, " beginpstvw")]
     #[case(Scope::DashboardDraft, " abeghimnpstvw")]
     #[case(Scope::DashboardEmpty, " eginps")]
-    #[case(Scope::DashboardGroup, " aeghimnpstv")]
-    #[case(Scope::DashboardWorktreeGroup, " abeghimnpstv")]
-    #[case(Scope::DashboardGroupThread, " eginpstv")]
     #[case(Scope::DashboardGroupDraft, " aeghimnpstv")]
     #[case(Scope::SidebarIncognito, " efginpstv")]
     #[case(Scope::SidebarIncognitoDraft, " aefghimnpstv")]
@@ -2302,7 +1821,6 @@ mod tests {
 
     #[rstest::rstest]
     #[case(vec![ctrl('h')], Intent::FocusSidebar)]
-    #[case(vec![key(KeyCode::Enter)], Intent::DashboardRun)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('n'))], Intent::NewSession)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('p'))], Intent::AddProject)]
     #[case(vec![key(KeyCode::Char(' ')), key(KeyCode::Char('w'))], Intent::ChangeWorkspace)]
@@ -2333,7 +1851,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case('s', Intent::ToggleSettle)]
-    #[case('d', Intent::DeleteThread)]
+    #[case('d', Intent::Delete)]
     fn sidebar_thread_key_yields_its_intent(#[case] c: char, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
         let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
@@ -2356,7 +1874,7 @@ mod tests {
         // Then it asks to discard the draft.
         assert_eq!(
             intent,
-            Some(Intent::DeleteThread),
+            Some(Intent::Delete),
             "d on a draft should ask to discard it"
         );
     }

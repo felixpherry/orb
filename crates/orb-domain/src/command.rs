@@ -2,9 +2,9 @@
 //! has updated [`AppState`](crate::AppState). Pane commands,
 //! `ListDirectories`, `ListBranches`, `LoadPreview` and `OpenTool` are carried
 //! out by the frontend loop; session commands (drafts, add or remove a project, move to
-//! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle, delete,
-//! visit, save the sidebar's width and filter, save the jump list, create, start, pin,
-//! settle and delete groups, save a group draft, answer a trust confirm,
+//! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle,
+//! delete and visit a session, save the sidebar's width and filter, save the jump list,
+//! create and start groups, save a group draft, answer a trust confirm,
 //! split a pane, open a tab, save a layout) go to the sessions actor; worktree commands (refresh, delete) go to the worktrees actor; search
 //! commands (query, preview) go to the search actor.
 
@@ -12,18 +12,16 @@ use std::path::PathBuf;
 
 use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::tree::Split;
-use crate::feat::sessions::state::{
-    AttachTarget, GroupId, GroupKind, ProjectId, SessionId, ThreadId,
-};
+use crate::feat::sessions::state::{GroupId, GroupKind, ProjectId, SessionId, ThreadId};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Show the target's session in the terminal pane and send it input. If
-    /// its orb worktree is gone, the sessions actor recreates it first and the
-    /// frontend attaches once it's back.
-    Attach(AttachTarget),
+    /// Give every pane of the session a client and show it, with the keys in
+    /// its focused pane. If its orb worktree is gone, the sessions actor
+    /// recreates it first and the frontend attaches once it's back.
+    Attach(SessionId),
     /// Stop sending input to the terminal pane.
     Detach,
     /// Split `session`'s focused pane `split`; the sessions actor makes the pane.
@@ -81,24 +79,25 @@ pub enum Command {
     },
     /// Poll the sessions' statuses now instead of waiting for the next tick.
     RefreshSessions,
-    /// Pin the thread to the top of the sidebar.
-    Pin(ThreadId),
-    /// Unpin the thread.
-    Unpin(ThreadId),
-    /// Give the thread orb's own name, or with `None` go back to the
-    /// harness's title.
-    RenameThread {
-        thread: ThreadId,
-        title: Option<String>,
+    /// Pin the session to the top of the sidebar; a settled session
+    /// un-settles.
+    PinSession(SessionId),
+    /// Unpin the session.
+    UnpinSession(SessionId),
+    /// Give the session a name, or with `None` go back to its agents' or
+    /// directory's.
+    RenameSession {
+        session: SessionId,
+        name: Option<String>,
     },
-    /// Move the thread to the Settled shelf and stop its session.
-    Settle(ThreadId),
-    /// Bring the thread back from the Settled shelf and keep it active.
-    Unsettle(ThreadId),
-    /// Delete the thread and its session.
-    Delete(ThreadId),
-    /// The user is looking at the thread now.
-    Visit(ThreadId),
+    /// Move the session to the Settled shelf.
+    SettleSession(SessionId),
+    /// Bring the session back from the Settled shelf and keep it active.
+    UnsettleSession(SessionId),
+    /// Delete the session: its panes, tabs and threads.
+    DeleteSession(SessionId),
+    /// The user is looking at the session now.
+    Visit(SessionId),
     /// Save the sidebar's width and project filter as they now are in the
     /// app state.
     SaveUi,
@@ -118,18 +117,6 @@ pub enum Command {
     StartGroupDraft(GroupId),
     /// Save the group's default setup and draft as they now are in the app state.
     SaveGroupDraft(GroupId),
-    /// Pin the group to the top of the sidebar; a settled group un-settles.
-    PinGroup(GroupId),
-    /// Unpin the group.
-    UnpinGroup(GroupId),
-    /// Move the group to the Settled shelf and stop its idle sessions.
-    SettleGroup(GroupId),
-    /// Bring the group back from the Settled shelf and keep it active.
-    UnsettleGroup(GroupId),
-    /// Delete every thread of the group and its session, then the
-    /// group and its folder or worktree; a Feature group whose slug branch
-    /// isn't merged is kept whole.
-    DeleteGroup(GroupId),
     /// Mark the folder the waiting session start asks about trusted in
     /// its harness's config, and try the start again.
     TrustWorkspace,

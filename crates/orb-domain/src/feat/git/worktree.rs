@@ -104,6 +104,7 @@ mod tests {
     /// A thread in `cwd` on `branch`, last active `activity` seconds in.
     fn thread(id: i64, cwd: &str, branch: &str, activity: u64) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,

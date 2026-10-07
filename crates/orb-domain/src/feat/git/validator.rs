@@ -7,7 +7,7 @@ use std::path::Path;
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::{DraftWorkspace, GroupKind, Sessions, SidebarItem};
+use crate::feat::sessions::state::{DraftWorkspace, Sessions};
 
 /// Why changing the selected thread's or draft's workspace can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -59,18 +59,14 @@ pub fn validate_change_workspace(state: &AppState) -> Result<(), ChangeWorkspace
 /// [`SwitchBranchError::Busy`].
 pub const BUSY_DIRECTORY: &str = "A session is working in this directory";
 
-/// Why switching the selected thread's, draft's or group's branch can't
-/// proceed.
+/// Why switching the selected session's or draft's branch can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum SwitchBranchError {
-    /// The cursor isn't on a thread, a draft or a group's card.
+    /// The cursor isn't on a draft or a session with an agent.
     NoSelection,
-    /// The thread is in a group, whose branch is switched from its card.
+    /// The session's lead thread is in a group.
     Grouped,
-    /// The card's group has no worktree: a Research or Learn group, or a
-    /// Feature group before its draft starts.
-    NoWorktree,
     /// A session is already being started.
     Starting,
     /// A thread in the directory the checkout would change is working or
@@ -78,47 +74,33 @@ pub enum SwitchBranchError {
     Busy,
 }
 
-/// Allow switching the selected thread's, draft's or Feature group card's
-/// branch unless a start is in flight or a turn is underway in the directory
-/// a checkout would change. A local draft checks out in the project's root,
-/// an existing-worktree draft in its worktree, and a group in its worktree; a
+/// Allow switching the selected draft's branch, or that of the selected
+/// session's lead thread, unless a start is in flight or a turn is underway
+/// in the directory a checkout would change. A local draft checks out in the
+/// project's root and an existing-worktree draft in its worktree; a
 /// new-worktree draft only records its base, and a draft whose project isn't
 /// a git repository is offered `git init` instead.
 ///
 /// # Errors
 ///
-/// Returns [`SwitchBranchError::NoSelection`] without a selected thread,
-/// draft or group card, [`SwitchBranchError::Grouped`] on a thread in a
-/// group, [`SwitchBranchError::NoWorktree`] on a card whose group has no
-/// worktree, [`SwitchBranchError::Starting`] while a start is in flight, and
-/// [`SwitchBranchError::Busy`] while any thread in the same directory is in
-/// progress.
+/// Returns [`SwitchBranchError::NoSelection`] without a selected draft or a
+/// session with an agent, [`SwitchBranchError::Grouped`] when the lead
+/// thread is in a group, [`SwitchBranchError::Starting`] while a start is in
+/// flight, and [`SwitchBranchError::Busy`] while any thread in the same
+/// directory is in progress.
 pub fn validate_switch_branch(state: &AppState) -> Result<(), SwitchBranchError> {
     let sessions = &state.sessions;
-    let card = match sessions.cursor {
-        Some(SidebarItem::Group(_)) => sessions.selected_group(),
-        _ => None,
-    };
-    match (sessions.selected_draft(), sessions.selected_thread(), card) {
-        (None, None, None) => Err(SwitchBranchError::NoSelection),
-        (None, Some(thread), _) if thread.group.is_some() => Err(SwitchBranchError::Grouped),
-        (None, None, Some((_, group))) if group.kind != GroupKind::Feature => {
-            Err(SwitchBranchError::NoWorktree)
-        }
+    match (sessions.selected_draft(), sessions.selected_thread()) {
+        (None, None) => Err(SwitchBranchError::NoSelection),
+        (None, Some(thread)) if thread.group.is_some() => Err(SwitchBranchError::Grouped),
         _ if sessions.starting => Err(SwitchBranchError::Starting),
-        (Some((_, draft)), ..) if !draft.repo => Ok(()),
-        (Some((project, draft)), ..) => match &draft.workspace {
+        (Some((_, draft)), _) if !draft.repo => Ok(()),
+        (Some((project, draft)), _) => match &draft.workspace {
             DraftWorkspace::Existing(path) => not_busy(sessions, path),
             DraftWorkspace::NewWorktree => Ok(()),
             DraftWorkspace::Local => not_busy(sessions, &project.root),
         },
-        (None, Some(thread), _) => not_busy(sessions, &thread.cwd),
-        (None, None, Some((_, group))) => group
-            .dir
-            .as_deref()
-            .map_or(Err(SwitchBranchError::NoWorktree), |dir| {
-                not_busy(sessions, dir)
-            }),
+        (None, Some(thread)) => not_busy(sessions, &thread.cwd),
     }
 }
 
@@ -144,14 +126,14 @@ mod tests {
     };
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupId, GroupKind, Project, ProjectId,
-        ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, GroupId, PaneId, PaneLaunch, Project, ProjectId, ProjectKind,
+        SessionId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus, sessions_for,
     };
 
     /// One project at `/work` whose only thread, selected, runs in the root
     /// with `transcript`.
     fn selected(transcript: Option<&str>) -> AppState {
-        AppState {
+        let mut state = AppState {
             sessions: Sessions {
                 projects: vec![Project {
                     id: ProjectId(1),
@@ -161,6 +143,7 @@ mod tests {
                     removed: false,
                     draft: None,
                     threads: vec![Thread {
+                        last_session: None,
                         harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
@@ -168,7 +151,11 @@ mod tests {
                         transcript: transcript.map(Into::into),
                         status: ThreadStatus::Idle,
                         turn_started_at: None,
-                        pane: None,
+                        pane: Some(PaneLaunch {
+                            pane: PaneId(1),
+                            session: SessionId(1),
+                            command: vec![],
+                        }),
                         branch: None,
                         pinned_at: None,
                         settled_at: None,
@@ -183,11 +170,13 @@ mod tests {
                     groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
-                cursor: Some(SidebarItem::Thread(ThreadId(1))),
+                cursor: Some(SidebarItem::Session(SessionId(1))),
                 ..Sessions::default()
             },
             ..AppState::default()
-        }
+        };
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
+        state
     }
 
     #[rstest::rstest]
@@ -476,92 +465,6 @@ mod tests {
             result,
             Err(SwitchBranchError::Grouped),
             "a group's directory is fixed"
-        );
-    }
-
-    /// [`grouped`] with the cursor on group 9's card: a `kind` group, in
-    /// `dir` when given.
-    fn on_card(kind: GroupKind, dir: Option<&str>) -> AppState {
-        let mut state = grouped();
-        if let Some(project) = state.sessions.projects.first_mut() {
-            project.groups = vec![Group {
-                id: GroupId(9),
-                kind,
-                name: "GT-514-login".into(),
-                dir: dir.map(Into::into),
-                branch: None,
-                created_at: SystemTime::UNIX_EPOCH,
-                pinned_at: None,
-                settled_at: None,
-                active_since: SystemTime::UNIX_EPOCH,
-                draft: None,
-                defaults: GroupDefaults {
-                    harness: HarnessId::new("claude"),
-                    model: None,
-                    permission: None,
-                },
-            }];
-        }
-        state.sessions.cursor = Some(SidebarItem::Group(GroupId(9)));
-        state
-    }
-
-    #[rstest::rstest]
-    fn switch_branch_allowed_on_a_started_feature_card() {
-        // Given a Feature group's card, its worktree at /wt/orb-1a2b3c4d.
-        let state = on_card(GroupKind::Feature, Some("/wt/orb-1a2b3c4d"));
-
-        // When validating a branch switch.
-        let result = validate_switch_branch(&state);
-
-        // Then it's allowed.
-        assert_eq!(result, Ok(()), "a Feature card switches its worktree");
-    }
-
-    #[rstest::rstest]
-    fn switch_branch_rejected_on_a_feature_card_while_its_thread_works() {
-        // Given a Feature group's card, its worktree at /work, where its
-        // thread is working.
-        let mut state = on_card(GroupKind::Feature, Some("/work"));
-        if let Some(thread) = state
-            .sessions
-            .projects
-            .first_mut()
-            .and_then(|project| project.threads.first_mut())
-        {
-            thread.status = ThreadStatus::Working;
-        }
-
-        // When validating a branch switch.
-        let result = validate_switch_branch(&state);
-
-        // Then validation fails with Busy.
-        assert_eq!(
-            result,
-            Err(SwitchBranchError::Busy),
-            "a checkout would change files under the group's running turn"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case::research(GroupKind::Research, Some("/orb/research/x"))]
-    #[case::learn(GroupKind::Learn, Some("/orb/learn/x"))]
-    #[case::unstarted_feature(GroupKind::Feature, None)]
-    fn switch_branch_rejected_on_a_card_without_a_worktree(
-        #[case] kind: GroupKind,
-        #[case] dir: Option<&str>,
-    ) {
-        // Given a card whose group has no worktree.
-        let state = on_card(kind, dir);
-
-        // When validating a branch switch.
-        let result = validate_switch_branch(&state);
-
-        // Then validation fails with NoWorktree.
-        assert_eq!(
-            result,
-            Err(SwitchBranchError::NoWorktree),
-            "a {kind:?} card at {dir:?} has no worktree"
         );
     }
 }

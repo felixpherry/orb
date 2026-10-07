@@ -90,12 +90,13 @@ mod tests {
     use crate::feat::layout::tree::Split;
     use crate::feat::sessions::state::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
-        Thread, ThreadId, ThreadStatus,
+        Thread, ThreadId, ThreadStatus, sessions_for,
     };
     use crate::{AppState, Focus};
 
     fn thread(id: i64) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
@@ -105,6 +106,7 @@ mod tests {
             turn_started_at: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
+                session: SessionId(id),
                 command: vec![],
             }),
             branch: None,
@@ -136,17 +138,18 @@ mod tests {
                     groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
-                cursor: Some(SidebarItem::Thread(ThreadId(1))),
+                cursor: Some(SidebarItem::Session(SessionId(1))),
                 ..Sessions::default()
             },
             focus,
             ..AppState::default()
         };
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
         state
             .layouts
             .insert(SessionId(1), SessionLayout::of(test_entry(1)));
         if open {
-            state.attached.insert(ThreadId(1));
+            state.attached.insert(SessionId(1));
         }
         state
     }

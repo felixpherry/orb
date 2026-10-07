@@ -103,7 +103,6 @@
 //! an answer, in any project, unless the thread is being deleted.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -121,8 +120,8 @@ use super::session_host::{
 };
 use super::state::{
     Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, NEW_THREAD,
-    Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
-    SidebarItem, Thread, ThreadId, ThreadStatus,
+    Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Session, SessionId,
+    SessionKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
 };
 use super::store::{
     DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewPaneThread, NewThread, PaneRow,
@@ -157,11 +156,8 @@ const AUTO_SETTLE_AFTER: i64 = 3 * 24 * 60 * 60 * 1000;
 const SAVE_FAILED: &str = "couldn't save orb's state";
 /// The error shown when a group's or the Incognito folder can't be made.
 const FOLDER_UNMADE: &str = "couldn't make the folder";
-/// The error shown when a deleted group's folder can't be removed.
+/// The error shown when a deleted session's folder can't be removed.
 const FOLDER_UNREMOVED: &str = "couldn't remove the folder";
-/// The error shown when a deleted Feature group's worktree is kept because a
-/// thread outside the group still works in it.
-const WORKTREE_IN_USE: &str = "kept the worktree: another thread works in it";
 /// The error shown when a started session can't be saved or shown.
 const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
 /// The error shown when the harness's config can't be updated to trust a folder.
@@ -191,21 +187,22 @@ pub struct SessionsActorDeps {
 }
 
 /// Owns [`Sessions`](super::state::Sessions) and the harnesses the frontend
-/// shows (`AppState::harnesses`): the projects, their drafts and
-/// groups, the threads' statuses, titles, pins and settles, the latest host error,
-/// the origin ref a start is fetching, the folder a harness asks to trust
-/// before a start, and the started or restored thread the frontend should
-/// attach to. It adds orb's Incognito project at start. It also restores the sidebar's width
-/// and project filter, and selects a new group's draft. It loads every
-/// session's layout at start, adds the panes splits and new tabs make (it
-/// saves their store rows, so it gives them their ids), lays out a new
-/// thread's session, drops a deleted session's layout, and saves a layout
-/// when asked. The intent handler
-/// also moves the cursor, opens and closes the shelf, marks a start as starting, edits a draft's fields before
-/// asking for them to be saved, and resizes or filters the sidebar before
-/// asking for that to be saved. It binds threads to panes from the agents'
-/// pane files, keeps each pane's latest report and resume command current,
-/// and owns each session's pin, settle and activity state on its store row.
+/// shows (`AppState::harnesses`): the projects, their drafts and groups, the
+/// sessions with their names, pins and settles, the threads' statuses and
+/// titles, the latest host error, the origin ref a start is fetching, the
+/// folder a harness asks to trust before a start, and the started or restored
+/// session the frontend should attach to. It adds orb's Incognito project at
+/// start. It also restores the sidebar's width and project filter, and
+/// selects a new group's draft. It loads every session's layout at start,
+/// adds the panes splits and new tabs make (it saves their store rows, so it
+/// gives them their ids), lays out a new thread's session, drops a deleted
+/// session's layout, and saves a layout when asked. The intent handler also
+/// moves the cursor, opens and closes the shelf, marks a start as starting,
+/// edits a draft's fields before asking for them to be saved, and resizes or
+/// filters the sidebar before asking for that to be saved. It binds threads
+/// to panes from the agents' pane files, keeps each pane's latest report and
+/// resume command current, and owns each session's name, pin, settle and
+/// activity state on its store row.
 pub struct SessionsActor {
     services: Services,
     state: State,
@@ -261,6 +258,10 @@ pub struct SaveLayout(pub SessionId);
 /// into panes, so they don't fight the `claude --resume` those panes run.
 #[derive(Debug)]
 pub struct StopMigrated;
+
+/// Kill the panes zmx still runs for sessions that are already settled.
+#[derive(Debug)]
+pub struct KillSettled;
 
 /// How long to wait before the next [`Poll`].
 #[derive(Debug, Reply)]
@@ -339,36 +340,38 @@ pub struct AddProject(pub PathBuf);
 #[derive(Debug)]
 pub struct RefreshSessions;
 
-/// Pin a thread to the top of the sidebar, un-settling it if needed.
+/// Pin a session to the top of the sidebar, un-settling it if needed.
 #[derive(Debug)]
-pub struct Pin(pub ThreadId);
+pub struct PinSession(pub SessionId);
 
-/// Unpin a thread.
+/// Unpin a session.
 #[derive(Debug)]
-pub struct Unpin(pub ThreadId);
+pub struct UnpinSession(pub SessionId);
 
-/// Give a thread orb's own name, or with `None` go back to the harness's title.
+/// Give a session a name, or with `None` go back to its agents' or
+/// directory's.
 #[derive(Debug)]
-pub struct RenameThread {
-    pub thread: ThreadId,
-    pub title: Option<String>,
+pub struct RenameSession {
+    pub session: SessionId,
+    pub name: Option<String>,
 }
 
-/// Settle a thread onto the Settled shelf and stop its session.
+/// Settle a session onto the Settled shelf.
 #[derive(Debug)]
-pub struct Settle(pub ThreadId);
+pub struct SettleSession(pub SessionId);
 
-/// Take a thread off the Settled shelf and keep it active until its next turn.
+/// Take a session off the Settled shelf and keep it active until its next
+/// turn.
 #[derive(Debug)]
-pub struct Unsettle(pub ThreadId);
+pub struct UnsettleSession(pub SessionId);
 
-/// Delete a thread's session and forget the thread.
+/// Delete a session: its panes, tabs and threads.
 #[derive(Debug)]
-pub struct Delete(pub ThreadId);
+pub struct DeleteSession(pub SessionId);
 
-/// The user selected a thread, so its latest turn is seen.
+/// The user selected a session, so its agents' latest turns are seen.
 #[derive(Debug)]
-pub struct Visit(pub ThreadId);
+pub struct Visit(pub SessionId);
 
 /// Save the sidebar's width and project filter as they now are in the app
 /// state.
@@ -400,30 +403,9 @@ pub struct StartGroupDraft(pub GroupId);
 #[derive(Debug)]
 pub struct SaveGroupDraft(pub GroupId);
 
-/// Pin group `.0`; a settled group un-settles.
+/// Recreate session `.0`'s orb worktree, gone from disk, then attach to it.
 #[derive(Debug)]
-pub struct PinGroup(pub GroupId);
-
-/// Unpin group `.0`.
-#[derive(Debug)]
-pub struct UnpinGroup(pub GroupId);
-
-/// Settle group `.0` and stop its idle sessions, unless one of its threads is
-/// mid-turn.
-#[derive(Debug)]
-pub struct SettleGroup(pub GroupId);
-
-/// Un-settle group `.0` and keep it active.
-#[derive(Debug)]
-pub struct UnsettleGroup(pub GroupId);
-
-/// Delete every thread of group `.0` and its session, then the group.
-#[derive(Debug)]
-pub struct DeleteGroup(pub GroupId);
-
-/// Recreate thread `.0`'s orb worktree, gone from disk, then attach to it.
-#[derive(Debug)]
-pub struct RestoreWorktree(pub ThreadId);
+pub struct RestoreWorktree(pub SessionId);
 
 /// What a harness's probe found: `.0` replaces the entry with its id.
 #[derive(Debug)]
@@ -499,6 +481,7 @@ impl Actor for SessionsActor {
             let actor_ref = actor_ref.clone();
             tokio::spawn(async move {
                 let _ = actor_ref.tell(StopMigrated).await;
+                let _ = actor_ref.tell(KillSettled).await;
             });
         }
         let poke = actor.poke.clone();
@@ -555,6 +538,18 @@ impl Message<StopMigrated> for SessionsActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.stop_migrated().await;
+    }
+}
+
+impl Message<KillSettled> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: KillSettled,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.kill_settled();
     }
 }
 
@@ -756,71 +751,75 @@ impl Message<RefreshSessions> for SessionsActor {
     }
 }
 
-impl Message<Pin> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(&mut self, Pin(id): Pin, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.pin(id);
-    }
-}
-
-impl Message<Unpin> for SessionsActor {
+impl Message<PinSession> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        Unpin(id): Unpin,
+        PinSession(id): PinSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.unpin(id);
+        self.pin_session(id);
     }
 }
 
-impl Message<RenameThread> for SessionsActor {
+impl Message<UnpinSession> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        RenameThread { thread, title }: RenameThread,
+        UnpinSession(id): UnpinSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.rename(thread, title);
+        self.unpin_session(id);
     }
 }
 
-impl Message<Settle> for SessionsActor {
+impl Message<RenameSession> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        Settle(id): Settle,
+        RenameSession { session, name }: RenameSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.settle(id).await;
+        self.rename_session(session, name);
     }
 }
 
-impl Message<Unsettle> for SessionsActor {
+impl Message<SettleSession> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        Unsettle(id): Unsettle,
+        SettleSession(id): SettleSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.unsettle(id);
+        self.settle_session(id).await;
     }
 }
 
-impl Message<Delete> for SessionsActor {
+impl Message<UnsettleSession> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        Delete(id): Delete,
+        UnsettleSession(id): UnsettleSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.delete(id).await;
+        self.unsettle_session(id);
+    }
+}
+
+impl Message<DeleteSession> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        DeleteSession(id): DeleteSession,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.delete_session(id).await;
     }
 }
 
@@ -905,66 +904,6 @@ impl Message<SaveGroupDraft> for SessionsActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.save_group_draft(id);
-    }
-}
-
-impl Message<PinGroup> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        PinGroup(id): PinGroup,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.pin_group(id);
-    }
-}
-
-impl Message<UnpinGroup> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        UnpinGroup(id): UnpinGroup,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.unpin_group(id);
-    }
-}
-
-impl Message<SettleGroup> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        SettleGroup(id): SettleGroup,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.settle_group(id).await;
-    }
-}
-
-impl Message<UnsettleGroup> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        UnsettleGroup(id): UnsettleGroup,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.unsettle_group(id);
-    }
-}
-
-impl Message<DeleteGroup> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        DeleteGroup(id): DeleteGroup,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.delete_group(id).await;
     }
 }
 
@@ -1069,7 +1008,7 @@ impl SessionsActor {
             JumpList::from_saved(
                 saved
                     .into_iter()
-                    .filter(|&item| exists(&projects, item))
+                    .filter(|&item| exists(&projects, &session_rows, item))
                     .collect(),
             )
         };
@@ -1083,6 +1022,11 @@ impl SessionsActor {
             }
             let sessions = &mut app.sessions;
             sessions.projects = projects;
+            sessions.sessions = {
+                let mut shown: Vec<Session> = session_rows.values().map(show_session).collect();
+                shown.sort_by_key(|session| session.id.0);
+                shown
+            };
             sessions.cursor = None;
             sessions.filter_to(filter);
             sessions.error = error.or_else(|| integration_missing.then(|| NUDGE.to_owned()));
@@ -1153,7 +1097,9 @@ impl SessionsActor {
     ///   command then names it.
     ///
     /// Reports from an agent orb has no harness for, or a pane orb has no row
-    /// for, are ignored.
+    /// for, are ignored, and so is an `end` from a settled session's pane:
+    /// settling ended it, and its thread and resume command stay for the
+    /// session to come back.
     fn follow_report(
         &mut self,
         pane: PaneId,
@@ -1169,6 +1115,14 @@ impl SessionsActor {
         let sid = report.session_id.as_str();
         let holds = |row: &ThreadRow| row.short_id == sid || row.session_id.as_deref() == Some(sid);
         let current = self.rows.iter().position(|row| row.pane_id == Some(pane));
+        let settled = self
+            .panes
+            .get(&pane)
+            .and_then(|row| self.sessions.get(&row.session_id))
+            .is_some_and(|session| session.settled_override == Some(SettledOverride::Settled));
+        if report.event == AgentEvent::End && settled {
+            return Ok(());
+        }
         if report.event == AgentEvent::End {
             let ended = match current.and_then(|i| self.rows.get_mut(i)) {
                 Some(row) if holds(row) => {
@@ -1214,8 +1168,10 @@ impl SessionsActor {
                     .and_then(|row| row.pane_id)
                     .filter(|&old| old != pane);
                 self.unbind(current)?;
+                let session = self.panes.get(&pane).map(|row| row.session_id);
                 if let Some(row) = self.rows.get_mut(j) {
                     row.pane_id = Some(pane);
+                    row.orb_session = session;
                     take_session(row, sid);
                     take_transcript(row, report.transcript.as_ref());
                     self.store.save_thread(row)?;
@@ -1285,6 +1241,7 @@ impl SessionsActor {
             group_id: None,
             harness,
             pane_id: Some(pane),
+            orb_session: self.panes.get(&pane).map(|row| row.session_id),
         };
         let thread = unpolled(&self.services, &row, &self.panes);
         self.rows.push(row);
@@ -1390,7 +1347,10 @@ impl SessionsActor {
     /// harness orb doesn't know is Gone.
     fn apply(&mut self, listed: &HashMap<HarnessId, Vec<SessionRecord>>, live: &Live) {
         let now = now_ms();
-        let cursor = self.state.read().sessions.cursor;
+        let selected = match self.state.read().sessions.cursor {
+            Some(SidebarItem::Session(id)) => Some(id),
+            _ => None,
+        };
         let mut statuses = Vec::with_capacity(self.rows.len());
         let mut error = None;
         let mut hosted = HashSet::new();
@@ -1421,17 +1381,20 @@ impl SessionsActor {
                 }
                 rename_hex_branch(&self.services.git, &self.worktrees_root, row);
             }
-            let selected = cursor == Some(SidebarItem::Thread(row.id));
-            follow_activity(row, status, was_in_progress, selected, now);
+            let in_selected = selected.is_some()
+                && row
+                    .pane_id
+                    .and_then(|pane| self.panes.get(&pane))
+                    .map(|pane| pane.session_id)
+                    == selected;
+            follow_activity(row, status, was_in_progress, in_selected, now);
             if *row != before && self.store.save_thread(row).is_err() {
                 error = Some(SAVE_FAILED.to_owned());
             }
             statuses.push(Some(status));
         }
         self.hosted = hosted;
-        let changed_groups = self.follow_groups(&statuses, now, &mut error);
-        let selected = self.selected_session(cursor);
-        self.follow_sessions(&statuses, selected, now, &mut error);
+        let changed_sessions = self.follow_sessions(&statuses, selected, now, &mut error);
         let changed = {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
@@ -1459,13 +1422,12 @@ impl SessionsActor {
                     );
                 }
             }
-            for row in self
-                .groups
-                .iter()
-                .filter(|row| changed_groups.contains(&row.id))
-            {
-                if let Some(shown) = sessions.group_mut(row.id) {
-                    *shown = group(row, &self.rows);
+            for id in changed_sessions {
+                if let (Some(row), Some(shown)) = (
+                    self.sessions.get(&id),
+                    sessions.sessions.iter_mut().find(|shown| shown.id == id),
+                ) {
+                    *shown = show_session(row);
                     changed = true;
                 }
             }
@@ -1476,54 +1438,21 @@ impl SessionsActor {
         }
     }
 
-    /// Follows each group's un-settle from its threads' polled rows and
-    /// `statuses` (index-aligned with the rows; `None` where a thread wasn't
-    /// polled), saving the groups that changed. A group with a thread that
-    /// wasn't polled is left as it was. Sets `error` when a save fails.
-    /// Returns the groups that changed.
-    fn follow_groups(
-        &mut self,
-        statuses: &[Option<ThreadStatus>],
-        now: i64,
-        error: &mut Option<String>,
-    ) -> Vec<GroupId> {
-        let mut changed_groups = Vec::new();
-        for group_row in &mut self.groups {
-            let Some(children) = self
-                .rows
-                .iter()
-                .zip(statuses)
-                .filter(|(row, _)| row.group_id == Some(group_row.id))
-                .map(|(row, status)| Some((row, (*status)?)))
-                .collect::<Option<Vec<(&ThreadRow, ThreadStatus)>>>()
-            else {
-                continue;
-            };
-            let before = group_row.clone();
-            let in_progress = children.iter().any(|(_, status)| status.in_progress());
-            follow_group(group_row, in_progress, now);
-            if *group_row != before {
-                if self.store.save_group(group_row).is_err() {
-                    *error = Some(SAVE_FAILED.to_owned());
-                }
-                changed_groups.push(group_row.id);
-            }
-        }
-        changed_groups
-    }
-
     /// Follows each session's settle lifecycle (see [`follow_session`]) from
     /// its agent threads' polled rows and `statuses` (index-aligned with the
     /// rows; `None` where a thread wasn't polled, which leaves its session as
     /// it was), saving the ones that changed. `selected` never auto-settles.
-    /// Sets `error` when a save fails.
+    /// A session that auto-settles is detached and its panes killed. Sets
+    /// `error` when a save fails. Returns the sessions that changed.
     fn follow_sessions(
         &mut self,
         statuses: &[Option<ThreadStatus>],
         selected: Option<SessionId>,
         now: i64,
         error: &mut Option<String>,
-    ) {
+    ) -> Vec<SessionId> {
+        let mut changed = Vec::new();
+        let mut auto_settled = Vec::new();
         for session in self.sessions.values_mut() {
             let Some(children) = self
                 .rows
@@ -1545,31 +1474,38 @@ impl SessionsActor {
                 .fold(session.last_activity_at, i64::max);
             let in_progress = children.iter().any(|(_, status)| status.in_progress());
             let before = session.clone();
-            follow_session(
+            let settled = follow_session(
                 session,
-                latest,
-                in_progress,
+                Activity {
+                    latest,
+                    in_progress,
+                    agents: !children.is_empty(),
+                },
                 selected == Some(session.id),
                 now,
             );
-            if *session != before && self.store.save_session(session).is_err() {
-                *error = Some(SAVE_FAILED.to_owned());
+            if *session != before {
+                if self.store.save_session(session).is_err() {
+                    *error = Some(SAVE_FAILED.to_owned());
+                }
+                changed.push(session.id);
+            }
+            if settled {
+                auto_settled.push(session.id);
             }
         }
-    }
-
-    /// The session the sidebar's cursor is on: its thread's pane's, or for a
-    /// group card or its draft row the group's first thread with a pane.
-    fn selected_session(&self, cursor: Option<SidebarItem>) -> Option<SessionId> {
-        let row = match cursor? {
-            SidebarItem::Thread(id) => self.rows.iter().find(|row| row.id == id),
-            SidebarItem::Group(id) | SidebarItem::GroupDraft(id) => self
-                .rows
-                .iter()
-                .find(|row| row.group_id == Some(id) && row.pane_id.is_some()),
-            _ => None,
-        }?;
-        self.panes.get(&row.pane_id?).map(|pane| pane.session_id)
+        if !auto_settled.is_empty() {
+            {
+                let mut app = self.state.write();
+                for id in &auto_settled {
+                    app.attached.remove(id);
+                }
+            }
+            for &id in &auto_settled {
+                self.kill_panes(id);
+            }
+        }
+        changed
     }
 
     /// Gives project `id` a draft unless it has one: the project's last-used
@@ -2009,12 +1945,12 @@ impl SessionsActor {
                 .iter_mut()
                 .find(|project| project.id == project_id)
                 .ok_or_else(|| NEW_SESSION_UNSAVED.to_owned())?;
-            let id = thread.id;
+            let session = thread.session();
             project.draft = None;
             project.threads.insert(0, thread);
             if sessions.cursor == Some(SidebarItem::Draft(project_id)) {
-                sessions.cursor = Some(SidebarItem::Thread(id));
-                sessions.attach = Some(id);
+                sessions.cursor = session.map(SidebarItem::Session);
+                sessions.attach = session;
             }
             saved.map_err(|_report| SAVE_FAILED.to_owned())
         });
@@ -2123,11 +2059,11 @@ impl SessionsActor {
                 group.dir.get_or_insert_with(|| cwd.to_owned());
                 group.draft = None;
             }
-            let id = thread.id;
+            let session = thread.session();
             project.threads.insert(0, thread);
             if sessions.cursor == from {
-                sessions.cursor = Some(SidebarItem::Thread(id));
-                sessions.attach = Some(id);
+                sessions.cursor = session.map(SidebarItem::Session);
+                sessions.attach = session;
             }
             saved
         });
@@ -2269,24 +2205,24 @@ impl SessionsActor {
         }
     }
 
-    /// Recreates thread `id`'s worktree at its path and asks the frontend to
-    /// attach to the thread, ending the start the frontend marked. On failure,
-    /// git's reason shows and nothing attaches.
-    fn restore_worktree(&mut self, id: ThreadId) {
+    /// Recreates session `id`'s worktree at its path and asks the frontend to
+    /// attach to the session, ending the start the frontend marked. On
+    /// failure, git's reason shows and nothing attaches.
+    fn restore_worktree(&mut self, id: SessionId) {
         let result = self.recreate_worktree(id).map(|()| {
             self.state.write().sessions.attach = Some(id);
         });
         self.end_start(result);
     }
 
-    /// Prunes git's record of thread `id`'s missing worktree, then adds it back
-    /// on its branch, or on that branch made anew from the default branch (as
-    /// origin has it) when it's gone. A directory that is back already needs
-    /// nothing.
-    fn recreate_worktree(&self, id: ThreadId) -> Result<(), String> {
+    /// Prunes git's record of session `id`'s missing worktree, then adds it
+    /// back on its branch, or on that branch made anew from the default branch
+    /// (as origin has it) when it's gone. A directory that is back already
+    /// needs nothing.
+    fn recreate_worktree(&self, id: SessionId) -> Result<(), String> {
         let (root, cwd, branch) = self
             .restore_target(id)
-            .ok_or_else(|| "the thread is gone".to_owned())?;
+            .ok_or_else(|| "the session is gone".to_owned())?;
         if cwd.is_dir() {
             return Ok(());
         }
@@ -2304,20 +2240,37 @@ impl SessionsActor {
             .map_err(|report| git_reason(&report))
     }
 
-    /// Thread `id`'s project root, its directory, and the branch its worktree
-    /// was on: its Feature group's branch, else its own, else orb's `orb/<hex>`
-    /// for the directory.
-    fn restore_target(&self, id: ThreadId) -> Option<(PathBuf, PathBuf, Option<String>)> {
-        let row = self.rows.iter().find(|row| row.id == id)?;
-        let group_branch = row
-            .group_id
-            .and_then(|group| self.groups.iter().find(|g| g.id == group))
-            .filter(|group| group.kind == GroupKind::Feature)
-            .and_then(|group| group.branch.clone());
-        let branch = group_branch
-            .or_else(|| row.branch.clone())
-            .or_else(|| hex_branch(&self.worktrees_root, &row.cwd));
-        Some((self.project_root(row.project_id)?, row.cwd.clone(), branch))
+    /// Session `id`'s project root, its directory, and the branch its
+    /// worktree was on: the session's recorded branch, else one of its
+    /// threads' (its Feature group's branch, else its own), else orb's
+    /// `orb/<hex>` for the directory.
+    fn restore_target(&self, id: SessionId) -> Option<(PathBuf, PathBuf, Option<String>)> {
+        let session = self.sessions.get(&id)?;
+        let thread_branch = self
+            .rows
+            .iter()
+            .filter(|row| {
+                row.pane_id
+                    .and_then(|pane| self.panes.get(&pane))
+                    .is_some_and(|pane| pane.session_id == id)
+            })
+            .find_map(|row| {
+                row.group_id
+                    .and_then(|group| self.groups.iter().find(|g| g.id == group))
+                    .filter(|group| group.kind == GroupKind::Feature)
+                    .and_then(|group| group.branch.clone())
+                    .or_else(|| row.branch.clone())
+            });
+        let branch = session
+            .branch
+            .clone()
+            .or(thread_branch)
+            .or_else(|| hex_branch(&self.worktrees_root, &session.dir));
+        Some((
+            self.project_root(session.project_id)?,
+            session.dir.clone(),
+            branch,
+        ))
     }
 
     /// Finishes a move once the new session runs: removes the old session,
@@ -2574,14 +2527,21 @@ impl SessionsActor {
             name: None,
         };
         let entry = pane_entry(&self.services, &self.orb_root, &pane);
-        self.state
-            .write()
-            .layouts
-            .insert(inserted.session, SessionLayout::of(entry));
-        self.sessions.insert(
-            inserted.session,
-            SessionRow {
+        {
+            let mut app = self.state.write();
+            let kind = app
+                .sessions
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .map_or(SessionKind::Plain, |project| session_kind(project.kind));
+            let session = SessionRow {
                 id: inserted.session,
+                project_id,
+                kind,
+                name: None,
+                branch: None,
+                created_at: now,
                 dir: new.cwd.clone(),
                 active_tab: 0,
                 pinned_at: None,
@@ -2589,8 +2549,12 @@ impl SessionsActor {
                 settled_at: None,
                 unsettled_at: None,
                 last_activity_at: now,
-            },
-        );
+            };
+            app.layouts
+                .insert(inserted.session, SessionLayout::of(entry));
+            app.sessions.sessions.push(show_session(&session));
+            self.sessions.insert(inserted.session, session);
+        }
         self.panes.insert(pane.id, pane);
         let row = ThreadRow {
             id: inserted.thread,
@@ -2618,6 +2582,7 @@ impl SessionsActor {
             group_id: new.group_id,
             harness: new.harness,
             pane_id: Some(inserted.pane),
+            orb_session: Some(inserted.session),
         };
         if row.branch.is_some() && self.store.save_thread(&row).is_err() {
             return Err(NEW_SESSION_UNSAVED.to_owned());
@@ -2838,229 +2803,144 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Pins a thread; pinning a settled thread un-settles it.
-    fn pin(&mut self, id: ThreadId) {
-        self.edit(id, |row, now| {
+    /// Pins session `id`; pinning a settled session un-settles it.
+    fn pin_session(&mut self, id: SessionId) {
+        self.edit_session(id, |row, now| {
             row.pinned_at = row.pinned_at.or(Some(now));
             if row.settled_override == Some(SettledOverride::Settled) {
-                unsettle_row(row, now);
+                unsettle_session_row(row, now);
             }
         });
     }
 
-    fn unpin(&mut self, id: ThreadId) {
-        self.edit(id, |row, _| row.pinned_at = None);
+    fn unpin_session(&mut self, id: SessionId) {
+        self.edit_session(id, |row, _| row.pinned_at = None);
     }
 
-    /// Pins a group; pinning a settled group un-settles it.
-    fn pin_group(&mut self, id: GroupId) {
-        self.edit_group(id, |row, now| {
-            row.pinned_at = row.pinned_at.or(Some(now));
-            if row.settled_override == Some(SettledOverride::Settled) {
-                unsettle_group_row(row, now);
-            }
-        });
+    /// Gives session `id` the user's name; `None` goes back to its agents'
+    /// or directory's.
+    fn rename_session(&mut self, id: SessionId, name: Option<String>) {
+        self.edit_session(id, |row, _| row.name = name);
     }
 
-    fn unpin_group(&mut self, id: GroupId) {
-        self.edit_group(id, |row, _| row.pinned_at = None);
+    /// The saved threads running in session `id`'s panes.
+    fn session_rows(&self, id: SessionId) -> impl Iterator<Item = &ThreadRow> {
+        self.rows.iter().filter(move |row| {
+            row.pane_id
+                .and_then(|pane| self.panes.get(&pane))
+                .is_some_and(|pane| pane.session_id == id)
+        })
     }
 
-    /// Gives a thread orb's own name; `None` goes back to the harness's title.
-    fn rename(&mut self, id: ThreadId, title: Option<String>) {
-        self.edit(id, |row, _| row.renamed_title = title);
-    }
-
-    /// Settles a thread that isn't mid-turn, then stops its session if it's
-    /// idle. A turn that started after the key press wins.
-    async fn settle(&mut self, id: ThreadId) {
-        let (Some((harness, short_id)), Some(status)) = (self.session(id), self.status(id)) else {
-            return;
-        };
-        if status.in_progress() {
-            return;
-        }
-        self.edit(id, settle_row);
-        if status == ThreadStatus::Idle && self.hosted.contains(&id) {
-            // ponytail: stop runs on the actor (~0.7 s); spawn it if triage feels laggy.
-            self.stop(&harness, &short_id).await;
-        }
-    }
-
-    fn unsettle(&mut self, id: ThreadId) {
-        self.edit(id, unsettle_row);
-    }
-
-    /// Settles a group none of whose threads is mid-turn, then stops its
-    /// idle sessions that a harness runs itself. A turn that started after
-    /// the key press wins.
-    async fn settle_group(&mut self, id: GroupId) {
-        let children: Vec<(HarnessId, String, ThreadStatus)> = self
-            .rows
-            .iter()
-            .filter(|row| row.group_id == Some(id) && self.hosted.contains(&row.id))
-            .filter_map(|row| {
-                Some((
+    /// Settles session `id` unless one of its agent panes has a turn
+    /// underway (a turn that started after the key press wins), then stops
+    /// its idle threads a harness runs itself and kills every pane, keeping
+    /// its tabs, layout and each pane's resume command.
+    async fn settle_session(&mut self, id: SessionId) {
+        let agents: Vec<(HarnessId, String, Option<ThreadStatus>, bool)> = self
+            .session_rows(id)
+            .map(|row| {
+                (
                     row.harness.clone(),
                     row.short_id.clone(),
-                    self.status(row.id)?,
-                ))
+                    self.status(row.id),
+                    self.hosted.contains(&row.id),
+                )
             })
             .collect();
-        if children.iter().any(|(.., status)| status.in_progress()) {
+        if agents
+            .iter()
+            .any(|(_, _, status, _)| status.is_some_and(ThreadStatus::in_progress))
+        {
             return;
         }
-        self.edit_group(id, settle_group_row);
-        for (harness, short_id, status) in children {
-            if status == ThreadStatus::Idle {
+        self.edit_session(id, settle_session_row);
+        for (harness, short_id, status, hosted) in agents {
+            if hosted && status == Some(ThreadStatus::Idle) {
+                // ponytail: stop runs on the actor (~0.7 s); spawn it if triage feels laggy.
                 self.stop(&harness, &short_id).await;
             }
         }
+        self.kill_panes(id);
     }
 
-    fn unsettle_group(&mut self, id: GroupId) {
-        self.edit_group(id, unsettle_group_row);
+    fn unsettle_session(&mut self, id: SessionId) {
+        self.edit_session(id, unsettle_session_row);
     }
 
-    /// Marks a thread's latest turn seen.
-    fn visit(&mut self, id: ThreadId) {
-        self.edit(id, |row, now| row.last_visited_at = now);
-    }
-
-    /// Removes a thread's session, then forgets the thread. Only a session
-    /// its harness runs itself is removed first. If the removal fails, the thread stays, shown again,
-    /// and the reason shows. However it ends, the thread is no longer hidden
-    /// as being deleted.
-    async fn delete(&mut self, id: ThreadId) {
-        let (Some((harness, short_id)), Some(_)) = (self.session(id), self.status(id)) else {
-            self.state.write().sessions.deleting.remove(&id);
-            (self.wake)();
-            return;
-        };
-        let removed = match self.harness(&harness) {
-            Ok(harness) if self.hosted.contains(&id) => {
-                harness.remove(&short_id).await.map_err(|r| reason(&r))
-            }
-            _ => Ok(()),
-        };
-        if let Err(error) = removed {
-            {
-                let mut app = self.state.write();
-                app.sessions.deleting.remove(&id);
-                app.sessions.error = Some(error);
-            }
-            (self.wake)();
-            return;
-        }
-        let session = self
-            .rows
-            .iter()
-            .find(|row| row.id == id)
-            .and_then(|row| self.panes.get(&row.pane_id?))
-            .map(|pane| pane.session_id);
-        let pane = self
-            .rows
-            .iter()
-            .find(|row| row.id == id)
-            .and_then(|row| row.pane_id);
-        let deleted = self.store.delete_thread(id);
-        self.rows.retain(|row| row.id != id);
-        if let Some(pane) = pane {
-            let _ = fs::remove_file(self.pane_files.file(pane));
-        }
-        let emptied = session.filter(|session| {
-            !self.rows.iter().any(|row| {
-                row.pane_id
-                    .and_then(|pane| self.panes.get(&pane))
-                    .is_some_and(|pane| pane.session_id == *session)
-            })
-        });
-        let deleted = match emptied {
-            Some(session) => deleted.and_then(|()| {
-                self.panes.retain(|_, pane| pane.session_id != session);
-                self.sessions.remove(&session);
-                self.state.write().layouts.remove(session);
-                self.store.delete_session(session)
-            }),
-            None => deleted,
-        };
-        {
-            let mut app = self.state.write();
-            let sessions = &mut app.sessions;
-            for project in &mut sessions.projects {
-                project.threads.retain(|thread| thread.id != id);
-            }
-            sessions.deleting.remove(&id);
-            if deleted.is_err() {
-                sessions.error = Some(SAVE_FAILED.to_owned());
-            }
-        }
-        (self.wake)();
-    }
-
-    /// Deletes each of group `id`'s threads as `delete` does, then, once none
-    /// is left, the group. A thread whose session couldn't be removed stays
-    /// in the group, shown again with the reason, and so does the group.
-    /// Then its directory goes too (see `clear_group_dir`); if that fails,
-    /// the group is still deleted and the reason shows. A Feature group whose
-    /// slug branch the delete would remove isn't merged is refused first,
-    /// with the reason, and nothing changes. Otherwise its threads are hidden
-    /// and detached at once, its card, draft and threads leave the jump list,
-    /// and a cursor on the group moves to the neighbouring row (a thread
-    /// there counts as visited).
-    async fn delete_group(&mut self, id: GroupId) {
-        let threads: Vec<ThreadId> = self
-            .rows
-            .iter()
-            .filter(|row| row.group_id == Some(id))
+    /// Marks the latest turn of each of session `id`'s agents seen.
+    fn visit(&mut self, id: SessionId) {
+        let unseen: Vec<ThreadId> = self
+            .session_rows(id)
+            .filter(|row| row.last_activity_at > row.last_visited_at)
             .map(|row| row.id)
             .collect();
-        if let Some(slug) = self.unmerged_slug(id) {
-            self.state.write().sessions.error = Some(unmerged(&slug));
-            return (self.wake)();
+        for thread in unseen {
+            self.edit(thread, |row, now| row.last_visited_at = now);
         }
-        let neighbour = {
-            let mut app = self.state.write();
-            let app = &mut *app;
-            let sessions = &mut app.sessions;
-            let on_group = sessions.selected_group().map(|(_, group)| group.id) == Some(id);
-            if on_group {
-                sessions.cursor = sessions.row_neighbour(SidebarItem::Group(id));
+    }
+
+    /// Deletes session `id`: removes its threads a harness runs itself first
+    /// (a failure keeps the session, shown again with the reason), kills
+    /// every pane, deletes a Research or Learn folder that is orb's own and
+    /// no other session uses, then its tabs, panes, threads (ended ones
+    /// included) and row, and
+    /// forgets them. Claude transcripts, pi session files and worktrees
+    /// stay. However it ends, the session is no longer hidden as being
+    /// deleted.
+    async fn delete_session(&mut self, id: SessionId) {
+        let hosted: Vec<(HarnessId, String)> = self
+            .session_rows(id)
+            .filter(|row| self.hosted.contains(&row.id))
+            .map(|row| (row.harness.clone(), row.short_id.clone()))
+            .collect();
+        for (harness, short_id) in hosted {
+            let removed = match self.harness(&harness) {
+                Ok(harness) => harness.remove(&short_id).await.map_err(|r| reason(&r)),
+                Err(_) => Ok(()),
+            };
+            if let Err(error) = removed {
+                {
+                    let mut app = self.state.write();
+                    app.sessions.deleting.remove(&id);
+                    app.sessions.error = Some(error);
+                }
+                return (self.wake)();
             }
-            app.jumps.remove(SidebarItem::Group(id));
-            app.jumps.remove(SidebarItem::GroupDraft(id));
-            for thread in &threads {
-                sessions.deleting.insert(*thread);
-                app.attached.remove(thread);
-                app.jumps.remove(SidebarItem::Thread(*thread));
-            }
-            on_group.then(|| sessions.selected_id()).flatten()
-        };
-        (self.wake)();
-        self.save_jumps();
-        if let Some(neighbour) = neighbour {
-            self.visit(neighbour);
         }
-        for thread in threads {
-            self.delete(thread).await;
+        self.kill_panes(id);
+        let cleared = self.clear_folder(id);
+        let threads: Vec<ThreadId> = self
+            .session_rows(id)
+            .chain(self.rows.iter().filter(|row| row.orb_session == Some(id)))
+            .map(|row| row.id)
+            .collect();
+        let panes: Vec<PaneId> = self
+            .panes
+            .values()
+            .filter(|pane| pane.session_id == id)
+            .map(|pane| pane.id)
+            .collect();
+        let deleted = self.store.delete_session(id);
+        self.rows.retain(|row| !threads.contains(&row.id));
+        for pane in &panes {
+            let _ = fs::remove_file(self.pane_files.file(*pane));
+            self.panes.remove(pane);
+            self.pane_reports.remove(pane);
         }
-        if self.rows.iter().any(|row| row.group_id == Some(id)) {
-            return;
-        }
-        let deleted = self.store.delete_group(id);
-        let cleared = match self.groups.iter().position(|row| row.id == id) {
-            Some(index) => {
-                let row = self.groups.remove(index);
-                self.clear_group_dir(&row)
-            }
-            None => Ok(()),
-        };
+        self.sessions.remove(&id);
         {
             let mut app = self.state.write();
+            app.layouts.remove(id);
+            app.attached.remove(&id);
             let sessions = &mut app.sessions;
+            sessions.sessions.retain(|session| session.id != id);
             for project in &mut sessions.projects {
-                project.groups.retain(|group| group.id != id);
+                project
+                    .threads
+                    .retain(|thread| !threads.contains(&thread.id));
             }
+            sessions.deleting.remove(&id);
             match (deleted, cleared) {
                 (Err(_), _) => sessions.error = Some(SAVE_FAILED.to_owned()),
                 (Ok(()), Err(error)) => sessions.error = Some(error),
@@ -3070,92 +2950,83 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Removes deleted group `row`'s directory. For a Research or Learn group,
-    /// that's its own folder directly under orb's folder for the kind (already
-    /// gone counts as done). For a started Feature group, it's the orb
-    /// worktree, forced, then its branch if git agrees it's merged. Any other
-    /// directory is left alone. The error is the mode-line text.
-    fn clear_group_dir(&self, row: &GroupRow) -> Result<(), String> {
-        let Some(dir) = &row.dir else {
-            return Ok(());
-        };
-        match own_folder(row.kind) {
-            None => self.remove_group_worktree(row, dir),
-            Some((_, kind_dir, _))
-                if dir.parent() == Some(self.orb_root.join(kind_dir).as_path())
-                    && dir.file_name() == Some(OsStr::new(&row.name)) =>
-            {
-                match fs::remove_dir_all(dir) {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                    Err(_) => Err(FOLDER_UNREMOVED.to_owned()),
-                }
-            }
-            Some(_) => Ok(()),
-        }
-    }
-
-    /// Force-removes Feature group `row`'s orb worktree at `dir` (or, when
-    /// the directory is already gone, prunes git's record of it), then
-    /// safe-deletes the branch orb made for it, named after the group (one
-    /// git still refuses, which `delete_group` checked for first, stays with
-    /// git's reason). A branch the group was
-    /// switched to is the user's and stays. Neither is touched while a
-    /// thread outside the group works there.
-    fn remove_group_worktree(&self, row: &GroupRow, dir: &Path) -> Result<(), String> {
-        let Some(root) = self.worktree_root(row, dir) else {
-            return Ok(());
-        };
-        if self.shares_worktree(row, dir) {
-            return Err(WORKTREE_IN_USE.to_owned());
-        }
-        let git = &self.services.git;
-        let cleared = if dir.is_dir() {
-            git.remove_worktree(&root, dir, true)
-        } else {
-            git.prune_worktrees(&root)
-        };
-        cleared.map_err(|report| git_reason(&report))?;
-        let branch = row.name.as_str();
-        if git.branch_exists(&root, branch) {
-            git.delete_branch(&root, branch, false)
-                .map_err(|report| git_reason(&report))?;
-        }
-        Ok(())
-    }
-
-    /// The project root of Feature group `row`'s worktree `dir`, when `dir` is
-    /// an orb worktree of a known project: the only worktree a group delete
-    /// removes.
-    fn worktree_root(&self, row: &GroupRow, dir: &Path) -> Option<PathBuf> {
-        self.project_root(row.project_id)
-            .filter(|_| is_orb_worktree(&self.worktrees_root, dir))
-    }
-
-    /// Whether a thread outside group `row` works in `dir`.
-    fn shares_worktree(&self, row: &GroupRow, dir: &Path) -> bool {
-        self.rows
+    /// Kills the panes zmx still lists for every settled session, listing
+    /// each socket dir once, in pane order. Failures are ignored.
+    fn kill_settled(&self) {
+        let mut rows: Vec<&PaneRow> = self
+            .panes
+            .values()
+            .filter(|row| {
+                self.sessions.get(&row.session_id).is_some_and(|session| {
+                    session.settled_override == Some(SettledOverride::Settled)
+                })
+            })
+            .collect();
+        rows.sort_by_key(|row| row.id.0);
+        let zmx: Vec<ZmxSession> = rows
+            .into_iter()
+            .map(|row| pane_entry(&self.services, &self.orb_root, row).zmx)
+            .collect();
+        let listed: HashMap<&Path, Vec<ZmxEntry>> = zmx
             .iter()
-            .any(|thread| thread.cwd == dir && thread.group_id != Some(row.id))
+            .map(|session| session.dir.as_path())
+            .collect::<HashSet<&Path>>()
+            .into_iter()
+            .map(|dir| (dir, self.services.zmx.list(dir).unwrap_or_default()))
+            .collect();
+        for session in &zmx {
+            let running = listed
+                .get(session.dir.as_path())
+                .is_some_and(|entries| entries.iter().any(|entry| entry.name == session.name));
+            if running {
+                let _ = self.services.zmx.kill(session);
+            }
+        }
     }
 
-    /// Group `id`'s slug branch, if deleting the group would delete it (see
-    /// `remove_group_worktree`) and git doesn't call it merged.
-    fn unmerged_slug(&self, id: GroupId) -> Option<String> {
-        let row = self.groups.iter().find(|row| row.id == id)?;
-        let dir = row
-            .dir
-            .as_deref()
-            .filter(|_| row.kind == GroupKind::Feature)?;
-        let root = self.worktree_root(row, dir)?;
-        let git = &self.services.git;
-        let unmerged = !self.shares_worktree(row, dir)
-            && git.branch_exists(&root, &row.name)
-            && !git.is_merged(&root, &row.name);
-        unmerged.then(|| row.name.clone())
+    /// Runs `zmx kill` on each of session `id`'s panes in pane order,
+    /// ignoring failures.
+    fn kill_panes(&self, id: SessionId) {
+        let mut rows: Vec<&PaneRow> = self
+            .panes
+            .values()
+            .filter(|row| row.session_id == id)
+            .collect();
+        rows.sort_by_key(|row| row.id.0);
+        for row in rows {
+            let _ = self
+                .services
+                .zmx
+                .kill(&pane_entry(&self.services, &self.orb_root, row).zmx);
+        }
     }
 
-    /// Saves the sidebar's width and project filter, showing why if it can't.
+    /// Removes session `id`'s folder when it is a Research or Learn session
+    /// in orb's own folder for its kind and no other session uses it
+    /// (already gone counts as done). The error is the mode-line text.
+    fn clear_folder(&self, id: SessionId) -> Result<(), String> {
+        let Some(row) = self.sessions.get(&id) else {
+            return Ok(());
+        };
+        let kind_dir = match row.kind {
+            SessionKind::Research => "research",
+            SessionKind::Learn => "learn",
+            SessionKind::Plain | SessionKind::Incognito => return Ok(()),
+        };
+        let shared = self
+            .sessions
+            .values()
+            .any(|other| other.id != id && other.dir == row.dir);
+        if shared || row.dir.parent() != Some(self.orb_root.join(kind_dir).as_path()) {
+            return Ok(());
+        }
+        match fs::remove_dir_all(&row.dir) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(FOLDER_UNREMOVED.to_owned()),
+        }
+    }
+
     /// Adds a shell pane in `session`'s directory: splitting its focused pane
     /// `split`, or in a new tab when `None`. Then saves the layout. Nothing
     /// happens once the session's layout is gone; a pane that can't be saved
@@ -3195,8 +3066,9 @@ impl SessionsActor {
     }
 
     /// Saves `session`'s tabs, active tab and pane names as the app state
-    /// has them; panes no tab holds any more are deleted from the store.
-    /// Nothing happens once its layout is gone.
+    /// has them; panes no tab holds any more are deleted from the store. A
+    /// session whose layout emptied keeps no tab or pane and settles now;
+    /// nothing happens for one that is gone.
     fn save_layout(&mut self, session: SessionId) {
         let saved = {
             let app = self.state.read();
@@ -3220,8 +3092,13 @@ impl SessionsActor {
                 (tabs, layout.active(), names)
             })
         };
-        let Some((tabs, active, names)) = saved else {
-            return;
+        let (tabs, active, names) = match saved {
+            Some(saved) => saved,
+            None if self.sessions.contains_key(&session) => {
+                self.edit_session(session, settle_session_row);
+                (Vec::new(), 0, Vec::new())
+            }
+            None => return,
         };
         match self.store.save_layout(session, active, &tabs, &names) {
             Ok(dropped) => {
@@ -3287,6 +3164,30 @@ impl SessionsActor {
                     status,
                     pane_launch(&self.services, row, &self.panes),
                 );
+            }
+        }
+        (self.wake)();
+    }
+
+    /// Changes session `id`'s saved row with `change` (given the time now),
+    /// then saves and shows it. Does nothing if the session is gone.
+    fn edit_session<F>(&mut self, id: SessionId, change: F)
+    where
+        F: FnOnce(&mut SessionRow, i64),
+    {
+        let Some(row) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        change(row, now_ms());
+        let saved = self.store.save_session(row);
+        {
+            let mut app = self.state.write();
+            let sessions = &mut app.sessions;
+            if saved.is_err() {
+                sessions.error = Some(SAVE_FAILED.to_owned());
+            }
+            if let Some(shown) = sessions.sessions.iter_mut().find(|shown| shown.id == id) {
+                *shown = show_session(row);
             }
         }
         (self.wake)();
@@ -3392,14 +3293,6 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Thread `id`'s harness and the session id that harness gave it.
-    fn session(&self, id: ThreadId) -> Option<(HarnessId, String)> {
-        self.rows
-            .iter()
-            .find(|row| row.id == id)
-            .map(|row| (row.harness.clone(), row.short_id.clone()))
-    }
-
     /// The directory project `id`'s sessions start in.
     fn project_root(&self, id: ProjectId) -> Option<PathBuf> {
         self.state
@@ -3483,11 +3376,9 @@ struct Moved {
 /// Follows a polled row's activity, given its `status` now and whether a
 /// turn was underway before this poll:
 /// - a turn that ended is the thread's latest activity;
-/// - a turn underway un-settles the thread and ends its kept-active mark;
-/// - the selected thread's latest turn is seen.
+/// - the latest turn of a thread in the selected session is seen.
 ///
-/// A grouped row's un-settle is its group's (see [`follow_group`]); settling
-/// by idleness is its session's (see [`follow_session`]).
+/// Settling and un-settling are its session's (see [`follow_session`]).
 fn follow_activity(
     row: &mut ThreadRow,
     status: ThreadStatus,
@@ -3498,9 +3389,34 @@ fn follow_activity(
     if was_in_progress && !status.in_progress() {
         row.last_activity_at = now;
     }
-    let grouped = row.group_id.is_some();
-    if !grouped
-        && status.in_progress()
+    if selected && row.last_activity_at > row.last_visited_at {
+        row.last_visited_at = now;
+    }
+}
+
+/// What a poll saw of a session's agent panes.
+#[derive(Debug, Clone, Copy)]
+struct Activity {
+    /// The latest turn activity in it, its own or any agent pane's.
+    latest: i64,
+    /// Whether any agent pane has a turn underway.
+    in_progress: bool,
+    /// Whether it has an agent pane at all.
+    agents: bool,
+}
+
+/// Follows a session's settle lifecycle from `activity`:
+/// - the latest activity becomes the session's;
+/// - a turn underway un-settles it and ends its kept-active mark;
+/// - an unpinned session with an agent pane, idle for
+///   [`AUTO_SETTLE_AFTER`], settles as of that activity, unless it is kept
+///   active, in progress or `selected`. A session with no agent pane never
+///   settles by itself, since settling kills its shells and editors.
+///
+/// Returns whether it settled the session just now.
+fn follow_session(row: &mut SessionRow, activity: Activity, selected: bool, now: i64) -> bool {
+    row.last_activity_at = activity.latest;
+    if activity.in_progress
         && let Some(settled_override) = row.settled_override
     {
         if settled_override == SettledOverride::Settled {
@@ -3509,82 +3425,30 @@ fn follow_activity(
         row.settled_override = None;
         row.settled_at = None;
     }
-    if selected && row.last_activity_at > row.last_visited_at {
-        row.last_visited_at = now;
-    }
-}
-
-/// Un-settles a group when any of its threads has a turn `in_progress`,
-/// ending its kept-active mark.
-fn follow_group(row: &mut GroupRow, in_progress: bool, now: i64) {
-    if in_progress && let Some(settled_override) = row.settled_override {
-        if settled_override == SettledOverride::Settled {
-            row.unsettled_at = Some(now);
-        }
-        row.settled_override = None;
-        row.settled_at = None;
-    }
-}
-
-/// Follows a session's settle lifecycle, given the latest turn activity in it
-/// (its own or any agent pane's) and whether any agent pane has a turn
-/// underway:
-/// - the latest activity becomes the session's;
-/// - a turn underway un-settles it and ends its kept-active mark;
-/// - an unpinned session idle for [`AUTO_SETTLE_AFTER`] settles as of that
-///   activity, unless it is kept active, in progress or `selected`.
-fn follow_session(row: &mut SessionRow, latest: i64, in_progress: bool, selected: bool, now: i64) {
-    row.last_activity_at = latest;
-    if in_progress && let Some(settled_override) = row.settled_override {
-        if settled_override == SettledOverride::Settled {
-            row.unsettled_at = Some(now);
-        }
-        row.settled_override = None;
-        row.settled_at = None;
-    }
     if row.settled_override.is_none()
         && row.pinned_at.is_none()
-        && !in_progress
+        && activity.agents
+        && !activity.in_progress
         && !selected
-        && now.saturating_sub(latest) >= AUTO_SETTLE_AFTER
+        && now.saturating_sub(activity.latest) >= AUTO_SETTLE_AFTER
     {
-        row.settled_override = Some(SettledOverride::Settled);
-        row.settled_at = Some(latest);
-        row.unsettled_at = None;
-        row.pinned_at = None;
+        settle_session_row(row, activity.latest);
+        return true;
     }
+    false
 }
 
-/// Settles `row` onto the shelf as of `at`, unpinning it.
-fn settle_row(row: &mut ThreadRow, at: i64) {
+/// Settles session `row` onto the shelf as of `at`, unpinning it.
+fn settle_session_row(row: &mut SessionRow, at: i64) {
     row.settled_override = Some(SettledOverride::Settled);
     row.settled_at = Some(at);
     row.unsettled_at = None;
     row.pinned_at = None;
 }
 
-/// Un-settles `row` and keeps it active until its next turn activity. It
-/// re-enters Active at `now` unless it was already kept active.
-fn unsettle_row(row: &mut ThreadRow, now: i64) {
-    if row.settled_override != Some(SettledOverride::Active) {
-        row.unsettled_at = Some(now);
-    }
-    row.settled_override = Some(SettledOverride::Active);
-    row.settled_at = None;
-}
-
-/// Settles group `row` onto the shelf as of `at`, unpinning it, as
-/// [`settle_row`] does for a thread.
-fn settle_group_row(row: &mut GroupRow, at: i64) {
-    row.settled_override = Some(SettledOverride::Settled);
-    row.settled_at = Some(at);
-    row.unsettled_at = None;
-    row.pinned_at = None;
-}
-
-/// Un-settles group `row` and keeps it active until its next turn activity,
-/// as [`unsettle_row`] does for a thread.
-fn unsettle_group_row(row: &mut GroupRow, now: i64) {
+/// Un-settles session `row` and keeps it active until its next turn
+/// activity. It re-enters Active at `now` unless it was already kept active.
+fn unsettle_session_row(row: &mut SessionRow, now: i64) {
     if row.settled_override != Some(SettledOverride::Active) {
         row.unsettled_at = Some(now);
     }
@@ -3750,9 +3614,6 @@ fn notice_kind(old: ThreadStatus, new: ThreadStatus) -> Option<NoticeKind> {
 /// status changes in a way that needs the user; never for a thread being
 /// deleted. The title is the row's, already updated by this poll.
 fn notice(sessions: &Sessions, row: &ThreadRow, status: ThreadStatus) -> Option<Notice> {
-    if sessions.deleting.contains(&row.id) {
-        return None;
-    }
     let (project, thread) = sessions.projects.iter().find_map(|project| {
         project
             .threads
@@ -3760,6 +3621,9 @@ fn notice(sessions: &Sessions, row: &ThreadRow, status: ThreadStatus) -> Option<
             .find(|thread| thread.id == row.id)
             .map(|thread| (project, thread))
     })?;
+    if sessions.is_deleting(thread) {
+        return None;
+    }
     Some(Notice {
         thread: row.id,
         kind: notice_kind(thread.status, status)?,
@@ -3795,6 +3659,7 @@ fn thread(row: &ThreadRow, status: ThreadStatus, pane: Option<PaneLaunch>) -> Th
         status,
         turn_started_at: row.turn_started_at.map(from_ms),
         pane,
+        last_session: row.orb_session,
         branch: row.branch.clone(),
         pinned_at: row.pinned_at.map(from_ms),
         settled_at: row
@@ -3812,17 +3677,53 @@ fn thread(row: &ThreadRow, status: ThreadStatus, pane: Option<PaneLaunch>) -> Th
     }
 }
 
-/// Whether saved jump-list row `item` still names something in `projects`,
-/// shown or not: its thread, its project (for a draft) or its group.
-fn exists(projects: &[Project], item: SidebarItem) -> bool {
-    projects.iter().any(|project| match item {
-        SidebarItem::Thread(id) => project.threads.iter().any(|thread| thread.id == id),
-        SidebarItem::Draft(id) => project.id == id,
-        SidebarItem::Group(id) | SidebarItem::GroupDraft(id) => {
-            project.groups.iter().any(|group| group.id == id)
-        }
+/// The kind of session a project's new thread gets.
+fn session_kind(kind: ProjectKind) -> SessionKind {
+    match kind {
+        ProjectKind::Normal => SessionKind::Plain,
+        ProjectKind::Research => SessionKind::Research,
+        ProjectKind::Learn => SessionKind::Learn,
+        ProjectKind::Incognito => SessionKind::Incognito,
+    }
+}
+
+/// How a saved session looks: settled only while settled by hand or by
+/// idleness, active since the later of its creation and its latest
+/// un-settle.
+fn show_session(row: &SessionRow) -> Session {
+    Session {
+        id: row.id,
+        project: row.project_id,
+        kind: row.kind,
+        dir: row.dir.clone(),
+        name: row.name.clone(),
+        branch: row.branch.clone(),
+        created_at: from_ms(row.created_at),
+        pinned_at: row.pinned_at.map(from_ms),
+        settled_at: row
+            .settled_at
+            .filter(|_| row.settled_override == Some(SettledOverride::Settled))
+            .map(from_ms),
+        active_since: from_ms(row.created_at.max(row.unsettled_at.unwrap_or(0))),
+        last_activity_at: from_ms(row.last_activity_at),
+    }
+}
+
+/// Whether saved jump-list row `item` still names something, shown or not:
+/// one of `sessions`, or in `projects` a project (for a draft) or a group.
+fn exists(
+    projects: &[Project],
+    sessions: &HashMap<SessionId, SessionRow>,
+    item: SidebarItem,
+) -> bool {
+    match item {
+        SidebarItem::Session(id) => sessions.contains_key(&id),
+        SidebarItem::Draft(id) => projects.iter().any(|project| project.id == id),
+        SidebarItem::GroupDraft(id) => projects
+            .iter()
+            .any(|project| project.groups.iter().any(|group| group.id == id)),
         SidebarItem::SettledShelf => false,
-    })
+    }
 }
 
 /// How a saved group looks: its saved draft, and a draft whenever no saved
@@ -3877,6 +3778,7 @@ fn pane_launch(
     let pane = panes.get(&row.pane_id?)?;
     Some(PaneLaunch {
         pane: pane.id,
+        session: pane.session_id,
         command: match pane.resume {
             Some(_) => vec![],
             None => harness.attach_argv(
@@ -4137,12 +4039,6 @@ fn project_title(root: &Path) -> String {
     )
 }
 
-/// The error shown when a Feature group isn't deleted because its slug
-/// branch has commits git doesn't call merged.
-fn unmerged(slug: &str) -> String {
-    format!("branch {slug} has unmerged commits")
-}
-
 /// Milliseconds since the Unix epoch, now.
 fn now_ms() -> i64 {
     to_ms(SystemTime::now())
@@ -4179,12 +4075,12 @@ mod tests {
 
     use super::{
         FAST_POLL, Probed, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms,
-        spawn_sessions_actor,
+        settle_session_row, spawn_sessions_actor,
     };
     use crate::Focus;
     use crate::TextInput;
     use crate::command::Workspace;
-    use crate::common::{Services, State, Wake};
+    use crate::common::{Services, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
     use crate::feat::git::validator::BUSY_DIRECTORY;
     use crate::feat::git::worktree::hex_branch;
@@ -4202,7 +4098,7 @@ mod tests {
     };
     use crate::feat::sessions::state::{
         Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Notice,
-        NoticeKind, Own, PaneId, ProjectId, ProjectKind, SidebarItem, SidebarRow, Thread, ThreadId,
+        NoticeKind, Own, PaneId, ProjectId, ProjectKind, SessionId, SidebarItem, Thread, ThreadId,
         ThreadStatus,
     };
     use crate::feat::sessions::store::{
@@ -4536,15 +4432,6 @@ mod tests {
         fn having(branch: &str) -> Arc<Self> {
             Arc::new(Self {
                 existing: Some(branch.to_owned()),
-                ..Self::answering()
-            })
-        }
-
-        /// A repository without an `origin` where `branch` exists, unmerged.
-        fn unmerged(branch: &str) -> Arc<Self> {
-            Arc::new(Self {
-                existing: Some(branch.to_owned()),
-                merged: false,
                 ..Self::answering()
             })
         }
@@ -5046,30 +4933,6 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn settling_a_thread_stops_it_through_its_own_harness() -> Result<(), Report<StoreError>>
-    {
-        // Given an idle thread of the other harness.
-        let store = Store::open_in_memory()?;
-        let id = add_thread_in(&store, OTHER, "bb")?;
-        let claude = FakeHost::listing(Vec::new());
-        let other = FakeHost::listing(vec![record("bb", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start_beside(store, &claude, &other);
-        actor.poll().await;
-
-        // When settling it.
-        actor.settle(id).await;
-
-        // Then only the other harness stops its session.
-        assert_eq!(
-            (claude.stopped(), other.stopped()),
-            (Vec::new(), vec!["bb".to_owned()]),
-            "a thread should stop through the harness it runs in"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
     async fn starting_a_draft_creates_its_session_through_the_drafts_harness()
     -> Result<(), Report<StoreError>> {
         // Given a local draft of the other harness.
@@ -5288,6 +5151,781 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn restore_shows_each_saved_session() -> Result<(), Report<StoreError>> {
+        // Given a thread's session in the orb project.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then the session is shown in its directory.
+        let shown: Vec<(SessionId, PathBuf)> = state
+            .read()
+            .sessions
+            .sessions
+            .iter()
+            .map(|session| (session.id, session.dir.clone()))
+            .collect();
+        assert_eq!(
+            shown,
+            [(inserted.session, PathBuf::from(PROJECT_ROOT))],
+            "every saved session should be shown"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn emptied_layout_settles_its_session() -> Result<(), Report<StoreError>> {
+        // Given a thread's one-pane session whose last pane was closed.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().layouts.close_pane(inserted.pane);
+
+        // When saving its layout.
+        actor.save_layout(inserted.session);
+
+        // Then the store keeps no tab for it and has it settled.
+        let saved = actor.store.layouts()?;
+        let settled = saved
+            .sessions
+            .iter()
+            .find(|row| row.id == inserted.session)
+            .and_then(|row| row.settled_override);
+        assert_eq!(
+            (saved.tabs.len(), settled),
+            (0, Some(SettledOverride::Settled)),
+            "a session whose last pane closed is saved empty and settled"
+        );
+        Ok(())
+    }
+
+    /// A zmx that lists no sessions and records each command, on the pane
+    /// socket dir /zmx.
+    fn recording_zmx() -> (Arc<FakeZmx>, ZmxService) {
+        let zmx = Arc::new(FakeZmx::new(ZmxOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        (zmx.clone(), ZmxService::new(zmx, PathBuf::from("/zmx")))
+    }
+
+    /// The zmx session names `zmx` was asked to kill, in order.
+    fn killed(zmx: &FakeZmx) -> Vec<String> {
+        zmx.calls()
+            .into_iter()
+            .filter_map(|argv| {
+                let at = argv.iter().position(|word| word == "kill")?;
+                argv.get(at + 1)
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    /// The saved row of session `id`.
+    fn saved_session_row(store: &Store, id: SessionId) -> Option<SessionRow> {
+        store
+            .layouts()
+            .ok()?
+            .sessions
+            .into_iter()
+            .find(|row| row.id == id)
+    }
+
+    #[rstest::rstest]
+    fn pin_session_saves_its_pin() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When pinning it.
+        actor.pin_session(inserted.session);
+
+        // Then its row is saved pinned.
+        assert!(
+            saved_session_row(&actor.store, inserted.session)
+                .is_some_and(|row| row.pinned_at.is_some()),
+            "a pinned session should be saved pinned"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pin_on_a_settled_session_unsettles_it() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, settled.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.edit_session(inserted.session, settle_session_row);
+
+        // When pinning it.
+        actor.pin_session(inserted.session);
+
+        // Then it shows active again.
+        assert_eq!(
+            state
+                .read()
+                .sessions
+                .session(inserted.session)
+                .map(|session| session.settled_at),
+            Some(None),
+            "pinning a settled session should bring it back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn unpin_session_clears_its_pin() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, pinned.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.pin_session(inserted.session);
+
+        // When unpinning it.
+        actor.unpin_session(inserted.session);
+
+        // Then its row is saved unpinned.
+        assert!(
+            saved_session_row(&actor.store, inserted.session)
+                .is_some_and(|row| row.pinned_at.is_none()),
+            "an unpinned session should be saved unpinned"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn rename_session_saves_the_name() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When naming it "auth".
+        actor.rename_session(inserted.session, Some("auth".to_owned()));
+
+        // Then the store returns the name.
+        assert_eq!(
+            saved_session_row(&actor.store, inserted.session).and_then(|row| row.name),
+            Some("auth".to_owned()),
+            "a session's r name should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn rename_session_shows_the_name_as_its_title() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When naming it "auth".
+        actor.rename_session(inserted.session, Some("auth".to_owned()));
+
+        // Then its title is the name.
+        let app = state.read();
+        let title = app
+            .sessions
+            .session(inserted.session)
+            .map(|session| app.sessions.title(session));
+        assert_eq!(title.as_deref(), Some("auth"), "the r name is the title");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_session_marks_it_settled() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, idle.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When settling it.
+        actor.settle_session(inserted.session).await;
+
+        // Then it shows and is saved settled.
+        let settled = (
+            state
+                .read()
+                .sessions
+                .session(inserted.session)
+                .is_some_and(|session| session.settled_at.is_some()),
+            saved_session_row(&actor.store, inserted.session).and_then(|row| row.settled_override),
+        );
+        assert_eq!(
+            settled,
+            (true, Some(SettledOverride::Settled)),
+            "a settled session should show and be saved settled"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_session_with_a_working_agent_is_ignored() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, its agent working.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When settling it.
+        actor.settle_session(inserted.session).await;
+
+        // Then it stays unsettled.
+        assert_eq!(
+            saved_session_row(&actor.store, inserted.session).and_then(|row| row.settled_override),
+            None,
+            "a turn that started after the key press wins"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_session_stops_an_idle_hosted_agent() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, its agent idle and hosted by Claude.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When settling it.
+        actor.settle_session(inserted.session).await;
+
+        // Then Claude stops aa.
+        assert_eq!(
+            host.stopped(),
+            vec!["aa".to_owned()],
+            "an idle hosted agent should be stopped"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_session_kills_every_pane() -> Result<(), Report<StoreError>> {
+        // Given thread aa's idle session with a second pane, and thread bb's
+        // session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        insert_thread(&store, "bb", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (zmx, service) = recording_zmx();
+        actor.services.zmx = service;
+
+        // When settling aa's session.
+        actor.settle_session(inserted.session).await;
+
+        // Then both its panes are killed, and nothing of bb's.
+        assert_eq!(
+            killed(&zmx),
+            vec![inserted.pane.zmx_name(), second.zmx_name()],
+            "settling a session kills each of its panes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_session_unpins_it() -> Result<(), Report<StoreError>> {
+        // Given thread aa's pinned idle session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        actor.pin_session(inserted.session);
+
+        // When settling it.
+        actor.settle_session(inserted.session).await;
+
+        // Then it is saved without its pin.
+        assert_eq!(
+            saved_session_row(&actor.store, inserted.session).map(|row| row.pinned_at),
+            Some(None),
+            "a settle should remove the pin"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settling_a_pane_agents_session_stops_nothing() -> Result<(), Report<StoreError>> {
+        // Given an idle Claude in aa's pane, which no harness runs itself.
+        let mut fx = PaneStatus::new(
+            false,
+            vec![interactive(&[100], ThreadStatus::Idle)],
+            running,
+        )?;
+        fx.actor.poll().await;
+
+        // When settling aa's session.
+        fx.actor.settle_session(fx.thread.session).await;
+
+        // Then nothing was asked to stop it.
+        assert!(
+            fx.host.stopped().is_empty(),
+            "a pane agent has no hosted session to stop"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn unsettle_session_keeps_it_active() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, settled.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.edit_session(inserted.session, settle_session_row);
+
+        // When un-settling it.
+        actor.unsettle_session(inserted.session);
+
+        // Then it is kept active.
+        assert_eq!(
+            saved_session_row(&actor.store, inserted.session).and_then(|row| row.settled_override),
+            Some(SettledOverride::Active),
+            "an un-settled session should be kept active"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn visit_marks_the_sessions_agents_seen() -> Result<(), Report<StoreError>> {
+        // Given thread aa whose turn ended unseen.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, state) = start_unselected(store, &host);
+        actor.poll().await;
+        host.set_list(Ok(vec![record("aa", ThreadStatus::Idle)]));
+        actor.poll().await;
+
+        // When visiting its session.
+        actor.visit(inserted.session);
+
+        // Then aa is seen.
+        assert_eq!(
+            shown(&state, inserted.thread).map(|thread| thread.unseen),
+            Some(false),
+            "visiting a session should see its agents' turns"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_session_kills_every_pane() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session with a second pane, and thread bb's
+        // session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        insert_thread(&store, "bb", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (zmx, service) = recording_zmx();
+        actor.services.zmx = service;
+
+        // When deleting aa's session.
+        actor.delete_session(inserted.session).await;
+
+        // Then both its panes are killed, and nothing of bb's.
+        assert_eq!(
+            killed(&zmx),
+            vec![inserted.pane.zmx_name(), second.zmx_name()],
+            "deleting a session kills each of its panes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_session_removes_its_threads_tabs_panes_and_row()
+    -> Result<(), Report<StoreError>> {
+        // Given thread aa's session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When deleting it.
+        actor.delete_session(inserted.session).await;
+
+        // Then the store keeps no session, tab, pane or thread of it.
+        let layouts = actor.store.layouts()?;
+        let left = (
+            layouts.sessions.len(),
+            layouts.tabs.len(),
+            layouts.panes.len(),
+            actor.store.load()?.1.len(),
+        );
+        assert_eq!(left, (0, 0, 0, 0), "a deleted session leaves nothing");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_threadless_session_removes_it() -> Result<(), Report<StoreError>> {
+        // Given a session whose agent has ended, so no thread runs in it.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        resave(&store, "aa", |row| ThreadRow {
+            pane_id: None,
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When deleting it.
+        actor.delete_session(inserted.session).await;
+
+        // Then it is neither shown nor saved.
+        let kept = (
+            state.read().sessions.session(inserted.session).is_some(),
+            saved_session_row(&actor.store, inserted.session).is_some(),
+        );
+        assert_eq!(kept, (false, false), "a session without threads still goes");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_session_removes_its_ended_threads() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, aa having ended in it.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        resave(&store, "aa", |row| ThreadRow {
+            pane_id: None,
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When deleting the session.
+        actor.delete_session(inserted.session).await;
+
+        // Then aa is neither shown nor saved.
+        let kept = (
+            shown(&state, inserted.thread).is_some(),
+            actor.store.load()?.1.len(),
+        );
+        assert_eq!(
+            kept,
+            (false, 0),
+            "a deleted session takes its ended threads"
+        );
+        Ok(())
+    }
+
+    /// A store holding two sessions of orb's Research project in `dir`, made
+    /// for threads aa and, when `shared`, bb.
+    fn research_sessions(
+        orb_root: &Path,
+        dir: &Path,
+        shared: bool,
+    ) -> Result<(Store, InsertedThread), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        let project_id = store.add_project(
+            &orb_root.join("research"),
+            "Research",
+            ProjectKind::Research,
+            0,
+        )?;
+        let insert = |short_id: &str| {
+            store.insert_thread(&NewThread {
+                harness: HarnessId::new("claude"),
+                project_id,
+                short_id: short_id.to_owned(),
+                cwd: dir.to_owned(),
+                created_at: now_ms() - HOUR_MS,
+                model: None,
+                permission_mode: None,
+                group_id: None,
+                zmx: None,
+            })
+        };
+        let inserted = insert("aa")?;
+        if shared {
+            insert("bb")?;
+        }
+        Ok((store, inserted))
+    }
+
+    /// An actor on `store` with orb's folder at `orb_root`.
+    fn start_at(store: Store, orb_root: &Path) -> (SessionsActor, State) {
+        start_in(
+            store,
+            &FakeHost::listing(Vec::new()),
+            &FakeGit::local(),
+            &FakeTrust::accepting(),
+            Path::new(NO_CLAUDE_DIR),
+            orb_root,
+            Path::new(INCOGNITO_ROOT),
+        )
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_research_session_removes_its_folder() -> Result<(), Report<StoreError>> {
+        // Given a Research session in its own folder under orb's.
+        let orb = tempfile::tempdir().change_context(StoreError)?;
+        let dir = orb.path().join("research").join("tokio-cancel");
+        fs::create_dir_all(&dir).change_context(StoreError)?;
+        let (store, inserted) = research_sessions(orb.path(), &dir, false)?;
+        let (mut actor, _state) = start_at(store, orb.path());
+
+        // When deleting it.
+        actor.delete_session(inserted.session).await;
+
+        // Then its folder is gone.
+        assert!(!dir.exists(), "a Research session takes its folder");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_research_session_keeps_a_folder_another_session_uses()
+    -> Result<(), Report<StoreError>> {
+        // Given two Research sessions in the same folder under orb's.
+        let orb = tempfile::tempdir().change_context(StoreError)?;
+        let dir = orb.path().join("research").join("tokio-cancel");
+        fs::create_dir_all(&dir).change_context(StoreError)?;
+        let (store, inserted) = research_sessions(orb.path(), &dir, true)?;
+        let (mut actor, _state) = start_at(store, orb.path());
+
+        // When deleting one of them.
+        actor.delete_session(inserted.session).await;
+
+        // Then the folder stays.
+        assert!(dir.exists(), "a folder another session uses stays");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_research_session_leaves_a_folder_outside_orbs_own()
+    -> Result<(), Report<StoreError>> {
+        // Given a Research session whose folder isn't under orb's research
+        // folder.
+        let orb = tempfile::tempdir().change_context(StoreError)?;
+        let outside = tempfile::tempdir().change_context(StoreError)?;
+        let (store, inserted) = research_sessions(orb.path(), outside.path(), false)?;
+        let (mut actor, _state) = start_at(store, orb.path());
+
+        // When deleting it.
+        actor.delete_session(inserted.session).await;
+
+        // Then that folder is still there.
+        assert!(
+            outside.path().is_dir(),
+            "only a session's own folder under orb's is removed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_research_session_whose_folder_is_gone_shows_no_error()
+    -> Result<(), Report<StoreError>> {
+        // Given a Research session whose own folder was already removed by
+        // hand.
+        let orb = tempfile::tempdir().change_context(StoreError)?;
+        let dir = orb.path().join("research").join("tokio-cancel");
+        let (store, inserted) = research_sessions(orb.path(), &dir, false)?;
+        let (mut actor, state) = start_at(store, orb.path());
+
+        // When deleting it.
+        actor.delete_session(inserted.session).await;
+
+        // Then no error shows.
+        assert_eq!(
+            error_of(&state),
+            None,
+            "an already-removed folder counts as removed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_session_removes_its_pane_files() -> Result<(), Report<StoreError>> {
+        // Given thread aa's pane has a report.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.thread.pane, "start", "aa", Some("startup"))?;
+        fx.actor.poll().await;
+
+        // When deleting aa's session.
+        fx.actor.delete_session(fx.thread.session).await;
+
+        // Then the pane's file is gone.
+        assert!(
+            !fx.file(fx.thread.pane).exists(),
+            "a deleted session's pane files should go"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_pane_agents_session_skips_remove() -> Result<(), Report<StoreError>> {
+        // Given an idle Claude in aa's pane, which no harness runs itself.
+        let mut fx = PaneStatus::new(
+            false,
+            vec![interactive(&[100], ThreadStatus::Idle)],
+            running,
+        )?;
+        fx.actor.poll().await;
+
+        // When deleting aa's session.
+        fx.actor.delete_session(fx.thread.session).await;
+
+        // Then nothing was asked to remove it.
+        assert!(
+            fx.host.removed().is_empty(),
+            "a pane agent has no hosted session to remove"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_remove_keeps_the_session() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, whose hosted agent can't be removed.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+        state.write().sessions.deleting.insert(inserted.session);
+
+        // When deleting it.
+        actor.delete_session(inserted.session).await;
+
+        // Then the sidebar lists it again.
+        let listed = state
+            .read()
+            .sessions
+            .sidebar()
+            .iter()
+            .any(|row| row.item() == SidebarItem::Session(inserted.session));
+        assert!(listed, "a session whose delete failed should come back");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn failed_remove_shows_the_reason() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, whose hosted agent can't be removed.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When deleting it.
+        actor.delete_session(inserted.session).await;
+
+        // Then the reason is the error.
+        assert_eq!(
+            state.read().sessions.error.as_deref(),
+            Some("rm: busy"),
+            "the mode line should show why the delete failed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn delete_session_unhides_it() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, hidden as being deleted.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.deleting.insert(inserted.session);
+
+        // When deleting it.
+        actor.delete_session(inserted.session).await;
+
+        // Then nothing is left hidden.
+        assert!(
+            state.read().sessions.deleting.is_empty(),
+            "a deleted session shouldn't stay marked as being deleted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_keeps_a_migrated_session_jump() -> Result<(), Report<StoreError>> {
+        // Given a saved jump to thread aa's session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa", None)?;
+        store.save_jumps(&[SidebarItem::Session(inserted.session)])?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            store,
+            &FakeHost::listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the jump is in the list.
+        assert_eq!(
+            state.read().jumps.entries(),
+            [SidebarItem::Session(inserted.session)],
+            "a saved session jump should come back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn session_without_agents_never_auto_settles() -> Result<(), Report<StoreError>> {
+        // Given a session idle for four days whose agent has ended.
+        let (store, _) = store_with_thread("aa")?;
+        let session = saved_session(&store, "aa")?.id;
+        session_idle_for_four_days(&store, "aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            pane_id: None,
+            ..row
+        })?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start_unselected(store, &host);
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the session stays active.
+        assert_eq!(
+            saved_session_row(&actor.store, session).and_then(|row| row.settled_override),
+            None,
+            "a session of shells only never settles by itself"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn split_pane_saves_a_new_focused_pane() -> Result<(), Report<StoreError>> {
         // Given a thread's one-pane session.
         let store = Store::open_in_memory()?;
@@ -5430,28 +6068,6 @@ mod tests {
             marked.is_empty(),
             "stopped sessions should be forgotten: {marked:?}"
         );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_lone_thread_deletes_its_session() -> Result<(), Report<StoreError>> {
-        // Given an idle thread in a session of its own.
-        let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete(inserted.thread).await;
-
-        // Then its session is neither laid out nor saved.
-        let kept = (
-            state.read().layouts.get(inserted.session).is_some(),
-            actor.store.layouts()?.sessions.len(),
-        );
-        assert_eq!(kept, (false, 0), "a lone thread's session goes with it");
         Ok(())
     }
 
@@ -6005,7 +6621,12 @@ mod tests {
         {
             let mut app = state.write();
             app.focus = Focus::Sidebar;
-            app.attached.insert(id);
+            let session = app
+                .sessions
+                .threads()
+                .find(|thread| thread.id == id)
+                .and_then(Thread::session);
+            app.attached.extend(session);
         }
 
         // When polling.
@@ -7618,7 +8239,11 @@ mod tests {
 
         // Then the new thread is selected.
         assert_eq!(
-            state.read().sessions.selected_id(),
+            state
+                .read()
+                .sessions
+                .selected_thread()
+                .map(|thread| thread.id),
             Some(saved(&actor.store, "bb")?.id),
             "the new thread should take the draft's place under the cursor"
         );
@@ -7637,10 +8262,10 @@ mod tests {
         // When starting it.
         actor.start_draft(id).await;
 
-        // Then the frontend is asked to attach to the new thread.
+        // Then the frontend is asked to attach to the new thread's session.
         assert_eq!(
             state.read().sessions.attach,
-            Some(saved(&actor.store, "bb")?.id),
+            Some(session_of(&actor.store, saved(&actor.store, "bb")?.id)?),
             "a still-selected draft's thread should be attached to"
         );
         Ok(())
@@ -7682,7 +8307,7 @@ mod tests {
         store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Thread(thread));
+        state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(thread.0)));
 
         // When starting the draft.
         actor.start_draft(id).await;
@@ -7705,7 +8330,7 @@ mod tests {
         store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
         let host = FakeHost::creating(Ok("bb"));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Thread(thread));
+        state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(thread.0)));
 
         // When starting the draft.
         actor.start_draft(id).await;
@@ -7713,7 +8338,7 @@ mod tests {
         // Then the old thread stays selected.
         assert_eq!(
             state.read().sessions.cursor,
-            Some(SidebarItem::Thread(thread)),
+            Some(SidebarItem::Session(SessionId(thread.0))),
             "the cursor should stay where the user moved it"
         );
         Ok(())
@@ -7926,75 +8551,6 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn rename_shows_the_orb_name_as_the_title() -> Result<(), Report<StoreError>> {
-        // Given a thread Claude titled.
-        let (store, id) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            title: Some("Fix the sidebar".to_owned()),
-            ..row
-        })?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When renaming it.
-        actor.rename(id, Some("Sidebar search".to_owned()));
-
-        // Then the sidebar shows the orb name.
-        assert_eq!(
-            shown(&state, id).and_then(|thread| thread.title).as_deref(),
-            Some("Sidebar search"),
-            "the orb name should beat Claude's title"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn rename_saves_the_orb_name() -> Result<(), Report<StoreError>> {
-        // Given a thread.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When renaming it.
-        actor.rename(id, Some("Sidebar search".to_owned()));
-
-        // Then the store keeps the orb name.
-        assert_eq!(
-            saved(&actor.store, "aa")?.renamed_title.as_deref(),
-            Some("Sidebar search"),
-            "the orb name should survive a restart"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn rename_to_none_goes_back_to_claudes_title() -> Result<(), Report<StoreError>> {
-        // Given a thread Claude titled and the user renamed.
-        let (store, id) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            title: Some("Fix the sidebar".to_owned()),
-            renamed_title: Some("Sidebar search".to_owned()),
-            ..row
-        })?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When clearing its orb name.
-        actor.rename(id, None);
-
-        // Then the sidebar shows Claude's title again.
-        assert_eq!(
-            shown(&state, id).and_then(|thread| thread.title).as_deref(),
-            Some("Fix the sidebar"),
-            "clearing the orb name should fall back to Claude's title"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
     async fn new_custom_title_replaces_the_orb_name() -> Result<(), Report<StoreError>> {
         // Given a thread renamed with `r` after a `/rename` to `orb-m1`,
         // whose transcript now has a `/rename` to `orb-m2`.
@@ -8177,13 +8733,13 @@ mod tests {
 
     #[rstest::rstest]
     fn restore_selects_the_first_sidebar_item() -> Result<(), Report<StoreError>> {
-        // Given an old pinned thread and a newer unpinned one.
+        // Given an old pinned session and a newer unpinned one.
         let store = Store::open_in_memory()?;
         let pinned = add_thread(&store, "old", 10)?;
         add_thread(&store, "new", 20)?;
-        resave(&store, "old", |row| ThreadRow {
+        store.save_session(&SessionRow {
             pinned_at: Some(30),
-            ..row
+            ..saved_session(&store, "old")?
         })?;
 
         // When the actor starts.
@@ -8193,10 +8749,10 @@ mod tests {
             Path::new(NO_CLAUDE_DIR),
         );
 
-        // Then the pinned thread, first in the sidebar, is selected.
+        // Then the pinned session, first in the sidebar, is selected.
         assert_eq!(
             state.read().sessions.cursor,
-            Some(SidebarItem::Thread(pinned)),
+            Some(SidebarItem::Session(SessionId(pinned.0))),
             "the sidebar's first row should be selected"
         );
         Ok(())
@@ -8216,8 +8772,8 @@ mod tests {
     fn restore_drops_a_saved_jump_to_a_missing_thread() -> Result<(), Report<StoreError>> {
         // Given a saved jump list naming thread aa and a thread that's gone.
         let (store, id) = store_with_thread("aa")?;
-        let gone = SidebarItem::Thread(ThreadId(id.0 + 1));
-        store.save_jumps(&[SidebarItem::Thread(id), gone])?;
+        let gone = SidebarItem::Session(SessionId(id.0 + 1));
+        store.save_jumps(&[SidebarItem::Session(SessionId(id.0)), gone])?;
 
         // When the actor starts.
         let (_actor, state) = start(
@@ -8229,7 +8785,7 @@ mod tests {
         // Then only thread aa is in the jump list.
         assert_eq!(
             state.read().jumps.entries(),
-            [SidebarItem::Thread(id)],
+            [SidebarItem::Session(SessionId(id.0))],
             "a saved jump to a missing thread should be dropped"
         );
         Ok(())
@@ -8244,7 +8800,7 @@ mod tests {
             &FakeHost::listing(Vec::new()),
             Path::new(NO_CLAUDE_DIR),
         );
-        state.write().jumps = JumpList::from_saved(vec![SidebarItem::Thread(id)]);
+        state.write().jumps = JumpList::from_saved(vec![SidebarItem::Session(SessionId(id.0))]);
 
         // When saving the jump list.
         actor.save_jumps();
@@ -8252,7 +8808,7 @@ mod tests {
         // Then the store holds it.
         assert_eq!(
             actor.store.jumps()?,
-            vec![SidebarItem::Thread(id)],
+            vec![SidebarItem::Session(SessionId(id.0))],
             "the jump list should be saved"
         );
         Ok(())
@@ -8661,7 +9217,7 @@ mod tests {
         // Then the cursor is on web's thread.
         assert_eq!(
             state.read().sessions.cursor,
-            Some(SidebarItem::Thread(thread)),
+            Some(SidebarItem::Session(SessionId(thread.0))),
             "the cursor should start on the filtered sidebar's first row"
         );
         Ok(())
@@ -8933,232 +9489,6 @@ mod tests {
         Ok(since)
     }
 
-    /// Settles the saved thread `short_id` an hour ago.
-    fn settled_an_hour_ago(store: &Store, short_id: &str) -> Result<(), Report<StoreError>> {
-        resave(store, short_id, |row| ThreadRow {
-            settled_override: Some(SettledOverride::Settled),
-            settled_at: Some(now_ms() - HOUR_MS),
-            ..row
-        })
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn settle_marks_the_thread_settled() -> Result<(), Report<StoreError>> {
-        // Given an idle thread.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When settling it.
-        actor.settle(id).await;
-
-        // Then it shows settled and is saved settled.
-        let settled = (
-            shown(&state, id)
-                .and_then(|thread| thread.settled_at)
-                .is_some(),
-            saved(&actor.store, "aa")?.settled_at.is_some(),
-        );
-        assert_eq!(
-            settled,
-            (true, true),
-            "a settled thread should show and be saved as settled"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn settle_stops_an_idle_session() -> Result<(), Report<StoreError>> {
-        // Given an idle thread.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When settling it.
-        actor.settle(id).await;
-
-        // Then its session is stopped.
-        assert_eq!(
-            host.stopped(),
-            vec!["aa".to_owned()],
-            "settling should stop the idle session"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn settle_unpins_the_thread() -> Result<(), Report<StoreError>> {
-        // Given a pinned idle thread.
-        let (store, id) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            pinned_at: Some(now_ms() - HOUR_MS),
-            ..row
-        })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When settling it.
-        actor.settle(id).await;
-
-        // Then it is no longer pinned.
-        assert_eq!(
-            shown(&state, id).map(|thread| thread.pinned_at),
-            Some(None),
-            "a settle should remove the pin"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn settle_of_a_working_thread_is_ignored() -> Result<(), Report<StoreError>> {
-        // Given a thread a poll saw working.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When a settle arrives.
-        actor.settle(id).await;
-
-        // Then the thread stays active and its session keeps running.
-        let ignored = (
-            shown(&state, id).map(|thread| thread.settled_at),
-            host.stopped(),
-        );
-        assert_eq!(
-            ignored,
-            (Some(None), Vec::<String>::new()),
-            "a turn underway should win over the settle"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn unsettle_keeps_the_thread_active() -> Result<(), Report<StoreError>> {
-        // Given a settled thread.
-        let (store, id) = store_with_thread("aa")?;
-        settled_an_hour_ago(&store, "aa")?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When un-settling it.
-        actor.unsettle(id);
-
-        // Then it is saved kept active and not settled.
-        let row = saved(&actor.store, "aa")?;
-        assert_eq!(
-            (row.settled_override, row.settled_at),
-            (Some(SettledOverride::Active), None),
-            "an un-settle should keep the thread active"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn unsettle_moves_the_thread_to_the_top_of_active() -> Result<(), Report<StoreError>> {
-        // Given an older settled thread and a newer active one.
-        let store = Store::open_in_memory()?;
-        let old = add_thread(&store, "aa", now_ms() - 2 * HOUR_MS)?;
-        add_thread(&store, "bb", now_ms() - HOUR_MS)?;
-        settled_an_hour_ago(&store, "aa")?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When un-settling the older one.
-        actor.unsettle(old);
-
-        // Then it is the first card.
-        let first = state
-            .read()
-            .sessions
-            .sidebar()
-            .first()
-            .map(SidebarRow::item);
-        assert_eq!(
-            first,
-            Some(SidebarItem::Thread(old)),
-            "an un-settled thread re-enters Active at the top"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn pin_on_a_settled_thread_unsettles_it() -> Result<(), Report<StoreError>> {
-        // Given a settled thread.
-        let (store, id) = store_with_thread("aa")?;
-        settled_an_hour_ago(&store, "aa")?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When pinning it.
-        actor.pin(id);
-
-        // Then it is pinned and no longer settled.
-        let pinned = shown(&state, id)
-            .map(|thread| (thread.pinned_at.is_some(), thread.settled_at.is_none()));
-        assert_eq!(
-            pinned,
-            Some((true, true)),
-            "pinning should bring a settled thread back as a pin"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn working_poll_unsettles_a_settled_thread() -> Result<(), Report<StoreError>> {
-        // Given a settled thread whose session starts a turn.
-        let (store, id) = store_with_thread("aa")?;
-        settled_an_hour_ago(&store, "aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When polling.
-        actor.poll().await;
-
-        // Then it is no longer settled.
-        assert_eq!(
-            shown(&state, id).map(|thread| thread.settled_at),
-            Some(None),
-            "turn activity should un-settle the thread"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn working_poll_clears_a_kept_active_mark() -> Result<(), Report<StoreError>> {
-        // Given a kept-active thread whose session starts a turn.
-        let (store, _) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            settled_override: Some(SettledOverride::Active),
-            ..row
-        })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the mark is cleared.
-        assert_eq!(
-            saved(&actor.store, "aa")?.settled_override,
-            None,
-            "turn activity should let auto-settle apply again"
-        );
-        Ok(())
-    }
-
     #[rstest::rstest]
     #[tokio::test]
     async fn turn_end_on_an_unselected_thread_is_unseen() -> Result<(), Report<StoreError>> {
@@ -9170,7 +9500,7 @@ mod tests {
             record("bb", ThreadStatus::Idle),
         ]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Thread(other));
+        state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(other.0)));
         actor.poll().await;
 
         // When a poll sees its turn end.
@@ -9196,7 +9526,7 @@ mod tests {
         let (store, id) = store_with_thread("aa")?;
         let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Thread(id));
+        state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(id.0)));
         actor.poll().await;
 
         // When a poll sees its turn end.
@@ -9265,252 +9595,6 @@ mod tests {
             saved(&actor.store, "aa")?.branch.as_deref(),
             Some(CURRENT_BRANCH),
             "a turn end with no scanned branch should ask git"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn visit_marks_the_thread_seen() -> Result<(), Report<StoreError>> {
-        // Given a thread whose last turn ended after it was last selected.
-        let (store, id) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            last_activity_at: now_ms() - 60_000,
-            ..row
-        })?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When the user visits it.
-        actor.visit(id);
-
-        // Then it is seen.
-        assert_eq!(
-            shown(&state, id).map(|thread| thread.unseen),
-            Some(false),
-            "selecting a thread should see its latest turn"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn delete_removes_the_session() -> Result<(), Report<StoreError>> {
-        // Given an idle thread.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete(id).await;
-
-        // Then its session is removed.
-        assert_eq!(
-            host.removed(),
-            vec!["aa".to_owned()],
-            "deleting should remove the Claude session"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn delete_removes_the_thread() -> Result<(), Report<StoreError>> {
-        // Given an idle thread.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete(id).await;
-
-        // Then it is neither shown nor saved.
-        let kept = (
-            shown(&state, id).is_some(),
-            actor.store.load()?.1.iter().any(|row| row.id == id),
-        );
-        assert_eq!(kept, (false, false), "a deleted thread should be forgotten");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_remove_keeps_the_thread() -> Result<(), Report<StoreError>> {
-        // Given an idle thread whose session can't be removed.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete(id).await;
-
-        // Then it is still shown.
-        assert!(
-            shown(&state, id).is_some(),
-            "a session that wasn't removed would keep running unseen"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_remove_shows_the_reason() -> Result<(), Report<StoreError>> {
-        // Given an idle thread whose session can't be removed.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete(id).await;
-
-        // Then the reason is the error.
-        assert_eq!(
-            state.read().sessions.error.as_deref(),
-            Some("rm: busy"),
-            "the mode line should show why the delete failed"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_gone_thread_skips_remove() -> Result<(), Report<StoreError>> {
-        // Given a thread Claude no longer knows.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete(id).await;
-
-        // Then nothing is removed.
-        assert!(
-            host.removed().is_empty(),
-            "there is no session left to remove"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_gone_thread_forgets_it() -> Result<(), Report<StoreError>> {
-        // Given a thread Claude no longer knows.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete(id).await;
-
-        // Then it is no longer shown.
-        assert!(
-            shown(&state, id).is_none(),
-            "a gone thread should be deleted directly"
-        );
-        Ok(())
-    }
-
-    /// Hides thread `id` as being deleted, as the intent handler does.
-    fn hide(state: &State, id: ThreadId) {
-        state.write().sessions.deleting.insert(id);
-    }
-
-    /// Whether any thread is still hidden as being deleted.
-    fn any_hidden(state: &State) -> bool {
-        !state.read().sessions.deleting.is_empty()
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn delete_unhides_the_thread() -> Result<(), Report<StoreError>> {
-        // Given an idle thread hidden as being deleted.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-        hide(&state, id);
-
-        // When deleting it.
-        actor.delete(id).await;
-
-        // Then nothing is left hidden.
-        assert!(
-            !any_hidden(&state),
-            "a deleted thread shouldn't stay marked as being deleted"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_remove_shows_the_thread_again() -> Result<(), Report<StoreError>> {
-        // Given an idle thread hidden as being deleted, whose session can't
-        // be removed.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-        hide(&state, id);
-
-        // When deleting it.
-        actor.delete(id).await;
-
-        // Then the sidebar lists it again.
-        let listed = state
-            .read()
-            .sessions
-            .sidebar()
-            .iter()
-            .any(|row| row.item() == SidebarItem::Thread(id));
-        assert!(listed, "a thread whose delete failed should come back");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_gone_thread_unhides_it() -> Result<(), Report<StoreError>> {
-        // Given a thread Claude no longer knows, hidden as being deleted.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-        hide(&state, id);
-
-        // When deleting it.
-        actor.delete(id).await;
-
-        // Then nothing is left hidden.
-        assert!(
-            !any_hidden(&state),
-            "a deleted gone thread shouldn't stay marked as being deleted"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_an_unknown_thread_unhides_it() -> Result<(), Report<StoreError>> {
-        // Given a thread orb doesn't know, hidden as being deleted.
-        let (store, _id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-        let unknown = ThreadId(999);
-        hide(&state, unknown);
-
-        // When deleting it.
-        actor.delete(unknown).await;
-
-        // Then nothing is left hidden.
-        assert!(
-            !any_hidden(&state),
-            "a delete with nothing to delete should still unhide the thread"
         );
         Ok(())
     }
@@ -10827,7 +10911,7 @@ mod tests {
         let host = FakeHost::listing(vec![in_session(ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
-        state.write().sessions.deleting.insert(id);
+        state.write().sessions.deleting.insert(SessionId(id.0));
 
         // When a poll sees its turn end.
         host.set_list(Ok(vec![in_session(ThreadStatus::Idle)]));
@@ -11449,10 +11533,13 @@ mod tests {
 
         // Then the new thread is selected and attached.
         let sessions = &state.read().sessions;
-        let thread = sessions.threads().next().map(|thread| thread.id);
+        let thread = sessions.threads().next();
         assert_eq!(
             (sessions.cursor, sessions.attach),
-            (thread.map(SidebarItem::Thread), thread),
+            (
+                thread.and_then(Thread::session).map(SidebarItem::Session),
+                thread.and_then(Thread::session)
+            ),
             "the started thread should be selected and attached"
         );
         Ok(())
@@ -11479,10 +11566,13 @@ mod tests {
 
         // Then its thread is selected and to be attached.
         let sessions = &state.read().sessions;
-        let thread = sessions.threads().next().map(|thread| thread.id);
+        let thread = sessions.threads().next();
         assert_eq!(
             (sessions.cursor, sessions.attach),
-            (thread.map(SidebarItem::Thread), thread),
+            (
+                thread.and_then(Thread::session).map(SidebarItem::Session),
+                thread.and_then(Thread::session)
+            ),
             "the trusted start's thread should replace the draft and attach"
         );
         Ok(())
@@ -11687,8 +11777,8 @@ mod tests {
         let first = state
             .read()
             .sessions
-            .group_threads(id)
-            .next()
+            .threads()
+            .find(|thread| thread.group == Some(id))
             .and_then(|thread| thread.pane.clone())
             .map(|launch| launch.command);
         assert_eq!(
@@ -11704,19 +11794,19 @@ mod tests {
     async fn starting_a_group_draft_after_the_cursor_moved_keeps_the_cursor()
     -> Result<(), Report<StoreError>> {
         // Given a started Research group's draft, with the cursor since moved
-        // to the group's card.
+        // to the shelf's header.
         let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
         let (_dir, id, mut actor, state) = started_group_draft(GroupKind::Research, &host, &git)?;
-        state.write().sessions.cursor = Some(SidebarItem::Group(id));
+        state.write().sessions.cursor = Some(SidebarItem::SettledShelf);
 
         // When the draft starts.
         actor.start_group_draft(id).await;
 
-        // Then the cursor stays on the card, and nothing is attached.
+        // Then the cursor stays where it is, and nothing is attached.
         let sessions = &state.read().sessions;
         assert_eq!(
             (sessions.cursor, sessions.attach),
-            (Some(SidebarItem::Group(id)), None),
+            (Some(SidebarItem::SettledShelf), None),
             "a moved cursor should stay put"
         );
         Ok(())
@@ -12091,123 +12181,6 @@ mod tests {
             .ok_or_else(|| Report::new(StoreError).attach(format!("group {id:?} isn't saved")))
     }
 
-    /// Saves `change` over group `id`'s saved row.
-    fn resave_group<F>(store: &Store, id: GroupId, change: F) -> Result<(), Report<StoreError>>
-    where
-        F: FnOnce(GroupRow) -> GroupRow,
-    {
-        store.save_group(&change(saved_group(store, id)?))
-    }
-
-    #[rstest::rstest]
-    fn pinning_a_group_saves_its_pin() -> Result<(), Report<StoreError>> {
-        // Given a group holding thread aa.
-        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa"])?;
-        let (mut actor, _state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When pinning it.
-        actor.pin_group(group);
-
-        // Then the pin is saved.
-        assert!(
-            saved_group(&actor.store, group)?.pinned_at.is_some(),
-            "the group's pin should be saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn pinning_a_settled_group_unsettles_it() -> Result<(), Report<StoreError>> {
-        // Given a settled group holding thread aa.
-        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa"])?;
-        resave_group(&store, group, |row| GroupRow {
-            settled_override: Some(SettledOverride::Settled),
-            settled_at: Some(now_ms() - HOUR_MS),
-            ..row
-        })?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When pinning it.
-        actor.pin_group(group);
-
-        // Then it's no longer shown as settled.
-        assert_eq!(
-            shown_group(&state, group).map(|group| group.settled_at),
-            Some(None),
-            "pinning a settled group should un-settle it"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn pinning_a_group_keeps_its_directory() -> Result<(), Report<StoreError>> {
-        // Given a group in /work/GT-514-login holding thread aa.
-        let dir = PathBuf::from("/work/GT-514-login");
-        let (store, group, _) = store_with_group(GroupKind::Feature, Some(&dir), &["aa"])?;
-        let (mut actor, _state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When pinning it.
-        actor.pin_group(group);
-
-        // Then its saved directory is unchanged.
-        assert_eq!(
-            saved_group(&actor.store, group)?.dir,
-            Some(dir),
-            "pinning shouldn't lose the group's directory"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn unpinning_a_group_clears_its_pin() -> Result<(), Report<StoreError>> {
-        // Given a pinned group holding thread aa.
-        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa"])?;
-        resave_group(&store, group, |row| GroupRow {
-            pinned_at: Some(now_ms() - HOUR_MS),
-            ..row
-        })?;
-        let (mut actor, _state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When unpinning it.
-        actor.unpin_group(group);
-
-        // Then no pin is saved.
-        assert_eq!(
-            saved_group(&actor.store, group)?.pinned_at,
-            None,
-            "the group's pin should be cleared"
-        );
-        Ok(())
-    }
-
-    /// A Feature group holding `short_ids`, polled on `host`, so each thread
-    /// has its listed status.
-    async fn polled_group(
-        host: &Arc<FakeHost>,
-        short_ids: &[&str],
-    ) -> Result<(GroupId, Vec<ThreadId>, SessionsActor, State), Report<StoreError>> {
-        let (store, group, threads) = store_with_group(GroupKind::Feature, None, short_ids)?;
-        let (mut actor, state) = start(store, host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-        Ok((group, threads, actor, state))
-    }
-
     /// A started Feature group in the orb worktree [`HEX_WORKTREE`] on
     /// [`SLUG_BRANCH`], holding idle thread aa, polled once, on `git`.
     async fn started_feature_group(
@@ -12219,655 +12192,6 @@ mod tests {
         let (mut actor, state) = start_with(store, &host, git, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
         Ok((group, actor, state))
-    }
-
-    /// A started Feature group in idle thread aa, polled once, whose worktree
-    /// `<worktrees_root>/orb/orb-1a2b3c4d` is on disk, on `git`.
-    async fn feature_group_on_disk(
-        git: &Arc<FakeGit>,
-        worktrees_root: &Path,
-    ) -> Result<(GroupId, SessionsActor, State, PathBuf), Report<StoreError>> {
-        let dir = worktrees_root.join("orb").join("orb-1a2b3c4d");
-        fs::create_dir_all(&dir).change_context(StoreError)?;
-        let (store, group, _) = store_with_group(GroupKind::Feature, Some(&dir), &["aa"])?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start_with(store, &host, git, Path::new(NO_CLAUDE_DIR));
-        worktrees_root.clone_into(&mut actor.worktrees_root);
-        actor.poll().await;
-        Ok((group, actor, state, dir))
-    }
-
-    /// Makes Research group `GT-514-login`'s own folder under `orb_root`.
-    fn research_folder(orb_root: &Path) -> Result<PathBuf, Report<StoreError>> {
-        let dir = orb_root.join("research").join(SLUG_BRANCH);
-        fs::create_dir_all(&dir).change_context(StoreError)?;
-        Ok(dir)
-    }
-
-    /// A Research group in its own `dir` under `orb_root`, holding idle thread
-    /// aa, polled once.
-    async fn research_group(
-        orb_root: &Path,
-        dir: &Path,
-    ) -> Result<(GroupId, SessionsActor, State), Report<StoreError>> {
-        let (store, group, _) = store_with_group(GroupKind::Research, Some(dir), &["aa"])?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start_in(
-            store,
-            &host,
-            &FakeGit::local(),
-            &FakeTrust::accepting(),
-            Path::new(NO_CLAUDE_DIR),
-            orb_root,
-            Path::new(INCOGNITO_ROOT),
-        );
-        actor.poll().await;
-        Ok((group, actor, state))
-    }
-
-    /// Whether `git` was asked to remove any worktree.
-    fn removed_a_worktree(git: &FakeGit) -> bool {
-        git.calls()
-            .iter()
-            .any(|call| matches!(call, GitCall::RemoveWorktree { .. }))
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn settling_a_group_marks_it_settled() -> Result<(), Report<StoreError>> {
-        // Given a group holding idle thread aa.
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (group, _, mut actor, state) = polled_group(&host, &["aa"]).await?;
-
-        // When settling it.
-        actor.settle_group(group).await;
-
-        // Then it is saved and shown settled.
-        let row = saved_group(&actor.store, group)?;
-        assert_eq!(
-            (
-                row.settled_override,
-                row.settled_at.is_some(),
-                shown_group(&state, group)
-                    .and_then(|shown| shown.settled_at)
-                    .is_some()
-            ),
-            (Some(SettledOverride::Settled), true, true),
-            "the group should move to the Settled shelf"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn settling_a_group_stops_every_idle_thread() -> Result<(), Report<StoreError>> {
-        // Given a group whose threads aa and bb are idle and cc stopped.
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("bb", ThreadStatus::Idle),
-            record("cc", ThreadStatus::Stopped),
-        ]);
-        let (group, _, mut actor, _state) = polled_group(&host, &["aa", "bb", "cc"]).await?;
-
-        // When settling it.
-        actor.settle_group(group).await;
-
-        // Then the idle sessions are stopped.
-        let mut stopped = host.stopped();
-        stopped.sort();
-        assert_eq!(
-            stopped,
-            vec!["aa".to_owned(), "bb".to_owned()],
-            "settling a group should stop its idle sessions"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn settling_a_group_with_a_working_thread_is_ignored() -> Result<(), Report<StoreError>> {
-        // Given a group whose thread bb started a turn after the key press.
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("bb", ThreadStatus::Working),
-        ]);
-        let (group, _, mut actor, _state) = polled_group(&host, &["aa", "bb"]).await?;
-
-        // When settling it.
-        actor.settle_group(group).await;
-
-        // Then it stays unsettled.
-        assert_eq!(
-            saved_group(&actor.store, group)?.settled_override,
-            None,
-            "a turn underway wins over the settle"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn unsettling_a_group_keeps_it_active() -> Result<(), Report<StoreError>> {
-        // Given a settled group holding thread aa.
-        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa"])?;
-        resave_group(&store, group, |row| GroupRow {
-            settled_override: Some(SettledOverride::Settled),
-            settled_at: Some(now_ms() - HOUR_MS),
-            ..row
-        })?;
-        let (mut actor, _state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When un-settling it.
-        actor.unsettle_group(group);
-
-        // Then it is kept active.
-        assert_eq!(
-            saved_group(&actor.store, group)?.settled_override,
-            Some(SettledOverride::Active),
-            "an un-settled group stays active until its next turn"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn new_turn_in_a_thread_unsettles_its_group() -> Result<(), Report<StoreError>> {
-        // Given a settled group whose thread aa starts a turn.
-        let (store, group, _) = store_with_group(GroupKind::Feature, None, &["aa", "bb"])?;
-        resave_group(&store, group, |row| GroupRow {
-            settled_override: Some(SettledOverride::Settled),
-            settled_at: Some(now_ms() - HOUR_MS),
-            ..row
-        })?;
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Working),
-            record("bb", ThreadStatus::Stopped),
-        ]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the group is no longer settled.
-        assert_eq!(
-            shown_group(&state, group).map(|group| group.settled_at),
-            Some(None),
-            "turn activity in a thread should un-settle its group"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_group_removes_every_session() -> Result<(), Report<StoreError>> {
-        // Given a group holding idle threads aa and bb.
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("bb", ThreadStatus::Idle),
-        ]);
-        let (group, _, mut actor, _state) = polled_group(&host, &["aa", "bb"]).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then both sessions are removed.
-        let mut removed = host.removed();
-        removed.sort();
-        assert_eq!(
-            removed,
-            vec!["aa".to_owned(), "bb".to_owned()],
-            "deleting a group should remove its Claude sessions"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_group_forgets_it() -> Result<(), Report<StoreError>> {
-        // Given a group holding idle threads aa and bb.
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("bb", ThreadStatus::Idle),
-        ]);
-        let (group, _, mut actor, state) = polled_group(&host, &["aa", "bb"]).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then neither the group nor its threads are saved or shown.
-        let (_, threads, _, groups) = actor.store.load()?;
-        assert_eq!(
-            (
-                groups.iter().any(|row| row.id == group),
-                threads.len(),
-                shown_group(&state, group).is_some()
-            ),
-            (false, 0, false),
-            "a deleted group should be forgotten"
-        );
-        Ok(())
-    }
-
-    /// The jump list after `group` holding `threads` was listed in it (its
-    /// card, its draft and each thread) with project 1's draft kept apart.
-    fn group_jumps(group: GroupId, threads: &[ThreadId]) -> JumpList {
-        let rows = [
-            SidebarItem::Draft(ProjectId(1)),
-            SidebarItem::Group(group),
-            SidebarItem::GroupDraft(group),
-        ];
-        JumpList::from_saved(
-            rows.into_iter()
-                .chain(threads.iter().map(|&id| SidebarItem::Thread(id)))
-                .collect(),
-        )
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_group_drops_its_rows_from_the_jump_list() -> Result<(), Report<StoreError>>
-    {
-        // Given a group holding idle threads aa and bb, with its card, draft
-        // and threads in the jump list after project 1's draft.
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("bb", ThreadStatus::Idle),
-        ]);
-        let (group, threads, mut actor, state) = polled_group(&host, &["aa", "bb"]).await?;
-        state.write().jumps = group_jumps(group, &threads);
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then only project 1's draft is left in the jump list.
-        assert_eq!(
-            state.read().jumps.entries(),
-            [SidebarItem::Draft(ProjectId(1))],
-            "a deleted group's card, draft and threads should leave the jump list"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_group_saves_the_pruned_jump_list() -> Result<(), Report<StoreError>> {
-        // Given a group holding idle threads aa and bb, with its card, draft
-        // and threads in the jump list after project 1's draft.
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("bb", ThreadStatus::Idle),
-        ]);
-        let (group, threads, mut actor, state) = polled_group(&host, &["aa", "bb"]).await?;
-        state.write().jumps = group_jumps(group, &threads);
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then the saved jump list holds only project 1's draft.
-        assert_eq!(
-            actor.store.jumps()?,
-            vec![SidebarItem::Draft(ProjectId(1))],
-            "deleting a group should save the jump list without its rows"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_group_leaves_a_folder_outside_orbs_own() -> Result<(), Report<StoreError>> {
-        // Given a Research group whose folder isn't under orb's research
-        // folder, holding idle thread aa.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let (store, group, _) = store_with_group(GroupKind::Research, Some(dir.path()), &["aa"])?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then that folder is still there.
-        assert!(
-            dir.path().is_dir(),
-            "only a group's own folder under orb's is removed"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_draft_only_group_forgets_it() -> Result<(), Report<StoreError>> {
-        // Given a group with no thread yet.
-        let (store, group, _) = store_with_group(GroupKind::Feature, None, &[])?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then it is neither saved nor shown.
-        assert_eq!(
-            (
-                actor.store.load()?.3.iter().any(|row| row.id == group),
-                shown_group(&state, group).is_some()
-            ),
-            (false, false),
-            "d on a draft-only group's card discards it"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleted_group_name_can_be_used_again() -> Result<(), Report<StoreError>> {
-        // Given Feature group `GT-514-login` created in the orb project, then
-        // deleted.
-        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
-        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
-        let group = groups_of(&state)
-            .first()
-            .map(|group| group.id)
-            .ok_or_else(|| Report::new(StoreError).attach("the group wasn't created"))?;
-        actor.delete_group(group).await;
-
-        // When creating it again.
-        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
-
-        // Then it shows again, with no error.
-        let names: Vec<String> = groups_of(&state).into_iter().map(|g| g.name).collect();
-        assert_eq!(
-            (names, error_of(&state)),
-            (vec!["GT-514-login".to_owned()], None),
-            "a deleted group's name is free again"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_remove_keeps_the_groups_thread() -> Result<(), Report<StoreError>> {
-        // Given a group whose thread aa is being deleted but can't be removed.
-        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
-        let (group, threads, mut actor, state) = polled_group(&host, &["aa"]).await?;
-        state
-            .write()
-            .sessions
-            .deleting
-            .extend(threads.iter().copied());
-
-        // When deleting the group.
-        actor.delete_group(group).await;
-
-        // Then aa shows again.
-        let shown_again: Vec<bool> = threads
-            .iter()
-            .map(|id| shown(&state, *id).is_some() && !state.read().sessions.deleting.contains(id))
-            .collect();
-        assert_eq!(
-            shown_again,
-            vec![true],
-            "a session that wasn't removed would keep running unseen"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_remove_keeps_the_group() -> Result<(), Report<StoreError>> {
-        // Given a group whose thread aa can't be removed.
-        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
-        let (group, _, mut actor, state) = polled_group(&host, &["aa"]).await?;
-
-        // When deleting the group.
-        actor.delete_group(group).await;
-
-        // Then the group is still saved and shown.
-        assert_eq!(
-            (
-                actor.store.load()?.3.iter().any(|row| row.id == group),
-                shown_group(&state, group).is_some()
-            ),
-            (true, true),
-            "a group keeps the thread it couldn't delete"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_group_remove_shows_the_reason() -> Result<(), Report<StoreError>> {
-        // Given a group whose thread aa can't be removed.
-        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
-        let (group, _, mut actor, state) = polled_group(&host, &["aa"]).await?;
-
-        // When deleting the group.
-        actor.delete_group(group).await;
-
-        // Then the reason is the error.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("rm: busy"),
-            "the mode line should show why the delete failed"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_research_group_removes_its_folder() -> Result<(), Report<StoreError>> {
-        // Given a Research group in its own folder under orb's, holding idle
-        // thread aa.
-        let orb_root = tempfile::tempdir().change_context(StoreError)?;
-        let dir = research_folder(orb_root.path())?;
-        let (group, mut actor, _state) = research_group(orb_root.path(), &dir).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then its folder is gone.
-        assert!(!dir.exists(), "deleting a group should remove its folder");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_research_group_whose_folder_is_gone_shows_no_error()
-    -> Result<(), Report<StoreError>> {
-        // Given a Research group whose own folder was already removed by hand.
-        let orb_root = tempfile::tempdir().change_context(StoreError)?;
-        let dir = research_folder(orb_root.path())?;
-        let (group, mut actor, state) = research_group(orb_root.path(), &dir).await?;
-        fs::remove_dir_all(&dir).change_context(StoreError)?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then no error shows.
-        assert_eq!(
-            error_of(&state),
-            None,
-            "an already-removed folder counts as removed"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleted_research_group_name_can_be_used_again() -> Result<(), Report<StoreError>> {
-        // Given Research group `tokio-cancel` created, then deleted.
-        let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
-        let group = groups_of(&state)
-            .first()
-            .map(|group| group.id)
-            .ok_or_else(|| Report::new(StoreError).attach("the group wasn't created"))?;
-        actor.delete_group(group).await;
-
-        // When creating it again.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
-
-        // Then it shows again, with no error.
-        let names: Vec<String> = groups_of(&state).into_iter().map(|g| g.name).collect();
-        assert_eq!(
-            (names, error_of(&state)),
-            (vec!["tokio-cancel".to_owned()], None),
-            "a deleted Research group's folder is gone, so its name is free"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_force_removes_its_worktree() -> Result<(), Report<StoreError>>
-    {
-        // Given a started Feature group in an orb worktree on disk.
-        let git = FakeGit::having(SLUG_BRANCH);
-        let worktrees_root = tempfile::tempdir().change_context(StoreError)?;
-        let (group, mut actor, _state, dir) =
-            feature_group_on_disk(&git, worktrees_root.path()).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then its worktree is removed with force.
-        assert!(
-            git.calls().contains(&GitCall::RemoveWorktree {
-                path: dir,
-                force: true
-            }),
-            "the worktree should go even with changes"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_a_pruned_worktree_deletes_the_group()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose orb worktree is gone from disk.
-        let (group, mut actor, state) =
-            started_feature_group(&FakeGit::having(SLUG_BRANCH)).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then the group is gone.
-        assert!(
-            groups_of(&state).is_empty(),
-            "a group whose worktree is gone should still delete"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_a_pruned_worktree_deletes_the_slug_branch()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose orb worktree is gone from disk.
-        let git = FakeGit::having(SLUG_BRANCH);
-        let (group, mut actor, _state) = started_feature_group(&git).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then its slug branch is safe-deleted.
-        assert!(
-            git.calls().contains(&GitCall::DeleteBranch {
-                branch: SLUG_BRANCH.into(),
-                force: false,
-            }),
-            "the slug branch should go with the group"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_a_pruned_worktree_prunes_stale_metadata()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose orb worktree is gone from disk.
-        let git = FakeGit::having(SLUG_BRANCH);
-        let (group, mut actor, _state) = started_feature_group(&git).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then git prunes its record of the gone worktree.
-        assert!(
-            git.calls()
-                .contains(&GitCall::PruneWorktrees(PROJECT_ROOT.into())),
-            "git's stale worktree record should be pruned"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_a_pruned_worktree_skips_the_removal()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose orb worktree is gone from disk.
-        let git = FakeGit::having(SLUG_BRANCH);
-        let (group, mut actor, _state) = started_feature_group(&git).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then git is asked to remove no worktree.
-        assert!(
-            !removed_a_worktree(&git),
-            "a worktree already gone has nothing to remove"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_safe_deletes_its_branch() -> Result<(), Report<StoreError>> {
-        // Given a started Feature group on its slug branch.
-        let git = FakeGit::having(SLUG_BRANCH);
-        let (group, mut actor, _state) = started_feature_group(&git).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then its branch is deleted without force.
-        assert!(
-            git.calls().contains(&GitCall::DeleteBranch {
-                branch: SLUG_BRANCH.into(),
-                force: false,
-            }),
-            "the branch should be deleted only if merged"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_switched_feature_group_keeps_the_branch_it_was_switched_to()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group switched to the user's branch `main`.
-        let git = FakeGit::having("main");
-        let (group, mut actor, _state) = started_feature_group(&git).await?;
-        actor.check_out_group(group, &git_ref("main", false));
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then `main` isn't deleted: only the slug branch is orb's.
-        assert!(
-            !git.calls().contains(&GitCall::DeleteBranch {
-                branch: "main".into(),
-                force: false,
-            }),
-            "a branch the group was switched to should stay"
-        );
-        Ok(())
     }
 
     #[rstest::rstest]
@@ -12938,421 +12262,60 @@ mod tests {
         Ok(())
     }
 
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_an_unmerged_branch_shows_why()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose slug branch isn't merged.
-        let git = FakeGit::unmerged(SLUG_BRANCH);
-        let (group, mut actor, state) = started_feature_group(&git).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then the mode line says the branch has unmerged commits.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("branch GT-514-login has unmerged commits"),
-            "the mode line should say why the group stays"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_an_unmerged_branch_keeps_it()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose slug branch isn't merged.
-        let git = FakeGit::unmerged(SLUG_BRANCH);
-        let (group, mut actor, state) = started_feature_group(&git).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then it is still saved and shown.
-        assert_eq!(
-            (
-                actor.store.load()?.3.iter().any(|row| row.id == group),
-                shown_group(&state, group).is_some()
-            ),
-            (true, true),
-            "an unmerged slug branch refuses the whole delete"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_an_unmerged_branch_removes_no_session()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group, holding thread aa, whose slug branch
-        // isn't merged.
-        let git = FakeGit::unmerged(SLUG_BRANCH);
-        let (store, group, _) =
-            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then no session is removed and thread aa is still saved.
-        assert_eq!(
-            (host.removed(), saved(&actor.store, "aa").is_ok()),
-            (Vec::<String>::new(), true),
-            "the refusal comes before any thread is touched"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_an_unmerged_branch_touches_no_git()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose slug branch isn't merged.
-        let git = FakeGit::unmerged(SLUG_BRANCH);
-        let (group, mut actor, _state) = started_feature_group(&git).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then git removes or prunes no worktree and deletes no branch.
-        let touched = git.calls().iter().any(|call| {
-            matches!(
-                call,
-                GitCall::RemoveWorktree { .. }
-                    | GitCall::PruneWorktrees(_)
-                    | GitCall::DeleteBranch { .. }
-            )
-        });
-        assert!(!touched, "the worktree and branch stay as they are");
-        Ok(())
-    }
-
-    /// [`started_feature_group`] with thread aa attached and the cursor on
-    /// the card, and whether any wake has seen a thread hidden as deleting.
-    async fn watched_feature_group(
-        git: &Arc<FakeGit>,
-    ) -> Result<(GroupId, SessionsActor, State, Arc<Mutex<bool>>), Report<StoreError>> {
-        let (store, group, threads) =
-            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let state = State::default();
-        let hidden = Arc::new(Mutex::new(false));
-        let wake: Wake = {
-            let (state, hidden) = (state.clone(), hidden.clone());
-            Arc::new(move || {
-                if !state.read().sessions.deleting.is_empty() {
-                    *hidden.lock().unwrap_or_else(PoisonError::into_inner) = true;
-                }
-            })
-        };
-        let mut actor = SessionsActor::restore(SessionsActorDeps {
-            services: Services {
-                harnesses: Harnesses::new(vec![Arc::new(ClaudeCode::new(
-                    host,
-                    FakeTrust::accepting(),
-                    PathBuf::from(NO_CLAUDE_DIR),
-                    GitService::new(git.clone()),
-                ))]),
-                git: GitService::new(git.clone()),
-                zmx: fake_zmx(),
-            },
-            state: state.clone(),
-            store,
-            worktrees_root: PathBuf::from(WORKTREES_ROOT),
-            orb_root: PathBuf::from(ORB_ROOT),
-            incognito_root: PathBuf::from(INCOGNITO_ROOT),
-            wake,
-            integration_missing: false,
-        });
-        actor.poll().await;
-        {
-            let mut app = state.write();
-            app.attached.extend(threads);
-            app.sessions.cursor = Some(SidebarItem::Group(group));
-        }
-        Ok((group, actor, state, hidden))
-    }
-
-    fn seen(hidden: &Mutex<bool>) -> bool {
-        *hidden.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_an_unmerged_branch_never_hides_its_threads()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose slug branch isn't merged.
-        let (group, mut actor, _state, hidden) =
-            watched_feature_group(&FakeGit::unmerged(SLUG_BRANCH)).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then no redraw ever showed its thread hidden.
-        assert!(!seen(&hidden), "a refused delete should never flicker");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_with_an_unmerged_branch_keeps_it_attached()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose slug branch isn't merged, its
-        // thread attached.
-        let (group, mut actor, state, _hidden) =
-            watched_feature_group(&FakeGit::unmerged(SLUG_BRANCH)).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then its thread is still attached.
-        assert_eq!(
-            state.read().attached.len(),
-            1,
-            "a refused delete should leave the pane alone"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_group_hides_its_threads_while_they_are_removed()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose slug branch is merged.
-        let (group, mut actor, _state, hidden) =
-            watched_feature_group(&FakeGit::having(SLUG_BRANCH)).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then a redraw showed its thread hidden before it was removed.
-        assert!(
-            seen(&hidden),
-            "a delete that goes ahead hides the threads at once"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_group_detaches_its_threads() -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose thread is attached.
-        let (group, mut actor, state, _hidden) =
-            watched_feature_group(&FakeGit::having(SLUG_BRANCH)).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then nothing is attached.
-        assert!(
-            state.read().attached.is_empty(),
-            "a deleted group's threads should be detached"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_group_moves_the_cursor_off_it() -> Result<(), Report<StoreError>> {
-        // Given a started Feature group, the only row, with the cursor on its
-        // card.
-        let (group, mut actor, state, _hidden) =
-            watched_feature_group(&FakeGit::having(SLUG_BRANCH)).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then the cursor is on no row.
-        assert_eq!(
-            state.read().sessions.cursor,
-            None,
-            "the cursor should leave a deleted group"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_whose_slug_branch_is_gone_needs_no_merge()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose slug branch is gone, in a repo
-        // where only an unmerged `main` exists.
-        let git = FakeGit::unmerged("main");
-        let (group, mut actor, state) = started_feature_group(&git).await?;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then the group goes: there's no branch to check.
-        assert!(
-            shown_group(&state, group).is_none(),
-            "a missing slug branch needs no merge check"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_whose_worktree_is_shared_needs_no_merge()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group with an unmerged slug branch, in an
-        // orb worktree where lone thread cc also works.
-        let git = FakeGit::unmerged(SLUG_BRANCH);
-        let (store, group, _) =
-            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
-        let project = orb_project(&store)?;
-        store
-            .insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
-                project_id: project,
-                short_id: "cc".to_owned(),
-                cwd: HEX_WORKTREE.into(),
-                created_at: now_ms() - HOUR_MS,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-                zmx: None,
-            })
-            .map(|inserted| inserted.thread)?;
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("cc", ThreadStatus::Idle),
-        ]);
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then the group goes: the worktree and branch it keeps aren't deleted.
-        assert!(
-            shown_group(&state, group).is_none(),
-            "a kept branch needs no merge check"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_never_started_feature_group_touches_no_git()
-    -> Result<(), Report<StoreError>> {
-        // Given a Feature group that has only its draft.
-        let git = FakeGit::having(SLUG_BRANCH);
-        let (store, group, _) = store_with_group(GroupKind::Feature, None, &[])?;
-        let (mut actor, _state) = start_with(
-            store,
-            &FakeHost::listing(Vec::new()),
-            &git,
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When deleting it.
-        actor.delete_group(group).await;
-
-        // Then git removes no worktree and deletes no branch.
-        let touched = git.calls().iter().any(|call| {
-            matches!(
-                call,
-                GitCall::RemoveWorktree { .. } | GitCall::DeleteBranch { .. }
-            )
-        });
-        assert!(!touched, "a never-started group has nothing on disk");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_feature_group_keeps_a_worktree_a_lone_thread_uses()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group in an orb worktree on disk where lone
-        // thread cc also works.
-        let git = FakeGit::having(SLUG_BRANCH);
-        let worktrees_root = tempfile::tempdir().change_context(StoreError)?;
-        let dir = worktrees_root.path().join("orb").join("orb-1a2b3c4d");
-        fs::create_dir_all(&dir).change_context(StoreError)?;
-        let (store, group, _) = store_with_group(GroupKind::Feature, Some(&dir), &["aa"])?;
-        store
-            .insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
-                project_id: saved_group(&store, group)?.project_id,
-                short_id: "cc".to_owned(),
-                cwd: dir.clone(),
-                created_at: now_ms() - HOUR_MS,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-                zmx: None,
-            })
-            .map(|inserted| inserted.thread)?;
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("cc", ThreadStatus::Idle),
-        ]);
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-        worktrees_root.path().clone_into(&mut actor.worktrees_root);
-        actor.poll().await;
-
-        // When deleting the group.
-        actor.delete_group(group).await;
-
-        // Then the worktree is not removed.
-        assert!(
-            !removed_a_worktree(&git),
-            "a worktree another thread works in must stay"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_group_child_leaves_the_worktree() -> Result<(), Report<StoreError>> {
-        // Given a started Feature group in an orb worktree, holding idle
-        // threads aa and bb.
-        let git = FakeGit::having(SLUG_BRANCH);
-        let (store, _, threads) = store_with_group(
-            GroupKind::Feature,
-            Some(Path::new(HEX_WORKTREE)),
-            &["aa", "bb"],
-        )?;
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("bb", ThreadStatus::Idle),
-        ]);
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-        let bb = threads
-            .get(1)
-            .copied()
-            .ok_or_else(|| Report::new(StoreError).attach("bb wasn't saved"))?;
-
-        // When deleting bb alone.
-        actor.delete(bb).await;
-
-        // Then the worktree is not removed.
-        assert!(
-            !removed_a_worktree(&git),
-            "deleting one thread of a group never touches its directory"
-        );
-        Ok(())
-    }
-
-    /// A store whose thread `aa` was in [`HEX_WORKTREE`], now gone, on
-    /// `branch`.
-    fn pruned_thread(branch: Option<&str>) -> Result<(Store, ThreadId), Report<StoreError>> {
-        let (store, id) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            cwd: PathBuf::from(HEX_WORKTREE),
+    /// Saves thread `short_id` in the orb project, created an hour ago, in a
+    /// session of its own in `cwd`, on `branch`.
+    fn insert_in(
+        store: &Store,
+        short_id: &str,
+        cwd: &Path,
+        branch: Option<&str>,
+    ) -> Result<InsertedThread, Report<StoreError>> {
+        let project_id = orb_project(store)?;
+        let inserted = store.insert_thread(&NewThread {
+            harness: HarnessId::new("claude"),
+            project_id,
+            short_id: short_id.to_owned(),
+            cwd: cwd.to_owned(),
+            created_at: now_ms() - HOUR_MS,
+            model: None,
+            permission_mode: None,
+            group_id: None,
+            zmx: None,
+        })?;
+        resave(store, short_id, |row| ThreadRow {
             branch: branch.map(str::to_owned),
             ..row
         })?;
-        Ok((store, id))
+        Ok(inserted)
+    }
+
+    /// The session thread `id` runs in, as `store` has it.
+    fn session_of(store: &Store, id: ThreadId) -> Result<SessionId, Report<StoreError>> {
+        let pane = store
+            .load()?
+            .1
+            .into_iter()
+            .find(|row| row.id == id)
+            .and_then(|row| row.pane_id);
+        store
+            .layouts()?
+            .panes
+            .into_iter()
+            .find(|row| Some(row.id) == pane)
+            .map(|row| row.session_id)
+            .ok_or_else(|| Report::new(StoreError).attach("the thread has no session"))
+    }
+
+    /// A store whose thread `aa` has a session in [`HEX_WORKTREE`], now
+    /// gone, on `branch`.
+    fn pruned_thread(branch: Option<&str>) -> Result<(Store, SessionId), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        let inserted = insert_in(&store, "aa", Path::new(HEX_WORKTREE), branch)?;
+        Ok((store, inserted.session))
     }
 
     /// The git calls an actor on `store` and `git` makes restoring `id`.
-    fn restore_calls(store: Store, git: &Arc<FakeGit>, id: ThreadId) -> Vec<GitCall> {
+    fn restore_calls(store: Store, git: &Arc<FakeGit>, id: SessionId) -> Vec<GitCall> {
         let (mut actor, _state) = start_with(
             store,
             &FakeHost::listing(vec![]),
@@ -13489,11 +12452,11 @@ mod tests {
         // When restoring its worktree.
         actor.restore_worktree(id);
 
-        // Then the frontend is asked to attach to the thread.
+        // Then the frontend is asked to attach to the session.
         assert_eq!(
             state.read().sessions.attach,
             Some(id),
-            "a restored thread should be attached"
+            "a restored session should be attached"
         );
         Ok(())
     }
@@ -13554,12 +12517,7 @@ mod tests {
         // Given a draft start waiting for its folder to be trusted, and thread
         // aa's pruned worktree.
         let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let id = add_thread(&store, "aa", now_ms() - HOUR_MS)?;
-        resave(&store, "aa", |row| ThreadRow {
-            cwd: PathBuf::from(HEX_WORKTREE),
-            branch: Some("fix-parser".to_owned()),
-            ..row
-        })?;
+        let id = insert_in(&store, "aa", Path::new(HEX_WORKTREE), Some("fix-parser"))?.session;
         let host = FakeHost::untrusted(1, Ok("bb"));
         let (mut actor, state) =
             start_with(store, &host, &FakeGit::local(), Path::new(NO_CLAUDE_DIR));
@@ -13592,6 +12550,7 @@ mod tests {
             .first()
             .copied()
             .ok_or_else(|| Report::new(StoreError).attach("aa wasn't saved"))?;
+        let id = session_of(&store, id)?;
         let git = FakeGit::having(SLUG_BRANCH);
 
         // When restoring its worktree.
@@ -13613,12 +12572,8 @@ mod tests {
     async fn restore_of_a_directory_that_exists_runs_no_git() -> Result<(), Report<StoreError>> {
         // Given thread aa in a directory that is on disk.
         let dir = tempfile::tempdir().change_context(StoreError)?;
-        let (store, id) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            cwd: dir.path().to_owned(),
-            branch: Some("fix-parser".to_owned()),
-            ..row
-        })?;
+        let store = Store::open_in_memory()?;
+        let id = insert_in(&store, "aa", dir.path(), Some("fix-parser"))?.session;
         let git = FakeGit::local();
 
         // When restoring its worktree.
@@ -13925,6 +12880,118 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn end_report_leaves_the_session_listed() -> Result<(), Report<StoreError>> {
+        // Given aa's conversation ended in its session's only agent pane.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.thread.pane, "end", "aa", None)?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then the session is still in the sidebar.
+        let listed = fx
+            .state
+            .read()
+            .sessions
+            .sidebar()
+            .iter()
+            .any(|row| row.item() == SidebarItem::Session(fx.thread.session));
+        assert!(listed, "a session whose agents all ended keeps its card");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settle_session_keeps_each_panes_resume_command() -> Result<(), Report<StoreError>> {
+        // Given aa running in its pane, then its session settled, which ends
+        // aa's conversation in the pane.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.thread.pane, "start", "aa", Some("resume"))?;
+        fx.actor.poll().await;
+        fx.actor.settle_session(fx.thread.session).await;
+        fx.report(fx.thread.pane, "end", "aa", None)?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then the pane still resumes aa.
+        assert_eq!(
+            fx.resume(fx.thread.pane)?.as_deref(),
+            Some("claude --resume aa"),
+            "a settled pane should keep its resume command"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn thread_resumed_in_another_session_takes_that_session() -> Result<(), Report<StoreError>>
+    {
+        // Given thread bb's session, and aa's conversation resumed in bb's
+        // pane.
+        let mut other = None;
+        let mut fx = PaneReports::with(|store, _| {
+            other = Some(insert_thread(store, "bb", None)?);
+            Ok(())
+        })?;
+        let other = other.ok_or_else(|| Report::new(StoreError).attach("bb wasn't made"))?;
+        fx.report(other.pane, "start", "aa", Some("resume"))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then aa belongs to bb's session.
+        assert_eq!(
+            fx.row(fx.thread.thread)?.orb_session,
+            Some(other.session),
+            "a thread should take the session of the pane it is bound to"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn end_report_keeps_the_threads_session() -> Result<(), Report<StoreError>> {
+        // Given aa's conversation ended in its pane.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.thread.pane, "end", "aa", None)?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then aa still shows in its session.
+        assert_eq!(
+            shown(&fx.state, fx.thread.thread).and_then(|thread| thread.home()),
+            Some(fx.thread.session),
+            "an ended thread should keep the session it ran in"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn end_report_in_a_settled_session_keeps_the_thread_bound()
+    -> Result<(), Report<StoreError>> {
+        // Given aa's session settled, then aa's conversation ending in its
+        // pane.
+        let mut fx = PaneReports::new()?;
+        fx.actor.edit_session(fx.thread.session, settle_session_row);
+        fx.report(fx.thread.pane, "end", "aa", None)?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then aa keeps its pane.
+        assert_eq!(
+            fx.row(fx.thread.thread)?.pane_id,
+            Some(fx.thread.pane),
+            "settling ended it, so the thread waits to come back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn pane_report_end_of_another_session_changes_nothing() -> Result<(), Report<StoreError>>
     {
         // Given aa's pane reports the end of some other conversation.
@@ -13998,25 +13065,6 @@ mod tests {
             fx.rows()?.len(),
             1,
             "an unknown pane's report should be ignored"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_thread_removes_its_pane_file() -> Result<(), Report<StoreError>> {
-        // Given thread aa's pane has a report.
-        let mut fx = PaneReports::new()?;
-        fx.report(fx.thread.pane, "start", "aa", Some("startup"))?;
-        fx.actor.poll().await;
-
-        // When deleting aa.
-        fx.actor.delete(fx.thread.thread).await;
-
-        // Then the pane's file is gone.
-        assert!(
-            !fx.file(fx.thread.pane).exists(),
-            "a deleted thread's pane file should go"
         );
         Ok(())
     }
@@ -14219,50 +13267,6 @@ mod tests {
         Ok(())
     }
 
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn deleting_a_pane_thread_skips_remove() -> Result<(), Report<StoreError>> {
-        // Given an idle Claude in aa's pane, which no harness runs itself.
-        let mut fx = PaneStatus::new(
-            false,
-            vec![interactive(&[100], ThreadStatus::Idle)],
-            running,
-        )?;
-        fx.actor.poll().await;
-
-        // When deleting aa.
-        fx.actor.delete(fx.thread.thread).await;
-
-        // Then nothing was asked to remove it.
-        assert!(
-            fx.host.removed().is_empty(),
-            "a pane thread has no hosted session to remove"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn settling_a_pane_thread_stops_nothing() -> Result<(), Report<StoreError>> {
-        // Given an idle Claude in aa's pane, which no harness runs itself.
-        let mut fx = PaneStatus::new(
-            false,
-            vec![interactive(&[100], ThreadStatus::Idle)],
-            running,
-        )?;
-        fx.actor.poll().await;
-
-        // When settling aa.
-        fx.actor.settle(fx.thread.thread).await;
-
-        // Then nothing was stopped.
-        assert!(
-            fx.host.stopped().is_empty(),
-            "a pane thread has no hosted session to stop"
-        );
-        Ok(())
-    }
-
     /// Leaves the saved thread `short_id` and every saved session idle for
     /// four days, and returns since when.
     fn session_idle_for_four_days(
@@ -14343,7 +13347,7 @@ mod tests {
         session_idle_for_four_days(&store, "aa")?;
         let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start_unselected(store, &host);
-        state.write().sessions.cursor = Some(SidebarItem::Thread(id));
+        state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(id.0)));
 
         // When polling.
         actor.poll().await;
@@ -14353,30 +13357,6 @@ mod tests {
             saved_session(&actor.store, "aa")?.settled_override,
             None,
             "the selected session should never auto-settle"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn session_under_a_selected_group_draft_never_auto_settles()
-    -> Result<(), Report<StoreError>> {
-        // Given group thread aa's session idle for four days, with the group's
-        // draft row selected.
-        let (store, group, _) = store_with_group(GroupKind::Research, None, &["aa"])?;
-        session_idle_for_four_days(&store, "aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start_unselected(store, &host);
-        state.write().sessions.cursor = Some(SidebarItem::GroupDraft(group));
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the session stays active.
-        assert_eq!(
-            saved_session(&actor.store, "aa")?.settled_override,
-            None,
-            "a selected group draft row should keep its session active"
         );
         Ok(())
     }
@@ -14480,6 +13460,30 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn turn_in_a_pane_ends_its_sessions_kept_active_mark() -> Result<(), Report<StoreError>> {
+        // Given thread aa's kept-active session, and aa now working.
+        let (store, _) = store_with_thread("aa")?;
+        resave_sessions(&store, |row| SessionRow {
+            settled_override: Some(SettledOverride::Active),
+            ..row
+        })?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let (mut actor, _state) = start_unselected(store, &host);
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the mark is cleared.
+        assert_eq!(
+            saved_session(&actor.store, "aa")?.settled_override,
+            None,
+            "turn activity should let auto-settle apply again"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn turn_end_is_its_sessions_latest_activity() -> Result<(), Report<StoreError>> {
         // Given thread aa polled while working.
         let (store, _) = store_with_thread("aa")?;
@@ -14496,6 +13500,87 @@ mod tests {
             saved_session(&actor.store, "aa")?.last_activity_at,
             saved(&actor.store, "aa")?.last_activity_at,
             "the session's activity should follow its thread's turn end"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn auto_settle_kills_the_sessions_panes() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session idle for four days.
+        let (store, _) = store_with_thread("aa")?;
+        session_idle_for_four_days(&store, "aa")?;
+        let pane = saved(&store, "aa")?
+            .pane_id
+            .ok_or_else(|| Report::new(StoreError).attach("aa has no pane"))?;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, _state) = start_unselected(store, &host);
+        let (zmx, service) = recording_zmx();
+        actor.services.zmx = service;
+
+        // When polling, which auto-settles the session.
+        actor.poll().await;
+
+        // Then its pane is killed.
+        assert_eq!(
+            killed(&zmx),
+            vec![pane.zmx_name()],
+            "an auto-settle should kill the session's panes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn auto_settle_detaches_the_session() -> Result<(), Report<StoreError>> {
+        // Given thread aa's attached session idle for four days.
+        let (store, _) = store_with_thread("aa")?;
+        session_idle_for_four_days(&store, "aa")?;
+        let session = saved_session(&store, "aa")?.id;
+        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start_unselected(store, &host);
+        state.write().attached.insert(session);
+
+        // When polling, which auto-settles the session.
+        actor.poll().await;
+
+        // Then it is no longer attached.
+        assert!(
+            !state.read().attached.contains(&session),
+            "an auto-settled session should be detached"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn kill_settled_kills_listed_panes_of_settled_sessions() -> Result<(), Report<StoreError>> {
+        // Given settled session aa and unsettled session bb, zmx listing both
+        // their panes.
+        let store = Store::open_in_memory()?;
+        let settled = insert_thread(&store, "aa", None)?;
+        let active = insert_thread(&store, "bb", None)?;
+        let host = FakeHost::listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.edit_session(settled.session, settle_session_row);
+        let zmx = Arc::new(FakeZmx::new(ZmxOutput {
+            success: true,
+            stdout: format!(
+                "  name={}\tpid=100\tclients=0\tcreated=1\n  name={}\tpid=101\tclients=0\tcreated=1\n",
+                settled.pane.zmx_name(),
+                active.pane.zmx_name()
+            ),
+            stderr: String::new(),
+        }));
+        actor.services.zmx = ZmxService::new(zmx.clone(), PathBuf::from("/zmx"));
+
+        // When killing the settled sessions' panes.
+        actor.kill_settled();
+
+        // Then only aa's pane is killed.
+        assert_eq!(
+            killed(&zmx),
+            vec![settled.pane.zmx_name()],
+            "only a settled session's listed pane should be killed"
         );
         Ok(())
     }

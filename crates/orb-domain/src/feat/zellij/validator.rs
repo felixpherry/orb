@@ -8,21 +8,21 @@ use crate::AppState;
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum OpenToolError {
-    /// The cursor isn't on a thread, a draft or a group row.
+    /// The cursor isn't on a session, a draft or a group's draft.
     NoSelection,
 }
 
-/// Allow opening a tool when a thread, a draft, a group card or a group draft
-/// is selected.
+/// Allow opening a tool when a session, a draft or a group draft is
+/// selected.
 ///
 /// # Errors
 ///
-/// Returns [`OpenToolError::NoSelection`] without a selected thread, draft or
-/// group row.
+/// Returns [`OpenToolError::NoSelection`] without a selected session, draft
+/// or group draft.
 pub fn validate_open_tool(state: &AppState) -> Result<(), OpenToolError> {
     match (
         state.sessions.selected_draft(),
-        state.sessions.selected_thread(),
+        state.sessions.selected_session(),
         state.sessions.selected_group(),
     ) {
         (None, None, None) => Err(OpenToolError::NoSelection),
@@ -38,14 +38,15 @@ mod tests {
     use super::{OpenToolError, validate_open_tool};
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Project,
-        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, PaneId,
+        PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus, sessions_for,
     };
 
     /// One project at `/work` with a thread, a draft and group 9 (still a
     /// draft), the cursor on `cursor`.
     fn state_at(cursor: Option<SidebarItem>) -> AppState {
-        AppState {
+        let mut state = AppState {
             sessions: Sessions {
                 projects: vec![Project {
                     id: ProjectId(1),
@@ -64,6 +65,7 @@ mod tests {
                         from: None,
                     }),
                     threads: vec![Thread {
+                        last_session: None,
                         harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: None,
@@ -71,7 +73,11 @@ mod tests {
                         transcript: None,
                         status: ThreadStatus::Idle,
                         turn_started_at: None,
-                        pane: None,
+                        pane: Some(PaneLaunch {
+                            pane: PaneId(1),
+                            session: SessionId(1),
+                            command: vec![],
+                        }),
                         branch: None,
                         pinned_at: None,
                         settled_at: None,
@@ -106,7 +112,9 @@ mod tests {
                 ..Sessions::default()
             },
             ..AppState::default()
-        }
+        };
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
+        state
     }
 
     #[rstest::rstest]
@@ -128,9 +136,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(SidebarItem::Thread(ThreadId(1)))]
+    #[case(SidebarItem::Session(SessionId(1)))]
     #[case(SidebarItem::Draft(ProjectId(1)))]
-    fn open_tool_allowed_on_a_thread_or_draft(#[case] cursor: SidebarItem) {
+    fn open_tool_allowed_on_a_session_or_draft(#[case] cursor: SidebarItem) {
         // Given a selected thread or draft.
         let state = state_at(Some(cursor));
 
@@ -138,20 +146,19 @@ mod tests {
         let result = validate_open_tool(&state);
 
         // Then it is allowed.
-        assert_eq!(result, Ok(()), "a thread or draft has a directory");
+        assert_eq!(result, Ok(()), "a session or draft has a directory");
     }
 
     #[rstest::rstest]
-    #[case(SidebarItem::Group(GroupId(9)))]
-    #[case(SidebarItem::GroupDraft(GroupId(9)))]
-    fn open_tool_allowed_on_a_group_row(#[case] cursor: SidebarItem) {
-        // Given a selected group card or group draft.
+    fn open_tool_allowed_on_a_group_draft() {
+        // Given a selected group draft.
+        let cursor = SidebarItem::GroupDraft(GroupId(9));
         let state = state_at(Some(cursor));
 
         // When validating opening a tool.
         let result = validate_open_tool(&state);
 
         // Then it is allowed.
-        assert_eq!(result, Ok(()), "a group row has a directory");
+        assert_eq!(result, Ok(()), "a group draft has a directory");
     }
 }

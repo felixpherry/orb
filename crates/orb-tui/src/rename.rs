@@ -70,7 +70,7 @@ pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer, hits: &mut H
 /// The box's title for what it names.
 fn title(target: RenameTarget) -> &'static str {
     match target {
-        RenameTarget::Thread(_) => " Rename Session ",
+        RenameTarget::Session(_) => " Rename Session ",
         RenameTarget::NewGroup {
             kind: GroupKind::Feature,
             ..
@@ -91,7 +91,7 @@ fn title(target: RenameTarget) -> &'static str {
 #[cfg(test)]
 mod tests {
     use orb_domain::TextInput;
-    use orb_domain::feat::sessions::state::{GroupKind, PaneId, ProjectId, SessionId, ThreadId};
+    use orb_domain::feat::sessions::state::{GroupKind, PaneId, ProjectId, SessionId};
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
     use ratatui::buffer::Buffer;
     use ratatui::layout::{Position, Rect};
@@ -102,7 +102,7 @@ mod tests {
 
     /// The rename box holding `text` drawn on a 100x10 screen.
     fn drawn(text: &str) -> (Buffer, Position) {
-        drawn_for(RenameTarget::Thread(ThreadId(1)), text)
+        drawn_for(RenameTarget::Session(SessionId(1)), text)
     }
 
     /// The name box for `target` holding `text` drawn on a 100x10 screen.
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(RenameTarget::Thread(ThreadId(1)), " Rename Session ")]
+    #[case(RenameTarget::Session(SessionId(1)), " Rename Session ")]
     #[case(RenameTarget::Tab { owner: SessionId(1), tab: 0 }, " Rename Tab ")]
     #[case(RenameTarget::Pane(PaneId(1)), " Rename Pane ")]
     #[case(
@@ -216,7 +216,7 @@ mod tests {
         // Given the rename box on a 100x10 screen.
         let area = Rect::new(0, 0, 100, 10);
         let rename = Rename {
-            target: RenameTarget::Thread(ThreadId(1)),
+            target: RenameTarget::Session(SessionId(1)),
             input: TextInput::new("Fix the sidebar"),
             creating: false,
         };
@@ -237,7 +237,7 @@ mod tests {
         // Given the rename box holding "Fix the sidebar" on a 100x10 screen.
         let area = Rect::new(0, 0, 100, 10);
         let rename = Rename {
-            target: RenameTarget::Thread(ThreadId(1)),
+            target: RenameTarget::Session(SessionId(1)),
             input: TextInput::new("Fix the sidebar"),
             creating: false,
         };

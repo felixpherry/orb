@@ -38,7 +38,9 @@ use crate::picker::{PickerScroll, highlight, span};
 use crate::session_picker::{
     big, boxed, boxes, markdown, meta, render_input, reply_speaker, speaker, wrap_words,
 };
-use crate::sidebar::{BG_DARK, BLUE, BLUE1, COMMENT, CYAN, DARK3, DARK5, FG, ORANGE, RED, VISUAL};
+use crate::sidebar::{
+    BG_DARK, BLUE, BLUE1, COMMENT, CYAN, DARK3, DARK5, FG, ORANGE, RED, VISUAL, is_attached,
+};
 
 /// Draws the search picker over `area`: `picker`'s hit rows, with the
 /// indexing progress and any index error from `state`, beside the selected
@@ -188,7 +190,7 @@ fn render_preview(
     let found = state.sessions.threads().find(|found| found.id == *thread);
     let info = found.and_then(|found| state.harness_info(&found.harness));
     let status = found.map_or_else(Line::default, |found| {
-        meta(found, info, state.attached.contains(thread), now)
+        meta(found, info, is_attached(&state.attached, found), now)
     });
     let width = usize::from(inner.width).saturating_sub(1);
     let (body, focus) = match picker.search_preview() {
@@ -709,6 +711,7 @@ mod tests {
                     removed: false,
                     draft: None,
                     threads: vec![Thread {
+                        last_session: None,
                         harness: HarnessId::new("claude"),
                         id: ThreadId(1),
                         title: Some("fix the bug".to_owned()),

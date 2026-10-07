@@ -9,7 +9,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::harness::{HarnessId, HarnessInfo};
-use crate::feat::sessions::state::{ProjectId, ProjectKind, ThreadId};
+use crate::feat::sessions::state::{ProjectId, ProjectKind, SessionId, ThreadId};
 
 /// One row a picker can show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,11 +51,13 @@ pub enum PickerItem {
     AllProjects,
     /// A confirm picker's answer: `Yes` or `No`. Matched on its label.
     Confirm(bool),
-    /// A thread in the session picker, labelled `<project|group>/title` and
+    /// A session in the session picker, labelled `<project>/title` and
     /// matched on the whole label. `split` is the byte offset where the title
-    /// starts. `settled` is whether it, or its group, is settled.
-    Thread {
-        id: ThreadId,
+    /// starts. `thread` is its most recently active agent's, whose transcript
+    /// the preview reads. `settled` is whether it is settled.
+    Session {
+        id: SessionId,
+        thread: Option<ThreadId>,
         label: String,
         split: usize,
         settled: bool,
@@ -437,7 +439,7 @@ fn hidden(item: &PickerItem, pattern: &str) -> bool {
         | PickerItem::InitGit
         | PickerItem::AllProjects
         | PickerItem::Confirm(_)
-        | PickerItem::Thread { .. }
+        | PickerItem::Session { .. }
         | PickerItem::Worktree { .. }
         | PickerItem::Hit { .. } => false,
     }
@@ -503,7 +505,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::Setting { label, .. }
         | PickerItem::Harness { label, .. }
         | PickerItem::Heading(label)
-        | PickerItem::Thread { label, .. }
+        | PickerItem::Session { label, .. }
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (label.clone(), None),
     };
@@ -568,7 +570,7 @@ mod tests {
                 PickerItem::Setting { label, .. }
                 | PickerItem::Harness { label, .. }
                 | PickerItem::Heading(label)
-                | PickerItem::Thread { label, .. }
+                | PickerItem::Session { label, .. }
                 | PickerItem::Worktree { label, .. }
                 | PickerItem::Hit { label, .. } => label.clone(),
             })
@@ -656,7 +658,7 @@ mod tests {
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
-                | PickerItem::Thread { .. }
+                | PickerItem::Session { .. }
                 | PickerItem::Worktree { .. }
                 | PickerItem::Hit { .. } => None,
             })

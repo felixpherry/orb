@@ -28,12 +28,6 @@ pub enum Intent {
     FocusRight,
     /// Move the keys to the sidebar.
     FocusSidebar,
-    /// Highlight the dashboard's next menu item.
-    DashboardNext,
-    /// Highlight the dashboard's previous menu item.
-    DashboardPrev,
-    /// Run the dashboard's highlighted menu item.
-    DashboardRun,
     /// Select this sidebar row (a click). During a search, end it on that
     /// row as `⏎` does.
     SelectRow(SidebarItem),
@@ -43,9 +37,6 @@ pub enum Intent {
     /// Move the sidebar's cursor one row up, stopping on the first row (the
     /// wheel).
     SelectWheelPrev,
-    /// Highlight the dashboard's menu item at this index without running it
-    /// (a click).
-    DashboardHighlight(usize),
     /// Hide the sidebar, giving the right side the full width, or show it
     /// again.
     ToggleSidebar,
@@ -87,14 +78,15 @@ pub enum Intent {
     MoveTabRight,
     /// Focus this pane of the shown tab and move the keys there (a click).
     FocusPane(PaneId),
-    /// Attach to the selected thread's session, or start the selected draft,
-    /// or open or close the selected group.
+    /// Attach to the selected session (un-settling a settled one), start the
+    /// selected draft, or open or close the Settled shelf on its header.
     Attach,
     /// Return from the attached session to the sidebar.
     Detach,
     /// Leave the attached session for the sidebar, keeping its pane shown.
     LeavePane,
-    /// Detach the selected thread from its pane, keeping the keys where they are.
+    /// Detach the selected session from its panes, keeping the keys where
+    /// they are.
     DetachSelected,
     /// Move back to the previous row in the jump list.
     JumpBack,
@@ -117,31 +109,24 @@ pub enum Intent {
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
     FilterProjects,
-    /// Pin or unpin the selected lone thread or group.
+    /// Pin or unpin the selected session.
     TogglePin,
-    /// Open the rename box for the selected thread, filled in with its title.
+    /// Open the rename box for the selected session, filled in with its
+    /// title.
     Rename,
     /// Move the keys to the sidebar's input box to search thread titles.
     Search,
-    /// Un-settle the selected lone thread or group, or ask to settle it.
+    /// Un-settle the selected session, or ask to settle it.
     ToggleSettle,
-    /// Ask to delete the selected thread or group and its sessions, or
-    /// to discard the selected draft.
-    DeleteThread,
-    /// Show the Settled shelf's threads.
+    /// Ask to delete the selected session, or to discard the selected draft
+    /// or group draft.
+    Delete,
+    /// Show the Settled shelf's sessions.
     OpenShelf,
-    /// Hide the Settled shelf's threads.
+    /// Hide the Settled shelf's sessions.
     CloseShelf,
-    /// Show the selected group's children.
-    OpenGroup,
-    /// Hide the selected group's children and select its card; on a settled
-    /// group already closed, close the Settled shelf.
-    CloseGroup,
     /// Start a new group of `kind`: pick its project (Feature), then name it.
     NewGroup(GroupKind),
-    /// Select the selected group's draft, making one at the top of the group
-    /// when it has none, and open the group.
-    OpenGroupDraft,
     /// Open the directory picker to add a project.
     AddProject,
     /// Open the workspace picker for the selected draft, or the selected
@@ -214,15 +199,13 @@ impl fmt::Display for Intent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Quit => "quit",
-            Self::SelectNext | Self::SelectWheelNext => "next thread",
-            Self::SelectPrev | Self::SelectWheelPrev => "previous thread",
+            Self::SelectNext | Self::SelectWheelNext => "next session",
+            Self::SelectPrev | Self::SelectWheelPrev => "previous session",
             Self::SelectRow(_) | Self::PickerSelectRow(_) => "select",
-            Self::DashboardHighlight(_) => "highlight item",
             Self::FocusRight | Self::MoveFocus(NavDirection::Right) => "focus right",
             Self::FocusSidebar => "focus sidebar",
-            Self::DashboardNext | Self::PickerNext | Self::PickerWheelNext => "next item",
-            Self::DashboardPrev | Self::PickerPrev | Self::PickerWheelPrev => "previous item",
-            Self::DashboardRun => "run item",
+            Self::PickerNext | Self::PickerWheelNext => "next item",
+            Self::PickerPrev | Self::PickerWheelPrev => "previous item",
             Self::ToggleSidebar | Self::LeavePane => "sidebar",
             Self::WidenFocused => "widen",
             Self::NarrowFocused => "narrow",
@@ -264,15 +247,12 @@ impl fmt::Display for Intent {
             Self::Rename => "rename",
             Self::Search => "search",
             Self::ToggleSettle => "settle",
-            Self::DeleteThread | Self::PickerBackspace => "delete",
+            Self::Delete | Self::PickerBackspace => "delete",
             Self::OpenShelf => "open settled",
             Self::CloseShelf => "close settled",
-            Self::OpenGroup => "open group",
-            Self::CloseGroup => "close group",
             Self::NewGroup(GroupKind::Feature) => "feature group",
             Self::NewGroup(GroupKind::Research) => "research group",
             Self::NewGroup(GroupKind::Learn) => "learn group",
-            Self::OpenGroupDraft => "group draft",
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",
@@ -383,16 +363,6 @@ mod tests {
         assert_eq!(
             Intent::NewGroup(kind).to_string(),
             expected,
-            "which-key label"
-        );
-    }
-
-    #[rstest::rstest]
-    fn open_group_draft_displays_as_group_draft() {
-        // Given / When / Then: which-key labels OpenGroupDraft "group draft".
-        assert_eq!(
-            Intent::OpenGroupDraft.to_string(),
-            "group draft",
             "which-key label"
         );
     }

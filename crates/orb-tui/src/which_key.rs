@@ -136,8 +136,8 @@ fn key_name(key: &KeyEvent) -> String {
 /// The icon and its colour for an intent (mini.icons style).
 fn look(intent: &Intent) -> (&'static str, Color) {
     match intent {
-        Intent::NewSession | Intent::OpenGroupDraft => ("\u{f067}", GREEN),
-        Intent::AddProject | Intent::OpenGroup => (FOLDER_OPEN, BLUE),
+        Intent::NewSession => ("\u{f067}", GREEN),
+        Intent::AddProject => (FOLDER_OPEN, BLUE),
         Intent::FilterProjects => ("\u{f0b0}", CYAN),
         Intent::PickModel => ("\u{f0e7}", MAGENTA),
         Intent::PickPermission => ("\u{f023}", YELLOW),
@@ -149,7 +149,6 @@ fn look(intent: &Intent) -> (&'static str, Color) {
         Intent::ToggleSidebar => ("\u{f0db}", BLUE1),
         Intent::SelectFirst => ("\u{f062}", BLUE),
         Intent::NewGroup(kind) => kind_look(*kind),
-        Intent::CloseGroup => (FOLDER, BLUE),
         Intent::OpenWorktreePicker => (WORKTREE, ORANGE),
         _ => ("\u{f111}", DARK5),
     }
@@ -219,7 +218,7 @@ mod tests {
 
     use super::render;
     use crate::keymap::{KeyCategory, Keys, Scope, keymap, press};
-    use crate::sidebar::{BLUE2, FOLDER, FOLDER_OPEN, GREEN1, PURPLE};
+    use crate::sidebar::{BLUE2, GREEN1, PURPLE};
 
     const SCREEN: Rect = Rect::new(0, 0, 80, 20);
 
@@ -495,65 +494,6 @@ mod tests {
             cell,
             Some((icon.to_owned(), colour)),
             "the icon on the {pressed} row"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(Intent::OpenGroup, FOLDER_OPEN, "open group")]
-    #[case(Intent::CloseGroup, FOLDER, "close group")]
-    fn fold_intents_show_folder_icons(
-        #[case] intent: Intent,
-        #[case] icon: &str,
-        #[case] label: &str,
-    ) {
-        // Given a keymap with `␣x` bound to the intent, and Space pressed.
-        let keys = {
-            let mut km = Keymap::new();
-            km.bind(
-                "<leader>x",
-                intent,
-                KeyCategory::Navigation,
-                Scope::Sidebar.into(),
-            );
-            leader(Keys::new(km, Scope::Sidebar.into()))
-        };
-
-        // When drawing the popup.
-        let buffer = draw(&keys, SCREEN);
-
-        // Then the `x` row shows the folder icon.
-        let lines = lines(&buffer);
-        let row = format!("│ x ➜ {icon} {label}");
-        assert!(
-            lines.iter().any(|line| line.contains(&row)),
-            "the screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn open_group_draft_shows_the_plus_icon() {
-        // Given a keymap with `␣x` bound to OpenGroupDraft, and Space pressed.
-        let keys = {
-            let mut km = Keymap::new();
-            km.bind(
-                "<leader>x",
-                Intent::OpenGroupDraft,
-                KeyCategory::Sessions,
-                Scope::Sidebar.into(),
-            );
-            leader(Keys::new(km, Scope::Sidebar.into()))
-        };
-
-        // When drawing the popup.
-        let buffer = draw(&keys, SCREEN);
-
-        // Then the `x` row shows the plus icon.
-        let lines = lines(&buffer);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("│ x ➜ \u{f067} group draft")),
-            "the screen was {lines:#?}"
         );
     }
 }

@@ -47,11 +47,13 @@ mod tests {
     use crate::AppState;
     use crate::feat::jumps::state::JumpList;
     use crate::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
+        Thread, ThreadId, ThreadStatus, sessions_for,
     };
 
     fn thread(id: i64) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
@@ -59,7 +61,11 @@ mod tests {
             transcript: None,
             status: ThreadStatus::Idle,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                session: SessionId(id),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -74,12 +80,12 @@ mod tests {
     }
 
     fn on(id: i64) -> SidebarItem {
-        SidebarItem::Thread(ThreadId(id))
+        SidebarItem::Session(SessionId(id))
     }
 
     /// Threads 1 and 2, the cursor on thread 2, and a jump list of `jumps`.
     fn jumping(jumps: &[i64]) -> AppState {
-        AppState {
+        let mut state = AppState {
             sessions: Sessions {
                 projects: vec![Project {
                     id: ProjectId(1),
@@ -97,7 +103,9 @@ mod tests {
             },
             jumps: JumpList::from_saved(jumps.iter().copied().map(on).collect()),
             ..AppState::default()
-        }
+        };
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
+        state
     }
 
     #[rstest::rstest]

@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::command::Workspace;
-use crate::feat::dashboard::items;
 use crate::feat::git::validator::{
     BUSY_DIRECTORY, ChangeWorkspaceError, SwitchBranchError, validate_change_workspace,
     validate_switch_branch,
@@ -26,15 +25,13 @@ use crate::feat::picker::validator::{
     validate_pick_project, validate_pick_session, validate_remove_project,
 };
 use crate::feat::sessions::state::{
-    Draft, DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, PaneId, Project, ProjectId,
-    ProjectKind, Search, SessionId, Sessions, SidebarItem, Thread, ThreadId, group_slug,
+    Draft, DraftWorkspace, GroupId, GroupKind, Own, Project, ProjectId, ProjectKind, Search,
+    SessionId, SessionKind, Sessions, SidebarItem, ThreadId, group_slug,
 };
 use crate::feat::sessions::validator::{
-    DeleteError, LAST_IN_GROUP, NewGroupError, SETTLE_IN_PROGRESS, ToggleSettleError,
-    validate_close_group, validate_close_shelf, validate_delete, validate_new_group,
-    validate_new_incognito, validate_open_group, validate_open_group_draft, validate_open_shelf,
-    validate_pick_setting, validate_start_draft, validate_start_group_draft, validate_toggle_pin,
-    validate_toggle_settle,
+    NewGroupError, SETTLE_IN_PROGRESS, ToggleSettleError, validate_close_shelf, validate_delete,
+    validate_new_group, validate_new_incognito, validate_open_shelf, validate_pick_setting,
+    validate_start_draft, validate_start_group_draft, validate_toggle_pin, validate_toggle_settle,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
@@ -106,31 +103,6 @@ impl IntentHandler {
                 with_visit(state, vec![])
             }
             Intent::FocusRight => focus_right(state),
-            Intent::DashboardHighlight(index) => {
-                state
-                    .dashboard
-                    .highlight(&state.sessions, state.offers_permissions(), *index);
-                vec![]
-            }
-            Intent::DashboardNext => {
-                state
-                    .dashboard
-                    .next(&state.sessions, state.offers_permissions());
-                vec![]
-            }
-            Intent::DashboardPrev => {
-                state
-                    .dashboard
-                    .prev(&state.sessions, state.offers_permissions());
-                vec![]
-            }
-            Intent::DashboardRun => {
-                let items = items(&state.sessions, state.offers_permissions());
-                match items.get(state.dashboard.index(&state.sessions, items.len())) {
-                    Some(item) => Self::handle(&item.intent(), state),
-                    None => vec![],
-                }
-            }
             Intent::FocusSidebar => match validate_focus_sidebar(state) {
                 Ok(()) => {
                     state.focus = Focus::Sidebar;
@@ -189,12 +161,6 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
-            Intent::Attach if matches!(state.sessions.cursor, Some(SidebarItem::Group(_))) => {
-                if let Some(SidebarItem::Group(id)) = state.sessions.cursor {
-                    state.sessions.toggle_group(id);
-                }
-                vec![]
-            }
             Intent::Attach if matches!(state.sessions.cursor, Some(SidebarItem::GroupDraft(_))) => {
                 match (validate_start_group_draft(state), state.sessions.cursor) {
                     (Ok(()), Some(SidebarItem::GroupDraft(group))) => {
@@ -204,10 +170,10 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
-            Intent::Attach => attach_thread(state),
+            Intent::Attach => attach_session(state),
             Intent::Detach => {
                 state.focus = Focus::Sidebar;
-                if let Some(id) = state.sessions.selected_id() {
+                if let Some(id) = state.sessions.selected_session().map(|session| session.id) {
                     state.attached.remove(&id);
                 }
                 vec![Command::Detach, Command::RefreshSessions]
@@ -250,7 +216,7 @@ impl IntentHandler {
                 match (validate_focus_pane(state, *pane), state.shown_session()) {
                     (Ok(()), Some(owner)) => {
                         state.layouts.focus_pane(owner, *pane);
-                        let mut commands = attach_thread(state);
+                        let mut commands = attach_session(state);
                         commands.push(Command::SaveLayout(owner));
                         commands
                     }
@@ -276,7 +242,10 @@ impl IntentHandler {
                 Err(_) => vec![],
             },
             Intent::DetachSelected => {
-                match (validate_detach(state), state.sessions.selected_id()) {
+                match (
+                    validate_detach(state),
+                    state.sessions.selected_session().map(|session| session.id),
+                ) {
                     (Ok(()), Some(id)) => {
                         state.attached.remove(&id);
                         vec![Command::RefreshSessions]
@@ -528,7 +497,6 @@ impl IntentHandler {
                 validate_switch_branch(state),
                 state.sessions.selected_draft(),
                 state.sessions.selected_thread(),
-                state.sessions.selected_group(),
             ) {
                 (Ok(()), Some((project, draft)), ..) if !draft.repo => {
                     open_picker(state, PickerState::init_git(project.id, state.focus));
@@ -546,7 +514,7 @@ impl IntentHandler {
                     open_picker(state, picker);
                     vec![Command::ListBranches(cwd)]
                 }
-                (Ok(()), None, Some(thread), _) => {
+                (Ok(()), None, Some(thread)) => {
                     let cwd = thread.cwd.clone();
                     let unstarted = thread.transcript.is_none() && !thread.status.in_progress();
                     let target = PickTarget::Thread(thread.id);
@@ -555,17 +523,6 @@ impl IntentHandler {
                     open_picker(state, picker);
                     vec![Command::ListBranches(cwd)]
                 }
-                (Ok(()), None, None, Some((_, group))) => match &group.dir {
-                    Some(dir) => {
-                        let cwd = dir.clone();
-                        let target = PickTarget::Group(group.id);
-                        let picker =
-                            PickerState::branches(target, cwd.clone(), false, None, state.focus);
-                        open_picker(state, picker);
-                        vec![Command::ListBranches(cwd)]
-                    }
-                    None => vec![],
-                },
                 (Err(SwitchBranchError::Busy), ..) => {
                     state.sessions.error = Some(BUSY_DIRECTORY.to_owned());
                     vec![]
@@ -575,16 +532,16 @@ impl IntentHandler {
             Intent::OpenTool(tool) => match (
                 validate_open_tool(state),
                 state.sessions.selected_draft(),
-                state.sessions.selected_thread(),
+                state.sessions.selected_session(),
                 state.sessions.selected_group(),
             ) {
                 (Ok(()), Some((project, draft)), ..) => vec![Command::OpenTool {
                     tool: *tool,
                     cwd: draft_dir(project, draft),
                 }],
-                (Ok(()), None, Some(thread), _) => vec![Command::OpenTool {
+                (Ok(()), None, Some(session), _) => vec![Command::OpenTool {
                     tool: *tool,
-                    cwd: thread.cwd.clone(),
+                    cwd: session.dir.clone(),
                 }],
                 (Ok(()), None, None, Some((project, group))) => vec![Command::OpenTool {
                     tool: *tool,
@@ -714,37 +671,18 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
-                Some(&PickerKind::SettleThread { thread }) => {
+                Some(&PickerKind::SettleSession { session }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
-                        Some(PickerItem::Confirm(true)) => settle(state, thread),
+                        Some(PickerItem::Confirm(true)) => settle_session(state, session),
                         _ => vec![],
                     }
                 }
-                Some(&PickerKind::SettleGroup { group }) => {
-                    match close_picker(state).as_ref().and_then(PickerState::selected) {
-                        Some(PickerItem::Confirm(true)) => settle_group(state, group),
-                        _ => vec![],
-                    }
-                }
-                Some(&PickerKind::DeleteGroup { group, .. }) => {
+                Some(&PickerKind::DeleteSession { session, .. }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::Confirm(true))
-                            if still_deletable(state, SidebarItem::Group(group)) =>
+                            if still_deletable(state, SidebarItem::Session(session)) =>
                         {
-                            // Nothing is hidden yet: the sessions actor may
-                            // refuse (an unmerged Feature branch), so it hides,
-                            // detaches and moves the cursor once it goes ahead.
-                            vec![Command::DeleteGroup(group)]
-                        }
-                        _ => vec![],
-                    }
-                }
-                Some(&PickerKind::DeleteThread { thread }) => {
-                    match close_picker(state).as_ref().and_then(PickerState::selected) {
-                        Some(PickerItem::Confirm(true))
-                            if still_deletable(state, SidebarItem::Thread(thread)) =>
-                        {
-                            delete_thread(state, thread)
+                            delete_session(state, session)
                         }
                         _ => vec![],
                     }
@@ -808,15 +746,15 @@ impl IntentHandler {
                 }) => close_picker(state)
                     .map(|picker| pick_group_branch(&picker))
                     .unwrap_or_default(),
-                Some(PickerKind::Sessions { .. } | PickerKind::Search { .. }) => match (
-                    validate_pick_session(state),
-                    close_picker(state)
-                        .as_ref()
-                        .and_then(PickerState::selected_thread),
-                ) {
-                    (Ok(()), Some(thread)) => pick_session(state, thread),
-                    _ => vec![],
-                },
+                Some(PickerKind::Sessions { .. } | PickerKind::Search { .. }) => {
+                    let valid = validate_pick_session(state);
+                    let session = close_picker(state)
+                        .and_then(|picker| picker.picked_session(&state.sessions));
+                    match (valid, session) {
+                        (Ok(()), Some(session)) => pick_session(state, session),
+                        _ => vec![],
+                    }
+                }
                 Some(PickerKind::Worktrees) => vec![],
                 Some(PickerKind::DeleteWorktree { .. }) => leave_delete_worktree(state),
                 _ => match (validate_pick_project(state), validate_add_directory(state)) {
@@ -882,20 +820,6 @@ impl IntentHandler {
                 }
                 Err(_) => vec![],
             },
-            Intent::OpenGroup => match (validate_open_group(state), selected_group_id(state)) {
-                (Ok(()), Some(id)) => {
-                    state.sessions.open_group(id);
-                    vec![]
-                }
-                _ => vec![],
-            },
-            Intent::CloseGroup => match (validate_close_group(state), selected_group_id(state)) {
-                (Ok(()), Some(id)) => {
-                    state.sessions.close_group(id);
-                    vec![]
-                }
-                _ => vec![],
-            },
             Intent::NewGroup(GroupKind::Feature) => {
                 let items = state
                     .sessions
@@ -907,35 +831,23 @@ impl IntentHandler {
                 vec![]
             }
             Intent::NewGroup(kind) => open_group_name(state, *kind, None),
-            Intent::OpenGroupDraft => {
-                match (validate_open_group_draft(state), selected_group_id(state)) {
-                    (Ok(()), Some(group)) => open_group_draft(state, group),
-                    _ => vec![],
-                }
-            }
-            Intent::TogglePin if matches!(state.sessions.cursor, Some(SidebarItem::Group(_))) => {
-                match (validate_toggle_pin(state), state.sessions.selected_group()) {
-                    (Ok(()), Some((_, group))) => match group.pinned_at {
-                        Some(_) => vec![Command::UnpinGroup(group.id)],
-                        None => vec![Command::PinGroup(group.id)],
-                    },
-                    _ => vec![],
-                }
-            }
             Intent::TogglePin => {
-                match (validate_toggle_pin(state), state.sessions.selected_thread()) {
-                    (Ok(()), Some(thread)) => match thread.pinned_at {
-                        Some(_) => vec![Command::Unpin(thread.id)],
-                        None => vec![Command::Pin(thread.id)],
+                match (
+                    validate_toggle_pin(state),
+                    state.sessions.selected_session(),
+                ) {
+                    (Ok(()), Some(session)) => match session.pinned_at {
+                        Some(_) => vec![Command::UnpinSession(session.id)],
+                        None => vec![Command::PinSession(session.id)],
                     },
                     _ => vec![],
                 }
             }
-            Intent::Rename => match (validate_rename(state), state.sessions.selected_thread()) {
-                (Ok(()), Some(thread)) => {
+            Intent::Rename => match (validate_rename(state), state.sessions.selected_session()) {
+                (Ok(()), Some(session)) => {
                     let rename = Rename {
-                        target: RenameTarget::Thread(thread.id),
-                        input: TextInput::new(thread.title.as_deref().unwrap_or_default()),
+                        target: RenameTarget::Session(session.id),
+                        input: TextInput::new(&state.sessions.title(session)),
                         creating: false,
                     };
                     state.rename = Some(rename);
@@ -952,38 +864,16 @@ impl IntentHandler {
                 state.focus = Focus::Search;
                 vec![]
             }
-            Intent::ToggleSettle
-                if matches!(state.sessions.cursor, Some(SidebarItem::Group(_))) =>
-            {
-                match (
-                    validate_toggle_settle(state),
-                    state.sessions.selected_group(),
-                ) {
-                    (Ok(()), Some((_, group))) if group.settled_at.is_some() => {
-                        vec![Command::UnsettleGroup(group.id)]
-                    }
-                    (Ok(()), Some((_, group))) => {
-                        let picker = PickerState::settle_group(group.id, state.focus);
-                        open_picker(state, picker);
-                        vec![]
-                    }
-                    (Err(ToggleSettleError::InProgress), _) => {
-                        state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
-                        vec![]
-                    }
-                    _ => vec![],
-                }
-            }
             Intent::ToggleSettle => {
                 match (
                     validate_toggle_settle(state),
-                    state.sessions.selected_thread(),
+                    state.sessions.selected_session(),
                 ) {
-                    (Ok(()), Some(thread)) if thread.settled_at.is_some() => {
-                        vec![Command::Unsettle(thread.id)]
+                    (Ok(()), Some(session)) if session.settled_at.is_some() => {
+                        vec![Command::UnsettleSession(session.id)]
                     }
-                    (Ok(()), Some(thread)) => {
-                        let picker = PickerState::settle_thread(thread.id, state.focus);
+                    (Ok(()), Some(session)) => {
+                        let picker = PickerState::settle_session(session.id, state.focus);
                         open_picker(state, picker);
                         vec![]
                     }
@@ -994,29 +884,20 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
-            Intent::DeleteThread => match (validate_delete(state), state.sessions.cursor) {
+            Intent::Delete => match (validate_delete(state), state.sessions.cursor) {
                 (Ok(()), Some(SidebarItem::Draft(project))) => {
                     open_picker(state, PickerState::discard_draft(project, state.focus));
                     vec![]
                 }
-                (Ok(()), Some(SidebarItem::Thread(id))) => {
-                    open_picker(state, PickerState::delete_thread(id, state.focus));
+                (Ok(()), Some(SidebarItem::Session(id))) => {
+                    let folder = state.sessions.session(id).is_some_and(|session| {
+                        matches!(session.kind, SessionKind::Research | SessionKind::Learn)
+                    });
+                    open_picker(state, PickerState::delete_session(id, folder, state.focus));
                     vec![]
                 }
                 (Ok(()), Some(SidebarItem::GroupDraft(group))) => {
                     open_picker(state, PickerState::discard_group_draft(group, state.focus));
-                    vec![]
-                }
-                (Ok(()), Some(SidebarItem::Group(group))) => {
-                    let dir = state
-                        .sessions
-                        .selected_group()
-                        .and_then(|(_, group)| group.dir.as_ref().map(|_| group.kind));
-                    open_picker(state, PickerState::delete_group(group, dir, state.focus));
-                    vec![]
-                }
-                (Err(DeleteError::LastInGroup), _) => {
-                    state.sessions.error = Some(LAST_IN_GROUP.to_owned());
                     vec![]
                 }
                 _ => vec![],
@@ -1256,51 +1137,21 @@ fn remove_project(state: &mut AppState, project: ProjectId) -> Vec<Command> {
     )
 }
 
-/// Settles `thread`, answered `Yes` in its confirm, if the cursor is still on
-/// it and it is still unsettled and between turns. Settling detaches it and
-/// moves the cursor to the neighbouring card; a turn that started meanwhile
-/// shows the refusal on the mode line.
-fn settle(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
-    match (
-        validate_toggle_settle(state),
-        state.sessions.selected_thread(),
-    ) {
-        (Ok(()), Some(selected)) if selected.id == thread && selected.settled_at.is_none() => {
-            state.attached.remove(&thread);
-            state.sessions.cursor = state.sessions.card_neighbour(SidebarItem::Thread(thread));
-            with_visit(state, vec![Command::Settle(thread)])
-        }
-        (Err(ToggleSettleError::InProgress), Some(selected)) if selected.id == thread => {
-            state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
-            vec![]
-        }
-        _ => vec![],
-    }
-}
-
-/// Settles `group`, answered `Yes` in its confirm, if the cursor is still on
-/// its card and it is still unsettled with no turn underway. Settling
-/// detaches its threads and moves the cursor to the neighbouring card; a turn
+/// Settles `session`, answered `Yes` in its confirm, if the cursor is still
+/// on it, it is still unsettled and no agent pane has a turn underway: it
+/// leaves `attached` and the cursor moves to the neighbouring card. A turn
 /// that started meanwhile shows the refusal on the mode line.
-fn settle_group(state: &mut AppState, group: GroupId) -> Vec<Command> {
-    let on_card = state.sessions.cursor == Some(SidebarItem::Group(group));
+fn settle_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
     match (
         validate_toggle_settle(state),
-        state.sessions.selected_group(),
+        state.sessions.selected_session(),
     ) {
-        (Ok(()), Some((_, shown))) if on_card && shown.settled_at.is_none() => {
-            let threads: Vec<ThreadId> = state
-                .sessions
-                .group_threads(group)
-                .map(|thread| thread.id)
-                .collect();
-            for thread in &threads {
-                state.attached.remove(thread);
-            }
-            state.sessions.cursor = state.sessions.card_neighbour(SidebarItem::Group(group));
-            with_visit(state, vec![Command::SettleGroup(group)])
+        (Ok(()), Some(selected)) if selected.id == session && selected.settled_at.is_none() => {
+            state.attached.remove(&session);
+            state.sessions.cursor = state.sessions.card_neighbour(SidebarItem::Session(session));
+            with_visit(state, vec![Command::SettleSession(session)])
         }
-        (Err(ToggleSettleError::InProgress), _) if on_card => {
+        (Err(ToggleSettleError::InProgress), Some(selected)) if selected.id == session => {
             state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
             vec![]
         }
@@ -1314,15 +1165,18 @@ fn still_deletable(state: &AppState, item: SidebarItem) -> bool {
     state.sessions.cursor == Some(item) && validate_delete(state).is_ok()
 }
 
-/// Asks for `thread` to be deleted, hiding it at once, detaching it, dropping
-/// it from the jump list and moving the cursor to the neighbouring row.
-fn delete_thread(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
-    let neighbour = state.sessions.row_neighbour(SidebarItem::Thread(thread));
-    state.sessions.deleting.insert(thread);
-    state.attached.remove(&thread);
-    state.jumps.remove(SidebarItem::Thread(thread));
+/// Hides `session` at once, detaches it, drops it from the jump list, moves
+/// the cursor to the neighbouring row, and asks for the delete.
+fn delete_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
+    let neighbour = state.sessions.row_neighbour(SidebarItem::Session(session));
+    state.sessions.deleting.insert(session);
+    state.attached.remove(&session);
+    state.jumps.remove(SidebarItem::Session(session));
     state.sessions.cursor = neighbour;
-    with_visit(state, vec![Command::Delete(thread), Command::SaveJumps])
+    with_visit(
+        state,
+        vec![Command::DeleteSession(session), Command::SaveJumps],
+    )
 }
 
 /// Asks for `project`'s draft to be discarded, dropping it from the jump list
@@ -1373,14 +1227,12 @@ fn open_draft(state: &mut AppState, project: ProjectId) -> Vec<Command> {
         .collect()
 }
 
-/// Jumps to `thread`, picked in the session or search picker: puts the cursor on it,
-/// opens what hides its row, and attaches like `⏎` on the row, recording the
-/// move as a jump.
-fn pick_session(state: &mut AppState, thread: ThreadId) -> Vec<Command> {
+/// Jumps to `session`, picked in the session or search picker: puts the
+/// cursor on it and attaches like `⏎` on its row, recording the move as a
+/// jump.
+fn pick_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
     let from = state.sessions.cursor;
-    let item = SidebarItem::Thread(thread);
-    state.sessions.cursor = Some(item);
-    state.sessions.reveal(item);
+    state.sessions.cursor = Some(SidebarItem::Session(session));
     let mut commands = record_jump(state, from);
     commands.extend(show_pane(state));
     with_visit(state, commands)
@@ -1500,9 +1352,8 @@ fn setting_target(
 ) -> Option<(DraftTarget, &HarnessId, Option<&str>, Option<&str>)> {
     let target = match sessions.cursor? {
         SidebarItem::Draft(project) => DraftTarget::Project(project),
-        SidebarItem::Group(group) => DraftTarget::Group(group),
         SidebarItem::GroupDraft(group) => DraftTarget::GroupDraft(group),
-        SidebarItem::Thread(_) | SidebarItem::SettledShelf => return None,
+        SidebarItem::Session(_) | SidebarItem::SettledShelf => return None,
     };
     let (harness, model, permission) = sessions.settings()?;
     Some((target, harness, model, permission))
@@ -1676,66 +1527,50 @@ fn back_to_worktrees(state: &mut AppState, deleted: bool) {
     }
 }
 
-/// Opens `group`, puts the cursor on its draft, and gives it one when it has
-/// none, asking the sessions actor to save it.
-fn open_group_draft(state: &mut AppState, id: GroupId) -> Vec<Command> {
-    state.sessions.open_group(id);
-    state.sessions.cursor = Some(SidebarItem::GroupDraft(id));
-    match state.sessions.group_mut(id) {
-        Some(group) if group.draft.is_none() => {
-            group.draft = Some(GroupDraft::default());
-            vec![Command::SaveGroupDraft(id)]
-        }
-        _ => vec![],
-    }
-}
-
-/// The id of the group under the cursor: its card's, its draft's, or its
-/// thread's.
-fn selected_group_id(state: &AppState) -> Option<GroupId> {
-    state.sessions.selected_group().map(|(_, group)| group.id)
-}
-
-/// Attaches to the selected thread's session and records entering it as a
-/// jump, unless the thread can't be attached to or is the row the last
-/// `<C-o>`/`<C-i>` landed on.
-fn attach_thread(state: &mut AppState) -> Vec<Command> {
+/// Attaches to the selected session and records entering it as a jump,
+/// unless it can't be attached to or is the row the last `<C-o>`/`<C-i>`
+/// landed on.
+fn attach_session(state: &mut AppState) -> Vec<Command> {
     let mut commands = show_pane(state);
-    if let (false, Some(id)) = (commands.is_empty(), state.sessions.selected_id())
-        && state.jumps.enter(SidebarItem::Thread(id))
+    if let (false, Some(id)) = (
+        commands.is_empty(),
+        state.sessions.selected_session().map(|session| session.id),
+    ) && state.jumps.enter(SidebarItem::Session(id))
     {
         commands.push(Command::SaveJumps);
     }
     commands
 }
 
-/// Attaches to the selected thread's session, adding it to the attached
-/// threads and showing its pane with the keys in it, unless the thread can't
-/// be attached to.
+/// Attaches to the selected session, adding it to the attached sessions and
+/// showing its layout with the keys in its focused pane, unless it can't be
+/// attached to or has no layout. A settled session is un-settled first.
 fn show_pane(state: &mut AppState) -> Vec<Command> {
-    match (
-        validate_attach(state),
-        state
-            .sessions
-            .selected_thread()
-            .and_then(Thread::attach_target),
-    ) {
-        (Ok(()), Some(target)) if state.layouts.owner_of(target.pane).is_some() => {
+    let selected = state
+        .sessions
+        .selected_session()
+        .map(|session| (session.id, session.settled_at.is_some()));
+    match (validate_attach(state), selected) {
+        (Ok(()), Some((id, settled))) if state.layouts.get(id).is_some() => {
             state.focus = Focus::Attached;
-            state.attached.insert(target.thread);
-            vec![Command::Attach(target), Command::RefreshSessions]
+            state.attached.insert(id);
+            settled
+                .then_some(Command::UnsettleSession(id))
+                .into_iter()
+                .chain([Command::Attach(id), Command::RefreshSessions])
+                .collect()
         }
         _ => vec![],
     }
 }
 
 /// Moves the keys into the shown layout's focused pane while the selected
-/// thread is attached and can still be attached to; with no layout shown
+/// session is attached and can still be attached to; with no layout shown
 /// they stay put.
 fn focus_right(state: &mut AppState) -> Vec<Command> {
-    match state.sessions.selected_id() {
+    match state.sessions.selected_session().map(|session| session.id) {
         Some(id) if state.attached.contains(&id) && validate_attach(state).is_ok() => {
-            attach_thread(state)
+            attach_session(state)
         }
         _ => vec![],
     }
@@ -1791,18 +1626,7 @@ fn move_focus(state: &mut AppState, nav: NavDirection) -> Vec<Command> {
     }
 }
 
-/// Whether some thread runs in `pane`.
-fn runs_a_thread(state: &AppState, pane: PaneId) -> bool {
-    state.sessions.threads().any(|thread| {
-        thread
-            .pane
-            .as_ref()
-            .is_some_and(|launch| launch.pane == pane)
-    })
-}
-
-/// Closes the focused pane and saves the layout; on a pane a thread runs
-/// in, detaches the selected thread instead.
+/// Closes the focused pane and saves the layout.
 fn close_pane(state: &mut AppState) -> Vec<Command> {
     let focused = state.shown_layout().and_then(SessionLayout::focused);
     let (Ok(()), Some(owner), Some(focused)) =
@@ -1810,32 +1634,15 @@ fn close_pane(state: &mut AppState) -> Vec<Command> {
     else {
         return vec![];
     };
-    if runs_a_thread(state, focused) {
-        return IntentHandler::handle(&Intent::Detach, state);
-    }
     state.layouts.close_pane(focused);
     vec![Command::SaveLayout(owner)]
 }
 
-/// Closes the shown tab and saves the layout; one holding a pane a thread
-/// runs in detaches the selected thread instead.
+/// Closes the shown tab and saves the layout.
 fn close_tab(state: &mut AppState) -> Vec<Command> {
     let (Ok(()), Some(owner)) = (validate_tab_action(state), state.shown_session()) else {
         return vec![];
     };
-    let holds_thread = state
-        .shown_layout()
-        .and_then(SessionLayout::active_tab)
-        .is_some_and(|tab| {
-            state
-                .sessions
-                .threads()
-                .filter_map(|thread| thread.pane.as_ref())
-                .any(|launch| tab.holds(launch.pane))
-        });
-    if holds_thread {
-        return IntentHandler::handle(&Intent::Detach, state);
-    }
     state.layouts.close_tab(owner);
     vec![Command::SaveLayout(owner)]
 }
@@ -1936,10 +1743,7 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
             let name = rename.input.text().trim();
             let name = (!name.is_empty()).then(|| name.to_owned());
             return match rename.target {
-                RenameTarget::Thread(thread) => vec![Command::RenameThread {
-                    thread,
-                    title: name,
-                }],
+                RenameTarget::Session(session) => vec![Command::RenameSession { session, name }],
                 RenameTarget::NewGroup { .. } => vec![],
                 // The keys go back to the panes.
                 RenameTarget::Tab { owner, tab } => {
@@ -2068,8 +1872,8 @@ fn record_jump(state: &mut AppState, from: Option<SidebarItem>) -> Vec<Command> 
     vec![Command::SaveJumps]
 }
 
-/// Lands a jump back or forward on `target`: the cursor moves there and its
-/// row is revealed. From a pane, the keys follow into the target's pane while
+/// Lands a jump back or forward on `target`: the cursor moves there. From a
+/// pane, the keys follow into the target's pane while
 /// orb is attached to it, else go to the sidebar; elsewhere they stay put.
 fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
     let Some(target) = target else {
@@ -2077,9 +1881,8 @@ fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
     };
     let from_pane = state.focus == Focus::Attached;
     state.sessions.cursor = Some(target);
-    state.sessions.reveal(target);
     let pane = match target {
-        SidebarItem::Thread(id) if from_pane && state.attached.contains(&id) => show_pane(state),
+        SidebarItem::Session(id) if from_pane && state.attached.contains(&id) => show_pane(state),
         _ => vec![],
     };
     let mut commands = vec![Command::SaveJumps];
@@ -2093,9 +1896,14 @@ fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
     with_visit(state, commands)
 }
 
-/// `commands`, then a visit to the thread under the cursor, if any.
+/// `commands`, then a visit to the session under the cursor, if any.
 fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
-    commands.extend(state.sessions.selected_id().map(Command::Visit));
+    commands.extend(
+        state
+            .sessions
+            .selected_session()
+            .map(|session| Command::Visit(session.id)),
+    );
     commands
 }
 
@@ -2118,11 +1926,11 @@ mod tests {
     use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice, setting_label};
     use crate::feat::picker::state::{DraftTarget, PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
-        AttachTarget, Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind,
-        Own, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search, SessionId, Sessions,
-        SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, PaneId,
+        PaneLaunch, Project, ProjectId, ProjectKind, Search, SessionId, Sessions, SidebarItem,
+        SidebarRow, Thread, ThreadId, ThreadStatus, sessions_for,
     };
-    use crate::feat::sessions::validator::{LAST_IN_GROUP, SETTLE_IN_PROGRESS};
+    use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use crate::feat::worktrees::state::{Worktree, Worktrees};
     use crate::feat::zellij::zellij_service::Tool;
@@ -2130,6 +1938,14 @@ mod tests {
     use ratatui::layout::Rect;
 
     /// Claude's setting row for `value`.
+    /// `sessions` with the sessions its projects' threads run in.
+    fn fill(sessions: Sessions) -> Sessions {
+        Sessions {
+            sessions: sessions_for(&sessions.projects),
+            ..sessions
+        }
+    }
+
     fn setting(value: Option<&str>) -> PickerItem {
         let info = info();
         PickerItem::Setting {
@@ -2142,12 +1958,14 @@ mod tests {
     fn launch(id: i64) -> PaneLaunch {
         PaneLaunch {
             pane: PaneId(id),
+            session: SessionId(id),
             command: vec!["claude".into(), "attach".into(), format!("t{id}").into()],
         }
     }
 
     fn thread(id: i64, status: ThreadStatus) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: None,
@@ -2192,20 +2010,22 @@ mod tests {
                 SessionLayout::of(test_entry(pane.pane.0)),
             );
         }
+        let projects = vec![Project {
+            id: ProjectId(1),
+            title: "work".into(),
+            root: "/work".into(),
+            created_at: SystemTime::UNIX_EPOCH,
+            removed: false,
+            draft: None,
+            threads,
+            groups: vec![],
+            kind: ProjectKind::Normal,
+        }];
         AppState {
             layouts,
             sessions: Sessions {
-                projects: vec![Project {
-                    id: ProjectId(1),
-                    title: "work".into(),
-                    root: "/work".into(),
-                    created_at: SystemTime::UNIX_EPOCH,
-                    removed: false,
-                    draft: None,
-                    threads,
-                    groups: vec![],
-                    kind: ProjectKind::Normal,
-                }],
+                sessions: sessions_for(&projects),
+                projects,
                 cursor: Some(cursor),
                 ..Sessions::default()
             },
@@ -2217,7 +2037,7 @@ mod tests {
     /// threads, all added at the same time.
     fn with_projects(titles: &[&str]) -> AppState {
         AppState {
-            sessions: Sessions {
+            sessions: fill(Sessions {
                 projects: (1..)
                     .zip(titles)
                     .map(|(id, title)| Project {
@@ -2233,7 +2053,7 @@ mod tests {
                     })
                     .collect(),
                 ..Sessions::default()
-            },
+            }),
             ..AppState::default()
         }
     }
@@ -2268,7 +2088,7 @@ mod tests {
 
     /// One project holding `threads`, with thread `selected` selected.
     fn state_with(threads: Vec<Thread>, selected: i64) -> AppState {
-        state_at(threads, SidebarItem::Thread(ThreadId(selected)))
+        state_at(threads, SidebarItem::Session(SessionId(selected)))
     }
 
     /// Thread `id`, idle and prompt-less, in the project's root `/work`.
@@ -2326,7 +2146,7 @@ mod tests {
 
         // Then the first thread is selected.
         assert_eq!(
-            state.sessions.selected_id(),
+            state.sessions.selected_thread().map(|thread| thread.id),
             Some(ThreadId(2)),
             "SelectNext should wrap to the first thread"
         );
@@ -2345,7 +2165,7 @@ mod tests {
 
         // Then the last thread is selected.
         assert_eq!(
-            state.sessions.selected_id(),
+            state.sessions.selected_thread().map(|thread| thread.id),
             Some(ThreadId(1)),
             "SelectPrev should wrap to the last thread"
         );
@@ -2615,11 +2435,7 @@ mod tests {
         assert_eq!(
             commands,
             vec![
-                Command::Attach(AttachTarget {
-                    thread: ThreadId(1),
-                    pane: PaneId(1),
-                    cwd: "/work/1".into(),
-                }),
+                Command::Attach(SessionId(1)),
                 Command::RefreshSessions,
                 Command::SaveJumps,
             ],
@@ -2628,48 +2444,23 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn attach_to_a_settled_thread_returns_attach() {
-        // Given a selected settled thread whose session was stopped.
+    fn enter_on_a_settled_session_unsettles_and_attaches_it() {
+        // Given a selected settled session.
         let mut state = state_with(vec![settled(1)], 1);
 
         // When handling Attach.
         let commands = IntentHandler::handle(&Intent::Attach, &mut state);
 
-        // Then the loop attaches to it, which resumes the stopped session.
-        assert!(
-            matches!(commands.first(), Some(Command::Attach(target)) if target.thread == ThreadId(1)),
-            "Attach on a settled, stopped thread should attach to it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn attach_to_gone_thread_leaves_focus_unchanged() {
-        // Given a selected thread whose session is gone.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Gone)], 1);
-
-        // When handling Attach.
-        IntentHandler::handle(&Intent::Attach, &mut state);
-
-        // Then keys still drive the sidebar.
+        // Then it is un-settled, then attached.
         assert_eq!(
-            state.focus,
-            Focus::Sidebar,
-            "Attach to a gone thread should not change focus"
-        );
-    }
-
-    #[rstest::rstest]
-    fn attach_to_gone_thread_returns_no_commands() {
-        // Given a selected thread whose session is gone.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Gone)], 1);
-
-        // When handling Attach.
-        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
-
-        // Then nothing happens.
-        assert!(
-            commands.is_empty(),
-            "Attach to a gone thread should return no commands"
+            commands.get(..2),
+            Some(
+                &[
+                    Command::UnsettleSession(SessionId(1)),
+                    Command::Attach(SessionId(1))
+                ][..]
+            ),
+            "⏎ on a settled session should bring it back and attach"
         );
     }
 
@@ -2677,7 +2468,7 @@ mod tests {
     fn attached() -> AppState {
         AppState {
             focus: Focus::Attached,
-            attached: HashSet::from([ThreadId(1)]),
+            attached: HashSet::from([SessionId(1)]),
             ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
         }
     }
@@ -2687,7 +2478,7 @@ mod tests {
     fn left_pane(attached: &[i64], selected: i64) -> AppState {
         AppState {
             focus: Focus::Sidebar,
-            attached: attached.iter().copied().map(ThreadId).collect(),
+            attached: attached.iter().copied().map(SessionId).collect(),
             ..state_with(
                 vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
                 selected,
@@ -2721,7 +2512,7 @@ mod tests {
 
         // Then the thread is attached.
         assert!(
-            state.attached.contains(&ThreadId(1)),
+            state.attached.contains(&SessionId(1)),
             "Attach should add the thread to attached"
         );
     }
@@ -2736,7 +2527,7 @@ mod tests {
 
         // Then thread 1 is still attached.
         assert!(
-            state.attached.contains(&ThreadId(1)),
+            state.attached.contains(&SessionId(1)),
             "selecting another thread should keep thread 1 attached"
         );
     }
@@ -2751,7 +2542,7 @@ mod tests {
 
         // Then thread 1 is no longer attached.
         assert!(
-            !state.attached.contains(&ThreadId(1)),
+            !state.attached.contains(&SessionId(1)),
             "Detach should remove the selected thread from attached"
         );
     }
@@ -2798,7 +2589,7 @@ mod tests {
 
         // Then thread 1 is no longer attached.
         assert!(
-            !state.attached.contains(&ThreadId(1)),
+            !state.attached.contains(&SessionId(1)),
             "DetachSelected should remove the selected thread from attached"
         );
     }
@@ -2861,7 +2652,7 @@ mod tests {
 
         // Then thread 1 is still attached.
         assert!(
-            state.attached.contains(&ThreadId(1)),
+            state.attached.contains(&SessionId(1)),
             "LeavePane should keep the thread attached"
         );
     }
@@ -2933,11 +2724,7 @@ mod tests {
         assert_eq!(
             commands,
             vec![
-                Command::Attach(AttachTarget {
-                    thread: ThreadId(2),
-                    pane: PaneId(2),
-                    cwd: "/work/2".into(),
-                }),
+                Command::Attach(SessionId(2)),
                 Command::RefreshSessions,
                 Command::SaveJumps,
             ],
@@ -2981,7 +2768,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn settle_removes_the_thread_from_attached() {
+    fn settle_confirm_detaches_the_session() {
         // Given attached thread 1 selected in the sidebar, and Yes highlighted in its settle
         // confirm.
         let mut state = left_pane(&[1], 1);
@@ -2992,7 +2779,7 @@ mod tests {
 
         // Then thread 1 is no longer attached.
         assert!(
-            !state.attached.contains(&ThreadId(1)),
+            !state.attached.contains(&SessionId(1)),
             "settling should remove the thread from attached"
         );
     }
@@ -3002,14 +2789,14 @@ mod tests {
         // Given attached thread 1 selected in the sidebar, and Yes highlighted in its delete
         // confirm.
         let mut state = left_pane(&[1], 1);
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then thread 1 is no longer attached.
         assert!(
-            !state.attached.contains(&ThreadId(1)),
+            !state.attached.contains(&SessionId(1)),
             "deleting should remove the thread from attached"
         );
     }
@@ -3670,7 +3457,7 @@ mod tests {
         // Then the shelf and cursor are unchanged.
         assert_eq!(
             (state.sessions.shelf_open, state.sessions.cursor),
-            (true, Some(SidebarItem::Thread(ThreadId(1)))),
+            (true, Some(SidebarItem::Session(SessionId(1)))),
             "h on a card should do nothing"
         );
     }
@@ -3711,75 +3498,6 @@ mod tests {
         state
     }
 
-    #[rstest::rstest]
-    fn switch_branch_on_a_feature_card_opens_its_worktrees_branch_picker() {
-        // Given a started Feature group's card selected.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling SwitchBranch.
-        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
-
-        // Then the group's branch picker on its worktree takes the keys.
-        assert_eq!(
-            (state.focus, state.picker.as_ref().map(PickerState::kind)),
-            (
-                Focus::Picker,
-                Some(&PickerKind::Branches {
-                    target: PickTarget::Group(GroupId(9)),
-                    cwd: "/work/GT-514-login".into(),
-                    unstarted: false,
-                })
-            ),
-            "␣b on a Feature card should open its worktree's branches"
-        );
-    }
-
-    #[rstest::rstest]
-    fn switch_branch_on_a_feature_card_lists_its_worktrees_branches() {
-        // Given a started Feature group's card selected.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling SwitchBranch.
-        let commands = IntentHandler::handle(&Intent::SwitchBranch, &mut state);
-
-        // Then the worktree's refs are listed.
-        assert_eq!(
-            commands,
-            [Command::ListBranches("/work/GT-514-login".into())],
-            "the picker's refs come from the group's worktree"
-        );
-    }
-
-    #[rstest::rstest]
-    fn picking_a_branch_for_a_group_returns_checkout_group() {
-        // Given the group's branch picker with `main` highlighted.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
-        if let Some(picker) = &mut state.picker {
-            picker.show_branches(
-                Path::new("/work/GT-514-login"),
-                vec![
-                    branch("GT-514-login", true, Some("/work/GT-514-login")),
-                    branch("main", false, None),
-                ],
-            );
-        }
-        IntentHandler::handle(&Intent::PickerNext, &mut state);
-
-        // When confirming.
-        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then main is checked out in the group's worktree.
-        assert_eq!(
-            commands,
-            [Command::CheckoutGroup {
-                group: GroupId(9),
-                git_ref: branch("main", false, None),
-            }],
-            "a picked branch should be checked out for the whole group"
-        );
-    }
-
     /// One project holding Feature group 9, still a draft on `model`, with
     /// the group draft selected.
     fn group_drafting(model: Option<&str>) -> AppState {
@@ -3808,20 +3526,6 @@ mod tests {
         state
     }
 
-    /// `state` with thread `id` running `model`.
-    fn with_model(mut state: AppState, id: i64, model: &str) -> AppState {
-        if let Some(thread) = state
-            .sessions
-            .projects
-            .iter_mut()
-            .flat_map(|project| &mut project.threads)
-            .find(|thread| thread.id == ThreadId(id))
-        {
-            thread.model = Some(model.to_owned());
-        }
-        state
-    }
-
     /// `state` with group 9's defaults on `model` in `permission` mode.
     fn with_defaults(mut state: AppState, model: &str, permission: &str) -> AppState {
         if let Some(defaults) = state
@@ -3833,399 +3537,6 @@ mod tests {
             defaults.permission = Some(permission.to_owned());
         }
         state
-    }
-
-    #[rstest::rstest]
-    fn n_on_a_folded_group_opens_it() {
-        // Given the cursor on group 9's card, folded.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        state.sessions.folded.insert(GroupId(9));
-
-        // When handling OpenGroupDraft.
-        IntentHandler::handle(&Intent::OpenGroupDraft, &mut state);
-
-        // Then the group is no longer folded.
-        assert!(
-            !state.sessions.folded.contains(&GroupId(9)),
-            "n on a folded card should open the group"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(SidebarItem::Group(GroupId(9)))]
-    #[case(SidebarItem::Thread(ThreadId(1)))]
-    fn n_on_a_settled_group_makes_no_draft(#[case] cursor: SidebarItem) {
-        // Given the cursor on settled group 9's card or thread.
-        let mut state = grouped_state(true, cursor);
-
-        // When handling OpenGroupDraft.
-        IntentHandler::handle(&Intent::OpenGroupDraft, &mut state);
-
-        // Then the group still has no draft.
-        assert!(
-            state
-                .sessions
-                .group(GroupId(9))
-                .is_some_and(|(_, group)| group.draft.is_none()),
-            "n works only on an active group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn n_on_a_settled_group_opens_nothing() {
-        // Given the cursor on settled group 9's card, the shelf closed.
-        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
-        state.sessions.shelf_open = false;
-
-        // When handling OpenGroupDraft.
-        IntentHandler::handle(&Intent::OpenGroupDraft, &mut state);
-
-        // Then neither the shelf nor the group opens.
-        assert_eq!(
-            (
-                state.sessions.shelf_open,
-                state.sessions.opened.contains(&GroupId(9))
-            ),
-            (false, false),
-            "n on a settled group should open nothing"
-        );
-    }
-
-    #[rstest::rstest]
-    fn n_on_a_settled_group_shows_no_error() {
-        // Given the cursor on settled group 9's card.
-        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
-
-        // When handling OpenGroupDraft.
-        IntentHandler::handle(&Intent::OpenGroupDraft, &mut state);
-
-        // Then the mode line stays quiet.
-        assert_eq!(
-            state.sessions.error, None,
-            "n on a settled group is a silent no-op"
-        );
-    }
-
-    #[rstest::rstest]
-    fn p_on_a_card_pins_the_group() {
-        // Given the cursor on group 9's card, unpinned.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling TogglePin.
-        let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
-
-        // Then the sessions actor is asked to pin the group.
-        assert_eq!(
-            commands,
-            vec![Command::PinGroup(GroupId(9))],
-            "p on a card should pin its group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn p_on_a_pinned_card_unpins_the_group() {
-        // Given the cursor on group 9's card, pinned.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        if let Some(group) = state
-            .sessions
-            .projects
-            .iter_mut()
-            .flat_map(|project| &mut project.groups)
-            .next()
-        {
-            group.pinned_at = Some(at(5));
-        }
-
-        // When handling TogglePin.
-        let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
-
-        // Then the sessions actor is asked to unpin the group.
-        assert_eq!(
-            commands,
-            vec![Command::UnpinGroup(GroupId(9))],
-            "p on a pinned card should unpin its group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn p_on_a_grouped_thread_does_nothing() {
-        // Given the cursor on thread 1 of group 9.
-        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
-
-        // When handling TogglePin.
-        let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
-
-        // Then nothing is asked of the sessions actor.
-        assert!(
-            commands.is_empty(),
-            "a grouped thread is pinned with its group"
-        );
-    }
-
-    /// `state` with thread `id` in `status`.
-    fn with_status(mut state: AppState, id: i64, status: ThreadStatus) -> AppState {
-        if let Some(thread) = state
-            .sessions
-            .projects
-            .iter_mut()
-            .flat_map(|project| &mut project.threads)
-            .find(|thread| thread.id == ThreadId(id))
-        {
-            thread.status = status;
-        }
-        state
-    }
-
-    #[rstest::rstest]
-    fn s_on_a_card_opens_the_settle_group_confirm() {
-        // Given the cursor on group 9's card.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling ToggleSettle.
-        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
-
-        // Then its settle confirm is open with No selected.
-        assert_eq!(
-            open_confirm(&state),
-            Some((
-                &PickerKind::SettleGroup { group: GroupId(9) },
-                Some(&PickerItem::Confirm(false))
-            )),
-            "s on a card should ask to settle the group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn confirming_the_settle_group_confirm_emits_settle_group() {
-        // Given Yes highlighted in group 9's settle confirm.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        answer_yes(&Intent::ToggleSettle, &mut state);
-
-        // When confirming.
-        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the sessions actor is asked to settle the group.
-        assert!(
-            commands.contains(&Command::SettleGroup(GroupId(9))),
-            "Yes on the settle group confirm should return SettleGroup"
-        );
-    }
-
-    #[rstest::rstest]
-    fn settling_a_group_detaches_its_threads() {
-        // Given threads 1 and 2 of group 9 attached, and Yes highlighted in
-        // its settle confirm.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        state.attached.extend([ThreadId(1), ThreadId(2)]);
-        answer_yes(&Intent::ToggleSettle, &mut state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then neither thread is attached.
-        assert!(
-            state.attached.is_empty(),
-            "settling a group should detach its threads"
-        );
-    }
-
-    #[rstest::rstest]
-    fn settling_a_group_selects_the_next_card() {
-        // Given group 9 beside lone thread 3, and Yes highlighted in the
-        // group's settle confirm.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        if let Some(project) = state.sessions.projects.first_mut() {
-            project.threads.push(thread(3, ThreadStatus::Idle));
-        }
-        answer_yes(&Intent::ToggleSettle, &mut state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the lone thread's card is selected.
-        assert_eq!(
-            state.sessions.cursor,
-            Some(SidebarItem::Thread(ThreadId(3))),
-            "settling a group should select the neighbouring card"
-        );
-    }
-
-    #[rstest::rstest]
-    fn s_on_a_card_with_a_working_thread_shows_the_in_progress_error() {
-        // Given the cursor on group 9's card while thread 2 is working.
-        let mut state = with_status(
-            grouped_state(false, SidebarItem::Group(GroupId(9))),
-            2,
-            ThreadStatus::Working,
-        );
-
-        // When handling ToggleSettle.
-        IntentHandler::handle(&Intent::ToggleSettle, &mut state);
-
-        // Then the mode line says why.
-        assert_eq!(
-            state.sessions.error.as_deref(),
-            Some(SETTLE_IN_PROGRESS),
-            "a group with a turn underway can't settle"
-        );
-    }
-
-    #[rstest::rstest]
-    fn s_on_a_settled_card_unsettles_the_group() {
-        // Given the cursor on settled group 9's card.
-        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
-
-        // When handling ToggleSettle.
-        let commands = IntentHandler::handle(&Intent::ToggleSettle, &mut state);
-
-        // Then the sessions actor is asked to un-settle the group.
-        assert_eq!(
-            commands,
-            vec![Command::UnsettleGroup(GroupId(9))],
-            "s on a settled card should un-settle its group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn s_on_a_grouped_thread_does_nothing() {
-        // Given the cursor on thread 1 of group 9.
-        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
-
-        // When handling ToggleSettle.
-        let commands = IntentHandler::handle(&Intent::ToggleSettle, &mut state);
-
-        // Then nothing is asked and no confirm opens.
-        assert_eq!(
-            (commands, state.picker.is_some()),
-            (vec![], false),
-            "a grouped thread is settled with its group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn d_on_a_groups_only_thread_shows_the_last_in_group_error() {
-        // Given group 9 holding only thread 1, which is selected.
-        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
-        if let Some(project) = state.sessions.projects.first_mut() {
-            project.threads.retain(|thread| thread.id == ThreadId(1));
-        }
-
-        // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
-
-        // Then the mode line says why.
-        assert_eq!(
-            state.sessions.error.as_deref(),
-            Some(LAST_IN_GROUP),
-            "a group keeps its last thread"
-        );
-    }
-
-    #[rstest::rstest]
-    fn d_on_a_group_draft_shows_the_last_in_group_error() {
-        // Given the group draft selected.
-        let mut state = group_drafting(None);
-
-        // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
-
-        // Then the mode line says why.
-        assert_eq!(
-            state.sessions.error.as_deref(),
-            Some(LAST_IN_GROUP),
-            "a group keeps its draft"
-        );
-    }
-
-    #[rstest::rstest]
-    fn d_on_a_grouped_thread_with_a_sibling_opens_the_delete_confirm() {
-        // Given thread 2 of group 9 selected, beside thread 1.
-        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(2)));
-
-        // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
-
-        // Then its delete confirm is open.
-        assert_eq!(
-            state.picker.as_ref().map(PickerState::kind),
-            Some(&PickerKind::DeleteThread {
-                thread: ThreadId(2)
-            }),
-            "d on a grouped thread with a sibling should ask to delete it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn d_on_a_card_opens_the_delete_group_confirm() {
-        // Given the cursor on group 9's card.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
-
-        // Then the group's delete confirm is open.
-        assert_eq!(
-            state.picker.as_ref().map(PickerState::kind),
-            Some(&PickerKind::DeleteGroup {
-                group: GroupId(9),
-                dir: Some(GroupKind::Feature)
-            }),
-            "d on a card should ask to delete the group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn d_on_a_never_started_feature_card_confirms_without_a_worktree() {
-        // Given the cursor on the card of Feature group 9, still a draft.
-        let mut state = group_drafting(None);
-        state.sessions.cursor = Some(SidebarItem::Group(GroupId(9)));
-
-        // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
-
-        // Then the group's delete confirm names no directory.
-        assert_eq!(
-            state.picker.as_ref().map(PickerState::kind),
-            Some(&PickerKind::DeleteGroup {
-                group: GroupId(9),
-                dir: None
-            }),
-            "a never-started Feature group has no worktree to delete"
-        );
-    }
-
-    #[rstest::rstest]
-    fn confirming_the_delete_group_confirm_hides_nothing_yet() {
-        // Given Yes highlighted in group 9's delete confirm.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        answer_yes(&Intent::DeleteThread, &mut state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then no thread is hidden and the cursor stays on the card: the
-        // sessions actor may still refuse the delete.
-        assert_eq!(
-            (state.sessions.deleting.is_empty(), state.sessions.cursor),
-            (true, Some(SidebarItem::Group(GroupId(9)))),
-            "a group delete should show nothing gone before the actor agrees"
-        );
-    }
-
-    #[rstest::rstest]
-    fn confirming_the_delete_group_confirm_emits_delete_group() {
-        // Given Yes highlighted in group 9's delete confirm.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        answer_yes(&Intent::DeleteThread, &mut state);
-
-        // When confirming.
-        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the sessions actor is asked to delete the group.
-        assert!(
-            commands.contains(&Command::DeleteGroup(GroupId(9))),
-            "Yes on the delete group confirm should return DeleteGroup"
-        );
     }
 
     #[rstest::rstest]
@@ -4291,127 +3602,6 @@ mod tests {
         );
     }
 
-    #[rstest::rstest]
-    #[case::model(Intent::PickModel, PickerKind::Model { target: DraftTarget::Group(GroupId(9)), icon: info().icon })]
-    #[case::permission(
-        Intent::PickPermission,
-        PickerKind::Permission { target: DraftTarget::Group(GroupId(9)) }
-    )]
-    fn leader_m_and_a_on_a_card_open_the_groups_setting_picker(
-        #[case] intent: Intent,
-        #[case] kind: PickerKind,
-    ) {
-        // Given a started group's card selected.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling the pick.
-        IntentHandler::handle(&intent, &mut state);
-
-        // Then the group's picker is open.
-        assert_eq!(
-            state.picker.as_ref().map(PickerState::kind),
-            Some(&kind),
-            "␣m/␣a on a card should pick the group's default"
-        );
-    }
-
-    #[rstest::rstest]
-    fn picking_a_model_on_a_card_sets_the_groups_default() {
-        // Given a started group's card and its model picker with Claude Opus
-        // 5.5, after Default, highlighted.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        IntentHandler::handle(&Intent::PickModel, &mut state);
-        IntentHandler::handle(&Intent::PickerNext, &mut state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the group's default model is claude-opus-5-5.
-        assert_eq!(
-            group_default_model(&state).as_deref(),
-            Some("claude-opus-5-5"),
-            "the picked model should be the group's default"
-        );
-    }
-
-    #[rstest::rstest]
-    fn picking_a_model_on_a_card_saves_it() {
-        // Given a started group's card and its model picker with Claude Opus
-        // 5.5 highlighted.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        IntentHandler::handle(&Intent::PickModel, &mut state);
-        IntentHandler::handle(&Intent::PickerNext, &mut state);
-
-        // When confirming.
-        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the sessions actor is asked to save the group's defaults.
-        assert_eq!(
-            commands,
-            vec![Command::SaveGroupDraft(GroupId(9))],
-            "a card's model pick should be saved"
-        );
-    }
-
-    #[rstest::rstest]
-    fn picking_a_model_on_a_card_leaves_its_threads_alone() {
-        // Given a started group's card, thread 2 running haiku, and the
-        // model picker with Claude Opus 5.5 highlighted.
-        let mut state = with_model(
-            grouped_state(false, SidebarItem::Group(GroupId(9))),
-            2,
-            "haiku",
-        );
-        IntentHandler::handle(&Intent::PickModel, &mut state);
-        IntentHandler::handle(&Intent::PickerNext, &mut state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then thread 2 still runs haiku.
-        let model = state
-            .sessions
-            .threads()
-            .find(|thread| thread.id == ThreadId(2))
-            .and_then(|thread| thread.model.clone());
-        assert_eq!(
-            model.as_deref(),
-            Some("haiku"),
-            "a running thread keeps its model"
-        );
-    }
-
-    #[rstest::rstest]
-    fn leader_m_on_a_card_shows_the_groups_default_as_current() {
-        // Given a started group's card whose default is Claude Opus 5.5.
-        let mut state = with_defaults(
-            grouped_state(false, SidebarItem::Group(GroupId(9))),
-            "claude-opus-5-5",
-            "auto",
-        );
-
-        // When handling PickModel.
-        IntentHandler::handle(&Intent::PickModel, &mut state);
-
-        // Then the picker highlights the group's default.
-        let highlighted = state
-            .picker
-            .as_ref()
-            .and_then(PickerState::selected)
-            .cloned();
-        assert_eq!(
-            highlighted,
-            Some(setting(Some("claude-opus-5-5"))),
-            "the card's picker should start on the group's default"
-        );
-    }
-
-    /// Group 9's default model, as the app state has it.
-    fn group_default_model(state: &AppState) -> Option<String> {
-        let (_, group) = state.sessions.selected_group()?;
-        group.defaults.model.clone()
-    }
-
     /// Group 9's draft's resolved model, as the app state has it.
     fn group_draft_model(state: &AppState) -> Option<String> {
         let (_, group) = state.sessions.selected_group()?;
@@ -4456,153 +3646,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn l_on_a_folded_group_opens_it() {
-        // Given the cursor on group 9's card, folded.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        state.sessions.folded.insert(GroupId(9));
-
-        // When handling OpenGroup.
-        IntentHandler::handle(&Intent::OpenGroup, &mut state);
-
-        // Then the group is no longer folded.
-        assert!(
-            !state.sessions.folded.contains(&GroupId(9)),
-            "l on a folded card should open the group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn l_on_a_closed_settled_group_opens_it() {
-        // Given the cursor on settled group 9, closed.
-        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
-
-        // When handling OpenGroup.
-        IntentHandler::handle(&Intent::OpenGroup, &mut state);
-
-        // Then the group is opened.
-        assert!(
-            state.sessions.opened.contains(&GroupId(9)),
-            "l on a settled group should open it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn l_on_a_settled_group_opens_the_shelf() {
-        // Given the cursor on settled group 9 with the shelf closed.
-        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
-
-        // When handling OpenGroup.
-        IntentHandler::handle(&Intent::OpenGroup, &mut state);
-
-        // Then the Settled shelf is open.
-        assert!(
-            state.sessions.shelf_open,
-            "l on a settled group should open the shelf with it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn h_on_a_grouped_thread_closes_the_group_onto_its_card() {
-        // Given the cursor on thread 1 in open group 9.
-        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
-
-        // When handling CloseGroup.
-        IntentHandler::handle(&Intent::CloseGroup, &mut state);
-
-        // Then the group is folded with its card selected.
-        assert_eq!(
-            (
-                state.sessions.folded.contains(&GroupId(9)),
-                state.sessions.cursor
-            ),
-            (true, Some(SidebarItem::Group(GroupId(9)))),
-            "h on a child should fold the group onto its card"
-        );
-    }
-
-    #[rstest::rstest]
-    fn h_on_an_open_settled_group_closes_it_onto_its_card() {
-        // Given the shelf open, settled group 9 opened and the cursor on its thread 1.
-        let mut state = grouped_state(true, SidebarItem::Thread(ThreadId(1)));
-        state.sessions.shelf_open = true;
-        state.sessions.opened.insert(GroupId(9));
-
-        // When handling CloseGroup.
-        IntentHandler::handle(&Intent::CloseGroup, &mut state);
-
-        // Then the group is closed with its row selected.
-        assert_eq!(
-            (
-                state.sessions.opened.contains(&GroupId(9)),
-                state.sessions.cursor
-            ),
-            (false, Some(SidebarItem::Group(GroupId(9)))),
-            "h in an open settled group should close it onto its row"
-        );
-    }
-
-    #[rstest::rstest]
-    fn h_on_a_closed_settled_group_closes_the_shelf() {
-        // Given the shelf open and the cursor on settled group 9, closed.
-        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
-        state.sessions.shelf_open = true;
-
-        // When handling CloseGroup.
-        IntentHandler::handle(&Intent::CloseGroup, &mut state);
-
-        // Then the shelf is closed with its header selected.
-        assert_eq!(
-            (state.sessions.shelf_open, state.sessions.cursor),
-            (false, Some(SidebarItem::SettledShelf)),
-            "h on a closed settled group should close the shelf onto its header"
-        );
-    }
-
-    #[rstest::rstest]
-    fn enter_on_an_open_card_folds_the_group() {
-        // Given the cursor on open group 9's card.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling Attach.
-        IntentHandler::handle(&Intent::Attach, &mut state);
-
-        // Then the group is folded.
-        assert!(
-            state.sessions.folded.contains(&GroupId(9)),
-            "⏎ on an open card should fold the group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn enter_on_a_folded_card_opens_the_group() {
-        // Given the cursor on folded group 9's card.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        state.sessions.folded.insert(GroupId(9));
-
-        // When handling Attach.
-        IntentHandler::handle(&Intent::Attach, &mut state);
-
-        // Then the group is open.
-        assert!(
-            !state.sessions.folded.contains(&GroupId(9)),
-            "⏎ on a folded card should open the group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn enter_on_a_card_returns_no_commands() {
-        // Given the cursor on group 9's card.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling Attach.
-        let commands = IntentHandler::handle(&Intent::Attach, &mut state);
-
-        // Then nothing attaches.
-        assert!(commands.is_empty(), "⏎ on a card shouldn't attach");
-    }
-
-    #[rstest::rstest]
-    fn settle_returns_the_settle_command() {
+    fn settle_confirm_returns_settle_session() {
         // Given threads 2 and 1 in sidebar order, with thread 2 selected, and Yes highlighted in
         // its settle confirm.
         let mut state = state_with(
@@ -4616,7 +3660,7 @@ mod tests {
 
         // Then the sessions actor is asked to settle thread 2.
         assert!(
-            commands.contains(&Command::Settle(ThreadId(2))),
+            commands.contains(&Command::SettleSession(SessionId(2))),
             "Yes on the settle confirm should return Settle"
         );
     }
@@ -4641,7 +3685,7 @@ mod tests {
         // Then the card below is selected.
         assert_eq!(
             state.sessions.cursor,
-            Some(SidebarItem::Thread(ThreadId(1))),
+            Some(SidebarItem::Session(SessionId(1))),
             "settle should select the next card below"
         );
     }
@@ -4662,7 +3706,7 @@ mod tests {
         // Then the card above is selected.
         assert_eq!(
             state.sessions.cursor,
-            Some(SidebarItem::Thread(ThreadId(2))),
+            Some(SidebarItem::Session(SessionId(2))),
             "settling the last card should select the one above"
         );
     }
@@ -4695,7 +3739,7 @@ mod tests {
         // Then the sessions actor is asked to un-settle it.
         assert_eq!(
             commands,
-            vec![Command::Unsettle(ThreadId(1))],
+            vec![Command::UnsettleSession(SessionId(1))],
             "ToggleSettle on a settled thread should return Unsettle"
         );
     }
@@ -4711,8 +3755,24 @@ mod tests {
         // Then the cursor stays on it.
         assert_eq!(
             state.sessions.cursor,
-            Some(SidebarItem::Thread(ThreadId(1))),
+            Some(SidebarItem::Session(SessionId(1))),
             "un-settle should keep the cursor on the thread"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_pin_on_a_session_returns_pin_session() {
+        // Given a selected unpinned session.
+        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+
+        // When handling TogglePin.
+        let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
+
+        // Then the sessions actor is asked to pin it.
+        assert_eq!(
+            commands,
+            vec![Command::PinSession(SessionId(1))],
+            "p on an unpinned session pins it"
         );
     }
 
@@ -4733,23 +3793,23 @@ mod tests {
         // Then the sessions actor is asked to unpin it.
         assert_eq!(
             commands,
-            vec![Command::Unpin(ThreadId(1))],
+            vec![Command::UnpinSession(SessionId(1))],
             "TogglePin on a pinned thread should return Unpin"
         );
     }
 
     #[rstest::rstest]
-    fn delete_returns_the_delete_command() {
+    fn delete_confirm_returns_delete_session() {
         // Given one thread, selected, and Yes highlighted in its delete confirm.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then the sessions actor is asked to delete it.
         assert!(
-            commands.contains(&Command::Delete(ThreadId(1))),
+            commands.contains(&Command::DeleteSession(SessionId(1))),
             "Yes on the delete confirm should return Delete"
         );
     }
@@ -4767,7 +3827,7 @@ mod tests {
             1,
         );
         state.sessions.shelf_open = true;
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -4775,7 +3835,7 @@ mod tests {
         // Then the settled thread below, past the header, is selected.
         assert_eq!(
             state.sessions.cursor,
-            Some(SidebarItem::Thread(ThreadId(3))),
+            Some(SidebarItem::Session(SessionId(3))),
             "delete should select the next thread row below"
         );
     }
@@ -4804,19 +3864,19 @@ mod tests {
 
         // Then the thread it lands on is visited.
         assert!(
-            commands.contains(&Command::Visit(ThreadId(expected))),
+            commands.contains(&Command::Visit(SessionId(expected))),
             "{intent:?} should visit thread {expected}"
         );
     }
 
     #[rstest::rstest]
-    fn delete_hides_the_thread_from_the_sidebar() {
+    fn delete_confirm_hides_the_session() {
         // Given threads 2 and 1, with thread 1 selected, and Yes highlighted in its delete confirm.
         let mut state = state_with(
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
             1,
         );
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -4830,7 +3890,7 @@ mod tests {
             .collect();
         assert_eq!(
             listed,
-            vec![SidebarItem::Thread(ThreadId(2))],
+            vec![SidebarItem::Session(SessionId(2))],
             "a deleted thread should leave the sidebar at once"
         );
     }
@@ -4848,7 +3908,7 @@ mod tests {
 
         // Then the newly selected thread is visited.
         assert!(
-            commands.contains(&Command::Visit(ThreadId(1))),
+            commands.contains(&Command::Visit(SessionId(1))),
             "SelectNext should visit the thread it lands on"
         );
     }
@@ -5775,33 +4835,6 @@ mod tests {
         );
     }
 
-    #[rstest::rstest]
-    fn picking_a_harness_on_a_group_card_resets_its_default_model_and_permission() {
-        // Given a started group's card with defaults on opus in auto mode,
-        // and its harness picker with pi highlighted.
-        let mut state = with_defaults(
-            grouped_state(false, SidebarItem::Group(GroupId(9))),
-            "opus",
-            "auto",
-        );
-        state.harnesses = vec![info(), pi_like()];
-        let mut state = picking_pi(state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the group's defaults are pi on the default model and permission.
-        assert_eq!(
-            state.sessions.selected_group().map(|(_, group)| (
-                group.defaults.harness.clone(),
-                group.defaults.model.clone(),
-                group.defaults.permission.clone()
-            )),
-            Some((HarnessId::new("pi"), None, None)),
-            "a card's harness pick should reset its default model and permission"
-        );
-    }
-
     /// `state` with group 9 holding `draft`, and Claude and a pi-like harness
     /// registered.
     fn with_group_draft(mut state: AppState, draft: GroupDraft) -> AppState {
@@ -5816,61 +4849,6 @@ mod tests {
     fn group_draft(state: &AppState) -> Option<GroupDraft> {
         let (_, group) = state.sessions.group(GroupId(9))?;
         group.draft.clone()
-    }
-
-    #[rstest::rstest]
-    fn n_on_a_card_without_a_draft_selects_a_new_group_draft() {
-        // Given the cursor on started group 9's card, with no draft.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling OpenGroupDraft.
-        IntentHandler::handle(&Intent::OpenGroupDraft, &mut state);
-
-        // Then the group has a draft and the cursor is on it.
-        assert_eq!(
-            (state.sessions.cursor, group_draft(&state)),
-            (
-                Some(SidebarItem::GroupDraft(GroupId(9))),
-                Some(GroupDraft::default())
-            ),
-            "n should give the group a draft and select it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn n_on_a_card_without_a_draft_saves_it() {
-        // Given the cursor on started group 9's card, with no draft.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling OpenGroupDraft.
-        let commands = IntentHandler::handle(&Intent::OpenGroupDraft, &mut state);
-
-        // Then the sessions actor is asked to save the new draft.
-        assert_eq!(
-            commands,
-            vec![Command::SaveGroupDraft(GroupId(9))],
-            "a new group draft should be saved"
-        );
-    }
-
-    #[rstest::rstest]
-    fn n_with_a_group_draft_selects_it_and_saves_nothing() {
-        // Given thread 2 of group 9 selected, and the group already has a
-        // draft.
-        let mut state = with_group_draft(
-            grouped_state(false, SidebarItem::Thread(ThreadId(2))),
-            GroupDraft::default(),
-        );
-
-        // When handling OpenGroupDraft.
-        let commands = IntentHandler::handle(&Intent::OpenGroupDraft, &mut state);
-
-        // Then the cursor moves to the draft and nothing is asked.
-        assert_eq!(
-            (state.sessions.cursor, commands),
-            (Some(SidebarItem::GroupDraft(GroupId(9))), vec![]),
-            "n should select the existing draft without saving"
-        );
     }
 
     #[rstest::rstest]
@@ -5932,104 +4910,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn group_draft_without_overrides_follows_a_card_model_change() {
-        // Given group 9's card selected, its draft with no overrides, and the
-        // card's model picker with Claude Opus 5.5 highlighted.
-        let mut state = with_group_draft(
-            grouped_state(false, SidebarItem::Group(GroupId(9))),
-            GroupDraft::default(),
-        );
-        IntentHandler::handle(&Intent::PickModel, &mut state);
-        IntentHandler::handle(&Intent::PickerNext, &mut state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the draft runs claude-opus-5-5 too.
-        assert_eq!(
-            group_draft_model(&state).as_deref(),
-            Some("claude-opus-5-5"),
-            "a draft without its own model should follow the card"
-        );
-    }
-
-    #[rstest::rstest]
-    fn group_draft_harness_override_survives_a_card_harness_change() {
-        // Given group 9's card selected on Claude, its draft with its own
-        // Claude harness, and the card's harness picker with pi highlighted.
-        let state = with_group_draft(
-            grouped_state(false, SidebarItem::Group(GroupId(9))),
-            GroupDraft {
-                harness: Own::Set(HarnessId::new("claude")),
-                ..GroupDraft::default()
-            },
-        );
-        let mut state = picking_pi(state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the draft still runs Claude.
-        let harness = state
-            .sessions
-            .group(GroupId(9))
-            .and_then(|(_, group)| group.draft_settings().map(|(harness, ..)| harness.clone()));
-        assert_eq!(
-            harness,
-            Some(HarnessId::new("claude")),
-            "a draft's own harness should outlive a card harness change"
-        );
-    }
-
-    #[rstest::rstest]
-    fn card_harness_change_drops_a_following_drafts_model_override() {
-        // Given group 9's card selected on Claude, its draft following the
-        // card's harness with its own model and permission, and the card's
-        // harness picker with pi highlighted.
-        let state = with_group_draft(
-            grouped_state(false, SidebarItem::Group(GroupId(9))),
-            GroupDraft {
-                harness: Own::Group,
-                model: Own::Set(Some("claude-opus-5-5".into())),
-                permission: Own::Set(Some("plan".into())),
-            },
-        );
-        let mut state = picking_pi(state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the draft follows the card for every setting again.
-        assert_eq!(
-            group_draft(&state),
-            Some(GroupDraft::default()),
-            "the old harness's model and permission picks should go"
-        );
-    }
-
-    #[rstest::rstest]
-    fn picking_a_permission_on_a_card_sets_the_groups_default() {
-        // Given a started group's card and its permission picker with plan
-        // highlighted.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        IntentHandler::handle(&Intent::PickPermission, &mut state);
-        highlight(&mut state, &setting(Some("plan")));
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the group's default permission is plan.
-        assert_eq!(
-            state
-                .sessions
-                .selected_group()
-                .and_then(|(_, group)| group.defaults.permission.clone()),
-            Some("plan".into()),
-            "the picked permission should be the group's default"
-        );
-    }
-
-    #[rstest::rstest]
     fn d_on_a_group_draft_with_a_thread_opens_the_discard_confirm() {
         // Given group 9's draft selected, the group holding threads.
         let mut state = with_group_draft(
@@ -6038,7 +4918,7 @@ mod tests {
         );
 
         // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+        IntentHandler::handle(&Intent::Delete, &mut state);
 
         // Then the group draft's discard confirm is open.
         assert_eq!(
@@ -6056,7 +4936,7 @@ mod tests {
             grouped_state(false, SidebarItem::GroupDraft(GroupId(9))),
             GroupDraft::default(),
         );
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -6077,7 +4957,7 @@ mod tests {
             grouped_state(false, SidebarItem::GroupDraft(GroupId(9))),
             GroupDraft::default(),
         );
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -6094,7 +4974,7 @@ mod tests {
     fn delete_on_a_draft_returns_discard_draft() {
         // Given a selected draft, and Yes highlighted in its discard confirm.
         let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -6113,7 +4993,7 @@ mod tests {
             draft(DraftWorkspace::Local),
             vec![thread(1, ThreadStatus::Idle)],
         );
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -6121,7 +5001,7 @@ mod tests {
         // Then the card below is selected.
         assert_eq!(
             state.sessions.cursor,
-            Some(SidebarItem::Thread(ThreadId(1))),
+            Some(SidebarItem::Session(SessionId(1))),
             "discarding a draft should select the row below"
         );
     }
@@ -6131,6 +5011,7 @@ mod tests {
         for project in &mut state.sessions.projects {
             project.threads = threads.to_vec();
         }
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
     }
 
     /// The open picker's kind and selected item.
@@ -6142,7 +5023,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn settle_opens_the_settle_confirm_with_no_selected() {
+    fn toggle_settle_on_a_session_opens_its_confirm() {
         // Given a selected idle thread.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
 
@@ -6153,8 +5034,8 @@ mod tests {
         assert_eq!(
             open_confirm(&state),
             Some((
-                &PickerKind::SettleThread {
-                    thread: ThreadId(1)
+                &PickerKind::SettleSession {
+                    session: SessionId(1)
                 },
                 Some(&PickerItem::Confirm(false))
             )),
@@ -6175,7 +5056,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn settle_on_a_working_thread_shows_the_refusal() {
+    fn settle_is_refused_while_an_agent_works() {
         // Given a selected thread Claude is working in.
         let mut state = state_with(vec![thread(1, ThreadStatus::Working)], 1);
 
@@ -6266,14 +5147,15 @@ mod tests {
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
 
         // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+        IntentHandler::handle(&Intent::Delete, &mut state);
 
         // Then its delete confirm is open with No selected.
         assert_eq!(
             open_confirm(&state),
             Some((
-                &PickerKind::DeleteThread {
-                    thread: ThreadId(1)
+                &PickerKind::DeleteSession {
+                    session: SessionId(1),
+                    folder: false
                 },
                 Some(&PickerItem::Confirm(false))
             )),
@@ -6287,7 +5169,7 @@ mod tests {
         let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
 
         // When handling DeleteThread.
-        IntentHandler::handle(&Intent::DeleteThread, &mut state);
+        IntentHandler::handle(&Intent::Delete, &mut state);
 
         // Then its discard confirm is open with No selected.
         assert_eq!(
@@ -6304,8 +5186,8 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Intent::ToggleSettle, state_with(vec![thread(1, ThreadStatus::Idle)], 1))]
-    #[case(Intent::DeleteThread, state_with(vec![thread(1, ThreadStatus::Idle)], 1))]
-    #[case(Intent::DeleteThread, drafting(draft(DraftWorkspace::Local), vec![]))]
+    #[case(Intent::Delete, state_with(vec![thread(1, ThreadStatus::Idle)], 1))]
+    #[case(Intent::Delete, drafting(draft(DraftWorkspace::Local), vec![]))]
     fn no_on_a_sidebar_confirm_returns_no_commands(
         #[case] intent: Intent,
         #[case] mut state: AppState,
@@ -6328,7 +5210,7 @@ mod tests {
         // Given Yes highlighted in thread 1's delete confirm, and then thread 1
         // leaves the sidebar.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
         poll(&mut state, &[]);
 
         // When confirming.
@@ -6432,25 +5314,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn open_tool_on_a_group_card_uses_the_group_dir() {
-        // Given a group card selected, its group in `/work/GT-514-login`.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-
-        // When handling OpenTool.
-        let commands = IntentHandler::handle(&Intent::OpenTool(Tool::Lazygit), &mut state);
-
-        // Then lazygit opens in the group's directory.
-        assert_eq!(
-            commands,
-            vec![Command::OpenTool {
-                tool: Tool::Lazygit,
-                cwd: "/work/GT-514-login".into(),
-            }],
-            "a card's tools open in its group's directory"
-        );
-    }
-
-    #[rstest::rstest]
     fn open_tool_on_an_unstarted_feature_group_uses_the_project_root() {
         // Given a Feature group draft with no directory yet, in `/work`.
         let mut state = group_drafting(None);
@@ -6472,7 +5335,7 @@ mod tests {
     #[rstest::rstest]
     fn open_tool_on_a_grouped_thread_uses_its_cwd() {
         // Given grouped thread 1 selected, running in `/work/1`.
-        let mut state = grouped_state(false, SidebarItem::Thread(ThreadId(1)));
+        let mut state = grouped_state(false, SidebarItem::Session(SessionId(1)));
 
         // When handling OpenTool.
         let commands = IntentHandler::handle(&Intent::OpenTool(Tool::Shell), &mut state);
@@ -6506,6 +5369,7 @@ mod tests {
         for (project, id) in state.sessions.projects.iter_mut().zip([11, 21]) {
             project.threads = vec![thread(id, ThreadStatus::Idle)];
         }
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
         state.sessions.filter = filter.map(ProjectId);
         state.sessions.cursor = Some(cursor);
         IntentHandler::handle(&Intent::FilterProjects, &mut state);
@@ -6612,7 +5476,7 @@ mod tests {
     }
 
     fn on_thread(id: i64) -> SidebarItem {
-        SidebarItem::Thread(ThreadId(id))
+        SidebarItem::Session(SessionId(id))
     }
 
     #[rstest::rstest]
@@ -6881,7 +5745,7 @@ mod tests {
         // Then the filter is saved and thread 21 visited.
         assert_eq!(
             commands,
-            vec![Command::SaveUi, Command::Visit(ThreadId(21))],
+            vec![Command::SaveUi, Command::Visit(SessionId(21))],
             "filtering should save the filter"
         );
     }
@@ -6949,7 +5813,7 @@ mod tests {
             vec![
                 Command::RemoveProject(ProjectId(1)),
                 Command::SaveUi,
-                Command::Visit(ThreadId(21)),
+                Command::Visit(SessionId(21)),
             ],
             "Yes should remove the project"
         );
@@ -7102,7 +5966,7 @@ mod tests {
         AppState {
             focus: Focus::Rename,
             rename: Some(Rename {
-                target: RenameTarget::Thread(ThreadId(1)),
+                target: RenameTarget::Session(SessionId(1)),
                 input: TextInput::new(text),
                 creating: false,
             }),
@@ -7116,7 +5980,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn rename_opens_the_box_filled_with_the_threads_title() {
+    fn rename_opens_the_box_with_the_session_title() {
         // Given a selected thread titled "Fix the sidebar".
         let mut state = titled(Some("Fix the sidebar"));
 
@@ -7132,18 +5996,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn rename_on_an_untitled_thread_opens_an_empty_box() {
-        // Given a selected thread with no title yet.
+    fn rename_on_an_untitled_session_holds_its_folder_name() {
+        // Given a selected session in /work/1 whose agent has no title yet.
         let mut state = titled(None);
 
         // When handling Rename.
         IntentHandler::handle(&Intent::Rename, &mut state);
 
-        // Then the rename box is empty, not "New thread".
+        // Then the rename box holds the folder's name, the session's title.
         assert_eq!(
             rename_text(&state),
-            Some(""),
-            "an untitled thread's rename box should start empty"
+            Some("1"),
+            "an untitled session's rename box should hold its title"
         );
     }
 
@@ -7188,7 +6052,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn rename_confirm_returns_rename_thread_with_the_trimmed_text() {
+    fn rename_confirm_returns_rename_session() {
         // Given the rename box holding " Sidebar search ".
         let mut state = renaming(" Sidebar search ");
 
@@ -7198,9 +6062,9 @@ mod tests {
         // Then the thread is renamed to the trimmed text.
         assert_eq!(
             commands,
-            vec![Command::RenameThread {
-                thread: ThreadId(1),
-                title: Some("Sidebar search".to_owned()),
+            vec![Command::RenameSession {
+                session: SessionId(1),
+                name: Some("Sidebar search".to_owned()),
             }],
             "⏎ should rename the thread"
         );
@@ -7219,9 +6083,9 @@ mod tests {
         // Then orb's name is cleared.
         assert_eq!(
             commands,
-            vec![Command::RenameThread {
-                thread: ThreadId(1),
-                title: None,
+            vec![Command::RenameSession {
+                session: SessionId(1),
+                name: None,
             }],
             "a blank ⏎ should go back to Claude's title"
         );
@@ -7294,9 +6158,9 @@ mod tests {
         state.focus = Focus::Search;
         state.sessions.search = Some(Search {
             input: TextInput::new(text),
-            return_to: Some(SidebarItem::Thread(ThreadId(2))),
+            return_to: Some(SidebarItem::Session(SessionId(2))),
         });
-        state.sessions.cursor = cursor.map(|id| SidebarItem::Thread(ThreadId(id)));
+        state.sessions.cursor = cursor.map(|id| SidebarItem::Session(SessionId(id)));
         state
     }
 
@@ -7331,7 +6195,7 @@ mod tests {
         // Then the cursor is on the first match.
         assert_eq!(
             state.sessions.cursor,
-            Some(SidebarItem::Thread(ThreadId(3))),
+            Some(SidebarItem::Session(SessionId(3))),
             "typing should select the first match"
         );
     }
@@ -7347,7 +6211,7 @@ mod tests {
         // Then the match is visited.
         assert_eq!(
             commands,
-            vec![Command::Visit(ThreadId(3))],
+            vec![Command::Visit(SessionId(3))],
             "typing should visit the first match"
         );
     }
@@ -7363,7 +6227,7 @@ mod tests {
         // Then the cursor is on thread 1, past the unmatched thread 2.
         assert_eq!(
             state.sessions.cursor,
-            Some(SidebarItem::Thread(ThreadId(1))),
+            Some(SidebarItem::Session(SessionId(1))),
             "<C-j> should move to the next match"
         );
     }
@@ -7379,7 +6243,7 @@ mod tests {
         // Then the cursor is on thread 3, past the unmatched thread 2.
         assert_eq!(
             state.sessions.cursor,
-            Some(SidebarItem::Thread(ThreadId(3))),
+            Some(SidebarItem::Session(SessionId(3))),
             "<C-k> should move to the previous match"
         );
     }
@@ -7400,7 +6264,11 @@ mod tests {
                 state.focus,
                 state.sessions.cursor
             ),
-            (true, Focus::Sidebar, Some(SidebarItem::Thread(ThreadId(3)))),
+            (
+                true,
+                Focus::Sidebar,
+                Some(SidebarItem::Session(SessionId(3)))
+            ),
             "⏎ should end the search on the match"
         );
     }
@@ -7416,7 +6284,7 @@ mod tests {
         // Then it acts as Esc: the cursor is back on thread 2.
         assert_eq!(
             (state.sessions.search.is_none(), state.sessions.cursor),
-            (true, Some(SidebarItem::Thread(ThreadId(2)))),
+            (true, Some(SidebarItem::Session(SessionId(2)))),
             "⏎ with no match should act as Esc"
         );
     }
@@ -7437,111 +6305,12 @@ mod tests {
                 state.focus,
                 state.sessions.cursor
             ),
-            (true, Focus::Sidebar, Some(SidebarItem::Thread(ThreadId(2)))),
+            (
+                true,
+                Focus::Sidebar,
+                Some(SidebarItem::Session(SessionId(2)))
+            ),
             "Esc should end the search where it began"
-        );
-    }
-
-    /// The dashboard cursor's index on `state`'s selection.
-    fn dashboard_index(state: &AppState) -> usize {
-        let len = crate::feat::dashboard::items(&state.sessions, state.offers_permissions()).len();
-        state.dashboard.index(&state.sessions, len)
-    }
-
-    #[rstest::rstest]
-    fn dashboard_next_on_the_last_item_wraps_to_the_first() {
-        // Given a thread's dashboard with the cursor on its last item.
-        let mut state = AppState {
-            focus: Focus::Dashboard,
-            ..state_with(vec![in_root(1)], 1)
-        };
-        IntentHandler::handle(&Intent::DashboardPrev, &mut state);
-
-        // When handling DashboardNext.
-        IntentHandler::handle(&Intent::DashboardNext, &mut state);
-
-        // Then the first item is highlighted.
-        assert_eq!(dashboard_index(&state), 0, "next on the last item wraps");
-    }
-
-    #[rstest::rstest]
-    fn dashboard_prev_on_the_first_item_wraps_to_the_last() {
-        // Given a thread's dashboard with the cursor on its first item.
-        let mut state = AppState {
-            focus: Focus::Dashboard,
-            ..state_with(vec![in_root(1)], 1)
-        };
-
-        // When handling DashboardPrev.
-        IntentHandler::handle(&Intent::DashboardPrev, &mut state);
-
-        // Then the last of the thread's eleven items is highlighted.
-        assert_eq!(
-            dashboard_index(&state),
-            10,
-            "previous on the first item wraps"
-        );
-    }
-
-    #[rstest::rstest]
-    fn dashboard_run_on_model_opens_the_drafts_model_picker() {
-        // Given a git draft's dashboard with the cursor on Model, its fifth
-        // item.
-        let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
-        for _ in 0..4 {
-            IntentHandler::handle(&Intent::DashboardNext, &mut state);
-        }
-
-        // When handling DashboardRun.
-        IntentHandler::handle(&Intent::DashboardRun, &mut state);
-
-        // Then the draft's model picker is open, as PickModel opens it.
-        assert_eq!(
-            state.picker.as_ref().map(PickerState::kind),
-            Some(&PickerKind::Model {
-                target: DraftTarget::Project(ProjectId(1)),
-                icon: info().icon,
-            }),
-            "⏎ on Model should open the model picker"
-        );
-    }
-
-    #[rstest::rstest]
-    fn dashboard_run_with_nothing_selected_opens_the_project_picker() {
-        // Given the dashboard with no thread or draft selected.
-        let mut state = AppState {
-            focus: Focus::Dashboard,
-            ..with_projects(&["alpha"])
-        };
-
-        // When handling DashboardRun on its first item.
-        IntentHandler::handle(&Intent::DashboardRun, &mut state);
-
-        // Then New session's project picker is open.
-        assert_eq!(
-            state.picker.as_ref().map(PickerState::kind),
-            Some(&PickerKind::Projects),
-            "⏎ with nothing selected should run New session"
-        );
-    }
-
-    #[rstest::rstest]
-    fn dashboard_cursor_goes_back_to_the_first_item_on_a_new_selection() {
-        // Given thread 2's dashboard with the cursor moved down.
-        let mut state = AppState {
-            focus: Focus::Dashboard,
-            ..state_with(vec![in_root(1), in_root(2)], 2)
-        };
-        IntentHandler::handle(&Intent::DashboardNext, &mut state);
-
-        // When selecting the next thread.
-        IntentHandler::handle(&Intent::SelectNext, &mut state);
-
-        // Then the first item is highlighted.
-        assert_eq!(
-            dashboard_index(&state),
-            0,
-            "a new selection should start on Open"
         );
     }
 
@@ -7835,7 +6604,7 @@ mod tests {
     fn jumping(focus: Focus, attached: &[i64], jumps: &[SidebarItem]) -> AppState {
         AppState {
             focus,
-            attached: attached.iter().copied().map(ThreadId).collect(),
+            attached: attached.iter().copied().map(SessionId).collect(),
             jumps: JumpList::from_saved(jumps.to_vec()),
             ..state_with(
                 vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
@@ -7976,7 +6745,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn jump_back_moves_the_cursor_to_the_older_row() {
+    fn jump_back_lands_on_a_session() {
         // Given thread 1 listed before the cursor's thread 2.
         let mut state = jumping(Focus::Sidebar, &[], &[on_thread(1), on_thread(2)]);
 
@@ -8045,7 +6814,10 @@ mod tests {
 
         // Then the keys are in thread 1's pane.
         assert_eq!(
-            (state.focus, state.sessions.selected_id()),
+            (
+                state.focus,
+                state.sessions.selected_thread().map(|thread| thread.id)
+            ),
             (Focus::Attached, Some(ThreadId(1))),
             "<C-o> from a pane should follow into the target's pane"
         );
@@ -8061,11 +6833,7 @@ mod tests {
 
         // Then the loop shows thread 1's pane.
         assert!(
-            commands.contains(&Command::Attach(AttachTarget {
-                thread: ThreadId(1),
-                pane: PaneId(1),
-                cwd: "/work/1".into(),
-            })),
+            commands.contains(&Command::Attach(SessionId(1))),
             "<C-o> onto a live pane should show it"
         );
     }
@@ -8151,7 +6919,7 @@ mod tests {
         // Then it only saves the list and visits thread 1.
         assert_eq!(
             commands,
-            vec![Command::SaveJumps, Command::Visit(ThreadId(1))],
+            vec![Command::SaveJumps, Command::Visit(SessionId(1))],
             "<C-o> must never attach"
         );
     }
@@ -8239,6 +7007,7 @@ mod tests {
                 thread(22, ThreadStatus::Idle),
             ];
         }
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
         state.sessions.filter = Some(ProjectId(2));
         state.sessions.cursor = Some(on_thread(22));
         state.jumps = JumpList::from_saved(vec![on_thread(21), on_thread(11), on_thread(22)]);
@@ -8255,41 +7024,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn jump_back_onto_a_thread_in_a_folded_group_opens_it() {
-        // Given group 9 folded with the cursor on its card, and its thread 1
-        // listed before the card.
-        let mut state = grouped_state(false, SidebarItem::Group(GroupId(9)));
-        state.sessions.folded.insert(GroupId(9));
-        state.jumps = JumpList::from_saved(vec![on_thread(1), SidebarItem::Group(GroupId(9))]);
-
-        // When handling JumpBack.
-        IntentHandler::handle(&Intent::JumpBack, &mut state);
-
-        // Then the group is open.
-        assert!(
-            !state.sessions.folded.contains(&GroupId(9)),
-            "<C-o> into a folded group should open it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn jump_back_onto_a_thread_in_a_settled_closed_group_opens_it_and_the_shelf() {
-        // Given settled group 9 closed under a closed shelf with the cursor on
-        // its card, and its thread 1 listed before the card.
-        let mut state = grouped_state(true, SidebarItem::Group(GroupId(9)));
-        state.jumps = JumpList::from_saved(vec![on_thread(1), SidebarItem::Group(GroupId(9))]);
-
-        // When handling JumpBack.
-        IntentHandler::handle(&Intent::JumpBack, &mut state);
-
-        // Then the group and the shelf are open.
-        assert!(
-            state.sessions.opened.contains(&GroupId(9)) && state.sessions.shelf_open,
-            "<C-o> into a settled group should open it and the shelf"
-        );
-    }
-
-    #[rstest::rstest]
     fn jump_back_after_a_delete_skips_the_deleted_thread() {
         // Given threads 3, 2 and 1 listed, and 1, 3, 2 in the jump list, with
         // thread 2 deleted from the sidebar (the cursor moves to thread 1).
@@ -8298,7 +7032,7 @@ mod tests {
             2,
         );
         state.jumps = JumpList::from_saved(vec![on_thread(1), on_thread(3), on_thread(2)]);
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // When handling JumpBack.
@@ -8317,7 +7051,7 @@ mod tests {
         // Given threads 1 and 2 in the jump list, and Yes highlighted in
         // selected thread 2's delete confirm.
         let mut state = jumping(Focus::Sidebar, &[], &[on_thread(1), on_thread(2)]);
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -8336,7 +7070,7 @@ mod tests {
         // its discard confirm.
         let mut state = drafting(draft(DraftWorkspace::Local), vec![]);
         state.jumps = JumpList::from_saved(vec![SidebarItem::Draft(ProjectId(1))]);
-        answer_yes(&Intent::DeleteThread, &mut state);
+        answer_yes(&Intent::Delete, &mut state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -8354,14 +7088,14 @@ mod tests {
         state
     }
 
-    /// The thread ids the open picker shows, in order.
-    fn session_ids(state: &AppState) -> Vec<ThreadId> {
+    /// The session ids the open picker shows, in order.
+    fn session_ids(state: &AppState) -> Vec<SessionId> {
         state
             .picker
             .iter()
             .flat_map(PickerState::shown)
             .filter_map(|(item, _)| match item {
-                PickerItem::Thread { id, .. } => Some(*id),
+                PickerItem::Session { id, .. } => Some(*id),
                 _ => None,
             })
             .collect()
@@ -8374,7 +7108,7 @@ mod tests {
             .iter()
             .flat_map(PickerState::shown)
             .filter_map(|(item, _)| match item {
-                PickerItem::Thread { label, .. } => Some(label.clone()),
+                PickerItem::Session { label, .. } => Some(label.clone()),
                 _ => None,
             })
             .collect()
@@ -8403,6 +7137,7 @@ mod tests {
         for (project, id) in state.sessions.projects.iter_mut().zip((11..).step_by(10)) {
             project.threads = vec![thread(id, ThreadStatus::Idle)];
         }
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
         state
     }
 
@@ -8428,7 +7163,7 @@ mod tests {
         // Then thread 1 is listed first.
         assert_eq!(
             session_ids(&state),
-            [ThreadId(1), ThreadId(2)],
+            [SessionId(1), SessionId(2)],
             "the latest turn end should come first"
         );
     }
@@ -8450,7 +7185,7 @@ mod tests {
         // Then the working thread is listed first.
         assert_eq!(
             session_ids(&state),
-            [ThreadId(1), ThreadId(2)],
+            [SessionId(1), SessionId(2)],
             "a turn started after another's end should rank first"
         );
     }
@@ -8467,7 +7202,7 @@ mod tests {
         // Then only alpha's thread is listed.
         assert_eq!(
             session_ids(&state),
-            [ThreadId(11)],
+            [SessionId(11)],
             "the project filter should apply"
         );
     }
@@ -8484,27 +7219,8 @@ mod tests {
         // Then both are listed, newest chat first.
         assert_eq!(
             session_ids(&state),
-            [ThreadId(1), ThreadId(2)],
+            [SessionId(1), SessionId(2)],
             "the selected thread should be listed in its place"
-        );
-    }
-
-    #[rstest::rstest]
-    fn session_picker_leaves_out_a_gone_thread() {
-        // Given gone thread 1 and idle thread 2.
-        let state = state_at(
-            vec![thread(1, ThreadStatus::Gone), thread(2, ThreadStatus::Idle)],
-            SidebarItem::SettledShelf,
-        );
-
-        // When opening the session picker.
-        let state = open_sessions(state);
-
-        // Then only thread 2 is listed.
-        assert_eq!(
-            session_ids(&state),
-            [ThreadId(2)],
-            "a gone thread shouldn't be listed"
         );
     }
 
@@ -8515,7 +7231,7 @@ mod tests {
             vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
             SidebarItem::SettledShelf,
         );
-        state.sessions.deleting.insert(ThreadId(1));
+        state.sessions.deleting.insert(SessionId(1));
 
         // When opening the session picker.
         let state = open_sessions(state);
@@ -8523,7 +7239,7 @@ mod tests {
         // Then only thread 2 is listed.
         assert_eq!(
             session_ids(&state),
-            [ThreadId(2)],
+            [SessionId(2)],
             "a thread being deleted shouldn't be listed"
         );
     }
@@ -8542,7 +7258,7 @@ mod tests {
         // Then only thread 2 is listed.
         assert_eq!(
             session_ids(&state),
-            [ThreadId(2)],
+            [SessionId(2)],
             "settled threads should start hidden"
         );
     }
@@ -8560,23 +7276,8 @@ mod tests {
 
         // Then thread 1 is listed.
         assert!(
-            session_ids(&state).contains(&ThreadId(1)),
+            session_ids(&state).contains(&SessionId(1)),
             "toggling settled should list settled threads"
-        );
-    }
-
-    #[rstest::rstest]
-    fn session_picker_hides_a_thread_in_a_settled_group() {
-        // Given threads 1 and 2 in settled group 9, with no row selected.
-        let state = grouped_state(true, SidebarItem::SettledShelf);
-
-        // When opening the session picker.
-        let state = open_sessions(state);
-
-        // Then nothing is listed.
-        assert!(
-            session_ids(&state).is_empty(),
-            "a settled group's threads should start hidden"
         );
     }
 
@@ -8600,28 +7301,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn grouped_thread_row_is_labelled_slug_and_title() {
-        // Given thread 1, titled `api`, alone in group GT-514-login.
-        let mut state = grouped_state(false, SidebarItem::SettledShelf);
-        if let Some(project) = state.sessions.projects.first_mut() {
-            project.threads.retain(|thread| thread.id == ThreadId(1));
-            if let Some(thread) = project.threads.first_mut() {
-                thread.title = Some("api".into());
-            }
-        }
-
-        // When opening the session picker.
-        let state = open_sessions(state);
-
-        // Then its row reads `GT-514-login/api`.
-        assert_eq!(
-            session_labels(&state),
-            ["GT-514-login/api"],
-            "a grouped thread is labelled by its group's slug"
-        );
-    }
-
-    #[rstest::rstest]
     fn incognito_thread_row_is_labelled_incognito_and_title() {
         // Given thread 1, titled `scratch`, in orb's Incognito project.
         let mut state = with_projects(&["Incognito"]);
@@ -8629,6 +7308,7 @@ mod tests {
             project.kind = ProjectKind::Incognito;
             project.threads = vec![named(thread(1, ThreadStatus::Idle), "scratch")];
         }
+        state.sessions.sessions = sessions_for(&state.sessions.projects);
 
         // When opening the session picker.
         let state = open_sessions(state);
@@ -8642,8 +7322,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn untitled_thread_row_ends_in_new_thread() {
-        // Given untitled thread 1 in project `work`.
+    fn untitled_session_row_ends_in_its_folder() {
+        // Given untitled thread 1 in project `work`, running in /work/1.
         let state = state_at(
             vec![thread(1, ThreadStatus::Idle)],
             SidebarItem::SettledShelf,
@@ -8652,11 +7332,11 @@ mod tests {
         // When opening the session picker.
         let state = open_sessions(state);
 
-        // Then its row reads `work/New thread`.
+        // Then its row reads `work/1`.
         assert_eq!(
             session_labels(&state),
-            ["work/New thread"],
-            "an untitled thread is labelled New thread"
+            ["work/1"],
+            "an untitled session is labelled by its folder"
         );
     }
 
@@ -8672,7 +7352,7 @@ mod tests {
         // Then only itemku's thread is shown.
         assert_eq!(
             session_ids(&state),
-            [ThreadId(11)],
+            [SessionId(11)],
             "typed text should match the project part of the label"
         );
     }
@@ -8728,7 +7408,7 @@ mod tests {
         // Then only `alpha` is shown, still filtered by the typed text.
         assert_eq!(
             session_ids(&state),
-            [ThreadId(1)],
+            [SessionId(1)],
             "toggling should keep the typed text"
         );
     }
@@ -8777,7 +7457,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn picking_a_session_returns_attach_for_it() {
+    fn picking_a_session_attaches_it() {
         // Given the session picker on thread 1, opened on thread 2.
         let mut state = picking_thread_1();
 
@@ -8786,11 +7466,7 @@ mod tests {
 
         // Then the loop attaches to thread 1.
         assert!(
-            commands.contains(&Command::Attach(AttachTarget {
-                thread: ThreadId(1),
-                pane: PaneId(1),
-                cwd: "/work/1".into(),
-            })),
+            commands.contains(&Command::Attach(SessionId(1))),
             "picking should attach to the thread"
         );
     }
@@ -8808,43 +7484,6 @@ mod tests {
             state.focus,
             Focus::Attached,
             "picking should focus the pane"
-        );
-    }
-
-    #[rstest::rstest]
-    fn picking_a_session_in_a_folded_group_opens_the_group() {
-        // Given the session picker on thread 1 of folded group 9, opened on
-        // thread 2.
-        let mut state = grouped_state(false, on_thread(2));
-        state.sessions.folded.insert(GroupId(9));
-        let mut state = open_sessions(state);
-        IntentHandler::handle(&Intent::PickerNext, &mut state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then group 9 is open.
-        assert!(
-            !state.sessions.folded.contains(&GroupId(9)),
-            "picking should open the thread's group"
-        );
-    }
-
-    #[rstest::rstest]
-    fn picking_a_session_in_a_settled_group_opens_the_shelf() {
-        // Given the session picker showing settled threads, on thread 1 of
-        // settled group 9, opened on thread 2.
-        let mut state = open_sessions(grouped_state(true, on_thread(2)));
-        IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
-        IntentHandler::handle(&Intent::PickerNext, &mut state);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the Settled shelf is open.
-        assert!(
-            state.sessions.shelf_open,
-            "picking a settled group's thread should open the shelf"
         );
     }
 
@@ -8879,10 +7518,14 @@ mod tests {
         );
     }
 
-    /// The session picker on thread 1, opened on thread 2, after thread 1
-    /// was deleted.
+    /// The session picker on session 1, opened on session 2, after session
+    /// 1 was deleted.
     fn picking_deleted() -> AppState {
         let mut state = picking_thread_1();
+        state
+            .sessions
+            .sessions
+            .retain(|session| session.id != SessionId(1));
         if let Some(project) = state.sessions.projects.first_mut() {
             project.threads.retain(|thread| thread.id != ThreadId(1));
         }
@@ -8911,23 +7554,6 @@ mod tests {
 
         // Then nothing happens.
         assert!(commands.is_empty(), "a deleted thread can't be jumped into");
-    }
-
-    #[rstest::rstest]
-    fn picking_a_session_that_turned_gone_leaves_the_cursor() {
-        // Given thread 1 highlighted, but gone since the picker opened.
-        let state = picking_thread_1();
-        let mut state = with_status(state, 1, ThreadStatus::Gone);
-
-        // When confirming.
-        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-
-        // Then the cursor stays on thread 2.
-        assert_eq!(
-            state.sessions.cursor,
-            Some(on_thread(2)),
-            "a gone thread can't be jumped into"
-        );
     }
 
     /// `thread` with a transcript at `/t/<id>.jsonl`.
@@ -9343,40 +7969,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn dashboard_highlight_moves_the_menu_cursor() {
-        // Given a thread's dashboard with the cursor on its first item.
-        let mut state = AppState {
-            focus: Focus::Dashboard,
-            ..state_with(vec![in_root(1)], 1)
-        };
-
-        // When handling DashboardHighlight on the third item (a click).
-        IntentHandler::handle(&Intent::DashboardHighlight(2), &mut state);
-
-        // Then the third item is highlighted.
-        assert_eq!(
-            dashboard_index(&state),
-            2,
-            "a click should highlight its item"
-        );
-    }
-
-    #[rstest::rstest]
-    fn dashboard_highlight_returns_no_commands() {
-        // Given a thread's dashboard with the cursor on its first item.
-        let mut state = AppState {
-            focus: Focus::Dashboard,
-            ..state_with(vec![in_root(1)], 1)
-        };
-
-        // When handling DashboardHighlight on the third item.
-        let commands = IntentHandler::handle(&Intent::DashboardHighlight(2), &mut state);
-
-        // Then nothing runs.
-        assert_eq!(commands, vec![], "highlighting shouldn't run the item");
-    }
-
-    #[rstest::rstest]
     fn picker_cursor_to_moves_the_pickers_cursor() {
         // Given the project picker with "al" typed.
         let mut state = picking(Focus::Sidebar);
@@ -9468,7 +8060,7 @@ mod tests {
                     cwd: USED.into(),
                     ..thread(1, ThreadStatus::Idle)
                 }],
-                SidebarItem::Thread(ThreadId(1)),
+                SidebarItem::Session(SessionId(1)),
             )
         }
     }
@@ -9586,7 +8178,7 @@ mod tests {
     fn remove_on_an_attached_row_sets_the_refusal() {
         // Given thread 1, in `USED`, attached.
         let mut state = AppState {
-            attached: [ThreadId(1)].into(),
+            attached: [SessionId(1)].into(),
             ..worktree_state()
         };
 
@@ -9970,11 +8562,7 @@ mod tests {
 
         // Then the loop attaches to thread 1.
         assert!(
-            commands.contains(&Command::Attach(AttachTarget {
-                thread: ThreadId(1),
-                pane: PaneId(1),
-                cwd: "/work/1".into(),
-            })),
+            commands.contains(&Command::Attach(SessionId(1))),
             "picking a hit should attach to its thread"
         );
     }
@@ -10003,12 +8591,62 @@ mod tests {
         assert!(commands.is_empty(), "a gone thread can't be attached");
     }
 
+    /// [`searching_a_hit_in`] thread 1, its pane ended, having last run in
+    /// `last_session`.
+    fn searching_an_ended_thread(last_session: Option<SessionId>) -> AppState {
+        let mut state = searching_a_hit_in(1);
+        for thread in state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| project.threads.iter_mut())
+            .filter(|thread| thread.id == ThreadId(1))
+        {
+            thread.pane = None;
+            thread.last_session = last_session;
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn picking_a_hit_of_an_ended_thread_attaches_its_session() {
+        // Given the search picker on a hit in thread 1, which ended in
+        // session 1.
+        let mut state = searching_an_ended_thread(Some(SessionId(1)));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the loop attaches to session 1.
+        assert!(
+            commands.contains(&Command::Attach(SessionId(1))),
+            "a hit on an ended thread should open its session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picking_a_hit_without_a_session_only_closes_the_picker() {
+        // Given the search picker on a hit in thread 1, which never ran in a
+        // session.
+        let mut state = searching_an_ended_thread(None);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the picker closes and nothing else happens.
+        assert_eq!(
+            (state.picker.is_none(), commands),
+            (true, vec![]),
+            "a hit with no session should only close the picker"
+        );
+    }
+
     /// Thread 1 selected and attached, shown in session 1's one-tab layout
     /// over an 80×24 body, with the keys at `focus`.
     fn with_layout(focus: Focus) -> AppState {
         let mut state = AppState {
             focus,
-            attached: HashSet::from([ThreadId(1)]),
+            attached: HashSet::from([SessionId(1)]),
             ..state_with(vec![thread(1, ThreadStatus::Idle)], 1)
         };
         state.layouts.fit_to(Rect::new(0, 0, 80, 24));
@@ -10142,17 +8780,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn close_pane_on_the_threads_pane_detaches_the_thread() {
+    fn close_pane_on_an_agents_pane_closes_it() {
         // Given thread 1's lone pane with the keys.
         let mut state = with_layout(Focus::Attached);
 
         // When closing it.
-        IntentHandler::handle(&Intent::ClosePane, &mut state);
+        let commands = IntentHandler::handle(&Intent::ClosePane, &mut state);
 
-        // Then thread 1 is detached.
-        assert!(
-            !state.attached.contains(&ThreadId(1)),
-            "closing the thread's own pane detaches it"
+        // Then its layout is gone and saved as such.
+        assert_eq!(
+            (state.layouts.get(SessionId(1)).is_some(), commands),
+            (false, vec![Command::SaveLayout(SessionId(1))]),
+            "an agent's pane closes like any other"
         );
     }
 
@@ -10311,17 +8950,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn close_tab_holding_the_threads_pane_detaches_the_thread() {
+    fn close_tab_holding_an_agents_pane_closes_it() {
         // Given thread 1's one-tab layout.
         let mut state = with_layout(Focus::Attached);
 
         // When closing the tab.
-        IntentHandler::handle(&Intent::CloseTab, &mut state);
+        let commands = IntentHandler::handle(&Intent::CloseTab, &mut state);
 
-        // Then thread 1 is detached.
-        assert!(
-            !state.attached.contains(&ThreadId(1)),
-            "closing the thread's own tab detaches it"
+        // Then its layout is gone and saved as such.
+        assert_eq!(
+            (state.layouts.get(SessionId(1)).is_some(), commands),
+            (false, vec![Command::SaveLayout(SessionId(1))]),
+            "a tab holding an agent's pane closes like any other"
         );
     }
 

@@ -2,14 +2,14 @@
 //! tokyonight-moon.
 //!
 //! On the left, the mode in a block of its colour, an arrow into the
-//! selected thread's or draft's branch, then its project, the latest error
-//! in red and the worktree notice. On a group's rows, the branch is the
-//! group's and the project reads `<project>/<slug>`. On the right, `N running`,
-//! `fetching origin/<base>…` while Start fetches, or `starting session…`
-//! with a spinner, how many threads need an approval or
+//! selected session's or draft's branch, then its place: `<project>/<title>`
+//! for a session, `<project>/<slug>` for a group draft, the project for a
+//! draft. Then the latest error in red and the worktree notice. On the
+//! right, `N running`, `fetching origin/<base>…` while Start fetches, or
+//! `starting session…` with a spinner, how many agents need an approval or
 //! an answer, the selected row's place among the listed rows, and the local
-//! time in the mode's colour. When the line is too narrow, the right side stays whole and the
-//! left side is cut at its end.
+//! time in the mode's colour. When the line is too narrow, the right side
+//! stays whole and the left side is cut at its end.
 
 use std::borrow::Cow;
 use std::time::SystemTime;
@@ -81,23 +81,28 @@ fn mode(state: &AppState) -> (&'static str, Color) {
 }
 
 /// a · b · c: the mode block, the branch block when there's a branch, then the
-/// project, the error and the worktree notice. On a group's rows, the project
-/// reads `<project>/<slug>` and the branch is the group's.
+/// project, the error and the worktree notice. On a session, the project
+/// reads `<project>/<title>` and the branch is its lead agent's, else the
+/// one the session recorded; on a group draft, `<project>/<slug>` and the
+/// group's branch.
 fn left(sessions: &Sessions, notice: Option<&str>, mode: &str, colour: Color) -> Line<'static> {
     let (branch, project): (Option<&str>, Option<String>) = match (
-        sessions.selected_group(),
-        sessions.selected_thread(),
+        sessions.selected_session(),
+        sessions.selected_group_draft(),
         sessions.selected_draft(),
     ) {
-        (Some((project, group)), _, _) => (
+        (Some(session), _, _) => (
+            sessions
+                .selected_thread()
+                .and_then(|thread| thread.branch.as_deref())
+                .or(session.branch.as_deref()),
+            sessions
+                .project(session.project)
+                .map(|project| format!("{}/{}", project.title, sessions.title(session))),
+        ),
+        (None, Some((project, group)), _) => (
             group.branch.as_deref(),
             Some(format!("{}/{}", project.title, group.name)),
-        ),
-        (None, Some(thread), _) => (
-            thread.branch.as_deref(),
-            sessions
-                .selected_project()
-                .map(|project| project.title.clone()),
         ),
         (None, None, Some((project, draft))) => {
             (draft.branch.as_deref(), Some(project.title.clone()))
@@ -169,20 +174,13 @@ fn activity(sessions: &Sessions, now: SystemTime) -> Option<String> {
     }
 }
 
-/// The cursor's row, 1-based, among the listed drafts and threads (not the
-/// Settled header or group cards), and how many are listed.
+/// The cursor's row, 1-based, among the listed drafts and sessions (not the
+/// Settled header), and how many are listed.
 fn position(sessions: &Sessions) -> Option<(usize, usize)> {
     let items: Vec<SidebarItem> = sessions
         .sidebar()
         .iter()
-        .filter(|row| {
-            !matches!(
-                row,
-                SidebarRow::ShelfHeader { .. }
-                    | SidebarRow::GroupCard { .. }
-                    | SidebarRow::SettledGroup { .. }
-            )
-        })
+        .filter(|row| !matches!(row, SidebarRow::ShelfHeader { .. }))
         .map(SidebarRow::item)
         .collect();
     let at = items
@@ -233,10 +231,12 @@ mod tests {
     use orb_domain::feat::harness::HarnessId;
     use std::time::{Duration, SystemTime};
 
+    use crate::test_support::sessions_for;
     use jiff::tz::{self, TimeZone};
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Project,
-        ProjectId, ProjectKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, PaneId,
+        PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem, Thread,
+        ThreadId, ThreadStatus,
     };
     use orb_domain::feat::worktrees::state::Worktrees;
     use orb_domain::{AppState, Focus};
@@ -250,8 +250,17 @@ mod tests {
     /// 2023-11-14 22:13:20 UTC, at spinner frame 0.
     const NOW: u64 = 1_700_000_000;
 
+    /// `sessions` with the sessions its projects' threads run in.
+    fn fill(sessions: Sessions) -> Sessions {
+        Sessions {
+            sessions: sessions_for(&sessions.projects),
+            ..sessions
+        }
+    }
+
     fn thread(id: i64, status: ThreadStatus) -> Thread {
         Thread {
+            last_session: None,
             harness: HarnessId::new("claude"),
             id: ThreadId(id),
             title: Some("Fix the bug".to_owned()),
@@ -259,7 +268,11 @@ mod tests {
             transcript: None,
             status,
             turn_started_at: None,
-            pane: None,
+            pane: Some(PaneLaunch {
+                pane: PaneId(id),
+                session: SessionId(id),
+                command: vec![],
+            }),
             branch: None,
             pinned_at: None,
             settled_at: None,
@@ -288,10 +301,10 @@ mod tests {
     }
 
     fn sessions(threads: Vec<Thread>) -> Sessions {
-        Sessions {
+        fill(Sessions {
             projects: vec![project(1, "orb", threads)],
             ..Sessions::default()
-        }
+        })
     }
 
     fn with_sessions(sessions: Sessions) -> AppState {
@@ -306,7 +319,7 @@ mod tests {
         AppState {
             focus,
             sessions: Sessions {
-                cursor: Some(SidebarItem::Thread(ThreadId(1))),
+                cursor: Some(SidebarItem::Session(SessionId(1))),
                 ..sessions(vec![thread(1, ThreadStatus::Idle)])
             },
             ..AppState::default()
@@ -460,10 +473,43 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn branch_block_shows_the_threads_branch() {
-        // Given a selected thread on branch orb/x.
+    fn project_shows_the_sessions_title_on_a_session() {
+        // Given session 1 selected, its agent titled `Fix the bug`, in orb.
+        let state = selected(Focus::Sidebar);
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the project reads orb/Fix the bug.
+        let text = text(&buffer);
+        assert!(
+            text.contains("\u{f07b} orb/Fix the bug"),
+            "mode line was '{text}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn branch_block_shows_the_sessions_branch() {
+        // Given a selected session that recorded branch orb/y, its agent on
+        // no branch.
+        let mut state = selected(Focus::Sidebar);
+        for session in &mut state.sessions.sessions {
+            session.branch = Some("orb/y".to_owned());
+        }
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the branch block names orb/y.
+        let text = text(&buffer);
+        assert!(text.contains("\u{e0a0} orb/y"), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn branch_block_shows_the_lead_agents_branch() {
+        // Given a selected session whose agent is on branch orb/x.
         let state = with_sessions(Sessions {
-            cursor: Some(SidebarItem::Thread(ThreadId(1))),
+            cursor: Some(SidebarItem::Session(SessionId(1))),
             ..sessions(vec![Thread {
                 branch: Some("orb/x".to_owned()),
                 ..thread(1, ThreadStatus::Idle)
@@ -742,14 +788,14 @@ mod tests {
     #[rstest::rstest]
     fn counts_include_threads_the_filter_hides() {
         // Given a working thread in jinn while the sidebar shows only orb.
-        let state = with_sessions(Sessions {
+        let state = with_sessions(fill(Sessions {
             projects: vec![
                 project(1, "orb", vec![thread(1, ThreadStatus::Idle)]),
                 project(2, "jinn", vec![thread(2, ThreadStatus::Working)]),
             ],
             filter: Some(ProjectId(1)),
             ..Sessions::default()
-        });
+        }));
 
         // When drawing the mode line.
         let buffer = draw(&state);
@@ -763,7 +809,7 @@ mod tests {
     fn position_shows_the_cursors_row_of_the_shown_rows() {
         // Given seven threads with the cursor on the third row (thread 5).
         let state = with_sessions(Sessions {
-            cursor: Some(SidebarItem::Thread(ThreadId(5))),
+            cursor: Some(SidebarItem::Session(SessionId(5))),
             ..sessions((1..=7).map(|id| thread(id, ThreadStatus::Idle)).collect())
         });
 
@@ -796,35 +842,6 @@ mod tests {
         }
     }
 
-    #[rstest::rstest]
-    fn position_counts_group_children_but_not_cards() {
-        // Given a group holding threads 1 and 2, with the cursor on its
-        // second child (thread 2).
-        let state = {
-            let threads = [1, 2]
-                .map(|id| Thread {
-                    group: Some(GroupId(9)),
-                    ..thread(id, ThreadStatus::Idle)
-                })
-                .into();
-            with_sessions(Sessions {
-                projects: vec![Project {
-                    groups: vec![feature_group()],
-                    ..project(1, "orb", threads)
-                }],
-                cursor: Some(SidebarItem::Thread(ThreadId(2))),
-                ..Sessions::default()
-            })
-        };
-
-        // When drawing the mode line.
-        let buffer = draw(&state);
-
-        // Then the position reads 2/2.
-        let text = text(&buffer);
-        assert!(text.contains(" 2/2 "), "mode line was '{text}'");
-    }
-
     /// Group 9 holding thread 1 and a draft: Feature `GT-514-login` in `orb`,
     /// or Research `tokio-cancel` in `Research`; the cursor on `cursor`.
     fn in_group(kind: GroupKind, cursor: SidebarItem) -> AppState {
@@ -844,7 +861,7 @@ mod tests {
             group: Some(GroupId(9)),
             ..thread(1, ThreadStatus::Idle)
         };
-        with_sessions(Sessions {
+        with_sessions(fill(Sessions {
             projects: vec![Project {
                 groups: vec![Group {
                     draft: Some(GroupDraft::default()),
@@ -859,16 +876,13 @@ mod tests {
             }],
             cursor: Some(cursor),
             ..Sessions::default()
-        })
+        }))
     }
 
     #[rstest::rstest]
-    #[case::card(SidebarItem::Group(GroupId(9)))]
-    #[case::group_draft(SidebarItem::GroupDraft(GroupId(9)))]
-    #[case::grouped_thread(SidebarItem::Thread(ThreadId(1)))]
-    fn project_shows_the_group_path_on_a_group_row(#[case] cursor: SidebarItem) {
-        // Given the cursor on one of Feature group GT-514-login's rows in orb.
-        let state = in_group(GroupKind::Feature, cursor);
+    fn project_shows_the_group_path_on_a_group_draft() {
+        // Given the cursor on Feature group GT-514-login's draft in orb.
+        let state = in_group(GroupKind::Feature, SidebarItem::GroupDraft(GroupId(9)));
 
         // When drawing the mode line.
         let buffer = draw(&state);
@@ -883,8 +897,8 @@ mod tests {
 
     #[rstest::rstest]
     fn branch_block_shows_a_feature_groups_branch() {
-        // Given the cursor on Feature group GT-514-login's card.
-        let state = in_group(GroupKind::Feature, SidebarItem::Group(GroupId(9)));
+        // Given the cursor on Feature group GT-514-login's draft.
+        let state = in_group(GroupKind::Feature, SidebarItem::GroupDraft(GroupId(9)));
 
         // When drawing the mode line.
         let buffer = draw(&state);
@@ -899,8 +913,8 @@ mod tests {
 
     #[rstest::rstest]
     fn research_group_shows_no_branch_block() {
-        // Given the cursor on Research group tokio-cancel's card.
-        let state = in_group(GroupKind::Research, SidebarItem::Group(GroupId(9)));
+        // Given the cursor on Research group tokio-cancel's draft.
+        let state = in_group(GroupKind::Research, SidebarItem::GroupDraft(GroupId(9)));
 
         // When drawing the mode line.
         let buffer = draw(&state);
