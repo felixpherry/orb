@@ -1,15 +1,17 @@
 //! Key routing: which keys do what in each focus. Only keys the user has
 //! defined are bound.
 //!
-//! The Cmd keys (focus moves, split, close, grow and shrink, tab moves) and
+//! The Cmd keys (focus moves, split, close, grow and shrink, tab moves),
+//! `<C-S-h>`/`<C-S-l>` (the keys to the sidebar and into the panes) and
 //! `<C-[>`/`<C-]>` (back and forward through the jump list) come first, in
 //! the sidebar and in panes, outside which-key: it has no Super modifier,
-//! and Ctrl+[ must never match a plain Esc. `<C-g>` is the which-key leader
-//! in both; its popup lists only the keys that do something for the
-//! selection (`<C-g> w`/`<C-g> b` not on Incognito, Research and Learn
-//! sessions, `<C-g> p` and `<C-g> <C-g>` only in a pane, `<C-g> t` only with
-//! a session selected, `<C-g> f` only in the sidebar). The sidebar's own
-//! keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`, `q`, `/` and `i`, `l`/`h`,
+//! Ctrl+Shift+h must never match a plain `<C-h>`, and Ctrl+[ must never
+//! match a plain Esc. `<C-g>` is the which-key leader in both; its popup
+//! lists only the keys that do something for the selection (`<C-g> w`/`<C-g>
+//! b` not on Incognito, Research and Learn sessions, `<C-g> p` and `<C-g>
+//! <C-g>` only in a pane, `<C-g> t` and `<C-g> e` only with a session
+//! selected, `<C-g> f` only in the sidebar); `<C-g> q` quits. The sidebar's
+//! own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`, `/` and `i`, `l`/`h`,
 //! `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent row) go through the same keymap. In a pane
 //! every other key goes to its program. An open picker, the rename box and
 //! the sidebar search take typed characters and have their own fixed keys,
@@ -186,7 +188,6 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind("<enter>", Intent::Attach, KeyCategory::Sessions, scope)
-            .bind("q", Intent::Quit, KeyCategory::General, scope)
             .bind("/", Intent::Search, KeyCategory::Navigation, scope)
             .bind("i", Intent::Search, KeyCategory::Navigation, scope)
             .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
@@ -212,6 +213,7 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     }
     for scope in SIDEBAR.into_iter().chain(PANE) {
         keymap
+            .bind("<leader>q", Intent::Quit, KeyCategory::General, scope)
             .bind(
                 "<leader>s",
                 Intent::ToggleSidebar,
@@ -284,6 +286,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     }
     for scope in SESSION {
         keymap
+            .bind(
+                "<leader>e",
+                Intent::SwapFocus,
+                KeyCategory::Navigation,
+                scope,
+            )
             .bind("<leader>tn", Intent::NewTab, KeyCategory::Navigation, scope)
             .bind(
                 "<leader>tx",
@@ -373,11 +381,14 @@ pub(crate) enum Route {
 }
 
 /// Where `key` goes in the sidebar, or in a pane when `in_pane`, with a
-/// which-key sequence `pending` or not: the Cmd keys, then the jump keys,
-/// then the keymap. In a pane only `<C-g>` and the rest of the sequence it
+/// which-key sequence `pending` or not: the Cmd keys, then `<C-S-h>` and
+/// `<C-S-l>`, then the jump keys, then the keymap. In a pane only `<C-g>` and the rest of the sequence it
 /// starts go to the keymap; every other key goes to its program.
 pub(crate) fn route(key: KeyEvent, in_pane: bool, pending: bool) -> Route {
-    match cmd_route(key).or_else(|| jump_route(key)) {
+    match cmd_route(key)
+        .or_else(|| ctrl_shift_route(key))
+        .or_else(|| jump_route(key))
+    {
         Some(intent) => Route::Intent(intent),
         None if !in_pane || pending || is_leader(key) => Route::Keymap,
         None => Route::Forward,
@@ -387,6 +398,22 @@ pub(crate) fn route(key: KeyEvent, in_pane: bool, pending: bool) -> Route {
 /// Whether `key` is `<C-g>`, whatever its kind or lock state.
 fn is_leader(key: KeyEvent) -> bool {
     (key.code, key.modifiers) == (LEADER.code, LEADER.modifiers)
+}
+
+/// The move of the keys `key` asks for: `<C-S-h>` to the sidebar and
+/// `<C-S-l>` into the panes. Kitty's alternate key report makes crossterm
+/// read Ctrl+Shift+h as `H` with only Ctrl; without it the key is `h` with
+/// Ctrl and Shift. Plain `<C-h>` and `<C-l>` never match: in a pane they
+/// belong to its program.
+fn ctrl_shift_route(key: KeyEvent) -> Option<Intent> {
+    let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('H'), KeyModifiers::CONTROL) => Some(Intent::LeavePane),
+        (KeyCode::Char('h'), modifiers) if modifiers == ctrl_shift => Some(Intent::LeavePane),
+        (KeyCode::Char('L'), KeyModifiers::CONTROL) => Some(Intent::FocusPanes),
+        (KeyCode::Char('l'), modifiers) if modifiers == ctrl_shift => Some(Intent::FocusPanes),
+        _ => None,
+    }
 }
 
 /// The jump `key` asks for: `<C-[>` goes back through the jump list and
@@ -419,7 +446,7 @@ fn cmd_route(key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('x') => Some(Intent::ClosePane),
         KeyCode::Char('+' | '=') => Some(Intent::GrowFocused),
         KeyCode::Char('-') => Some(Intent::ShrinkFocused),
-        KeyCode::Char(digit @ '1'..='5') => digit.to_digit(10).map(|n| Intent::GoToTab(n as usize)),
+        KeyCode::Char(digit @ '1'..='9') => digit.to_digit(10).map(|n| Intent::GoToTab(n as usize)),
         KeyCode::Char('[') => Some(Intent::PreviousTab),
         KeyCode::Char(']') => Some(Intent::NextTab),
         KeyCode::Char('i') => Some(Intent::MoveTabLeft),
@@ -533,7 +560,6 @@ mod tests {
     #[case(key(KeyCode::Char('j')), Intent::SelectNext)]
     #[case(key(KeyCode::Char('k')), Intent::SelectPrev)]
     #[case(key(KeyCode::Enter), Intent::Attach)]
-    #[case(key(KeyCode::Char('q')), Intent::Quit)]
     #[case(key(KeyCode::Char('p')), Intent::TogglePin)]
     #[case(key(KeyCode::Char('r')), Intent::Rename)]
     #[case(key(KeyCode::Char('l')), Intent::OpenShelf)]
@@ -894,6 +920,10 @@ mod tests {
     #[case(KeyCode::Char('3'), Intent::GoToTab(3))]
     #[case(KeyCode::Char('4'), Intent::GoToTab(4))]
     #[case(KeyCode::Char('5'), Intent::GoToTab(5))]
+    #[case(KeyCode::Char('6'), Intent::GoToTab(6))]
+    #[case(KeyCode::Char('7'), Intent::GoToTab(7))]
+    #[case(KeyCode::Char('8'), Intent::GoToTab(8))]
+    #[case(KeyCode::Char('9'), Intent::GoToTab(9))]
     #[case(KeyCode::Char('['), Intent::PreviousTab)]
     #[case(KeyCode::Char(']'), Intent::NextTab)]
     #[case(KeyCode::Char('i'), Intent::MoveTabLeft)]
@@ -939,6 +969,62 @@ mod tests {
 
         // Then it isn't one.
         assert_eq!(intent, None, "<C-h> is not a Cmd key");
+    }
+
+    #[rstest::rstest]
+    #[case::kitty_alternate_h(KeyCode::Char('H'), KeyModifiers::CONTROL, Intent::LeavePane)]
+    #[case::shifted_h(
+        KeyCode::Char('h'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        Intent::LeavePane
+    )]
+    #[case::kitty_alternate_l(KeyCode::Char('L'), KeyModifiers::CONTROL, Intent::FocusPanes)]
+    #[case::shifted_l(
+        KeyCode::Char('l'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        Intent::FocusPanes
+    )]
+    fn ctrl_shift_h_and_l_move_the_keys(
+        #[case] code: KeyCode,
+        #[case] modifiers: KeyModifiers,
+        #[case] expected: Intent,
+        #[values(false, true)] in_pane: bool,
+    ) {
+        // Given / When routing Ctrl+Shift with `code` in the sidebar or a pane.
+        let routed = route(KeyEvent::new(code, modifiers), in_pane, false);
+
+        // Then it asks for its intent.
+        assert_eq!(
+            routed,
+            Route::Intent(expected),
+            "{code} with {modifiers:?} should route (in a pane: {in_pane})"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case('h')]
+    #[case('l')]
+    fn plain_ctrl_h_and_l_go_to_the_pane(#[case] c: char) {
+        // Given plain Ctrl with `c`.
+        let pressed = ctrl(c);
+
+        // When routing it in a pane.
+        let routed = route(pressed, true, false);
+
+        // Then the pane's program gets it.
+        assert_eq!(routed, Route::Forward, "<C-{c}> belongs to the pane");
+    }
+
+    #[rstest::rstest]
+    fn plain_q_in_the_sidebar_does_nothing() {
+        // Given the keymap in Sidebar focus.
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+
+        // When pressing `q`.
+        let intent = press(&mut keys, key(KeyCode::Char('q')));
+
+        // Then nothing happens.
+        assert_eq!(intent, None, "<C-g> q quits, not q");
     }
 
     #[rstest::rstest]
@@ -1188,6 +1274,11 @@ mod tests {
     #[case(Scope::Sidebar, "t6", Intent::GoToTab(6))]
     #[case(Scope::Pane, "t9", Intent::GoToTab(9))]
     #[case(Scope::Pane, "\x07", Intent::SendCtrlG)]
+    #[case(Scope::Pane, "e", Intent::SwapFocus)]
+    #[case(Scope::Sidebar, "e", Intent::SwapFocus)]
+    #[case(Scope::Pane, "q", Intent::Quit)]
+    #[case(Scope::Sidebar, "q", Intent::Quit)]
+    #[case(Scope::SidebarEmpty, "q", Intent::Quit)]
     fn leader_keys_yield_their_intents(
         #[case] scope: Scope,
         #[case] then: &str,
@@ -1213,13 +1304,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, "/ Space W a b f g i n s t w")]
-    #[case(Scope::SidebarEmpty, "/ Space W a f g i n s")]
-    #[case(Scope::SidebarIncognito, "/ Space W a f g i n s t")]
-    #[case(Scope::Pane, "/ <C-g> Space W a b g i n p s t w")]
-    #[case(Scope::PaneIncognito, "/ <C-g> Space W a g i n p s t")]
-    #[case(Scope::SidebarAgent, "/ Space W a b f g i n s t w")]
-    #[case(Scope::SidebarAgentIncognito, "/ Space W a f g i n s t")]
+    #[case(Scope::Sidebar, "/ Space W a b e f g i n q s t w")]
+    #[case(Scope::SidebarEmpty, "/ Space W a f g i n q s")]
+    #[case(Scope::SidebarIncognito, "/ Space W a e f g i n q s t")]
+    #[case(Scope::Pane, "/ <C-g> Space W a b e g i n p q s t w")]
+    #[case(Scope::PaneIncognito, "/ <C-g> Space W a e g i n p q s t")]
+    #[case(Scope::SidebarAgent, "/ Space W a b e f g i n q s t w")]
+    #[case(Scope::SidebarAgentIncognito, "/ Space W a e f g i n q s t")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 

@@ -33,7 +33,7 @@ use crate::feat::sessions::validator::{
     validate_toggle_pin, validate_toggle_settle,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
-use crate::feat::sidebar::validator::{validate_focus_sidebar, validate_rename, validate_resize};
+use crate::feat::sidebar::validator::{validate_rename, validate_resize};
 use crate::{AppState, Command, Focus, Intent, TextInput};
 
 /// Applies each [`Intent`] to [`AppState`] in one match block.
@@ -138,9 +138,17 @@ impl IntentHandler {
                 None => attach_session(state),
             },
             Intent::LeavePane => leave_pane(state),
-            Intent::MoveFocus(nav) => match (state.focus, nav) {
-                (Focus::Sidebar, NavDirection::Right) => focus_right(state),
-                (Focus::Pane, _) => move_focus(state, *nav),
+            Intent::FocusPanes => match state.focus {
+                Focus::Sidebar => focus_right(state),
+                _ => vec![],
+            },
+            Intent::SwapFocus => match state.focus {
+                Focus::Pane => leave_pane(state),
+                Focus::Sidebar => focus_right(state),
+                _ => vec![],
+            },
+            Intent::MoveFocus(nav) => match state.focus {
+                Focus::Pane => move_focus(state, *nav),
                 _ => vec![],
             },
             Intent::SplitPane(split) => {
@@ -1230,14 +1238,15 @@ fn focus_right(state: &mut AppState) -> Vec<Command> {
     }
 }
 
-/// Moves the keys from a pane to the sidebar, unless it's hidden.
+/// Moves the keys from a pane to the sidebar, showing it if it's hidden.
 fn leave_pane(state: &mut AppState) -> Vec<Command> {
-    match validate_focus_sidebar(state) {
-        Ok(()) => {
+    match state.focus {
+        Focus::Pane => {
+            state.sidebar.hidden = false;
             state.focus = Focus::Sidebar;
             vec![Command::Detach, Command::RefreshSessions]
         }
-        Err(_) => vec![],
+        _ => vec![],
     }
 }
 
@@ -1267,14 +1276,13 @@ where
     vec![Command::SaveLayout(owner)]
 }
 
-/// Moves the focus to the pane `nav` of the focused one and saves the
-/// layout; from the leftmost pane the keys go to the sidebar.
+/// Moves the focus to the pane `nav` of the focused one, or across to the
+/// tab beside it, and saves the layout.
 fn move_focus(state: &mut AppState, nav: NavDirection) -> Vec<Command> {
     let (Ok(()), Some(owner)) = (validate_pane_action(state), state.shown_session()) else {
         return vec![];
     };
     match state.layouts.move_focus(owner, nav) {
-        FocusMove::Sidebar => leave_pane(state),
         FocusMove::Moved => vec![Command::SaveLayout(owner)],
         FocusMove::Stuck => vec![],
     }
@@ -2299,7 +2307,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leave_pane_while_the_sidebar_is_hidden_does_nothing() {
+    fn leave_pane_while_the_sidebar_is_hidden_shows_it_with_the_keys() {
         // Given keys going to an attached session, with the sidebar hidden.
         let mut state = AppState {
             sidebar: SidebarView {
@@ -2309,40 +2317,56 @@ mod tests {
             ..attached()
         };
 
-        // When handling LeavePane.
-        let commands = IntentHandler::handle(&Intent::LeavePane, &mut state);
+        // When handling LeavePane (`<C-S-h>`).
+        IntentHandler::handle(&Intent::LeavePane, &mut state);
 
-        // Then the session stays attached and nothing else happens.
+        // Then the sidebar is shown and has the keys.
         assert_eq!(
-            (state.focus, commands),
-            (Focus::Pane, vec![]),
-            "LeavePane should do nothing while the sidebar is hidden"
+            (state.sidebar.hidden, state.focus),
+            (false, Focus::Sidebar),
+            "LeavePane should show a hidden sidebar and focus it"
         );
     }
 
     #[rstest::rstest]
-    fn cmd_l_from_the_sidebar_on_an_attached_session_enters_its_panes() {
+    fn leave_pane_from_the_sidebar_does_nothing() {
         // Given the sidebar on attached thread 2.
         let mut state = left_pane(&[2], 2);
 
-        // When handling MoveFocus(Right) (`Cmd l`).
-        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+        // When handling LeavePane.
+        let commands = IntentHandler::handle(&Intent::LeavePane, &mut state);
+
+        // Then nothing happens.
+        assert_eq!(
+            (state.focus, commands),
+            (Focus::Sidebar, vec![]),
+            "the keys are already out of the panes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_panes_from_the_sidebar_on_an_attached_session_enters_its_panes() {
+        // Given the sidebar on attached thread 2.
+        let mut state = left_pane(&[2], 2);
+
+        // When handling FocusPanes (`<C-S-l>`).
+        IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then keys go into thread 2's pane.
         assert_eq!(
             state.focus,
             Focus::Pane,
-            "Cmd l should go into the selected session's pane"
+            "<C-S-l> should go into the selected session's pane"
         );
     }
 
     #[rstest::rstest]
-    fn cmd_l_from_the_sidebar_returns_attach_and_refresh() {
+    fn focus_panes_from_the_sidebar_returns_attach_and_refresh() {
         // Given the sidebar on attached thread 2.
         let mut state = left_pane(&[2], 2);
 
-        // When handling MoveFocus(Right) (`Cmd l`).
-        let commands = IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+        // When handling FocusPanes (`<C-S-l>`).
+        let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the loop attaches to thread 2 and the statuses are refreshed.
         assert_eq!(
@@ -2352,26 +2376,28 @@ mod tests {
                 Command::RefreshSessions,
                 Command::SaveJumps,
             ],
-            "Cmd l should attach to the selected session, then refresh"
+            "<C-S-l> should attach to the selected session, then refresh"
         );
     }
 
     #[rstest::rstest]
     #[case(&[])]
     #[case(&[1])]
-    fn cmd_l_from_the_sidebar_on_an_unattached_session_keeps_the_keys(#[case] attached: &[i64]) {
+    fn focus_panes_from_the_sidebar_on_an_unattached_session_keeps_the_keys(
+        #[case] attached: &[i64],
+    ) {
         // Given thread 2 selected and unattached, with no thread or thread 1
         // attached.
         let mut state = left_pane(attached, 2);
         let before = state.focus;
 
-        // When handling MoveFocus(Right) (`Cmd l`).
-        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+        // When handling FocusPanes (`<C-S-l>`).
+        IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the keys stay put.
         assert_eq!(
             state.focus, before,
-            "Cmd l with {attached:?} attached should keep the keys"
+            "<C-S-l> with {attached:?} attached should keep the keys"
         );
     }
 
@@ -5083,11 +5109,11 @@ mod tests {
     #[rstest::rstest]
     fn re_entering_the_pane_jump_back_landed_in_keeps_jump_forward() {
         // Given a jump back from thread 2's pane into thread 1's, then a
-        // click on the sidebar and `Cmd l` back into thread 1's pane.
+        // click on the sidebar and `<C-S-l>` back into thread 1's pane.
         let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), on_thread(2)]);
         IntentHandler::handle(&Intent::JumpBack, &mut state);
         IntentHandler::handle(&Intent::LeavePane, &mut state);
-        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+        IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // When handling JumpForward.
         IntentHandler::handle(&Intent::JumpForward, &mut state);
@@ -5108,8 +5134,8 @@ mod tests {
         IntentHandler::handle(&Intent::JumpBack, &mut state);
         IntentHandler::handle(&Intent::LeavePane, &mut state);
 
-        // When handling `Cmd l` back into thread 1's pane.
-        let commands = IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+        // When handling `<C-S-l>` back into thread 1's pane.
+        let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the list isn't saved: nothing was recorded.
         assert!(
@@ -6995,71 +7021,91 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn move_focus_left_from_the_leftmost_pane_focuses_the_sidebar() {
-        // Given thread 1's lone pane with the keys.
+    fn move_focus_left_from_the_only_tabs_leftmost_pane_keeps_the_keys() {
+        // Given thread 1's lone pane in its only tab, with the keys.
         let mut state = with_layout(Focus::Pane);
 
-        // When moving the focus left.
-        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
-
-        // Then the sidebar has the keys.
-        assert_eq!(state.focus, Focus::Sidebar, "leftmost left is the sidebar");
-    }
-
-    #[rstest::rstest]
-    fn move_focus_left_from_the_leftmost_pane_returns_detach() {
-        // Given thread 1's lone pane with the keys.
-        let mut state = with_layout(Focus::Pane);
-
-        // When moving the focus left.
+        // When moving the focus left (`Cmd h`).
         let commands = IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
 
-        // Then the pane loses the keys.
-        assert!(
-            commands.contains(&Command::Detach),
-            "leaving the pane should detach its keys"
-        );
-    }
-
-    #[rstest::rstest]
-    fn move_focus_left_with_the_sidebar_hidden_keeps_the_keys() {
-        // Given thread 1's lone pane with the keys and the sidebar hidden.
-        let mut state = with_layout(Focus::Pane);
-        state.sidebar.hidden = true;
-
-        // When moving the focus left.
-        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
-
-        // Then the pane keeps the keys.
+        // Then the pane keeps the keys and nothing happens.
         assert_eq!(
-            state.focus,
-            Focus::Pane,
-            "a hidden sidebar can't take the keys"
+            (state.focus, commands),
+            (Focus::Pane, vec![]),
+            "Cmd h never reaches the sidebar"
         );
     }
 
     #[rstest::rstest]
-    fn move_focus_right_from_the_sidebar_enters_the_shown_layout() {
+    #[case::left(NavDirection::Left)]
+    #[case::down(NavDirection::Down)]
+    #[case::up(NavDirection::Up)]
+    #[case::right(NavDirection::Right)]
+    fn move_focus_in_the_sidebar_does_nothing(#[case] nav: NavDirection) {
         // Given thread 1's layout shown while the sidebar has the keys.
         let mut state = with_layout(Focus::Sidebar);
 
-        // When moving the focus right.
-        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+        // When moving the focus (`Cmd h/j/k/l`).
+        let commands = IntentHandler::handle(&Intent::MoveFocus(nav), &mut state);
 
-        // Then the keys are in the pane.
-        assert_eq!(state.focus, Focus::Pane, "Cmd l enters the layout");
+        // Then the sidebar keeps the keys and nothing happens.
+        assert_eq!(
+            (state.focus, commands),
+            (Focus::Sidebar, vec![]),
+            "Cmd {nav:?} does nothing in the sidebar"
+        );
     }
 
     #[rstest::rstest]
-    fn move_focus_right_from_the_sidebar_without_a_layout_keeps_the_keys() {
+    fn focus_panes_from_the_sidebar_without_a_layout_keeps_the_keys() {
         // Given thread 1 selected but not attached.
         let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
 
-        // When moving the focus right.
-        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+        // When handling FocusPanes (`<C-S-l>`).
+        IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the sidebar keeps the keys.
         assert_eq!(state.focus, Focus::Sidebar, "nothing is shown to enter");
+    }
+
+    #[rstest::rstest]
+    fn focus_panes_from_a_pane_does_nothing() {
+        // Given thread 1's pane with the keys.
+        let mut state = with_layout(Focus::Pane);
+
+        // When handling FocusPanes (`<C-S-l>`).
+        let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
+
+        // Then nothing happens.
+        assert_eq!(
+            (state.focus, commands),
+            (Focus::Pane, vec![]),
+            "the keys are already in the panes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_focus_from_a_pane_focuses_the_sidebar() {
+        // Given thread 1's pane with the keys.
+        let mut state = with_layout(Focus::Pane);
+
+        // When handling SwapFocus (`<C-g> e`).
+        IntentHandler::handle(&Intent::SwapFocus, &mut state);
+
+        // Then the sidebar has the keys.
+        assert_eq!(state.focus, Focus::Sidebar, "<C-g> e leaves the pane");
+    }
+
+    #[rstest::rstest]
+    fn swap_focus_from_the_sidebar_enters_the_shown_layout() {
+        // Given thread 1's layout shown while the sidebar has the keys.
+        let mut state = with_layout(Focus::Sidebar);
+
+        // When handling SwapFocus (`<C-g> e`).
+        IntentHandler::handle(&Intent::SwapFocus, &mut state);
+
+        // Then the keys are in the pane.
+        assert_eq!(state.focus, Focus::Pane, "<C-g> e enters the layout");
     }
 
     #[rstest::rstest]

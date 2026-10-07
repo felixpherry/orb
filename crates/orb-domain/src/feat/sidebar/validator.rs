@@ -1,5 +1,5 @@
-//! Checks whether the user can resize the sidebar or move the keys to it
-//! (neither while it's hidden), or rename the selected row (only a session).
+//! Checks whether the user can resize the sidebar (not while it's hidden),
+//! or rename the selected row (only a session).
 
 use wherror::Error;
 
@@ -21,27 +21,6 @@ pub enum ResizeError {
 pub fn validate_resize(state: &AppState) -> Result<(), ResizeError> {
     if state.sidebar.hidden {
         Err(ResizeError::Hidden)
-    } else {
-        Ok(())
-    }
-}
-
-/// Why focusing the sidebar can't proceed.
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error(debug)]
-pub enum FocusSidebarError {
-    /// The sidebar is hidden.
-    Hidden,
-}
-
-/// Allow focusing the sidebar only while it's shown; `<C-g> s` shows it.
-///
-/// # Errors
-///
-/// Returns [`FocusSidebarError::Hidden`] while the sidebar is hidden.
-pub fn validate_focus_sidebar(state: &AppState) -> Result<(), FocusSidebarError> {
-    if state.sidebar.hidden {
-        Err(FocusSidebarError::Hidden)
     } else {
         Ok(())
     }
@@ -69,10 +48,7 @@ pub fn validate_rename(state: &AppState) -> Result<(), RenameError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FocusSidebarError, RenameError, ResizeError, validate_focus_sidebar, validate_rename,
-        validate_resize,
-    };
+    use super::{RenameError, ResizeError, validate_rename, validate_resize};
     use crate::AppState;
     use crate::feat::sessions::state::{Sessions, SidebarItem};
     use crate::feat::sidebar::state::SidebarView;
@@ -100,22 +76,6 @@ mod tests {
             result,
             Err(ResizeError::Hidden),
             "a hidden sidebar can't be resized"
-        );
-    }
-
-    #[rstest::rstest]
-    fn focus_sidebar_rejected_while_hidden() {
-        // Given a hidden sidebar.
-        let state = hidden();
-
-        // When validating focusing it.
-        let result = validate_focus_sidebar(&state);
-
-        // Then validation fails with Hidden.
-        assert_eq!(
-            result,
-            Err(FocusSidebarError::Hidden),
-            "a hidden sidebar can't take the keys"
         );
     }
 

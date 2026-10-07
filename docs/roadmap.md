@@ -36,7 +36,7 @@ Deliberately **not** built, because native Claude already does them inside its p
 - Installed tools: nvim, lazygit, yazi, gh, python3 (for the Claude hook), terminal-notifier 3.1.0 (Homebrew; clickable notifications), pi 1.0.0 (`~/.local/bin/pi`) and zmx 0.8.1 (Homebrew tap `neurosnap/tap`; it hosts every pane). Doesn't use VS Code.
 - Setup orb needs:
   - `orb integration install`, once, for the Claude hook and the pi extension.
-  - The kitty `map` lines for the Cmd keys: `map cmd+X send_key super+X` for `h`, `j`, `k`, `l`, the four arrows, `n`, `x`, `plus`, `equal`, `minus`, `1` to `5`, `[`, `]`, `i` and `o` (README lists them).
+  - The kitty `map` lines for the Cmd keys: `map cmd+X send_key super+X` for `h`, `j`, `k`, `l`, the four arrows, `n`, `x`, `plus`, `equal`, `minus`, `1` to `9`, `[`, `]`, `i` and `o`, plus `map ctrl+shift+h no_op` and `map ctrl+shift+l no_op` so kitty's own `show_scrollback` and `next_layout` let `<C-S-h>`/`<C-S-l>` through (README lists them).
   - terminal-notifier allowed in System Settings → Notifications. Until then, it prints `Notifications are not allowed for this application` and exits 3, and orb re-sends each notice through `osascript`, whose click opens Script Editor instead of going back to orb.
   - kitty's remote control on a socket (`allow_remote_control` and `listen_on` in `kitty.conf`, which set `KITTY_LISTEN_ON`), so that a notification click can bring kitty forward.
 
@@ -82,8 +82,8 @@ Sidebar on the left, the selected session's tabs on the right (or the start scre
 
 | Focus | Keys |
 |---|---|
-| Sidebar | `j`/`k` next/prev session card or agent row, wrapping at the ends · `gg`/`G` first/last row · `<C-d>`/`<C-u>` half the sidebar's height · `⏎` move the keys into the session's panes (resuming it if settled; on the Settled header: open/close; on an agent row: show its tab with the keys in its pane) · `p` pin/unpin (sessions only) · `s` settle/un-settle (settling asks `No`/`Yes`; sessions only) · `d` delete (after a `No`/`Yes` confirm; on an agent row: close its pane after a `No`/`Yes` confirm) · `r` rename (on an agent row: name its pane) · `/`/`i` search · `l`/`h` open/close the Settled shelf · `q` quit orb · the Cmd keys and `<C-g>` keys below |
-| Pane | every key goes to the pane's program, except the Cmd keys, `<C-g>`, `<C-[>` and `<C-]>` |
+| Sidebar | `j`/`k` next/prev session card or agent row, wrapping at the ends · `gg`/`G` first/last row · `<C-d>`/`<C-u>` half the sidebar's height · `⏎` move the keys into the session's panes (resuming it if settled; on the Settled header: open/close; on an agent row: show its tab with the keys in its pane) · `p` pin/unpin (sessions only) · `s` settle/un-settle (settling asks `No`/`Yes`; sessions only) · `d` delete (after a `No`/`Yes` confirm; on an agent row: close its pane after a `No`/`Yes` confirm) · `r` rename (on an agent row: name its pane) · `/`/`i` search · `l`/`h` open/close the Settled shelf · `<C-S-l>` into the panes · the Cmd keys (`Cmd h/j/k/l` do nothing here) and `<C-g>` keys below |
+| Pane | every key goes to the pane's program, except the Cmd keys, `<C-S-h>`, `<C-g>`, `<C-[>` and `<C-]>` |
 | Picker | typing filters (in the search picker it searches the transcripts) · `←`/`→` move the filter cursor · `Backspace`/`<C-w>` delete a char/word · `<C-j>`/`<C-k>` or `↑`/`↓` next/prev item, wrapping at the ends (focus stays in the filter input) · `<C-d>`/`<C-u>` half page, stopping at the ends · `⏎` pick (nothing in the worktree picker) · `Tab` open the highlighted directory (directory picker) · `<C-x>` remove the highlighted project (project filter, after a `No`/`Yes` confirm), or delete the highlighted worktree (worktree picker, after a `No`/`Yes` confirm; refused while a session in it isn't settled) · `<C-s>` show/hide settled sessions (session picker) · `Esc` cancel |
 | Rename box, search | the picker's keys: typing edits the text · `←`/`→` move its cursor · `Backspace`/`<C-w>` delete a char/word · search only: `<C-j>`/`<C-k>` or `↓`/`↑` next/prev match, wrapping at the ends · rename `⏎` saves (an empty or whitespace-only name clears orb's name, back to the agent's title) · search `⏎` clears the text and keeps the cursor on the match (with no match it acts as `Esc`) · `Esc` cancels the rename, or clears the search and puts the cursor back on the row it was on before `/` (the first row if that one is gone) · the other picker keys do nothing |
 
@@ -91,15 +91,18 @@ Full key table:
 
 | Key | Action |
 |---|---|
-| `Cmd h/j/k/l`, Cmd arrows | Move focus; leftmost `Cmd h` → sidebar; `Cmd l` from sidebar → panes; rightmost `Cmd l` → next tab |
+| `Cmd h/j/k/l`, Cmd arrows | Move focus between panes; at the tab's left/right edge go to the previous/next tab, wrapping, focusing the pane on the edge entered; nothing in the sidebar |
 | `Cmd n` | Add a pane (re-tiles the tab) |
 | `Cmd x` | Close pane |
 | `Cmd +`/`Cmd =`, `Cmd -` | Grow / shrink focused pane or sidebar |
-| `Cmd 1` to `Cmd 5` | Go to tab N |
+| `Cmd 1` to `Cmd 9` | Go to tab N |
 | `Cmd [` / `Cmd ]` | Previous / next tab |
 | `Cmd i` / `Cmd o` | Move tab left / right |
 | `Cmd f` | Unbound (reserved for floating panes) |
 | `<C-[>` / `<C-]>` | Jump list back / forward |
+| `<C-S-h>` / `<C-S-l>` | Keys to the sidebar (showing it) / into the shown session's panes |
+| `<C-g> e` | Keys to the sidebar or into the panes, whichever they aren't in |
+| `<C-g> q` | Quit orb |
 | `<C-g> s` | Toggle sidebar |
 | `<C-g> p d/r/f/x/c` | Pane: split down, split right, zoom, close, rename |
 | `<C-g> t n/x/r/1-9` | Tab: new, close, rename, go to N |
@@ -115,12 +118,12 @@ Full key table:
 | `<C-g> <C-g>` | Send Ctrl g to the focused pane |
 
 - Keys not listed here are defined by the user in a plan. Agents don't invent bindings.
-- Routing order for a key: a picker, the rename box or the search takes it first; then the Cmd keys; then `<C-[>`/`<C-]>` (bare Ctrl only); then `<C-g>` and which-key; then the sidebar's plain keys while the sidebar has the keys; else the focused pane.
+- Routing order for a key: a picker, the rename box or the search takes it first; then the Cmd keys; then `<C-S-h>`/`<C-S-l>`; then `<C-[>`/`<C-]>` (bare Ctrl only); then `<C-g>` and which-key; then the sidebar's plain keys while the sidebar has the keys; else the focused pane.
 - `<C-g> <C-g>` sends Ctrl g to the focused pane, which Claude uses to open the prompt in `$EDITOR`.
 - `<C-[>` never matches a plain Esc: under kitty's disambiguate flag Ctrl+[ arrives apart from Esc. The legacy `<C-]>` byte reads as Ctrl+5 and isn't matched (research §21).
 - In a pane, a key that doesn't continue a pending `<C-g>` sequence is swallowed, and Esc closes the popup.
 - Keys are bound by what's selected, so which-key never lists a key that does nothing there: `<C-g> w`/`<C-g> b` not on Incognito, Research or Learn sessions; `+pane` and `<C-g> <C-g>` in panes only; `<C-g> f` in the sidebar only; `p`/`s` only on a session card, `r`/`d` on a card or an agent row.
-- `q` quits orb from the sidebar; every pane keeps running under zmx. There is no `:` command line (dropped in M9; see Backlog).
+- `<C-g> q` quits orb from the sidebar or a pane; every pane keeps running under zmx. There is no `:` command line (dropped in M9; see Backlog).
 - **Look** (LazyVim's default which-key, the helix preset, in tokyonight-moon): a rounded `#589ed7` box on `bg_dark` in the bottom-right corner, sitting on the mode line, as tall as its rows (cut off when the screen is shorter); the pending keys in the top border in orange (`<C-g>` for the leader); one `key ➜ icon desc` row per next key (key cyan and right-aligned, `➜` dim, a Nerd Font icon in its own colour, the description magenta, a group as blue `+name`) in which-key's order (letters and digits before symbols, lowercase before its capital); `esc close  ⌫ back` on the last row.
 
 ### Start screen

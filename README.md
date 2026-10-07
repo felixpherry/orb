@@ -20,9 +20,9 @@ Then:
 2. `<C-g> n` picks a project, then a workspace (the checkout, a new worktree, or a worktree the project used before) and, for a new worktree, its base branch. The session opens with one shell.
 3. Type `claude` or `pi` in the shell. The pane becomes an agent row under the session's card.
 4. `Cmd n` adds a pane and re-tiles the tab, `<C-g> p r`/`p d` split the pane right/down and share the space evenly, and `<C-g> t n` opens a tab.
-5. `q` in the sidebar quits orb. Every pane keeps running under zmx, and orb reattaches them when it starts again.
+5. `<C-g> q` quits orb. Every pane keeps running under zmx, and orb reattaches them when it starts again.
 
-The Cmd keys reach orb only through kitty `map` lines in `kitty.conf`:
+The Cmd keys reach orb only through kitty `map` lines in `kitty.conf`, and `<C-S-h>`/`<C-S-l>` only once kitty stops using them itself:
 
 ```
 map cmd+h send_key super+h
@@ -43,10 +43,16 @@ map cmd+2 send_key super+2
 map cmd+3 send_key super+3
 map cmd+4 send_key super+4
 map cmd+5 send_key super+5
+map cmd+6 send_key super+6
+map cmd+7 send_key super+7
+map cmd+8 send_key super+8
+map cmd+9 send_key super+9
 map cmd+[ send_key super+[
 map cmd+] send_key super+]
 map cmd+i send_key super+i
 map cmd+o send_key super+o
+map ctrl+shift+h no_op
+map ctrl+shift+l no_op
 ```
 
 ## Demo
@@ -86,18 +92,21 @@ The demo shows, in order:
 
 ## Keys
 
-`<C-g>` is the leader in the sidebar and in panes; press it and wait for the which-key popup. While a pane has the keys, every key goes to its program except the Cmd keys, `<C-g>`, `<C-[>` and `<C-]>`.
+`<C-g>` is the leader in the sidebar and in panes; press it and wait for the which-key popup. While a pane has the keys, every key goes to its program except the Cmd keys, `<C-S-h>`, `<C-g>`, `<C-[>` and `<C-]>`.
 
 | Key | Action |
 | --- | --- |
-| `Cmd h/j/k/l`, Cmd arrows | Move focus between panes; `Cmd h` from the leftmost pane goes to the sidebar, `Cmd l` from the sidebar goes back, and `Cmd l` from the rightmost pane goes to the next tab |
+| `Cmd h/j/k/l`, Cmd arrows | Move focus between panes; at the tab's left or right edge, go to the previous or next tab (wrapping) and focus its pane on that edge. They do nothing in the sidebar |
 | `Cmd n` | Add a pane (re-tiles the tab) |
 | `Cmd x` | Close the pane |
 | `Cmd +` / `Cmd =`, `Cmd -` | Grow / shrink the focused pane or the sidebar |
-| `Cmd 1` to `Cmd 5` | Go to tab N |
+| `Cmd 1` to `Cmd 9` | Go to tab N |
 | `Cmd [` / `Cmd ]` | Previous / next tab |
 | `Cmd i` / `Cmd o` | Move the tab left / right |
 | `<C-[>` / `<C-]>` | Jump back / forward through the jump list |
+| `<C-S-h>` / `<C-S-l>` | Move the keys to the sidebar (showing it if hidden) / into the shown session's panes |
+| `<C-g> e` | Move the keys to the sidebar or into the panes, whichever they aren't in |
+| `<C-g> q` | Quit orb (every pane keeps running) |
 | `<C-g> s` | Hide or show the sidebar |
 | `<C-g> p d/r/f/x/c` | In a pane: split down, split right, zoom, close, rename |
 | `<C-g> t n/x/r/1-9` | Tab: new, close, rename, go to N |
@@ -124,9 +133,8 @@ In the sidebar:
 | `r` | Rename the session, or name the agent's pane on an agent row |
 | `/` or `i` | Search |
 | `l` / `h` | Open / close the Settled shelf |
-| `q` | Quit orb (every pane keeps running) |
 
-`<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎`, `Cmd l` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
+`<C-[>`/`<C-]>` move through a jump list like neovim's. Moving the keys into a session's panes (`⏎`, `<C-S-l>` or `<C-g> e` from the sidebar, a double-click on its row, or a click into a pane), `gg`/`G`, a search ended by `⏎`, a `<C-g> n` pick, and a session or search picker pick are jumps; `j`/`k` and `<C-d>`/`<C-u>` aren't. orb keeps the newest 20 rows, each at most once, across restarts. A jump selects the session and leaves the keys where they were, in its panes when pressed from a pane. It never resumes a settled session or clears the project filter.
 
 ## Mouse
 

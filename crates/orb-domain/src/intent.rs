@@ -35,9 +35,9 @@ pub enum Intent {
     /// Hide the sidebar, giving the right side the full width, or show it
     /// again.
     ToggleSidebar,
-    /// Move the focus to the pane that way; from the leftmost pane to the
-    /// sidebar, from the rightmost to the next tab, and from the sidebar
-    /// (`Right`) into the shown layout.
+    /// Move the focus to the pane that way; from the tab's left or right edge
+    /// to the previous or next tab, wrapping. Only while the keys are in a
+    /// pane.
     MoveFocus(NavDirection),
     /// Split the focused pane, the new shell taking the focus.
     SplitPane(Split),
@@ -75,8 +75,14 @@ pub enum Intent {
     /// Attach to the selected session (un-settling a settled one), or open or
     /// close the Settled shelf on its header.
     Attach,
-    /// Move the keys from a pane to the sidebar, keeping the panes shown.
+    /// Move the keys from a pane to the sidebar, showing it if it's hidden
+    /// and keeping the panes shown.
     LeavePane,
+    /// Move the keys from the sidebar into the shown session's panes.
+    FocusPanes,
+    /// Move the keys from a pane to the sidebar, or from the sidebar into
+    /// the shown session's panes.
+    SwapFocus,
     /// Send Ctrl g to the focused pane's program (`<C-g> <C-g>`, since
     /// `<C-g>` alone is orb's leader).
     SendCtrlG,
@@ -188,6 +194,8 @@ impl fmt::Display for Intent {
             Self::PickerNext | Self::PickerWheelNext => "next item",
             Self::PickerPrev | Self::PickerWheelPrev => "previous item",
             Self::ToggleSidebar | Self::LeavePane => "sidebar",
+            Self::FocusPanes => "panes",
+            Self::SwapFocus => "switch focus",
             Self::MoveFocus(NavDirection::Left) => "focus left",
             Self::MoveFocus(NavDirection::Up) => "focus up",
             Self::MoveFocus(NavDirection::Down) => "focus down",

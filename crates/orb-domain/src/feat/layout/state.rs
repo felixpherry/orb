@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
 
-use super::tree::{NavDirection, Split, TileLayout, find_in_direction};
+use super::tree::{NavDirection, PaneInfo, Split, TileLayout, find_in_direction};
 use crate::feat::sessions::state::{PaneId, SessionId};
 use crate::feat::sidebar::state::STEP;
 use crate::feat::zmx::zmx_service::ZmxSession;
@@ -303,13 +303,41 @@ fn inside(area: Rect) -> Rect {
     )
 }
 
+/// The pane a move `nav` into a tab focuses: one on the edge it enters
+/// from (the rightmost column moving left, the leftmost moving right). The
+/// tab's own focus is kept when it's on that edge; else the topmost
+/// pane there that isn't collapsed in a stack.
+fn entry_pane(panes: &[PaneInfo], nav: NavDirection) -> Option<PaneId> {
+    let edge: Vec<&PaneInfo> = match nav {
+        NavDirection::Left => {
+            let right = panes.iter().map(|info| info.rect.right()).max()?;
+            panes
+                .iter()
+                .filter(|info| info.rect.right() == right)
+                .collect()
+        }
+        NavDirection::Right => {
+            let left = panes.iter().map(|info| info.rect.x).min()?;
+            panes.iter().filter(|info| info.rect.x == left).collect()
+        }
+        NavDirection::Up | NavDirection::Down => return None,
+    };
+    match edge.iter().find(|info| info.is_focused) {
+        Some(info) => Some(info.id),
+        None => edge
+            .iter()
+            .filter(|info| !info.collapsed)
+            .min_by_key(|info| info.rect.y)
+            .or_else(|| edge.iter().min_by_key(|info| info.rect.y))
+            .map(|info| info.id),
+    }
+}
+
 /// What a focus move did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusMove {
-    /// Another pane, or the next tab's focused pane, has the focus.
+    /// Another pane, in this tab or the one beside it, has the focus.
     Moved,
-    /// Nothing is left of the focused pane: the keys go to the sidebar.
-    Sidebar,
     /// Nothing that way; nothing changed.
     Stuck,
 }
@@ -467,8 +495,9 @@ impl Layouts {
     }
 
     /// Moves the focus to the pane `nav` of the focused one. With none to the
-    /// left the keys go to the sidebar; with none to the right the next tab
-    /// is shown.
+    /// left or right, the previous or next tab is shown, wrapping, and the
+    /// pane on the edge it's entered from gets the focus. With one tab
+    /// nothing changes.
     pub fn move_focus(&mut self, owner: SessionId, nav: NavDirection) -> FocusMove {
         let body = self.body;
         let Some(layout) = self.sessions.get_mut(&owner) else {
@@ -484,18 +513,23 @@ impl Layouts {
             .iter()
             .find(|info| info.is_focused)
             .and_then(|focused| find_in_direction(focused, nav, &panes));
-        match (neighbour, nav) {
+        let target = match (neighbour, nav) {
             (Some(id), _) => {
                 tab.tree.focus_pane(id);
-                FocusMove::Moved
+                return FocusMove::Moved;
             }
-            (None, NavDirection::Left) => FocusMove::Sidebar,
-            (None, NavDirection::Right) if active + 1 < tab_count => {
-                layout.active = active + 1;
-                FocusMove::Moved
-            }
-            (None, _) => FocusMove::Stuck,
+            (None, NavDirection::Left) if tab_count > 1 => (active + tab_count - 1) % tab_count,
+            (None, NavDirection::Right) if tab_count > 1 => (active + 1) % tab_count,
+            (None, _) => return FocusMove::Stuck,
+        };
+        layout.active = target;
+        if let Some(tab) = layout.tab_mut()
+            && !tab.zoomed
+            && let Some(id) = entry_pane(&tab.tree.panes(body), nav)
+        {
+            tab.tree.focus_pane(id);
         }
+        FocusMove::Moved
     }
 
     /// Focuses `pane` in `owner`'s shown tab.
@@ -1120,43 +1154,101 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn move_focus_left_from_the_leftmost_pane_asks_for_the_sidebar() {
-        // Given a lone pane.
-        let mut layouts = opened();
-
-        // When moving the focus left.
-        let moved = layouts.move_focus(OWNER, NavDirection::Left);
-
-        // Then the keys should go to the sidebar.
-        assert_eq!(moved, FocusMove::Sidebar, "leftmost left is the sidebar");
-    }
-
-    #[rstest::rstest]
-    fn move_focus_right_from_the_rightmost_pane_goes_to_the_next_tab() {
-        // Given three tabs, the first shown.
+    #[case::left_from_the_second(2, NavDirection::Left, 0)]
+    #[case::left_from_the_first_wraps(1, NavDirection::Left, 2)]
+    #[case::right_from_the_first(1, NavDirection::Right, 1)]
+    #[case::right_from_the_last_wraps(3, NavDirection::Right, 0)]
+    fn move_focus_off_the_tab_edge_shows_the_tab_beside_it(
+        #[case] from: usize,
+        #[case] nav: NavDirection,
+        #[case] shown: usize,
+    ) {
+        // Given three one-pane tabs, tab `from` shown.
         let mut layouts = three_tabs();
+        layouts.go_to_tab(OWNER, from);
 
-        // When moving the focus right.
-        let moved = layouts.move_focus(OWNER, NavDirection::Right);
+        // When moving the focus off the tab's edge.
+        let moved = layouts.move_focus(OWNER, nav);
 
-        // Then the second tab is shown.
+        // Then the tab beside it is shown, wrapping past the ends.
         assert_eq!(
             (moved, active(&layouts)),
-            (FocusMove::Moved, Some(1)),
-            "rightmost right shows the next tab"
+            (FocusMove::Moved, Some(shown)),
+            "the edge leads to the tab beside it"
         );
     }
 
     #[rstest::rstest]
-    fn move_focus_right_on_the_last_tab_is_stuck() {
+    fn move_focus_left_into_a_tab_focuses_its_rightmost_pane() {
+        // Given tab 1 with panes 7 and 8 side by side, 7 focused, and tab 2
+        // of pane 9 shown.
+        let mut layouts = split_right();
+        layouts.focus_pane(OWNER, PaneId(7));
+        layouts.new_tab(OWNER, entry(9));
+
+        // When moving the focus left.
+        layouts.move_focus(OWNER, NavDirection::Left);
+
+        // Then tab 1's right pane has the focus.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(8)),
+            "entering from the right focuses the rightmost pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_focus_right_into_a_tab_focuses_its_leftmost_pane() {
+        // Given tab 1 of pane 7 and tab 2 with panes 9 and 10 side by side,
+        // 10 focused, tab 1 shown.
+        let mut layouts = opened();
+        layouts.new_tab(OWNER, entry(9));
+        layouts.split(OWNER, Split::Right, entry(10));
+        layouts.go_to_tab(OWNER, 1);
+
+        // When moving the focus right.
+        layouts.move_focus(OWNER, NavDirection::Right);
+
+        // Then tab 2's left pane has the focus.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(9)),
+            "entering from the left focuses the leftmost pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_focus_into_a_tab_keeps_its_focus_on_the_entry_edge() {
+        // Given tab 1 of pane 7 and tab 2 with pane 9 above pane 10, 10
+        // focused, tab 1 shown.
+        let mut layouts = opened();
+        layouts.new_tab(OWNER, entry(9));
+        layouts.split(OWNER, Split::Down, entry(10));
+        layouts.go_to_tab(OWNER, 1);
+
+        // When moving the focus right.
+        layouts.move_focus(OWNER, NavDirection::Right);
+
+        // Then tab 2 keeps the focus on the lower pane.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(10)),
+            "a focused pane on the entry edge keeps the focus"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::left(NavDirection::Left)]
+    #[case::right(NavDirection::Right)]
+    fn move_focus_off_the_edge_of_the_only_tab_is_stuck(#[case] nav: NavDirection) {
         // Given a lone pane in the only tab.
         let mut layouts = opened();
 
-        // When moving the focus right.
-        let moved = layouts.move_focus(OWNER, NavDirection::Right);
+        // When moving the focus off its edge.
+        let moved = layouts.move_focus(OWNER, nav);
 
         // Then nothing moves.
-        assert_eq!(moved, FocusMove::Stuck, "nothing is right of the last tab");
+        assert_eq!(moved, FocusMove::Stuck, "one tab has nothing beside it");
     }
 
     #[rstest::rstest]

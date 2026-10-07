@@ -894,6 +894,8 @@ Tags as in §6.
 - Ctrl+[ under the disambiguate flag is `CSI 91;5u` (`Char('[')` with Ctrl); Esc is `CSI 27u` (`KeyCode::Esc`). Without the kitty protocol Ctrl+[ is byte 0x1B, read as Esc.
 - Ctrl+] is `CSI 93;5u`; its legacy byte 0x1D reads as Ctrl+5, which is also what kitty sends for a real Ctrl+5 (`CSI 53;5u`).
 - Ctrl+g is `CSI 103;5u`, or byte 0x07 without the protocol; both read as `Char('g')` with Ctrl.
+- Ctrl+Shift+h under `CSI > 5 u` is `CSI 104:72;6u`: key 104, alternate (shifted) key 72, modifiers 1 + Shift + Ctrl. crossterm 0.29 (`parse_csi_u_encoded_key_code`) replaces the key with the shifted codepoint and clears Shift, so it reads as `Char('H')` with only Ctrl. Without the alternate codepoint it reads as `Char('h')` with Ctrl and Shift. Ctrl+Shift+l is the same with 108:76. orb matches both forms and never plain `<C-h>`/`<C-l>`.
+- kitty 0.48.2 binds `kitty_mod+h` to `show_scrollback` and `kitty_mod+l` to `next_layout` by default (`kitty_mod` = ctrl+shift), so neither key reaches orb until `map ctrl+shift+h no_op` and `map ctrl+shift+l no_op` override them. Loaded with kitty's own loader (as in §16), both keys end with the empty definition after the change, and `cmd+6` to `cmd+9` end with `send_key super+6` to `super+9` over kitty's own `sixth_window` to `ninth_window` (verified 2026-10-07).
 - `ratatui-which-key` 0.14: `Keymap::with_leader(key)` replaces the Space leader; its parser reads `<leader>`, `<c-g>`, `<space>` and plain characters, and has no Super modifier.
 
 ### Claude hook input **[verified: Claude Code 2.1.292 bundle]**
