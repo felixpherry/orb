@@ -117,11 +117,13 @@ impl TileLayout {
         ids
     }
 
-    /// Splits the focused pane `split`, the new pane `id` taking the second
-    /// half and the focus.
+    /// Splits the focused pane `split`, the new pane `id` going right after it
+    /// and taking the focus. The run of `split` splits the two panes join is
+    /// re-divided into equal shares.
     pub fn split_focused(&mut self, split: Split, id: PaneId) {
         if let Some(node) = find_pane_mut(&mut self.root, self.focus) {
             *node = split_node(self.focus, split, id, 0.5);
+            even_run(&mut self.root, split, id);
             self.set_focus(id);
         }
     }
@@ -446,6 +448,42 @@ fn template(ids: &[PaneId]) -> Option<Node> {
     even_chain(columns, Split::Right)
 }
 
+/// `node`'s run of `split` splits, flattened: every subtree under it that
+/// isn't itself a `split` split, in tree order. Anything else (a pane, a
+/// split the other way) is a run of one.
+fn run_members(node: &Node, split: Split) -> Vec<Node> {
+    match node {
+        Node::Split {
+            split: direction,
+            first,
+            second,
+            ..
+        } if *direction == split => {
+            let mut members = run_members(first, split);
+            members.extend(run_members(second, split));
+            members
+        }
+        _ => vec![node.clone()],
+    }
+}
+
+/// Shares the run of `split` splits that pane `id` sits in out evenly: the
+/// topmost `split` split whose run has `id` as a member becomes an
+/// [`even_chain`] of that run's members.
+fn even_run(node: &mut Node, split: Split, id: PaneId) {
+    let members = run_members(node, split);
+    if members.len() > 1 && members.contains(&Node::Pane(id)) {
+        if let Some(chain) = even_chain(members, split) {
+            *node = chain;
+        }
+        return;
+    }
+    if let Node::Split { first, second, .. } = node {
+        even_run(first, split, id);
+        even_run(second, split, id);
+    }
+}
+
 fn count_panes(node: &Node) -> usize {
     match node {
         Node::Pane(_) => 1,
@@ -730,6 +768,54 @@ mod tests {
 
         // Then pane 2 has the focus.
         assert_eq!(layout.focused(), pane(2), "the new pane should be focused");
+    }
+
+    #[rstest::rstest]
+    fn split_right_beside_two_columns_gives_three_equal_columns() {
+        // Given panes 1 and 2 side by side, pane 2 focused.
+        let mut layout = halves(2);
+
+        // When splitting pane 2 right with pane 3.
+        layout.split_focused(Split::Right, pane(3));
+
+        // Then the tab is three columns of equal width.
+        let widths: Vec<u16> = columns_of(&layout, AREA)
+            .iter()
+            .filter_map(|column| column.first().map(|rect| rect.width))
+            .collect();
+        assert_eq!(
+            (shape(&layout, AREA), spread(&widths) <= 1),
+            (vec![1, 1, 1], true),
+            "a right split beside two columns should give three even columns, widths {widths:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn split_down_inside_the_middle_column_keeps_the_columns_at_thirds() {
+        // Given three equal columns of panes 1, 2 and 3, pane 2 focused.
+        let mut layout = TileLayout::from_saved(
+            split(
+                Split::Right,
+                1.0 / 3.0,
+                Node::Pane(pane(1)),
+                split(Split::Right, 0.5, Node::Pane(pane(2)), Node::Pane(pane(3))),
+            ),
+            pane(2),
+        );
+
+        // When splitting pane 2 down with pane 4.
+        layout.split_focused(Split::Down, pane(4));
+
+        // Then only the middle column holds two panes, and the columns stay at thirds.
+        let widths: Vec<u16> = columns_of(&layout, AREA)
+            .iter()
+            .filter_map(|column| column.first().map(|rect| rect.width))
+            .collect();
+        assert_eq!(
+            (shape(&layout, AREA), spread(&widths) <= 1),
+            (vec![1, 2, 1], true),
+            "a down split should divide only its column, widths {widths:?}"
+        );
     }
 
     #[rstest::rstest]

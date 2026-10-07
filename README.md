@@ -19,7 +19,7 @@ Then:
 1. `<C-g> a` adds a project from a directory picker (`Tab` opens a folder, `⏎` adds it).
 2. `<C-g> n` picks a project, then a workspace (the checkout, a new worktree, or a worktree the project used before) and, for a new worktree, its base branch. The session opens with one shell.
 3. Type `claude` or `pi` in the shell. The pane becomes an agent row under the session's card.
-4. `Cmd n` adds a pane and re-tiles the tab, `<C-g> p r`/`p d` split the pane right/down, and `<C-g> t n` opens a tab.
+4. `Cmd n` adds a pane and re-tiles the tab, `<C-g> p r`/`p d` split the pane right/down and share the space evenly, and `<C-g> t n` opens a tab.
 5. `q` in the sidebar quits orb. Every pane keeps running under zmx, and orb reattaches them when it starts again.
 
 The Cmd keys reach orb only through kitty `map` lines in `kitty.conf`:

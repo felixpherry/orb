@@ -308,7 +308,8 @@ impl Layouts {
     }
 
     /// Splits the shown tab's focused pane `split` with `pane`, which takes
-    /// the focus; the tab shows every pane again.
+    /// the focus, sharing the space evenly along that direction; the tab shows
+    /// every pane again.
     pub fn split(&mut self, owner: SessionId, split: Split, pane: PaneEntry) {
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
