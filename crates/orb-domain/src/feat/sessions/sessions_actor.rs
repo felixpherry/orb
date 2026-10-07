@@ -117,8 +117,8 @@ use super::state::{
     SidebarItem, Thread, ThreadId, ThreadStatus,
 };
 use super::store::{
-    DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewThread, PaneRow, SettledOverride,
-    Store, TabRow, ThreadRow, Ui,
+    DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewPaneThread, NewThread, PaneRow,
+    SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
 };
 use super::template;
 use super::validator::{group_exists, on_disk};
@@ -130,6 +130,8 @@ use crate::feat::git::worktree::{
     hex, hex_branch, is_orb_worktree, new_worktree_path, previous_worktree, slug,
 };
 use crate::feat::harness::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat, claude};
+use crate::feat::integration::pane_file::{AgentEvent, AgentReport, PaneFiles};
+use crate::feat::integration::{NUDGE, panes_dir};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{PaneEntry, SessionLayout, Tab};
 use crate::feat::layout::tree::{Split, TileLayout};
@@ -176,6 +178,9 @@ pub struct SessionsActorDeps {
     pub incognito_root: PathBuf,
     /// Tells the frontend to redraw.
     pub wake: Wake,
+    /// Neither orb's Claude hook nor its pi extension is installed; the mode
+    /// line says how to install them.
+    pub integration_missing: bool,
 }
 
 /// Owns [`Sessions`](super::state::Sessions) and the harnesses the frontend
@@ -191,7 +196,8 @@ pub struct SessionsActorDeps {
 /// when asked. The intent handler
 /// also moves the cursor, opens and closes the shelf, marks a start as starting, edits a draft's fields before
 /// asking for them to be saved, and resizes or filters the sidebar before
-/// asking for that to be saved.
+/// asking for that to be saved. It binds threads to panes from the agents'
+/// pane files, and keeps each pane's resume command current.
 pub struct SessionsActor {
     services: Services,
     state: State,
@@ -212,6 +218,8 @@ pub struct SessionsActor {
     /// The start waiting for the user to trust the folder its harness names,
     /// and that path.
     pending: Option<(PendingStart, PathBuf)>,
+    /// The agents' reports of what runs in each pane.
+    pane_files: PaneFiles,
 }
 
 /// Poll the session host now.
@@ -979,6 +987,7 @@ impl SessionsActor {
             orb_root,
             incognito_root,
             wake,
+            integration_missing,
         } = deps;
         let _ = fs::create_dir_all(&incognito_root);
         let added = store.add_project(
@@ -1062,7 +1071,7 @@ impl SessionsActor {
             sessions.projects = projects;
             sessions.cursor = None;
             sessions.filter_to(filter);
-            sessions.error = error;
+            sessions.error = error.or_else(|| integration_missing.then(|| NUDGE.to_owned()));
         }
         wake();
         Self {
@@ -1070,6 +1079,7 @@ impl SessionsActor {
             state,
             store,
             worktrees_root,
+            pane_files: PaneFiles::new(panes_dir(&orb_root)),
             orb_root,
             wake,
             poke: Arc::default(),
@@ -1085,6 +1095,7 @@ impl SessionsActor {
     /// long to wait before the next poll: a second while a turn is underway
     /// or orb is attached.
     async fn poll(&mut self) -> Duration {
+        self.follow_pane_files();
         if let Err(report) = self.sync().await {
             self.fail(&report);
         }
@@ -1094,6 +1105,190 @@ impl SessionsActor {
         } else {
             SLOW_POLL
         }
+    }
+
+    /// Applies the agents' reports written since the last poll, oldest first.
+    /// A failed save shows on the mode line.
+    fn follow_pane_files(&mut self) {
+        let mut failed = false;
+        for (pane, report) in self.pane_files.changed() {
+            failed |= self.follow_report(pane, &report).is_err();
+        }
+        if failed {
+            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+            (self.wake)();
+        }
+    }
+
+    /// What `report` from `pane` means for the threads:
+    /// - `end` of the pane's current conversation: the thread leaves the pane,
+    ///   and the pane has nothing to resume;
+    /// - anything else names the conversation now in the pane: its thread
+    ///   keeps the pane (transcript refreshed), or the current thread takes
+    ///   the new id after Claude's `/clear` or pi's `/new`, or the thread
+    ///   holding that id moves in, or a new thread starts; the pane's resume
+    ///   command then names it.
+    ///
+    /// Reports from an agent orb has no harness for, or a pane orb has no row
+    /// for, are ignored.
+    fn follow_report(
+        &mut self,
+        pane: PaneId,
+        report: &AgentReport,
+    ) -> Result<(), Report<StoreError>> {
+        let Some(cwd) = self.panes.get(&pane).map(|row| row.cwd.clone()) else {
+            return Ok(());
+        };
+        let id = HarnessId::new(report.agent.clone());
+        let Some(harness) = self.services.harnesses.get(&id).cloned() else {
+            return Ok(());
+        };
+        let sid = report.session_id.as_str();
+        let holds = |row: &ThreadRow| row.short_id == sid || row.session_id.as_deref() == Some(sid);
+        let current = self.rows.iter().position(|row| row.pane_id == Some(pane));
+        if report.event == AgentEvent::End {
+            let ended = match current.and_then(|i| self.rows.get_mut(i)) {
+                Some(row) if holds(row) => {
+                    row.pane_id = None;
+                    self.store.save_thread(row)?;
+                    true
+                }
+                _ => false,
+            };
+            return if ended {
+                self.set_resume(pane, None)
+            } else {
+                Ok(())
+            };
+        }
+        self.set_resume(pane, Some(&harness.resume_command(sid)))?;
+        let holder = self.rows.iter().position(holds);
+        let swaps = current
+            .and_then(|i| self.rows.get(i))
+            .is_some_and(|row| report.replaces_conversation() && row.harness == id);
+        match (current, holder) {
+            (Some(i), Some(j)) if i == j => {
+                if let Some(row) = self.rows.get_mut(i) {
+                    let before = row.clone();
+                    take_transcript(row, report.transcript.as_ref());
+                    if *row != before {
+                        self.store.save_thread(row)?;
+                    }
+                }
+            }
+            (Some(i), _) if swaps => {
+                if let Some(row) = self.rows.get_mut(i) {
+                    take_session(row, sid);
+                    row.transcript_path.clone_from(&report.transcript);
+                    row.transcript_offset = 0;
+                    self.store.save_thread(row)?;
+                }
+            }
+            (current, Some(j)) => {
+                let old_pane = self
+                    .rows
+                    .get(j)
+                    .and_then(|row| row.pane_id)
+                    .filter(|&old| old != pane);
+                self.unbind(current)?;
+                if let Some(row) = self.rows.get_mut(j) {
+                    row.pane_id = Some(pane);
+                    take_session(row, sid);
+                    take_transcript(row, report.transcript.as_ref());
+                    self.store.save_thread(row)?;
+                }
+                if let Some(old) = old_pane {
+                    self.set_resume(old, None)?;
+                }
+            }
+            (current, None) => {
+                self.unbind(current)?;
+                self.start_pane_thread(pane, cwd, id, report)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes the thread at `index` in the rows, if any, out of its pane.
+    fn unbind(&mut self, index: Option<usize>) -> Result<(), Report<StoreError>> {
+        if let Some(row) = index.and_then(|i| self.rows.get_mut(i)) {
+            row.pane_id = None;
+            self.store.save_thread(row)?;
+        }
+        Ok(())
+    }
+
+    /// Saves and shows a thread `report` started in `pane`, in the project of
+    /// the pane's session, at the top of its threads.
+    fn start_pane_thread(
+        &mut self,
+        pane: PaneId,
+        cwd: PathBuf,
+        harness: HarnessId,
+        report: &AgentReport,
+    ) -> Result<(), Report<StoreError>> {
+        let now = now_ms();
+        let (id, project_id) = self.store.insert_pane_thread(&NewPaneThread {
+            pane,
+            session_id: report.session_id.clone(),
+            transcript_path: report.transcript.clone(),
+            harness: harness.clone(),
+            cwd: cwd.clone(),
+            created_at: now,
+        })?;
+        let row = ThreadRow {
+            id,
+            project_id,
+            short_id: report.session_id.clone(),
+            session_id: Some(report.session_id.clone()),
+            title: None,
+            custom_title: None,
+            cwd,
+            transcript_path: report.transcript.clone(),
+            transcript_offset: 0,
+            created_at: now,
+            turn_started_at: None,
+            branch: None,
+            pinned_at: None,
+            settled_override: None,
+            settled_at: None,
+            unsettled_at: None,
+            last_activity_at: now,
+            last_visited_at: now,
+            ai_titled: false,
+            model: None,
+            permission_mode: None,
+            renamed_title: None,
+            group_id: None,
+            harness,
+            pane_id: Some(pane),
+        };
+        let thread = unpolled(&self.services, &row, &self.panes);
+        self.rows.push(row);
+        if let Some(project) = self
+            .state
+            .write()
+            .sessions
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+        {
+            project.threads.insert(0, thread);
+        }
+        (self.wake)();
+        Ok(())
+    }
+
+    /// Saves pane `pane`'s resume command, unless it already has it.
+    fn set_resume(&mut self, pane: PaneId, resume: Option<&str>) -> Result<(), Report<StoreError>> {
+        let Some(row) = self.panes.get_mut(&pane) else {
+            return Ok(());
+        };
+        if row.resume.as_deref() != resume {
+            self.store.set_pane_resume(pane, resume)?;
+            row.resume = resume.map(str::to_owned);
+        }
+        Ok(())
     }
 
     /// Asks the host what every session is doing, shows it, and stops the
@@ -2657,8 +2852,16 @@ impl SessionsActor {
             .find(|row| row.id == id)
             .and_then(|row| self.panes.get(&row.pane_id?))
             .map(|pane| pane.session_id);
+        let pane = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .and_then(|row| row.pane_id);
         let deleted = self.store.delete_thread(id);
         self.rows.retain(|row| row.id != id);
+        if let Some(pane) = pane {
+            let _ = fs::remove_file(self.pane_files.file(pane));
+        }
         let emptied = session.filter(|session| {
             !self.rows.iter().any(|row| {
                 row.pane_id
@@ -3329,6 +3532,23 @@ fn update_row(
     }
 }
 
+/// Makes `row` the thread of conversation `session_id`.
+fn take_session(row: &mut ThreadRow, session_id: &str) {
+    session_id.clone_into(&mut row.short_id);
+    row.session_id = Some(session_id.to_owned());
+}
+
+/// Points `row` at `transcript` when the report names a different one, read
+/// from its start.
+fn take_transcript(row: &mut ThreadRow, transcript: Option<&PathBuf>) {
+    if let Some(path) = transcript
+        && row.transcript_path.as_ref() != Some(path)
+    {
+        row.transcript_path = Some(path.clone());
+        row.transcript_offset = 0;
+    }
+}
+
 /// Renames the `orb/<hex>` branch of the orb worktree `row` is in to
 /// `orb/<slug>` of its title, once the harness or the user titled it. The old name
 /// stays when that branch already exists or git refuses.
@@ -3839,8 +4059,8 @@ mod tests {
         ThreadStatus,
     };
     use crate::feat::sessions::store::{
-        DraftRow, GroupRow, InsertedThread, LastUsed, LastWorkspace, NewGroup, NewThread,
-        SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
+        DraftRow, GroupRow, InsertedThread, LastUsed, LastWorkspace, NewGroup, NewPaneThread,
+        NewThread, SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::feat::zmx::zmx_service::fake::FakeZmx;
@@ -4590,6 +4810,7 @@ mod tests {
             orb_root: orb_root.to_owned(),
             incognito_root: incognito_root.to_owned(),
             wake: Arc::new(|| {}),
+            integration_missing: false,
         });
         (actor, state)
     }
@@ -4626,6 +4847,7 @@ mod tests {
             orb_root: PathBuf::from(ORB_ROOT),
             incognito_root: PathBuf::from(INCOGNITO_ROOT),
             wake: Arc::new(|| {}),
+            integration_missing: false,
         }
     }
 
@@ -5218,6 +5440,29 @@ mod tests {
                 HarnessInfo::placeholder(HarnessId::new(OTHER), OTHER),
             ],
             "restore should publish a placeholder per harness before any probe answers"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_without_integrations_shows_the_install_nudge() -> Result<(), Report<StoreError>> {
+        // Given neither orb's Claude hook nor its pi extension is installed.
+        let claude = FakeHost::listing(Vec::new());
+        let other = FakeHost::listing(Vec::new());
+        let state = State::default();
+        let deps = SessionsActorDeps {
+            integration_missing: true,
+            ..deps_beside(Store::open_in_memory()?, &claude, &other, &state)
+        };
+
+        // When restoring.
+        let _actor = SessionsActor::restore(deps);
+
+        // Then the mode line says how to install them.
+        assert_eq!(
+            state.read().sessions.error.as_deref(),
+            Some(crate::feat::integration::NUDGE),
+            "a missing integration should show the install nudge"
         );
         Ok(())
     }
@@ -12936,6 +13181,7 @@ mod tests {
             orb_root: PathBuf::from(ORB_ROOT),
             incognito_root: PathBuf::from(INCOGNITO_ROOT),
             wake,
+            integration_missing: false,
         });
         actor.poll().await;
         {
@@ -13498,6 +13744,395 @@ mod tests {
         assert!(
             calls.is_empty(),
             "a worktree already back should need no git"
+        );
+        Ok(())
+    }
+
+    /// Claude thread `aa` in a pane of its own and a shell pane beside it in
+    /// the same session, the actor reading pane files under a scratch orb
+    /// folder.
+    struct PaneReports {
+        dir: tempfile::TempDir,
+        thread: InsertedThread,
+        shell: PaneId,
+        actor: SessionsActor,
+        state: State,
+    }
+
+    impl PaneReports {
+        fn new() -> Result<Self, Report<StoreError>> {
+            Self::with(|_, _| Ok(()))
+        }
+
+        /// The fixture, with `setup` run on its store and `aa`'s pane first.
+        fn with<F>(setup: F) -> Result<Self, Report<StoreError>>
+        where
+            F: FnOnce(&Store, &InsertedThread) -> Result<(), Report<StoreError>>,
+        {
+            let dir = tempfile::tempdir().change_context(StoreError)?;
+            let store = Store::open_in_memory()?;
+            let thread = insert_thread(&store, "aa", None)?;
+            let shell = store.insert_pane(thread.session, Path::new(PROJECT_ROOT))?;
+            setup(&store, &thread)?;
+            let host = FakeHost::listing(Vec::new());
+            let (actor, state) = start_in(
+                store,
+                &host,
+                &FakeGit::local(),
+                &FakeTrust::accepting(),
+                Path::new(NO_CLAUDE_DIR),
+                dir.path(),
+                Path::new(INCOGNITO_ROOT),
+            );
+            Ok(Self {
+                dir,
+                thread,
+                shell,
+                actor,
+                state,
+            })
+        }
+
+        /// Pane `pane`'s file.
+        fn file(&self, pane: PaneId) -> PathBuf {
+            self.dir
+                .path()
+                .join("panes")
+                .join(format!("{}.json", pane.0))
+        }
+
+        /// Writes Claude's `event` report of conversation `session_id` from
+        /// `pane`, started for `source`, its transcript `/t/<id>.jsonl`.
+        fn report(
+            &self,
+            pane: PaneId,
+            event: &str,
+            session_id: &str,
+            source: Option<&str>,
+        ) -> Result<(), Report<StoreError>> {
+            fs::create_dir_all(self.dir.path().join("panes")).change_context(StoreError)?;
+            let json = serde_json::json!({
+                "agent": "claude",
+                "event": event,
+                "session_id": session_id,
+                "transcript": format!("/t/{session_id}.jsonl"),
+                "source": source,
+                "at": now_ms(),
+            });
+            fs::write(self.file(pane), json.to_string()).change_context(StoreError)
+        }
+
+        /// The saved threads.
+        fn rows(&self) -> Result<Vec<ThreadRow>, Report<StoreError>> {
+            Ok(self.actor.store.load()?.1)
+        }
+
+        /// The saved thread `id`.
+        fn row(&self, id: ThreadId) -> Result<ThreadRow, Report<StoreError>> {
+            self.rows()?
+                .into_iter()
+                .find(|row| row.id == id)
+                .ok_or_else(|| Report::new(StoreError).attach("the thread isn't saved"))
+        }
+
+        /// Pane `pane`'s saved resume command.
+        fn resume(&self, pane: PaneId) -> Result<Option<String>, Report<StoreError>> {
+            Ok(self
+                .actor
+                .store
+                .layouts()?
+                .panes
+                .into_iter()
+                .find(|row| row.id == pane)
+                .and_then(|row| row.resume))
+        }
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_start_creates_a_thread_in_that_pane() -> Result<(), Report<StoreError>> {
+        // Given Claude started conversation s-new in the shell pane.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.shell, "start", "s-new", Some("startup"))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then a Claude thread for s-new runs in that pane, with its transcript.
+        let found: Vec<_> = fx
+            .rows()?
+            .into_iter()
+            .filter(|row| row.short_id == "s-new")
+            .map(|row| {
+                (
+                    row.pane_id,
+                    row.session_id,
+                    row.harness,
+                    row.transcript_path,
+                )
+            })
+            .collect();
+        let expected = vec![(
+            Some(fx.shell),
+            Some("s-new".to_owned()),
+            HarnessId::new("claude"),
+            Some(PathBuf::from("/t/s-new.jsonl")),
+        )];
+        assert_eq!(
+            found, expected,
+            "the report should start a thread in the pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_start_shows_the_new_thread() -> Result<(), Report<StoreError>> {
+        // Given Claude started conversation s-new in the shell pane.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.shell, "start", "s-new", Some("startup"))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then the new thread is shown.
+        let id = fx
+            .rows()?
+            .into_iter()
+            .find(|row| row.short_id == "s-new")
+            .map(|row| row.id)
+            .ok_or_else(|| Report::new(StoreError).attach("no thread for s-new"))?;
+        assert!(
+            shown(&fx.state, id).is_some(),
+            "the new thread should be shown in its project"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_resume_binds_the_thread_holding_that_session()
+    -> Result<(), Report<StoreError>> {
+        // Given Claude resumed thread aa's conversation in the shell pane.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.shell, "start", "aa", Some("resume"))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then aa, still the only thread, runs in the shell pane.
+        let found: Vec<_> = fx
+            .rows()?
+            .into_iter()
+            .map(|row| (row.id, row.pane_id))
+            .collect();
+        assert_eq!(
+            found,
+            vec![(fx.thread.thread, Some(fx.shell))],
+            "the thread holding the session should move into the pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_resume_takes_the_pane_from_its_previous_thread()
+    -> Result<(), Report<StoreError>> {
+        // Given thread s-old runs in the shell pane, and Claude then resumed
+        // aa's conversation there.
+        let mut old = None;
+        let mut fx = PaneReports::with(|store, thread| {
+            let shell = store
+                .layouts()?
+                .panes
+                .into_iter()
+                .map(|row| row.id)
+                .find(|&pane| pane != thread.pane)
+                .ok_or_else(|| Report::new(StoreError).attach("no shell pane"))?;
+            old = Some(
+                store
+                    .insert_pane_thread(&NewPaneThread {
+                        pane: shell,
+                        session_id: "s-old".to_owned(),
+                        transcript_path: None,
+                        harness: HarnessId::new("claude"),
+                        cwd: PathBuf::from(PROJECT_ROOT),
+                        created_at: now_ms(),
+                    })?
+                    .0,
+            );
+            Ok(())
+        })?;
+        let old = old.ok_or_else(|| Report::new(StoreError))?;
+        fx.report(fx.shell, "start", "aa", Some("resume"))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then s-old's thread no longer has a pane.
+        assert_eq!(
+            fx.row(old)?.pane_id,
+            None,
+            "the pane's earlier thread should leave it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::claude_clear("clear")]
+    #[case::pi_new("new")]
+    #[tokio::test]
+    async fn pane_report_after_clear_keeps_the_same_thread(
+        #[case] source: &str,
+    ) -> Result<(), Report<StoreError>> {
+        // Given aa's pane started a fresh conversation s-2 in its place.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.thread.pane, "start", "s-2", Some(source))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then thread aa holds s-2.
+        assert_eq!(
+            fx.row(fx.thread.thread)?.session_id.as_deref(),
+            Some("s-2"),
+            "the same thread should take the new conversation"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_after_clear_swaps_the_transcript() -> Result<(), Report<StoreError>> {
+        // Given aa's pane ran /clear into conversation s-2.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.thread.pane, "start", "s-2", Some("clear"))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then thread aa reads s-2's transcript.
+        assert_eq!(
+            fx.row(fx.thread.thread)?.transcript_path,
+            Some(PathBuf::from("/t/s-2.jsonl")),
+            "the thread should read the new conversation's transcript"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_end_unbinds_the_thread() -> Result<(), Report<StoreError>> {
+        // Given aa's conversation ended in its pane.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.thread.pane, "end", "aa", None)?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then aa no longer has a pane.
+        assert_eq!(
+            fx.row(fx.thread.thread)?.pane_id,
+            None,
+            "an ended thread should leave its pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_end_of_another_session_changes_nothing() -> Result<(), Report<StoreError>>
+    {
+        // Given aa's pane reports the end of some other conversation.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.thread.pane, "end", "zz", None)?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then aa keeps its pane.
+        assert_eq!(
+            fx.row(fx.thread.thread)?.pane_id,
+            Some(fx.thread.pane),
+            "a stale end should change nothing"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_start_sets_the_panes_resume_command() -> Result<(), Report<StoreError>> {
+        // Given Claude started conversation s-new in the shell pane.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.shell, "start", "s-new", Some("startup"))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then the pane resumes s-new.
+        assert_eq!(
+            fx.resume(fx.shell)?.as_deref(),
+            Some("claude --resume s-new"),
+            "the pane should resume its conversation"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_end_clears_the_panes_resume_command() -> Result<(), Report<StoreError>> {
+        // Given aa's pane resumes aa, and aa's conversation ended.
+        let mut fx = PaneReports::with(|store, thread| {
+            store.set_pane_resume(thread.pane, Some("claude --resume aa"))
+        })?;
+        fx.report(fx.thread.pane, "end", "aa", None)?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then the pane has nothing to resume.
+        assert_eq!(
+            fx.resume(fx.thread.pane)?,
+            None,
+            "an ended conversation shouldn't be resumed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn pane_report_from_an_unknown_pane_is_ignored() -> Result<(), Report<StoreError>> {
+        // Given a report from a pane orb has no row for.
+        let mut fx = PaneReports::new()?;
+        fx.report(PaneId(999), "start", "s-new", Some("startup"))?;
+
+        // When polling.
+        fx.actor.poll().await;
+
+        // Then no thread is added.
+        assert_eq!(
+            fx.rows()?.len(),
+            1,
+            "an unknown pane's report should be ignored"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_thread_removes_its_pane_file() -> Result<(), Report<StoreError>> {
+        // Given thread aa's pane has a report.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.thread.pane, "start", "aa", Some("startup"))?;
+        fx.actor.poll().await;
+
+        // When deleting aa.
+        fx.actor.delete(fx.thread.thread).await;
+
+        // Then the pane's file is gone.
+        assert!(
+            !fx.file(fx.thread.pane).exists(),
+            "a deleted thread's pane file should go"
         );
         Ok(())
     }

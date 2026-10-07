@@ -3,6 +3,7 @@
 pub mod dashboard;
 pub mod git;
 pub mod harness;
+pub mod integration;
 pub mod jumps;
 pub mod layout;
 pub mod notify;

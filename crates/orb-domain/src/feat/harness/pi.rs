@@ -150,6 +150,9 @@ impl Harness for Pi {
             notice,
         }
     }
+    fn resume_command(&self, session_id: &str) -> String {
+        format!("pi --session-id {session_id}")
+    }
 }
 
 #[cfg(test)]

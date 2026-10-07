@@ -135,4 +135,8 @@ impl Harness for ClaudeCode {
     fn trust(&self, dir: &Path) -> Result<(), Report<HarnessError>> {
         self.trust.trust(dir).change_context(HarnessError)
     }
+
+    fn resume_command(&self, session_id: &str) -> String {
+        format!("claude --resume {session_id}")
+    }
 }

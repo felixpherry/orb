@@ -2,7 +2,8 @@
 //! (the environment).
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use error_stack::{Report, ResultExt};
@@ -15,6 +16,7 @@ use orb_domain::feat::harness::claude::supervisor::ClaudeSupervisor;
 use orb_domain::feat::harness::claude::trust::{ClaudeConfigTrust, claude_config_file};
 use orb_domain::feat::harness::pi::Pi;
 use orb_domain::feat::harness::pi::runner::ProcessRunner;
+use orb_domain::feat::integration::{self, IntegrationPaths};
 use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, ZellijTarget, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
@@ -43,7 +45,13 @@ fn main() -> Result<(), Report<OrbError>> {
         .ok_or_else(|| Report::new(OrbError).attach("HOME is not set"))?;
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let claude_config = claude_config_file(config_dir.as_deref(), &home);
-    let claude_dir = config_dir.unwrap_or_else(|| home.join(".claude"));
+    let claude_dir = integration::claude_dir(config_dir, &home);
+    let orb_root = home.join(".orb");
+    let integrations = integration_paths(&home, &orb_root, &claude_dir);
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "integration") {
+        return install_integrations(&args, &integrations, &home);
+    }
     let pi_sessions = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
         .map_or_else(|| home.join(".pi/agent/sessions"), PathBuf::from);
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -59,7 +67,6 @@ fn main() -> Result<(), Report<OrbError>> {
         let cli = ZellijCli::new(std::env::var_os("NO_COLOR"));
         ZellijService::new(Arc::new(cli), shell, home.clone(), pane)
     });
-    let orb_root = home.join(".orb");
     let store = Store::open(&orb_root.join("userdata/state.sqlite")).change_context(OrbError)?;
     let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
@@ -101,6 +108,7 @@ fn main() -> Result<(), Report<OrbError>> {
         orb_root,
         incognito_root: PathBuf::from("/tmp/orb-incognito"),
         wake: frontend.waker(),
+        integration_missing: !integrations.any_installed(),
     });
     runtime.block_on(sessions.wait_for_startup());
     let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
@@ -131,6 +139,37 @@ fn main() -> Result<(), Report<OrbError>> {
             notifier,
         )
         .change_context(OrbError)
+}
+
+/// Where orb's integrations live: under `orb_root`, `claude_dir`, and pi's
+/// agent dir (`$PI_CODING_AGENT_DIR`, else under `home`).
+fn integration_paths(home: &Path, orb_root: &Path, claude_dir: &Path) -> IntegrationPaths {
+    IntegrationPaths {
+        orb_root: orb_root.to_owned(),
+        claude_dir: claude_dir.to_owned(),
+        pi_dir: integration::pi_agent_dir(
+            std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from),
+            home,
+        ),
+    }
+}
+
+/// `orb integration install`: installs both integrations and prints what it
+/// wrote.
+fn install_integrations(
+    args: &[OsString],
+    paths: &IntegrationPaths,
+    home: &Path,
+) -> Result<(), Report<OrbError>> {
+    if args.get(1).is_none_or(|arg| arg != "install") || args.len() > 2 {
+        return Err(Report::new(OrbError).attach("usage: orb integration install"));
+    }
+    let lines = integration::install(paths, home).change_context(OrbError)?;
+    let mut out = std::io::stdout().lock();
+    for line in lines {
+        writeln!(out, "{line}").change_context(OrbError)?;
+    }
+    Ok(())
 }
 
 /// Desktop notices, clicked back to orb's window (kitty on macOS, niri on

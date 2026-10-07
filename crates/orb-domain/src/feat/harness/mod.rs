@@ -1,9 +1,10 @@
 //! Harnesses, the programs a thread runs in.
 //!
 //! Everything orb does differently per harness (starting and listing
-//! sessions, reading transcripts, trusting a folder, the models on offer)
-//! lives in that harness's implementation. Each draft, group and thread
-//! stores the id of its harness, and shared code picks the harness by it.
+//! sessions, reading transcripts, trusting a folder, the models on offer,
+//! and how to resume a conversation) lives in that harness's implementation.
+//! Each draft, group and thread stores the id of its harness, and shared
+//! code picks the harness by it.
 
 pub mod claude;
 pub mod pi;
@@ -182,6 +183,10 @@ pub trait Harness: SessionHost + TranscriptFormat {
     fn trust(&self, _dir: &Path) -> Result<(), Report<HarnessError>> {
         Ok(())
     }
+
+    /// The command typed into a pane's fresh shell to bring conversation
+    /// `session_id` back.
+    fn resume_command(&self, session_id: &str) -> String;
 }
 
 /// Every harness orb knows, in registration order; the first is the default.
@@ -350,6 +355,10 @@ pub(crate) mod fake {
                 unavailable: None,
                 ..HarnessInfo::placeholder(self.id(), self.id)
             }
+        }
+
+        fn resume_command(&self, session_id: &str) -> String {
+            format!("{} --resume {session_id}", self.id)
         }
     }
 }

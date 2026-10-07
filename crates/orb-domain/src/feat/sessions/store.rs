@@ -147,6 +147,18 @@ pub struct NewThread {
     pub zmx: Option<ZmxSession>,
 }
 
+/// A thread an agent report started in an existing pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPaneThread {
+    pub pane: PaneId,
+    /// The harness's id for the conversation; also its short id.
+    pub session_id: String,
+    pub transcript_path: Option<PathBuf>,
+    pub harness: HarnessId,
+    pub cwd: PathBuf,
+    pub created_at: i64,
+}
+
 /// What [`Store::insert_thread`] made: the thread and its one-pane session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InsertedThread {
@@ -803,6 +815,62 @@ impl Store {
             .attach("failed to commit deleting the session")
     }
 
+    /// Saves a thread running in `row.pane`, in the project of that pane's
+    /// session, last active and visited when created. Returns it and its
+    /// project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a path isn't UTF-8, the pane doesn't exist, the id
+    /// is already a thread's short id, or the database can't be written.
+    pub fn insert_pane_thread(
+        &self,
+        row: &NewPaneThread,
+    ) -> Result<(ThreadId, ProjectId), Report<StoreError>> {
+        let transcript_path = row.transcript_path.as_deref().map(utf8).transpose()?;
+        self.conn
+            .query_row(
+                "INSERT INTO threads
+                   (project_id, short_id, session_id, cwd, transcript_path, created_at,
+                    last_activity_at, last_visited_at, harness, pane_id)
+                 SELECT s.project_id, ?2, ?2, ?3, ?4, ?5, ?5, ?5, ?6, p.id
+                   FROM panes p JOIN sessions s ON s.id = p.session_id
+                  WHERE p.id = ?1
+                 RETURNING id, project_id",
+                params![
+                    row.pane.0,
+                    row.session_id,
+                    utf8(&row.cwd)?,
+                    transcript_path,
+                    row.created_at,
+                    row.harness.as_str(),
+                ],
+                |found| Ok((ThreadId(found.get(0)?), ProjectId(found.get(1)?))),
+            )
+            .change_context(StoreError)
+            .attach("failed to save the pane's thread")
+    }
+
+    /// Sets the command typed into pane `pane`'s fresh shell; `None` = none.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be written.
+    pub fn set_pane_resume(
+        &self,
+        pane: PaneId,
+        resume: Option<&str>,
+    ) -> Result<(), Report<StoreError>> {
+        self.conn
+            .execute(
+                "UPDATE panes SET resume = ?2 WHERE id = ?1",
+                params![pane.0, resume],
+            )
+            .change_context(StoreError)
+            .attach("failed to save the pane's resume command")?;
+        Ok(())
+    }
+
     /// Forgets the `--bg` sessions `panes` replaced, once they're stopped.
     ///
     /// # Errors
@@ -823,9 +891,9 @@ impl Store {
 
     /// Updates everything about a thread that changes after it's created: its
     /// session and directory (a thread can move to another workspace), titles,
-    /// branch, transcript position, turn start, pin and settle state, and
-    /// activity and visit stamps. Its model, permission mode and group stay as
-    /// inserted.
+    /// branch, transcript position, turn start, pin and settle state,
+    /// activity and visit stamps, and the pane it runs in. Its model,
+    /// permission mode and group stay as inserted.
     ///
     /// # Errors
     ///
@@ -839,7 +907,8 @@ impl Store {
                         transcript_offset = ?5, turn_started_at = ?6, custom_title = ?7,
                         branch = ?8, pinned_at = ?9, settled_override = ?10, settled_at = ?11,
                         unsettled_at = ?12, last_activity_at = ?13, last_visited_at = ?14,
-                        short_id = ?15, cwd = ?16, ai_titled = ?17, renamed_title = ?18
+                        short_id = ?15, cwd = ?16, ai_titled = ?17, renamed_title = ?18,
+                        pane_id = ?19
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -860,6 +929,7 @@ impl Store {
                     utf8(&row.cwd)?,
                     row.ai_titled,
                     row.renamed_title,
+                    row.pane_id.map(|pane| pane.0),
                 ],
             )
             .change_context(StoreError)
@@ -1838,9 +1908,9 @@ mod tests {
 
     use super::{
         DraftRow, DraftWorkspace, GroupDraft, GroupId, GroupKind, GroupRow, LastUsed,
-        LastWorkspace, MIGRATIONS, NewGroup, NewThread, Own, PaneId, ProjectId, ProjectKind,
-        SavedLayouts, SessionId, SettledOverride, SidebarItem, Store, StoreError, TabRow, ThreadId,
-        ThreadRow, TileLayout, Ui,
+        LastWorkspace, MIGRATIONS, NewGroup, NewPaneThread, NewThread, Own, PaneId, ProjectId,
+        ProjectKind, SavedLayouts, SessionId, SettledOverride, SidebarItem, Store, StoreError,
+        TabRow, ThreadId, ThreadRow, TileLayout, Ui,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -3950,6 +4020,97 @@ mod tests {
             found,
             vec![(inserted.session, PathBuf::from("/tmp/logs"))],
             "the new pane should load back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn save_thread_saves_its_pane() -> Result<(), Report<StoreError>> {
+        // Given a thread and a second pane in its session.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let pane = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
+        let mut row = store
+            .load()?
+            .1
+            .into_iter()
+            .find(|row| row.id == inserted.thread)
+            .ok_or_else(|| Report::new(StoreError))?;
+
+        // When saving the thread in that pane.
+        row.pane_id = Some(pane);
+        store.save_thread(&row)?;
+
+        // Then it loads back in that pane.
+        let panes: Vec<Option<PaneId>> =
+            store.load()?.1.into_iter().map(|row| row.pane_id).collect();
+        assert_eq!(panes, vec![Some(pane)], "the thread's pane should be saved");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn insert_pane_thread_joins_the_project_of_the_panes_session() -> Result<(), Report<StoreError>>
+    {
+        // Given a pane in a session of the orb project.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let pane = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
+
+        // When a report starts a thread in that pane.
+        let (thread, project) = store.insert_pane_thread(&NewPaneThread {
+            pane,
+            session_id: "s-new".to_owned(),
+            transcript_path: Some(PathBuf::from("/t/s-new.jsonl")),
+            harness: HarnessId::new("claude"),
+            cwd: PathBuf::from("/tmp/orb"),
+            created_at: 2_000,
+        })?;
+
+        // Then it is saved in the orb project, running in that pane.
+        let found = store
+            .load()?
+            .1
+            .into_iter()
+            .find(|row| row.id == thread)
+            .map(|row| (row.project_id, row.pane_id, row.session_id));
+        assert_eq!(
+            (project, found),
+            (
+                project_id,
+                Some((project_id, Some(pane), Some("s-new".to_owned())))
+            ),
+            "the thread should join the pane's project and run in the pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn set_pane_resume_is_loaded_back_with_the_pane() -> Result<(), Report<StoreError>> {
+        // Given a thread's pane.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = store.insert_thread(&new_thread(project_id))?;
+
+        // When setting its resume command.
+        store.set_pane_resume(inserted.pane, Some("claude --resume s-1"))?;
+
+        // Then it loads back with the pane.
+        let resume: Vec<Option<String>> = store
+            .layouts()?
+            .panes
+            .into_iter()
+            .filter(|row| row.id == inserted.pane)
+            .map(|row| row.resume)
+            .collect();
+        assert_eq!(
+            resume,
+            vec![Some("claude --resume s-1".to_owned())],
+            "the resume command should be saved"
         );
         Ok(())
     }
