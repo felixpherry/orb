@@ -15,8 +15,13 @@
 //! The schema grows through an ordered list of migrations, and a database
 //! from before sessions is copied aside before it is migrated. Times are
 //! milliseconds since the Unix epoch.
+//!
+//! One orb at a time owns a store: it holds a lock beside the database for as
+//! long as it runs, since a second orb on the same store would stop the
+//! first one's panes.
 
 use std::collections::HashMap;
+use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 
 use error_stack::{Report, ResultExt};
@@ -297,6 +302,34 @@ const MIGRATIONS: &[Migration] = &[
 "),
     Migration::Code(v11),
 ];
+
+/// Takes the store at `path` for this process: an exclusive lock on the
+/// `.lock` file beside it, held until the returned file is dropped (or the
+/// process ends).
+///
+/// # Errors
+///
+/// Returns an error if another process holds the lock, or the lock file
+/// can't be created.
+pub fn lock(path: &Path) -> Result<File, Report<StoreError>> {
+    let lock_path = path.with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .change_context(StoreError)
+            .attach_with(|| format!("failed to create {}", parent.display()))?;
+    }
+    let file = File::create(&lock_path)
+        .change_context(StoreError)
+        .attach_with(|| format!("failed to create {}", lock_path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(Report::new(StoreError)
+            .attach("another orb is already running; quit it before starting this one")),
+        Err(TryLockError::Error(error)) => Err(Report::new(error)
+            .change_context(StoreError)
+            .attach(format!("failed to lock {}", lock_path.display()))),
+    }
+}
 
 impl Store {
     /// Opens the database at `path`, creating it and its directories if needed,
@@ -1449,7 +1482,7 @@ mod tests {
     use super::{
         MIGRATIONS, NewPaneThread, PaneId, ProjectId, ProjectKind, SavedLayouts, SessionId,
         SessionKind, SessionRow, SettledOverride, SidebarItem, Store, StoreError, TabRow,
-        ThreadRow, Ui,
+        ThreadRow, Ui, lock,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -1488,6 +1521,39 @@ mod tests {
             session,
             pane,
         })
+    }
+
+    #[rstest::rstest]
+    fn lock_is_refused_while_another_holder_has_it() -> Result<(), Report<StoreError>> {
+        // Given one orb holding the store's lock.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let _held = lock(&path)?;
+
+        // When a second orb tries to take it.
+        let second = lock(&path);
+
+        // Then it is refused.
+        assert!(
+            second.is_err(),
+            "a second lock on the same store should fail"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn lock_is_free_again_once_its_holder_drops_it() -> Result<(), Report<StoreError>> {
+        // Given an orb that held the store's lock and quit.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        drop(lock(&path)?);
+
+        // When another orb takes it.
+        let next = lock(&path);
+
+        // Then it gets the lock.
+        assert!(next.is_ok(), "a released lock should be free to take");
+        Ok(())
     }
 
     #[rstest::rstest]

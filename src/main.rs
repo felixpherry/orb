@@ -24,7 +24,7 @@ use orb_domain::feat::sessions::child_env::child_env;
 use orb_domain::feat::sessions::sessions_actor::{
     SessionsActorDeps, StopMigrated, spawn_sessions_actor,
 };
-use orb_domain::feat::sessions::store::Store;
+use orb_domain::feat::sessions::store::{self, Store};
 use orb_domain::feat::worktrees::worktrees_actor::{
     SWEEP_EVERY, WorktreesActorDeps, spawn_worktrees_actor,
 };
@@ -56,7 +56,9 @@ fn main() -> Result<(), Report<OrbError>> {
     let env = child_env(std::env::vars_os());
     let tz = TimeZone::system();
     let notifier = desktop_notifier();
-    let store = Store::open(&orb_root.join("userdata/state.sqlite")).change_context(OrbError)?;
+    let store_path = orb_root.join("userdata/state.sqlite");
+    let _store_lock = store::lock(&store_path).change_context(OrbError)?;
+    let store = Store::open(&store_path).change_context(OrbError)?;
     let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
