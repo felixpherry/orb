@@ -10,7 +10,10 @@
 //!
 //! Each pane's program also gets `ORB_PANE_ID`, naming the pane it runs in;
 //! one inherited from orb's own environment is dropped, so harness commands
-//! and an orb started inside a pane never see a stale one.
+//! and an orb started inside a pane never see a stale one. The zmx session
+//! variables go too: with `ZMX_SESSION` set, `zmx attach` switches the
+//! enclosing session's client and exits, so an orb started inside a pane
+//! could never attach its own.
 
 use std::ffi::OsString;
 
@@ -60,9 +63,10 @@ const TERMINAL_VARS: [&str; 11] = [
 ];
 
 /// Prefixes of variables that identify the outer terminal or multiplexer.
-const TERMINAL_PREFIXES: [&str; 10] = [
+const TERMINAL_PREFIXES: [&str; 11] = [
     "KITTY_",
     "ZELLIJ",
+    "ZMX_SESSION",
     "TMUX",
     "TERM_PROGRAM",
     "LC_TERMINAL",
@@ -171,6 +175,21 @@ mod tests {
         let env = env_of(&parent);
 
         // Then the identity variable is gone.
+        assert!(values_of(&env, key).is_empty(), "{key} should be removed");
+    }
+
+    #[rstest::rstest]
+    #[case("ZMX_SESSION")]
+    #[case("ZMX_SESSION_PREFIX")]
+    fn enclosing_zmx_session_is_removed(#[case] key: &str) {
+        // Given orb runs inside another orb's pane, a zmx session.
+        let parent = [(key, "orb-p470")];
+
+        // When building the child's environment.
+        let env = env_of(&parent);
+
+        // Then the zmx session variable is gone, so a pane's `zmx attach`
+        // attaches instead of switching the enclosing client.
         assert!(values_of(&env, key).is_empty(), "{key} should be removed");
     }
 
