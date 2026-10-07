@@ -9,9 +9,9 @@
 //! match a plain Esc. `<C-g>` is the which-key leader in both; its popup
 //! lists only the keys that do something for the selection (`<C-g> w`/`<C-g>
 //! b` not on Incognito, Research and Learn sessions, `<C-g> p` and `<C-g>
-//! <C-g>` only in a pane, `<C-g> t` only with a session selected and its `b` only in a pane, `<C-g> f`
-//! only in the sidebar); `<C-g> e` hides or shows the sidebar and `<C-g> q`
-//! quits. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
+//! <C-g>` only in a pane, `<C-g> t` only with a session selected and its
+//! `b` only in a pane, `<C-g> f` only in the sidebar); `<C-g> e` hides or
+//! shows the sidebar and `<C-g> q` quits. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
 //! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
 //! row) go through the same keymap. In a pane every other key goes to its
 //! program. An open picker, the rename box and
