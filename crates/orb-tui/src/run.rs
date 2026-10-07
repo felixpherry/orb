@@ -32,8 +32,9 @@
 //! selected thread's transcript changes length, since each takes
 //! milliseconds.
 //!
-//! A click on the sidebar or `Cmd h` from the leftmost pane moves the keys to
-//! the sidebar and leaves the panes drawn, so `Cmd l` goes back in. Settling
+//! A click on the sidebar, `<C-S-h>` or `<C-g> e` from a pane moves the keys
+//! to the sidebar and leaves the panes drawn, so `<C-S-l>` or `<C-g> e` goes
+//! back in. Settling
 //! or deleting a session ends its panes' clients; `⏎` on a settled session
 //! brings its panes back the way start-up does. A pane whose program exits
 //! within a second of attaching leaves `session exited at start` on the start screen.

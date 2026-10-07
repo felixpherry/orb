@@ -31,14 +31,19 @@ Entries are added or amended **only with human approval**.
 
 ---
 
-- (keybinds) Plain `q` in the sidebar or the dashboard quits orb.
+- (keybinds) `<C-g> q` quits orb from the sidebar or a pane.
+- (keybinds) `Cmd h`/`Cmd l` move the focus to the pane on that side, and from the tab's left or right edge to the previous or next tab, wrapping from the last tab to the first and back.
+- (keybinds) A `Cmd h` or `Cmd l` that changes tabs focuses the new tab's pane on the edge it enters from, keeping the tab's own focused pane when it's on that edge, else the topmost one there.
+- (keybinds) `Cmd h/j/k/l` do nothing while the sidebar has the keys.
+- (keybinds) `<C-S-h>` moves the keys from a pane to the sidebar, showing the sidebar if it's hidden.
+- (keybinds) `<C-S-l>` moves the keys from the sidebar into the shown session's panes.
+- (keybinds) `<C-g> e` moves the keys from a pane to the sidebar, or from the sidebar into the shown session's panes.
 - (keybinds) orb has no `:` command line.
 - (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
 - (pane) orb redraws when input, PTY output, child exit, or an actor's state change wakes the loop, and every 100 ms while a thread is working (the spinner's frame); there is no other tick or frame throttle.
 - (pane) While attached, keys, paste, focus events, and mouse events over the pane are encoded for the child's current terminal modes and written straight to the PTY, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.
-- (keybinds) While attached, every key goes to Claude except `<C-\>`, which returns to the dashboard, `<C-h>`, which focuses the sidebar and leaves the Claude pane shown, or does nothing while the sidebar is hidden, `<C-b>`, which hides or shows the sidebar and keeps the keys in the pane, `<C-Right>`/`<C-Left>`, which resize the pane as on the dashboard, `<C-o>`/`<C-i>`, which move through the jump list, and `<C-Space>`, which opens the session picker.
 - (keybinds) While attached, Claude's background-task shortcut works only as `Ctrl+X Ctrl+B`, because orb takes `<C-b>`.
 - (identity) orb runs each thread in one of two harnesses, Claude Code or pi, fixed when its draft starts.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
@@ -50,7 +55,6 @@ Entries are added or amended **only with human approval**.
 - (sidebar) The sidebar lists orb's drafts and the sessions orb started, as one list across projects where each thread outside a group is a three-line tree node showing its status icon, title, and time, then its project and status word, then its branch.
 - (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the sidebar search has the keys and a shown/total count of drafts and threads, and the selected row's first line highlighted.
 - (pane) Attaching runs `claude attach <id>` for a Claude thread, or `zmx attach <id> pi --session-id <id>` for a pi thread, in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
-- (keybinds) `<C-h>`/`<C-l>` move focus between the sidebar and the right-hand area (the dashboard, or the Claude pane while it's shown), `j`/`k` move between threads in the sidebar, `⏎` attaches, and `<Space>` is the leader with a which-key popup.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
 - (pane) The right-hand area shows the selected thread's Claude pane while orb is attached to that thread, except while the dashboard has the keys; otherwise it shows the dashboard.
@@ -104,7 +108,6 @@ Entries are added or amended **only with human approval**.
 - (zellij) A zellij call that runs longer than 2 s is killed; when it was opening a tool, the mode line then shows `zellij timed out (session renamed? restart orb)`.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
-- (keybinds) `␣e` hides or shows the sidebar; while it's hidden the right-hand area takes the full width, and `<C-h>` and resizing do nothing.
 - (keybinds) In the sidebar, the dashboard or the attached pane, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
 - (sidebar) The sidebar's width and project filter persist across restarts.
 - (keybinds) `␣f` in the sidebar opens the project filter: `All projects`, then Research and Learn once `␣gr`/`␣gl` has added them, then Incognito, then the projects in `␣n` order.
@@ -172,7 +175,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `␣b` (and the dashboard's `b`) on a started Feature group's card switches its worktree's branch for the group and every thread in it; `␣b` isn't bound on a group's other rows, and `␣w` is bound on none.
 - (groups) Groups and each thread's group persist to orb's store (store migration v8 added the `groups` table and `threads.group_id`).
 - (keybinds) In the sidebar, the dashboard or the attached pane, `<C-o>`/`<C-i>` move back/forward through the jump list, as in neovim.
-- (jumps) A jump is entering a thread's pane (`⏎`, `<C-l>`, a double-click on its row, a click into its pane, or a draft starting), `gg`/`G`, a search ended by `⏎` or a click, a `␣n` pick, or a session or search picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.
+- (jumps) A jump is entering a thread's pane (`⏎`, `<C-S-l>`, `<C-g> e`, a double-click on its row, a click into its pane, or a draft starting), `gg`/`G`, a search ended by `⏎` or a click, a `␣n` pick, or a session or search picker pick; it records the row it leaves and the row it lands on, except that entering the pane of the row the last `<C-o>`/`<C-i>` landed on records nothing.
 - (jumps) A jump back or forward shows the target's pane only while orb is attached to it, with the keys in the pane only when pressed from one; it never attaches, starts a draft, or clears the project filter.
 - (jumps) Deleted rows, rows hidden by the project filter, and the Settled header are skipped, and a folded group opens on arrival.
 - (jumps) orb persists the newest 20 jump-list rows to its store (store migration v9 added the `jumps` table); a row already in the list moves to the newest slot.
@@ -206,7 +209,11 @@ Entries are added or amended **only with human approval**.
 - (mouse) A click on a dashboard menu item moves the menu cursor to it without running it.
 - (mouse) In a picker, a click selects a row, a double-click picks it, the wheel over its list moves the selection one row without wrapping (over the session, worktree or search picker's preview it does nothing), a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.
 - (mouse) A click outside the rename box cancels it like `Esc`.
-- (mouse) Clicks on the tab bar and on pane frames do nothing.
+- (mouse) Clicks on pane frames do nothing.
+- (mouse) A click on a tab in the tab bar shows that tab and moves the keys into its focused pane.
+- (mouse) A click on the tab bar's `+` opens a new tab, as `<C-g> t n` does.
+- (mouse) A click on a `← +N` or `+N →` chip shows the nearest hidden tab on that side.
+- (mouse) The wheel over the tab bar shows the next tab on a scroll up and the previous one on a scroll down, without wrapping.
 - (mouse) A click on the input line of the sidebar search, a picker or the rename box moves its text cursor to the grapheme under it, to the first shown grapheme on the prompt, or to the end past the text.
 - (worktrees) A worktree under `~/.orb/worktrees/` is pruned once nothing uses it, or once no draft uses it and every thread and Feature group in it has been settled, the latest for at least 7 days.
 - (worktrees) Pruning skips a worktree with uncommitted changes or untracked files, and one whose thread is attached or has a turn underway.
@@ -262,7 +269,10 @@ Entries are added or amended **only with human approval**.
 - (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
 - (search) `␣sg` indexes pi threads' session files alongside Claude transcripts.
 - (layout) Adding a pane with `Cmd n` or closing one re-tiles the tab by pane count: `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
-- (layout) From 11 panes a tab shows its first pane on the left and the rest in a stack: a list naming every stacked pane, with `>` on the shown one, beside the shown pane's full-height frame.
+- (layout) From 11 panes a tab is one stack: a list naming every pane at the top, with `>` on the shown one, and the shown pane's frame below it.
+- (layout) `<C-g> p s` stacks a new pane with the focused one and shows it, until the next add, split or close re-tiles the tab.
+- (layout) A tab holds at most one stack, so `<C-g> p s` on a pane outside it adds the new pane to that stack.
+- (layout) A stack's list has no frame and scrolls to keep the shown row once it would take more than half the stack's height.
 - (layout) `<C-g> p r` and `<C-g> p d` split the focused pane and share the space evenly among the panes split in that direction, until the next add or close re-tiles the tab.
 - (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
