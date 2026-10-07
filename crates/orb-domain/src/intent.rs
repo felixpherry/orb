@@ -120,10 +120,13 @@ pub enum Intent {
     ToggleSettle,
     /// Ask to delete the selected session.
     Delete,
-    /// Show the Settled shelf's sessions.
-    OpenShelf,
-    /// Hide the Settled shelf's sessions.
-    CloseShelf,
+    /// Show the selected card's agent rows, or the Settled shelf's sessions
+    /// on its header (`l`).
+    Unfold,
+    /// Hide the selected card's agent rows, from the card or one of them, or
+    /// the Settled shelf's sessions from its header or a settled session
+    /// (`h`).
+    Fold,
     /// Name a new session in orb's own `kind` folder.
     NewFolder(FolderKind),
     /// Open the directory picker to add a project.
@@ -239,8 +242,8 @@ impl fmt::Display for Intent {
             Self::Search => "search",
             Self::ToggleSettle => "settle",
             Self::Delete | Self::PickerBackspace => "delete",
-            Self::OpenShelf => "open settled",
-            Self::CloseShelf => "close settled",
+            Self::Unfold => "open",
+            Self::Fold => "close",
             Self::NewFolder(FolderKind::Research) => "research session",
             Self::NewFolder(FolderKind::Learn) => "learn session",
             Self::AddProject => "add project",

@@ -342,8 +342,8 @@ pub struct Search {
 /// when a start ends, `fetching`, `attach`, the cursor and `filter`
 /// after a restore, the cursor on a new session, removing a session from
 /// `deleting`, pushing `notices`) and by the intent handler (the cursor on
-/// navigation, settle and delete, `shelf_open`, `starting` when a start
-/// begins, adding a session to `deleting`, `filter`). The frontend loop takes
+/// navigation, settle and delete, `shelf_open`, `folded`, `starting` when a
+/// start begins, adding a session to `deleting`, `filter`). The frontend loop takes
 /// `attach` and `notices`.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
@@ -379,6 +379,9 @@ pub struct Sessions {
     /// intent handler; the frontend clears it when it gives the keys to a
     /// pane.
     pub search: Option<Search>,
+    /// Sessions whose cards hide their agent rows. Written only by the
+    /// intent handler; empty at start and never saved.
+    pub folded: HashSet<SessionId>,
 }
 
 impl Sessions {
@@ -464,6 +467,21 @@ impl Sessions {
         })
     }
 
+    /// Session `id`'s agent rows: its agents running in a pane, with the
+    /// pane.
+    pub fn agent_rows(&self, id: SessionId) -> Vec<(&Thread, PaneId)> {
+        self.agents(id)
+            .into_iter()
+            .filter_map(|thread| Some((thread, thread.pane.as_ref()?.pane)))
+            .collect()
+    }
+
+    /// Whether session `id`'s card hides its agent rows: it's folded and no
+    /// search has text, since a search lists a folded card as if open.
+    pub fn hides_agents(&self, id: SessionId) -> bool {
+        self.folded.contains(&id) && !self.searching()
+    }
+
     /// Whether `thread` runs in a session being deleted.
     pub fn is_deleting(&self, thread: &Thread) -> bool {
         thread
@@ -479,14 +497,16 @@ impl Sessions {
     }
 
     /// The sidebar's rows: pinned sessions (newest pin first), active sessions (newest created or
-    /// un-settled first), each card followed by one row per agent pane, then, if any is settled, the shelf header and the
+    /// un-settled first), each card followed by one row per agent pane unless
+    /// it's folded, then, if any is settled, the shelf header and the
     /// settled sessions (newest settle first). A collapsed shelf still lists
     /// the cursor's settled session. Ties go to the higher id. Sessions being
     /// deleted aren't listed. While a project filter is set, only that
     /// project's rows are. While a search has text, only the sessions whose
     /// title, or one of whose agents' titles, matches it are,
     /// settled ones even while the shelf is closed, and the shelf header only
-    /// when a settled session matches, reading as open.
+    /// when a settled session matches, reading as open; a folded card lists
+    /// its agent rows then too.
     pub fn sidebar(&self) -> Vec<SidebarRow<'_>> {
         let (mut settled, live): (Vec<_>, Vec<_>) = self
             .listed_sessions()
@@ -501,11 +521,10 @@ impl Sessions {
         let mut rows: Vec<SidebarRow<'_>> = Vec::new();
         for (project, session) in pinned.into_iter().chain(active) {
             rows.push(SidebarRow::Card { project, session });
-            let agents: Vec<(&Thread, PaneId)> = self
-                .agents(session.id)
-                .into_iter()
-                .filter_map(|thread| Some((thread, thread.pane.as_ref()?.pane)))
-                .collect();
+            if self.hides_agents(session.id) {
+                continue;
+            }
+            let agents = self.agent_rows(session.id);
             let count = agents.len();
             rows.extend(agents.into_iter().enumerate().map(|(at, (thread, pane))| {
                 SidebarRow::Agent {
@@ -818,6 +837,17 @@ impl Sessions {
         self.cursor = Some(SidebarItem::SettledShelf);
     }
 
+    /// Hide session `id`'s agent rows and put the cursor on its card.
+    pub fn fold(&mut self, id: SessionId) {
+        self.folded.insert(id);
+        self.cursor = Some(SidebarItem::Session(id));
+    }
+
+    /// Show session `id`'s agent rows again.
+    pub fn unfold(&mut self, id: SessionId) {
+        self.folded.remove(&id);
+    }
+
     /// Whether a jump can land on `item`: it still exists, isn't being
     /// deleted, and the project filter lists it. Never the Settled header or
     /// an agent row.
@@ -896,7 +926,7 @@ impl Sessions {
     }
 
     /// Whether a search with text is filtering the sidebar.
-    fn searching(&self) -> bool {
+    pub fn searching(&self) -> bool {
         self.search
             .as_ref()
             .is_some_and(|search| !search.input.text().trim().is_empty())
@@ -2701,6 +2731,44 @@ mod tests {
             items,
             vec![on(1), agent_row(1, 1), agent_row(1, 2)],
             "each agent should get its own row after its card"
+        );
+    }
+
+    /// Session 1 running agents 1 ("fix login") and 2, its card folded.
+    fn folded_card() -> Sessions {
+        let mut sessions = holding(
+            vec![titled(agent(1, 1, 0), "fix login"), agent(2, 1, 5)],
+            vec![session(1)],
+        );
+        sessions.folded.insert(SessionId(1));
+        sessions
+    }
+
+    #[rstest::rstest]
+    fn sidebar_lists_no_agent_rows_under_a_folded_card() {
+        // Given session 1's card folded over agents 1 and 2.
+        let sessions = folded_card();
+
+        // When listing the sidebar's rows.
+        let items: Vec<SidebarItem> = sessions.sidebar().iter().map(SidebarRow::item).collect();
+
+        // Then only the card is listed.
+        assert_eq!(items, vec![on(1)], "a folded card hides its agent rows");
+    }
+
+    #[rstest::rstest]
+    fn sidebar_lists_a_folded_cards_agent_rows_while_searching() {
+        // Given session 1's card folded, and a search for "fix" matching it.
+        let sessions = searching(folded_card(), "fix");
+
+        // When listing the sidebar's rows.
+        let items: Vec<SidebarItem> = sessions.sidebar().iter().map(SidebarRow::item).collect();
+
+        // Then the card lists its agent rows as if open.
+        assert_eq!(
+            items,
+            vec![on(1), agent_row(1, 1), agent_row(1, 2)],
+            "a search reads a folded card as open"
         );
     }
 

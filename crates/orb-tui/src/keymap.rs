@@ -191,8 +191,8 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
             .bind("<enter>", Intent::Attach, KeyCategory::Sessions, scope)
             .bind("/", Intent::Search, KeyCategory::Navigation, scope)
             .bind("i", Intent::Search, KeyCategory::Navigation, scope)
-            .bind("l", Intent::OpenShelf, KeyCategory::Navigation, scope)
-            .bind("h", Intent::CloseShelf, KeyCategory::Navigation, scope)
+            .bind("l", Intent::Unfold, KeyCategory::Navigation, scope)
+            .bind("h", Intent::Fold, KeyCategory::Navigation, scope)
             .bind(
                 "<leader>f",
                 Intent::FilterProjects,
@@ -563,8 +563,8 @@ mod tests {
     #[case(key(KeyCode::Enter), Intent::Attach)]
     #[case(key(KeyCode::Char('p')), Intent::TogglePin)]
     #[case(key(KeyCode::Char('r')), Intent::Rename)]
-    #[case(key(KeyCode::Char('l')), Intent::OpenShelf)]
-    #[case(key(KeyCode::Char('h')), Intent::CloseShelf)]
+    #[case(key(KeyCode::Char('l')), Intent::Unfold)]
+    #[case(key(KeyCode::Char('h')), Intent::Fold)]
     fn sidebar_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
         let mut keys = Keys::new(keymap(), Scope::Sidebar);

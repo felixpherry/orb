@@ -1,13 +1,13 @@
 //! Checks whether the user's sidebar actions can proceed: making a new
 //! session, naming a new Research or Learn session's folder, pinning,
 //! settling or deleting the selected session (pin and settle are refused on
-//! an agent row), opening or closing the Settled shelf, and making an
-//! Incognito session.
+//! an agent row), folding and unfolding a card or the Settled shelf, and
+//! making an Incognito session.
 
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::{FolderKind, ProjectKind, SidebarItem, folder_slug};
+use crate::feat::sessions::state::{FolderKind, ProjectKind, SessionId, SidebarItem, folder_slug};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 
 /// Why making a session in a new folder from the name box can't proceed.
@@ -205,53 +205,83 @@ pub fn validate_new_incognito(state: &AppState) -> Result<(), NewIncognitoError>
     }
 }
 
-/// Why opening the Settled shelf can't proceed.
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error(debug)]
-pub enum OpenShelfError {
-    /// The cursor isn't on the shelf's header.
-    NotOnShelf,
+/// What `l` opens or `h` folds at the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldTarget {
+    /// The Settled shelf.
+    Shelf,
+    /// A session's card, by its agent rows.
+    Card(SessionId),
 }
 
-/// Allow opening the Settled shelf from its header.
+/// Why unfolding at the cursor can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum UnfoldError {
+    /// The cursor is on an agent row, or on nothing.
+    NotOnCard,
+    /// The session is settled; its row has no agent rows.
+    Settled,
+    /// The card has no agent rows to show.
+    NoAgents,
+}
+
+/// Allow unfolding the Settled shelf from its header, or a card that has
+/// agent rows.
 ///
 /// # Errors
 ///
-/// Returns [`OpenShelfError::NotOnShelf`] unless the cursor is on the header.
-pub fn validate_open_shelf(state: &AppState) -> Result<(), OpenShelfError> {
-    match state.sessions.cursor {
-        Some(SidebarItem::SettledShelf) => Ok(()),
-        _ => Err(OpenShelfError::NotOnShelf),
+/// Returns [`UnfoldError::NotOnCard`] off the header and cards,
+/// [`UnfoldError::Settled`] on a settled session, and
+/// [`UnfoldError::NoAgents`] on a card without agent rows.
+pub fn validate_unfold(state: &AppState) -> Result<FoldTarget, UnfoldError> {
+    let sessions = &state.sessions;
+    match sessions.cursor {
+        Some(SidebarItem::SettledShelf) => Ok(FoldTarget::Shelf),
+        Some(SidebarItem::Session(id)) => match sessions.session(id) {
+            Some(session) if session.settled_at.is_some() => Err(UnfoldError::Settled),
+            Some(_) if !sessions.agent_rows(id).is_empty() => Ok(FoldTarget::Card(id)),
+            _ => Err(UnfoldError::NoAgents),
+        },
+        Some(SidebarItem::Agent { .. }) | None => Err(UnfoldError::NotOnCard),
     }
 }
 
-/// Why closing the Settled shelf can't proceed.
+/// Why folding at the cursor can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
-pub enum CloseShelfError {
-    /// The cursor is neither on the shelf's header nor in the open shelf.
+pub enum FoldError {
+    /// No row is selected.
+    NoSelection,
+    /// The settled session isn't in the open shelf.
     NotInShelf,
+    /// The card has no agent rows to hide.
+    NoAgents,
 }
 
-/// Allow closing the Settled shelf from its header or from a settled session
-/// in the open shelf.
+/// Allow folding the Settled shelf from its header or a settled session in
+/// the open shelf, and a card that has agent rows from the card or one of
+/// its agent rows.
 ///
 /// # Errors
 ///
-/// Returns [`CloseShelfError::NotInShelf`] when the cursor is anywhere else.
-pub fn validate_close_shelf(state: &AppState) -> Result<(), CloseShelfError> {
+/// Returns [`FoldError::NoSelection`] with no row selected,
+/// [`FoldError::NotInShelf`] on a settled session while the shelf is
+/// closed, and [`FoldError::NoAgents`] on a card without agent rows.
+pub fn validate_fold(state: &AppState) -> Result<FoldTarget, FoldError> {
     let sessions = &state.sessions;
     match sessions.cursor {
-        Some(SidebarItem::SettledShelf) => Ok(()),
-        Some(SidebarItem::Session(_))
-            if sessions.shelf_open
-                && sessions
-                    .selected_session()
-                    .is_some_and(|session| session.settled_at.is_some()) =>
-        {
-            Ok(())
-        }
-        _ => Err(CloseShelfError::NotInShelf),
+        Some(SidebarItem::SettledShelf) => Ok(FoldTarget::Shelf),
+        Some(SidebarItem::Agent { session, .. }) => Ok(FoldTarget::Card(session)),
+        Some(SidebarItem::Session(id)) => match sessions.session(id) {
+            Some(session) if session.settled_at.is_some() && sessions.shelf_open => {
+                Ok(FoldTarget::Shelf)
+            }
+            Some(session) if session.settled_at.is_some() => Err(FoldError::NotInShelf),
+            Some(_) if !sessions.agent_rows(id).is_empty() => Ok(FoldTarget::Card(id)),
+            _ => Err(FoldError::NoAgents),
+        },
+        None => Err(FoldError::NoSelection),
     }
 }
 
@@ -261,10 +291,10 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        CloseShelfError, DeleteError, NewFolderError, NewIncognitoError, NewSessionError,
-        TogglePinError, ToggleSettleError, validate_close_shelf, validate_delete,
+        DeleteError, FoldError, FoldTarget, NewFolderError, NewIncognitoError, NewSessionError,
+        TogglePinError, ToggleSettleError, UnfoldError, validate_delete, validate_fold,
         validate_new_folder, validate_new_incognito, validate_new_session, validate_toggle_pin,
-        validate_toggle_settle,
+        validate_toggle_settle, validate_unfold,
     };
     use crate::feat::sessions::state::{
         FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
@@ -538,38 +568,138 @@ mod tests {
         );
     }
 
-    #[rstest::rstest]
-    fn close_shelf_allowed_on_a_settled_session_in_the_open_shelf() {
-        // Given a settled session selected in the open shelf.
-        let state = {
-            let mut state = on_session(ThreadStatus::Idle);
-            state.sessions.shelf_open = true;
-            if let Some(session) = state.sessions.sessions.first_mut() {
-                session.settled_at = Some(SystemTime::UNIX_EPOCH);
-            }
-            state
-        };
-
-        // When validating closing the shelf.
-        let result = validate_close_shelf(&state);
-
-        // Then it's allowed.
-        assert_eq!(result, Ok(()), "a settled row closes its shelf");
+    /// `on_session` with its session settled and the shelf `open` or not.
+    fn on_settled(open: bool) -> AppState {
+        let mut state = on_session(ThreadStatus::Idle);
+        state.sessions.shelf_open = open;
+        if let Some(session) = state.sessions.sessions.first_mut() {
+            session.settled_at = Some(SystemTime::UNIX_EPOCH);
+        }
+        state
     }
 
     #[rstest::rstest]
-    fn close_shelf_rejected_on_an_active_session() {
-        // Given an active session selected.
-        let state = on_session(ThreadStatus::Idle);
+    fn fold_on_a_settled_session_in_the_open_shelf_folds_the_shelf() {
+        // Given a settled session selected in the open shelf.
+        let state = on_settled(true);
 
-        // When validating closing the shelf.
-        let result = validate_close_shelf(&state);
+        // When validating a fold.
+        let result = validate_fold(&state);
+
+        // Then it folds the shelf.
+        assert_eq!(
+            result,
+            Ok(FoldTarget::Shelf),
+            "a settled row closes its shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fold_rejected_on_a_settled_session_while_the_shelf_is_closed() {
+        // Given a settled session selected while the shelf is closed.
+        let state = on_settled(false);
+
+        // When validating a fold.
+        let result = validate_fold(&state);
 
         // Then validation fails with NotInShelf.
         assert_eq!(
             result,
-            Err(CloseShelfError::NotInShelf),
-            "an active card isn't in the shelf"
+            Err(FoldError::NotInShelf),
+            "a closed shelf can't close again"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fold_on_a_card_with_agents_folds_the_card() {
+        // Given an active session with an agent pane selected.
+        let state = on_session(ThreadStatus::Idle);
+
+        // When validating a fold.
+        let result = validate_fold(&state);
+
+        // Then it folds the card.
+        assert_eq!(
+            result,
+            Ok(FoldTarget::Card(SessionId(1))),
+            "a card with agents folds"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fold_on_an_agent_row_folds_its_card() {
+        // Given session 1's agent row selected.
+        let mut state = on_session(ThreadStatus::Idle);
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        });
+
+        // When validating a fold.
+        let result = validate_fold(&state);
+
+        // Then it folds session 1's card.
+        assert_eq!(
+            result,
+            Ok(FoldTarget::Card(SessionId(1))),
+            "h on an agent row folds its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fold_rejected_on_a_card_without_agents() {
+        // Given an active session whose only thread has no pane.
+        let mut state = on_session(ThreadStatus::Idle);
+        for project in &mut state.sessions.projects {
+            for thread in &mut project.threads {
+                thread.pane = None;
+            }
+        }
+
+        // When validating a fold.
+        let result = validate_fold(&state);
+
+        // Then validation fails with NoAgents.
+        assert_eq!(
+            result,
+            Err(FoldError::NoAgents),
+            "a card without agent rows has nothing to fold"
+        );
+    }
+
+    #[rstest::rstest]
+    fn unfold_rejected_on_an_agent_row() {
+        // Given session 1's agent row selected.
+        let mut state = on_session(ThreadStatus::Idle);
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        });
+
+        // When validating an unfold.
+        let result = validate_unfold(&state);
+
+        // Then validation fails with NotOnCard.
+        assert_eq!(
+            result,
+            Err(UnfoldError::NotOnCard),
+            "an agent row has nothing to open"
+        );
+    }
+
+    #[rstest::rstest]
+    fn unfold_rejected_on_a_settled_session() {
+        // Given a settled session selected in the open shelf.
+        let state = on_settled(true);
+
+        // When validating an unfold.
+        let result = validate_unfold(&state);
+
+        // Then validation fails with Settled.
+        assert_eq!(
+            result,
+            Err(UnfoldError::Settled),
+            "a settled row has no agent rows"
         );
     }
 

@@ -28,9 +28,9 @@ use crate::feat::sessions::state::{
     SidebarItem, ThreadId, folder_slug,
 };
 use crate::feat::sessions::validator::{
-    NewFolderError, SETTLE_IN_PROGRESS, ToggleSettleError, validate_close_shelf, validate_delete,
-    validate_new_folder, validate_new_incognito, validate_new_session, validate_open_shelf,
-    validate_toggle_pin, validate_toggle_settle,
+    FoldTarget, NewFolderError, SETTLE_IN_PROGRESS, ToggleSettleError, validate_delete,
+    validate_fold, validate_new_folder, validate_new_incognito, validate_new_session,
+    validate_toggle_pin, validate_toggle_settle, validate_unfold,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::{validate_rename, validate_resize};
@@ -43,7 +43,8 @@ impl IntentHandler {
     /// Apply `intent` to `state` and return the commands that must follow.
     /// Every intent first clears the mode line's error and worktree notice,
     /// which the user has now seen; otherwise an intent that fails validation
-    /// changes nothing.
+    /// changes nothing. After every intent, a cursor left on an agent row of
+    /// a folded card unfolds it, unless a search lists the row anyway.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per intent keeps every input decision in one match"
@@ -51,7 +52,7 @@ impl IntentHandler {
     pub fn handle(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         state.sessions.error = None;
         state.worktrees.notice = None;
-        match intent {
+        let commands = match intent {
             Intent::Quit => {
                 state.should_quit = true;
                 vec![]
@@ -625,16 +626,24 @@ impl IntentHandler {
                 }
                 with_preview(state, before, vec![])
             }
-            Intent::OpenShelf => match validate_open_shelf(state) {
-                Ok(()) => {
+            Intent::Unfold => match validate_unfold(state) {
+                Ok(FoldTarget::Shelf) => {
                     state.sessions.open_shelf();
+                    vec![]
+                }
+                Ok(FoldTarget::Card(id)) => {
+                    state.sessions.unfold(id);
                     vec![]
                 }
                 Err(_) => vec![],
             },
-            Intent::CloseShelf => match validate_close_shelf(state) {
-                Ok(()) => {
+            Intent::Fold => match validate_fold(state) {
+                Ok(FoldTarget::Shelf) => {
                     state.sessions.close_shelf();
+                    vec![]
+                }
+                Ok(FoldTarget::Card(id)) => {
+                    state.sessions.fold(id);
                     vec![]
                 }
                 Err(_) => vec![],
@@ -726,7 +735,13 @@ impl IntentHandler {
                 }
                 _ => vec![],
             },
+        };
+        if let Some(SidebarItem::Agent { session, .. }) = state.sessions.cursor
+            && !state.sessions.searching()
+        {
+            state.sessions.unfold(session);
         }
+        commands
     }
 }
 
@@ -3359,8 +3374,8 @@ mod tests {
         // Given the cursor on the collapsed Settled header.
         let mut state = settle(state_at(vec![stopped(1)], SidebarItem::SettledShelf), &[1]);
 
-        // When handling OpenShelf.
-        IntentHandler::handle(&Intent::OpenShelf, &mut state);
+        // When handling Unfold on the header.
+        IntentHandler::handle(&Intent::Unfold, &mut state);
 
         // Then the shelf is open.
         assert!(
@@ -3375,8 +3390,8 @@ mod tests {
         let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
         state.sessions.shelf_open = true;
 
-        // When handling CloseShelf.
-        IntentHandler::handle(&Intent::CloseShelf, &mut state);
+        // When handling Fold.
+        IntentHandler::handle(&Intent::Fold, &mut state);
 
         // Then the shelf is closed with its header selected.
         assert_eq!(
@@ -3387,7 +3402,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn h_on_an_active_card_does_nothing() {
+    fn h_on_an_active_card_keeps_the_shelf_open() {
         // Given the shelf open and the cursor on active thread 1.
         let mut state = settle(
             state_with(vec![thread(1, ThreadStatus::Idle), stopped(2)], 1),
@@ -3395,14 +3410,14 @@ mod tests {
         );
         state.sessions.shelf_open = true;
 
-        // When handling CloseShelf.
-        IntentHandler::handle(&Intent::CloseShelf, &mut state);
+        // When handling Fold.
+        IntentHandler::handle(&Intent::Fold, &mut state);
 
         // Then the shelf and cursor are unchanged.
         assert_eq!(
             (state.sessions.shelf_open, state.sessions.cursor),
             (true, Some(SidebarItem::Session(SessionId(1)))),
-            "h on a card should do nothing"
+            "h on a card leaves the shelf alone"
         );
     }
 
@@ -7761,5 +7776,165 @@ mod tests {
             (Some(PaneId(50)), vec![]),
             "only the shown tab's panes can be shown"
         );
+    }
+
+    /// Session 1's card with its agent row, the cursor on `cursor`, folded
+    /// or not.
+    fn card_at(cursor: SidebarItem, folded: bool) -> AppState {
+        let mut state = state_at(vec![thread(1, ThreadStatus::Idle)], cursor);
+        if folded {
+            state.sessions.folded.insert(SessionId(1));
+        }
+        state
+    }
+
+    const AGENT_1: SidebarItem = SidebarItem::Agent {
+        session: SessionId(1),
+        pane: PaneId(1),
+    };
+
+    #[rstest::rstest]
+    fn unfold_on_a_folded_card_unfolds_it() {
+        // Given session 1's card folded, with the cursor on it.
+        let mut state = card_at(SidebarItem::Session(SessionId(1)), true);
+
+        // When handling Unfold (`l`).
+        IntentHandler::handle(&Intent::Unfold, &mut state);
+
+        // Then the card is open.
+        assert!(
+            !state.sessions.folded.contains(&SessionId(1)),
+            "l should open the card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fold_on_a_card_folds_it() {
+        // Given session 1's open card, with the cursor on it.
+        let mut state = card_at(SidebarItem::Session(SessionId(1)), false);
+
+        // When handling Fold (`h`).
+        IntentHandler::handle(&Intent::Fold, &mut state);
+
+        // Then the card is folded.
+        assert!(
+            state.sessions.folded.contains(&SessionId(1)),
+            "h should fold the card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fold_on_an_agent_row_folds_its_card() {
+        // Given the cursor on session 1's agent row.
+        let mut state = card_at(AGENT_1, false);
+
+        // When handling Fold (`h`).
+        IntentHandler::handle(&Intent::Fold, &mut state);
+
+        // Then session 1's card is folded.
+        assert!(
+            state.sessions.folded.contains(&SessionId(1)),
+            "h on an agent row should fold its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fold_on_an_agent_row_moves_the_cursor_to_its_card() {
+        // Given the cursor on session 1's agent row.
+        let mut state = card_at(AGENT_1, false);
+
+        // When handling Fold (`h`).
+        IntentHandler::handle(&Intent::Fold, &mut state);
+
+        // Then the cursor is on session 1's card.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Session(SessionId(1))),
+            "the folded row's cursor moves to its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn unfold_on_an_agent_row_does_nothing() {
+        // Given the cursor on session 1's agent row, the card open.
+        let mut state = card_at(AGENT_1, false);
+
+        // When handling Unfold (`l`).
+        IntentHandler::handle(&Intent::Unfold, &mut state);
+
+        // Then the cursor stays and nothing is folded.
+        assert_eq!(
+            (state.sessions.cursor, state.sessions.folded.is_empty()),
+            (Some(AGENT_1), true),
+            "l on an agent row should do nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fold_and_unfold_on_a_card_without_agents_do_nothing(
+        #[values(Intent::Fold, Intent::Unfold)] intent: Intent,
+    ) {
+        // Given session 1's card whose agent pane has closed.
+        let mut state = card_at(SidebarItem::Session(SessionId(1)), false);
+        for project in &mut state.sessions.projects {
+            for thread in &mut project.threads {
+                thread.pane = None;
+            }
+        }
+
+        // When handling `intent`.
+        IntentHandler::handle(&intent, &mut state);
+
+        // Then nothing is folded.
+        assert!(
+            state.sessions.folded.is_empty(),
+            "{intent:?} has no agent rows to act on"
+        );
+    }
+
+    #[rstest::rstest]
+    fn h_on_the_open_shelf_header_closes_it() {
+        // Given the cursor on the open Settled header.
+        let mut state = settle(state_at(vec![stopped(1)], SidebarItem::SettledShelf), &[1]);
+        state.sessions.shelf_open = true;
+
+        // When handling Fold (`h`).
+        IntentHandler::handle(&Intent::Fold, &mut state);
+
+        // Then the shelf is closed.
+        assert!(
+            !state.sessions.shelf_open,
+            "h on the header should close the shelf"
+        );
+    }
+
+    #[rstest::rstest]
+    fn search_confirm_on_a_folded_cards_agent_row_unfolds_it() {
+        // Given "logout" matching thread 3, its card folded and the cursor on
+        // its agent row.
+        let mut state = searching("logout", Some(3));
+        state.sessions.folded.insert(SessionId(3));
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(3),
+            pane: PaneId(3),
+        });
+
+        // When ending the search with `⏎`.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then thread 3's card is open.
+        assert!(
+            !state.sessions.folded.contains(&SessionId(3)),
+            "a cursor left on a hidden row unfolds its card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_app_state_has_no_folded_cards() {
+        // Given / When a fresh app state.
+        let state = AppState::default();
+
+        // Then every card is open.
+        assert!(state.sessions.folded.is_empty(), "cards start open");
     }
 }

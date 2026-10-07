@@ -4,22 +4,24 @@
 //! An input box heads it: `Sessions`, with an `i` badge lit while the
 //! search has the keys, the filtered project after the `>` prompt, and how
 //! many sessions are listed out of all of them. Below it, pinned sessions
-//! come first, then active ones, each a card: its most urgent agent's status icon and its
-//! title, then the project and status, then the branch (a Research or Learn
-//! session's folder), then one row per agent pane under the card, with its
-//! status, name or title and harness mark. The selected row's first line is
-//! highlighted. Settled
-//! sessions fold into a shelf at the bottom, drawn as one-line rows while
-//! it's open. The sidebar scrolls to keep the whole selected row in view,
+//! come first, then active ones, each a card: its most urgent agent's
+//! status icon and its title, then the project and status, then the branch
+//! (a Research or Learn session's folder as a `~/…` path), then one row per
+//! agent pane under the card, with its status, name or title and harness
+//! mark. A card with agent rows ends its last line with `⌄`; folded, it
+//! hides them and shows `›` after one status icon per agent. The selected
+//! row's first line is highlighted. Settled sessions fold into a shelf at
+//! the bottom, drawn as one-line rows while it's open. The sidebar scrolls to keep the whole selected row in view,
 //! unless the wheel scrolled it while the keys are elsewhere.
 //!
 //! While the user searches, the typed text follows the prompt, and only
 //! the sessions whose title or an agent's title matches it are
-//! listed, settled ones included, with the matched characters highlighted
-//! as in the pickers.
+//! listed, settled ones included and folded cards open, with the matched
+//! characters highlighted as in the pickers.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use orb_domain::feat::harness::HarnessInfo;
@@ -29,6 +31,7 @@ use orb_domain::feat::sessions::state::{
     SidebarRow, Thread, ThreadStatus, most_urgent,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
+use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
@@ -108,6 +111,7 @@ pub(crate) fn render(
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     layouts: &Layouts,
+    home: &Path,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -128,7 +132,7 @@ pub(crate) fn render(
         heights: rows.iter().map(height).collect(),
     };
     let selected_y = render_list(
-        sessions, attached, harnesses, layouts, rows, now, list, buf, scroll, hits,
+        sessions, attached, harnesses, layouts, home, rows, now, list, buf, scroll, hits,
     );
     (selected_y, layout, search_cursor)
 }
@@ -254,6 +258,7 @@ fn render_list(
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     layouts: &Layouts,
+    home: &Path,
     rows: Vec<SidebarRow<'_>>,
     now: SystemTime,
     area: Rect,
@@ -313,7 +318,8 @@ fn render_list(
                 .get(index + 1)
                 .is_some_and(|(row, _)| matches!(row, SidebarRow::Settled { .. }));
             render_row(
-                sessions, attached, harnesses, layouts, row, ends_shelf, now, row_area, &mut list,
+                sessions, attached, harnesses, layouts, home, row, ends_shelf, now, row_area,
+                &mut list,
             );
         }
         list
@@ -416,6 +422,7 @@ fn render_row(
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     layouts: &Layouts,
+    home: &Path,
     row: &SidebarRow<'_>,
     ends_shelf: bool,
     now: SystemTime,
@@ -428,6 +435,7 @@ fn render_row(
             project,
             session,
             attached.contains(&session.id),
+            home,
             now,
             area,
             buf,
@@ -464,12 +472,19 @@ fn render_row(
 /// A session's card: its most urgent agent's status icon (the idle circle
 /// without one, filled while `attached`), its title, pin and time; the
 /// project and the status word; the branch, or for a Research or Learn
-/// session its folder and kind icon.
+/// session its folder as a `~/…` path and its kind icon. With agent rows,
+/// the last line ends with `⌄` while they show and `›` while folded, after
+/// one status icon per agent (at most 8, then `+N`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the card's parts plus the frame inputs every node takes"
+)]
 fn render_card(
     sessions: &Sessions,
     project: &Project,
     session: &Session,
     attached: bool,
+    home: &Path,
     now: SystemTime,
     area: Rect,
     buf: &mut Buffer,
@@ -504,9 +519,18 @@ fn render_card(
         line(1),
         buf,
     );
-    let guide = if agents.is_empty() { LAST_GUIDE } else { GUIDE };
+    let rows = sessions.agent_rows(session.id);
+    let folded = sessions.hides_agents(session.id);
+    let guide = if rows.is_empty() || folded {
+        LAST_GUIDE
+    } else {
+        GUIDE
+    };
     let (place, kind) = match session_look(session.kind) {
-        Some(look) => (format!("{FOLDER} {}", folder_name(session)), Some(look)),
+        Some(look) => (
+            format!("{FOLDER} {}", tilde(&session.dir, home)),
+            Some(look),
+        ),
         None => {
             let branch = agents
                 .first()
@@ -516,11 +540,31 @@ fn render_card(
             (format!("{BRANCH} {branch}"), None)
         }
     };
+    let icons: Vec<_> = rows
+        .iter()
+        .filter(|_| folded)
+        .map(|(thread, _)| status(thread, attached, now))
+        .collect();
+    let rest = icons.len().saturating_sub(AGENT_ICONS);
+    let chevron = match (rows.is_empty(), folded) {
+        (true, _) => None,
+        (false, true) => Some(FOLD_CLOSED),
+        (false, false) => Some(FOLD_OPEN),
+    };
     render_split(
         Line::from(vec![span(guide, GUTTER), span(place, COMMENT)]),
         Line::from(
-            kind.map(|(icon, colour)| span(icon, colour))
-                .unwrap_or_default(),
+            kind.map(|(icon, colour)| span(format!("{icon} "), colour))
+                .into_iter()
+                .chain(
+                    icons
+                        .into_iter()
+                        .take(AGENT_ICONS)
+                        .map(|(glyph, _, colour)| span(format!("{glyph} "), colour)),
+                )
+                .chain((rest > 0).then(|| span(format!("+{rest} "), COMMENT)))
+                .chain(chevron.map(|chevron| span(chevron, DARK3)))
+                .collect::<Vec<_>>(),
         ),
         line(2),
         buf,
@@ -563,14 +607,6 @@ fn render_agent(
         area,
         buf,
     );
-}
-
-/// The name of a Research or Learn session's folder.
-fn folder_name(session: &Session) -> Cow<'_, str> {
-    session.dir.file_name().map_or_else(
-        || session.dir.to_string_lossy(),
-        |name| name.to_string_lossy(),
-    )
 }
 
 /// A folder kind's icon and colour: Research `nf-fa-flask` blue2, Learn
@@ -956,6 +992,12 @@ pub(crate) const FOLDER_OPEN: &str = "\u{f07c}";
 /// A model, before a harness's models when it has no mark
 /// (`nf-fa-microchip`).
 pub(crate) const CHIP: &str = "\u{f2db}";
+/// The most status icons a folded card shows before counting the rest.
+const AGENT_ICONS: usize = 8;
+/// A card whose agent rows show (`nf-oct-chevron_down`).
+const FOLD_OPEN: &str = "\u{f47c}";
+/// A folded card (`nf-oct-chevron_right`).
+const FOLD_CLOSED: &str = "\u{f460}";
 /// The tree guide before a node's middle line, a card's agent row and a
 /// settled row.
 const GUIDE: &str = " ├╴";
@@ -970,6 +1012,7 @@ mod tests {
     use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
     use orb_domain::feat::zmx::zmx_service::ZmxSession;
     use std::collections::HashSet;
+    use std::path::Path;
     use std::time::{Duration, Instant, SystemTime};
 
     use orb_domain::TextInput;
@@ -986,12 +1029,16 @@ mod tests {
 
     use super::{
         APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, BRANCH, COMMENT, COMPLETED_ICON,
-        CYAN, DARK3, FAILED_ICON, FG, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GUIDE, GUTTER,
-        IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PIN, PURPLE, RED, STOPPED_ICON,
-        SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
+        CYAN, DARK3, FAILED_ICON, FG, FOLD_CLOSED, FOLD_OPEN, FOLDER, FOLDER_OPEN, GONE_ICON,
+        GREEN, GUIDE, GUTTER, IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PIN, PURPLE, RED,
+        STOPPED_ICON, SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour, monogram, render,
+        working_label,
     };
     use crate::mouse::{Clicks, HitMap, MouseRoute};
     use crate::test_support::sessions_for;
+
+    /// The home directory the sidebar shortens folder paths against.
+    const HOME: &str = "/Users/me";
 
     fn at(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -1094,6 +1141,7 @@ mod tests {
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
+            Path::new(HOME),
             now,
             buf.area,
             &mut buf,
@@ -1127,6 +1175,7 @@ mod tests {
             &attached,
             &[info()],
             &Layouts::default(),
+            Path::new(HOME),
             now,
             buf.area,
             &mut buf,
@@ -1381,6 +1430,7 @@ mod tests {
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
+            Path::new(HOME),
             at(1000),
             buf.area,
             &mut buf,
@@ -1406,6 +1456,7 @@ mod tests {
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
+            Path::new(HOME),
             at(1000),
             buf.area,
             &mut buf,
@@ -1477,6 +1528,7 @@ mod tests {
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
+            Path::new(HOME),
             at(1000),
             buf.area,
             &mut buf,
@@ -1773,6 +1825,7 @@ mod tests {
             &HashSet::new(),
             harnesses,
             &Layouts::default(),
+            Path::new(HOME),
             at(1000),
             buf.area,
             &mut buf,
@@ -2324,14 +2377,157 @@ mod tests {
         // When drawing the sidebar.
         let buf = draw(&sessions, at(1000), 12);
 
-        // Then the third line ends with the kind's icon in its colour.
-        let last = (0..buf.area.width)
-            .rev()
-            .find_map(|x| glyph(&buf, x, 5).filter(|(symbol, _)| symbol.trim() != ""));
-        assert_eq!(
-            last.map(|(_, fg)| fg),
-            Some(colour),
-            "the {kind:?} icon's colour"
+        // Then the third line shows the kind's icon in its colour.
+        let shown = (0..buf.area.width)
+            .filter_map(|x| glyph(&buf, x, 5))
+            .any(|(symbol, fg)| symbol.trim() != "" && fg == colour);
+        assert!(shown, "the {kind:?} icon's colour on '{}'", line(&buf, 5));
+    }
+
+    /// Session 1 holding `count` stopped agents, each in its own pane, its
+    /// card `folded` or not.
+    fn card_of(count: i64, folded: bool) -> Sessions {
+        let threads = (1..=count)
+            .map(|id| Thread {
+                pane: Some(PaneLaunch {
+                    pane: PaneId(id),
+                    session: SessionId(1),
+                }),
+                ..stopped(id)
+            })
+            .collect();
+        let mut sessions = sessions(threads);
+        if folded {
+            sessions.folded.insert(SessionId(1));
+        }
+        sessions
+    }
+
+    #[rstest::rstest]
+    fn open_card_ends_its_last_line_with_the_down_chevron() {
+        // Given session 1's open card over two agents.
+        let sessions = card_of(2, false);
+
+        // When drawing the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then its third line ends with the down chevron.
+        assert!(
+            line(&buf, 5).trim_end().ends_with(FOLD_OPEN),
+            "line was '{}'",
+            line(&buf, 5)
+        );
+    }
+
+    #[rstest::rstest]
+    fn folded_card_shows_a_status_icon_per_agent_then_the_right_chevron() {
+        // Given session 1's card folded over two stopped agents.
+        let sessions = card_of(2, true);
+
+        // When drawing the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then its third line ends with two stop icons and the right chevron.
+        assert!(
+            line(&buf, 5)
+                .trim_end()
+                .ends_with(&format!("{STOPPED_ICON} {STOPPED_ICON} {FOLD_CLOSED}")),
+            "line was '{}'",
+            line(&buf, 5)
+        );
+    }
+
+    #[rstest::rstest]
+    fn folded_card_counts_agents_past_eight() {
+        // Given session 1's card folded over ten agents.
+        let sessions = card_of(10, true);
+
+        // When drawing the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then its third line counts the two past eight.
+        assert!(
+            line(&buf, 5).contains(&format!("{STOPPED_ICON} +2 {FOLD_CLOSED}")),
+            "line was '{}'",
+            line(&buf, 5)
+        );
+    }
+
+    #[rstest::rstest]
+    fn folded_card_closes_its_tree() {
+        // Given session 1's card folded over two agents.
+        let sessions = card_of(2, true);
+
+        // When drawing the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then its third line starts with the last guide.
+        assert!(
+            line(&buf, 5).starts_with(LAST_GUIDE),
+            "line was '{}'",
+            line(&buf, 5)
+        );
+    }
+
+    #[rstest::rstest]
+    fn card_without_agents_shows_no_chevron() {
+        // Given session 1 whose agent has ended.
+        let mut sessions = card_of(1, false);
+        for project in &mut sessions.projects {
+            for thread in &mut project.threads {
+                thread.pane = None;
+            }
+        }
+
+        // When drawing the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then its third line has no chevron.
+        let third = line(&buf, 5);
+        assert!(
+            !third.contains(FOLD_OPEN) && !third.contains(FOLD_CLOSED),
+            "line was '{third}'"
+        );
+    }
+
+    /// `sessions` with session 1 a Learn session in `~/.orb/learn/<slug>`.
+    fn learning(mut sessions: Sessions, slug: &str) -> Sessions {
+        if let Some(session) = sessions.sessions.first_mut() {
+            session.kind = SessionKind::Learn;
+            session.dir = format!("{HOME}/.orb/learn/{slug}").into();
+        }
+        sessions
+    }
+
+    #[rstest::rstest]
+    fn learn_card_shows_its_folder_as_a_tilde_path() {
+        // Given a Learn session in ~/.orb/learn/rust.
+        let sessions = learning(card_of(1, false), "rust");
+
+        // When drawing the sidebar.
+        let buf = draw(&sessions, at(1000), 12);
+
+        // Then its third line shows the path from home.
+        assert!(
+            line(&buf, 5).contains("~/.orb/learn/rust"),
+            "line was '{}'",
+            line(&buf, 5)
+        );
+    }
+
+    #[rstest::rstest]
+    fn narrow_learn_card_cuts_its_path_before_the_chevron() {
+        // Given a Learn session with a long slug, folded over one agent.
+        let sessions = learning(card_of(1, true), "a-long-learning-folder");
+
+        // When drawing a 24-column sidebar.
+        let (buf, ..) = render_sized(&sessions, at(1000), 24, 12);
+
+        // Then its third line still ends with the right chevron.
+        assert!(
+            line(&buf, 5).trim_end().ends_with(FOLD_CLOSED),
+            "line was '{}'",
+            line(&buf, 5)
         );
     }
 
@@ -2349,6 +2545,7 @@ mod tests {
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
+            Path::new(HOME),
             at(1000),
             buf.area,
             &mut buf,
@@ -2522,6 +2719,7 @@ mod tests {
             &HashSet::new(),
             &[info()],
             layouts,
+            Path::new(HOME),
             at(1000),
             buf.area,
             &mut buf,
