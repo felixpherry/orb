@@ -20,7 +20,7 @@ use crate::keymap::Keys;
 use crate::picker::WORKTREE;
 use crate::sidebar::{
     BG_DARK, BLUE, BLUE1, BORDER, COMMENT, CYAN, DARK5, FOLDER, FOLDER_OPEN, GREEN, MAGENTA,
-    ORANGE, RED, YELLOW, kind_look,
+    ORANGE, RED, kind_look,
 };
 
 /// One row of the popup: a next key and what it does.
@@ -139,8 +139,6 @@ fn look(intent: &Intent) -> (&'static str, Color) {
         Intent::NewSession => ("\u{f067}", GREEN),
         Intent::AddProject => (FOLDER_OPEN, BLUE),
         Intent::FilterProjects => ("\u{f0b0}", CYAN),
-        Intent::PickModel => ("\u{f0e7}", MAGENTA),
-        Intent::PickPermission => ("\u{f023}", YELLOW),
         Intent::ChangeWorkspace => ("\u{f1bb}", GREEN),
         Intent::SwitchBranch => ("\u{e725}", ORANGE),
         Intent::OpenTool(Tool::Shell) => ("\u{f120}", CYAN),
@@ -148,7 +146,7 @@ fn look(intent: &Intent) -> (&'static str, Color) {
         Intent::OpenTool(Tool::Nvim) => ("\u{e62b}", GREEN),
         Intent::ToggleSidebar => ("\u{f0db}", BLUE1),
         Intent::SelectFirst => ("\u{f062}", BLUE),
-        Intent::NewGroup(kind) => kind_look(*kind),
+        Intent::NewFolder(kind) => kind_look(*kind),
         Intent::OpenWorktreePicker => (WORKTREE, ORANGE),
         _ => ("\u{f111}", DARK5),
     }
@@ -218,7 +216,7 @@ mod tests {
 
     use super::render;
     use crate::keymap::{KeyCategory, Keys, Scope, keymap, press};
-    use crate::sidebar::{BLUE2, GREEN1, PURPLE};
+    use crate::sidebar::{BLUE2, PURPLE};
 
     const SCREEN: Rect = Rect::new(0, 0, 80, 20);
 
@@ -233,7 +231,7 @@ mod tests {
 
     /// orb's keymap on a thread with Space pressed.
     fn leader_on_thread() -> Keys {
-        leader(Keys::new(keymap(), Scope::Sidebar.into()))
+        leader(Keys::new(keymap(), Scope::Sidebar))
     }
 
     /// A buffer the size of `SCREEN` with the popup drawn inside `area`.
@@ -266,10 +264,10 @@ mod tests {
                     &format!("<leader>{key}"),
                     Intent::NewSession,
                     KeyCategory::Sessions,
-                    Scope::Sidebar.into(),
+                    Scope::Sidebar,
                 );
             }
-            leader(Keys::new(km, Scope::Sidebar.into()))
+            leader(Keys::new(km, Scope::Sidebar))
         };
 
         // When drawing the popup.
@@ -329,9 +327,9 @@ mod tests {
                 "<leader>xa",
                 Intent::NewSession,
                 KeyCategory::Sessions,
-                Scope::Sidebar.into(),
+                Scope::Sidebar,
             );
-            leader(Keys::new(km, Scope::Sidebar.into()))
+            leader(Keys::new(km, Scope::Sidebar))
         };
 
         // When drawing the popup.
@@ -405,7 +403,7 @@ mod tests {
     #[rstest::rstest]
     fn no_popup_without_a_pending_sequence() {
         // Given orb's keymap with nothing pressed.
-        let keys = Keys::new(keymap(), Scope::Sidebar.into());
+        let keys = Keys::new(keymap(), Scope::Sidebar);
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
@@ -455,10 +453,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case('f', "\u{f126}", GREEN1)]
     #[case('r', "\u{f0c3}", BLUE2)]
     #[case('l', "\u{f02d}", PURPLE)]
-    fn new_group_rows_show_their_kind_icon(
+    fn new_folder_rows_show_their_kind_icon(
         #[case] pressed: char,
         #[case] icon: &str,
         #[case] colour: Color,

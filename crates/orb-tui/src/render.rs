@@ -227,8 +227,8 @@ mod tests {
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::search::state::SearchProgress;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search,
-        SessionId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search, SessionId, Sessions,
+        SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use orb_domain::feat::zmx::zmx_service::ZmxSession;
@@ -271,7 +271,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             branch: None,
             pinned_at: None,
@@ -294,9 +293,8 @@ mod tests {
                 root: "/Users/me/dev/orb".into(),
                 created_at: SystemTime::UNIX_EPOCH,
                 removed: false,
-                draft: None,
+                repo: true,
                 threads,
-                groups: vec![],
                 kind: ProjectKind::Normal,
             }],
             ..Sessions::default()
@@ -305,7 +303,7 @@ mod tests {
 
     /// Draws `state` on an 80x8 screen.
     fn draw(state: &AppState) -> Buffer {
-        draw_with(state, &Keys::new(keymap(), Scope::Sidebar.into()))
+        draw_with(state, &Keys::new(keymap(), Scope::Sidebar))
     }
 
     /// Draws `state` on an 80x8 screen with `keys` pending.
@@ -315,7 +313,7 @@ mod tests {
 
     /// Draws `state` on an 80x40 screen, tall enough for the whole dashboard.
     fn draw_tall(state: &AppState, pane_error: Option<&str>) -> Buffer {
-        let keys = Keys::new(keymap(), Scope::Dashboard.into());
+        let keys = Keys::new(keymap(), Scope::Dashboard);
         frame(state, pane_error, &keys, 40)
             .backend()
             .buffer()
@@ -389,7 +387,7 @@ mod tests {
     /// Draws `state` on an 80x8 screen with `panes` running.
     fn draw_with_pane(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Buffer {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-        let keys = Keys::new(keymap(), Scope::Sidebar.into());
+        let keys = Keys::new(keymap(), Scope::Sidebar);
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
@@ -446,7 +444,6 @@ mod tests {
             thread.pane = Some(PaneLaunch {
                 pane: PaneId(1),
                 session: SessionId(1),
-                command: vec![],
             });
         }
         state.sessions.sessions = sessions_for(&state.sessions.projects);
@@ -456,27 +453,11 @@ mod tests {
         state
     }
 
-    /// orb's local draft, selected, with the given focus.
-    fn drafted(focus: Focus) -> AppState {
-        let mut sessions = Sessions {
-            cursor: Some(SidebarItem::Draft(ProjectId(1))),
-            ..sessions(vec![])
-        };
-        if let Some(project) = sessions.projects.first_mut() {
-            project.draft = Some(Draft {
-                harness: HarnessId::new("claude"),
-                workspace: DraftWorkspace::Local,
-                branch: Some("dev".to_owned()),
-                model: None,
-                permission: None,
-                created_at: SystemTime::UNIX_EPOCH,
-                repo: true,
-                from: None,
-            });
-        }
+    /// orb with no row selected, with the given focus.
+    fn unselected(focus: Focus) -> AppState {
         AppState {
             focus,
-            sessions,
+            sessions: sessions(vec![]),
             ..AppState::default()
         }
     }
@@ -601,15 +582,10 @@ mod tests {
         let state = delete_worktree_confirm();
 
         // When drawing a frame.
-        let buffer = frame(
-            &state,
-            None,
-            &Keys::new(keymap(), Scope::Sidebar.into()),
-            20,
-        )
-        .backend()
-        .buffer()
-        .clone();
+        let buffer = frame(&state, None, &Keys::new(keymap(), Scope::Sidebar), 20)
+            .backend()
+            .buffer()
+            .clone();
 
         // Then the list's row and the confirm's title are both on screen.
         let screen = text(&buffer, buffer.area);
@@ -626,7 +602,7 @@ mod tests {
         let mut hits = HitMap::default();
         let buffer = {
             let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
-            let keys = Keys::new(keymap(), Scope::Sidebar.into());
+            let keys = Keys::new(keymap(), Scope::Sidebar);
             let Ok(_) = terminal.draw(|frame| {
                 render(
                     frame,
@@ -693,12 +669,12 @@ mod tests {
         let state = selected(Focus::Sidebar);
 
         // When drawing a frame with the pane's error.
-        let buffer = draw_tall(&state, Some("claude attach failed"));
+        let buffer = draw_tall(&state, Some("zmx attach failed"));
 
         // Then the error is on the right side.
         let right = text(&buffer, right_of(&buffer));
         assert!(
-            right.contains("claude attach failed"),
+            right.contains("zmx attach failed"),
             "right side was\n{right}"
         );
     }
@@ -792,7 +768,7 @@ mod tests {
     fn leader_popup_on_a_two_row_screen_still_draws_the_mode_line() {
         // Given Space pressed on a two-row screen, too short for the popup.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 2));
-        let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
         press(
             &mut keys,
             KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
@@ -827,7 +803,7 @@ mod tests {
     fn leader_popup_sits_above_the_mode_line() {
         // Given Space pressed on a 20-row screen.
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 20));
-        let mut keys = Keys::new(keymap(), Scope::Sidebar.into());
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
         press(
             &mut keys,
             KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
@@ -941,7 +917,7 @@ mod tests {
     /// `panes` running; `None` while it's hidden.
     fn cursor_of(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Option<Position> {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
-        let keys = Keys::new(keymap(), Scope::Sidebar.into());
+        let keys = Keys::new(keymap(), Scope::Sidebar);
         let Ok(_) = terminal.draw(|frame| {
             render(
                 frame,
@@ -1036,9 +1012,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn selected_draft_shows_the_start_screen() {
-        // Given orb's draft selected.
-        let state = drafted(Focus::Sidebar);
+    fn no_selection_shows_the_start_screen() {
+        // Given no row selected.
+        let state = unselected(Focus::Sidebar);
 
         // When drawing a frame.
         let right = right_side(&draw_tall(&state, None));
@@ -1093,8 +1069,8 @@ mod tests {
 
     #[rstest::rstest]
     fn hidden_sidebar_centres_the_start_screen_on_the_whole_width() {
-        // Given orb's draft selected with the sidebar hidden.
-        let state = hidden(drafted(Focus::Sidebar));
+        // Given no row selected with the sidebar hidden.
+        let state = hidden(unselected(Focus::Sidebar));
 
         // When drawing a frame 80 columns wide.
         let buffer = draw(&state);
@@ -1249,7 +1225,7 @@ mod tests {
                 &state,
                 &HashMap::new(),
                 None,
-                &Keys::new(keymap(), Scope::Dashboard.into()),
+                &Keys::new(keymap(), Scope::Dashboard),
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
                 &mut SidebarScroll::default(),

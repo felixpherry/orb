@@ -10,17 +10,13 @@
 //! its path, the parent dimmed and the name bright, with the name on the
 //! right when the folder is named differently; so does the project filter,
 //! under an `All projects` row. Confirming a project's removal offers `No`
-//! and `Yes`; a session start waiting on trust asks `Trust ~/path?` the same
-//! way, and so does deleting a worktree. The worktree picker has its own
+//! and `Yes`, and so does deleting a worktree. The worktree picker has its own
 //! snacks layout in `worktree_picker`. The directory picker shows one folder
-//! per row; the workspace picker shows where a thread's session could run,
-//! each with its glyph; the branch picker shows each branch with its badge
-//! on the right, dimming the ones checked out where the thread can't follow
-//! and saying where; the model picker shows each model's name after its
-//! harness's mark, with its legacy models under their own heading, the
-//! permission picker each mode after a shield, and the harness picker each
-//! harness after a plug, dimmed with the reason when it can't be picked; a
-//! draft whose project isn't a git repository gets one row, `Initialize Git`.
+//! per row; the workspace picker shows where a session could run, each with
+//! its glyph; the branch and base pickers show each branch with its badge on
+//! the right, the branch picker dimming the ones checked out where the
+//! session can't follow and saying where; a project that isn't a git
+//! repository gets one row, `Initialize Git`.
 //! Where the filter matched is blue and bold, and the rows scroll to keep the
 //! selection in view.
 
@@ -43,8 +39,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::mouse::HitMap;
 use crate::sidebar::{
-    BG_DARK, BLUE, BLUE1, BORDER, BRANCH, CHIP, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK, FOLDER,
-    FOLDER_OPEN, GREEN, LOGO, MAGENTA, ORANGE, PLUG, VISUAL, YELLOW, badge, mark, render_split,
+    BG_DARK, BLUE, BLUE1, BORDER, BRANCH, COMMENT, CYAN, DARK3, DARK5, FG, FG_DARK, FOLDER,
+    FOLDER_OPEN, GREEN, MAGENTA, ORANGE, VISUAL, YELLOW, badge, render_split,
 };
 
 /// Nerd Font's code-fork glyph, before the worktree workspace rows and the
@@ -52,8 +48,6 @@ use crate::sidebar::{
 pub(crate) const WORKTREE: &str = "\u{f126}";
 /// Nerd Font's history glyph, before the previous worktree's workspace row.
 const HISTORY: &str = "\u{f1da}";
-/// Before a permission mode (`nf-fa-shield`).
-const SHIELD: &str = "\u{f132}";
 /// Before Initialize Git (`nf-fa-git`).
 const GIT: &str = "\u{f1d3}";
 
@@ -91,10 +85,7 @@ pub(crate) fn render(
     scroll: &mut PickerScroll,
     hits: &mut HitMap,
 ) -> (usize, Position) {
-    let title = Line::from(span(
-        format!(" {} ", title(picker.kind(), home, sessions)),
-        BLUE,
-    ));
+    let title = Line::from(span(format!(" {} ", title(picker.kind(), sessions)), BLUE));
     let popup = {
         let lines = |count: usize| u16::try_from(count).unwrap_or(u16::MAX);
         let title = u16::try_from(title.width()).unwrap_or(u16::MAX);
@@ -151,16 +142,13 @@ fn popup_rect(area: Rect, title: u16, shown: u16, total: u16) -> Rect {
 /// The picker's name, centred in its top border; paths under `home` show as
 /// `~/`. A settle or delete confirm names its session by its title in
 /// `sessions` (`session` once it is gone).
-fn title(kind: &PickerKind, home: &Path, sessions: &Sessions) -> Cow<'static, str> {
+fn title(kind: &PickerKind, sessions: &Sessions) -> Cow<'static, str> {
     let named = |id| {
         sessions
             .session(id)
             .map_or_else(|| "session".to_owned(), |session| sessions.title(session))
     };
     let name = match kind {
-        PickerKind::TrustWorkspace { dir } => {
-            return Cow::Owned(format!("Trust {}?", tilde(dir, home)));
-        }
         PickerKind::SettleSession { session } => {
             return Cow::Owned(format!("Settle {}?", named(*session)));
         }
@@ -172,7 +160,7 @@ fn title(kind: &PickerKind, home: &Path, sessions: &Sessions) -> Cow<'static, st
             session,
             folder: true,
         } => return Cow::Owned(format!("Delete {} and its folder?", named(*session))),
-        PickerKind::Projects | PickerKind::GroupProject => "Projects",
+        PickerKind::Projects => "Projects",
         PickerKind::Sessions { .. } => "Sessions",
         PickerKind::Worktrees => "Worktrees",
         PickerKind::Search { .. } => "Search",
@@ -180,12 +168,9 @@ fn title(kind: &PickerKind, home: &Path, sessions: &Sessions) -> Cow<'static, st
         PickerKind::Directories { .. } => "Add project",
         PickerKind::Workspace { .. } => "Workspace",
         PickerKind::Branches { .. } => "Branches",
-        PickerKind::Harness { .. } => "Harness",
-        PickerKind::Model { .. } => "Model",
-        PickerKind::Permission { .. } => "Permission mode",
+        PickerKind::Base { .. } => "New worktree from",
         PickerKind::InitGit { .. } => "Not a git repository",
         PickerKind::RemoveProject { .. } => "Remove project?",
-        PickerKind::DiscardDraft { .. } | PickerKind::DiscardGroupDraft { .. } => "Discard draft?",
         PickerKind::DeleteWorktree { dirty: false, .. } => "Delete worktree?",
         PickerKind::DeleteWorktree { dirty: true, .. } => {
             "Delete worktree and its uncommitted changes?"
@@ -203,9 +188,6 @@ fn hints(kind: &PickerKind) -> Line<'static> {
         PickerKind::RemoveProject { .. }
         | PickerKind::SettleSession { .. }
         | PickerKind::DeleteSession { .. }
-        | PickerKind::DiscardDraft { .. }
-        | PickerKind::DiscardGroupDraft { .. }
-        | PickerKind::TrustWorkspace { .. }
         | PickerKind::DeleteWorktree { .. }
         | PickerKind::InitGit { .. } => &[("⏎", "confirm"), ("Esc", "cancel")],
         _ => &[("⏎", "select"), ("Esc", "close")],
@@ -255,11 +237,7 @@ fn render_rows(
     }
     let selection = picker.selection();
     let offset = scroll.follow(selection, shown.len(), page);
-    let mut number = shown
-        .iter()
-        .take(offset)
-        .filter(|(item, _)| !matches!(item, PickerItem::Heading(_)))
-        .count();
+    let mut number = offset;
     for ((index, (item, matches)), y) in shown
         .into_iter()
         .enumerate()
@@ -273,13 +251,8 @@ fn render_rows(
         if index == selection && picker.selected().is_some() {
             buf.set_style(row, Style::new().bg(VISUAL));
         }
-        let label = match item {
-            PickerItem::Heading(_) => Span::raw("    "),
-            _ => {
-                number += 1;
-                span(format!("{number:>2}. "), DARK5)
-            }
-        };
+        number += 1;
+        let label = span(format!("{number:>2}. "), DARK5);
         let (content, right) = row_content(item, matches, picker.kind(), home);
         let left: Line = [Span::raw(" "), label].into_iter().chain(content).collect();
         // The row's own text wins; the right column is cut from its left.
@@ -386,29 +359,6 @@ fn row_content(
             )
         }
         PickerItem::Branch(row) => branch_row(row, matches, kind, home),
-        PickerItem::Setting { label, .. } => {
-            let mark = match kind {
-                PickerKind::Permission { .. } => icon(SHIELD, YELLOW),
-                PickerKind::Model {
-                    icon: mark_icon, ..
-                } => {
-                    let (glyph, fg) = mark(mark_icon.as_deref());
-                    icon(glyph, fg)
-                }
-                _ => icon(CHIP, BLUE1),
-            };
-            (labelled(mark, label, &matches.name), None)
-        }
-        PickerItem::Harness {
-            label,
-            icon,
-            unavailable,
-            ..
-        } => (
-            harness_row(label, icon.as_deref(), unavailable.as_deref(), matches),
-            None,
-        ),
-        PickerItem::Heading(text) => (vec![span(format!("── {text} ──"), COMMENT)], None),
         PickerItem::InitGit => (labelled(icon(GIT, ORANGE), INIT_GIT, &matches.name), None),
         PickerItem::AllProjects => (
             labelled(icon(FOLDER_OPEN, BLUE), ALL_PROJECTS, &matches.name),
@@ -432,6 +382,7 @@ fn branch_row(
 ) -> (Vec<Span<'static>>, Option<RightColumn>) {
     let cwd = match kind {
         PickerKind::Branches { cwd, .. } => cwd.as_path(),
+        PickerKind::Base { root, .. } => root.as_path(),
         _ => Path::new(""),
     };
     let git_ref = &row.git_ref;
@@ -453,28 +404,6 @@ fn branch_row(
         _ => branch_badge(git_ref, cwd).map(|(badge, fg)| RightColumn::new(badge.to_owned(), fg)),
     };
     (left, right)
-}
-
-/// A harness row: its mark (a plug when it has none) and its label, dimmed
-/// with the reason after it when it can't be picked.
-fn harness_row(
-    label: &str,
-    own: Option<&str>,
-    unavailable: Option<&str>,
-    matches: &Matches,
-) -> Vec<Span<'static>> {
-    let fg = match unavailable {
-        Some(_) => DARK3,
-        None => FG,
-    };
-    let (glyph, glyph_fg) = match own {
-        Some(own) => (own, LOGO),
-        None => (PLUG, BLUE1),
-    };
-    std::iter::once(icon(glyph, glyph_fg))
-        .chain(highlight(label, &matches.name, |_| fg))
-        .chain(unavailable.map(|reason| span(format!("  {reason}"), DARK3)))
-        .collect()
 }
 
 /// `glyph` and a space, in `fg`: the icon before a row's text.
@@ -597,7 +526,9 @@ where
 /// Why no rows are shown.
 fn empty_hint(picker: &PickerState) -> &'static str {
     match picker.kind() {
-        PickerKind::Branches { .. } if picker.input().is_empty() => "Loading branches…",
+        PickerKind::Branches { .. } | PickerKind::Base { .. } if picker.input().is_empty() => {
+            "Loading branches…"
+        }
         PickerKind::Directories { .. } if split_path(picker.input()).is_none() => {
             "Type a path starting with / or ~/"
         }
@@ -611,12 +542,10 @@ mod tests {
 
     use orb_domain::Focus;
     use orb_domain::feat::git::git_service::GitRef;
-    use orb_domain::feat::harness::claude::models::info;
-    use orb_domain::feat::harness::{HarnessId, HarnessInfo};
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
-    use orb_domain::feat::picker::state::{DraftTarget, PickTarget, PickerState};
+    use orb_domain::feat::picker::state::{PickTarget, PickerState};
     use orb_domain::feat::sessions::state::{
-        ProjectId, ProjectKind, Session, SessionId, SessionKind, Sessions, ThreadId,
+        ProjectId, ProjectKind, Session, SessionId, SessionKind, Sessions,
     };
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
@@ -624,7 +553,7 @@ mod tests {
     use std::time::UNIX_EPOCH;
     use unicode_segmentation::UnicodeSegmentation;
 
-    use super::{FOLDER, GIT, HISTORY, PLUG, PickerScroll, SHIELD, grapheme_at, render};
+    use super::{FOLDER, GIT, HISTORY, PickerScroll, grapheme_at, render};
     use crate::mouse::HitMap;
     use crate::sidebar::{BLUE1, DARK3, DARK5, FG, ORANGE, VISUAL, badge};
 
@@ -894,16 +823,11 @@ mod tests {
         "Add project"
     )]
     #[case(PickerState::project_filter(vec![PickerItem::AllProjects], None, Focus::Sidebar), "Filter projects")]
-    #[case(PickerState::group_project(vec![], Focus::Sidebar), "Projects")]
     #[case(workspace(), "Workspace")]
     #[case(branches(vec![branch("main", None)]), "Branches")]
     #[case(
-        PickerState::models(DraftTarget::Project(ProjectId(1)), Some(&info()), None, Focus::Dashboard),
-        "Model"
-    )]
-    #[case(
-        PickerState::permissions(DraftTarget::Project(ProjectId(1)), Some(&info()), None, Focus::Dashboard),
-        "Permission mode"
+        PickerState::base(PickTarget::New(ProjectId(1)), "/work".into(), Focus::Sidebar),
+        "New worktree from"
     )]
     #[case(
         PickerState::init_git(ProjectId(1), Focus::Dashboard),
@@ -924,14 +848,6 @@ mod tests {
     #[case(
         PickerState::delete_session(SessionId(1), true, Focus::Sidebar),
         "Delete session and its folder?"
-    )]
-    #[case(
-        PickerState::discard_draft(ProjectId(1), Focus::Sidebar),
-        "Discard draft?"
-    )]
-    #[case::trust(
-        PickerState::trust_workspace(PathBuf::from("/Users/me/dev/orb"), Focus::Sidebar),
-        "Trust ~/dev/orb?"
     )]
     #[case::clean_worktree(delete_worktree(false), "Delete worktree?")]
     #[case::dirty_worktree(delete_worktree(true), "Delete worktree and its uncommitted changes?")]
@@ -1011,33 +927,6 @@ mod tests {
         assert!(
             rows[0].starts_with("1. ") && rows[1].starts_with("2. "),
             "the first two rows were {rows:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn heading_is_not_numbered() {
-        // Given a model picker, whose five current models come before the
-        // Legacy models heading.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            None,
-            Focus::Dashboard,
-        );
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
-
-        // Then the first legacy model is number 6.
-        let lines = lines(&buf);
-        let legacy = lines
-            .iter()
-            .skip_while(|line| !line.contains("Legacy models"))
-            .nth(1)
-            .map(|line| line.trim_matches(['│', ' ']));
-        assert!(
-            legacy.is_some_and(|line| line.starts_with("6. ")),
-            "the first legacy model's row was {legacy:?}"
         );
     }
 
@@ -1140,14 +1029,6 @@ mod tests {
         PickerState::delete_session(SessionId(1), false, Focus::Sidebar),
         "⏎ confirm · Esc cancel"
     )]
-    #[case(
-        PickerState::discard_draft(ProjectId(1), Focus::Sidebar),
-        "⏎ confirm · Esc cancel"
-    )]
-    #[case::trust(
-        PickerState::trust_workspace(PathBuf::from("/Users/me/dev/orb"), Focus::Sidebar),
-        "⏎ confirm · Esc cancel"
-    )]
     #[case::delete_worktree(delete_worktree(false), "⏎ confirm · Esc cancel")]
     #[case(workspace(), "⏎ select · Esc close")]
     fn hints(#[case] picker: PickerState, #[case] expected: &str) {
@@ -1200,128 +1081,6 @@ mod tests {
             inner_line(&buf, 3).as_deref(),
             Some("Type a path starting with / or ~/"),
             "the empty list's row"
-        );
-    }
-
-    #[rstest::rstest]
-    fn model_row_starts_with_the_claude_mark() {
-        // Given a model picker.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            None,
-            Focus::Dashboard,
-        );
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
-
-        // Then Default follows the ✳ mark.
-        let lines = lines(&buf);
-        assert!(
-            lines.iter().any(|line| line.contains("✳ Default")),
-            "screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn permission_row_starts_with_a_shield() {
-        // Given a permission picker.
-        let picker = PickerState::permissions(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            None,
-            Focus::Dashboard,
-        );
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
-
-        // Then Default follows the shield.
-        let lines = lines(&buf);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains(&format!("{SHIELD} Default"))),
-            "screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn unavailable_harness_row_shows_its_reason() {
-        // Given a harness picker where pi lacks zmx.
-        let pi = HarnessInfo {
-            unavailable: Some("zmx not found".to_owned()),
-            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
-        };
-        let picker = PickerState::harnesses(
-            DraftTarget::Project(ProjectId(1)),
-            &[info(), pi],
-            &HarnessId::new("claude"),
-            Focus::Dashboard,
-        );
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
-
-        // Then pi's row names why it can't be picked.
-        let lines = lines(&buf);
-        assert!(
-            lines.iter().any(|line| line.contains("pi  zmx not found")),
-            "screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn harness_row_shows_its_own_mark() {
-        // Given a harness picker where pi has the mark `π`.
-        let pi = HarnessInfo {
-            icon: Some("π".to_owned()),
-            unavailable: None,
-            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
-        };
-        let picker = PickerState::harnesses(
-            DraftTarget::Project(ProjectId(1)),
-            &[info(), pi],
-            &HarnessId::new("claude"),
-            Focus::Dashboard,
-        );
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
-
-        // Then pi's row starts with its mark.
-        let lines = lines(&buf);
-        assert!(
-            lines.iter().any(|line| line.contains("π pi")),
-            "screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn harness_row_without_a_mark_shows_a_plug() {
-        // Given a harness picker where pi has no mark.
-        let pi = HarnessInfo {
-            unavailable: None,
-            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
-        };
-        let picker = PickerState::harnesses(
-            DraftTarget::Project(ProjectId(1)),
-            &[info(), pi],
-            &HarnessId::new("claude"),
-            Focus::Dashboard,
-        );
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
-
-        // Then pi's row starts with the plug.
-        let lines = lines(&buf);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains(&format!("{PLUG} pi"))),
-            "screen was {lines:#?}"
         );
     }
 
@@ -1381,7 +1140,7 @@ mod tests {
 
     fn workspace() -> PickerState {
         PickerState::workspace(
-            PickTarget::Thread(ThreadId(1)),
+            PickTarget::Move(SessionId(1)),
             vec![
                 PickerItem::Workspace(WorkspaceChoice::Current { worktree: false }),
                 PickerItem::Workspace(WorkspaceChoice::NewWorktree),
@@ -1416,7 +1175,7 @@ mod tests {
     fn branch_picker_while_listing_shows_loading() {
         // Given a branch picker whose refs aren't listed yet.
         let picker = PickerState::branches(
-            PickTarget::Thread(ThreadId(1)),
+            SessionId(1),
             "/tmp/repo".into(),
             false,
             None,
@@ -1449,13 +1208,8 @@ mod tests {
 
     /// A branch picker in `REPO` listing `refs`, after the first prompt.
     fn branches(refs: Vec<GitRef>) -> PickerState {
-        let mut picker = PickerState::branches(
-            PickTarget::Thread(ThreadId(1)),
-            REPO.into(),
-            false,
-            None,
-            Focus::Dashboard,
-        );
+        let mut picker =
+            PickerState::branches(SessionId(1), REPO.into(), false, None, Focus::Dashboard);
         picker.show_branches(Path::new(REPO), refs);
         picker
     }
@@ -1579,75 +1333,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn model_picker_lists_default_first() {
-        // Given a model picker.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            Some("sonnet"),
-            Focus::Dashboard,
-        );
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
-
-        // Then the first row, under the rule, is Default.
-        assert_eq!(
-            inner_line(&buf, 3),
-            Some("1. ✳ Default".to_owned()),
-            "the first row"
-        );
-    }
-
-    #[rstest::rstest]
-    fn model_picker_names_the_models() {
-        // Given a model picker.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            None,
-            Focus::Dashboard,
-        );
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
-
-        // Then the row after Default is Claude Opus 5.5, not its ID.
-        assert_eq!(
-            inner_line(&buf, 4),
-            Some("2. ✳ Claude Opus 5.5".to_owned()),
-            "the second row"
-        );
-    }
-
-    #[rstest::rstest]
-    fn model_picker_labels_the_legacy_models() {
-        // Given a model picker.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            None,
-            Focus::Dashboard,
-        );
-
-        // When drawing it.
-        let buf = draw(&picker, 60, 40);
-
-        // Then a Legacy models heading follows Claude Sonnet 5.
-        let lines = lines(&buf);
-        let after = lines
-            .iter()
-            .skip_while(|line| !line.contains("Claude Sonnet 5"))
-            .nth(1);
-        assert!(
-            after.is_some_and(|line| line.trim_matches(['│', ' ']) == "── Legacy models ──"),
-            "screen was {lines:#?}"
-        );
-    }
-
-    #[rstest::rstest]
     fn init_git_picker_offers_initialize_git() {
-        // Given the picker a non-git draft's ␣w or ␣b opens.
+        // Given the picker a non-git session's ␣w or ␣b opens.
         let picker = PickerState::init_git(ProjectId(1), Focus::Dashboard);
 
         // When drawing it.
@@ -1812,28 +1499,6 @@ mod tests {
             hits.picker_row_at(Position::new(cursor.x, cursor.y + 2 + line)),
             Some(index),
             "line {line} of the rows should be shown row {index}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn hit_map_leaves_a_heading_out() {
-        // Given a picker whose first row is a heading.
-        let picker = PickerState::projects(
-            vec![
-                PickerItem::Heading("Legacy models".to_owned()),
-                project(1, "alpha", "/alpha"),
-            ],
-            Focus::Sidebar,
-        );
-
-        // When drawing it.
-        let (hits, cursor) = hits_of(&picker, 100, 20);
-
-        // Then the heading's line maps to no row.
-        assert_eq!(
-            hits.picker_row_at(Position::new(cursor.x, cursor.y + 2)),
-            None,
-            "a heading should not be clickable"
         );
     }
 

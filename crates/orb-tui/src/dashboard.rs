@@ -173,7 +173,7 @@ mod tests {
 
     use crate::test_support::sessions_for;
     use orb_domain::AppState;
-    use orb_domain::feat::harness::claude::models::info;
+    use orb_domain::feat::harness::claude::info;
     use orb_domain::feat::sessions::state::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
         Thread, ThreadId, ThreadStatus,
@@ -205,7 +205,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             branch: Some("main".to_owned()),
             pinned_at: None,
@@ -230,9 +229,8 @@ mod tests {
                     root: "/Users/me/dev/orb".into(),
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
-                    draft: None,
+                    repo: true,
                     threads,
-                    groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
                 cursor: Some(SidebarItem::Session(SessionId(1))),
@@ -349,7 +347,7 @@ mod tests {
         let state = selected_thread();
 
         // When drawing the start screen 80×40 with the pane's error.
-        let buf = draw(&state, Some("claude attach failed"), 80, 40);
+        let buf = draw(&state, Some("zmx attach failed"), 80, 40);
 
         // Then the error is on the line under the footer.
         let lines = lines(&buf);
@@ -359,7 +357,7 @@ mod tests {
             .and_then(|footer| lines.get(footer + 1));
         assert_eq!(
             under.map(|line| line.trim()),
-            Some("claude attach failed"),
+            Some("zmx attach failed"),
             "the line under the footer"
         );
     }
@@ -372,7 +370,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
 
         // When drawing the start screen into the area.
-        render(&state, Some("claude attach failed"), area, &mut buf);
+        render(&state, Some("zmx attach failed"), area, &mut buf);
 
         // Then every cell outside the area is still blank.
         let drawn: Vec<Position> = buf

@@ -12,7 +12,7 @@
 //! The preview box is titled with the selected row's label. It shows the
 //! worktree's state, branch and size, then its path, branch, size, changes,
 //! last commit, last use and what the next sweep does with it, then one line
-//! per session or draft using it. Facts git hasn't reported yet show as
+//! per session using it. Facts git hasn't reported yet show as
 //! `…`. There are no key hints.
 
 use std::path::Path;
@@ -39,9 +39,6 @@ use crate::sidebar::{
     BG_DARK, BLUE, BRANCH, COMMENT, COMPLETED_ICON, DARK3, DARK5, FG, FG_DARK, GREEN, GUTTER,
     ORANGE, RED, VISUAL, YELLOW, ago_label, render_split, session_status,
 };
-
-/// A draft's icon.
-const DRAFT_ICON: &str = "\u{f044}";
 
 /// Draws the worktree picker over `area`: `picker`'s rows with live facts,
 /// sizes and users from `state`, and the selected worktree's preview.
@@ -112,17 +109,16 @@ impl<'a> Row<'a> {
         })
     }
 
-    /// The row's icon: the lead session's status while active (a pencil for
-    /// a draft), a dim check once settled, a dim fork with nothing using it.
+    /// The row's icon: the lead session's status while active, a dim check
+    /// once settled, a dim fork with nothing using it.
     fn icon(&self, app: &AppState, now: SystemTime) -> Span<'static> {
         match (
             self.state,
-            self.lead().and_then(|user| user_status(user, app, now)),
+            self.lead().map(|user| user_status(user, app, now)),
         ) {
             (RowState::Active, Some(status)) => user_icon(status),
-            (RowState::Active, None) => span(format!("{DRAFT_ICON} "), DARK5),
             (RowState::Settled, _) => span(format!("{COMPLETED_ICON} "), DARK3),
-            (RowState::Orphan, _) => span(format!("{WORKTREE} "), DARK3),
+            (RowState::Active | RowState::Orphan, _) => span(format!("{WORKTREE} "), DARK3),
         }
     }
 
@@ -132,36 +128,30 @@ impl<'a> Row<'a> {
     }
 }
 
-/// When `user` was settled; `None` while it's open, and always for a draft.
+/// When `user` was settled; `None` while it's open.
 fn settled_at(user: &User<'_>) -> Option<SystemTime> {
     match user {
         User::Session(_, session, _) => session.settled_at,
-        User::Draft(_) => None,
     }
 }
 
-/// A session user's status glyph, word and colour (see [`session_status`]);
-/// `None` for a draft.
+/// A session user's status glyph, word and colour (see [`session_status`]).
 fn user_status(
     user: &User<'_>,
     app: &AppState,
     now: SystemTime,
-) -> Option<(&'static str, Option<&'static str>, Color)> {
+) -> (&'static str, Option<&'static str>, Color) {
     match user {
-        User::Session(_, session, agents) => Some(session_status(
-            agents,
-            app.attached.contains(&session.id),
-            now,
-        )),
-        User::Draft(_) => None,
+        User::Session(_, session, agents) => {
+            session_status(agents, app.attached.contains(&session.id), now)
+        }
     }
 }
 
-/// `user`'s title: the session's, or `draft`.
+/// `user`'s title: the session's.
 fn user_title(user: &User<'_>, sessions: &Sessions) -> String {
     match user {
         User::Session(_, session, _) => sessions.title(session),
-        User::Draft(_) => "draft".to_owned(),
     }
 }
 
@@ -180,7 +170,6 @@ fn sweep(verdict: Verdict) -> (String, Color) {
     let (text, fg) = match verdict {
         Verdict::Attached => ("kept: a session in it is attached", DARK5),
         Verdict::MidTurn => ("kept: an agent in it is mid-turn", DARK5),
-        Verdict::Draft => ("kept: a draft starts here", DARK5),
         Verdict::Active => ("kept: a session in it is active", DARK5),
         Verdict::Dirty => ("kept: uncommitted changes", ORANGE),
         Verdict::Unknown => ("…", DARK5),
@@ -434,21 +423,21 @@ fn field(name: &str, value: Vec<Span<'static>>) -> Line<'static> {
 /// and bright title, and on the right its status and how long since its
 /// last chat, or how long since it settled.
 fn user_line(user: &User<'_>, app: &AppState, now: SystemTime, width: usize) -> Line<'static> {
-    let (icon, when) = match (settled_at(user), user_status(user, app, now)) {
-        (Some(at), _) => (
+    let (icon, when) = match settled_at(user) {
+        Some(at) => (
             span(format!("{COMPLETED_ICON} "), DARK3),
             format!("settled {}", ago(now, at)),
         ),
-        (None, Some(status)) => {
+        None => {
+            let status = user_status(user, app, now);
             let last = last_used(std::slice::from_ref(user), None).unwrap_or(now);
             (
                 user_icon(status),
                 format!("{} · {}", status.1.unwrap_or("idle"), ago(now, last)),
             )
         }
-        (None, None) => (span(format!("{DRAFT_ICON} "), DARK5), "draft".to_owned()),
     };
-    let (User::Session(project, ..) | User::Draft(project)) = user;
+    let User::Session(project, ..) = user;
     let mut line = Line::from(vec![
         Span::raw("   "),
         icon,
@@ -471,8 +460,8 @@ mod tests {
     use orb_domain::feat::git::git_service::WorktreeFacts;
     use orb_domain::feat::picker::state::{PickerState, worktree_items};
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId,
-        Sessions, Thread, ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
+        ThreadStatus,
     };
     use orb_domain::feat::worktrees::state::{Worktree, Worktrees};
     use orb_domain::{AppState, Focus};
@@ -512,7 +501,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             branch: None,
             pinned_at: None,
@@ -565,9 +553,8 @@ mod tests {
             root: "/Users/me/dev/orb".into(),
             created_at: UNIX_EPOCH,
             removed: false,
-            draft: None,
+            repo: true,
             threads,
-            groups: vec![],
             kind: ProjectKind::Normal,
         }];
         AppState {
@@ -888,23 +875,6 @@ mod tests {
         }
     }
 
-    /// `app` with a draft pointed at `orb-eeee`.
-    fn drafted(mut app: AppState) -> AppState {
-        if let Some(project) = app.sessions.projects.first_mut() {
-            project.draft = Some(Draft {
-                harness: HarnessId::new("claude"),
-                workspace: DraftWorkspace::Existing(path("orb-eeee")),
-                branch: None,
-                model: None,
-                permission: None,
-                created_at: now(),
-                repo: true,
-                from: None,
-            });
-        }
-        app
-    }
-
     /// `solo`, settled `ago` before [`now`].
     fn settled_for(ago: Duration) -> Thread {
         Thread {
@@ -922,11 +892,6 @@ mod tests {
     #[case::mid_turn(
         lone(Some(Thread { status: ThreadStatus::Working, ..solo() }), Some(facts(0))),
         "kept: an agent in it is mid-turn",
-        DARK5
-    )]
-    #[case::draft(
-        drafted(lone(None, Some(facts(0)))),
-        "kept: a draft starts here",
         DARK5
     )]
     #[case::active(

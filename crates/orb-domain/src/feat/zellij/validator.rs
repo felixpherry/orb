@@ -8,25 +8,19 @@ use crate::AppState;
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum OpenToolError {
-    /// The cursor isn't on a session, a draft or a group's draft.
+    /// The cursor isn't on a session.
     NoSelection,
 }
 
-/// Allow opening a tool when a session, a draft or a group draft is
-/// selected.
+/// Allow opening a tool when a session is selected.
 ///
 /// # Errors
 ///
-/// Returns [`OpenToolError::NoSelection`] without a selected session, draft
-/// or group draft.
+/// Returns [`OpenToolError::NoSelection`] without a selected session.
 pub fn validate_open_tool(state: &AppState) -> Result<(), OpenToolError> {
-    match (
-        state.sessions.selected_draft(),
-        state.sessions.selected_session(),
-        state.sessions.selected_group(),
-    ) {
-        (None, None, None) => Err(OpenToolError::NoSelection),
-        _ => Ok(()),
+    match state.sessions.selected_session() {
+        Some(_) => Ok(()),
+        None => Err(OpenToolError::NoSelection),
     }
 }
 
@@ -38,13 +32,11 @@ mod tests {
     use super::{OpenToolError, validate_open_tool};
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, PaneId,
-        PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus, sessions_for,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
+        Thread, ThreadId, ThreadStatus, sessions_for,
     };
 
-    /// One project at `/work` with a thread, a draft and group 9 (still a
-    /// draft), the cursor on `cursor`.
+    /// One project at `/work` with a thread, the cursor on `cursor`.
     fn state_at(cursor: Option<SidebarItem>) -> AppState {
         let mut state = AppState {
             sessions: Sessions {
@@ -54,16 +46,7 @@ mod tests {
                     root: "/work".into(),
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
-                    draft: Some(Draft {
-                        harness: HarnessId::new("claude"),
-                        workspace: DraftWorkspace::Local,
-                        branch: None,
-                        model: None,
-                        permission: None,
-                        created_at: SystemTime::UNIX_EPOCH,
-                        repo: true,
-                        from: None,
-                    }),
+                    repo: true,
                     threads: vec![Thread {
                         last_session: None,
                         harness: HarnessId::new("claude"),
@@ -76,7 +59,6 @@ mod tests {
                         pane: Some(PaneLaunch {
                             pane: PaneId(1),
                             session: SessionId(1),
-                            command: vec![],
                         }),
                         branch: None,
                         pinned_at: None,
@@ -88,23 +70,6 @@ mod tests {
                         group: None,
                         model: None,
                         permission: None,
-                    }],
-                    groups: vec![Group {
-                        id: GroupId(9),
-                        kind: GroupKind::Research,
-                        name: "tokio-cancel".into(),
-                        dir: Some("/orb/research/tokio-cancel".into()),
-                        branch: None,
-                        created_at: SystemTime::UNIX_EPOCH,
-                        pinned_at: None,
-                        settled_at: None,
-                        active_since: SystemTime::UNIX_EPOCH,
-                        draft: Some(GroupDraft::default()),
-                        defaults: GroupDefaults {
-                            harness: HarnessId::new("claude"),
-                            model: None,
-                            permission: None,
-                        },
                     }],
                     kind: ProjectKind::Normal,
                 }],
@@ -120,8 +85,8 @@ mod tests {
     #[rstest::rstest]
     #[case(None)]
     #[case(Some(SidebarItem::SettledShelf))]
-    fn open_tool_rejected_without_a_thread_or_draft(#[case] cursor: Option<SidebarItem>) {
-        // Given a cursor on neither a thread nor a draft.
+    fn open_tool_rejected_without_a_session(#[case] cursor: Option<SidebarItem>) {
+        // Given a cursor on no session.
         let state = state_at(cursor);
 
         // When validating opening a tool.
@@ -131,34 +96,19 @@ mod tests {
         assert_eq!(
             result,
             Err(OpenToolError::NoSelection),
-            "a tool needs a thread's or draft's directory"
+            "a tool needs a session's directory"
         );
     }
 
     #[rstest::rstest]
-    #[case(SidebarItem::Session(SessionId(1)))]
-    #[case(SidebarItem::Draft(ProjectId(1)))]
-    fn open_tool_allowed_on_a_session_or_draft(#[case] cursor: SidebarItem) {
-        // Given a selected thread or draft.
-        let state = state_at(Some(cursor));
+    fn open_tool_allowed_on_a_session() {
+        // Given a selected session.
+        let state = state_at(Some(SidebarItem::Session(SessionId(1))));
 
         // When validating opening a tool.
         let result = validate_open_tool(&state);
 
         // Then it is allowed.
-        assert_eq!(result, Ok(()), "a session or draft has a directory");
-    }
-
-    #[rstest::rstest]
-    fn open_tool_allowed_on_a_group_draft() {
-        // Given a selected group draft.
-        let cursor = SidebarItem::GroupDraft(GroupId(9));
-        let state = state_at(Some(cursor));
-
-        // When validating opening a tool.
-        let result = validate_open_tool(&state);
-
-        // Then it is allowed.
-        assert_eq!(result, Ok(()), "a group draft has a directory");
+        assert_eq!(result, Ok(()), "a session has a directory");
     }
 }

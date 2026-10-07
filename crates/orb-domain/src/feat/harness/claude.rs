@@ -1,26 +1,19 @@
-//! Claude Code, the harness orb started with: sessions run by its own
-//! background supervisor, transcripts under its config dir, trust written to
-//! its config file.
+//! Claude Code: the interactive Claudes it runs, seen by process,
+//! transcripts under its config dir, and the one stop of a background
+//! session the store's migration replaced.
 
-pub mod models;
 pub mod supervisor;
 pub mod transcript;
-pub mod trust;
 
-use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use error_stack::{Report, ResultExt};
+use error_stack::Report;
 
-use self::trust::WorkspaceTrust;
-use super::{Harness, HarnessError, HarnessId, HarnessInfo, Scan, TranscriptFormat};
-use crate::feat::git::git_service::GitService;
-use crate::feat::sessions::session_host::{
-    AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
-};
+use self::supervisor::ClaudeAgents;
+use super::{Harness, HarnessError, HarnessId, HarnessInfo, RunningAgent, Scan, TranscriptFormat};
 use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
 /// The id Claude Code threads are stored under.
@@ -29,62 +22,24 @@ pub const ID: &str = "claude";
 /// The name the user sees for Claude Code.
 const LABEL: &str = "Claude Code";
 
-/// Claude Code: sessions through `host`, transcripts under `claude_dir`,
-/// trust through `trust` at the repository's project folder.
+/// How the frontend marks Claude Code: its name and `✳`.
+pub fn info() -> HarnessInfo {
+    HarnessInfo {
+        id: HarnessId::new(ID),
+        label: LABEL.to_owned(),
+        icon: Some("✳".to_owned()),
+    }
+}
+
+/// Claude Code: its agents through `agents`, transcripts under `claude_dir`.
 pub struct ClaudeCode {
-    host: Arc<dyn SessionHost>,
-    trust: Arc<dyn WorkspaceTrust>,
+    agents: Arc<dyn ClaudeAgents>,
     claude_dir: PathBuf,
-    git: GitService,
 }
 
 impl ClaudeCode {
-    pub fn new(
-        host: Arc<dyn SessionHost>,
-        trust: Arc<dyn WorkspaceTrust>,
-        claude_dir: PathBuf,
-        git: GitService,
-    ) -> Self {
-        Self {
-            host,
-            trust,
-            claude_dir,
-            git,
-        }
-    }
-}
-
-#[async_trait]
-impl SessionHost for ClaudeCode {
-    fn name(&self) -> &'static str {
-        ID
-    }
-
-    async fn create(
-        &self,
-        cwd: &Path,
-        options: &SessionOptions,
-    ) -> Result<CreatedSession, Report<SessionHostError>> {
-        self.host.create(cwd, options).await
-    }
-
-    async fn list(
-        &self,
-        short_ids: &[String],
-    ) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
-        self.host.list(short_ids).await
-    }
-
-    async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
-        self.host.stop(short_id).await
-    }
-
-    async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
-        self.host.remove(short_id).await
-    }
-
-    fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString> {
-        self.host.attach_argv(short_id, start)
+    pub fn new(agents: Arc<dyn ClaudeAgents>, claude_dir: PathBuf) -> Self {
+        Self { agents, claude_dir }
     }
 }
 
@@ -114,6 +69,10 @@ impl TranscriptFormat for ClaudeCode {
 
 #[async_trait]
 impl Harness for ClaudeCode {
+    fn name(&self) -> &'static str {
+        self.agents.name()
+    }
+
     fn id(&self) -> HarnessId {
         HarnessId::new(ID)
     }
@@ -122,21 +81,114 @@ impl Harness for ClaudeCode {
         LABEL
     }
 
-    async fn probe(&self) -> HarnessInfo {
-        models::info()
-    }
-
-    /// Claude trusts a repository at its main checkout, which covers every
-    /// worktree of it.
-    fn trust_dir(&self, cwd: &Path) -> PathBuf {
-        self.git.project_path(cwd).unwrap_or_else(|| cwd.to_owned())
-    }
-
-    fn trust(&self, dir: &Path) -> Result<(), Report<HarnessError>> {
-        self.trust.trust(dir).change_context(HarnessError)
+    fn info(&self) -> HarnessInfo {
+        info()
     }
 
     fn resume_command(&self, session_id: &str) -> String {
         format!("claude --resume {session_id}")
+    }
+
+    async fn running(&self) -> Result<Vec<RunningAgent>, Report<HarnessError>> {
+        self.agents.list().await
+    }
+
+    async fn stop_migrated(&self, short_id: &str) -> Result<(), Report<HarnessError>> {
+        self.agents.stop(short_id).await
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fake {
+    use std::sync::{Mutex, PoisonError};
+
+    use async_trait::async_trait;
+    use error_stack::Report;
+
+    use super::supervisor::ClaudeAgents;
+    use crate::feat::harness::{HarnessError, RunningAgent};
+
+    /// A `claude` that runs the agents the test scripts and logs the
+    /// sessions it is asked to stop.
+    pub(crate) struct FakeClaude {
+        running: Mutex<Result<Vec<RunningAgent>, String>>,
+        stopped: Mutex<Vec<String>>,
+    }
+
+    impl FakeClaude {
+        /// A `claude` running `running`.
+        pub(crate) fn running(running: Vec<RunningAgent>) -> Self {
+            Self {
+                running: Mutex::new(Ok(running)),
+                stopped: Mutex::default(),
+            }
+        }
+
+        /// From now on `list` answers `running`, or fails with the reason.
+        pub(crate) fn set_running(&self, running: Result<Vec<RunningAgent>, String>) {
+            *self.running.lock().unwrap_or_else(PoisonError::into_inner) = running;
+        }
+
+        /// The sessions `stop` was called on, in order.
+        pub(crate) fn stopped(&self) -> Vec<String> {
+            self.stopped
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl ClaudeAgents for FakeClaude {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        async fn list(&self) -> Result<Vec<RunningAgent>, Report<HarnessError>> {
+            self.running
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .map_err(|reason| Report::new(HarnessError).attach(reason))
+        }
+
+        async fn stop(&self, short_id: &str) -> Result<(), Report<HarnessError>> {
+            self.stopped
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(short_id.to_owned());
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use error_stack::Report;
+
+    use super::ClaudeCode;
+    use super::fake::FakeClaude;
+    use crate::feat::harness::{Harness, HarnessError};
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn claude_stop_migrated_runs_claude_stop() -> Result<(), Report<HarnessError>> {
+        // Given Claude Code over a fake `claude`.
+        let agents = Arc::new(FakeClaude::running(Vec::new()));
+        let claude = ClaudeCode::new(agents.clone(), PathBuf::from("/nonexistent/claude"));
+
+        // When stopping the migrated session 28bf38e2.
+        claude.stop_migrated("28bf38e2").await?;
+
+        // Then `claude stop 28bf38e2` was asked for.
+        assert_eq!(
+            agents.stopped(),
+            ["28bf38e2"],
+            "the migrated session should be stopped through claude"
+        );
+        Ok(())
     }
 }

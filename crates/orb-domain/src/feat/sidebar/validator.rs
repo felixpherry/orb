@@ -55,8 +55,7 @@ pub enum RenameError {
     NoSession,
 }
 
-/// Allow renaming only the selected session: not a draft or the Settled
-/// header.
+/// Allow renaming only the selected session, not the Settled header.
 ///
 /// # Errors
 ///
@@ -75,7 +74,7 @@ mod tests {
         validate_resize,
     };
     use crate::AppState;
-    use crate::feat::sessions::state::{ProjectId, Sessions, SidebarItem};
+    use crate::feat::sessions::state::{Sessions, SidebarItem};
     use crate::feat::sidebar::state::SidebarView;
 
     fn hidden() -> AppState {
@@ -121,10 +120,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::draft(SidebarItem::Draft(ProjectId(1)))]
     #[case::shelf_header(SidebarItem::SettledShelf)]
     fn rename_rejected_without_a_selected_session(#[case] cursor: SidebarItem) {
-        // Given the cursor on a draft or the Settled header.
+        // Given the cursor on the Settled header.
         let state = AppState {
             sessions: Sessions {
                 cursor: Some(cursor),

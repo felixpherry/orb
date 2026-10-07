@@ -2,9 +2,8 @@
 //! tokyonight-moon.
 //!
 //! On the left, the mode in a block of its colour, an arrow into the
-//! selected session's or draft's branch, then its place: `<project>/<title>`
-//! for a session, `<project>/<slug>` for a group draft, the project for a
-//! draft. Then the latest error in red and the worktree notice. On the
+//! selected session's branch, then its place, `<project>/<title>`. Then the
+//! latest error in red and the worktree notice. On the
 //! right, `N running`, `fetching origin/<base>…` while Start fetches, or
 //! `starting session…` with a spinner, how many agents need an approval or
 //! an answer, the selected row's place among the listed rows, and the local
@@ -27,7 +26,7 @@ use ratatui::widgets::Widget;
 use crate::picker::WORKTREE;
 use crate::sidebar::{
     APPROVAL_ICON, BG_DARK, BLACK, BLUE, BRANCH, CYAN, FAILED_ICON, FG_DARK, FOLDER, GREEN, GREEN1,
-    GUTTER, INPUT_ICON, MAGENTA, ORANGE, RED, SPINNER, SPINNER_FRAME, YELLOW,
+    GUTTER, INPUT_ICON, ORANGE, RED, SPINNER, SPINNER_FRAME, YELLOW,
 };
 
 /// Closes a left block into the next (Nerd Font `nf-pl-left_hard_divider`).
@@ -69,29 +68,21 @@ pub(crate) fn render(
 
 /// The mode's name and colour.
 fn mode(state: &AppState) -> (&'static str, Color) {
-    let drafting = state.sessions.selected_draft().is_some()
-        || state.sessions.selected_group_draft().is_some();
-    match (state.focus, drafting) {
-        (Focus::Attached, _) => ("ATTACHED", GREEN1),
-        (Focus::Sidebar | Focus::Dashboard, true) => ("DRAFT", MAGENTA),
-        (Focus::Sidebar | Focus::Dashboard, false) => ("NORMAL", BLUE),
-        (Focus::Picker, _) => ("PICKER", YELLOW),
-        (Focus::Rename | Focus::Search, _) => ("INSERT", GREEN),
+    match state.focus {
+        Focus::Attached => ("ATTACHED", GREEN1),
+        Focus::Sidebar | Focus::Dashboard => ("NORMAL", BLUE),
+        Focus::Picker => ("PICKER", YELLOW),
+        Focus::Rename | Focus::Search => ("INSERT", GREEN),
     }
 }
 
 /// a · b · c: the mode block, the branch block when there's a branch, then the
 /// project, the error and the worktree notice. On a session, the project
 /// reads `<project>/<title>` and the branch is its lead agent's, else the
-/// one the session recorded; on a group draft, `<project>/<slug>` and the
-/// group's branch.
+/// one the session recorded.
 fn left(sessions: &Sessions, notice: Option<&str>, mode: &str, colour: Color) -> Line<'static> {
-    let (branch, project): (Option<&str>, Option<String>) = match (
-        sessions.selected_session(),
-        sessions.selected_group_draft(),
-        sessions.selected_draft(),
-    ) {
-        (Some(session), _, _) => (
+    let (branch, project): (Option<&str>, Option<String>) = match sessions.selected_session() {
+        Some(session) => (
             sessions
                 .selected_thread()
                 .and_then(|thread| thread.branch.as_deref())
@@ -100,14 +91,7 @@ fn left(sessions: &Sessions, notice: Option<&str>, mode: &str, colour: Color) ->
                 .project(session.project)
                 .map(|project| format!("{}/{}", project.title, sessions.title(session))),
         ),
-        (None, Some((project, group)), _) => (
-            group.branch.as_deref(),
-            Some(format!("{}/{}", project.title, group.name)),
-        ),
-        (None, None, Some((project, draft))) => {
-            (draft.branch.as_deref(), Some(project.title.clone()))
-        }
-        (None, None, None) => (None, None),
+        None => (None, None),
     };
     let mut spans = vec![on(format!(" {mode} "), BLACK, colour).bold()];
     match branch {
@@ -174,7 +158,7 @@ fn activity(sessions: &Sessions, now: SystemTime) -> Option<String> {
     }
 }
 
-/// The cursor's row, 1-based, among the listed drafts and sessions (not the
+/// The cursor's row, 1-based, among the listed sessions (not the
 /// Settled header), and how many are listed.
 fn position(sessions: &Sessions) -> Option<(usize, usize)> {
     let items: Vec<SidebarItem> = sessions
@@ -234,9 +218,8 @@ mod tests {
     use crate::test_support::sessions_for;
     use jiff::tz::{self, TimeZone};
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, PaneId,
-        PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
+        Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::worktrees::state::Worktrees;
     use orb_domain::{AppState, Focus};
@@ -245,7 +228,7 @@ mod tests {
     use ratatui::style::Color;
 
     use super::render;
-    use crate::sidebar::{BLUE, CYAN, FG_DARK, GREEN, GREEN1, MAGENTA, RED, YELLOW};
+    use crate::sidebar::{BLUE, CYAN, FG_DARK, GREEN, GREEN1, RED, YELLOW};
 
     /// 2023-11-14 22:13:20 UTC, at spinner frame 0.
     const NOW: u64 = 1_700_000_000;
@@ -271,7 +254,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             branch: None,
             pinned_at: None,
@@ -293,9 +275,8 @@ mod tests {
             root: format!("/Users/me/dev/{title}").into(),
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
-            draft: None,
+            repo: true,
             threads,
-            groups: vec![],
             kind: ProjectKind::Normal,
         }
     }
@@ -322,31 +303,6 @@ mod tests {
                 cursor: Some(SidebarItem::Session(SessionId(1))),
                 ..sessions(vec![thread(1, ThreadStatus::Idle)])
             },
-            ..AppState::default()
-        }
-    }
-
-    /// orb's local draft on `main`, selected, with the given focus.
-    fn drafted(focus: Focus) -> AppState {
-        let mut sessions = Sessions {
-            cursor: Some(SidebarItem::Draft(ProjectId(1))),
-            ..sessions(vec![])
-        };
-        if let Some(project) = sessions.projects.first_mut() {
-            project.draft = Some(Draft {
-                harness: HarnessId::new("claude"),
-                workspace: DraftWorkspace::Local,
-                branch: Some("main".to_owned()),
-                model: None,
-                permission: None,
-                created_at: SystemTime::UNIX_EPOCH,
-                repo: true,
-                from: None,
-            });
-        }
-        AppState {
-            focus,
-            sessions,
             ..AppState::default()
         }
     }
@@ -452,27 +408,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Focus::Sidebar)]
-    #[case(Focus::Dashboard)]
-    fn mode_line_shows_draft_on_a_draft(#[case] focus: Focus) {
-        // Given a selected draft.
-        let state = drafted(focus);
-
-        // When drawing the mode line.
-        let buffer = draw(&state);
-
-        // Then the mode is DRAFT.
-        let text = text(&buffer);
-        assert!(text.starts_with(" DRAFT "), "mode line was '{text}'");
-        // And it is on magenta.
-        assert_eq!(
-            buffer.cell((1, 0)).map(|cell| cell.bg),
-            Some(MAGENTA),
-            "DRAFT block background"
-        );
-    }
-
-    #[rstest::rstest]
     fn project_shows_the_sessions_title_on_a_session() {
         // Given session 1 selected, its agent titled `Fix the bug`, in orb.
         let state = selected(Focus::Sidebar);
@@ -522,19 +457,6 @@ mod tests {
         // Then the branch block names orb/x.
         let text = text(&buffer);
         assert!(text.contains("\u{e0a0} orb/x"), "mode line was '{text}'");
-    }
-
-    #[rstest::rstest]
-    fn branch_block_shows_the_drafts_branch() {
-        // Given a selected draft on main.
-        let state = drafted(Focus::Sidebar);
-
-        // When drawing the mode line.
-        let buffer = draw(&state);
-
-        // Then the branch block names main.
-        let text = text(&buffer);
-        assert!(text.contains("\u{e0a0} main"), "mode line was '{text}'");
     }
 
     #[rstest::rstest]
@@ -588,9 +510,9 @@ mod tests {
 
     #[rstest::rstest]
     fn error_shows_in_red_on_the_left() {
-        // Given a claude failure.
+        // Given a failure.
         let state = with_sessions(Sessions {
-            error: Some("Workspace not trusted".to_owned()),
+            error: Some("Workspace locked · Worktree".to_owned()),
             ..Sessions::default()
         });
 
@@ -599,7 +521,7 @@ mod tests {
 
         // Then the error shows in red.
         assert_eq!(
-            cell_at(&buffer, "Workspace not trusted").map(|cell| cell.fg),
+            cell_at(&buffer, "Workspace locked · Worktree").map(|cell| cell.fg),
             Some(RED),
             "error foreground in '{}'",
             text(&buffer)
@@ -821,125 +743,6 @@ mod tests {
         assert!(text.contains(" 3/7 "), "mode line was '{text}'");
     }
 
-    /// Feature group 9, `GT-514-login` on its branch, with no draft.
-    fn feature_group() -> Group {
-        Group {
-            id: GroupId(9),
-            kind: GroupKind::Feature,
-            name: "GT-514-login".to_owned(),
-            dir: None,
-            branch: Some("GT-514-login".to_owned()),
-            created_at: SystemTime::UNIX_EPOCH,
-            pinned_at: None,
-            settled_at: None,
-            active_since: SystemTime::UNIX_EPOCH,
-            draft: None,
-            defaults: GroupDefaults {
-                harness: HarnessId::new("claude"),
-                model: None,
-                permission: None,
-            },
-        }
-    }
-
-    /// Group 9 holding thread 1 and a draft: Feature `GT-514-login` in `orb`,
-    /// or Research `tokio-cancel` in `Research`; the cursor on `cursor`.
-    fn in_group(kind: GroupKind, cursor: SidebarItem) -> AppState {
-        let (title, group) = match kind {
-            GroupKind::Feature => ("orb", feature_group()),
-            GroupKind::Research | GroupKind::Learn => (
-                "Research",
-                Group {
-                    kind,
-                    name: "tokio-cancel".to_owned(),
-                    branch: None,
-                    ..feature_group()
-                },
-            ),
-        };
-        let child = Thread {
-            group: Some(GroupId(9)),
-            ..thread(1, ThreadStatus::Idle)
-        };
-        with_sessions(fill(Sessions {
-            projects: vec![Project {
-                groups: vec![Group {
-                    draft: Some(GroupDraft::default()),
-                    defaults: GroupDefaults {
-                        harness: HarnessId::new("claude"),
-                        model: None,
-                        permission: None,
-                    },
-                    ..group
-                }],
-                ..project(1, title, vec![child])
-            }],
-            cursor: Some(cursor),
-            ..Sessions::default()
-        }))
-    }
-
-    #[rstest::rstest]
-    fn project_shows_the_group_path_on_a_group_draft() {
-        // Given the cursor on Feature group GT-514-login's draft in orb.
-        let state = in_group(GroupKind::Feature, SidebarItem::GroupDraft(GroupId(9)));
-
-        // When drawing the mode line.
-        let buffer = draw(&state);
-
-        // Then the project reads orb/GT-514-login.
-        let text = text(&buffer);
-        assert!(
-            text.contains("\u{f07b} orb/GT-514-login"),
-            "mode line was '{text}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn branch_block_shows_a_feature_groups_branch() {
-        // Given the cursor on Feature group GT-514-login's draft.
-        let state = in_group(GroupKind::Feature, SidebarItem::GroupDraft(GroupId(9)));
-
-        // When drawing the mode line.
-        let buffer = draw(&state);
-
-        // Then the branch block names the group's branch.
-        let text = text(&buffer);
-        assert!(
-            text.contains("\u{e0a0} GT-514-login"),
-            "mode line was '{text}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn research_group_shows_no_branch_block() {
-        // Given the cursor on Research group tokio-cancel's draft.
-        let state = in_group(GroupKind::Research, SidebarItem::GroupDraft(GroupId(9)));
-
-        // When drawing the mode line.
-        let buffer = draw(&state);
-
-        // Then the project reads Research/tokio-cancel with no branch block.
-        let text = text(&buffer);
-        assert!(
-            text.contains("Research/tokio-cancel") && !text.contains('\u{e0a0}'),
-            "mode line was '{text}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn mode_line_shows_draft_on_a_group_draft() {
-        // Given the cursor on a group's draft.
-        let state = in_group(GroupKind::Feature, SidebarItem::GroupDraft(GroupId(9)));
-
-        // When drawing the mode line.
-        let buffer = draw(&state);
-
-        // Then the mode is DRAFT.
-        let text = text(&buffer);
-        assert!(text.starts_with(" DRAFT "), "mode line was '{text}'");
-    }
-
     #[rstest::rstest]
     fn clock_shows_local_time() {
         // Given a zone at +07:00, where NOW is 05:13.
@@ -976,11 +779,11 @@ mod tests {
 
     #[rstest::rstest]
     fn narrow_line_keeps_the_right_side_whole() {
-        // Given a long claude error.
+        // Given a long error.
         let state = with_sessions(Sessions {
             error: Some(
-                "Workspace not trusted. Run `claude` in /Users/me/dev/a-long-project once \
-                 and accept the trust prompt, then retry."
+                "project folder no longer exists: /Users/me/dev/a-long-project, so add it \
+                 again from the project picker, then retry."
                     .to_owned(),
             ),
             ..Sessions::default()
@@ -998,11 +801,11 @@ mod tests {
 
     #[rstest::rstest]
     fn narrow_line_cuts_the_error_before_the_mode_block() {
-        // Given a long claude error.
+        // Given a long error.
         let state = with_sessions(Sessions {
             error: Some(
-                "Workspace not trusted. Run `claude` in /Users/me/dev/a-long-project once \
-                 and accept the trust prompt, then retry."
+                "project folder no longer exists: /Users/me/dev/a-long-project, so add it \
+                 again from the project picker, then retry."
                     .to_owned(),
             ),
             ..Sessions::default()
@@ -1046,9 +849,9 @@ mod tests {
     #[case(0)]
     #[case(1)]
     fn tiny_line_draws_without_panicking(#[case] width: u16) {
-        // Given a claude error and a working thread.
+        // Given an error and a working thread.
         let state = with_sessions(Sessions {
-            error: Some("Workspace not trusted".to_owned()),
+            error: Some("Workspace locked · Worktree".to_owned()),
             ..sessions(vec![thread(1, ThreadStatus::Working)])
         });
 

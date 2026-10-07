@@ -109,7 +109,8 @@ pub fn install(
     } else {
         // ponytail: Claude may rewrite settings.json itself (`/model` and
         // others) between this read and write, and that edit would be lost;
-        // add trust.rs's stamp-and-retry if a lost edit is ever seen.
+        // re-read and retry when the file changed under the write if a lost
+        // edit is ever seen.
         // A symlinked settings file is replaced at its target, keeping the link.
         let target = fs::canonicalize(&settings).unwrap_or_else(|_| settings.clone());
         write_atomic(&target, &after)?;

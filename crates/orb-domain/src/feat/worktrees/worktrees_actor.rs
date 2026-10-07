@@ -559,7 +559,7 @@ mod tests {
         Ok(path)
     }
 
-    /// One project with no threads, groups or draft.
+    /// One project with no threads.
     fn one_project() -> AppState {
         AppState {
             sessions: Sessions {
@@ -569,10 +569,9 @@ mod tests {
                     root: PathBuf::from(REPO),
                     created_at: UNIX_EPOCH,
                     threads: Vec::new(),
-                    draft: None,
+                    repo: true,
                     removed: false,
                     kind: ProjectKind::Normal,
-                    groups: Vec::new(),
                 }],
                 ..Sessions::default()
             },

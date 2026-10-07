@@ -10,68 +10,48 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::feat::git::git_service::GitRef;
-use crate::feat::harness::{HarnessId, HarnessInfo};
-use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList, setting_label};
+use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList};
 use crate::feat::sessions::state::{
-    GroupId, NEW_THREAD, Project, ProjectId, Session, SessionId, Sessions, Thread, ThreadId,
+    NEW_THREAD, Project, ProjectId, Session, SessionId, Sessions, Thread, ThreadId,
 };
 use crate::feat::sessions::transcript::{Exchange, Role};
 use crate::feat::worktrees::state::{User, order, users};
 use crate::{AppState, Focus};
 
-/// What a workspace or branch picker sets up: a thread, a project's draft,
-/// or (branch only) a Feature group's worktree.
+/// What a workspace or base picker sets up: a new session in a project, or
+/// an existing session's move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickTarget {
-    Thread(ThreadId),
-    Draft(ProjectId),
-    Group(GroupId),
-}
-
-/// What a harness, model or permission picker sets: a project's draft, a
-/// group's card or a group's draft.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DraftTarget {
-    Project(ProjectId),
-    /// A group's card: its defaults.
-    Group(GroupId),
-    /// A group's draft: its own picks over the group's defaults.
-    GroupDraft(GroupId),
+    /// A new session of the project.
+    New(ProjectId),
+    /// An existing session's new workspace.
+    Move(SessionId),
 }
 
 /// What an open picker picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerKind {
-    /// `␣n`: pick a project to start a session in.
+    /// `␣n`: pick the project of a new session.
     Projects,
-    /// `␣gf`: pick the project a new Feature group is for.
-    GroupProject,
     /// `␣p`: pick a directory to add as a project. `listed` is the directory
     /// text (e.g. `~/dev/`) the items were read from; `None` while the input
     /// isn't a path.
     Directories { listed: Option<String> },
     /// `␣w`: pick where `target`'s session runs.
     Workspace { target: PickTarget },
-    /// `␣b`: pick a branch for `target`, whose refs are listed in `cwd`.
-    /// `unstarted` is whether it has had no prompt yet, so it can still
-    /// follow a branch into another worktree.
+    /// A new worktree's base for `target`: the refs of the project's `root`,
+    /// the default branch first, none disabled.
+    Base { target: PickTarget, root: PathBuf },
+    /// `␣b`: pick a branch for `session`, whose refs are listed in `cwd`,
+    /// its directory. `unstarted` is whether it has had no agent turn yet, so
+    /// it can still follow a branch into another worktree.
     Branches {
-        target: PickTarget,
+        session: SessionId,
         cwd: PathBuf,
         unstarted: bool,
     },
-    /// `␣h`: pick the harness of `target`'s draft.
-    Harness { target: DraftTarget },
-    /// `␣m`: pick the model of `target`'s draft; `icon` is its harness's mark.
-    Model {
-        target: DraftTarget,
-        icon: Option<String>,
-    },
-    /// `␣w` or `␣b` on a draft whose project isn't a git repository: make it
-    /// one.
+    /// `␣w` or `␣b` where the project isn't a git repository: make it one.
     InitGit { project: ProjectId },
-    /// `␣a`: pick the permission mode of `target`'s draft.
-    Permission { target: DraftTarget },
     /// `␣f`: pick the project the sidebar is filtered to, or all of them.
     ProjectFilter,
     /// `<C-x>` in the project filter: confirm removing `project`.
@@ -81,13 +61,6 @@ pub enum PickerKind {
     /// `d` on a session: confirm deleting it. `folder` says its Research or
     /// Learn folder goes too.
     DeleteSession { session: SessionId, folder: bool },
-    /// `d` on a draft: confirm discarding it.
-    DiscardDraft { project: ProjectId },
-    /// `d` on a group's draft: confirm discarding it.
-    DiscardGroupDraft { group: GroupId },
-    /// A harness refused a session start in `dir`, the folder it names for
-    /// it: confirm trusting it.
-    TrustWorkspace { dir: PathBuf },
     /// `␣␣`/`<C-Space>`: pick a thread to jump into. `settled` is whether
     /// settled threads are listed; `<C-s>` flips it.
     Sessions { settled: bool },
@@ -188,15 +161,6 @@ impl PickerState {
         }
     }
 
-    /// A project picker for a new Feature group over `items`, in the order
-    /// given.
-    pub fn group_project(items: Vec<PickerItem>, return_to: Focus) -> Self {
-        Self {
-            kind: PickerKind::GroupProject,
-            ..Self::projects(items, return_to)
-        }
-    }
-
     /// A project filter picker over `items`, in the order given, with
     /// `current`'s project selected, else the first item.
     pub fn project_filter(
@@ -242,23 +206,6 @@ impl PickerState {
     /// `folder`), with `No` selected.
     pub fn delete_session(session: SessionId, folder: bool, return_to: Focus) -> Self {
         Self::confirm(PickerKind::DeleteSession { session, folder }, return_to)
-    }
-
-    /// The `No`/`Yes` confirm for discarding `project`'s draft, with `No`
-    /// selected.
-    pub fn discard_draft(project: ProjectId, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::DiscardDraft { project }, return_to)
-    }
-
-    /// The `No`/`Yes` confirm for discarding `group`'s draft, with `No`
-    /// selected.
-    pub fn discard_group_draft(group: GroupId, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::DiscardGroupDraft { group }, return_to)
-    }
-
-    /// The `No`/`Yes` confirm for trusting `dir`, with `No` selected.
-    pub fn trust_workspace(dir: PathBuf, return_to: Focus) -> Self {
-        Self::confirm(PickerKind::TrustWorkspace { dir }, return_to)
     }
 
     /// The `No`/`Yes` confirm for deleting the worktree at `path`, with `No`
@@ -311,10 +258,10 @@ impl PickerState {
         }
     }
 
-    /// A branch picker for `target` in `cwd`, empty until its refs are
+    /// A branch picker for `session` in `cwd`, empty until its refs are
     /// listed; then `wanted` is selected if listed, else the first branch.
     pub fn branches(
-        target: PickTarget,
+        session: SessionId,
         cwd: PathBuf,
         unstarted: bool,
         wanted: Option<String>,
@@ -322,7 +269,7 @@ impl PickerState {
     ) -> Self {
         Self {
             kind: PickerKind::Branches {
-                target,
+                session,
                 cwd,
                 unstarted,
             },
@@ -337,11 +284,12 @@ impl PickerState {
         }
     }
 
-    /// The one-row picker that offers to make `project` a git repository.
-    pub fn init_git(project: ProjectId, return_to: Focus) -> Self {
+    /// A base branch picker for `target`'s new worktree, listing the refs of
+    /// `root`; empty until they are listed.
+    pub fn base(target: PickTarget, root: PathBuf, return_to: Focus) -> Self {
         Self {
-            kind: PickerKind::InitGit { project },
-            list: PickerList::new(vec![PickerItem::InitGit]),
+            kind: PickerKind::Base { target, root },
+            list: PickerList::default(),
             return_to,
             home: PathBuf::new(),
             page: 0,
@@ -352,112 +300,11 @@ impl PickerState {
         }
     }
 
-    /// A model picker for `target`'s draft: `Default`, then each of the
-    /// harness's (`info`'s) model groups under its heading, if it has one,
-    /// with `current` selected, also when it's one of a model's aliases.
-    pub fn models(
-        target: DraftTarget,
-        info: Option<&HarnessInfo>,
-        current: Option<&str>,
-        return_to: Focus,
-    ) -> Self {
-        let groups = info.map_or(&[][..], |info| info.models.as_slice());
-        let items = std::iter::once(default_setting())
-            .chain(groups.iter().flat_map(|group| {
-                group
-                    .heading
-                    .clone()
-                    .map(PickerItem::Heading)
-                    .into_iter()
-                    .chain(group.models.iter().map(|model| PickerItem::Setting {
-                        value: Some(model.id.clone()),
-                        label: model.name.clone(),
-                    }))
-            }))
-            .collect();
-        let current = current.map(|value| {
-            info.and_then(|info| info.model(value))
-                .map_or(value, |model| model.id.as_str())
-        });
-        let icon = info.and_then(|info| info.icon.clone());
-        Self::settings(
-            PickerKind::Model { target, icon },
-            items,
-            current,
-            return_to,
-        )
-    }
-
-    /// A harness picker for `target`'s draft over `infos`, in registration
-    /// order, with `current` selected unless it can't be picked.
-    pub fn harnesses(
-        target: DraftTarget,
-        infos: &[HarnessInfo],
-        current: &HarnessId,
-        return_to: Focus,
-    ) -> Self {
-        let items: Vec<PickerItem> = infos
-            .iter()
-            .map(|info| PickerItem::Harness {
-                id: info.id.clone(),
-                label: info.label.clone(),
-                icon: info.icon.clone(),
-                unavailable: info.unavailable.clone(),
-            })
-            .collect();
-        let selected = items
-            .iter()
-            .find(|item| matches!(item, PickerItem::Harness { id, .. } if id == current))
-            .cloned();
-        let mut picker = Self::settings(PickerKind::Harness { target }, items, None, return_to);
-        if let Some(selected) = selected {
-            picker.list.select(&selected);
-        }
-        picker
-    }
-
-    /// A permission-mode picker for `target`'s draft: `Default`, then the
-    /// harness's (`info`'s) permission modes, with `current` selected.
-    pub fn permissions(
-        target: DraftTarget,
-        info: Option<&HarnessInfo>,
-        current: Option<&str>,
-        return_to: Focus,
-    ) -> Self {
-        let modes = info.map_or(&[][..], |info| info.permission_modes.as_slice());
-        let items = std::iter::once(default_setting())
-            .chain(modes.iter().map(|mode| PickerItem::Setting {
-                value: Some(mode.clone()),
-                label: mode.clone(),
-            }))
-            .collect();
-        Self::settings(PickerKind::Permission { target }, items, current, return_to)
-    }
-
-    /// A `kind` picker over `items`, with the setting `current` selected, else
-    /// the first.
-    fn settings(
-        kind: PickerKind,
-        items: Vec<PickerItem>,
-        current: Option<&str>,
-        return_to: Focus,
-    ) -> Self {
-        let list = {
-            let selected = items
-                .iter()
-                .find(|item| {
-                    matches!(item, PickerItem::Setting { value, .. } if value.as_deref() == current)
-                })
-                .cloned();
-            let mut list = PickerList::new(items);
-            if let Some(selected) = selected {
-                list.select(&selected);
-            }
-            list
-        };
+    /// The one-row picker that offers to make `project` a git repository.
+    pub fn init_git(project: ProjectId, return_to: Focus) -> Self {
         Self {
-            kind,
-            list,
+            kind: PickerKind::InitGit { project },
+            list: PickerList::new(vec![PickerItem::InitGit]),
             return_to,
             home: PathBuf::new(),
             page: 0,
@@ -536,22 +383,36 @@ impl PickerState {
         self.list.set_items(items, &leaf);
     }
 
-    /// Shows `refs`, listed in `cwd`, filtered by the typed text, selecting
-    /// the wanted branch when nothing is typed. Ignored unless this is `cwd`'s
-    /// branch picker. Once the thread has had a prompt, a branch checked out
-    /// in another worktree is disabled.
+    /// Shows `refs`, listed in `cwd`, filtered by the typed text. Ignored
+    /// unless this is `cwd`'s branch or base picker. A branch picker selects
+    /// the wanted branch when nothing is typed and, once the thread has had a
+    /// prompt, disables a branch checked out in another worktree. A base
+    /// picker lists the default branch first and disables none.
     pub fn show_branches(&mut self, cwd: &Path, refs: Vec<GitRef>) {
-        let PickerKind::Branches {
-            cwd: picker_cwd,
-            unstarted,
-            ..
-        } = &self.kind
-        else {
-            return;
+        let unstarted = match &self.kind {
+            PickerKind::Branches {
+                cwd: picker_cwd,
+                unstarted,
+                ..
+            } if picker_cwd == cwd => *unstarted,
+            PickerKind::Base { root, .. } if root == cwd => {
+                let mut refs = refs;
+                refs.sort_by_key(|git_ref| !git_ref.default);
+                let items = refs
+                    .into_iter()
+                    .map(|git_ref| {
+                        PickerItem::Branch(BranchRow {
+                            disabled: false,
+                            git_ref,
+                        })
+                    })
+                    .collect();
+                let pattern = self.list.input().to_owned();
+                self.list.set_items(items, &pattern);
+                return;
+            }
+            _ => return,
         };
-        if picker_cwd != cwd {
-            return;
-        }
         let items = refs
             .into_iter()
             .map(|git_ref| {
@@ -739,9 +600,6 @@ impl PickerState {
                 PickerItem::Project { .. }
                 | PickerItem::Workspace(_)
                 | PickerItem::Branch(_)
-                | PickerItem::Setting { .. }
-                | PickerItem::Harness { .. }
-                | PickerItem::Heading(_)
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
@@ -883,14 +741,6 @@ impl PickerState {
     }
 }
 
-/// The `Default` row of a model or permission picker.
-fn default_setting() -> PickerItem {
-    PickerItem::Setting {
-        value: None,
-        label: setting_label(None, None).to_owned(),
-    }
-}
-
 /// Splits a path the user typed into the directory part, through the last
 /// `/`, and the rest. `None` unless it starts with `/` or `~/`.
 pub fn split_path(input: &str) -> Option<(&str, &str)> {
@@ -992,9 +842,8 @@ pub fn worktree_items(app: &AppState) -> Vec<PickerItem> {
                 .as_ref()
                 .and_then(|facts| facts.branch.as_deref());
             let users = users(app, &worktree.path);
-            let titles = users.iter().filter_map(|user| match user {
-                User::Session(_, session, _) => Some(app.sessions.title(session)),
-                User::Draft(_) => None,
+            let titles = users.iter().map(|user| match user {
+                User::Session(_, session, _) => app.sessions.title(session),
             });
             PickerItem::Worktree {
                 path: worktree.path.clone(),
@@ -1018,15 +867,10 @@ mod tests {
 
     use std::time::UNIX_EPOCH;
 
-    use super::{
-        DraftTarget, PickTarget, PickerState, expand, hit_label, session_items, split_path,
-    };
+    use super::{PickTarget, PickerState, expand, hit_label, session_items, split_path};
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
-    use crate::feat::harness::HarnessInfo;
-    use crate::feat::harness::claude::models::{LEGACY_MODELS, info};
-    use crate::feat::harness::fake::pi_like;
-    use crate::feat::picker::list::{PickerItem, setting_label};
+    use crate::feat::picker::list::PickerItem;
     use crate::feat::sessions::state::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
         ThreadStatus, sessions_for,
@@ -1332,15 +1176,10 @@ mod tests {
             .collect()
     }
 
-    /// Thread 1's branch picker in [`CWD`], showing `refs`.
+    /// Session 1's branch picker in [`CWD`], showing `refs`.
     fn branches_listing(unstarted: bool, refs: Vec<GitRef>) -> PickerState {
-        let mut picker = PickerState::branches(
-            PickTarget::Thread(ThreadId(1)),
-            CWD.into(),
-            unstarted,
-            None,
-            Focus::Dashboard,
-        );
+        let mut picker =
+            PickerState::branches(SessionId(1), CWD.into(), unstarted, None, Focus::Dashboard);
         picker.show_branches(Path::new(CWD), refs);
         picker
     }
@@ -1387,295 +1226,59 @@ mod tests {
         );
     }
 
-    /// Claude's setting row for `value`.
-    fn setting(value: Option<&str>) -> PickerItem {
-        let info = info();
-        PickerItem::Setting {
-            value: value.map(str::to_owned),
-            label: setting_label(value, Some(&info)).to_owned(),
+    /// Local branch `name`, the default branch when `default`.
+    fn local(name: &str, default: bool) -> GitRef {
+        GitRef {
+            name: name.to_owned(),
+            remote: false,
+            current: false,
+            default,
+            worktree: None,
         }
     }
 
-    /// The labels of the shown setting rows.
-    fn setting_labels(picker: &PickerState) -> Vec<Option<&str>> {
+    /// Project 1's base picker for a new worktree of [`CWD`], showing `refs`.
+    fn base_listing(refs: Vec<GitRef>) -> PickerState {
+        let mut picker =
+            PickerState::base(PickTarget::New(ProjectId(1)), CWD.into(), Focus::Sidebar);
+        picker.show_branches(Path::new(CWD), refs);
         picker
+    }
+
+    #[rstest::rstest]
+    fn base_picker_lists_the_default_branch_first() {
+        // Given / When listing two branches before the default one.
+        let picker = base_listing(vec![
+            local("feat", false),
+            local("fix", false),
+            local("main", true),
+        ]);
+
+        // Then the default branch comes first, the rest in order.
+        let names: Vec<&str> = picker
             .shown()
             .filter_map(|(item, _)| match item {
-                PickerItem::Setting { value, .. } => Some(value.as_deref()),
+                PickerItem::Branch(row) => Some(row.git_ref.name.as_str()),
                 _ => None,
             })
-            .collect()
-    }
-
-    #[rstest::rstest]
-    fn model_picker_lists_default_then_the_models() {
-        // Given / When opening a model picker for a draft with no model.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            None,
-            Focus::Dashboard,
-        );
-
-        // Then Default comes first, then every model ID, current then legacy.
+            .collect();
         assert_eq!(
-            setting_labels(&picker),
-            [
-                None,
-                Some("claude-opus-5-5"),
-                Some("claude-fable-5-1"),
-                Some("claude-opus-5"),
-                Some("claude-sonnet-5"),
-                Some("claude-fable-5"),
-                Some("claude-opus-4-8"),
-                Some("claude-opus-4-7"),
-                Some("claude-opus-4-6"),
-                Some("claude-opus-4-5"),
-                Some("claude-sonnet-4-6"),
-                Some("claude-haiku-4-5"),
-            ],
-            "the model picker lists Default then the model IDs"
+            names,
+            ["main", "feat", "fix"],
+            "the default branch should lead the base picker"
         );
     }
 
     #[rstest::rstest]
-    fn model_picker_heads_the_legacy_models() {
-        // Given / When opening a model picker.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            None,
-            Focus::Dashboard,
-        );
+    fn base_picker_disables_no_branch() {
+        // Given / When listing a branch checked out in another worktree.
+        let picker = base_listing(vec![local("main", true), feat_elsewhere()]);
 
-        // Then the Legacy models heading sits between Sonnet 5 and Fable 5.
-        let rows: Vec<&PickerItem> = picker.shown().map(|(item, _)| item).collect();
+        // Then no row is disabled.
         assert_eq!(
-            rows.get(4..7),
-            Some(
-                [
-                    &setting(Some("claude-sonnet-5")),
-                    &PickerItem::Heading("Legacy models".to_owned()),
-                    &setting(Some("claude-fable-5")),
-                ]
-                .as_slice()
-            ),
-            "the legacy models should follow their heading"
-        );
-    }
-
-    #[rstest::rstest]
-    fn moving_down_skips_the_legacy_heading() {
-        // Given a model picker on Claude Sonnet 5, the last current model.
-        let mut picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            Some("claude-sonnet-5"),
-            Focus::Dashboard,
-        );
-
-        // When moving down.
-        picker.next();
-
-        // Then the first legacy model is selected, not the heading.
-        assert_eq!(
-            picker.selected(),
-            Some(&setting(Some("claude-fable-5"))),
-            "the heading can't be selected"
-        );
-    }
-
-    #[rstest::rstest]
-    fn moving_down_from_the_last_model_wraps_to_default() {
-        // Given a model picker on the last legacy model.
-        let last = LEGACY_MODELS.last().map(|model| model.id);
-        let mut picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            last,
-            Focus::Dashboard,
-        );
-
-        // When moving down.
-        picker.next();
-
-        // Then Default, the first row, is selected.
-        assert_eq!(
-            picker.selected(),
-            Some(&setting(None)),
-            "moving down from the last model should wrap to Default"
-        );
-    }
-
-    #[rstest::rstest]
-    fn model_picker_selects_the_current_legacy_model() {
-        // Given / When opening a model picker for a draft on Claude Haiku 4.5.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            Some("claude-haiku-4-5"),
-            Focus::Dashboard,
-        );
-
-        // Then Claude Haiku 4.5 is selected.
-        assert_eq!(
-            picker.selected(),
-            Some(&setting(Some("claude-haiku-4-5"))),
-            "the draft's legacy model should be selected"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case("opus", "claude-opus-5")]
-    #[case("sonnet", "claude-sonnet-5")]
-    #[case("haiku", "claude-haiku-4-5")]
-    #[case("fable", "claude-fable-5-1")]
-    fn model_picker_selects_the_model_an_alias_names(
-        #[case] alias: &str,
-        #[case] id: &'static str,
-    ) {
-        // Given / When opening a model picker for a draft on an alias.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            Some(alias),
-            Focus::Dashboard,
-        );
-
-        // Then that model is selected.
-        assert_eq!(
-            picker.selected(),
-            Some(&setting(Some(id))),
-            "{alias} should select {id}"
-        );
-    }
-
-    #[rstest::rstest]
-    fn model_picker_selects_default_for_an_unknown_model() {
-        // Given / When opening a model picker for a draft on a value no model has.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            Some("opus[1m]"),
-            Focus::Dashboard,
-        );
-
-        // Then Default is selected.
-        assert_eq!(
-            picker.selected(),
-            Some(&setting(None)),
-            "a model not in the list should select Default"
-        );
-    }
-
-    #[rstest::rstest]
-    fn permission_picker_selects_the_current_mode() {
-        // Given / When opening a permission picker for a draft in plan mode.
-        let picker = PickerState::permissions(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&info()),
-            Some("plan"),
-            Focus::Dashboard,
-        );
-
-        // Then plan is selected.
-        assert_eq!(
-            picker.selected(),
-            Some(&setting(Some("plan"))),
-            "the draft's current mode should be selected"
-        );
-    }
-
-    /// Claude, and a pi-like harness that can't run because zmx is missing.
-    fn claude_and_unavailable_pi() -> Vec<HarnessInfo> {
-        vec![
-            info(),
-            HarnessInfo {
-                unavailable: Some("zmx not found".to_owned()),
-                ..pi_like()
-            },
-        ]
-    }
-
-    #[rstest::rstest]
-    fn harness_picker_disables_an_unavailable_harness() {
-        // Given / When opening a harness picker where pi lacks zmx.
-        let picker = PickerState::harnesses(
-            DraftTarget::Project(ProjectId(1)),
-            &claude_and_unavailable_pi(),
-            &HarnessId::new("claude"),
-            Focus::Dashboard,
-        );
-
-        // Then pi's row is shown with its reason, and disabled.
-        let pi = picker.shown().map(|(item, _)| item).find(
-            |item| matches!(item, PickerItem::Harness { id, .. } if *id == HarnessId::new("pi")),
-        );
-        assert_eq!(
-            pi.map(|item| (item.clone(), item.disabled())),
-            Some((
-                PickerItem::Harness {
-                    id: HarnessId::new("pi"),
-                    label: "pi".to_owned(),
-                    icon: None,
-                    unavailable: Some("zmx not found".to_owned()),
-                },
-                true
-            )),
-            "an unavailable harness should be listed with its reason and disabled"
-        );
-    }
-
-    #[rstest::rstest]
-    fn harness_picker_selects_the_current_harness() {
-        // Given / When opening a harness picker for a draft on pi.
-        let picker = PickerState::harnesses(
-            DraftTarget::Project(ProjectId(1)),
-            &[info(), pi_like()],
-            &HarnessId::new("pi"),
-            Focus::Dashboard,
-        );
-
-        // Then pi is selected.
-        assert!(
-            matches!(
-                picker.selected(),
-                Some(PickerItem::Harness { id, .. }) if *id == HarnessId::new("pi")
-            ),
-            "the draft's harness should be selected"
-        );
-    }
-
-    #[rstest::rstest]
-    fn model_picker_lists_provider_headings_and_their_models() {
-        // Given / When opening a model picker for a pi draft.
-        let picker = PickerState::models(
-            DraftTarget::Project(ProjectId(1)),
-            Some(&pi_like()),
-            None,
-            Focus::Dashboard,
-        );
-
-        // Then Default comes first, then each provider's heading and models.
-        let model = |id: &str| PickerItem::Setting {
-            value: Some(id.to_owned()),
-            label: id.to_owned(),
-        };
-        let rows: Vec<PickerItem> = picker.shown().map(|(item, _)| item.clone()).collect();
-        assert_eq!(
-            rows,
-            [
-                PickerItem::Setting {
-                    value: None,
-                    label: "Default".to_owned(),
-                },
-                PickerItem::Heading("anthropic".to_owned()),
-                model("anthropic/claude-x"),
-                model("anthropic/claude-y"),
-                PickerItem::Heading("openai".to_owned()),
-                model("openai/gpt-z"),
-            ],
-            "the model picker should list Default, then each provider's models under its name"
+            disabled_rows(&picker),
+            [false, false],
+            "any branch can be a new worktree's base"
         );
     }
 
@@ -1712,19 +1315,6 @@ mod tests {
         let picker = PickerState::settle_session(SessionId(9), Focus::Sidebar);
 
         // Then No is highlighted, so ⏎ alone settles nothing.
-        assert_eq!(
-            picker.selected(),
-            Some(&PickerItem::Confirm(false)),
-            "No should be the default"
-        );
-    }
-
-    #[rstest::rstest]
-    fn trust_workspace_confirm_starts_on_no() {
-        // Given / When opening the confirm for trusting /work.
-        let picker = PickerState::trust_workspace(PathBuf::from("/work"), Focus::Sidebar);
-
-        // Then No is highlighted, so ⏎ alone trusts nothing.
         assert_eq!(
             picker.selected(),
             Some(&PickerItem::Confirm(false)),
@@ -1900,7 +1490,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             last_session: Some(SessionId(id)),
             branch: None,
@@ -1924,10 +1513,9 @@ mod tests {
             root: PathBuf::from("/code/orb"),
             created_at: UNIX_EPOCH,
             threads,
-            draft: None,
+            repo: true,
             removed: false,
             kind: ProjectKind::Normal,
-            groups: vec![],
         }];
         Sessions {
             sessions: sessions_for(&projects),

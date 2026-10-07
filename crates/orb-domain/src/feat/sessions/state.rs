@@ -1,9 +1,8 @@
-//! The sidebar's contents: projects, their threads and drafts, the sidebar's
-//! order, and its cursor.
+//! The sidebar's contents: projects, their sessions and threads, the
+//! sidebar's order, and its cursor.
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +14,7 @@ use crate::feat::harness::HarnessId;
 use crate::feat::picker::list::fuzzy_match;
 use crate::feat::sidebar::state::SidebarLayout;
 
-/// What a draft is called, and a thread before its transcript names it.
+/// What a thread is called before its transcript names it.
 pub const NEW_THREAD: &str = "New thread";
 
 /// Identifies a thread across launches (its row in orb's store).
@@ -38,15 +37,12 @@ impl PaneId {
     }
 }
 
-/// A thread's pane, and what zmx runs when it creates that pane's session:
-/// the harness's command, or nothing (a login shell) for a pane orb will type
-/// a resume command into.
+/// The pane a thread runs in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneLaunch {
     pub pane: PaneId,
     /// The session the pane belongs to.
     pub session: SessionId,
-    pub command: Vec<OsString>,
 }
 
 /// What a session is for, which decides its look and keys.
@@ -89,25 +85,19 @@ pub struct Session {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProjectId(pub i64);
 
-/// Identifies a group across launches (its row in orb's store).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GroupId(pub i64);
-
-/// What a group is for, which decides where its sessions run.
+/// Which of orb's own folders a session lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupKind {
-    /// A feature in its own worktree, on a branch named after the group.
-    Feature,
-    /// A research folder.
+pub enum FolderKind {
+    /// `~/.orb/research/<name>/`.
     Research,
-    /// A learning folder.
+    /// `~/.orb/learn/<name>/`.
     Learn,
 }
 
-/// A group's slug: `name`'s words joined by `-`, case kept (`GT-514 login`
+/// A folder's slug: `name`'s words joined by `-`, case kept (`GT-514 login`
 /// → `GT-514-login`).
 #[must_use]
-pub fn group_slug(name: &str) -> String {
+pub fn folder_slug(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join("-")
 }
 
@@ -116,9 +106,9 @@ pub fn group_slug(name: &str) -> String {
 pub enum ProjectKind {
     /// A directory the user added.
     Normal,
-    /// orb's folder that holds Research groups.
+    /// orb's folder that holds Research sessions' folders.
     Research,
-    /// orb's folder that holds Learn groups.
+    /// orb's folder that holds Learn sessions' folders.
     Learn,
     /// orb's folder for chats outside any project (`/tmp/orb-incognito`).
     Incognito,
@@ -217,8 +207,9 @@ pub struct Thread {
     pub last_activity_at: SystemTime,
     /// A turn ended after the user last selected the thread.
     pub unseen: bool,
-    /// The group the thread belongs to; `None` = a top-level thread.
-    pub group: Option<GroupId>,
+    /// The id of the group a store from before sessions put the thread in;
+    /// `None` = none.
+    pub group: Option<i64>,
     /// The `--model` its session started with; `None` = the harness's default.
     pub model: Option<String>,
     /// The `--permission-mode` its session started with; `None` = the
@@ -264,124 +255,12 @@ impl Thread {
 }
 
 /// The thread among `threads` that most needs the user (see
-/// [`Thread::urgency`]); a session's or group's status is its.
+/// [`Thread::urgency`]); a session's status is its.
 pub fn most_urgent<'a, I>(threads: I) -> Option<&'a Thread>
 where
     I: IntoIterator<Item = &'a Thread>,
 {
     threads.into_iter().min_by_key(|thread| thread.urgency())
-}
-
-/// Where a draft's session will run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DraftWorkspace {
-    /// The project's root.
-    Local,
-    /// A worktree orb creates when the draft starts.
-    NewWorktree,
-    /// A worktree that already exists.
-    Existing(PathBuf),
-}
-
-/// The session setup picked for a project's next thread, before it starts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Draft {
-    pub workspace: DraftWorkspace,
-    /// Local: the root's checked-out branch as last known. New worktree: the
-    /// base it starts from (a ref name like `main` or `origin/x`). Existing:
-    /// that worktree's branch.
-    pub branch: Option<String>,
-    /// The `--model`; `None` = the harness's default.
-    pub model: Option<String>,
-    /// The `--permission-mode`; `None` = the harness's default.
-    pub permission: Option<String>,
-    pub created_at: SystemTime,
-    /// Whether the project's root is in a git repository, as the sessions
-    /// actor last found. Not saved.
-    pub repo: bool,
-    /// New worktree: the ref it would start from as git last knew it,
-    /// `origin/<base>` when origin has the base, else the base as is. `None`
-    /// until the sessions actor has looked. Not saved.
-    pub from: Option<String>,
-    /// The harness its session will run in.
-    pub harness: HarnessId,
-}
-
-/// A group's default session setup, which its draft follows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupDefaults {
-    /// The harness its threads start in.
-    pub harness: HarnessId,
-    /// The `--model`; `None` = the harness's default.
-    pub model: Option<String>,
-    /// The `--permission-mode`; `None` = the harness's default.
-    pub permission: Option<String>,
-}
-
-/// A group draft's setting: the group's default, or its own.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Own<T> {
-    /// Follows the group's card, live.
-    #[default]
-    Group,
-    /// Picked on the draft itself.
-    Set(T),
-}
-
-impl<T> Own<T> {
-    /// The draft's own value, else `default`.
-    pub fn or<'a>(&'a self, default: &'a T) -> &'a T {
-        match self {
-            Self::Group => default,
-            Self::Set(value) => value,
-        }
-    }
-}
-
-/// A group's draft: the next session's setup, each setting following the
-/// group's default unless the draft picked its own.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GroupDraft {
-    pub harness: Own<HarnessId>,
-    pub model: Own<Option<String>>,
-    pub permission: Own<Option<String>>,
-}
-
-/// Threads that work on one thing together, in one directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Group {
-    pub id: GroupId,
-    pub kind: GroupKind,
-    /// The group's slug.
-    pub name: String,
-    /// Where its sessions run; `None` for a Feature until its draft starts.
-    pub dir: Option<PathBuf>,
-    /// Feature: the branch named after the group; else `None`.
-    pub branch: Option<String>,
-    pub created_at: SystemTime,
-    /// When the group was pinned; `None` = not pinned.
-    pub pinned_at: Option<SystemTime>,
-    /// When the group was settled; `None` = not settled.
-    pub settled_at: Option<SystemTime>,
-    /// Sorts Active: the later of its creation and its latest un-settle.
-    pub active_since: SystemTime,
-    /// The harness, model and permission its draft follows.
-    pub defaults: GroupDefaults,
-    /// Its draft, if it has one: always before its first thread, then after `n`.
-    pub draft: Option<GroupDraft>,
-}
-
-impl Group {
-    /// Its draft's harness, model and permission: each its own pick, else the
-    /// group's default. `None` without a draft.
-    pub fn draft_settings(&self) -> Option<(&HarnessId, Option<&str>, Option<&str>)> {
-        let draft = self.draft.as_ref()?;
-        Some((
-            draft.harness.or(&self.defaults.harness),
-            draft.model.or(&self.defaults.model).as_deref(),
-            draft.permission.or(&self.defaults.permission).as_deref(),
-        ))
-    }
 }
 
 /// A directory the user starts sessions in.
@@ -394,22 +273,17 @@ pub struct Project {
     pub created_at: SystemTime,
     /// Newest first.
     pub threads: Vec<Thread>,
-    /// The project's draft; a project has at most one.
-    pub draft: Option<Draft>,
-    /// Removed from `␣n` and the project filter; its threads stay.
+    /// Whether its root is in a git repository, as the sessions actor last
+    /// found; never for orb's own projects. Not saved.
+    pub repo: bool,
+    /// Removed from `␣n` and the project filter; its sessions stay.
     pub removed: bool,
     pub kind: ProjectKind,
-    /// The project's groups; their threads are in `threads`.
-    pub groups: Vec<Group>,
 }
 
 /// A row the sidebar's cursor can rest on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarItem {
-    /// A project's draft.
-    Draft(ProjectId),
-    /// A group's draft.
-    GroupDraft(GroupId),
     /// A session's card, or its line on the Settled shelf.
     Session(SessionId),
     /// The Settled shelf's header.
@@ -419,16 +293,6 @@ pub enum SidebarItem {
 /// One sidebar row, in display order.
 #[derive(Debug, Clone, Copy)]
 pub enum SidebarRow<'a> {
-    /// A project's draft, drawn as a card.
-    Draft {
-        project: &'a Project,
-        draft: &'a Draft,
-    },
-    /// A group's draft, drawn as a draft card of its own.
-    GroupDraft {
-        project: &'a Project,
-        group: &'a Group,
-    },
     /// A pinned or active session: a three-line card and one line per agent
     /// pane.
     Card {
@@ -454,8 +318,6 @@ impl SidebarRow<'_> {
     /// What the cursor rests on when it is on this row.
     pub fn item(&self) -> SidebarItem {
         match self {
-            Self::Draft { project, .. } => SidebarItem::Draft(project.id),
-            Self::GroupDraft { group, .. } => SidebarItem::GroupDraft(group.id),
             Self::Card { session, .. } | Self::Settled { session, .. } => {
                 SidebarItem::Session(session.id)
             }
@@ -472,18 +334,15 @@ pub struct Search {
     pub return_to: Option<SidebarItem>,
 }
 
-/// orb's projects, sessions, threads and drafts, and where the sidebar's
-/// cursor is.
+/// orb's projects, sessions and threads, and where the sidebar's cursor is.
 ///
-/// Written by the sessions actor (projects and their drafts, `sessions`,
-/// `error`, `starting` when a start ends, `fetching`, `trust`, `attach`,
-/// the cursor and `filter` after a restore, the cursor when a still-selected
-/// draft becomes a session, the cursor on a new group's draft, removing a
-/// session from `deleting`, pushing `notices`) and by the intent handler
-/// (the cursor on navigation, settle and delete, `shelf_open`, `starting`
-/// when a start begins, a draft's fields when the user picks them, adding a
-/// session to `deleting`, `filter`). The frontend loop takes `attach` and
-/// `notices`.
+/// Written by the sessions actor (projects, `sessions`, `error`, `starting`
+/// when a start ends, `fetching`, `attach`, the cursor and `filter`
+/// after a restore, the cursor on a new session, removing a session from
+/// `deleting`, pushing `notices`) and by the intent handler (the cursor on
+/// navigation, settle and delete, `shelf_open`, `starting` when a start
+/// begins, adding a session to `deleting`, `filter`). The frontend loop takes
+/// `attach` and `notices`.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
@@ -503,12 +362,8 @@ pub struct Sessions {
     pub fetching: Option<String>,
     /// The latest failure; shown until the next intent or a later success.
     pub error: Option<String>,
-    /// A session start waits for the user to trust this folder, the one its
-    /// harness names for the start; the sessions actor clears it when the user
-    /// answers.
-    pub trust: Option<PathBuf>,
-    /// A started draft's session, or a session whose worktree was recreated,
-    /// for the frontend to attach to.
+    /// A new session, or a session whose worktree was recreated, for the
+    /// frontend to attach to.
     pub attach: Option<SessionId>,
     /// Sessions hidden while they are removed. The intent handler inserts,
     /// the sessions actor removes.
@@ -598,6 +453,15 @@ impl Sessions {
             })
     }
 
+    /// Whether an agent turn has run in session `id`: one of its threads,
+    /// ended ones included, has a title (its first prompt or an agent's
+    /// title) or a turn underway.
+    pub fn turned(&self, id: SessionId) -> bool {
+        self.threads().any(|thread| {
+            thread.home() == Some(id) && (thread.title.is_some() || thread.status.in_progress())
+        })
+    }
+
     /// Whether `thread` runs in a session being deleted.
     pub fn is_deleting(&self, thread: &Thread) -> bool {
         thread
@@ -612,47 +476,16 @@ impl Sessions {
             .flat_map(|project| project.threads.iter())
     }
 
-    /// The sidebar's rows: drafts and group drafts (newest first), pinned
-    /// sessions (newest pin first), active sessions (newest created or
+    /// The sidebar's rows: pinned sessions (newest pin first), active sessions (newest created or
     /// un-settled first), then, if any is settled, the shelf header and the
     /// settled sessions (newest settle first). A collapsed shelf still lists
     /// the cursor's settled session. Ties go to the higher id. Sessions being
     /// deleted aren't listed. While a project filter is set, only that
-    /// project's rows are. While a search has text, only the drafts and the
-    /// sessions whose title, or one of whose agents' titles, matches it are,
+    /// project's rows are. While a search has text, only the sessions whose
+    /// title, or one of whose agents' titles, matches it are,
     /// settled ones even while the shelf is closed, and the shelf header only
     /// when a settled session matches, reading as open.
     pub fn sidebar(&self) -> Vec<SidebarRow<'_>> {
-        let drafts: Vec<(SystemTime, i64, SidebarRow<'_>)> =
-            if self.title_matches(NEW_THREAD).is_some() {
-                self.listed_projects()
-                    .flat_map(|project| {
-                        let own = project.draft.as_ref().map(|draft| {
-                            (
-                                draft.created_at,
-                                project.id.0,
-                                SidebarRow::Draft { project, draft },
-                            )
-                        });
-                        let groups = project
-                            .groups
-                            .iter()
-                            .filter(|group| group.draft.is_some())
-                            .map(move |group| {
-                                (
-                                    group.created_at,
-                                    group.id.0,
-                                    SidebarRow::GroupDraft { project, group },
-                                )
-                            });
-                        own.into_iter().chain(groups)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-        let mut drafts = drafts;
-        drafts.sort_by_key(|(at, id, _)| Reverse((*at, *id)));
         let (mut settled, live): (Vec<_>, Vec<_>) = self
             .listed_sessions()
             .into_iter()
@@ -663,13 +496,11 @@ impl Sessions {
         pinned.sort_by_key(|(_, session)| Reverse((session.pinned_at, session.id.0)));
         active.sort_by_key(|(_, session)| Reverse((session.active_since, session.id.0)));
         settled.sort_by_key(|(_, session)| Reverse((session.settled_at, session.id.0)));
-        let mut rows: Vec<SidebarRow<'_>> = drafts.into_iter().map(|(.., row)| row).collect();
-        rows.extend(
-            pinned
-                .into_iter()
-                .chain(active)
-                .map(|(project, session)| SidebarRow::Card { project, session }),
-        );
+        let mut rows: Vec<SidebarRow<'_>> = pinned
+            .into_iter()
+            .chain(active)
+            .map(|(project, session)| SidebarRow::Card { project, session })
+            .collect();
         if !settled.is_empty() {
             let open = self.shelf_open || self.searching();
             rows.push(SidebarRow::ShelfHeader {
@@ -705,7 +536,7 @@ impl Sessions {
         }
     }
 
-    /// Move the cursor to the first draft or session the search lists, or to
+    /// Move the cursor to the first session the search lists, or to
     /// nothing when none matches. Blank text leaves the cursor where it is.
     pub fn select_first_match(&mut self) {
         if self.searching() {
@@ -713,7 +544,7 @@ impl Sessions {
         }
     }
 
-    /// Move the cursor to the next draft or session the search lists, past
+    /// Move the cursor to the next session the search lists, past
     /// the shelf header; wraps from the last one to the first. Without a
     /// cursor, or with one on a row that's gone, selects the first.
     pub fn select_next_match(&mut self) {
@@ -727,7 +558,7 @@ impl Sessions {
         }
     }
 
-    /// Move the cursor to the previous draft or session the search lists,
+    /// Move the cursor to the previous session the search lists,
     /// past the shelf header; wraps from the first one to the last. Without
     /// a cursor, or with one on a row that's gone, selects the first.
     pub fn select_prev_match(&mut self) {
@@ -768,82 +599,9 @@ impl Sessions {
         self.agents(self.selected_session()?.id).into_iter().next()
     }
 
-    /// The draft under the cursor and its project, if it still exists.
-    pub fn selected_draft(&self) -> Option<(&Project, &Draft)> {
-        let Some(SidebarItem::Draft(id)) = self.cursor else {
-            return None;
-        };
-        let project = self.project(id)?;
-        Some((project, project.draft.as_ref()?))
-    }
-
-    /// Project `id`'s draft, if it has one.
-    pub fn draft_mut(&mut self, id: ProjectId) -> Option<&mut Draft> {
-        self.projects
-            .iter_mut()
-            .find(|project| project.id == id)
-            .and_then(|project| project.draft.as_mut())
-    }
-
-    /// Group `id`, if it still exists.
-    pub fn group_mut(&mut self, id: GroupId) -> Option<&mut Group> {
-        self.projects
-            .iter_mut()
-            .flat_map(|project| project.groups.iter_mut())
-            .find(|group| group.id == id)
-    }
-
-    /// The project of the session, draft or group draft under the cursor.
+    /// The project of the session under the cursor.
     pub fn selected_project(&self) -> Option<&Project> {
-        match self.cursor? {
-            SidebarItem::Session(_) => self.project(self.selected_session()?.project),
-            SidebarItem::Draft(id) => self.project(id),
-            SidebarItem::GroupDraft(_) => self.selected_group().map(|(project, _)| project),
-            SidebarItem::SettledShelf => None,
-        }
-    }
-
-    /// The group under the cursor and its project: a group draft's, or the
-    /// group of the selected session's lead thread.
-    pub fn selected_group(&self) -> Option<(&Project, &Group)> {
-        match self.cursor? {
-            SidebarItem::GroupDraft(id) => self.group(id),
-            SidebarItem::Session(_) => self.group(self.selected_thread()?.group?),
-            SidebarItem::Draft(_) | SidebarItem::SettledShelf => None,
-        }
-    }
-
-    /// The harness, model and permission `␣h`/`␣m`/`␣a` set at the cursor: a
-    /// project draft's, or a group draft's resolved ones.
-    pub fn settings(&self) -> Option<(&HarnessId, Option<&str>, Option<&str>)> {
-        match self.cursor? {
-            SidebarItem::Draft(_) => self.selected_draft().map(|(_, draft)| {
-                (
-                    &draft.harness,
-                    draft.model.as_deref(),
-                    draft.permission.as_deref(),
-                )
-            }),
-            SidebarItem::GroupDraft(_) => self.selected_group_draft()?.1.draft_settings(),
-            SidebarItem::Session(_) | SidebarItem::SettledShelf => None,
-        }
-    }
-
-    /// The harness `␣h`/`␣m`/`␣a` set up at the cursor, as [`Self::settings`]
-    /// resolves it.
-    pub fn setting_harness(&self) -> Option<&HarnessId> {
-        self.settings().map(|(harness, ..)| harness)
-    }
-
-    /// The group whose draft is under the cursor, with its project, if the
-    /// group still has its draft.
-    pub fn selected_group_draft(&self) -> Option<(&Project, &Group)> {
-        match self.cursor? {
-            SidebarItem::GroupDraft(id) => {
-                self.group(id).filter(|(_, group)| group.draft.is_some())
-            }
-            _ => None,
-        }
+        self.project(self.selected_session()?.project)
     }
 
     /// Move the cursor to the row below; wraps from the last row to the first.
@@ -1008,14 +766,6 @@ impl Sessions {
                         projects.any(|project| project.id == session.project)
                     })
             }
-            SidebarItem::Draft(id) => projects
-                .any(|project| project.id == id && !project.removed && project.draft.is_some()),
-            SidebarItem::GroupDraft(id) => projects.any(|project| {
-                project
-                    .groups
-                    .iter()
-                    .any(|group| group.id == id && group.draft.is_some())
-            }),
             SidebarItem::SettledShelf => false,
         }
     }
@@ -1088,8 +838,8 @@ impl Sessions {
             .is_some_and(|search| !search.input.text().trim().is_empty())
     }
 
-    /// The drafts and sessions listed, in display order: every row but the
-    /// shelf header.
+    /// The sessions listed, in display order: every row but the shelf
+    /// header.
     fn matches(&self) -> Vec<SidebarItem> {
         self.items()
             .into_iter()
@@ -1100,17 +850,6 @@ impl Sessions {
     /// What each sidebar row's cursor rests on, in display order.
     fn items(&self) -> Vec<SidebarItem> {
         self.sidebar().iter().map(SidebarRow::item).collect()
-    }
-
-    /// Group `id` and its project, if it still exists.
-    pub fn group(&self, id: GroupId) -> Option<(&Project, &Group)> {
-        self.projects.iter().find_map(|project| {
-            project
-                .groups
-                .iter()
-                .find(|group| group.id == id)
-                .map(|group| (project, group))
-        })
     }
 
     /// Where the cursor is in `items`, if it's on one of them.
@@ -1205,10 +944,9 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Own, PaneId,
-        PaneLaunch, Project, ProjectId, ProjectKind, Search, Session, SessionId, SessionKind,
-        Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus, most_urgent,
-        sessions_for,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search, Session, SessionId,
+        SessionKind, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
+        most_urgent, sessions_for,
     };
     use crate::TextInput;
     use crate::feat::sidebar::state::SidebarLayout;
@@ -1250,7 +988,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             branch: None,
             pinned_at: None,
@@ -1291,7 +1028,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(session),
-                command: vec![],
             }),
             ..thread(id)
         }
@@ -1304,6 +1040,38 @@ mod tests {
             sessions: shown,
             ..Sessions::default()
         })
+    }
+
+    #[rstest::rstest]
+    fn turned_after_a_titled_thread() {
+        // Given session 1 whose ended thread was titled by its first prompt.
+        let sessions = holding(
+            vec![Thread {
+                title: Some("Fix the parser".into()),
+                pane: None,
+                last_session: Some(SessionId(1)),
+                ..thread(1)
+            }],
+            vec![session(1)],
+        );
+
+        // When asking whether a turn has run in it.
+        let turned = sessions.turned(SessionId(1));
+
+        // Then one has.
+        assert!(turned, "a titled thread means a turn ran");
+    }
+
+    #[rstest::rstest]
+    fn not_turned_with_only_untitled_idle_threads() {
+        // Given session 1 whose only thread is idle and untitled.
+        let sessions = holding(vec![agent(1, 1, 0)], vec![session(1)]);
+
+        // When asking whether a turn has run in it.
+        let turned = sessions.turned(SessionId(1));
+
+        // Then none has.
+        assert!(!turned, "an untitled idle thread has had no turn");
     }
 
     #[rstest::rstest]
@@ -1488,32 +1256,10 @@ mod tests {
             root: "/tmp".into(),
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
-            draft: None,
+            repo: true,
             threads,
-            groups: vec![],
             kind: ProjectKind::Normal,
         }
-    }
-
-    /// Project `id` with no threads and a local draft created at second `secs`.
-    fn drafted(id: i64, secs: u64) -> Project {
-        Project {
-            draft: Some(Draft {
-                harness: HarnessId::new("claude"),
-                workspace: DraftWorkspace::Local,
-                branch: None,
-                model: None,
-                permission: None,
-                created_at: at(secs),
-                repo: true,
-                from: None,
-            }),
-            ..project(id, vec![])
-        }
-    }
-
-    fn on_draft(id: i64) -> SidebarItem {
-        SidebarItem::Draft(ProjectId(id))
     }
 
     /// One project holding `threads`, with the cursor on `cursor`.
@@ -1788,121 +1534,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn sidebar_lists_drafts_before_pinned_and_active() {
-        // Given project 1 with a pinned and an active thread, and project 2
-        // with a draft.
-        let sessions = fill(Sessions {
-            projects: vec![
-                project(1, vec![pinned(1, 10), active(2, 20)]),
-                drafted(2, 5),
-            ],
-            ..Sessions::default()
-        });
-
-        // When listing the sidebar.
-        let items = items(&sessions);
-
-        // Then the draft comes first.
-        assert_eq!(
-            items,
-            vec![on_draft(2), on(1), on(2)],
-            "drafts should lead the sidebar"
-        );
-    }
-
-    #[rstest::rstest]
-    fn sidebar_orders_drafts_by_newest() {
-        // Given drafts created at 10 s (project 1) and 20 s (project 2).
-        let sessions = fill(Sessions {
-            projects: vec![drafted(1, 10), drafted(2, 20)],
-            ..Sessions::default()
-        });
-
-        // When listing the sidebar.
-        let items = items(&sessions);
-
-        // Then the newer draft comes first.
-        assert_eq!(
-            items,
-            vec![on_draft(2), on_draft(1)],
-            "drafts should list the newest first"
-        );
-    }
-
-    #[rstest::rstest]
-    fn select_next_from_a_draft_reaches_the_first_pinned_card() {
-        // Given a draft, selected, and pinned threads.
-        let mut sessions = fill(Sessions {
-            projects: vec![
-                drafted(1, 5),
-                project(2, vec![pinned(1, 10), pinned(2, 20)]),
-            ],
-            cursor: Some(on_draft(1)),
-            ..Sessions::default()
-        });
-
-        // When selecting the next row.
-        sessions.select_next();
-
-        // Then the newest pinned card is selected.
-        assert_eq!(
-            sessions.cursor,
-            Some(on(2)),
-            "next after the last draft should be the first pinned card"
-        );
-    }
-
-    #[rstest::rstest]
-    fn row_neighbour_of_a_draft_is_the_next_row() {
-        // Given two drafts and an active thread.
-        let sessions = fill(Sessions {
-            projects: vec![
-                drafted(1, 20),
-                drafted(2, 10),
-                project(3, vec![active(1, 30)]),
-            ],
-            ..Sessions::default()
-        });
-
-        // When finding where the cursor goes when the newer draft is deleted.
-        let neighbour = sessions.row_neighbour(on_draft(1));
-
-        // Then it's the draft below.
-        assert_eq!(
-            neighbour,
-            Some(on_draft(2)),
-            "deleting a draft should move to the next row"
-        );
-    }
-
-    #[rstest::rstest]
-    fn selected_draft_is_the_cursors_draft() {
-        // Given two drafts with the cursor on project 2's.
-        let sessions = fill(Sessions {
-            projects: vec![drafted(1, 10), drafted(2, 20)],
-            cursor: Some(on_draft(2)),
-            ..Sessions::default()
-        });
-
-        // When reading the selected draft.
-        let selected = sessions.selected_draft().map(|(project, _)| project.id);
-
-        // Then it's project 2's.
-        assert_eq!(
-            selected,
-            Some(ProjectId(2)),
-            "the selected draft should be the cursor's"
-        );
-    }
-
-    #[rstest::rstest]
     fn select_first_selects_the_top_row() {
-        // Given a draft above two cards, with the cursor on the last card.
+        // Given two cards, with the cursor on the last card.
         let mut sessions = fill(Sessions {
-            projects: vec![
-                drafted(1, 5),
-                project(2, vec![active(1, 10), active(2, 20)]),
-            ],
+            projects: vec![project(2, vec![active(1, 10), active(2, 20)])],
             cursor: Some(on(1)),
             ..Sessions::default()
         });
@@ -1910,10 +1545,10 @@ mod tests {
         // When selecting the first row.
         sessions.select_first();
 
-        // Then the draft is selected.
+        // Then the top card is selected.
         assert_eq!(
             sessions.cursor,
-            Some(on_draft(1)),
+            Some(on(2)),
             "the first row should be selected"
         );
     }
@@ -2248,14 +1883,11 @@ mod tests {
         );
     }
 
-    /// Project 1 with a draft, card 1 and settled thread 2, and project 2
-    /// with a draft, card 3 and settled thread 4, the shelf open, filtered to
-    /// `filter`.
+    /// Project 1 with card 1 and settled thread 2, and project 2 with card 3
+    /// and settled thread 4, the shelf open, filtered to `filter`.
     fn two_projects(filter: Option<i64>) -> Sessions {
-        let [first, second] = [(1, 1, 2), (2, 3, 4)].map(|(id, card, settled_id)| Project {
-            threads: vec![thread(card), settled(settled_id, 10)],
-            ..drafted(id, 0)
-        });
+        let [first, second] = [(1, 1, 2), (2, 3, 4)]
+            .map(|(id, card, settled_id)| project(id, vec![thread(card), settled(settled_id, 10)]));
         fill(Sessions {
             projects: vec![first, second],
             shelf_open: true,
@@ -2272,10 +1904,10 @@ mod tests {
         // When listing the sidebar.
         let rows = items(&sessions);
 
-        // Then only project 2's draft, card, shelf and settled thread show.
+        // Then only project 2's card, shelf and settled thread show.
         assert_eq!(
             rows,
-            vec![on_draft(2), on(3), SidebarItem::SettledShelf, on(4)],
+            vec![on(3), SidebarItem::SettledShelf, on(4)],
             "the filter should keep only project 2's rows"
         );
     }
@@ -2291,15 +1923,7 @@ mod tests {
         // Then both projects' rows show.
         assert_eq!(
             rows,
-            vec![
-                on_draft(2),
-                on_draft(1),
-                on(3),
-                on(1),
-                SidebarItem::SettledShelf,
-                on(4),
-                on(2),
-            ],
+            vec![on(3), on(1), SidebarItem::SettledShelf, on(4), on(2),],
             "no filter should list every project"
         );
     }
@@ -2330,10 +1954,10 @@ mod tests {
         // When filtering to project 2.
         sessions.filter_to(Some(ProjectId(2)));
 
-        // Then the cursor is on project 2's draft, the first row.
+        // Then the cursor is on project 2's card, the first row.
         assert_eq!(
             sessions.cursor,
-            Some(on_draft(2)),
+            Some(on(3)),
             "a cursor the filter hides should move to the first row"
         );
     }
@@ -2545,7 +2169,7 @@ mod tests {
         // Then only project 2's matching rows show.
         assert_eq!(
             rows,
-            vec![on_draft(2), on(3), SidebarItem::SettledShelf, on(4)],
+            vec![on(3), SidebarItem::SettledShelf, on(4)],
             "the search should stay inside the filter"
         );
     }
@@ -2749,80 +2373,6 @@ mod tests {
         assert_eq!(sessions.cursor, Some(on(3)), "the first row");
     }
 
-    /// Group `id` of `kind`, named `group-{id}`, active since the epoch.
-    fn group(id: i64, kind: GroupKind) -> Group {
-        Group {
-            id: GroupId(id),
-            kind,
-            name: format!("group-{id}"),
-            dir: None,
-            branch: None,
-            created_at: SystemTime::UNIX_EPOCH,
-            pinned_at: None,
-            settled_at: None,
-            active_since: SystemTime::UNIX_EPOCH,
-            draft: None,
-            defaults: GroupDefaults {
-                harness: HarnessId::new("claude"),
-                model: None,
-                permission: None,
-            },
-        }
-    }
-
-    #[rstest::rstest]
-    fn group_draft_is_listed_as_a_draft() {
-        // Given a group with a draft and no thread.
-        let sessions = fill(Sessions {
-            projects: vec![Project {
-                groups: vec![Group {
-                    draft: Some(GroupDraft::default()),
-                    ..group(9, GroupKind::Feature)
-                }],
-                ..project(1, vec![])
-            }],
-            ..Sessions::default()
-        });
-
-        // When listing the sidebar.
-        let rows = items(&sessions);
-
-        // Then its draft is the only row.
-        assert_eq!(
-            rows,
-            vec![SidebarItem::GroupDraft(GroupId(9))],
-            "a group's draft is a draft row of its own"
-        );
-    }
-
-    #[rstest::rstest]
-    fn group_draft_settings_take_the_drafts_own_picks() {
-        // Given a group on Claude with opus in auto mode, whose draft picked
-        // its own model and follows the rest.
-        let group = Group {
-            draft: Some(GroupDraft {
-                model: Own::Set(Some("sonnet".into())),
-                ..GroupDraft::default()
-            }),
-            defaults: GroupDefaults {
-                harness: HarnessId::new("claude"),
-                model: Some("opus".into()),
-                permission: Some("auto".into()),
-            },
-            ..group(9, GroupKind::Feature)
-        };
-
-        // When resolving the draft's settings.
-        let settings = group.draft_settings();
-
-        // Then the model is the draft's and the rest the group's.
-        assert_eq!(
-            settings,
-            Some((&HarnessId::new("claude"), Some("sonnet"), Some("auto"))),
-            "a draft's own pick should win over the group's default"
-        );
-    }
-
     #[rstest::rstest]
     fn sidebar_lists_one_card_per_session() {
         // Given threads 1 and 2 in session 1, and thread 3 in session 3.
@@ -2957,7 +2507,6 @@ mod tests {
 
     #[rstest::rstest]
     #[case(on(1))]
-    #[case(on_draft(1))]
     fn jumpable_skips_a_row_the_filter_hides(#[case] item: SidebarItem) {
         // Given two projects, filtered to project 2.
         let sessions = two_projects(Some(2));

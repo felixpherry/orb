@@ -1,5 +1,5 @@
-//! Group folder templates: the folder a new Research or Learn group is copied
-//! from, written from orb's built-in default when the user has none.
+//! Folder templates: the folder a new Research or Learn session's folder is
+//! copied from, written from orb's built-in default when the user has none.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -8,7 +8,7 @@ use std::path::Path;
 use error_stack::{Report, ResultExt};
 use wherror::Error;
 
-use super::state::GroupKind;
+use super::state::FolderKind;
 
 /// The built-in Research template: each file's path in the folder and its text.
 const RESEARCH: &[(&str, &str)] = &[
@@ -111,15 +111,11 @@ pub struct TemplateError;
 ///
 /// # Errors
 ///
-/// Returns an error for a Feature kind, which has no template, or if a write
-/// fails.
-pub fn seed(dir: &Path, kind: GroupKind) -> Result<(), Report<TemplateError>> {
+/// Returns an error if a write fails.
+pub fn seed(dir: &Path, kind: FolderKind) -> Result<(), Report<TemplateError>> {
     let files = match kind {
-        GroupKind::Research => RESEARCH,
-        GroupKind::Learn => LEARN,
-        GroupKind::Feature => {
-            return Err(Report::new(TemplateError).attach("a Feature group has no template"));
-        }
+        FolderKind::Research => RESEARCH,
+        FolderKind::Learn => LEARN,
     };
     for (path, text) in files {
         let file = dir.join(path);
@@ -186,7 +182,7 @@ mod tests {
     use error_stack::{Report, ResultExt};
 
     use super::{LEARN, RESEARCH, TemplateError, copy, seed};
-    use crate::feat::sessions::state::GroupKind;
+    use crate::feat::sessions::state::FolderKind;
 
     #[rstest::rstest]
     fn seed_writes_every_research_kit_file() -> Result<(), Report<TemplateError>> {
@@ -195,7 +191,7 @@ mod tests {
         let dir = root.path().join("research");
 
         // When seeding the Research template.
-        seed(&dir, GroupKind::Research)?;
+        seed(&dir, FolderKind::Research)?;
 
         // Then every kit file holds its built-in text.
         let wrong: Vec<&str> = RESEARCH
@@ -219,7 +215,7 @@ mod tests {
         let root = tempfile::tempdir().change_context(TemplateError)?;
 
         // When seeding the Learn template.
-        seed(root.path(), GroupKind::Learn)?;
+        seed(root.path(), FolderKind::Learn)?;
 
         // Then CLAUDE.md links to its sibling AGENTS.md.
         let target = fs::read_link(root.path().join("CLAUDE.md")).change_context(TemplateError)?;
@@ -237,7 +233,7 @@ mod tests {
         let root = tempfile::tempdir().change_context(TemplateError)?;
 
         // When seeding the Research template.
-        seed(root.path(), GroupKind::Research)?;
+        seed(root.path(), FolderKind::Research)?;
 
         // Then CLAUDE.md links to its sibling AGENTS.md.
         let target = fs::read_link(root.path().join("CLAUDE.md")).change_context(TemplateError)?;
@@ -256,7 +252,7 @@ mod tests {
         let dir = root.path().join("learn");
 
         // When seeding the Learn template.
-        seed(&dir, GroupKind::Learn)?;
+        seed(&dir, FolderKind::Learn)?;
 
         // Then every kit file holds its built-in text.
         let wrong: Vec<&str> = LEARN
@@ -275,24 +271,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn seed_refuses_a_feature_kind() -> Result<(), Report<TemplateError>> {
-        // Given an empty temp folder.
-        let root = tempfile::tempdir().change_context(TemplateError)?;
-
-        // When seeding a Feature template.
-        let seeded = seed(root.path(), GroupKind::Feature);
-
-        // Then it's refused.
-        assert!(seeded.is_err(), "a Feature group has no template");
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn copy_keeps_symlinks_as_symlinks() -> Result<(), Report<TemplateError>> {
         // Given a seeded template.
         let root = tempfile::tempdir().change_context(TemplateError)?;
         let (from, to) = (root.path().join("from"), root.path().join("to"));
-        seed(&from, GroupKind::Research)?;
+        seed(&from, FolderKind::Research)?;
 
         // When copying it.
         copy(&from, &to)?;
@@ -344,7 +327,7 @@ mod tests {
         // Given a seeded template and a destination holding `mine.md`.
         let root = tempfile::tempdir().change_context(TemplateError)?;
         let (from, to) = (root.path().join("from"), root.path().join("to"));
-        seed(&from, GroupKind::Research)?;
+        seed(&from, FolderKind::Research)?;
         fs::create_dir_all(&to).change_context(TemplateError)?;
         fs::write(to.join("mine.md"), "mine").change_context(TemplateError)?;
 
@@ -364,7 +347,7 @@ mod tests {
     /// A temp folder seeded with the Research template.
     fn seeded_research() -> Result<tempfile::TempDir, Report<TemplateError>> {
         let root = tempfile::tempdir().change_context(TemplateError)?;
-        seed(root.path(), GroupKind::Research)?;
+        seed(root.path(), FolderKind::Research)?;
         Ok(root)
     }
 
@@ -445,7 +428,7 @@ mod tests {
     /// A temp folder seeded with the Learn template.
     fn seeded_learn() -> Result<tempfile::TempDir, Report<TemplateError>> {
         let root = tempfile::tempdir().change_context(TemplateError)?;
-        seed(root.path(), GroupKind::Learn)?;
+        seed(root.path(), FolderKind::Learn)?;
         Ok(root)
     }
 

@@ -3,7 +3,7 @@
 use std::fmt;
 
 use crate::feat::layout::tree::{NavDirection, Split};
-use crate::feat::sessions::state::{GroupKind, PaneId, SidebarItem};
+use crate::feat::sessions::state::{FolderKind, PaneId, SidebarItem};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// A user action produced by the keymap and applied by the
@@ -78,8 +78,8 @@ pub enum Intent {
     MoveTabRight,
     /// Focus this pane of the shown tab and move the keys there (a click).
     FocusPane(PaneId),
-    /// Attach to the selected session (un-settling a settled one), start the
-    /// selected draft, or open or close the Settled shelf on its header.
+    /// Attach to the selected session (un-settling a settled one), or open or
+    /// close the Settled shelf on its header.
     Attach,
     /// Return from the attached session to the sidebar.
     Detach,
@@ -92,10 +92,9 @@ pub enum Intent {
     JumpBack,
     /// Move forward to the next row in the jump list, after a jump back.
     JumpForward,
-    /// Open the project picker to open that project's draft.
+    /// Open the project picker to make a session of that project.
     NewSession,
-    /// Open orb's Incognito project's draft, creating it when it has none,
-    /// like picking a project in the project picker; `⏎` then starts it.
+    /// Make a session in orb's Incognito folder, with one shell.
     NewIncognito,
     /// Open the session picker over the threads inside the project filter,
     /// newest chat first, to jump into one.
@@ -118,31 +117,23 @@ pub enum Intent {
     Search,
     /// Un-settle the selected session, or ask to settle it.
     ToggleSettle,
-    /// Ask to delete the selected session, or to discard the selected draft
-    /// or group draft.
+    /// Ask to delete the selected session.
     Delete,
     /// Show the Settled shelf's sessions.
     OpenShelf,
     /// Hide the Settled shelf's sessions.
     CloseShelf,
-    /// Start a new group of `kind`: pick its project (Feature), then name it.
-    NewGroup(GroupKind),
+    /// Name a new session in orb's own `kind` folder.
+    NewFolder(FolderKind),
     /// Open the directory picker to add a project.
     AddProject,
-    /// Open the workspace picker for the selected draft, or the selected
-    /// thread before its first prompt.
+    /// Open the workspace picker for the selected thread before its first
+    /// prompt.
     ChangeWorkspace,
-    /// Open the branch picker for the selected thread or draft.
+    /// Open the branch picker for the selected thread.
     SwitchBranch,
-    /// Open the tool in the selected thread's or draft's directory.
+    /// Open the tool in the selected session's directory.
     OpenTool(Tool),
-    /// Open the model picker for the selected draft.
-    PickModel,
-    /// Open the permission-mode picker for the selected draft.
-    PickPermission,
-    /// Open the harness picker for the selected draft, or for the group's
-    /// default on a group's card or draft.
-    PickHarness,
     /// Type a character into the picker's filter, the rename box, or the
     /// sidebar search.
     PickerInput(char),
@@ -177,8 +168,9 @@ pub enum Intent {
     PickerWheelNext,
     /// Select the picker's previous item, stopping on the first (the wheel).
     PickerWheelPrev,
-    /// Pick the selected item: open the project's draft, add the directory,
-    /// or apply the workspace, branch, model or permission mode. In the
+    /// Pick the selected item: go on with the project's new session, add the
+    /// directory, or apply the workspace, base, branch, model or permission
+    /// mode. In the
     /// rename box, save the name. In the sidebar search, end it and keep the
     /// cursor on the match, or with no match, cancel it.
     PickerConfirm,
@@ -250,16 +242,12 @@ impl fmt::Display for Intent {
             Self::Delete | Self::PickerBackspace => "delete",
             Self::OpenShelf => "open settled",
             Self::CloseShelf => "close settled",
-            Self::NewGroup(GroupKind::Feature) => "feature group",
-            Self::NewGroup(GroupKind::Research) => "research group",
-            Self::NewGroup(GroupKind::Learn) => "learn group",
+            Self::NewFolder(FolderKind::Research) => "research session",
+            Self::NewFolder(FolderKind::Learn) => "learn session",
             Self::AddProject => "add project",
             Self::ChangeWorkspace => "workspace",
             Self::SwitchBranch => "branch",
             Self::OpenTool(tool) => tool.label(),
-            Self::PickModel => "model",
-            Self::PickPermission => "permission",
-            Self::PickHarness => "harness",
             Self::PickerInput(_) => "type",
             Self::PickerDeleteWord => "delete word",
             Self::PickerCursorLeft => "cursor left",
@@ -278,7 +266,7 @@ impl fmt::Display for Intent {
 mod tests {
     use super::Intent;
     use crate::feat::layout::tree::{NavDirection, Split};
-    use crate::feat::sessions::state::{GroupKind, PaneId};
+    use crate::feat::sessions::state::{FolderKind, PaneId};
     use crate::feat::zellij::zellij_service::Tool;
 
     #[rstest::rstest]
@@ -355,13 +343,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(GroupKind::Feature, "feature group")]
-    #[case(GroupKind::Research, "research group")]
-    #[case(GroupKind::Learn, "learn group")]
-    fn new_group_displays_its_kind(#[case] kind: GroupKind, #[case] expected: &str) {
-        // Given / When / Then: which-key labels NewGroup by its kind.
+    #[case(FolderKind::Research, "research session")]
+    #[case(FolderKind::Learn, "learn session")]
+    fn new_folder_displays_its_kind(#[case] kind: FolderKind, #[case] expected: &str) {
+        // Given / When / Then: which-key labels NewFolder by its kind.
         assert_eq!(
-            Intent::NewGroup(kind).to_string(),
+            Intent::NewFolder(kind).to_string(),
             expected,
             "which-key label"
         );

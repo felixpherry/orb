@@ -1,18 +1,19 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
 //! has updated [`AppState`](crate::AppState). Pane commands,
 //! `ListDirectories`, `ListBranches`, `LoadPreview` and `OpenTool` are carried
-//! out by the frontend loop; session commands (drafts, add or remove a project, move to
-//! another workspace, switch a thread's or a group's branch, refresh, pin, rename, settle,
-//! delete and visit a session, save the sidebar's width and filter, save the jump list,
-//! create and start groups, save a group draft, answer a trust confirm,
-//! split a pane, open a tab, save a layout) go to the sessions actor; worktree commands (refresh, delete) go to the worktrees actor; search
-//! commands (query, preview) go to the search actor.
+//! out by the frontend loop; session commands (new sessions, add or remove a
+//! project, move a session to another workspace, switch a session's branch,
+//! refresh, pin, rename, settle, delete and visit a session, save the
+//! sidebar's width and filter, save the jump list, split a pane, open a tab,
+//! save a layout) go to the sessions actor; worktree commands (refresh,
+//! delete) go to the worktrees actor; search commands (query, preview) go to
+//! the search actor.
 
 use std::path::PathBuf;
 
 use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::tree::Split;
-use crate::feat::sessions::state::{GroupId, GroupKind, ProjectId, SessionId, ThreadId};
+use crate::feat::sessions::state::{FolderKind, ProjectId, SessionId, ThreadId};
 use crate::feat::zellij::zellij_service::Tool;
 
 /// Something that must happen in response to an intent.
@@ -31,39 +32,23 @@ pub enum Command {
     /// Save `session`'s tabs, splits, focus and pane names as the app state
     /// has them.
     SaveLayout(SessionId),
-    /// Give the project a draft, prefilled from its last-used settings,
-    /// unless it has one.
-    CreateDraft(ProjectId),
-    /// Save the project's draft as it now is in the app state.
-    SaveDraft(ProjectId),
-    /// Check the branch out in `cwd` for the project's draft: the draft's
-    /// directory, or the project's root, which the draft then moves to.
-    CheckoutDraft {
+    /// Make a session of `project` in `workspace`, with one shell.
+    NewSession {
         project: ProjectId,
-        git_ref: GitRef,
-        cwd: PathBuf,
+        workspace: Workspace,
     },
-    /// Make the project's root a git repository (`git init`) for its draft.
+    /// Make the project's root a git repository (`git init`).
     InitGit(ProjectId),
-    /// Start a session from the project's draft, which becomes a
-    /// thread.
-    StartDraft(ProjectId),
-    /// Throw the project's draft away.
-    DiscardDraft(ProjectId),
-    /// Start the thread's session over in another workspace, before its
-    /// first prompt.
-    MoveThread { thread: ThreadId, to: Workspace },
-    /// Check the branch out in the thread's directory. With `to_root`, check
-    /// it out in the project's root instead and move the prompt-less thread
-    /// there.
+    /// Move `session`, before its first agent turn, to `to`, restarting its
+    /// panes there.
+    ChangeWorkspace { session: SessionId, to: Workspace },
+    /// Check `git_ref` out in `session`'s directory; with `to_root`, check it
+    /// out in the project's checkout and move the session there.
     SwitchBranch {
-        thread: ThreadId,
+        session: SessionId,
         git_ref: GitRef,
         to_root: bool,
     },
-    /// Check the branch out in the group's worktree, which moves every thread
-    /// in it.
-    CheckoutGroup { group: GroupId, git_ref: GitRef },
     /// List the refs of the directory's repository into the open branch picker.
     ListBranches(PathBuf),
     /// Focus the tool's zellij pane for the directory, else open one.
@@ -103,26 +88,12 @@ pub enum Command {
     SaveUi,
     /// Save the jump list as it now is in the app state.
     SaveJumps,
-    /// Remove the project from `␣n` and the project filter and discard its
-    /// draft; its threads stay.
+    /// Remove the project from `␣n` and the project filter; its sessions
+    /// stay.
     RemoveProject(ProjectId),
-    /// Create a `kind` group named `name` (a slug) in `project`, or for
-    /// Research/Learn in orb's own project for the kind, with a draft.
-    CreateGroup {
-        kind: GroupKind,
-        project: Option<ProjectId>,
-        name: String,
-    },
-    /// Start the group's first thread from its draft.
-    StartGroupDraft(GroupId),
-    /// Save the group's default setup and draft as they now are in the app state.
-    SaveGroupDraft(GroupId),
-    /// Mark the folder the waiting session start asks about trusted in
-    /// its harness's config, and try the start again.
-    TrustWorkspace,
-    /// End the waiting session start as a failed one: the user didn't trust
-    /// its folder.
-    DeclineTrust,
+    /// Make a `kind` session in orb's own folder `name` (a slug), with one
+    /// shell.
+    NewFolderSession { kind: FolderKind, name: String },
     /// Rescan orb's worktrees and re-read their facts, then their sizes.
     RefreshWorktrees,
     /// Force-remove the worktree at `path`, keeping its branch.
@@ -140,11 +111,13 @@ pub enum Command {
     },
 }
 
-/// Where a thread's session runs.
+/// Where a new session runs, or where a session moves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Workspace {
-    /// A new worktree of the project, on a new branch.
-    NewWorktree,
-    /// A directory that already exists: a worktree or the project's root.
+    /// The project's checkout (its root).
+    Checkout,
+    /// A new worktree orb makes from `base`, a branch or remote ref name.
+    NewWorktree { base: String },
+    /// A worktree that already exists.
     Existing(PathBuf),
 }

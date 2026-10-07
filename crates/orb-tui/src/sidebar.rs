@@ -1,11 +1,10 @@
-//! The sidebar: one list of orb's drafts and sessions across projects, drawn
+//! The sidebar: one list of orb's sessions across projects, drawn
 //! like LazyVim's file explorer (snacks.nvim) in tokyonight-moon.
 //!
 //! An input box heads it: `Sessions`, with an `i` badge lit while the
 //! search has the keys, the filtered project after the `>` prompt, and how
-//! many drafts and sessions are listed out of all of them. Below it, drafts
-//! and group drafts come first as three-line nodes. Pinned sessions follow,
-//! then active ones, each a card: its most urgent agent's status icon and its
+//! many sessions are listed out of all of them. Below it, pinned sessions
+//! come first, then active ones, each a card: its most urgent agent's status icon and its
 //! title, then the project and status, then the branch (a Research or Learn
 //! session's folder), then one line per agent pane with its status, title
 //! and harness mark. The selected row's first line is highlighted. Settled
@@ -14,7 +13,7 @@
 //! unless the wheel scrolled it while the keys are elsewhere.
 //!
 //! While the user searches, the typed text follows the prompt, and only
-//! drafts and the sessions whose title or an agent's title matches it are
+//! the sessions whose title or an agent's title matches it are
 //! listed, settled ones included, with the matched characters highlighted
 //! as in the pickers.
 
@@ -24,8 +23,8 @@ use std::time::{Duration, SystemTime};
 
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::sessions::state::{
-    Draft, DraftWorkspace, Group, GroupKind, NEW_THREAD, Project, Session, SessionId, SessionKind,
-    Sessions, SidebarItem, SidebarRow, Thread, ThreadStatus, most_urgent,
+    FolderKind, NEW_THREAD, Project, Session, SessionId, SessionKind, Sessions, SidebarItem,
+    SidebarRow, Thread, ThreadStatus, most_urgent,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use ratatui::buffer::Buffer;
@@ -218,31 +217,19 @@ fn prompt<'a>(
     )
 }
 
-/// `shown/total`, like snacks' match count: the drafts and sessions listed,
-/// out of every draft, group draft and session not being deleted.
+/// `shown/total`, like snacks' match count: the sessions listed, out of
+/// every session not being deleted.
 fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
     let shown = rows
         .iter()
         .filter(|row| !matches!(row, SidebarRow::ShelfHeader { .. }))
         .count();
-    let drafts = sessions
-        .projects
-        .iter()
-        .map(|project| {
-            usize::from(project.draft.is_some())
-                + project
-                    .groups
-                    .iter()
-                    .filter(|group| group.draft.is_some())
-                    .count()
-        })
-        .sum::<usize>();
     let live = sessions
         .sessions
         .iter()
         .filter(|session| !sessions.deleting.contains(&session.id))
         .count();
-    format!("{shown}/{}", drafts + live)
+    format!("{shown}/{live}")
 }
 
 /// Draws the rows into `area`, scrolled so the selected one is whole on
@@ -414,11 +401,10 @@ fn place<'a>(
     (placed, top)
 }
 
-/// How many lines a row takes: a draft's node 3, a session's card 3 and one
-/// per agent pane, else 1.
+/// How many lines a row takes: a session's card 3 and one per agent pane,
+/// else 1.
 fn height(sessions: &Sessions, row: &SidebarRow<'_>) -> u16 {
     match row {
-        SidebarRow::Draft { .. } | SidebarRow::GroupDraft { .. } => 3,
         SidebarRow::Card { session, .. } => u16::try_from(sessions.agents(session.id).len())
             .unwrap_or(u16::MAX)
             .saturating_add(3),
@@ -443,14 +429,6 @@ fn render_row(
     buf: &mut Buffer,
 ) {
     match row {
-        SidebarRow::Draft { project, draft } => {
-            let matched = sessions.title_matches(NEW_THREAD).unwrap_or_default();
-            render_draft(project, draft, &matched, area, buf);
-        }
-        SidebarRow::GroupDraft { group, .. } => {
-            let matched = sessions.title_matches(NEW_THREAD).unwrap_or_default();
-            render_group_draft(group, &matched, area, buf);
-        }
         SidebarRow::Card { project, session } => render_card(
             sessions,
             harnesses,
@@ -569,23 +547,12 @@ fn folder_name(session: &Session) -> Cow<'_, str> {
     )
 }
 
-/// Where a group's sessions run: a Feature's branch, else its folder under
-/// `~/.orb`.
-fn group_place(group: &Group) -> String {
-    match group.kind {
-        GroupKind::Feature => format!("{BRANCH} {}", group.branch.as_deref().unwrap_or("—")),
-        GroupKind::Research => format!("{FOLDER} ~/.orb/research/{}", group.name),
-        GroupKind::Learn => format!("{FOLDER} ~/.orb/learn/{}", group.name),
-    }
-}
-
-/// A group kind's icon and colour: Feature `nf-fa-code_fork` green1,
-/// Research `nf-fa-flask` blue2, Learn `nf-fa-book` purple.
-pub(crate) fn kind_look(kind: GroupKind) -> (&'static str, Color) {
+/// A folder kind's icon and colour: Research `nf-fa-flask` blue2, Learn
+/// `nf-fa-book` purple.
+pub(crate) fn kind_look(kind: FolderKind) -> (&'static str, Color) {
     match kind {
-        GroupKind::Feature => ("\u{f126}", GREEN1),
-        GroupKind::Research => ("\u{f0c3}", BLUE2),
-        GroupKind::Learn => ("\u{f02d}", PURPLE),
+        FolderKind::Research => ("\u{f0c3}", BLUE2),
+        FolderKind::Learn => ("\u{f02d}", PURPLE),
     }
 }
 
@@ -593,69 +560,10 @@ pub(crate) fn kind_look(kind: GroupKind) -> (&'static str, Color) {
 /// and show it: Research `nf-fa-flask` blue2, Learn `nf-fa-book` purple.
 fn session_look(kind: SessionKind) -> Option<(&'static str, Color)> {
     match kind {
-        SessionKind::Research => Some(kind_look(GroupKind::Research)),
-        SessionKind::Learn => Some(kind_look(GroupKind::Learn)),
+        SessionKind::Research => Some(kind_look(FolderKind::Research)),
+        SessionKind::Learn => Some(kind_look(FolderKind::Learn)),
         SessionKind::Plain | SessionKind::Incognito => None,
     }
-}
-
-/// A draft's node: the pencil and `New thread` (`matched` at those byte
-/// offsets); the project; the workspace and branch it will start on.
-fn render_draft(project: &Project, draft: &Draft, matched: &[usize], area: Rect, buf: &mut Buffer) {
-    let [heading, place, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
-    render_draft_heading(matched, heading, buf);
-    render_split(project_line(project), Line::default(), place, buf);
-    render_split(
-        Line::from(vec![
-            span(LAST_GUIDE, GUTTER),
-            span(format!("{BRANCH} {}", workspace(draft)), COMMENT),
-        ]),
-        Line::default(),
-        footer,
-        buf,
-    );
-}
-
-/// A group's draft node: the pencil and `New thread` (`matched` at those
-/// byte offsets); the group's kind icon and slug; where its sessions run.
-fn render_group_draft(group: &Group, matched: &[usize], area: Rect, buf: &mut Buffer) {
-    let [heading, place, footer] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
-    render_draft_heading(matched, heading, buf);
-    let (icon, colour) = kind_look(group.kind);
-    render_split(
-        Line::from(vec![
-            span(GUIDE, GUTTER),
-            span(format!("{icon} "), colour),
-            span(group.name.as_str(), FG_DARK),
-        ]),
-        Line::default(),
-        place,
-        buf,
-    );
-    render_split(
-        Line::from(vec![
-            span(LAST_GUIDE, GUTTER),
-            span(group_place(group), COMMENT),
-        ]),
-        Line::default(),
-        footer,
-        buf,
-    );
-}
-
-/// A draft's first line: the pencil and `New thread`, `draft` on the right.
-fn render_draft_heading(matched: &[usize], area: Rect, buf: &mut Buffer) {
-    render_split(
-        Line::from(
-            [span(format!(" {PENCIL} "), YELLOW)]
-                .into_iter()
-                .chain(highlight(NEW_THREAD, matched, |_| FG))
-                .collect::<Vec<_>>(),
-        ),
-        Line::from(span("draft", DARK3)),
-        area,
-        buf,
-    );
 }
 
 /// A node's middle line: the project's folder in its badge colour, and its
@@ -666,20 +574,6 @@ fn project_line(project: &Project) -> Line<'_> {
         span(format!("{FOLDER} "), project_colour(&project.title)),
         span(project.title.as_str(), FG_DARK),
     ])
-}
-
-/// Where a draft will start: `local`, `new worktree` or `worktree`, then its
-/// branch when it has one.
-fn workspace(draft: &Draft) -> String {
-    let place = match draft.workspace {
-        DraftWorkspace::Local => "local",
-        DraftWorkspace::NewWorktree => "new worktree",
-        DraftWorkspace::Existing(_) => "worktree",
-    };
-    match &draft.branch {
-        Some(branch) => format!("{place} · {branch}"),
-        None => place.to_owned(),
-    }
 }
 
 /// The Settled shelf's folder, open or closed, and how many sessions it
@@ -960,7 +854,7 @@ pub(crate) const FG_DARK: Color = Color::Rgb(0x82, 0x8b, 0xb8);
 /// Times, branches, the count, settled titles and the stopped icon; the
 /// picker's hint labels, headings and empty-list text (`comment`).
 pub(crate) const COMMENT: Color = Color::Rgb(0x63, 0x6d, 0xa6);
-/// The idle icon, `draft`, the unlit shelf badge and settled marks; the
+/// The idle icon, the unlit shelf badge and settled marks; the
 /// picker's disabled branches and hint separators (`dark3`).
 pub(crate) const DARK3: Color = Color::Rgb(0x54, 0x5c, 0x7e);
 /// Working, the Settled shelf and the lit shelf badge; the picker's title and
@@ -972,15 +866,14 @@ pub(crate) const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
 /// A completed turn; the picker's current branch and new worktree; the mode
 /// line's INSERT (`green`).
 pub(crate) const GREEN: Color = Color::Rgb(0xc3, 0xe8, 0x8d);
-/// The mode line's ATTACHED (`green1`, lualine's terminal mode), and a
-/// Feature group's kind icon.
+/// The mode line's ATTACHED (`green1`, lualine's terminal mode).
 pub(crate) const GREEN1: Color = Color::Rgb(0x4f, 0xd6, 0xbe);
-/// A Research group's kind icon (`blue2`).
+/// A Research session's kind icon (`blue2`).
 pub(crate) const BLUE2: Color = Color::Rgb(0x0d, 0xb9, 0xd7);
-/// A Learn group's kind icon (`purple`).
+/// A Learn session's kind icon (`purple`).
 pub(crate) const PURPLE: Color = Color::Rgb(0xfc, 0xa7, 0xea);
-/// Needing approval, and a draft's pencil; the picker's permission shield
-/// and `worktree` branch badge; the rename box (`yellow`).
+/// Needing approval; the picker's `worktree` branch badge; the rename box
+/// (`yellow`).
 pub(crate) const YELLOW: Color = Color::Rgb(0xff, 0xc7, 0x77);
 /// The input box and the pin; the rule under the picker's input and its
 /// git icon (`orange`).
@@ -1034,10 +927,6 @@ pub(crate) const FOLDER: &str = "\u{f07b}";
 /// The open Settled shelf, and the picker's `All projects` row
 /// (`nf-fa-folder_open`).
 pub(crate) const FOLDER_OPEN: &str = "\u{f07c}";
-/// Before a harness in the picker and the dashboard (`nf-fa-plug`).
-pub(crate) const PLUG: &str = "\u{f1e6}";
-/// A draft (`nf-fa-pencil`).
-const PENCIL: &str = "\u{f040}";
 /// A model, before a harness's models when it has no mark
 /// (`nf-fa-microchip`).
 pub(crate) const CHIP: &str = "\u{f2db}";
@@ -1050,15 +939,15 @@ const LAST_GUIDE: &str = " └╴";
 
 #[cfg(test)]
 mod tests {
-    use orb_domain::feat::harness::claude::models::info;
+    use orb_domain::feat::harness::claude::info;
     use orb_domain::feat::harness::{HarnessId, HarnessInfo};
     use std::collections::HashSet;
     use std::time::{Duration, SystemTime};
 
     use orb_domain::TextInput;
     use orb_domain::feat::sessions::state::{
-        Draft, DraftWorkspace, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search,
-        SessionId, SessionKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search, SessionId, SessionKind,
+        Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::sidebar::state::SidebarLayout;
     use ratatui::buffer::{Buffer, Cell};
@@ -1068,7 +957,7 @@ mod tests {
     use super::{
         APPROVAL_ICON, ATTACHED_ICON, BG_DARK, BLUE, BLUE1, BLUE2, BRANCH, COMMENT, COMPLETED_ICON,
         CYAN, DARK3, FAILED_ICON, FG, FOLDER, FOLDER_OPEN, GONE_ICON, GREEN, GUIDE, GUTTER,
-        IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PENCIL, PIN, PURPLE, RED, STOPPED_ICON,
+        IDLE_ICON, INPUT_ICON, LAST_GUIDE, MAGENTA, ORANGE, PIN, PURPLE, RED, STOPPED_ICON,
         SidebarScroll, VISUAL, YELLOW, ago_label, badge_colour, monogram, render, working_label,
     };
     use crate::mouse::HitMap;
@@ -1092,7 +981,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             branch: None,
             pinned_at: None,
@@ -1121,9 +1009,8 @@ mod tests {
             root: format!("/Users/me/dev/{title}").into(),
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
-            draft: None,
+            repo: true,
             threads,
-            groups: vec![],
             kind: ProjectKind::Normal,
         }
     }
@@ -1135,24 +1022,6 @@ mod tests {
             projects,
             ..Sessions::default()
         }
-    }
-
-    /// orb with only a draft in `workspace` on `branch`.
-    fn draft(workspace: DraftWorkspace, branch: Option<&str>) -> Sessions {
-        let mut sessions = sessions(vec![]);
-        if let Some(project) = sessions.projects.first_mut() {
-            project.draft = Some(Draft {
-                harness: HarnessId::new("claude"),
-                workspace,
-                branch: branch.map(str::to_owned),
-                model: None,
-                permission: None,
-                created_at: SystemTime::UNIX_EPOCH,
-                repo: true,
-                from: None,
-            });
-        }
-        sessions
     }
 
     /// orb's thread 1 and web's thread 2, filtered to orb.
@@ -1622,22 +1491,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn search_highlights_the_matched_characters_of_a_draft() {
-        // Given a draft, searching for "N".
-        let sessions = searching(draft(DraftWorkspace::Local, None), "N");
-
-        // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 8);
-
-        // Then the `N` of `New thread` is blue and bold.
-        let n = (0..buf.area.width)
-            .filter_map(|x| buf.cell((x, 3)))
-            .find(|cell| cell.symbol() == "N")
-            .map(|cell| (cell.fg, cell.modifier.contains(Modifier::BOLD)));
-        assert_eq!(n, Some((BLUE1, true)), "the draft's matched `N`");
-    }
-
-    #[rstest::rstest]
     fn search_highlights_the_matched_characters_of_a_settled_thread() {
         // Given settled "Thread 7" with the shelf closed, searching for "7".
         let sessions = searching(sessions(vec![settled(7, 10)]), "7");
@@ -1890,12 +1743,12 @@ mod tests {
         buf
     }
 
-    /// A pi-like harness: tagged `pi`, with no mark.
+    /// A pi-like harness with no mark.
     fn pi_like() -> HarnessInfo {
         HarnessInfo {
-            tag: Some("pi".to_owned()),
-            unavailable: None,
-            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
+            id: HarnessId::new("pi"),
+            label: "pi".to_owned(),
+            icon: None,
         }
     }
 
@@ -1930,82 +1783,6 @@ mod tests {
         assert!(
             footer.starts_with(&format!(" ├╴{BRANCH} main ")),
             "line was '{footer}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn draft_first_line_is_new_thread_marked_draft() {
-        // Given a draft in orb.
-        let sessions = draft(DraftWorkspace::Local, Some("dev"));
-
-        // When rendering the sidebar.
-        let heading = line(&draw(&sessions, at(1000), 8), 3);
-
-        // Then its first line is the pencil and `New thread`, marked `draft`.
-        assert!(
-            heading.starts_with(&format!(" {PENCIL} New thread "))
-                && heading.trim_end().ends_with(" draft"),
-            "line was '{heading}'"
-        );
-    }
-
-    #[rstest::rstest]
-    fn draft_pencil_is_yellow() {
-        // Given a draft in orb.
-        let sessions = draft(DraftWorkspace::Local, Some("dev"));
-
-        // When rendering the sidebar.
-        let buf = draw(&sessions, at(1000), 8);
-
-        // Then the pencil is yellow.
-        assert_eq!(
-            glyph(&buf, 1, 3),
-            Some((PENCIL.to_owned(), YELLOW)),
-            "the draft's pencil"
-        );
-    }
-
-    #[rstest::rstest]
-    fn draft_second_line_shows_the_project() {
-        // Given a draft in orb.
-        let sessions = draft(DraftWorkspace::Local, Some("dev"));
-
-        // When rendering the sidebar.
-        let place = line(&draw(&sessions, at(1000), 8), 4);
-
-        // Then its second line is a guide and orb's folder and name.
-        assert_eq!(
-            place.trim_end(),
-            format!(" ├╴{FOLDER} orb"),
-            "the draft's second line"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(DraftWorkspace::Local, Some("dev"), "local · dev")]
-    #[case(DraftWorkspace::NewWorktree, None, "new worktree")]
-    #[case(
-        DraftWorkspace::Existing("/Users/me/.orb/worktrees/orb/orb-1a2b".into()),
-        Some("dev"),
-        "worktree · dev"
-    )]
-    fn draft_third_line_shows_its_workspace(
-        #[case] workspace: DraftWorkspace,
-        #[case] branch: Option<&str>,
-        #[case] expected: &str,
-    ) {
-        // Given a draft in `workspace` on `branch`.
-        let sessions = draft(workspace, branch);
-
-        // When rendering the sidebar.
-        let footer = line(&draw(&sessions, at(1000), 8), 5);
-
-        // Then its third line is the last guide, the branch glyph and where
-        // it will start.
-        assert_eq!(
-            footer.trim_end(),
-            format!(" └╴{BRANCH} {expected}"),
-            "the draft's third line"
         );
     }
 
@@ -2337,10 +2114,10 @@ mod tests {
     #[case(80, 3)]
     #[case(0, 0)]
     fn sidebar_draws_at_any_size(#[case] width: u16, #[case] height: u16) {
-        // Given a draft, a pinned thread, an active one and an open shelf,
-        // filtered to orb, with the settled thread selected.
+        // Given a pinned thread, an active one and an open shelf, filtered to
+        // orb, with the settled thread selected.
         let sessions = {
-            let mut sessions = draft(DraftWorkspace::NewWorktree, Some("main"));
+            let mut sessions = sessions(vec![]);
             if let Some(project) = sessions.projects.first_mut() {
                 project.threads = vec![
                     Thread {

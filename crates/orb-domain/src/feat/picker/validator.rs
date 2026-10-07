@@ -23,8 +23,7 @@ pub enum PickProjectError {
     NoProject,
 }
 
-/// Allow opening the highlighted project's draft, even while a session
-/// starts.
+/// Allow picking the highlighted project for a new session.
 ///
 /// # Errors
 ///
@@ -318,7 +317,7 @@ mod tests {
         assert_eq!(
             result,
             Ok(()),
-            "a draft can be opened while another session starts"
+            "a project can be picked while another session starts"
         );
     }
 
@@ -589,7 +588,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(1),
                 session: SessionId(1),
-                command: vec![],
             }),
             branch: None,
             pinned_at: None,
@@ -614,9 +612,8 @@ mod tests {
             root: "/alpha".into(),
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
-            draft: None,
+            repo: true,
             threads: vec![thread],
-            groups: vec![],
             kind: ProjectKind::Normal,
         }];
         AppState {

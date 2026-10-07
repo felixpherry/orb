@@ -8,7 +8,6 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
-use crate::feat::harness::{HarnessId, HarnessInfo};
 use crate::feat::sessions::state::{ProjectId, ProjectKind, SessionId, ThreadId};
 
 /// One row a picker can show.
@@ -28,24 +27,7 @@ pub enum PickerItem {
     Workspace(WorkspaceChoice),
     /// A branch to switch to, matched on its name.
     Branch(BranchRow),
-    /// A model or permission mode for a draft, with its text; `None` is the
-    /// harness's default. Matched on its label.
-    Setting {
-        value: Option<String>,
-        label: String,
-    },
-    /// A harness to start a draft's session in, with its mark if it has one,
-    /// matched on its label; disabled with the reason it can't be picked.
-    Harness {
-        id: HarnessId,
-        label: String,
-        icon: Option<String>,
-        unavailable: Option<String>,
-    },
-    /// A section label between rows. It can't be selected, and it's hidden
-    /// while a filter is typed.
-    Heading(String),
-    /// Make the draft's project a git repository. Matched on its label.
+    /// Make the project a git repository. Matched on its label.
     InitGit,
     /// The project filter's row for no filter. Matched on its label.
     AllProjects,
@@ -102,30 +84,10 @@ pub fn confirm_label(yes: bool) -> &'static str {
     if yes { "Yes" } else { "No" }
 }
 
-/// A model's or permission mode's text: a model `info` knows by its id or
-/// an alias shows its name, any other value shows as stored, and none is
-/// `Default`.
-pub fn setting_label<'a>(value: Option<&'a str>, info: Option<&'a HarnessInfo>) -> &'a str {
-    match value {
-        None => "Default",
-        Some(value) => info
-            .and_then(|info| info.model(value))
-            .map_or(value, |model| model.name.as_str()),
-    }
-}
-
 impl PickerItem {
     /// Whether the row is shown but can't be selected.
     pub fn disabled(&self) -> bool {
-        matches!(
-            self,
-            Self::Branch(BranchRow { disabled: true, .. })
-                | Self::Heading(_)
-                | Self::Harness {
-                    unavailable: Some(_),
-                    ..
-                }
-        )
+        matches!(self, Self::Branch(BranchRow { disabled: true, .. }))
     }
 }
 
@@ -430,12 +392,9 @@ impl PickerList {
 fn hidden(item: &PickerItem, pattern: &str) -> bool {
     match item {
         PickerItem::Directory { name } => name.starts_with('.') && !pattern.starts_with('.'),
-        PickerItem::Heading(_) => !pattern.trim().is_empty(),
         PickerItem::Project { .. }
         | PickerItem::Workspace(_)
         | PickerItem::Branch(_)
-        | PickerItem::Setting { .. }
-        | PickerItem::Harness { .. }
         | PickerItem::InitGit
         | PickerItem::AllProjects
         | PickerItem::Confirm(_)
@@ -502,10 +461,7 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
         PickerItem::InitGit => (INIT_GIT.to_owned(), None),
         PickerItem::AllProjects => (ALL_PROJECTS.to_owned(), None),
         PickerItem::Confirm(yes) => (confirm_label(*yes).to_owned(), None),
-        PickerItem::Setting { label, .. }
-        | PickerItem::Harness { label, .. }
-        | PickerItem::Heading(label)
-        | PickerItem::Session { label, .. }
+        PickerItem::Session { label, .. }
         | PickerItem::Worktree { label, .. }
         | PickerItem::Hit { label, .. } => (label.clone(), None),
     };
@@ -534,9 +490,8 @@ fn score(matcher: &SkimMatcherV2, item: &PickerItem, terms: &[&str]) -> Option<(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{BranchRow, Matches, PickerItem, PickerList, setting_label};
+    use super::{BranchRow, Matches, PickerItem, PickerList};
     use crate::feat::git::git_service::GitRef;
-    use crate::feat::harness::claude::models::info;
     use crate::feat::sessions::state::{ProjectId, ProjectKind};
 
     fn directories(names: &[&str]) -> Vec<PickerItem> {
@@ -567,10 +522,7 @@ mod tests {
                 PickerItem::InitGit => super::INIT_GIT.to_owned(),
                 PickerItem::AllProjects => super::ALL_PROJECTS.to_owned(),
                 PickerItem::Confirm(yes) => super::confirm_label(*yes).to_owned(),
-                PickerItem::Setting { label, .. }
-                | PickerItem::Harness { label, .. }
-                | PickerItem::Heading(label)
-                | PickerItem::Session { label, .. }
+                PickerItem::Session { label, .. }
                 | PickerItem::Worktree { label, .. }
                 | PickerItem::Hit { label, .. } => label.clone(),
             })
@@ -652,9 +604,6 @@ mod tests {
                 PickerItem::Directory { .. }
                 | PickerItem::Workspace(_)
                 | PickerItem::Branch(_)
-                | PickerItem::Setting { .. }
-                | PickerItem::Harness { .. }
-                | PickerItem::Heading(_)
                 | PickerItem::InitGit
                 | PickerItem::AllProjects
                 | PickerItem::Confirm(_)
@@ -939,57 +888,6 @@ mod tests {
 
         // Then nothing is selected.
         assert_eq!(selected_name(&list), None, "a disabled row can't be picked");
-    }
-
-    #[rstest::rstest]
-    fn heading_is_hidden_while_filtering() {
-        // Given a heading between two settings.
-        let mut list = PickerList::new(vec![
-            PickerItem::Setting {
-                value: Some("claude-sonnet-5".to_owned()),
-                label: "Claude Sonnet 5".to_owned(),
-            },
-            PickerItem::Heading("Legacy models".to_owned()),
-            PickerItem::Setting {
-                value: Some("claude-fable-5".to_owned()),
-                label: "Claude Fable 5".to_owned(),
-            },
-        ]);
-
-        // When typing text the heading matches.
-        list.refilter("models");
-
-        // Then the heading isn't shown.
-        assert!(
-            !shown_names(&list).contains(&"Legacy models".to_owned()),
-            "shown were {:?}",
-            shown_names(&list)
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(None, "Default")]
-    #[case(Some("claude-opus-5-5"), "Claude Opus 5.5")]
-    #[case(Some("claude-haiku-4-5"), "Claude Haiku 4.5")]
-    #[case(Some("opus"), "Claude Opus 5")]
-    #[case(Some("sonnet"), "Claude Sonnet 5")]
-    #[case(Some("haiku"), "Claude Haiku 4.5")]
-    #[case(Some("fable"), "Claude Fable 5.1")]
-    #[case(Some("claude-haiku-4-5-20251001"), "Claude Haiku 4.5")]
-    #[case(Some("opus[1m]"), "opus[1m]")]
-    #[case(Some("plan"), "plan")]
-    fn setting_label_names_known_models_and_keeps_other_values(
-        #[case] value: Option<&str>,
-        #[case] label: &str,
-    ) {
-        // Given / When / Then a model, by ID or alias, shows its name, and
-        // anything else shows as is.
-        let info = info();
-        assert_eq!(
-            setting_label(value, Some(&info)),
-            label,
-            "the setting's label"
-        );
     }
 
     #[rstest::rstest]

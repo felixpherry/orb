@@ -383,13 +383,10 @@ mod tests {
         LoadSearchPreview, SearchActor, SearchActorDeps, SearchTranscripts, spawn_search_actor,
     };
     use crate::common::State;
-    use crate::feat::git::git_cli::GitCli;
-    use crate::feat::git::git_service::GitService;
     use crate::feat::harness::Harnesses;
     use crate::feat::harness::claude::ClaudeCode;
     use crate::feat::harness::claude::supervisor::ClaudeSupervisor;
     use crate::feat::harness::claude::transcript::read_messages;
-    use crate::feat::harness::claude::trust::ClaudeConfigTrust;
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
     use crate::feat::search::index::SearchIndex;
@@ -438,7 +435,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             branch: None,
             pinned_at: None,
@@ -463,10 +459,9 @@ mod tests {
                     root: PathBuf::from("/repo"),
                     created_at: UNIX_EPOCH,
                     threads,
-                    draft: None,
+                    repo: true,
                     removed: false,
                     kind: ProjectKind::Normal,
-                    groups: Vec::new(),
                 }],
                 ..Sessions::default()
             },
@@ -475,12 +470,7 @@ mod tests {
     }
 
     fn deps(state: &State, index_path: PathBuf) -> SearchActorDeps {
-        let claude = ClaudeCode::new(
-            Arc::new(ClaudeSupervisor::new(Vec::new())),
-            Arc::new(ClaudeConfigTrust::new(PathBuf::new())),
-            PathBuf::new(),
-            GitService::new(Arc::new(GitCli::new(Vec::new()))),
-        );
+        let claude = ClaudeCode::new(Arc::new(ClaudeSupervisor::new(Vec::new())), PathBuf::new());
         SearchActorDeps {
             state: state.clone(),
             harnesses: Harnesses::new(vec![Arc::new(claude)]),

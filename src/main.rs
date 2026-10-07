@@ -15,9 +15,7 @@ use orb_domain::feat::git::git_service::GitService;
 use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::harness::claude::ClaudeCode;
 use orb_domain::feat::harness::claude::supervisor::ClaudeSupervisor;
-use orb_domain::feat::harness::claude::trust::{ClaudeConfigTrust, claude_config_file};
 use orb_domain::feat::harness::pi::Pi;
-use orb_domain::feat::harness::pi::runner::ProcessRunner;
 use orb_domain::feat::integration::{self, IntegrationPaths};
 use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
@@ -46,7 +44,6 @@ fn main() -> Result<(), Report<OrbError>> {
         .map(PathBuf::from)
         .ok_or_else(|| Report::new(OrbError).attach("HOME is not set"))?;
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-    let claude_config = claude_config_file(config_dir.as_deref(), &home);
     let claude_dir = integration::claude_dir(config_dir, &home);
     let orb_root = home.join(".orb");
     let integrations = integration_paths(&home, &orb_root, &claude_dir);
@@ -56,7 +53,6 @@ fn main() -> Result<(), Report<OrbError>> {
     }
     let pi_sessions = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
         .map_or_else(|| home.join(".pi/agent/sessions"), PathBuf::from);
-    let path = std::env::var_os("PATH").unwrap_or_default();
     let env = child_env(std::env::vars_os());
     let tz = TimeZone::system();
     let session = std::env::var_os("ZELLIJ_SESSION_NAME");
@@ -81,18 +77,8 @@ fn main() -> Result<(), Report<OrbError>> {
     let frontend = Frontend::new(tz);
     let services = {
         let git = GitService::new(Arc::new(GitCli::new(env.clone())));
-        let claude = ClaudeCode::new(
-            Arc::new(ClaudeSupervisor::new(env.clone())),
-            Arc::new(ClaudeConfigTrust::new(claude_config)),
-            claude_dir,
-            git.clone(),
-        );
-        let pi = Pi::new(
-            Arc::new(ProcessRunner::new(env.clone())),
-            &path,
-            orb_root.join("pi"),
-            pi_sessions,
-        );
+        let claude = ClaudeCode::new(Arc::new(ClaudeSupervisor::new(env.clone())), claude_dir);
+        let pi = Pi::new(pi_sessions);
         Services {
             harnesses: Harnesses::new(vec![Arc::new(claude), Arc::new(pi)]),
             git,

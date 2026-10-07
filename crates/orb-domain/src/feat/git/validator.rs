@@ -1,54 +1,42 @@
-//! Checks whether the user's git actions on the selected thread or draft can
-//! proceed: changing its workspace, and switching its branch (also on a
-//! Feature group's card, for the group's worktree).
+//! Checks whether the user's git actions on the selected session can
+//! proceed: changing its workspace, and switching its branch.
 
 use std::path::Path;
 
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::{DraftWorkspace, Sessions};
+use crate::feat::sessions::state::Sessions;
 
-/// Why changing the selected thread's or draft's workspace can't proceed.
+/// Why changing the selected session's workspace can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum ChangeWorkspaceError {
-    /// The cursor isn't on a thread or a draft.
+    /// The cursor isn't on a session.
     NoSelection,
-    /// The thread is in a group, whose directory is fixed.
-    Grouped,
-    /// A session is already being started.
+    /// A session is already being made, or a workspace changed.
     Starting,
-    /// The thread has had its first prompt. `worktree` is whether it runs in
-    /// a worktree rather than the project's root checkout.
+    /// An agent turn has run in the session. `worktree` is whether it runs
+    /// in a worktree rather than the project's checkout.
     Locked { worktree: bool },
 }
 
-/// Allow changing the selected draft's workspace, or the selected thread's
-/// before its first prompt, one start at a time.
+/// Allow changing the selected session's workspace before its first agent
+/// turn, one start at a time.
 ///
 /// # Errors
 ///
-/// Returns [`ChangeWorkspaceError::NoSelection`] without a selected thread or
-/// draft, [`ChangeWorkspaceError::Grouped`] on a thread in a group,
+/// Returns [`ChangeWorkspaceError::NoSelection`] without a selected session,
 /// [`ChangeWorkspaceError::Starting`] while a start is in flight, and
-/// [`ChangeWorkspaceError::Locked`] once the thread has a transcript or a turn
-/// underway.
+/// [`ChangeWorkspaceError::Locked`] once an agent turn has run in it.
 pub fn validate_change_workspace(state: &AppState) -> Result<(), ChangeWorkspaceError> {
     let sessions = &state.sessions;
-    match (
-        sessions.selected_draft(),
-        sessions.selected_thread(),
-        sessions.selected_project(),
-    ) {
-        (None, None, _) | (None, Some(_), None) => Err(ChangeWorkspaceError::NoSelection),
-        (None, Some(thread), _) if thread.group.is_some() => Err(ChangeWorkspaceError::Grouped),
+    match (sessions.selected_session(), sessions.selected_project()) {
+        (None, _) | (Some(_), None) => Err(ChangeWorkspaceError::NoSelection),
         _ if sessions.starting => Err(ChangeWorkspaceError::Starting),
-        (None, Some(thread), Some(project))
-            if thread.transcript.is_some() || thread.status.in_progress() =>
-        {
+        (Some(session), Some(project)) if sessions.turned(session.id) => {
             Err(ChangeWorkspaceError::Locked {
-                worktree: thread.cwd != project.root,
+                worktree: session.dir != project.root,
             })
         }
         _ => Ok(()),
@@ -59,48 +47,34 @@ pub fn validate_change_workspace(state: &AppState) -> Result<(), ChangeWorkspace
 /// [`SwitchBranchError::Busy`].
 pub const BUSY_DIRECTORY: &str = "A session is working in this directory";
 
-/// Why switching the selected session's or draft's branch can't proceed.
+/// Why switching the selected session's branch can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum SwitchBranchError {
-    /// The cursor isn't on a draft or a session with an agent.
+    /// The cursor isn't on a session.
     NoSelection,
-    /// The session's lead thread is in a group.
-    Grouped,
-    /// A session is already being started.
+    /// A session is already being made, or a workspace changed.
     Starting,
     /// A thread in the directory the checkout would change is working or
     /// waiting.
     Busy,
 }
 
-/// Allow switching the selected draft's branch, or that of the selected
-/// session's lead thread, unless a start is in flight or a turn is underway
-/// in the directory a checkout would change. A local draft checks out in the
-/// project's root and an existing-worktree draft in its worktree; a
-/// new-worktree draft only records its base, and a draft whose project isn't
-/// a git repository is offered `git init` instead.
+/// Allow switching the branch in the selected session's directory, unless
+/// a start is in flight or a turn is underway in that directory.
 ///
 /// # Errors
 ///
-/// Returns [`SwitchBranchError::NoSelection`] without a selected draft or a
-/// session with an agent, [`SwitchBranchError::Grouped`] when the lead
-/// thread is in a group, [`SwitchBranchError::Starting`] while a start is in
-/// flight, and [`SwitchBranchError::Busy`] while any thread in the same
-/// directory is in progress.
+/// Returns [`SwitchBranchError::NoSelection`] without a selected session,
+/// [`SwitchBranchError::Starting`] while a start is in flight, and
+/// [`SwitchBranchError::Busy`] while any thread in its directory is in
+/// progress.
 pub fn validate_switch_branch(state: &AppState) -> Result<(), SwitchBranchError> {
     let sessions = &state.sessions;
-    match (sessions.selected_draft(), sessions.selected_thread()) {
-        (None, None) => Err(SwitchBranchError::NoSelection),
-        (None, Some(thread)) if thread.group.is_some() => Err(SwitchBranchError::Grouped),
+    match sessions.selected_session() {
+        None => Err(SwitchBranchError::NoSelection),
         _ if sessions.starting => Err(SwitchBranchError::Starting),
-        (Some((_, draft)), _) if !draft.repo => Ok(()),
-        (Some((project, draft)), _) => match &draft.workspace {
-            DraftWorkspace::Existing(path) => not_busy(sessions, path),
-            DraftWorkspace::NewWorktree => Ok(()),
-            DraftWorkspace::Local => not_busy(sessions, &project.root),
-        },
-        (None, Some(thread)) => not_busy(sessions, &thread.cwd),
+        Some(session) => not_busy(sessions, &session.dir),
     }
 }
 
@@ -126,13 +100,13 @@ mod tests {
     };
     use crate::AppState;
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, GroupId, PaneId, PaneLaunch, Project, ProjectId, ProjectKind,
-        SessionId, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus, sessions_for,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
+        Thread, ThreadId, ThreadStatus, sessions_for,
     };
 
-    /// One project at `/work` whose only thread, selected, runs in the root
-    /// with `transcript`.
-    fn selected(transcript: Option<&str>) -> AppState {
+    /// One project at `/work` whose only session, selected, runs in the
+    /// root with one thread titled `title`.
+    fn selected(title: Option<&str>) -> AppState {
         let mut state = AppState {
             sessions: Sessions {
                 projects: vec![Project {
@@ -141,20 +115,19 @@ mod tests {
                     root: "/work".into(),
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
-                    draft: None,
+                    repo: true,
                     threads: vec![Thread {
                         last_session: None,
                         harness: HarnessId::new("claude"),
                         id: ThreadId(1),
-                        title: None,
+                        title: title.map(Into::into),
                         cwd: "/work".into(),
-                        transcript: transcript.map(Into::into),
+                        transcript: None,
                         status: ThreadStatus::Idle,
                         turn_started_at: None,
                         pane: Some(PaneLaunch {
                             pane: PaneId(1),
                             session: SessionId(1),
-                            command: vec![],
                         }),
                         branch: None,
                         pinned_at: None,
@@ -167,7 +140,6 @@ mod tests {
                         model: None,
                         permission: None,
                     }],
-                    groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
                 cursor: Some(SidebarItem::Session(SessionId(1))),
@@ -180,9 +152,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn change_workspace_rejected_when_the_thread_has_a_transcript() {
-        // Given a selected thread in the root checkout that has a transcript.
-        let state = selected(Some("/claude/t1.jsonl"));
+    fn change_workspace_rejected_after_an_agent_turn() {
+        // Given a selected session in the root checkout whose thread has a
+        // title, so a turn has run.
+        let state = selected(Some("fix the tests"));
 
         // When validating a workspace change.
         let result = validate_change_workspace(&state);
@@ -191,13 +164,13 @@ mod tests {
         assert_eq!(
             result,
             Err(ChangeWorkspaceError::Locked { worktree: false }),
-            "a prompted thread's workspace should be locked"
+            "a session that had a turn should be locked"
         );
     }
 
     #[rstest::rstest]
     fn change_workspace_rejected_while_starting() {
-        // Given a prompt-less selected thread while a start is in flight.
+        // Given a selected session with no turn, while a start is in flight.
         let state = {
             let mut state = selected(None);
             state.sessions.starting = true;
@@ -216,15 +189,19 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn change_workspace_allowed_before_the_first_prompt() {
-        // Given a prompt-less selected thread.
+    fn change_workspace_allowed_before_the_first_agent_turn() {
+        // Given a selected session whose thread has had no turn.
         let state = selected(None);
 
         // When validating a workspace change.
         let result = validate_change_workspace(&state);
 
         // Then it is allowed.
-        assert_eq!(result, Ok(()), "a prompt-less thread can change workspace");
+        assert_eq!(
+            result,
+            Ok(()),
+            "a session with no turn can change workspace"
+        );
     }
 
     /// [`selected`] plus thread 2, working in `cwd`.
@@ -243,8 +220,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn switch_branch_rejected_while_a_same_cwd_thread_works() {
-        // Given another thread in the selected thread's directory, working.
+    fn switch_branch_rejected_while_the_sessions_dir_is_busy() {
+        // Given another thread working in the selected session's directory.
         let state = with_working_thread("/work");
 
         // When validating a branch switch.
@@ -268,203 +245,5 @@ mod tests {
 
         // Then it is allowed.
         assert_eq!(result, Ok(()), "a turn elsewhere doesn't block a checkout");
-    }
-
-    /// [`with_working_thread`] in the root, plus the project's draft in
-    /// `workspace`, selected.
-    fn draft_beside_busy_root(workspace: DraftWorkspace) -> AppState {
-        let mut state = with_working_thread("/work");
-        if let Some(project) = state.sessions.projects.first_mut() {
-            project.draft = Some(Draft {
-                harness: HarnessId::new("claude"),
-                workspace,
-                branch: None,
-                model: None,
-                permission: None,
-                created_at: SystemTime::UNIX_EPOCH,
-                repo: true,
-                from: None,
-            });
-        }
-        state.sessions.cursor = Some(SidebarItem::Draft(ProjectId(1)));
-        state
-    }
-
-    #[rstest::rstest]
-    fn change_workspace_allowed_on_a_draft() {
-        // Given a selected local draft.
-        let state = draft_beside_busy_root(DraftWorkspace::Local);
-
-        // When validating a workspace change.
-        let result = validate_change_workspace(&state);
-
-        // Then it is allowed.
-        assert_eq!(result, Ok(()), "a draft can always change workspace");
-    }
-
-    #[rstest::rstest]
-    fn change_workspace_on_a_draft_rejected_while_starting() {
-        // Given a selected draft while a start is in flight.
-        let state = {
-            let mut state = draft_beside_busy_root(DraftWorkspace::Local);
-            state.sessions.starting = true;
-            state
-        };
-
-        // When validating a workspace change.
-        let result = validate_change_workspace(&state);
-
-        // Then validation fails with Starting.
-        assert_eq!(
-            result,
-            Err(ChangeWorkspaceError::Starting),
-            "a draft can't change while a start may be reading it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn switch_branch_allowed_on_an_existing_worktree_draft_while_the_root_is_busy() {
-        // Given a selected draft in an existing worktree and a thread working
-        // in the root.
-        let state = draft_beside_busy_root(DraftWorkspace::Existing("/wt/feat".into()));
-
-        // When validating a branch switch.
-        let result = validate_switch_branch(&state);
-
-        // Then it is allowed.
-        assert_eq!(
-            result,
-            Ok(()),
-            "the draft's checkout happens in its worktree, not the busy root"
-        );
-    }
-
-    #[rstest::rstest]
-    fn switch_branch_rejected_on_an_existing_worktree_draft_while_that_worktree_is_busy() {
-        // Given a selected draft in `/work-tree`, where a thread is working.
-        let state = {
-            let mut state = with_working_thread("/work-tree");
-            if let Some(project) = state.sessions.projects.first_mut() {
-                project.draft = Some(Draft {
-                    harness: HarnessId::new("claude"),
-                    workspace: DraftWorkspace::Existing("/work-tree".into()),
-                    branch: None,
-                    model: None,
-                    permission: None,
-                    created_at: SystemTime::UNIX_EPOCH,
-                    repo: true,
-                    from: None,
-                });
-            }
-            state.sessions.cursor = Some(SidebarItem::Draft(ProjectId(1)));
-            state
-        };
-
-        // When validating a branch switch.
-        let result = validate_switch_branch(&state);
-
-        // Then validation fails with Busy.
-        assert_eq!(
-            result,
-            Err(SwitchBranchError::Busy),
-            "a checkout would change files under the worktree's running turn"
-        );
-    }
-
-    #[rstest::rstest]
-    fn switch_branch_allowed_on_a_non_git_draft_while_the_root_is_busy() {
-        // Given a selected local draft of a project that isn't a git
-        // repository, and a thread working in the root.
-        let state = {
-            let mut state = draft_beside_busy_root(DraftWorkspace::Local);
-            if let Some(draft) = state.sessions.draft_mut(ProjectId(1)) {
-                draft.repo = false;
-            }
-            state
-        };
-
-        // When validating a branch switch.
-        let result = validate_switch_branch(&state);
-
-        // Then it is allowed: it only offers `git init`.
-        assert_eq!(result, Ok(()), "a non-git draft is offered git init");
-    }
-
-    #[rstest::rstest]
-    fn switch_branch_rejected_on_a_local_draft_while_the_root_is_busy() {
-        // Given a selected local draft and a thread working in the root.
-        let state = draft_beside_busy_root(DraftWorkspace::Local);
-
-        // When validating a branch switch.
-        let result = validate_switch_branch(&state);
-
-        // Then validation fails with Busy.
-        assert_eq!(
-            result,
-            Err(SwitchBranchError::Busy),
-            "a local draft's checkout would change files under the running turn"
-        );
-    }
-
-    #[rstest::rstest]
-    fn switch_branch_allowed_on_a_new_worktree_draft_while_the_root_is_busy() {
-        // Given a selected new-worktree draft and a thread working in the root.
-        let state = draft_beside_busy_root(DraftWorkspace::NewWorktree);
-
-        // When validating a branch switch.
-        let result = validate_switch_branch(&state);
-
-        // Then it is allowed.
-        assert_eq!(
-            result,
-            Ok(()),
-            "a new-worktree draft only records its base branch"
-        );
-    }
-
-    /// [`selected`] with the thread, prompt-less, in group 9.
-    fn grouped() -> AppState {
-        let mut state = selected(None);
-        if let Some(thread) = state
-            .sessions
-            .projects
-            .first_mut()
-            .and_then(|project| project.threads.first_mut())
-        {
-            thread.group = Some(GroupId(9));
-        }
-        state
-    }
-
-    #[rstest::rstest]
-    fn change_workspace_rejected_on_a_grouped_thread() {
-        // Given a prompt-less selected thread in a group.
-        let state = grouped();
-
-        // When validating a workspace change.
-        let result = validate_change_workspace(&state);
-
-        // Then validation fails with Grouped.
-        assert_eq!(
-            result,
-            Err(ChangeWorkspaceError::Grouped),
-            "a group's directory is fixed"
-        );
-    }
-
-    #[rstest::rstest]
-    fn switch_branch_rejected_on_a_grouped_thread() {
-        // Given a selected thread in a group.
-        let state = grouped();
-
-        // When validating a branch switch.
-        let result = validate_switch_branch(&state);
-
-        // Then validation fails with Grouped.
-        assert_eq!(
-            result,
-            Err(SwitchBranchError::Grouped),
-            "a group's directory is fixed"
-        );
     }
 }

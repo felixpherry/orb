@@ -1,11 +1,11 @@
 //! What the agent in a pane is doing, from what one poll saw: the pane's zmx
-//! session, the harness's records matched to the pane their process runs
-//! under, and the latest report the agent wrote to its pane file.
+//! session, the agents the harnesses see running matched to the pane their
+//! process runs under, and the latest report the agent wrote to its pane file.
 
 use std::collections::HashMap;
 
-use super::session_host::SessionRecord;
 use super::state::{PaneId, ThreadStatus};
+use crate::feat::harness::RunningAgent;
 use crate::feat::integration::pane_file::AgentEvent;
 use crate::feat::zmx::zmx_service::ZmxEntry;
 
@@ -17,12 +17,12 @@ pub struct PaneReport {
     pub at: i64,
 }
 
-/// The status of each pane a record's process runs under, given each running
-/// pane's zmx process in `roots`. A record belongs to the first root its
+/// The status of each pane an agent's process runs under, given each running
+/// pane's zmx process in `roots`. An agent belongs to the first root its
 /// ancestry reaches, itself included; of several in one pane, the one the
 /// fewest parents away wins.
 pub fn match_records(
-    records: &[SessionRecord],
+    records: &[RunningAgent],
     roots: &HashMap<u32, PaneId>,
 ) -> HashMap<PaneId, ThreadStatus> {
     let mut nearest: HashMap<PaneId, (usize, ThreadStatus)> = HashMap::new();
@@ -48,7 +48,7 @@ pub fn match_records(
 /// An agent pane's status: Stopped without a running zmx session; for a
 /// harness whose status comes from its reports (`reads_reports`), its latest
 /// `report` written since the session was made, else Stopped; otherwise the
-/// `matched` record's status, else Stopped.
+/// `matched` agent's status, else Stopped.
 pub fn pane_status(
     running: Option<&ZmxEntry>,
     reads_reports: bool,
@@ -77,16 +77,14 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{PaneReport, match_records, pane_status};
+    use crate::feat::harness::RunningAgent;
     use crate::feat::integration::pane_file::AgentEvent;
-    use crate::feat::sessions::session_host::SessionRecord;
     use crate::feat::sessions::state::{PaneId, ThreadStatus};
     use crate::feat::zmx::zmx_service::ZmxEntry;
 
     /// A Claude the user started, whose process and parents are `ancestry`.
-    fn interactive(ancestry: &[u32], status: ThreadStatus) -> SessionRecord {
-        SessionRecord {
-            short_id: None,
-            session_id: None,
+    fn interactive(ancestry: &[u32], status: ThreadStatus) -> RunningAgent {
+        RunningAgent {
             status,
             ancestry: ancestry.to_vec(),
         }

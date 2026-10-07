@@ -1,95 +1,71 @@
-//! Checks whether the user's sidebar actions can proceed: starting the
-//! selected draft or picking its model or permission mode, pinning, settling
-//! or deleting the selected session, discarding the selected draft, opening
-//! or closing the Settled shelf, creating a group, and opening the incognito
-//! draft.
+//! Checks whether the user's sidebar actions can proceed: making a new
+//! session, naming a new Research or Learn session's folder, pinning,
+//! settling or deleting the selected session, opening or closing the Settled
+//! shelf, and making an Incognito session.
 
 use wherror::Error;
 
 use crate::AppState;
-use crate::feat::sessions::state::{GroupKind, ProjectKind, SidebarItem, group_slug};
+use crate::feat::sessions::state::{FolderKind, ProjectKind, SidebarItem, folder_slug};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 
-/// Why creating a group from the name box can't proceed.
+/// Why making a session in a new folder from the name box can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
-pub enum NewGroupError {
-    /// The box isn't naming a new group, or the slug is empty.
+pub enum NewFolderError {
+    /// The box isn't naming a new folder, or the slug is empty.
     Empty,
-    /// The slug uses something git branches or folder names can't: the char
-    /// or sequence.
+    /// The slug uses something folder names can't: the char or sequence.
     Invalid(String),
-    /// A group of that kind and slug already exists in the project: the
-    /// mode-line text.
-    Taken(String),
-    /// `⏎` already asked for the group, and the sessions actor hasn't
+    /// `⏎` already asked for the session, and the sessions actor hasn't
     /// answered yet.
     Creating,
 }
 
-/// Characters a group's slug can't hold anywhere.
+/// Characters a folder's slug can't hold anywhere.
 const INVALID_CHARS: [char; 8] = ['/', '\\', '~', '^', ':', '?', '*', '['];
 
-/// The mode-line text for a group `slug` that another group of its kind in
-/// its project already has.
+/// The mode-line text for a `kind` folder `slug` that is already on disk.
 #[must_use]
-pub fn group_exists(slug: &str) -> String {
-    format!("Group {slug} already exists")
-}
-
-/// The mode-line text for a `kind` group's `slug` whose branch (in `project`,
-/// its title) or folder is already on disk.
-#[must_use]
-pub fn on_disk(kind: GroupKind, slug: &str, project: &str) -> String {
+pub fn folder_exists(kind: FolderKind, slug: &str) -> String {
     match kind {
-        GroupKind::Feature => format!("branch {slug} already exists in {project}"),
-        GroupKind::Research => format!("~/.orb/research/{slug} already exists"),
-        GroupKind::Learn => format!("~/.orb/learn/{slug} already exists"),
+        FolderKind::Research => format!("~/.orb/research/{slug} already exists"),
+        FolderKind::Learn => format!("~/.orb/learn/{slug} already exists"),
     }
 }
 
-/// Allow creating the group the name box names, once its slug is a usable
-/// branch and folder name no group of its kind in its project has, settled
-/// groups included.
+/// Allow making the session the name box names, once its slug is a usable
+/// folder name.
 ///
 /// # Errors
 ///
-/// Returns [`NewGroupError::Empty`] when the box isn't naming a new group or
-/// the slug is empty, [`NewGroupError::Invalid`] with the offending char or
-/// sequence when the slug holds one of `/ \ ~ ^ : ? * [`, starts with `-` or
-/// `.`, or holds `..`, [`NewGroupError::Taken`] with the mode-line text
-/// when the project already has that group, and [`NewGroupError::Creating`]
-/// while the box's group is being made.
-pub fn validate_new_group(state: &AppState) -> Result<(), NewGroupError> {
+/// Returns [`NewFolderError::Empty`] when the box isn't naming a new folder
+/// or the slug is empty, [`NewFolderError::Invalid`] with the offending char
+/// or sequence when the slug holds one of `/ \ ~ ^ : ? * [`, starts with `-`
+/// or `.`, or holds `..`, and [`NewFolderError::Creating`] while the box's
+/// session is being made.
+pub fn validate_new_folder(state: &AppState) -> Result<(), NewFolderError> {
     let Some(Rename {
-        target: RenameTarget::NewGroup { kind, project },
+        target: RenameTarget::NewFolder(_),
         input,
         creating,
     }) = &state.rename
     else {
-        return Err(NewGroupError::Empty);
+        return Err(NewFolderError::Empty);
     };
     if *creating {
-        return Err(NewGroupError::Creating);
+        return Err(NewFolderError::Creating);
     }
-    let slug = group_slug(input.text());
+    let slug = folder_slug(input.text());
     let invalid = slug
         .matches(INVALID_CHARS)
         .next()
         .or_else(|| ["-", "."].into_iter().find(|lead| slug.starts_with(lead)))
         .or_else(|| slug.contains("..").then_some(".."));
-    let in_project = state.sessions.projects.iter().find(|p| match kind {
-        GroupKind::Feature => Some(p.id) == *project,
-        GroupKind::Research => p.kind == ProjectKind::Research && !p.removed,
-        GroupKind::Learn => p.kind == ProjectKind::Learn && !p.removed,
-    });
-    match (slug.is_empty(), invalid, in_project) {
-        (true, _, _) => Err(NewGroupError::Empty),
-        (false, Some(what), _) => Err(NewGroupError::Invalid(what.to_owned())),
-        (false, None, Some(p)) if p.groups.iter().any(|g| g.kind == *kind && g.name == slug) => {
-            Err(NewGroupError::Taken(group_exists(&slug)))
-        }
-        (false, None, _) => Ok(()),
+    match (slug.is_empty(), invalid) {
+        (true, _) => Err(NewFolderError::Empty),
+        (false, Some(what)) => Err(NewFolderError::Invalid(what.to_owned())),
+        (false, None) => Ok(()),
     }
 }
 
@@ -157,59 +133,44 @@ pub fn validate_toggle_pin(state: &AppState) -> Result<(), TogglePinError> {
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum DeleteError {
-    /// The cursor isn't on a session, a draft or a group's draft.
+    /// The cursor isn't on a session.
     NoSelection,
-    /// The cursor is on a draft or a group's draft while a session is being
-    /// started, which may be starting from it.
-    Starting,
 }
 
-/// Allow deleting the selected session, whatever it is doing, and
-/// discarding the selected draft or group draft between session starts.
+/// Allow deleting the selected session, whatever it is doing.
 ///
 /// # Errors
 ///
-/// Returns [`DeleteError::NoSelection`] without a selected session, draft or
-/// group draft, and [`DeleteError::Starting`] on a draft or group draft while
-/// a start is in flight.
+/// Returns [`DeleteError::NoSelection`] without a selected session.
 pub fn validate_delete(state: &AppState) -> Result<(), DeleteError> {
-    let sessions = &state.sessions;
-    match (
-        sessions.selected_session(),
-        sessions.selected_draft(),
-        sessions.selected_group_draft(),
-    ) {
-        (None, None, None) => Err(DeleteError::NoSelection),
-        (None, ..) if sessions.starting => Err(DeleteError::Starting),
-        _ => Ok(()),
+    match state.sessions.selected_session() {
+        Some(_) => Ok(()),
+        None => Err(DeleteError::NoSelection),
     }
 }
 
-/// Why starting the selected draft can't proceed.
+/// Why making a new session can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
-pub enum StartDraftError {
-    /// The cursor isn't on a draft.
-    NoDraft,
-    /// A session is already being started.
+pub enum NewSessionError {
+    /// A session is already being made, or a workspace changed.
     Starting,
 }
 
-/// Allow starting the selected draft, one start at a time.
+/// Allow making a new session, one at a time.
 ///
 /// # Errors
 ///
-/// Returns [`StartDraftError::NoDraft`] without a selected draft, and
-/// [`StartDraftError::Starting`] while a start is in flight.
-pub fn validate_start_draft(state: &AppState) -> Result<(), StartDraftError> {
-    match state.sessions.selected_draft() {
-        None => Err(StartDraftError::NoDraft),
-        Some(_) if state.sessions.starting => Err(StartDraftError::Starting),
-        Some(_) => Ok(()),
+/// Returns [`NewSessionError::Starting`] while a start is in flight.
+pub fn validate_new_session(state: &AppState) -> Result<(), NewSessionError> {
+    if state.sessions.starting {
+        Err(NewSessionError::Starting)
+    } else {
+        Ok(())
     }
 }
 
-/// Why opening the incognito draft can't proceed.
+/// Why making an Incognito session can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum NewIncognitoError {
@@ -217,7 +178,7 @@ pub enum NewIncognitoError {
     NoProject,
 }
 
-/// Allow opening the incognito draft.
+/// Allow making an Incognito session.
 ///
 /// # Errors
 ///
@@ -227,56 +188,6 @@ pub fn validate_new_incognito(state: &AppState) -> Result<(), NewIncognitoError>
     match state.sessions.own_project(ProjectKind::Incognito) {
         None => Err(NewIncognitoError::NoProject),
         Some(_) => Ok(()),
-    }
-}
-
-/// Why starting the selected group draft can't proceed.
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error(debug)]
-pub enum StartGroupDraftError {
-    /// The cursor isn't on a group draft.
-    NoDraft,
-    /// A session is already being started.
-    Starting,
-}
-
-/// Allow starting the selected group draft, one start at a time.
-///
-/// # Errors
-///
-/// Returns [`StartGroupDraftError::NoDraft`] without a selected group draft,
-/// and [`StartGroupDraftError::Starting`] while a start is in flight.
-pub fn validate_start_group_draft(state: &AppState) -> Result<(), StartGroupDraftError> {
-    match state.sessions.selected_group_draft() {
-        None => Err(StartGroupDraftError::NoDraft),
-        Some(_) if state.sessions.starting => Err(StartGroupDraftError::Starting),
-        Some(_) => Ok(()),
-    }
-}
-
-/// Why picking the selected draft's model or permission mode can't proceed.
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error(debug)]
-pub enum PickSettingError {
-    /// The cursor isn't on a draft or group draft.
-    NoDraft,
-    /// A session is being started, maybe from the draft.
-    Starting,
-}
-
-/// Allow picking the selected draft's or group draft's harness, model or
-/// permission mode between session starts.
-///
-/// # Errors
-///
-/// Returns [`PickSettingError::NoDraft`] without a selected draft or group
-/// draft, and [`PickSettingError::Starting`] while a start is in flight.
-pub fn validate_pick_setting(state: &AppState) -> Result<(), PickSettingError> {
-    let sessions = &state.sessions;
-    match (sessions.selected_draft(), sessions.selected_group_draft()) {
-        (None, None) => Err(PickSettingError::NoDraft),
-        _ if sessions.starting => Err(PickSettingError::Starting),
-        _ => Ok(()),
     }
 }
 
@@ -336,99 +247,53 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        CloseShelfError, DeleteError, NewGroupError, NewIncognitoError, PickSettingError,
-        StartDraftError, StartGroupDraftError, TogglePinError, ToggleSettleError,
-        validate_close_shelf, validate_delete, validate_new_group, validate_new_incognito,
-        validate_pick_setting, validate_start_draft, validate_start_group_draft,
-        validate_toggle_pin, validate_toggle_settle,
+        CloseShelfError, DeleteError, NewFolderError, NewIncognitoError, NewSessionError,
+        TogglePinError, ToggleSettleError, validate_close_shelf, validate_delete,
+        validate_new_folder, validate_new_incognito, validate_new_session, validate_toggle_pin,
+        validate_toggle_settle,
     };
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, PaneId,
-        PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem, Thread,
-        ThreadId, ThreadStatus, sessions_for,
+        FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
+        SidebarItem, Thread, ThreadId, ThreadStatus, sessions_for,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::{AppState, TextInput};
 
-    /// One project whose local draft is selected, with a start in flight if
-    /// `starting`.
-    fn draft_selected(starting: bool) -> AppState {
-        AppState {
+    #[rstest::rstest]
+    fn new_session_rejected_while_starting() {
+        // Given a session start in flight.
+        let state = AppState {
             sessions: Sessions {
-                projects: vec![Project {
-                    id: ProjectId(1),
-                    title: "work".into(),
-                    root: "/work".into(),
-                    created_at: SystemTime::UNIX_EPOCH,
-                    removed: false,
-                    draft: Some(Draft {
-                        harness: HarnessId::new("claude"),
-                        workspace: DraftWorkspace::Local,
-                        branch: None,
-                        model: None,
-                        permission: None,
-                        created_at: SystemTime::UNIX_EPOCH,
-                        repo: true,
-                        from: None,
-                    }),
-                    threads: vec![],
-                    groups: vec![],
-                    kind: ProjectKind::Normal,
-                }],
-                cursor: Some(SidebarItem::Draft(ProjectId(1))),
-                starting,
+                starting: true,
                 ..Sessions::default()
             },
             ..AppState::default()
-        }
-    }
+        };
 
-    #[rstest::rstest]
-    fn start_draft_is_refused_without_a_draft() {
-        // Given no selected draft.
-        let state = AppState::default();
-
-        // When validating a draft start.
-        let result = validate_start_draft(&state);
-
-        // Then validation fails with NoDraft.
-        assert_eq!(
-            result,
-            Err(StartDraftError::NoDraft),
-            "only a draft can be started"
-        );
-    }
-
-    #[rstest::rstest]
-    fn start_draft_is_refused_while_starting() {
-        // Given a selected draft while a start is in flight.
-        let state = draft_selected(true);
-
-        // When validating a draft start.
-        let result = validate_start_draft(&state);
+        // When validating a new session.
+        let result = validate_new_session(&state);
 
         // Then validation fails with Starting.
         assert_eq!(
             result,
-            Err(StartDraftError::Starting),
-            "one start at a time"
+            Err(NewSessionError::Starting),
+            "one new session at a time"
         );
     }
 
     #[rstest::rstest]
-    fn start_draft_is_allowed_on_a_selected_draft() {
-        // Given a selected draft and no start in flight.
-        let state = draft_selected(false);
+    fn new_session_allowed_otherwise() {
+        // Given no start in flight.
+        let state = AppState::default();
 
-        // When validating a draft start.
-        let result = validate_start_draft(&state);
+        // When validating a new session.
+        let result = validate_new_session(&state);
 
         // Then it is allowed.
-        assert_eq!(result, Ok(()), "a selected draft can start");
+        assert_eq!(result, Ok(()), "a new session can start");
     }
 
-    /// orb's Incognito project, `removed` or not, with no draft and nothing
-    /// selected.
+    /// orb's Incognito project, `removed` or not, with nothing selected.
     fn incognito_project(removed: bool) -> AppState {
         AppState {
             sessions: Sessions {
@@ -438,9 +303,8 @@ mod tests {
                     root: "/tmp/orb-incognito".into(),
                     created_at: SystemTime::UNIX_EPOCH,
                     removed,
-                    draft: None,
+                    repo: true,
                     threads: vec![],
-                    groups: vec![],
                     kind: ProjectKind::Incognito,
                 }],
                 ..Sessions::default()
@@ -455,75 +319,15 @@ mod tests {
     fn new_incognito_rejected_without_an_incognito_project(#[case] state: AppState) {
         // Given no Incognito project, or only a removed one.
 
-        // When validating opening the incognito draft.
+        // When validating a new Incognito session.
         let result = validate_new_incognito(&state);
 
         // Then validation fails with NoProject.
         assert_eq!(
             result,
             Err(NewIncognitoError::NoProject),
-            "the incognito draft needs the Incognito project"
+            "an Incognito session needs the Incognito project"
         );
-    }
-
-    #[rstest::rstest]
-    fn pick_setting_is_refused_without_a_draft() {
-        // Given no selected draft.
-        let state = AppState::default();
-
-        // When validating a model or permission pick.
-        let result = validate_pick_setting(&state);
-
-        // Then validation fails with NoDraft.
-        assert_eq!(
-            result,
-            Err(PickSettingError::NoDraft),
-            "only a draft has a model and permission to pick"
-        );
-    }
-
-    #[rstest::rstest]
-    fn pick_setting_is_refused_while_starting() {
-        // Given a selected draft while a start is in flight.
-        let state = draft_selected(true);
-
-        // When validating a model or permission pick.
-        let result = validate_pick_setting(&state);
-
-        // Then validation fails with Starting.
-        assert_eq!(
-            result,
-            Err(PickSettingError::Starting),
-            "a draft can't change while a start may be reading it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn discarding_a_draft_is_refused_while_starting() {
-        // Given a selected draft while a start is in flight.
-        let state = draft_selected(true);
-
-        // When validating a delete.
-        let result = validate_delete(&state);
-
-        // Then validation fails with Starting.
-        assert_eq!(
-            result,
-            Err(DeleteError::Starting),
-            "a draft can't go away while a start may be reading it"
-        );
-    }
-
-    #[rstest::rstest]
-    fn discarding_a_draft_is_allowed_between_starts() {
-        // Given a selected draft and no start in flight.
-        let state = draft_selected(false);
-
-        // When validating a delete.
-        let result = validate_delete(&state);
-
-        // Then it is allowed.
-        assert_eq!(result, Ok(()), "a selected draft can be discarded");
     }
 
     /// One project holding session 1, whose agent thread 1 is `status`, with
@@ -537,7 +341,7 @@ mod tests {
                     root: "/work".into(),
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
-                    draft: None,
+                    repo: true,
                     threads: vec![Thread {
                         last_session: None,
                         harness: HarnessId::new("claude"),
@@ -550,7 +354,6 @@ mod tests {
                         pane: Some(PaneLaunch {
                             pane: PaneId(1),
                             session: SessionId(1),
-                            command: vec![],
                         }),
                         branch: None,
                         pinned_at: None,
@@ -563,7 +366,6 @@ mod tests {
                         model: None,
                         permission: None,
                     }],
-                    groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
                 cursor: Some(SidebarItem::Session(SessionId(1))),
@@ -720,51 +522,11 @@ mod tests {
         );
     }
 
-    /// Project `orb` (1) and orb's Research project (2), each holding a
-    /// settled `GT-514-login` group of its kind, with the name box for a new
-    /// `kind` group holding `text`, in `orb` for a Feature group.
-    fn naming(kind: GroupKind, text: &str) -> AppState {
-        let project =
-            |id: i64, title: &str, project_kind: ProjectKind, group_kind: GroupKind| Project {
-                id: ProjectId(id),
-                title: title.into(),
-                root: format!("/{title}").into(),
-                created_at: SystemTime::UNIX_EPOCH,
-                removed: false,
-                draft: None,
-                threads: vec![],
-                groups: vec![Group {
-                    id: GroupId(id),
-                    kind: group_kind,
-                    name: "GT-514-login".into(),
-                    dir: None,
-                    branch: None,
-                    created_at: SystemTime::UNIX_EPOCH,
-                    pinned_at: None,
-                    settled_at: Some(SystemTime::UNIX_EPOCH),
-                    active_since: SystemTime::UNIX_EPOCH,
-                    draft: None,
-                    defaults: GroupDefaults {
-                        harness: HarnessId::new("claude"),
-                        model: None,
-                        permission: None,
-                    },
-                }],
-                kind: project_kind,
-            };
+    /// The name box for a new `kind` session holding `text`.
+    fn naming(kind: FolderKind, text: &str) -> AppState {
         AppState {
-            sessions: Sessions {
-                projects: vec![
-                    project(1, "orb", ProjectKind::Normal, GroupKind::Feature),
-                    project(2, "Research", ProjectKind::Research, GroupKind::Research),
-                ],
-                ..Sessions::default()
-            },
             rename: Some(Rename {
-                target: RenameTarget::NewGroup {
-                    kind,
-                    project: (kind == GroupKind::Feature).then_some(ProjectId(1)),
-                },
+                target: RenameTarget::NewFolder(kind),
                 input: TextInput::new(text),
                 creating: false,
             }),
@@ -784,173 +546,57 @@ mod tests {
     #[case("-x", "-")]
     #[case(".x", ".")]
     #[case("a..b", "..")]
-    fn new_group_rejected_with_an_invalid_char(#[case] text: &str, #[case] what: &str) {
+    fn new_folder_rejects_what_folders_cant_hold(#[case] text: &str, #[case] what: &str) {
         // Given the name box holding the text.
-        let state = naming(GroupKind::Research, text);
+        let state = naming(FolderKind::Research, text);
 
-        // When validating the new group.
-        let result = validate_new_group(&state);
+        // When validating the new folder.
+        let result = validate_new_folder(&state);
 
         // Then it names what can't be used.
         assert_eq!(
             result,
-            Err(NewGroupError::Invalid(what.to_owned())),
+            Err(NewFolderError::Invalid(what.to_owned())),
             "{text:?} should be refused"
         );
     }
 
     #[rstest::rstest]
-    fn new_group_rejected_when_the_slug_is_empty() {
+    fn new_folder_rejects_an_empty_name() {
         // Given the name box holding only spaces.
-        let state = naming(GroupKind::Research, "   ");
+        let state = naming(FolderKind::Research, "   ");
 
-        // When validating the new group.
-        let result = validate_new_group(&state);
+        // When validating the new folder.
+        let result = validate_new_folder(&state);
 
         // Then it's refused as empty.
-        assert_eq!(result, Err(NewGroupError::Empty), "a blank name");
+        assert_eq!(result, Err(NewFolderError::Empty), "a blank name");
     }
 
     #[rstest::rstest]
-    #[case(GroupKind::Feature)]
-    #[case(GroupKind::Research)]
-    fn new_group_rejected_when_taken_in_the_project(#[case] kind: GroupKind) {
-        // Given the name box holding a settled group's name.
-        let state = naming(kind, "GT-514 login");
-
-        // When validating the new group.
-        let result = validate_new_group(&state);
-
-        // Then it's refused because a group has the name.
-        assert_eq!(
-            result,
-            Err(NewGroupError::Taken(
-                "Group GT-514-login already exists".to_owned()
-            )),
-            "a taken {kind:?} slug"
-        );
-    }
-
-    #[rstest::rstest]
-    fn new_group_rejected_while_the_group_is_being_made() {
+    fn new_folder_while_creating_is_creating() {
         // Given the name box holding a fresh name that `⏎` already asked for.
-        let mut state = naming(GroupKind::Research, "tokio cancel");
+        let mut state = naming(FolderKind::Research, "tokio cancel");
         if let Some(rename) = &mut state.rename {
             rename.creating = true;
         }
 
-        // When validating the new group.
-        let result = validate_new_group(&state);
+        // When validating the new folder.
+        let result = validate_new_folder(&state);
 
         // Then it's refused until the actor answers.
-        assert_eq!(result, Err(NewGroupError::Creating), "a second ⏎");
+        assert_eq!(result, Err(NewFolderError::Creating), "a second ⏎");
     }
 
     #[rstest::rstest]
-    fn new_group_allowed_for_a_fresh_slug() {
-        // Given the name box holding a name no group has.
-        let state = naming(GroupKind::Research, "tokio cancel");
+    fn new_folder_allowed_for_a_fresh_slug() {
+        // Given the name box holding a fresh name.
+        let state = naming(FolderKind::Research, "tokio cancel");
 
-        // When validating the new group.
-        let result = validate_new_group(&state);
+        // When validating the new folder.
+        let result = validate_new_folder(&state);
 
         // Then it's allowed.
         assert_eq!(result, Ok(()), "a fresh slug");
-    }
-
-    /// One project holding Research group 7, still a draft, with the cursor
-    /// on `cursor` and a start in flight if `starting`.
-    fn group_draft_at(cursor: SidebarItem, starting: bool) -> AppState {
-        AppState {
-            sessions: Sessions {
-                projects: vec![Project {
-                    id: ProjectId(1),
-                    title: "Research".into(),
-                    root: "/research".into(),
-                    created_at: SystemTime::UNIX_EPOCH,
-                    removed: false,
-                    draft: None,
-                    threads: vec![],
-                    groups: vec![Group {
-                        id: GroupId(7),
-                        kind: GroupKind::Research,
-                        name: "tokio-cancel".into(),
-                        dir: Some("/research/tokio-cancel".into()),
-                        branch: None,
-                        created_at: SystemTime::UNIX_EPOCH,
-                        pinned_at: None,
-                        settled_at: None,
-                        active_since: SystemTime::UNIX_EPOCH,
-                        draft: Some(GroupDraft::default()),
-                        defaults: GroupDefaults {
-                            harness: HarnessId::new("claude"),
-                            model: None,
-                            permission: None,
-                        },
-                    }],
-                    kind: ProjectKind::Research,
-                }],
-                cursor: Some(cursor),
-                starting,
-                ..Sessions::default()
-            },
-            ..AppState::default()
-        }
-    }
-
-    #[rstest::rstest]
-    fn start_group_draft_rejected_while_starting() {
-        // Given the group draft selected while a start is in flight.
-        let state = group_draft_at(SidebarItem::GroupDraft(GroupId(7)), true);
-
-        // When validating a group draft start.
-        let result = validate_start_group_draft(&state);
-
-        // Then validation fails with Starting.
-        assert_eq!(
-            result,
-            Err(StartGroupDraftError::Starting),
-            "one start at a time"
-        );
-    }
-
-    #[rstest::rstest]
-    fn pick_setting_allowed_on_a_group_draft() {
-        // Given the group draft selected.
-        let state = group_draft_at(SidebarItem::GroupDraft(GroupId(7)), false);
-
-        // When validating a setting pick.
-        let result = validate_pick_setting(&state);
-
-        // Then it's allowed.
-        assert_eq!(result, Ok(()), "a group draft has settings to pick");
-    }
-
-    #[rstest::rstest]
-    fn delete_allowed_on_a_group_draft() {
-        // Given the cursor on group 7's draft.
-        let state = group_draft_at(SidebarItem::GroupDraft(GroupId(7)), false);
-
-        // When validating a delete.
-        let result = validate_delete(&state);
-
-        // Then it's allowed.
-        assert_eq!(result, Ok(()), "a group's draft can be discarded");
-    }
-
-    #[rstest::rstest]
-    fn delete_rejected_on_a_group_draft_while_starting() {
-        // Given the cursor on group 7's draft while a start is in flight.
-        let state = group_draft_at(SidebarItem::GroupDraft(GroupId(7)), true);
-
-        // When validating a delete.
-        let result = validate_delete(&state);
-
-        // Then validation fails with Starting.
-        assert_eq!(
-            result,
-            Err(DeleteError::Starting),
-            "the draft may be starting"
-        );
     }
 }

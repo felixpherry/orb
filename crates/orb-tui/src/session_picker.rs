@@ -674,7 +674,7 @@ pub(crate) fn cut_right(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use orb_domain::feat::harness::HarnessId;
-    use orb_domain::feat::harness::claude::models::info;
+    use orb_domain::feat::harness::claude::info;
     use std::collections::HashSet;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -716,7 +716,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             branch: None,
             pinned_at: None,
@@ -747,9 +746,8 @@ mod tests {
             root: "/Users/me/dev/orb".into(),
             created_at: UNIX_EPOCH,
             removed: false,
-            draft: None,
+            repo: true,
             threads,
-            groups: vec![],
             kind: ProjectKind::Normal,
         }];
         Sessions {

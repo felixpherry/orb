@@ -1,23 +1,18 @@
-//! Sessions — the sessions orb started, in one list across projects.
+//! Sessions — the work orb shows in one list across projects.
 //!
-//! Each thread in the sidebar is one background session. This feature
-//! tracks which threads exist, what each is doing, and which one is selected.
-//! The user can pin a thread to the top, settle it onto the Settled shelf
-//! (which stops its session), give it a name of orb's own, or delete it. A
-//! search narrows the sidebar to the threads and drafts whose title matches
-//! what the user types, and ends with the cursor on the match or back where
-//! it was.
-//!
-//! Threads can work together in a group: a Feature group shares one worktree
-//! on a branch named after it, and a Research or Learn group shares a folder
-//! under orb's own directory, copied from the user's template for the kind.
-//!
-//! When a harness refuses a folder the user hasn't trusted, orb can record
-//! the user's trust in the harness's own config.
+//! Each session in the sidebar is a directory with tabs of panes, where the
+//! user runs shells and agents. This feature tracks which sessions exist,
+//! the threads (agent conversations) running in their panes and what each is
+//! doing, and which session is selected. The user can make a session in a
+//! project's checkout or a worktree, or a Research, Learn or Incognito one;
+//! move it to another workspace before its first agent turn; pin it to the
+//! top, settle it onto the Settled shelf (which kills its panes), give it a
+//! name of orb's own, or delete it. A search narrows the sidebar to the
+//! sessions whose title matches what the user types, and ends with the
+//! cursor on the match or back where it was.
 
 pub mod child_env;
 pub mod pane_status;
-pub mod session_host;
 pub mod sessions_actor;
 pub mod state;
 pub mod store;

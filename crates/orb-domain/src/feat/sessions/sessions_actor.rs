@@ -1,69 +1,55 @@
 //! The sessions actor — the owner of orb's threads, their statuses, and titles.
 //!
 //! At start it restores the saved threads into the shared state. Then it polls
-//! the session hosts: every second while a turn is underway in any agent
-//! pane, every five seconds otherwise, and right away when asked. Each poll
-//! reads what each thread's agent is doing: a session a harness runs itself
-//! from that harness's record; otherwise from the thread's pane, Stopped when
-//! the pane's zmx session isn't running, else the latest report a harness
-//! like pi wrote to the pane file, or the record of the Claude whose process
-//! runs under the pane (by process ancestry from the pane's zmx process). A
-//! thread with no pane is Stopped. Then it stamps when a turn starts, reads
+//! the harnesses: every second while a turn is underway in any agent pane,
+//! every five seconds otherwise, and right away when asked. Each poll reads
+//! what each thread's agent is doing from the thread's pane: Stopped when the
+//! pane's zmx session isn't running, else the latest report a harness like pi
+//! wrote to the pane file, or the status of the Claude whose process runs
+//! under the pane (by process ancestry from the pane's zmx process). A thread
+//! with no pane is Stopped. Then it stamps when a turn starts, reads
 //! new transcript lines for titles and branches, and saves what changed.
 //!
-//! It keeps each project's draft: created prefilled from the project's
-//! last-used workspace, model and permission (else the latest used project's
-//! model and permission in a local checkout), saved as the user edits it, and
-//! following checkouts in the project's root while it is a local draft.
-//! Starting a draft makes its worktree if it needs a new one, starts the
-//! session with its model and permission, and replaces the draft with the new
-//! thread; orb attaches to it only if the draft was still selected.
+//! It makes new sessions: a session row with one tab running a shell, in a
+//! project's checkout, a worktree it already has, a new worktree made from a
+//! base branch, or orb's Incognito folder (made first when missing). The new
+//! session is selected and the frontend asked to attach it. A failure shows
+//! the reason and removes the worktree and branch orb made for it. Whether
+//! each project is a git repository is found at start, on add and after
+//! Initialize Git.
 //!
-//! Before a thread's first prompt it can move the thread to another workspace:
-//! a new worktree of the project, or a directory that already exists. The new
-//! session starts first, and only then is the old one removed; a worktree orb
-//! made for a start that failed is removed again, and an orb worktree no
-//! thread uses after a move is removed unless it has changes. When a turn
+//! Before a session's first agent turn it can move the session to another
+//! workspace: the project's checkout, a worktree that already exists, or a
+//! new one made from a base branch. Every pane is killed, the threads in
+//! them unbound, and the session and its panes point at the new directory;
+//! the frontend then attaches it again, starting a fresh shell in each pane.
+//! A worktree orb made for a move that failed is removed again, and an orb
+//! worktree no session uses after a move is removed unless it has changes.
+//! When a turn
 //! ends in a worktree still on orb's `orb/<hex>` branch, and the harness or
 //! the user has titled the thread, the branch is renamed after that title.
 //!
 //! When the frontend finds a thread's orb worktree gone as it attaches, the
 //! actor recreates it at the same path, so the session resumes the conversation
 //! there. It prunes git's record of the old worktree, then checks out the
-//! branch the worktree was on: the Feature group's branch for a grouped
-//! thread, else the thread's own, else orb's `orb/<hex>` for the directory.
+//! branch the worktree was on: the session's, else one of its threads', else
+//! orb's `orb/<hex>` for the directory.
 //! When that branch is gone it makes it again from the project's default
 //! branch, fetched first from origin. Then it asks the frontend to attach, or
 //! shows git's reason.
 //!
-//! It checks branches out in a thread's directory or in a draft's (the
-//! project's root, or the draft's existing worktree), unless a turn is
-//! underway there. Before the first prompt, picking the default branch from a
-//! worktree checks it out in the project's root and moves the thread, or the
-//! draft, there. It makes a draft's project a git repository when asked.
+//! It checks branches out in a session's directory, unless a turn is
+//! underway there. Before the first agent turn, picking the default branch
+//! from a worktree checks it out in the project's checkout and moves the
+//! session there. It makes a project a git repository when asked.
 //!
-//! At start it shows every harness by its name alone, then asks each one, in
-//! parallel, for its models and permission modes and shows what it says.
+//! At start it shows every harness by its name and mark.
 //!
-//! Every session start, list, stop and removal goes through the thread's (or
-//! draft's, or group's) harness. A thread whose harness orb doesn't know shows
-//! as Gone, with nothing to attach.
+//! A thread whose harness orb doesn't know shows as Gone.
 //!
-//! When a harness refuses to start in a directory it hasn't been trusted in,
-//! the start waits while the actor asks the frontend to have the user trust
-//! the folder the harness names for it (the git root, the main repository
-//! for a worktree, or the directory itself outside git). On yes it
-//! marks the folder trusted in the harness's config and tries the start once
-//! more; a refusal then fails the start. On no, the start fails as
-//! `Workspace not trusted`. Either way a worktree made for a failed start is
-//! removed.
-//!
-//! It keeps each thread's place in the sidebar: pinning, settling onto the
-//! Settled shelf (which stops a session its harness runs itself), un-settling,
-//! and deleting (which removes only such a session). A turn un-settles its
-//! thread. A turn that ends while the user is on another thread shows as
-//! unseen until they select it. A thread being deleted is hidden from the
-//! sidebar until its session is removed; if the removal fails, it shows again.
+//! A turn that ends while the user is on another session shows as unseen
+//! until they select it. A session being deleted is hidden from the sidebar
+//! until it is removed.
 //!
 //! It follows each session's settle lifecycle on its store row: a turn ending
 //! in any of its agent panes is its latest activity, a turn underway
@@ -71,32 +57,18 @@
 //! is pinned, was just un-settled, or is the one the sidebar's cursor is on.
 //! Settling a session stops nothing.
 //!
-//! It creates groups. A Feature group is refused while its branch exists; it
-//! gets its worktree when its draft starts. A Research or Learn group lives in
-//! orb's own project for its kind, added when first needed, in a new folder
-//! copied from the user's template for the kind; orb writes that template
-//! from its built-in default when it's missing, and never overwrites a
-//! folder that already exists. A new group's default harness, model and
-//! permission are the project's last-used ones; the group's draft is
-//! selected, and its defaults and draft are saved as the user edits them.
-//! Starting the draft starts a thread: a Feature group's first in a new
-//! worktree on the branch named after it, which becomes the group's
-//! directory, any other in the group's directory. `n` opens a group's draft,
-//! making one at the top of the group when it has none. A group is pinned,
-//! settled and deleted as a whole: pinning a settled group un-settles it, settling it stops its idle sessions that a harness runs itself, and
-//! deleting it deletes each thread, then the group and its directory: a
-//! Research or Learn folder, or a Feature worktree (forced, or only pruned
-//! from git's records when it's already gone) and its branch. A Feature group
-//! whose branch orb would delete isn't merged is kept whole, with the reason.
-//! A turn in any of its threads un-settles it.
+//! It makes Research and Learn sessions: each in a new folder under orb's
+//! own project for its kind, added when first needed, copied from the user's
+//! template for the kind; orb writes that template from its built-in default
+//! when it's missing, and never overwrites a folder that already exists.
 //!
 //! It adds projects and removes them: a removed project leaves `␣n` and the
-//! project filter and loses its draft, its threads stay, and adding it again
+//! project filter, its sessions stay, and adding it again
 //! restores it.
 //!
 //! It restores the sidebar's saved width and project filter at start, and
 //! saves them when asked. It does the same for the jump list, dropping saved
-//! rows that no longer exist, and drops a deleted group's rows from it.
+//! rows that no longer exist.
 //!
 //! It queues a notice for the frontend to announce when a thread it has
 //! polled since orb started finishes a turn, or starts needing an approval or
@@ -115,28 +87,24 @@ use kameo::prelude::{Actor, ActorRef, Context, Message, Reply, Spawn};
 use tokio::sync::Notify;
 
 use super::pane_status::{PaneReport, match_records, pane_status};
-use super::session_host::{
-    AttachStart, SessionHostError, SessionOptions, SessionRecord, WorkspaceUntrusted,
-};
 use super::state::{
-    Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, NEW_THREAD,
-    Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Session, SessionId,
-    SessionKind, Sessions, SidebarItem, Thread, ThreadId, ThreadStatus,
+    FolderKind, NEW_THREAD, Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId,
+    ProjectKind, Session, SessionId, SessionKind, Sessions, SidebarItem, Thread, ThreadId,
+    ThreadStatus,
 };
 use super::store::{
-    DraftRow, GroupRow, LastUsed, LastWorkspace, NewGroup, NewPaneThread, NewThread, PaneRow,
-    SessionRow, SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
+    NewPaneThread, PaneRow, SessionRow, SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
 };
 use super::template;
-use super::validator::{group_exists, on_disk};
+use super::validator::folder_exists;
 use crate::command::Workspace;
 use crate::common::{Services, State, Wake};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
 use crate::feat::git::validator::BUSY_DIRECTORY;
-use crate::feat::git::worktree::{
-    hex, hex_branch, is_orb_worktree, new_worktree_path, previous_worktree, slug,
+use crate::feat::git::worktree::{hex, hex_branch, is_orb_worktree, new_worktree_path, slug};
+use crate::feat::harness::{
+    Harness, HarnessError, HarnessId, RunningAgent, Scan, TranscriptFormat, claude,
 };
-use crate::feat::harness::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat, claude};
 use crate::feat::integration::pane_file::{AgentEvent, AgentReport, PaneFiles};
 use crate::feat::integration::{NUDGE, panes_dir};
 use crate::feat::jumps::state::JumpList;
@@ -154,16 +122,13 @@ const SLOW_POLL: Duration = Duration::from_secs(5);
 const AUTO_SETTLE_AFTER: i64 = 3 * 24 * 60 * 60 * 1000;
 /// The error shown when orb's store can't be written.
 const SAVE_FAILED: &str = "couldn't save orb's state";
-/// The error shown when a group's or the Incognito folder can't be made.
+/// The error shown when a session's folder or the Incognito folder can't be
+/// made.
 const FOLDER_UNMADE: &str = "couldn't make the folder";
 /// The error shown when a deleted session's folder can't be removed.
 const FOLDER_UNREMOVED: &str = "couldn't remove the folder";
 /// The error shown when a started session can't be saved or shown.
 const NEW_SESSION_UNSAVED: &str = "couldn't save the new session";
-/// The error shown when the harness's config can't be updated to trust a folder.
-const TRUST_UNSAVED: &str = "couldn't trust the folder";
-/// The error shown when the user declines to trust a start's folder.
-const TRUST_DECLINED: &str = "Workspace not trusted";
 /// How many random worktree names to try before giving up.
 const WORKTREE_NAME_ATTEMPTS: u32 = 8;
 
@@ -187,18 +152,18 @@ pub struct SessionsActorDeps {
 }
 
 /// Owns [`Sessions`](super::state::Sessions) and the harnesses the frontend
-/// shows (`AppState::harnesses`): the projects, their drafts and groups, the
+/// shows (`AppState::harnesses`): the projects, the
 /// sessions with their names, pins and settles, the threads' statuses and
-/// titles, the latest host error, the origin ref a start is fetching, the
-/// folder a harness asks to trust before a start, and the started or restored
-/// session the frontend should attach to. It adds orb's Incognito project at
+/// titles, the latest error, the origin ref a start is fetching, and the
+/// new, moved or restored session the frontend should attach to. It adds orb's Incognito project at
 /// start. It also restores the sidebar's width and project filter, and
-/// selects a new group's draft. It loads every session's layout at start,
-/// adds the panes splits and new tabs make (it saves their store rows, so it
-/// gives them their ids), lays out a new thread's session, drops a deleted
+/// selects a new session. It loads every session's
+/// layout at start, adds the panes splits and new tabs make (it saves their
+/// store rows, so it gives them their ids), lays out a new session, drops a
+/// deleted
 /// session's layout, and saves a layout when asked. The intent handler also
 /// moves the cursor, opens and closes the shelf, marks a start as starting,
-/// edits a draft's fields before asking for them to be saved, and resizes or
+/// and resizes or
 /// filters the sidebar before asking for that to be saved. It binds threads
 /// to panes from the agents' pane files, keeps each pane's latest report and
 /// resume command current, and owns each session's name, pin, settle and
@@ -214,26 +179,18 @@ pub struct SessionsActor {
     poke: Arc<Notify>,
     /// The saved threads, as last written to the store.
     rows: Vec<ThreadRow>,
-    /// The saved groups, as last written to the store.
-    groups: Vec<GroupRow>,
     /// The saved panes, as last written to the store.
     panes: HashMap<PaneId, PaneRow>,
     /// Each saved session: its directory, where its new panes start, and
     /// its settle lifecycle.
     sessions: HashMap<SessionId, SessionRow>,
-    /// The start waiting for the user to trust the folder its harness names,
-    /// and that path.
-    pending: Option<(PendingStart, PathBuf)>,
     /// The agents' reports of what runs in each pane.
     pane_files: PaneFiles,
     /// Each pane's latest agent report.
     pane_reports: HashMap<PaneId, PaneReport>,
-    /// The threads a harness runs itself, as the last poll found: the only
-    /// ones settling stops and deleting removes.
-    hosted: HashSet<ThreadId>,
 }
 
-/// Poll the session host now.
+/// Poll the harnesses now.
 #[derive(Debug)]
 pub struct Poll;
 
@@ -267,70 +224,32 @@ pub struct KillSettled;
 #[derive(Debug, Reply)]
 pub struct NextPoll(pub Duration);
 
-/// Give a project a draft, prefilled from its last-used settings, unless it
-/// has one.
+/// Make a session of `project` in `workspace`, with one shell pane.
 #[derive(Debug)]
-pub struct CreateDraft(pub ProjectId);
-
-/// Save a project's draft as the app state has it, filling in its branch if
-/// it has none.
-#[derive(Debug)]
-pub struct SaveDraft(pub ProjectId);
-
-/// Check a branch out for a project's draft in `cwd`: the draft's directory,
-/// or the project's root, which the draft then moves to.
-#[derive(Debug)]
-pub struct CheckoutDraft {
+pub struct NewSession {
     pub project: ProjectId,
-    pub git_ref: GitRef,
-    pub cwd: PathBuf,
+    pub workspace: Workspace,
 }
 
-/// Make a project's root a git repository for its draft.
+/// Make a project's root a git repository.
 #[derive(Debug)]
 pub struct InitGit(pub ProjectId);
 
-/// Start a session from a project's draft, which becomes a thread.
+/// Move a session, before its first agent turn, to another workspace.
 #[derive(Debug)]
-pub struct StartDraft(pub ProjectId);
-
-/// Throw a project's draft away.
-#[derive(Debug)]
-pub struct DiscardDraft(pub ProjectId);
-
-/// Start a thread's session over in another workspace, before its first
-/// prompt.
-#[derive(Debug)]
-pub struct MoveThread {
-    pub thread: ThreadId,
+pub struct ChangeWorkspace {
+    pub session: SessionId,
     pub to: Workspace,
 }
 
-/// Check a branch out for a thread: in its directory, or with `to_root` in
-/// its project's root, moving the prompt-less thread there.
+/// Check a branch out for a session: in its directory, or with `to_root` in
+/// its project's checkout, moving the session there.
 #[derive(Debug)]
 pub struct SwitchBranch {
-    pub thread: ThreadId,
+    pub session: SessionId,
     pub git_ref: GitRef,
     pub to_root: bool,
 }
-
-/// Check a branch out in a group's worktree, moving every thread in it.
-#[derive(Debug)]
-pub struct CheckoutGroup {
-    pub group: GroupId,
-    pub git_ref: GitRef,
-}
-
-/// Mark the waiting start's project path trusted in the harness's config, as the
-/// user said yes, and try the start once more.
-#[derive(Debug)]
-pub struct TrustWorkspace;
-
-/// End the waiting start as a failed one, as the user declined to trust its
-/// project path.
-#[derive(Debug)]
-pub struct DeclineTrust;
 
 /// Add a directory as a project.
 #[derive(Debug)]
@@ -382,70 +301,20 @@ pub struct SaveUi;
 #[derive(Debug)]
 pub struct SaveJumps;
 
-/// Remove a project from `␣n` and the project filter and discard its draft.
+/// Remove a project from `␣n` and the project filter.
 #[derive(Debug)]
 pub struct RemoveProject(pub ProjectId);
 
-/// Create a `kind` group named `name` (a slug) with a draft: in `project`
-/// for a Feature group, else in orb's own project for the kind.
+/// Make a `kind` session with one shell in orb's own folder `name` (a slug).
 #[derive(Debug)]
-pub struct CreateGroup {
-    pub kind: GroupKind,
-    pub project: Option<ProjectId>,
+pub struct NewFolderSession {
+    pub kind: FolderKind,
     pub name: String,
 }
-
-/// Start group `.0`'s first thread from its draft.
-#[derive(Debug)]
-pub struct StartGroupDraft(pub GroupId);
-
-/// Save group `.0`'s default model and permission as the app state has them.
-#[derive(Debug)]
-pub struct SaveGroupDraft(pub GroupId);
 
 /// Recreate session `.0`'s orb worktree, gone from disk, then attach to it.
 #[derive(Debug)]
 pub struct RestoreWorktree(pub SessionId);
-
-/// What a harness's probe found: `.0` replaces the entry with its id.
-#[derive(Debug)]
-pub struct Probed(pub HarnessInfo);
-
-/// A session start in flight: what it is for, where it runs, the branch
-/// checked out there when known, the worktree orb made for it, if any, and
-/// the options the session starts with.
-struct PendingStart {
-    kind: StartKind,
-    cwd: PathBuf,
-    branch: Option<String>,
-    made: Option<MadeWorktree>,
-    options: SessionOptions,
-    /// The harness the session starts in.
-    harness: HarnessId,
-}
-
-/// What a session start is for.
-enum StartKind {
-    /// A new thread from the project's draft, whose workspace was of kind
-    /// `workspace`.
-    Draft {
-        project: ProjectId,
-        workspace: LastWorkspace,
-    },
-    /// A thread of group `group` in `project`, from its draft. The cursor
-    /// follows the thread if it's still on `from`.
-    Group {
-        project: ProjectId,
-        group: GroupId,
-        from: Option<SidebarItem>,
-    },
-    /// An existing, prompt-less thread moving out of `old_cwd`.
-    Move {
-        thread: ThreadId,
-        old_short_id: String,
-        old_cwd: PathBuf,
-    },
-}
 
 /// A worktree orb made, on its new branch.
 struct MadeWorktree {
@@ -469,14 +338,6 @@ impl Actor for SessionsActor {
         actor_ref: ActorRef<Self>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send {
         let actor = Self::restore(args);
-        for harness in actor.services.harnesses.all() {
-            let harness = Arc::clone(harness);
-            let actor_ref = actor_ref.clone();
-            tokio::spawn(async move {
-                let info = harness.probe().await;
-                let _ = actor_ref.tell(Probed(info)).await;
-            });
-        }
         {
             let actor_ref = actor_ref.clone();
             tokio::spawn(async move {
@@ -553,73 +414,11 @@ impl Message<KillSettled> for SessionsActor {
     }
 }
 
-impl Message<Probed> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        Probed(mut info): Probed,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        {
-            let notice = info.notice.take();
-            let mut app = self.state.write();
-            if let Some(entry) = app.harnesses.iter_mut().find(|entry| entry.id == info.id) {
-                *entry = info;
-            }
-            if let Some(notice) = notice {
-                app.sessions.error = Some(notice);
-            }
-        }
-        (self.wake)();
-    }
-}
-
 impl Message<Poll> for SessionsActor {
     type Reply = NextPoll;
 
     async fn handle(&mut self, _msg: Poll, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         NextPoll(self.poll().await)
-    }
-}
-
-impl Message<CreateDraft> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        CreateDraft(id): CreateDraft,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.create_draft(id);
-    }
-}
-
-impl Message<SaveDraft> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        SaveDraft(id): SaveDraft,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.save_draft(id);
-    }
-}
-
-impl Message<CheckoutDraft> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        CheckoutDraft {
-            project,
-            git_ref,
-            cwd,
-        }: CheckoutDraft,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.checkout_draft(project, &git_ref, &cwd);
     }
 }
 
@@ -635,39 +434,27 @@ impl Message<InitGit> for SessionsActor {
     }
 }
 
-impl Message<StartDraft> for SessionsActor {
+impl Message<NewSession> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        StartDraft(id): StartDraft,
+        NewSession { project, workspace }: NewSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.start_draft(id).await;
+        self.new_session(project, workspace);
     }
 }
 
-impl Message<DiscardDraft> for SessionsActor {
+impl Message<ChangeWorkspace> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        DiscardDraft(id): DiscardDraft,
+        ChangeWorkspace { session, to }: ChangeWorkspace,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.discard_draft(id);
-    }
-}
-
-impl Message<MoveThread> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        MoveThread { thread, to }: MoveThread,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.move_thread(thread, to).await;
+        self.change_workspace(session, to);
     }
 }
 
@@ -677,53 +464,13 @@ impl Message<SwitchBranch> for SessionsActor {
     async fn handle(
         &mut self,
         SwitchBranch {
-            thread,
+            session,
             git_ref,
             to_root,
         }: SwitchBranch,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if to_root {
-            self.switch_to_root(thread, &git_ref).await;
-        } else {
-            self.check_out(thread, &git_ref);
-        }
-    }
-}
-
-impl Message<CheckoutGroup> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        CheckoutGroup { group, git_ref }: CheckoutGroup,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.check_out_group(group, &git_ref);
-    }
-}
-
-impl Message<TrustWorkspace> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        _msg: TrustWorkspace,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.trust_workspace().await;
-    }
-}
-
-impl Message<DeclineTrust> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        _msg: DeclineTrust,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.decline_trust();
+        self.switch_branch(session, &git_ref, to_root);
     }
 }
 
@@ -795,7 +542,7 @@ impl Message<SettleSession> for SessionsActor {
         SettleSession(id): SettleSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.settle_session(id).await;
+        self.settle_session(id);
     }
 }
 
@@ -819,7 +566,7 @@ impl Message<DeleteSession> for SessionsActor {
         DeleteSession(id): DeleteSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.delete_session(id).await;
+        self.delete_session(id);
     }
 }
 
@@ -867,43 +614,15 @@ impl Message<RemoveProject> for SessionsActor {
     }
 }
 
-impl Message<CreateGroup> for SessionsActor {
+impl Message<NewFolderSession> for SessionsActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        CreateGroup {
-            kind,
-            project,
-            name,
-        }: CreateGroup,
+        NewFolderSession { kind, name }: NewFolderSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.create_group(kind, project, name);
-    }
-}
-
-impl Message<StartGroupDraft> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        StartGroupDraft(id): StartGroupDraft,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.start_group_draft(id).await;
-    }
-}
-
-impl Message<SaveGroupDraft> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        SaveGroupDraft(id): SaveGroupDraft,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.save_group_draft(id);
+        self.new_folder_session(kind, &name);
     }
 }
 
@@ -920,10 +639,10 @@ impl Message<RestoreWorktree> for SessionsActor {
 }
 
 impl SessionsActor {
-    /// Shows the saved projects, threads and drafts, sizes the sidebar as it
+    /// Shows the saved projects and threads, sizes the sidebar as it
     /// was saved, kept within its bounds, filters it to the saved project if
     /// that's still shown and not removed, and selects its first row. Each
-    /// draft learns what git says about it. The saved jump list comes back
+    /// project learns whether it is a git repository. The saved jump list comes back
     /// without the rows that no longer exist, and every session's layout comes
     /// back as it was saved. orb's Incognito project is added
     /// (or un-removed) and its folder made first.
@@ -955,17 +674,13 @@ impl SessionsActor {
             layouts,
             error: layouts_error,
         } = restore_layouts(&store, &services, &orb_root);
-        let (projects, rows, drafts, groups, error) = match store.load() {
-            Ok((projects, rows, drafts, groups)) => (
+        let (projects, rows, error) = match store.load() {
+            Ok((projects, rows)) => (
                 projects,
                 rows,
-                drafts,
-                groups,
                 added.err().map(|_report| SAVE_FAILED.to_owned()),
             ),
             Err(_) => (
-                Vec::new(),
-                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Some("couldn't load orb's saved sessions".to_owned()),
@@ -980,21 +695,16 @@ impl SessionsActor {
                     .filter(|row| row.project_id == project.id)
                     .map(|row| unpolled(&services, row, &panes))
                     .collect(),
-                draft: drafts
-                    .iter()
-                    .find(|draft| draft.project_id == project.id)
-                    .map(|row| with_git(&services.git, &project.root, draft_of(row))),
+                // ponytail: one git call per project at start; cache it if
+                // many projects make start-up slow.
+                repo: project.kind == ProjectKind::Normal
+                    && services.git.project_path(&project.root).is_some(),
                 id: project.id,
                 title: project.title,
                 root: project.root,
                 created_at: from_ms(project.created_at),
                 removed: project.removed_at.is_some(),
                 kind: project.kind,
-                groups: groups
-                    .iter()
-                    .filter(|row| row.project_id == project.id)
-                    .map(|row| group(row, &rows))
-                    .collect(),
             })
             .collect();
         let ui = store.ui().unwrap_or_default();
@@ -1008,7 +718,7 @@ impl SessionsActor {
             JumpList::from_saved(
                 saved
                     .into_iter()
-                    .filter(|&item| exists(&projects, &session_rows, item))
+                    .filter(|&item| exists(&session_rows, item))
                     .collect(),
             )
         };
@@ -1016,7 +726,7 @@ impl SessionsActor {
             let mut app = state.write();
             app.sidebar.width = ui.sidebar_width.map_or(DEFAULT_WIDTH, clamp_width);
             app.jumps = jumps;
-            app.harnesses = services.harnesses.placeholders();
+            app.harnesses = services.harnesses.infos();
             for (session, layout) in layouts {
                 app.layouts.insert(session, layout);
             }
@@ -1042,16 +752,13 @@ impl SessionsActor {
             wake,
             poke: Arc::default(),
             rows,
-            groups,
             panes,
             sessions: session_rows,
-            pending: None,
             pane_reports: HashMap::new(),
-            hosted: HashSet::new(),
         }
     }
 
-    /// Asks the host what every session is doing and shows it. Returns how
+    /// Asks the harnesses what every agent is doing and shows it. Returns how
     /// long to wait before the next poll: a second while any agent pane has a
     /// turn underway.
     async fn poll(&mut self) -> Duration {
@@ -1271,23 +978,16 @@ impl SessionsActor {
         Ok(())
     }
 
-    /// Asks the host what every session is doing and shows it.
-    /// A harness whose list fails leaves its threads as they were; the
+    /// Asks the harnesses what every agent is doing and shows it.
+    /// A harness that can't be asked leaves its threads as they were; the
     /// others still update, and the failure is returned after.
-    async fn sync(&mut self) -> Result<(), Report<SessionHostError>> {
-        let mut listed: HashMap<HarnessId, Vec<SessionRecord>> = HashMap::new();
+    async fn sync(&mut self) -> Result<(), Report<HarnessError>> {
+        let mut listed: HashMap<HarnessId, Vec<RunningAgent>> = HashMap::new();
         let mut failure = None;
         for harness in self.services.harnesses.all() {
-            let id = harness.id();
-            let short_ids: Vec<String> = self
-                .rows
-                .iter()
-                .filter(|row| row.harness == id)
-                .map(|row| row.short_id.clone())
-                .collect();
-            match harness.list(&short_ids).await {
-                Ok(records) => {
-                    listed.insert(id, records);
+            match harness.running().await {
+                Ok(agents) => {
+                    listed.insert(harness.id(), agents);
                 }
                 Err(report) => failure = Some(report),
             }
@@ -1299,8 +999,8 @@ impl SessionsActor {
 
     /// What the poll sees of the panes threads run in: each one's zmx session
     /// (one `zmx list` per socket dir; a dir zmx can't list leaves its panes
-    /// out) and the records matched to the panes their processes run under.
-    fn live(&self, listed: &HashMap<HarnessId, Vec<SessionRecord>>) -> Live {
+    /// out) and the agents matched to the panes their processes run under.
+    fn live(&self, listed: &HashMap<HarnessId, Vec<RunningAgent>>) -> Live {
         let bound: Vec<(PaneId, ZmxSession)> = self
             .rows
             .iter()
@@ -1333,19 +1033,19 @@ impl SessionsActor {
             .iter()
             .filter_map(|(pane, entry)| Some((entry.as_ref()?.pid?, *pane)))
             .collect();
-        let records: Vec<SessionRecord> = listed.values().flatten().cloned().collect();
+        let agents: Vec<RunningAgent> = listed.values().flatten().cloned().collect();
         Live {
-            matched: match_records(&records, &roots),
+            matched: match_records(&agents, &roots),
             sessions,
         }
     }
 
-    /// Updates every saved thread from its record and transcript, follows its
-    /// activity and its group's and session's settle lifecycle, saves the
-    /// ones that changed, then shows them all in one write. A thread whose
-    /// harness wasn't `listed` (its list failed) is left as it was; one whose
+    /// Updates every saved thread from its pane and transcript, follows its
+    /// activity and its session's settle lifecycle, saves the ones that
+    /// changed, then shows them all in one write. A thread whose harness
+    /// wasn't `listed` (it couldn't be asked) is left as it was; one whose
     /// harness orb doesn't know is Gone.
-    fn apply(&mut self, listed: &HashMap<HarnessId, Vec<SessionRecord>>, live: &Live) {
+    fn apply(&mut self, listed: &HashMap<HarnessId, Vec<RunningAgent>>, live: &Live) {
         let now = now_ms();
         let selected = match self.state.read().sessions.cursor {
             Some(SidebarItem::Session(id)) => Some(id),
@@ -1353,28 +1053,20 @@ impl SessionsActor {
         };
         let mut statuses = Vec::with_capacity(self.rows.len());
         let mut error = None;
-        let mut hosted = HashSet::new();
         for row in &mut self.rows {
             let harness = self.services.harnesses.get(&row.harness);
-            let records = match (harness, listed.get(&row.harness)) {
-                (Some(_), None) => {
-                    statuses.push(None);
-                    continue;
-                }
-                (_, records) => records.map_or(&[][..], Vec::as_slice),
-            };
-            let record = hosted_record(records, &row.short_id);
-            let Some(status) = status_now(row, harness, record, live, &self.pane_reports) else {
+            if harness.is_some() && !listed.contains_key(&row.harness) {
+                statuses.push(None);
+                continue;
+            }
+            let Some(status) = status_now(row, harness, live, &self.pane_reports) else {
                 statuses.push(None);
                 continue;
             };
-            if record.is_some() {
-                hosted.insert(row.id);
-            }
             let before = row.clone();
             let was_in_progress = row.turn_started_at.is_some();
             let format = harness.map(|harness| harness.as_ref() as &dyn TranscriptFormat);
-            let asks_git = update_row(row, record, status, now, format);
+            let asks_git = update_row(row, status, now, format);
             if was_in_progress && !status.in_progress() {
                 if asks_git && let Some(branch) = current_branch(&self.services.git, &row.cwd) {
                     row.branch = Some(branch);
@@ -1393,7 +1085,6 @@ impl SessionsActor {
             }
             statuses.push(Some(status));
         }
-        self.hosted = hosted;
         let changed_sessions = self.follow_sessions(&statuses, selected, now, &mut error);
         let changed = {
             let mut app = self.state.write();
@@ -1414,12 +1105,7 @@ impl SessionsActor {
                     changed = true;
                 }
                 if let Some(thread) = thread_mut(sessions, row.id) {
-                    changed |= show(
-                        thread,
-                        row,
-                        status,
-                        pane_launch(&self.services, row, &self.panes),
-                    );
+                    changed |= show(thread, row, status, pane_launch(row, &self.panes));
                 }
             }
             for id in changed_sessions {
@@ -1508,577 +1194,41 @@ impl SessionsActor {
         changed
     }
 
-    /// Gives project `id` a draft unless it has one: the project's last-used
-    /// workspace, harness, model and permission, else the latest used
-    /// project's harness, model and permission in a local checkout, else the
-    /// first registered harness. A last-used harness orb no longer knows gives
-    /// the first registered one with its default model and permission. A
-    /// remembered previous worktree the project no longer has falls back to a
-    /// local checkout. The branch is the
-    /// one checked out in the draft's directory, or for a new worktree the
-    /// default branch; see [`with_git`].
-    fn create_draft(&mut self, id: ProjectId) {
-        let seeds = self
-            .state
-            .read()
-            .sessions
-            .projects
-            .iter()
-            .find(|project| project.id == id && project.draft.is_none())
-            .map(|project| {
-                let previous = previous_worktree(project, &project.root, None);
-                (project.root.clone(), previous)
-            });
-        let Some((root, previous)) = seeds else {
-            return (self.wake)();
-        };
-        let last = self.store.last_used(id).ok().flatten();
-        let (workspace, branch) = match (last.as_ref().map(|last| last.workspace), previous) {
-            (Some(LastWorkspace::NewWorktree), _) => (DraftWorkspace::NewWorktree, None),
-            (Some(LastWorkspace::Previous), Some((path, branch))) => {
-                (DraftWorkspace::Existing(path), branch)
-            }
-            _ => (DraftWorkspace::Local, None),
-        };
-        let (harness, model, permission) = self.last_settings(last);
-        let draft = with_git(
-            &self.services.git,
-            &root,
-            Draft {
-                branch,
-                workspace,
-                model,
-                permission,
-                created_at: from_ms(now_ms()),
-                repo: true,
-                from: None,
-                harness,
-            },
-        );
-        let saved = self.store.save_draft(&draft_row(id, &draft));
-        {
-            let mut app = self.state.write();
-            let sessions = &mut app.sessions;
-            if let Some(project) = sessions.projects.iter_mut().find(|p| p.id == id) {
-                project.draft = Some(draft);
-            }
-            if saved.is_err() {
-                sessions.error = Some(SAVE_FAILED.to_owned());
-            }
-        }
-        (self.wake)();
-    }
-
-    /// The harness, model and permission a new draft or group starts with:
-    /// `last`, else the latest last-used record from any project. A harness
-    /// orb no longer knows gives the first registered one with its defaults;
-    /// a record from before harnesses keeps its model and permission on the
-    /// first one.
-    fn last_settings(&self, last: Option<LastUsed>) -> (HarnessId, Option<String>, Option<String>) {
-        let default = self.services.harnesses.default_id();
-        match last.or_else(|| self.store.latest_last_used().ok().flatten()) {
-            Some(LastUsed {
-                harness: Some(id), ..
-            }) if self.services.harnesses.get(&id).is_none() => (default, None, None),
-            Some(used) => (
-                used.harness.unwrap_or(default),
-                used.model,
-                used.permission_mode,
-            ),
-            None => (default, None, None),
-        }
-    }
-
-    /// Saves project `id`'s draft as the app state has it, first bringing
-    /// what git says about it up to date; see [`with_git`].
-    fn save_draft(&mut self, id: ProjectId) {
-        let Some((root, _, draft)) = self.draft(id) else {
-            return;
-        };
-        let seen = with_git(&self.services.git, &root, draft.clone());
-        let row = {
-            let mut app = self.state.write();
-            let Some(shown) = app.sessions.draft_mut(id) else {
-                return;
-            };
-            shown.repo = seen.repo;
-            // The user may have changed it meanwhile; a later save follows.
-            if shown.workspace == draft.workspace && shown.branch == draft.branch {
-                shown.branch = seen.branch;
-                shown.from = seen.from;
-            }
-            draft_row(id, shown)
-        };
-        if self.store.save_draft(&row).is_err() {
-            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
-        }
-        (self.wake)();
-    }
-
-    /// Saves group `id`'s default setup and draft as the app state has them,
-    /// on its kept row, so nothing else of the group changes.
-    fn save_group_draft(&mut self, id: GroupId) {
-        let shown = self
-            .state
-            .read()
-            .sessions
-            .group(id)
-            .map(|(_, group)| (group.defaults.clone(), group.draft.clone()));
-        let Some((defaults, draft)) = shown else {
-            return;
-        };
-        self.edit_group(id, |row, _now| {
-            row.harness = defaults.harness;
-            row.draft_model = defaults.model;
-            row.draft_permission_mode = defaults.permission;
-            row.draft = draft;
-        });
-    }
-
-    /// Checks `git_ref` out in `cwd` for project `id`'s draft. A checkout in
-    /// the project's root moves a draft in a worktree back to the root.
-    fn checkout_draft(&mut self, id: ProjectId, git_ref: &GitRef, cwd: &Path) {
-        let Some(root) = self.project_root(id) else {
-            return;
-        };
-        if let Some(local) = self.check_out_in(cwd, git_ref)
-            && cwd == root
-        {
-            self.draft_to_root(id, local);
-        }
-    }
-
-    /// Moves project `id`'s draft from its worktree to the project's root,
-    /// on `branch`, and saves it.
-    fn draft_to_root(&mut self, id: ProjectId, branch: String) {
-        let row = {
-            let mut app = self.state.write();
-            let Some(draft) = app
-                .sessions
-                .draft_mut(id)
-                .filter(|draft| matches!(draft.workspace, DraftWorkspace::Existing(_)))
-            else {
-                return;
-            };
-            draft.workspace = DraftWorkspace::Local;
-            draft.branch = Some(branch);
-            draft.from = None;
-            draft_row(id, draft)
-        };
-        if self.store.save_draft(&row).is_err() {
-            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
-        }
-        (self.wake)();
-    }
-
-    /// Runs `git init` in project `id`'s root, then shows its draft as a git
-    /// project's. A failure shows why.
+    /// Runs `git init` in project `id`'s root, then shows the project as a
+    /// git repository. A failure shows why.
     fn init_git(&mut self, id: ProjectId) {
         let Some(root) = self.project_root(id) else {
             return;
         };
-        match self.services.git.init(&root) {
-            Ok(()) => self.save_draft(id),
-            Err(report) => {
-                self.state.write().sessions.error = Some(format!(
-                    "Git initialization failed: {}",
-                    git_reason(&report)
-                ));
-                (self.wake)();
-            }
-        }
-    }
-
-    /// Forgets project `id`'s draft.
-    fn discard_draft(&mut self, id: ProjectId) {
-        let deleted = self.store.delete_draft(id);
+        let inited = self.services.git.init(&root);
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
-            if let Some(project) = sessions.projects.iter_mut().find(|p| p.id == id) {
-                project.draft = None;
-            }
-            if deleted.is_err() {
-                sessions.error = Some(SAVE_FAILED.to_owned());
+            match inited {
+                Ok(()) => {
+                    if let Some(project) = sessions.projects.iter_mut().find(|p| p.id == id) {
+                        project.repo = true;
+                    }
+                }
+                Err(report) => {
+                    sessions.error = Some(format!(
+                        "Git initialization failed: {}",
+                        git_reason(&report)
+                    ));
+                }
             }
         }
         (self.wake)();
     }
 
-    /// Starts a session from project `id`'s draft, with its model and
-    /// permission: in the project's root, in its existing worktree, or in a
-    /// new worktree made now from the draft's base branch. A draft of a
-    /// project that isn't a git repository always starts in the root. An
-    /// Incognito draft's folder is made first when missing; any other missing
-    /// folder fails the start with its path.
-    async fn start_draft(&mut self, id: ProjectId) {
-        let Some((root, kind, draft)) = self.draft(id) else {
-            return self.end_start(Err("the draft is gone".to_owned()));
-        };
-        if kind == ProjectKind::Incognito && fs::create_dir_all(&root).is_err() {
-            return self.end_start(Err(FOLDER_UNMADE.to_owned()));
-        }
-        let options = SessionOptions {
-            model: draft.model,
-            permission_mode: draft.permission,
-        };
-        let harness = draft.harness;
-        let workspace = if draft.repo {
-            draft.workspace
-        } else {
-            DraftWorkspace::Local
-        };
-        let (workspace, cwd, made) = match workspace {
-            DraftWorkspace::Local if root.is_dir() => (LastWorkspace::Local, root, None),
-            DraftWorkspace::Local => {
-                return self.end_start(Err(format!(
-                    "project folder no longer exists: {}",
-                    root.display()
-                )));
-            }
-            DraftWorkspace::Existing(path) if path.is_dir() => {
-                (LastWorkspace::Previous, path, None)
-            }
-            DraftWorkspace::Existing(path) => {
-                return self.end_start(Err(format!(
-                    "worktree no longer exists: {}",
-                    path.display()
-                )));
-            }
-            DraftWorkspace::NewWorktree => {
-                match self.add_worktree(&root, draft.branch.as_deref(), None) {
-                    Ok(made) => (LastWorkspace::NewWorktree, made.path.clone(), Some(made)),
-                    Err(report) => return self.end_start(Err(git_reason(&report))),
-                }
-            }
-        };
-        // The draft's branch can be stale (a checkout outside orb, a restart).
-        let branch = match &made {
-            Some(made) => Some(made.branch.clone()),
-            None => current_branch(&self.services.git, &cwd),
-        };
-        let pending = PendingStart {
-            kind: StartKind::Draft {
-                project: id,
-                workspace,
-            },
-            cwd,
-            branch,
-            made,
-            options,
-            harness,
-        };
-        self.start(pending, true).await;
-    }
-
-    /// Project `id`'s root, kind and draft, if it has one.
-    fn draft(&self, id: ProjectId) -> Option<(PathBuf, ProjectKind, Draft)> {
-        self.state
-            .read()
-            .sessions
-            .projects
-            .iter()
-            .find(|project| project.id == id)
-            .and_then(|project| Some((project.root.clone(), project.kind, project.draft.clone()?)))
-    }
-
-    /// Starts a session for `pending` in its harness and finishes what it was
-    /// for. If the harness hasn't been trusted in its directory and
-    /// `allow_trust`, the start waits for the user to trust the harness's
-    /// folder for it (asking the frontend once). If it fails, the reason
-    /// shows and a worktree made for it is removed.
-    async fn start(&mut self, pending: PendingStart, allow_trust: bool) {
-        let harness = match self.harness(&pending.harness) {
-            Ok(harness) => harness,
-            Err(error) => {
-                if let Some(made) = &pending.made {
-                    self.remove_made(made);
-                }
-                return self.end_start(Err(error));
-            }
-        };
-        let created = harness.create(&pending.cwd, &pending.options).await;
-        if let Err(report) = &created
-            && allow_trust
-            && report.contains::<WorkspaceUntrusted>()
-        {
-            let dir = harness.trust_dir(&pending.cwd);
-            let asked = {
-                let mut app = self.state.write();
-                app.sessions.trust.replace(dir.clone()).as_ref() == Some(&dir)
-            };
-            self.pending = Some((pending, dir));
-            if !asked {
-                (self.wake)();
-            }
-            return;
-        }
-        let PendingStart {
-            kind,
-            cwd,
-            branch,
-            made,
-            options,
-            harness,
-        } = pending;
-        match (created, kind) {
-            (Ok(created), StartKind::Draft { project, workspace }) => {
-                let thread = self.save_new(
-                    project,
-                    &cwd,
-                    &created.short_id,
-                    branch,
-                    &options,
-                    None,
-                    &harness,
-                );
-                let used = LastUsed {
-                    harness: Some(harness),
-                    workspace,
-                    model: options.model,
-                    permission_mode: options.permission_mode,
-                };
-                self.finish_draft(project, &used, thread);
-            }
-            (
-                Ok(created),
-                StartKind::Group {
-                    project,
-                    group,
-                    from,
-                },
-            ) => {
-                let thread = self.save_new(
-                    project,
-                    &cwd,
-                    &created.short_id,
-                    branch,
-                    &options,
-                    Some(group),
-                    &harness,
-                );
-                self.finish_group_start(project, group, from, &cwd, thread);
-            }
-            (
-                Ok(created),
-                StartKind::Move {
-                    thread,
-                    old_short_id,
-                    old_cwd,
-                },
-            ) => {
-                let moved = Moved {
-                    thread,
-                    short_id: created.short_id,
-                    cwd,
-                    branch,
-                };
-                self.finish_move(moved, &harness, &old_short_id, &old_cwd)
-                    .await;
-            }
-            (Err(report), _) => {
-                if let Some(made) = made {
-                    self.remove_made(&made);
-                }
-                self.end_start(Err(reason(&report)));
-            }
-        }
-    }
-
-    /// Marks the waiting start's project path trusted in the harness's config and
-    /// tries the start once more; a second refusal fails it. If the path
-    /// can't be marked, the start fails and a worktree made for it is removed.
-    async fn trust_workspace(&mut self) {
-        let Some((pending, dir)) = self.pending.take() else {
-            return;
-        };
-        self.state.write().sessions.trust = None;
-        let trusted = self.harness(&pending.harness).and_then(|harness| {
-            harness
-                .trust(&dir)
-                .map_err(|_report| TRUST_UNSAVED.to_owned())
-        });
-        match trusted {
-            Ok(()) => self.start(pending, false).await,
-            Err(error) => {
-                if let Some(made) = &pending.made {
-                    self.remove_made(made);
-                }
-                self.end_start(Err(error));
-            }
-        }
-    }
-
-    /// Ends the waiting start as a failed one, as the user declined to trust
-    /// its project path: the draft stays, a worktree made for it is removed,
-    /// and `Workspace not trusted` shows.
-    fn decline_trust(&mut self) {
-        let Some((pending, _)) = self.pending.take() else {
-            return;
-        };
-        self.state.write().sessions.trust = None;
-        if let Some(made) = &pending.made {
-            self.remove_made(made);
-        }
-        self.end_start(Err(TRUST_DECLINED.to_owned()));
-    }
-
-    /// Replaces project `project_id`'s draft with the thread `created` from
-    /// it, first in the project, and records `used` as the project's last-used
-    /// settings. If the draft was still selected, selects the thread and asks
-    /// the frontend to attach to it.
-    fn finish_draft(
-        &mut self,
-        project_id: ProjectId,
-        used: &LastUsed,
-        created: Result<Thread, String>,
-    ) {
-        let result = created.and_then(|thread| {
-            let saved = self
-                .store
-                .delete_draft(project_id)
-                .and_then(|()| self.store.record_last_used(project_id, used, now_ms()));
-            let mut app = self.state.write();
-            let sessions = &mut app.sessions;
-            let project = sessions
-                .projects
-                .iter_mut()
-                .find(|project| project.id == project_id)
-                .ok_or_else(|| NEW_SESSION_UNSAVED.to_owned())?;
-            let session = thread.session();
-            project.draft = None;
-            project.threads.insert(0, thread);
-            if sessions.cursor == Some(SidebarItem::Draft(project_id)) {
-                sessions.cursor = session.map(SidebarItem::Session);
-                sessions.attach = session;
-            }
-            saved.map_err(|_report| SAVE_FAILED.to_owned())
-        });
-        self.end_start(result);
-    }
-
-    /// Starts a thread from group `id`'s draft with its resolved settings: a
-    /// Feature group not yet started in a new worktree of its project on the
-    /// branch named after it, refused while that branch exists; any other
-    /// group in its directory, a Feature group on the branch checked out there.
-    async fn start_group_draft(&mut self, id: GroupId) {
-        let found = self
-            .state
-            .read()
-            .sessions
-            .projects
-            .iter()
-            .find_map(|project| {
-                let group = project.groups.iter().find(|group| group.id == id)?;
-                let (harness, model, permission) = group.draft_settings()?;
-                Some((
-                    project.id,
-                    project.root.clone(),
-                    project.title.clone(),
-                    group.clone(),
-                    harness.clone(),
-                    SessionOptions {
-                        model: model.map(str::to_owned),
-                        permission_mode: permission.map(str::to_owned),
-                    },
-                ))
-            });
-        let Some((project, root, title, group, harness, options)) = found else {
-            return self.end_start(Err("the draft is gone".to_owned()));
-        };
-        let (cwd, branch, made) = match (group.kind, group.dir) {
-            (GroupKind::Feature, None) => {
-                let branch = group.branch.unwrap_or(group.name);
-                if self.services.git.branch_exists(&root, &branch) {
-                    return self.end_start(Err(on_disk(GroupKind::Feature, &branch, &title)));
-                }
-                match self.add_worktree(&root, None, Some(&branch)) {
-                    Ok(made) => (made.path.clone(), Some(branch), Some(made)),
-                    Err(report) => return self.end_start(Err(git_reason(&report))),
-                }
-            }
-            (kind, Some(dir)) if dir.is_dir() => {
-                let branch = match kind {
-                    GroupKind::Feature => current_branch(&self.services.git, &dir),
-                    GroupKind::Research | GroupKind::Learn => None,
-                };
-                (dir, branch, None)
-            }
-            (_, dir) => {
-                let dir = dir.unwrap_or_default();
-                return self.end_start(Err(format!("folder no longer exists: {}", dir.display())));
-            }
-        };
-        let pending = PendingStart {
-            kind: StartKind::Group {
-                project,
-                group: id,
-                from: Some(SidebarItem::GroupDraft(id)),
-            },
-            cwd,
-            branch,
-            made,
-            options,
-            harness,
-        };
-        self.start(pending, true).await;
-    }
-
-    /// Adds group `group_id`'s thread `created`, first in its project: its
-    /// first thread replaces the draft, in `cwd` (a Feature group's directory
-    /// from now on). If the cursor is still on `from`, selects the thread and
-    /// asks the frontend to attach, in the same state write. Doesn't record
-    /// last-used settings.
-    fn finish_group_start(
-        &mut self,
-        project_id: ProjectId,
-        group_id: GroupId,
-        from: Option<SidebarItem>,
-        cwd: &Path,
-        created: Result<Thread, String>,
-    ) {
-        let result = created.and_then(|thread| {
-            let saved = match self.groups.iter_mut().find(|row| row.id == group_id) {
-                Some(row) => {
-                    row.dir.get_or_insert_with(|| cwd.to_owned());
-                    row.draft = None;
-                    self.store
-                        .save_group(row)
-                        .map_err(|_report| SAVE_FAILED.to_owned())
-                }
-                None => Err(NEW_SESSION_UNSAVED.to_owned()),
-            };
-            let mut app = self.state.write();
-            let sessions = &mut app.sessions;
-            let project = sessions
-                .projects
-                .iter_mut()
-                .find(|project| project.id == project_id)
-                .ok_or_else(|| NEW_SESSION_UNSAVED.to_owned())?;
-            if let Some(group) = project.groups.iter_mut().find(|group| group.id == group_id) {
-                group.dir.get_or_insert_with(|| cwd.to_owned());
-                group.draft = None;
-            }
-            let session = thread.session();
-            project.threads.insert(0, thread);
-            if sessions.cursor == from {
-                sessions.cursor = session.map(SidebarItem::Session);
-                sessions.attach = session;
-            }
-            saved
-        });
-        self.end_start(result);
-    }
-
-    /// Ends a session start: stops showing it as starting, unless another
-    /// start still waits for trust, and shows `result`'s error, or clears the
-    /// error and polls the new session now.
+    /// Ends a session start: stops showing it as starting, and shows
+    /// `result`'s error, or clears the error and polls the new session now.
     fn end_start(&self, result: Result<(), String>) {
         let succeeded = result.is_ok();
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
-            sessions.starting = self.pending.is_some();
+            sessions.starting = false;
             sessions.error = result.err();
         }
         (self.wake)();
@@ -2087,68 +1237,243 @@ impl SessionsActor {
         }
     }
 
-    /// Moves a prompt-less thread to another workspace: prepares it, then
-    /// starts the thread's session there.
-    async fn move_thread(&mut self, id: ThreadId, to: Workspace) {
-        match self.prepare_move(id, to).await {
-            Ok(pending) => self.start(pending, true).await,
-            Err(error) => self.end_start(Err(error)),
+    /// Makes a session of project `id` in `workspace` with one tab running a
+    /// shell, selects it and asks the frontend to attach it. The checkout or
+    /// an existing worktree must still be a folder; a new worktree is made
+    /// from its base (fetched from origin first, see `add_worktree`); the
+    /// Incognito project's folder is made first. On failure the reason
+    /// shows, and a worktree orb made for it is removed with its branch.
+    fn new_session(&mut self, id: ProjectId, workspace: Workspace) {
+        let Some((root, kind)) = self.project_of(id) else {
+            return self.end_start(Err("the project is gone".to_owned()));
+        };
+        if kind == ProjectKind::Incognito && fs::create_dir_all(&root).is_err() {
+            return self.end_start(Err(FOLDER_UNMADE.to_owned()));
+        }
+        let (dir, made) = match self.reach(&root, workspace) {
+            Ok(reached) => reached,
+            Err(error) => return self.end_start(Err(error)),
+        };
+        let branch = self.branch_of(&dir, made.as_ref());
+        let result = self.save_session(id, session_kind(kind), &dir, branch);
+        if result.is_err()
+            && let Some(made) = &made
+        {
+            self.remove_made(made);
+        }
+        self.end_start(result);
+    }
+
+    /// Saves a new `kind` session of project `project` in `dir` on `branch`
+    /// with one tab of one shell pane, shows it, selects it and asks the
+    /// frontend to attach it. The error is the mode-line text.
+    fn save_session(
+        &mut self,
+        project: ProjectId,
+        kind: SessionKind,
+        dir: &Path,
+        branch: Option<String>,
+    ) -> Result<(), String> {
+        let now = now_ms();
+        let (id, pane) = self
+            .store
+            .insert_session(project, kind, dir, branch.as_deref(), now)
+            .map_err(|_report| NEW_SESSION_UNSAVED.to_owned())?;
+        let row = SessionRow {
+            id,
+            project_id: project,
+            kind,
+            name: None,
+            branch,
+            created_at: now,
+            dir: dir.to_owned(),
+            active_tab: 0,
+            pinned_at: None,
+            settled_override: None,
+            settled_at: None,
+            unsettled_at: None,
+            last_activity_at: now,
+        };
+        let pane = PaneRow {
+            id: pane,
+            session_id: id,
+            cwd: dir.to_owned(),
+            zmx_name: None,
+            zmx_dir: None,
+            resume: None,
+            migrated_bg: None,
+            name: None,
+        };
+        let entry = pane_entry(&self.services, &self.orb_root, &pane);
+        {
+            let mut app = self.state.write();
+            app.layouts.insert(id, SessionLayout::of(entry));
+            let sessions = &mut app.sessions;
+            sessions.sessions.push(show_session(&row));
+            sessions.cursor = Some(SidebarItem::Session(id));
+            sessions.attach = Some(id);
+        }
+        self.panes.insert(pane.id, pane);
+        self.sessions.insert(id, row);
+        Ok(())
+    }
+
+    /// Project `id`'s root and kind, if it still exists.
+    fn project_of(&self, id: ProjectId) -> Option<(PathBuf, ProjectKind)> {
+        self.state
+            .read()
+            .sessions
+            .project(id)
+            .map(|project| (project.root.clone(), project.kind))
+    }
+
+    /// Where `to` is for a session of the project rooted at `root`: the
+    /// checkout or an existing worktree, which must still be a folder, or a
+    /// new worktree made from its base (fetched from origin first, see
+    /// `add_worktree`), with the worktree orb made. The error is the
+    /// mode-line text.
+    fn reach(&self, root: &Path, to: Workspace) -> Result<(PathBuf, Option<MadeWorktree>), String> {
+        match to {
+            Workspace::Checkout if root.is_dir() => Ok((root.to_owned(), None)),
+            Workspace::Checkout => Err(format!(
+                "project folder no longer exists: {}",
+                root.display()
+            )),
+            Workspace::Existing(path) if path.is_dir() => Ok((path, None)),
+            Workspace::Existing(path) => {
+                Err(format!("worktree no longer exists: {}", path.display()))
+            }
+            Workspace::NewWorktree { base } => self
+                .add_worktree(root, Some(&base), None)
+                .map(|made| (made.path.clone(), Some(made)))
+                .map_err(|report| git_reason(&report)),
         }
     }
 
-    /// Checks again that thread `id` has had no prompt, then gets the
-    /// workspace ready: an existing directory, or a new worktree of the
-    /// project, made from its default branch (fetched first from `origin` when
-    /// there is one). The session starts over with the thread's model and
-    /// permission.
-    async fn prepare_move(&mut self, id: ThreadId, to: Workspace) -> Result<PendingStart, String> {
-        self.sync().await.map_err(|report| reason(&report))?;
-        let row = self
-            .rows
-            .iter()
-            .find(|row| row.id == id)
-            .ok_or_else(|| "the thread is gone".to_owned())?;
-        let root = self
-            .project_root(row.project_id)
-            .ok_or_else(|| "the thread's project is gone".to_owned())?;
-        let busy = self.status(id).is_some_and(ThreadStatus::in_progress);
-        if row.transcript_path.is_some() || busy {
-            let workspace = if row.cwd == root {
+    /// The branch a session in `dir` is on: the one orb `made` there, else
+    /// the one checked out, if git can tell.
+    fn branch_of(&self, dir: &Path, made: Option<&MadeWorktree>) -> Option<String> {
+        made.map_or_else(
+            || current_branch(&self.services.git, dir),
+            |made| Some(made.branch.clone()),
+        )
+    }
+
+    /// Moves session `id`, which has had no agent turn, to `to`: the
+    /// checkout, an existing worktree, or a new one made from its base. Saves
+    /// the session and its panes at the new directory, kills every pane,
+    /// unbinds the threads in them and clears their resume commands, and
+    /// points the layout at the new directory. The worktree it left is
+    /// removed with its branch when orb made it and no other session uses it
+    /// (git refuses one with changes). However it ends, the frontend is
+    /// asked to attach the session again, which starts a fresh shell in each
+    /// pane; a session that has had a turn, or a target that can't be
+    /// reached, stays where it was with the reason shown.
+    fn change_workspace(&mut self, id: SessionId, to: Workspace) {
+        let result = self.move_session(id, to);
+        self.state.write().sessions.attach = Some(id);
+        self.end_start(result);
+    }
+
+    /// The work of [`Self::change_workspace`], up to asking for the attach.
+    fn move_session(&mut self, id: SessionId, to: Workspace) -> Result<(), String> {
+        let (project, old_dir, old_branch) = self
+            .sessions
+            .get(&id)
+            .map(|row| (row.project_id, row.dir.clone(), row.branch.clone()))
+            .ok_or_else(|| "the session is gone".to_owned())?;
+        let (root, _) = self
+            .project_of(project)
+            .ok_or_else(|| "the project is gone".to_owned())?;
+        if self.state.read().sessions.turned(id) {
+            let workspace = if old_dir == root {
                 "Local checkout"
             } else {
                 "Worktree"
             };
             return Err(format!("Workspace locked · {workspace}"));
         }
-        let kind = StartKind::Move {
-            thread: id,
-            old_short_id: row.short_id.clone(),
-            old_cwd: row.cwd.clone(),
-        };
-        let options = SessionOptions {
-            model: row.model.clone(),
-            permission_mode: row.permission_mode.clone(),
-        };
-        let (cwd, made) = match to {
-            Workspace::Existing(path) if path.is_dir() => (path, None),
-            Workspace::Existing(path) => {
-                return Err(format!("worktree no longer exists: {}", path.display()));
+        let (dir, made) = self.reach(&root, to)?;
+        let branch = self.branch_of(&dir, made.as_ref());
+        if self
+            .store
+            .move_session(id, &dir, branch.as_deref())
+            .is_err()
+        {
+            if let Some(made) = &made {
+                self.remove_made(made);
             }
-            Workspace::NewWorktree => {
-                let made = self
-                    .add_worktree(&root, None, None)
-                    .map_err(|report| git_reason(&report))?;
-                (made.path.clone(), Some(made))
+            return Err(SAVE_FAILED.to_owned());
+        }
+        self.kill_panes(id);
+        let panes: Vec<PaneId> = self
+            .panes
+            .values()
+            .filter(|pane| pane.session_id == id)
+            .map(|pane| pane.id)
+            .collect();
+        let mut saved = Ok(());
+        let mut unbound = Vec::new();
+        for &pane in &panes {
+            for row in self.rows.iter_mut().filter(|row| row.pane_id == Some(pane)) {
+                row.pane_id = None;
+                unbound.push(row.id);
+                if self.store.save_thread(row).is_err() {
+                    saved = Err(SAVE_FAILED.to_owned());
+                }
             }
-        };
-        Ok(PendingStart {
-            kind,
-            cwd,
-            branch: made.as_ref().map(|made| made.branch.clone()),
-            made,
-            options,
-            harness: row.harness.clone(),
-        })
+            if self.set_resume(pane, None).is_err() {
+                saved = Err(SAVE_FAILED.to_owned());
+            }
+            if let Some(row) = self.panes.get_mut(&pane) {
+                row.cwd.clone_from(&dir);
+            }
+        }
+        let shown = self.sessions.get_mut(&id).map(|row| {
+            row.dir.clone_from(&dir);
+            row.branch.clone_from(&branch);
+            show_session(row)
+        });
+        {
+            let mut app = self.state.write();
+            app.layouts.move_session(id, &dir);
+            let sessions = &mut app.sessions;
+            if let (Some(shown), Some(session)) = (
+                shown,
+                sessions
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id),
+            ) {
+                *session = shown;
+            }
+            for row in self.rows.iter().filter(|row| unbound.contains(&row.id)) {
+                if let Some(thread) = thread_mut(sessions, row.id) {
+                    let status = thread.status;
+                    show(thread, row, status, pane_launch(row, &self.panes));
+                }
+            }
+        }
+        self.remove_left(&root, &old_dir, old_branch);
+        saved
+    }
+
+    /// Removes the orb worktree at `old_dir`, a session just left, and its
+    /// branch (the session's `old_branch`, else orb's `orb/<hex>` for it),
+    /// unless another session still uses it; git refuses one with changes,
+    /// or a branch that isn't merged.
+    fn remove_left(&self, root: &Path, old_dir: &Path, old_branch: Option<String>) {
+        if !is_orb_worktree(&self.worktrees_root, old_dir)
+            || self.sessions.values().any(|row| row.dir == old_dir)
+        {
+            return;
+        }
+        let git = &self.services.git;
+        if git.remove_worktree(root, old_dir, false).is_ok()
+            && let Some(branch) = old_branch.or_else(|| hex_branch(&self.worktrees_root, old_dir))
+        {
+            let _ = git.delete_branch(root, &branch, false);
+        }
     }
 
     /// Makes a new worktree of the repository at `repo` on the new branch
@@ -2242,7 +1567,7 @@ impl SessionsActor {
 
     /// Session `id`'s project root, its directory, and the branch its
     /// worktree was on: the session's recorded branch, else one of its
-    /// threads' (its Feature group's branch, else its own), else orb's
+    /// threads', else orb's
     /// `orb/<hex>` for the directory.
     fn restore_target(&self, id: SessionId) -> Option<(PathBuf, PathBuf, Option<String>)> {
         let session = self.sessions.get(&id)?;
@@ -2254,13 +1579,7 @@ impl SessionsActor {
                     .and_then(|pane| self.panes.get(&pane))
                     .is_some_and(|pane| pane.session_id == id)
             })
-            .find_map(|row| {
-                row.group_id
-                    .and_then(|group| self.groups.iter().find(|g| g.id == group))
-                    .filter(|group| group.kind == GroupKind::Feature)
-                    .and_then(|group| group.branch.clone())
-                    .or_else(|| row.branch.clone())
-            });
+            .find_map(|row| row.branch.clone());
         let branch = session
             .branch
             .clone()
@@ -2271,92 +1590,6 @@ impl SessionsActor {
             session.dir.clone(),
             branch,
         ))
-    }
-
-    /// Finishes a move once the new session runs: removes the old session,
-    /// saves and shows the thread in its new workspace, and removes the orb
-    /// worktree it left if no thread uses it and it has no changes.
-    async fn finish_move(
-        &mut self,
-        moved: Moved,
-        harness: &HarnessId,
-        old_short_id: &str,
-        old_cwd: &Path,
-    ) {
-        let removed = match self.harness(harness) {
-            Ok(harness) => harness.remove(old_short_id).await.map_err(|r| reason(&r)),
-            Err(error) => Err(error),
-        };
-        let branch = moved.branch.or_else(|| {
-            self.rows
-                .iter()
-                .find(|row| row.id != moved.thread && row.cwd == moved.cwd)
-                .and_then(|row| row.branch.clone())
-        });
-        let Some(row) = self.rows.iter_mut().find(|row| row.id == moved.thread) else {
-            return self.end_start(Err(NEW_SESSION_UNSAVED.to_owned()));
-        };
-        let old_branch = row.branch.take();
-        *row = ThreadRow {
-            short_id: moved.short_id,
-            cwd: moved.cwd,
-            session_id: None,
-            transcript_path: None,
-            transcript_offset: 0,
-            title: None,
-            custom_title: None,
-            ai_titled: false,
-            branch,
-            ..row.clone()
-        };
-        let saved = self.store.save_thread(row);
-        let shown = unpolled(&self.services, row, &self.panes);
-        let project_id = row.project_id;
-        if let Some(thread) = thread_mut(&mut self.state.write().sessions, moved.thread) {
-            *thread = shown;
-        }
-        if is_orb_worktree(&self.worktrees_root, old_cwd)
-            && !self.rows.iter().any(|row| row.cwd == old_cwd)
-            && let Some(root) = self.project_root(project_id)
-        {
-            let git = &self.services.git;
-            if git.remove_worktree(&root, old_cwd, false).is_ok()
-                && let Some(old_branch) = old_branch
-            {
-                let _ = git.delete_branch(&root, &old_branch, false);
-            }
-        }
-        let result = match (saved, removed) {
-            (Err(_), _) => Err(SAVE_FAILED.to_owned()),
-            (Ok(()), Err(error)) => Err(error),
-            (Ok(()), Ok(())) => Ok(()),
-        };
-        self.end_start(result);
-    }
-
-    /// Checks `git_ref` out in group `id`'s worktree, which moves every
-    /// thread in it.
-    fn check_out_group(&mut self, id: GroupId, git_ref: &GitRef) {
-        let dir = self
-            .groups
-            .iter()
-            .find(|row| row.id == id)
-            .and_then(|row| row.dir.clone());
-        if let Some(dir) = dir {
-            let _ = self.check_out_in(&dir, git_ref);
-        }
-    }
-
-    /// Checks `git_ref` out in thread `id`'s directory.
-    fn check_out(&mut self, id: ThreadId, git_ref: &GitRef) {
-        let cwd = self
-            .rows
-            .iter()
-            .find(|row| row.id == id)
-            .map(|row| row.cwd.clone());
-        if let Some(cwd) = cwd {
-            let _ = self.check_out_in(&cwd, git_ref);
-        }
     }
 
     /// Checks `git_ref` out in `cwd` and shows the branch there. Refused while
@@ -2379,44 +1612,49 @@ impl SessionsActor {
         checked_out
     }
 
-    /// Checks the default branch out in the project's root and moves the
-    /// prompt-less thread `id` there from its worktree. Refused while a turn
-    /// is underway in the root.
-    async fn switch_to_root(&mut self, id: ThreadId, git_ref: &GitRef) {
+    /// Checks `git_ref` out for session `id`: in its directory, or with
+    /// `to_root` in its project's checkout, moving the session there.
+    fn switch_branch(&mut self, id: SessionId, git_ref: &GitRef, to_root: bool) {
+        match self.sessions.get(&id).map(|row| row.dir.clone()) {
+            _ if to_root => self.switch_to_root(id, git_ref),
+            Some(dir) => {
+                let _ = self.check_out_in(&dir, git_ref);
+            }
+            None => {}
+        }
+    }
+
+    /// Checks `git_ref` out in the project's checkout and moves session
+    /// `id`, which has had no agent turn, there from its worktree. Refused
+    /// while a turn is underway in the checkout.
+    fn switch_to_root(&mut self, id: SessionId, git_ref: &GitRef) {
         let root = self
-            .rows
-            .iter()
-            .find(|row| row.id == id)
+            .sessions
+            .get(&id)
             .and_then(|row| self.project_root(row.project_id));
         let Some(root) = root else {
-            return self.end_start(Err("the thread is gone".to_owned()));
+            return self.end_start(Err("the session is gone".to_owned()));
         };
-        let pending = match self
-            .prepare_move(id, Workspace::Existing(root.clone()))
-            .await
-        {
-            Ok(pending) => pending,
-            Err(error) => return self.end_start(Err(error)),
-        };
+        if self.state.read().sessions.turned(id) {
+            return self.change_workspace(id, Workspace::Checkout);
+        }
         if self.busy_in(&root) {
+            self.state.write().sessions.attach = Some(id);
             return self.end_start(Err(BUSY_DIRECTORY.to_owned()));
         }
         match self.services.git.checkout(&root, git_ref) {
             Ok(local) => {
                 let _ = self.show_branch(&root, &local);
-                let pending = PendingStart {
-                    branch: Some(local),
-                    ..pending
-                };
-                self.start(pending, true).await;
+                self.change_workspace(id, Workspace::Checkout);
             }
-            Err(report) => self.end_start(Err(git_reason(&report))),
+            Err(report) => {
+                self.state.write().sessions.attach = Some(id);
+                self.end_start(Err(git_reason(&report)));
+            }
         }
     }
 
-    /// Saves and shows `branch` on every thread in `cwd`, on the group whose
-    /// worktree it is, and on the draft there: a local draft of a project
-    /// rooted there, or one in that worktree.
+    /// Saves and shows `branch` on every thread and every session in `cwd`.
     fn show_branch(&mut self, cwd: &Path, branch: &str) -> Result<(), String> {
         let mut saved = Ok(());
         let mut app = self.state.write();
@@ -2427,46 +1665,16 @@ impl SessionsActor {
             }
             if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
                 let status = thread.status;
-                show(
-                    thread,
-                    row,
-                    status,
-                    pane_launch(&self.services, row, &self.panes),
-                );
+                show(thread, row, status, pane_launch(row, &self.panes));
             }
         }
-        for row in self
-            .groups
-            .iter_mut()
-            .filter(|row| row.dir.as_deref() == Some(cwd))
-        {
+        for row in self.sessions.values_mut().filter(|row| row.dir == cwd) {
             row.branch = Some(branch.to_owned());
-            if self.store.save_group(row).is_err() {
+            if self.store.save_session(row).is_err() {
                 saved = Err(SAVE_FAILED.to_owned());
             }
-            if let Some(shown) = app.sessions.group_mut(row.id) {
-                *shown = group(row, &self.rows);
-            }
-        }
-        for project in &mut app.sessions.projects {
-            let root = project.root.as_path();
-            if let Some(draft) = project
-                .draft
-                .as_mut()
-                .filter(|draft| match &draft.workspace {
-                    DraftWorkspace::Local => root == cwd,
-                    DraftWorkspace::Existing(path) => path == cwd,
-                    DraftWorkspace::NewWorktree => false,
-                })
-            {
-                draft.branch = Some(branch.to_owned());
-                if self
-                    .store
-                    .save_draft(&draft_row(project.id, draft))
-                    .is_err()
-                {
-                    saved = Err(SAVE_FAILED.to_owned());
-                }
+            if let Some(shown) = app.sessions.sessions.iter_mut().find(|s| s.id == row.id) {
+                *shown = show_session(row);
             }
         }
         saved
@@ -2479,117 +1687,6 @@ impl SessionsActor {
             .sessions
             .threads()
             .any(|thread| thread.cwd == cwd && thread.status.in_progress())
-    }
-
-    /// Saves a session just started in `harness` in `cwd` on `branch` with
-    /// `options` under the project, in `group` if any.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "each is one field of the new thread's row"
-    )]
-    fn save_new(
-        &mut self,
-        project_id: ProjectId,
-        cwd: &Path,
-        short_id: &str,
-        branch: Option<String>,
-        options: &SessionOptions,
-        group: Option<GroupId>,
-        harness: &HarnessId,
-    ) -> Result<Thread, String> {
-        let now = now_ms();
-        let new = NewThread {
-            project_id,
-            short_id: short_id.to_owned(),
-            cwd: cwd.to_owned(),
-            created_at: now,
-            model: options.model.clone(),
-            permission_mode: options.permission_mode.clone(),
-            group_id: group,
-            harness: harness.clone(),
-            zmx: self
-                .services
-                .harnesses
-                .get(harness)
-                .and_then(|harness| harness.zmx_session(short_id)),
-        };
-        let Ok(inserted) = self.store.insert_thread(&new) else {
-            return Err(NEW_SESSION_UNSAVED.to_owned());
-        };
-        let pane = PaneRow {
-            id: inserted.pane,
-            session_id: inserted.session,
-            cwd: new.cwd.clone(),
-            zmx_name: new.zmx.as_ref().map(|zmx| zmx.name.clone()),
-            zmx_dir: new.zmx.as_ref().map(|zmx| zmx.dir.clone()),
-            resume: None,
-            migrated_bg: None,
-            name: None,
-        };
-        let entry = pane_entry(&self.services, &self.orb_root, &pane);
-        {
-            let mut app = self.state.write();
-            let kind = app
-                .sessions
-                .projects
-                .iter()
-                .find(|project| project.id == project_id)
-                .map_or(SessionKind::Plain, |project| session_kind(project.kind));
-            let session = SessionRow {
-                id: inserted.session,
-                project_id,
-                kind,
-                name: None,
-                branch: None,
-                created_at: now,
-                dir: new.cwd.clone(),
-                active_tab: 0,
-                pinned_at: None,
-                settled_override: None,
-                settled_at: None,
-                unsettled_at: None,
-                last_activity_at: now,
-            };
-            app.layouts
-                .insert(inserted.session, SessionLayout::of(entry));
-            app.sessions.sessions.push(show_session(&session));
-            self.sessions.insert(inserted.session, session);
-        }
-        self.panes.insert(pane.id, pane);
-        let row = ThreadRow {
-            id: inserted.thread,
-            project_id,
-            short_id: new.short_id,
-            session_id: None,
-            title: None,
-            custom_title: None,
-            cwd: new.cwd,
-            transcript_path: None,
-            transcript_offset: 0,
-            created_at: now,
-            turn_started_at: None,
-            branch,
-            pinned_at: None,
-            settled_override: None,
-            settled_at: None,
-            unsettled_at: None,
-            last_activity_at: now,
-            last_visited_at: now,
-            ai_titled: false,
-            model: new.model,
-            permission_mode: new.permission_mode,
-            renamed_title: None,
-            group_id: new.group_id,
-            harness: new.harness,
-            pane_id: Some(inserted.pane),
-            orb_session: Some(inserted.session),
-        };
-        if row.branch.is_some() && self.store.save_thread(&row).is_err() {
-            return Err(NEW_SESSION_UNSAVED.to_owned());
-        }
-        let thread = unpolled(&self.services, &row, &self.panes);
-        self.rows.push(row);
-        Ok(thread)
     }
 
     /// Saves `root` as a project, unless it already is one, and shows it; a
@@ -2610,7 +1707,8 @@ impl SessionsActor {
             match added {
                 Ok(id) => {
                     sessions.error = None;
-                    show_project(sessions, id, title, root, ProjectKind::Normal, now);
+                    let repo = self.services.git.project_path(&root).is_some();
+                    show_project(sessions, id, title, root, ProjectKind::Normal, repo, now);
                 }
                 Err(error) => sessions.error = Some(error),
             }
@@ -2618,184 +1716,103 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Creates a `kind` group named `name` with a draft, and selects the
-    /// draft. Research/Learn: orb's project for the kind (added or restored),
-    /// then the folder `<orb_root>/<kind>/<name>` copied from
-    /// `<orb_root>/templates/<kind>`, seeded first when missing. Feature:
-    /// refused while the branch `name` exists. Any refusal or failure shows on
-    /// the mode line and leaves no group; a folder this call made is removed
-    /// again. The name box that asked closes once the group is made, and
-    /// otherwise stays open with its text. A made group outside the project
-    /// filter clears the filter, and saves that.
-    fn create_group(&mut self, kind: GroupKind, project: Option<ProjectId>, name: String) {
+    /// Makes a `kind` session named `name` in orb's own folder for the kind:
+    /// adds or restores its project, copies `<orb_root>/templates/<kind>`
+    /// (seeded when missing) to `<orb_root>/<kind>/<name>`, refused when that
+    /// folder exists, and saves a session of that kind there with one shell,
+    /// selected and attached. A made session outside the project filter
+    /// clears it. The name box closes once the session is made and otherwise
+    /// stays open with the reason on the mode line; a folder this call made
+    /// is removed again.
+    fn new_folder_session(&mut self, kind: FolderKind, name: &str) {
         let now = now_ms();
-        let own = own_folder(kind);
-        let resolved = match (own, project) {
-            (Some((project_kind, dir, title)), _) => {
-                let root = self.orb_root.join(dir);
-                fs::create_dir_all(&root)
-                    .map_err(|_error| FOLDER_UNMADE.to_owned())
-                    .and_then(|()| {
-                        self.store
-                            .add_project(&root, title, project_kind, now)
-                            .map_err(|_report| SAVE_FAILED.to_owned())
-                    })
-                    .map(|id| (id, root, title.to_owned()))
+        let (project_kind, kind_dir, title) = own_folder(kind);
+        let root = self.orb_root.join(kind_dir);
+        let project = fs::create_dir_all(&root)
+            .map_err(|_error| FOLDER_UNMADE.to_owned())
+            .and_then(|()| {
+                self.store
+                    .add_project(&root, title, project_kind, now)
+                    .map_err(|_report| SAVE_FAILED.to_owned())
+            });
+        if let Ok(id) = project {
+            let mut app = self.state.write();
+            show_project(
+                &mut app.sessions,
+                id,
+                title.to_owned(),
+                root.clone(),
+                project_kind,
+                false,
+                now,
+            );
+        }
+        let made = project.and_then(|id| {
+            let dir = self.make_folder(kind, kind_dir, &root, name)?;
+            let saved = self.save_session(id, session_kind(project_kind), &dir, None);
+            if saved.is_err() {
+                let _ = fs::remove_dir_all(&dir);
             }
-            (None, Some(id)) => self
-                .state
-                .read()
-                .sessions
-                .projects
-                .iter()
-                .find(|p| p.id == id)
-                .map(|p| (id, p.root.clone(), p.title.clone()))
-                .ok_or_else(|| "the project is gone".to_owned()),
-            (None, None) => Err("the project is gone".to_owned()),
-        };
-        let created = resolved
-            .as_ref()
-            .map_err(Clone::clone)
-            .and_then(|(id, root, title)| self.new_group(kind, *id, root, title, name, now));
+            saved.map(|()| id)
+        });
         let unfiltered = {
             let mut app = self.state.write();
             let app = &mut *app;
+            answer_name_box(app, made.is_ok());
             let sessions = &mut app.sessions;
-            if let (Some((project_kind, ..)), Ok((id, root, title))) = (own, &resolved) {
-                show_project(
-                    sessions,
-                    *id,
-                    title.clone(),
-                    root.clone(),
-                    project_kind,
-                    now,
-                );
+            let outside = made
+                .as_ref()
+                .is_ok_and(|&id| sessions.filter.is_some_and(|filter| filter != id));
+            if outside {
+                sessions.filter = None;
             }
-            let made = created.is_ok();
-            let unfiltered = match (created, resolved) {
-                (Ok(group), Ok((id, ..))) => {
-                    sessions.cursor = Some(SidebarItem::GroupDraft(group.id));
-                    sessions.error = None;
-                    if let Some(p) = sessions.projects.iter_mut().find(|p| p.id == id) {
-                        p.groups.push(group);
-                    }
-                    let outside = sessions.filter.is_some_and(|filter| filter != id);
-                    if outside {
-                        sessions.filter = None;
-                    }
-                    outside
-                }
-                (Ok(_), Err(_)) => false,
-                (Err(error), _) => {
-                    sessions.error = Some(error);
-                    false
-                }
-            };
-            answer_name_box(app, made);
-            unfiltered
+            outside
         };
         if unfiltered {
             self.save_ui();
         }
-        (self.wake)();
+        self.end_start(made.map(|_| ()));
     }
 
-    /// Saves a `kind` group `name` in `project` (rooted at `root`, titled
-    /// `title`) with its folder, if it has one, and returns how it shows.
-    /// The error is the mode-line text.
-    fn new_group(
-        &mut self,
-        kind: GroupKind,
-        project: ProjectId,
+    /// Copies `kind`'s template (`<orb_root>/templates/<kind_dir>`, seeded
+    /// when missing) to `root/name` and returns that folder; refused when it
+    /// exists. A folder this call made is removed again on failure. The
+    /// error is the mode-line text.
+    fn make_folder(
+        &self,
+        kind: FolderKind,
+        kind_dir: &str,
         root: &Path,
-        title: &str,
-        name: String,
-        now: i64,
-    ) -> Result<Group, String> {
-        let taken = self
-            .groups
-            .iter()
-            .any(|row| row.project_id == project && row.kind == kind && row.name == name);
-        if taken {
-            return Err(group_exists(&name));
+        name: &str,
+    ) -> Result<PathBuf, String> {
+        let dir = root.join(name);
+        if dir.exists() {
+            return Err(folder_exists(kind, name));
         }
-        let (dir, branch) = match own_folder(kind) {
-            None if self.services.git.branch_exists(root, &name) => {
-                return Err(on_disk(kind, &name, title));
-            }
-            None => (None, Some(name.clone())),
-            Some((_, kind_dir, _)) => {
-                let dir = root.join(&name);
-                if dir.exists() {
-                    return Err(on_disk(kind, &name, title));
-                }
-                let template = self.orb_root.join("templates").join(kind_dir);
-                let seeded = if template.exists() {
-                    Ok(())
-                } else {
-                    template::seed(&template, kind)
-                };
-                let copied = seeded.and_then(|()| template::copy(&template, &dir));
-                if copied.is_err() {
-                    let _ = fs::remove_dir_all(&dir);
-                    return Err(FOLDER_UNMADE.to_owned());
-                }
-                (Some(dir), None)
-            }
+        let template = self.orb_root.join("templates").join(kind_dir);
+        let seeded = if template.exists() {
+            Ok(())
+        } else {
+            template::seed(&template, kind)
         };
-        let (harness, draft_model, draft_permission_mode) =
-            self.last_settings(self.store.last_used(project).ok().flatten());
-        let inserted = self.store.insert_group(&NewGroup {
-            project_id: project,
-            kind,
-            name: name.clone(),
-            dir: dir.clone(),
-            branch: branch.clone(),
-            created_at: now,
-            draft_model: draft_model.clone(),
-            draft_permission_mode: draft_permission_mode.clone(),
-            harness: harness.clone(),
-        });
-        let Ok(id) = inserted else {
-            if let Some(dir) = &dir {
-                let _ = fs::remove_dir_all(dir);
+        match seeded.and_then(|()| template::copy(&template, &dir)) {
+            Ok(()) => Ok(dir),
+            Err(_) => {
+                let _ = fs::remove_dir_all(&dir);
+                Err(FOLDER_UNMADE.to_owned())
             }
-            return Err(SAVE_FAILED.to_owned());
-        };
-        let row = GroupRow {
-            id,
-            project_id: project,
-            kind,
-            name,
-            dir,
-            branch,
-            created_at: now,
-            pinned_at: None,
-            settled_override: None,
-            settled_at: None,
-            unsettled_at: None,
-            draft_model,
-            draft_permission_mode,
-            harness,
-            draft: None,
-        };
-        let shown = group(&row, &self.rows);
-        self.groups.push(row);
-        Ok(shown)
+        }
     }
 
-    /// Removes project `id` from `␣n` and the project filter and discards its
-    /// draft, once the store has; its threads stay.
+    /// Removes project `id` from `␣n` and the project filter once the store
+    /// has; its sessions stay.
     fn remove_project(&mut self, id: ProjectId) {
         let removed = self.store.remove_project(id, now_ms());
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
             match (removed, sessions.projects.iter_mut().find(|p| p.id == id)) {
-                (Ok(()), Some(project)) => {
-                    project.removed = true;
-                    project.draft = None;
-                }
+                (Ok(()), Some(project)) => project.removed = true,
                 (Ok(()), None) => {}
                 (Err(_), _) => sessions.error = Some(SAVE_FAILED.to_owned()),
             }
@@ -2833,34 +1850,16 @@ impl SessionsActor {
     }
 
     /// Settles session `id` unless one of its agent panes has a turn
-    /// underway (a turn that started after the key press wins), then stops
-    /// its idle threads a harness runs itself and kills every pane, keeping
-    /// its tabs, layout and each pane's resume command.
-    async fn settle_session(&mut self, id: SessionId) {
-        let agents: Vec<(HarnessId, String, Option<ThreadStatus>, bool)> = self
+    /// underway (a turn that started after the key press wins), then kills
+    /// every pane, keeping its tabs, layout and each pane's resume command.
+    fn settle_session(&mut self, id: SessionId) {
+        if self
             .session_rows(id)
-            .map(|row| {
-                (
-                    row.harness.clone(),
-                    row.short_id.clone(),
-                    self.status(row.id),
-                    self.hosted.contains(&row.id),
-                )
-            })
-            .collect();
-        if agents
-            .iter()
-            .any(|(_, _, status, _)| status.is_some_and(ThreadStatus::in_progress))
+            .any(|row| self.status(row.id).is_some_and(ThreadStatus::in_progress))
         {
             return;
         }
         self.edit_session(id, settle_session_row);
-        for (harness, short_id, status, hosted) in agents {
-            if hosted && status == Some(ThreadStatus::Idle) {
-                // ponytail: stop runs on the actor (~0.7 s); spawn it if triage feels laggy.
-                self.stop(&harness, &short_id).await;
-            }
-        }
         self.kill_panes(id);
     }
 
@@ -2880,34 +1879,12 @@ impl SessionsActor {
         }
     }
 
-    /// Deletes session `id`: removes its threads a harness runs itself first
-    /// (a failure keeps the session, shown again with the reason), kills
-    /// every pane, deletes a Research or Learn folder that is orb's own and
-    /// no other session uses, then its tabs, panes, threads (ended ones
-    /// included) and row, and
-    /// forgets them. Claude transcripts, pi session files and worktrees
-    /// stay. However it ends, the session is no longer hidden as being
-    /// deleted.
-    async fn delete_session(&mut self, id: SessionId) {
-        let hosted: Vec<(HarnessId, String)> = self
-            .session_rows(id)
-            .filter(|row| self.hosted.contains(&row.id))
-            .map(|row| (row.harness.clone(), row.short_id.clone()))
-            .collect();
-        for (harness, short_id) in hosted {
-            let removed = match self.harness(&harness) {
-                Ok(harness) => harness.remove(&short_id).await.map_err(|r| reason(&r)),
-                Err(_) => Ok(()),
-            };
-            if let Err(error) = removed {
-                {
-                    let mut app = self.state.write();
-                    app.sessions.deleting.remove(&id);
-                    app.sessions.error = Some(error);
-                }
-                return (self.wake)();
-            }
-        }
+    /// Deletes session `id`: kills every pane, deletes a Research or Learn
+    /// folder that is orb's own and no other session uses, then its tabs,
+    /// panes, threads (ended ones included) and row, and forgets them.
+    /// Claude transcripts, pi session files and worktrees stay. However it
+    /// ends, the session is no longer hidden as being deleted.
+    fn delete_session(&mut self, id: SessionId) {
         self.kill_panes(id);
         let cleared = self.clear_folder(id);
         let threads: Vec<ThreadId> = self
@@ -3158,12 +2135,7 @@ impl SessionsActor {
             }
             if let Some(thread) = thread_mut(sessions, id) {
                 let status = thread.status;
-                show(
-                    thread,
-                    row,
-                    status,
-                    pane_launch(&self.services, row, &self.panes),
-                );
+                show(thread, row, status, pane_launch(row, &self.panes));
             }
         }
         (self.wake)();
@@ -3188,30 +2160,6 @@ impl SessionsActor {
             }
             if let Some(shown) = sessions.sessions.iter_mut().find(|shown| shown.id == id) {
                 *shown = show_session(row);
-            }
-        }
-        (self.wake)();
-    }
-
-    /// Changes group `id`'s saved row with `change` (given the time now),
-    /// then saves and shows it. Does nothing if the group is gone.
-    fn edit_group<F>(&mut self, id: GroupId, change: F)
-    where
-        F: FnOnce(&mut GroupRow, i64),
-    {
-        let Some(row) = self.groups.iter_mut().find(|row| row.id == id) else {
-            return;
-        };
-        change(row, now_ms());
-        let saved = self.store.save_group(row);
-        {
-            let mut app = self.state.write();
-            let sessions = &mut app.sessions;
-            if saved.is_err() {
-                sessions.error = Some(SAVE_FAILED.to_owned());
-            }
-            if let Some(shown) = sessions.group_mut(id) {
-                *shown = group(row, &self.rows);
             }
         }
         (self.wake)();
@@ -3245,7 +2193,7 @@ impl SessionsActor {
         // ponytail: stops run in order on the actor (~0.7 s each), once after
         // the migration; run them concurrently if many threads ever migrate.
         for (_, short_id) in &marked {
-            let _ = claude.stop(short_id).await;
+            let _ = claude.stop_migrated(short_id).await;
         }
         let panes: Vec<PaneId> = marked.iter().map(|(pane, _)| *pane).collect();
         match self.store.clear_migrated_bg(&panes) {
@@ -3263,32 +2211,8 @@ impl SessionsActor {
         }
     }
 
-    /// Stops a session in `harness`, showing why if it can't.
-    async fn stop(&mut self, harness: &HarnessId, short_id: &str) {
-        match self.harness(harness) {
-            Ok(harness) => {
-                if let Err(report) = harness.stop(short_id).await {
-                    self.fail(&report);
-                }
-            }
-            Err(error) => {
-                self.state.write().sessions.error = Some(error);
-                (self.wake)();
-            }
-        }
-    }
-
-    /// The harness `id` names, or the mode-line text for one orb doesn't know.
-    fn harness(&self, id: &HarnessId) -> Result<Arc<dyn Harness>, String> {
-        self.services
-            .harnesses
-            .get(id)
-            .cloned()
-            .ok_or_else(|| format!("unknown harness {id}"))
-    }
-
-    /// Shows a host failure in the mode line.
-    fn fail(&self, report: &Report<SessionHostError>) {
+    /// Shows a harness failure in the mode line.
+    fn fail(&self, report: &Report<HarnessError>) {
         self.state.write().sessions.error = Some(reason(report));
         (self.wake)();
     }
@@ -3320,36 +2244,23 @@ struct Live {
     /// Each bound pane's zmx session, `None` when it isn't running. A pane
     /// whose socket dir couldn't be listed is missing.
     sessions: HashMap<PaneId, Option<ZmxEntry>>,
-    /// The status of each pane a record's process runs under.
+    /// The status of each pane an agent's process runs under.
     matched: HashMap<PaneId, ThreadStatus>,
 }
 
-/// The hosted record of session `short_id`: the live one over a stale
-/// stopped one (`--all` can list both).
-fn hosted_record<'a>(records: &'a [SessionRecord], short_id: &str) -> Option<&'a SessionRecord> {
-    records
-        .iter()
-        .filter(|record| record.short_id.as_deref() == Some(short_id))
-        .min_by_key(|record| matches!(record.status, ThreadStatus::Stopped | ThreadStatus::Failed))
-}
-
 /// What a saved thread is doing now, if this poll can tell: Gone for a
-/// harness orb doesn't know; its hosted `record`'s status; Stopped with no
-/// pane; else its pane's status (see [`pane_status`]). `None` (left as it
-/// was) when its pane's socket dir couldn't be listed.
+/// harness orb doesn't know; Stopped with no pane; else its pane's status
+/// (see [`pane_status`]). `None` (left as it was) when its pane's socket dir
+/// couldn't be listed.
 fn status_now(
     row: &ThreadRow,
     harness: Option<&Arc<dyn Harness>>,
-    record: Option<&SessionRecord>,
     live: &Live,
     reports: &HashMap<PaneId, PaneReport>,
 ) -> Option<ThreadStatus> {
     let Some(harness) = harness else {
         return Some(ThreadStatus::Gone);
     };
-    if let Some(record) = record {
-        return Some(record.status);
-    }
     let Some(pane) = row.pane_id else {
         return Some(ThreadStatus::Stopped);
     };
@@ -3360,17 +2271,6 @@ fn status_now(
         reports.get(&pane).copied(),
         live.matched.get(&pane).copied(),
     ))
-}
-
-/// A thread whose session started over in a new workspace.
-struct Moved {
-    thread: ThreadId,
-    /// The new session's id.
-    short_id: String,
-    /// The new workspace.
-    cwd: PathBuf,
-    /// The new workspace's branch, when orb made or checked it out.
-    branch: Option<String>,
 }
 
 /// Follows a polled row's activity, given its `status` now and whether a
@@ -3456,9 +2356,9 @@ fn unsettle_session_row(row: &mut SessionRow, now: i64) {
     row.settled_at = None;
 }
 
-/// Answers the name box that asked for a group, if it's still waiting: closes
-/// it once the group is `made`, else leaves it open with its text for another
-/// try.
+/// Answers the name box that asked for a new session, if it's still waiting:
+/// closes it once the session is `made`, else leaves it open with its text
+/// for another try.
 fn answer_name_box(app: &mut AppState, made: bool) {
     match (&mut app.rename, made) {
         (Some(rename), false) if rename.creating => rename.creating = false,
@@ -3481,27 +2381,16 @@ fn thread_mut(sessions: &mut Sessions, id: ThreadId) -> Option<&mut Thread> {
         .find(|thread| thread.id == id)
 }
 
-/// Brings a saved thread up to date with its record: the session id, the
-/// turn stamp, and the title and branch from any new transcript lines, read
-/// in its harness's `format`. Returns whether a scan ran and named no
-/// branch, which leaves the branch to git.
+/// Brings a saved thread up to date with `status`: the turn stamp, and the
+/// title and branch from any new transcript lines, read in its harness's
+/// `format`. Returns whether a scan ran and named no branch, which leaves
+/// the branch to git.
 fn update_row(
     row: &mut ThreadRow,
-    record: Option<&SessionRecord>,
     status: ThreadStatus,
     now_ms: i64,
     format: Option<&dyn TranscriptFormat>,
 ) -> bool {
-    if let Some(session_id) = record.and_then(|record| record.session_id.as_ref())
-        && row.session_id.as_ref() != Some(session_id)
-    {
-        // A new session (e.g. after `/clear`) writes a new transcript.
-        if row.session_id.is_some() {
-            row.transcript_path = None;
-            row.transcript_offset = 0;
-        }
-        row.session_id = Some(session_id.clone());
-    }
     row.turn_started_at = status
         .in_progress()
         .then(|| row.turn_started_at.unwrap_or(now_ms));
@@ -3641,12 +2530,12 @@ fn display_title(row: &ThreadRow) -> Option<String> {
         .or_else(|| row.title.clone())
 }
 
-/// The one-line reason a session host failure carries.
-fn reason(report: &Report<SessionHostError>) -> String {
+/// The one-line reason a harness failure carries.
+fn reason(report: &Report<HarnessError>) -> String {
     report
         .downcast_ref::<String>()
         .cloned()
-        .unwrap_or_else(|| "session command failed".to_owned())
+        .unwrap_or_else(|| "harness command failed".to_owned())
 }
 
 /// How a saved thread looks with `status`, its pane run as `pane`.
@@ -3709,86 +2598,31 @@ fn show_session(row: &SessionRow) -> Session {
     }
 }
 
-/// Whether saved jump-list row `item` still names something, shown or not:
-/// one of `sessions`, or in `projects` a project (for a draft) or a group.
-fn exists(
-    projects: &[Project],
-    sessions: &HashMap<SessionId, SessionRow>,
-    item: SidebarItem,
-) -> bool {
+/// Whether saved jump-list row `item` still names one of `sessions`, shown
+/// or not.
+fn exists(sessions: &HashMap<SessionId, SessionRow>, item: SidebarItem) -> bool {
     match item {
         SidebarItem::Session(id) => sessions.contains_key(&id),
-        SidebarItem::Draft(id) => projects.iter().any(|project| project.id == id),
-        SidebarItem::GroupDraft(id) => projects
-            .iter()
-            .any(|project| project.groups.iter().any(|group| group.id == id)),
         SidebarItem::SettledShelf => false,
     }
 }
 
-/// How a saved group looks: its saved draft, and a draft whenever no saved
-/// thread is in it.
-fn group(row: &GroupRow, threads: &[ThreadRow]) -> Group {
-    Group {
-        id: row.id,
-        kind: row.kind,
-        name: row.name.clone(),
-        dir: row.dir.clone(),
-        branch: row.branch.clone(),
-        created_at: from_ms(row.created_at),
-        pinned_at: row.pinned_at.map(from_ms),
-        settled_at: row
-            .settled_at
-            .filter(|_| row.settled_override == Some(SettledOverride::Settled))
-            .map(from_ms),
-        active_since: from_ms(row.created_at.max(row.unsettled_at.unwrap_or(0))),
-        defaults: GroupDefaults {
-            harness: row.harness.clone(),
-            model: row.draft_model.clone(),
-            permission: row.draft_permission_mode.clone(),
-        },
-        draft: row.draft.clone().or_else(|| {
-            (!threads.iter().any(|thread| thread.group_id == Some(row.id)))
-                .then(GroupDraft::default)
-        }),
-    }
-}
-
 /// How a saved thread looks before its first poll; one whose harness orb
-/// doesn't know is Gone, with nothing to attach.
+/// doesn't know is Gone.
 fn unpolled(services: &Services, row: &ThreadRow, panes: &HashMap<PaneId, PaneRow>) -> Thread {
     let status = match services.harnesses.get(&row.harness) {
         Some(_) => ThreadStatus::Unknown,
         None => ThreadStatus::Gone,
     };
-    thread(row, status, pane_launch(services, row, panes))
+    thread(row, status, pane_launch(row, panes))
 }
 
-/// `row`'s pane and what runs in it: nothing for a pane with a resume
-/// command (it starts as a shell to type that into), else its harness's
-/// command, built from the row's model and whether its transcript is known,
-/// so a pane that starts the session again starts it right. `None` for a
-/// thread with no pane or a harness orb doesn't know.
-fn pane_launch(
-    services: &Services,
-    row: &ThreadRow,
-    panes: &HashMap<PaneId, PaneRow>,
-) -> Option<PaneLaunch> {
-    let harness = services.harnesses.get(&row.harness)?;
+/// `row`'s pane and its session; `None` for a thread with no pane.
+fn pane_launch(row: &ThreadRow, panes: &HashMap<PaneId, PaneRow>) -> Option<PaneLaunch> {
     let pane = panes.get(&row.pane_id?)?;
     Some(PaneLaunch {
         pane: pane.id,
         session: pane.session_id,
-        command: match pane.resume {
-            Some(_) => vec![],
-            None => harness.attach_argv(
-                &row.short_id,
-                &AttachStart {
-                    model: row.model.as_deref(),
-                    has_transcript: row.transcript_path.is_some(),
-                },
-            ),
-        },
     })
 }
 
@@ -3895,55 +2729,6 @@ fn current_branch(git: &GitService, cwd: &Path) -> Option<String> {
         .map(|git_ref| git_ref.name)
 }
 
-/// How project `project_id`'s draft is saved.
-fn draft_row(project_id: ProjectId, draft: &Draft) -> DraftRow {
-    DraftRow {
-        project_id,
-        workspace: draft.workspace.clone(),
-        branch: draft.branch.clone(),
-        model: draft.model.clone(),
-        permission_mode: draft.permission.clone(),
-        created_at: to_ms(draft.created_at),
-        harness: draft.harness.clone(),
-    }
-}
-
-/// The branch a draft in `workspace` of the project at `root` shows: the one
-/// checked out in its directory, or for a new worktree the default branch.
-/// `None` when git can't tell.
-fn draft_branch(git: &GitService, root: &Path, workspace: &DraftWorkspace) -> Option<String> {
-    match workspace {
-        DraftWorkspace::Local => current_branch(git, root),
-        DraftWorkspace::Existing(path) => current_branch(git, path),
-        DraftWorkspace::NewWorktree => git.default_branch(root).ok(),
-    }
-}
-
-/// `draft` of the project at `root` with what git now says about it: whether
-/// the root is in a repository, its branch when it has none (see
-/// [`draft_branch`]), and for a new worktree the ref it would start from
-/// (see [`start_point`]), judged by what origin had at the last fetch.
-fn with_git(git: &GitService, root: &Path, draft: Draft) -> Draft {
-    let repo = git.refs(root).is_ok();
-    let branch = match draft.branch {
-        Some(branch) => Some(branch),
-        None if repo => draft_branch(git, root, &draft.workspace),
-        None => None,
-    };
-    let from = match (&draft.workspace, &branch) {
-        (DraftWorkspace::NewWorktree, Some(base)) if repo => {
-            start_point(git, root, base, |b| Ok(git.has_remote_branch(root, b))).ok()
-        }
-        _ => None,
-    };
-    Draft {
-        branch,
-        repo,
-        from,
-        ..draft
-    }
-}
-
 /// The ref a new worktree of `repo` starts from for `base`: `origin/<b>` when
 /// the repository has an origin and `origin_has` says it has `b` (a fetch at
 /// Start, a look at the last fetch for the dashboard), else `base` as is.
@@ -3970,29 +2755,16 @@ where
     })
 }
 
-/// How a saved draft looks, before git is asked about it.
-fn draft_of(row: &DraftRow) -> Draft {
-    Draft {
-        workspace: row.workspace.clone(),
-        branch: row.branch.clone(),
-        model: row.model.clone(),
-        permission: row.permission_mode.clone(),
-        created_at: from_ms(row.created_at),
-        repo: true,
-        from: None,
-        harness: row.harness.clone(),
-    }
-}
-
 /// Shows project `id` in `sessions`: restores it if removed, taking `kind`
 /// unless that's [`ProjectKind::Normal`] (as the store keeps a saved kind),
-/// or adds it.
+/// or adds it; either way `repo` says whether it is a git repository.
 fn show_project(
     sessions: &mut Sessions,
     id: ProjectId,
     title: String,
     root: PathBuf,
     kind: ProjectKind,
+    repo: bool,
     now: i64,
 ) {
     match sessions
@@ -4002,6 +2774,7 @@ fn show_project(
     {
         Some(project) => {
             project.removed = false;
+            project.repo = repo;
             if kind != ProjectKind::Normal {
                 project.kind = kind;
             }
@@ -4012,22 +2785,19 @@ fn show_project(
             root,
             created_at: from_ms(now),
             threads: Vec::new(),
-            draft: None,
+            repo,
             removed: false,
             kind,
-            groups: Vec::new(),
         }),
     }
 }
 
-/// orb's own folder for a `kind` group: its project's kind, its folder's
-/// name under orb's directory, and its project's title. `None` for a Feature
-/// group, which lives in the user's project.
-fn own_folder(kind: GroupKind) -> Option<(ProjectKind, &'static str, &'static str)> {
+/// orb's own folder for a `kind` session: its project's kind, its folder's
+/// name under orb's directory, and its project's title.
+fn own_folder(kind: FolderKind) -> (ProjectKind, &'static str, &'static str) {
     match kind {
-        GroupKind::Feature => None,
-        GroupKind::Research => Some((ProjectKind::Research, "research", "Research")),
-        GroupKind::Learn => Some((ProjectKind::Learn, "learn", "Learn")),
+        FolderKind::Research => (ProjectKind::Research, "research", "Research"),
+        FolderKind::Learn => (ProjectKind::Learn, "learn", "Learn"),
     }
 }
 
@@ -4064,52 +2834,41 @@ fn from_ms(ms: i64) -> SystemTime {
 )]
 mod tests {
     use crate::feat::harness::HarnessId;
-    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex, OnceLock, PoisonError};
     use std::time::{Duration, SystemTime};
 
-    use async_trait::async_trait;
     use error_stack::{Report, ResultExt};
 
     use super::{
-        FAST_POLL, Probed, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms,
-        settle_session_row, spawn_sessions_actor,
+        FAST_POLL, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms,
+        settle_session_row,
     };
     use crate::Focus;
     use crate::TextInput;
     use crate::command::Workspace;
     use crate::common::{Services, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
-    use crate::feat::git::validator::BUSY_DIRECTORY;
-    use crate::feat::git::worktree::hex_branch;
     use crate::feat::harness::claude::ClaudeCode;
-    use crate::feat::harness::claude::models;
+    use crate::feat::harness::claude::fake::FakeClaude;
     use crate::feat::harness::claude::transcript::transcript_path;
-    use crate::feat::harness::claude::trust::{WorkspaceTrust, WorkspaceTrustError};
     use crate::feat::harness::fake::FakeHarness;
-    use crate::feat::harness::{Harness, HarnessInfo, Harnesses};
+    use crate::feat::harness::{Harness, Harnesses, RunningAgent};
     use crate::feat::jumps::state::JumpList;
     use crate::feat::layout::tree::Split;
-    use crate::feat::sessions::session_host::{
-        AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
-        WorkspaceUntrusted,
-    };
     use crate::feat::sessions::state::{
-        Draft, DraftWorkspace, Group, GroupDefaults, GroupDraft, GroupId, GroupKind, Notice,
-        NoticeKind, Own, PaneId, ProjectId, ProjectKind, SessionId, SidebarItem, Thread, ThreadId,
-        ThreadStatus,
+        FolderKind, Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind,
+        Session, SessionId, SessionKind, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::store::{
-        DraftRow, GroupRow, InsertedThread, LastUsed, LastWorkspace, NewGroup, NewPaneThread,
-        NewThread, SessionRow, SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
+        NewPaneThread, SessionRow, SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::feat::zmx::zmx_service::fake::FakeZmx;
     use crate::feat::zmx::zmx_service::{ZmxOutput, ZmxService, ZmxSession};
 
-    /// The orb project's root, a folder that exists so its drafts can start.
+    /// The orb project's root, a folder that exists so its sessions can start.
     const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
     /// The web project's root, another folder that exists.
     const WEB_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
@@ -4121,207 +2880,8 @@ mod tests {
     const INCOGNITO_ROOT: &str = "/nonexistent/orb-incognito";
     /// Why git refuses outside a repository.
     const NOT_A_REPO: &str = "fatal: not a git repository";
-    const UNTRUSTED: &str = concat!(
-        "Workspace not trusted. Run `claude` in ",
-        env!("CARGO_MANIFEST_DIR"),
-        " once and accept the trust prompt"
-    );
     const HOUR_MS: i64 = 60 * 60 * 1000;
     const DAY_MS: i64 = 24 * HOUR_MS;
-
-    /// A session host whose answers the test scripts.
-    struct FakeHost {
-        list: Mutex<Result<Vec<SessionRecord>, String>>,
-        create: Result<String, String>,
-        remove: Result<(), String>,
-        /// The sessions `stop` was called on, in order.
-        stopped: Mutex<Vec<String>>,
-        /// The sessions `remove` was called on, in order.
-        removed: Mutex<Vec<String>>,
-        /// The directories `create` was called in, in order.
-        created_in: Mutex<Vec<PathBuf>>,
-        /// Whether each `create`'s directory existed when it was called, in
-        /// order.
-        cwd_existed: Mutex<Vec<bool>>,
-        /// The options `create` was called with, in order.
-        created_with: Mutex<Vec<SessionOptions>>,
-        /// How many more creates refuse an untrusted directory before
-        /// `create` answers.
-        untrusted: Mutex<u32>,
-    }
-
-    impl FakeHost {
-        /// Lists `records`; stops and removes succeed.
-        fn answering(records: Vec<SessionRecord>) -> Self {
-            Self {
-                list: Mutex::new(Ok(records)),
-                create: Err("no create scripted".to_owned()),
-                remove: Ok(()),
-                stopped: Mutex::default(),
-                removed: Mutex::default(),
-                created_in: Mutex::default(),
-                cwd_existed: Mutex::default(),
-                created_with: Mutex::default(),
-                untrusted: Mutex::default(),
-            }
-        }
-
-        fn listing(records: Vec<SessionRecord>) -> Arc<Self> {
-            Arc::new(Self::answering(records))
-        }
-
-        fn creating(create: Result<&str, &str>) -> Arc<Self> {
-            Arc::new(Self {
-                create: create.map(str::to_owned).map_err(str::to_owned),
-                ..Self::answering(Vec::new())
-            })
-        }
-
-        /// Lists the thread `aa` idle and answers creates with `create`.
-        fn moving(create: Result<&str, &str>) -> Arc<Self> {
-            Arc::new(Self {
-                create: create.map(str::to_owned).map_err(str::to_owned),
-                ..Self::answering(vec![record("aa", ThreadStatus::Idle)])
-            })
-        }
-
-        /// Lists the thread `aa` idle, refuses the first `times` creates as
-        /// untrusted, then answers with `create`.
-        fn untrusted(times: u32, create: Result<&str, &str>) -> Arc<Self> {
-            Arc::new(Self {
-                create: create.map(str::to_owned).map_err(str::to_owned),
-                untrusted: Mutex::new(times),
-                ..Self::answering(vec![record("aa", ThreadStatus::Idle)])
-            })
-        }
-
-        fn refusing_remove(records: Vec<SessionRecord>, reason: &str) -> Arc<Self> {
-            Arc::new(Self {
-                remove: Err(reason.to_owned()),
-                ..Self::answering(records)
-            })
-        }
-
-        fn stopped(&self) -> Vec<String> {
-            self.stopped
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-        }
-
-        fn removed(&self) -> Vec<String> {
-            self.removed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-        }
-
-        fn created_in(&self) -> Vec<PathBuf> {
-            self.created_in
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-        }
-
-        fn cwd_existed(&self) -> Vec<bool> {
-            self.cwd_existed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-        }
-
-        fn created_with(&self) -> Vec<SessionOptions> {
-            self.created_with
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-        }
-
-        fn set_list(&self, list: Result<Vec<SessionRecord>, String>) {
-            *self.list.lock().unwrap_or_else(PoisonError::into_inner) = list;
-        }
-    }
-
-    #[async_trait]
-    impl SessionHost for FakeHost {
-        fn name(&self) -> &'static str {
-            "fake"
-        }
-
-        async fn create(
-            &self,
-            cwd: &Path,
-            options: &SessionOptions,
-        ) -> Result<CreatedSession, Report<SessionHostError>> {
-            self.created_in
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(cwd.to_owned());
-            self.cwd_existed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(cwd.is_dir());
-            self.created_with
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(options.clone());
-            {
-                let mut untrusted = self
-                    .untrusted
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                if *untrusted > 0 {
-                    *untrusted -= 1;
-                    return Err(Report::new(SessionHostError)
-                        .attach_opaque(WorkspaceUntrusted)
-                        .attach(UNTRUSTED.to_owned()));
-                }
-            }
-            self.create
-                .clone()
-                .map(|short_id| CreatedSession { short_id })
-                .map_err(|reason| Report::new(SessionHostError).attach(reason))
-        }
-
-        async fn list(
-            &self,
-            _short_ids: &[String],
-        ) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
-            self.list
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-                .map_err(|reason| Report::new(SessionHostError).attach(reason))
-        }
-
-        async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
-            self.stopped
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(short_id.to_owned());
-            Ok(())
-        }
-
-        async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
-            self.removed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(short_id.to_owned());
-            self.remove
-                .clone()
-                .map_err(|reason| Report::new(SessionHostError).attach(reason))
-        }
-
-        /// `[<short id>]`, plus `--model <m>` until the thread's transcript
-        /// is known, as pi's host builds it.
-        fn attach_argv(&self, short_id: &str, start: &AttachStart<'_>) -> Vec<OsString> {
-            let mut argv = vec![OsString::from(short_id)];
-            if let (Some(model), false) = (start.model, start.has_transcript) {
-                argv.extend(["--model", model].map(OsString::from));
-            }
-            argv
-        }
-    }
 
     /// A git call the actor made.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4401,29 +2961,11 @@ mod tests {
             Arc::new(Self::answering())
         }
 
-        /// A repository without an `origin` whose project path is `project`.
-        fn in_project(project: &str) -> Arc<Self> {
-            Arc::new(Self {
-                project: Some(PathBuf::from(project)),
-                ..Self::answering()
-            })
-        }
-
         /// A repository with an `origin` that answers fetches with `fetch`.
         fn with_origin(fetch: Result<bool, &str>) -> Arc<Self> {
             Arc::new(Self {
                 origin: true,
                 fetch: fetch.map_err(str::to_owned),
-                ..Self::answering()
-            })
-        }
-
-        /// A repository with an `origin` that had `branches` at the last
-        /// fetch.
-        fn tracking(branches: &[&str]) -> Arc<Self> {
-            Arc::new(Self {
-                origin: true,
-                remote: branches.iter().map(|&branch| branch.to_owned()).collect(),
                 ..Self::answering()
             })
         }
@@ -4463,6 +3005,13 @@ mod tests {
                 .clone()
         }
 
+        fn record(&self, call: GitCall) {
+            self.calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(call);
+        }
+
         /// Looks at `state` on every later fetch.
         fn watch(&self, state: &State) {
             let _ = self.watched.set(state.clone());
@@ -4474,13 +3023,6 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
-        }
-
-        fn record(&self, call: GitCall) {
-            self.calls
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(call);
         }
 
         /// The branch the actor renamed, and its new name.
@@ -4652,59 +3194,6 @@ mod tests {
         }
     }
 
-    /// A trust service that records the folders it trusts, and may refuse.
-    struct FakeTrust {
-        fails: bool,
-        /// The folders `trust` was called on, in order.
-        trusted: Mutex<Vec<PathBuf>>,
-    }
-
-    impl FakeTrust {
-        fn accepting() -> Arc<Self> {
-            Arc::new(Self {
-                fails: false,
-                trusted: Mutex::default(),
-            })
-        }
-
-        fn failing() -> Arc<Self> {
-            Arc::new(Self {
-                fails: true,
-                trusted: Mutex::default(),
-            })
-        }
-
-        fn trusted(&self) -> Vec<PathBuf> {
-            self.trusted
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-        }
-    }
-
-    impl WorkspaceTrust for FakeTrust {
-        fn name(&self) -> &'static str {
-            "fake"
-        }
-
-        fn trust(&self, dir: &Path) -> Result<(), Report<WorkspaceTrustError>> {
-            self.trusted
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(dir.to_owned());
-            if self.fails {
-                Err(Report::new(WorkspaceTrustError).attach("config unwritable"))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    /// A zmx with no sessions, on the pane socket dir /zmx.
-    fn fake_zmx() -> ZmxService {
-        zmx_listing("")
-    }
-
     /// A zmx whose `list` prints `stdout` on every socket dir, on the pane
     /// socket dir /zmx.
     fn zmx_listing(stdout: &str) -> ZmxService {
@@ -4718,13 +3207,51 @@ mod tests {
         )
     }
 
-    fn record(short_id: &str, status: ThreadStatus) -> SessionRecord {
-        SessionRecord {
-            short_id: Some(short_id.to_owned()),
-            session_id: None,
+    /// A thread and the one-pane session it runs in.
+    #[derive(Debug, Clone, Copy)]
+    struct Seeded {
+        thread: ThreadId,
+        session: SessionId,
+        pane: PaneId,
+    }
+
+    /// The process the fake zmx runs the pane of thread `short_id` as.
+    fn pid_of(short_id: &str) -> u32 {
+        short_id.bytes().fold(7_u32, |pid, byte| {
+            pid.wrapping_mul(31).wrapping_add(u32::from(byte)) % 1_000_000
+        }) + 1_000
+    }
+
+    /// The Claude running in thread `short_id`'s pane, `status`.
+    fn record(short_id: &str, status: ThreadStatus) -> RunningAgent {
+        RunningAgent {
             status,
-            ancestry: Vec::new(),
+            ancestry: vec![pid_of(short_id)],
         }
+    }
+
+    /// A `claude` running `agents`.
+    fn listing(agents: Vec<RunningAgent>) -> Arc<FakeClaude> {
+        Arc::new(FakeClaude::running(agents))
+    }
+
+    /// A zmx running the pane of every thread `store` has bound to one, as
+    /// process [`pid_of`] its short id, on the pane socket dir /zmx.
+    fn zmx_running(store: &Store) -> ZmxService {
+        let panes = store.layouts().map(|saved| saved.panes).unwrap_or_default();
+        let rows = store.load().map(|(_, rows)| rows).unwrap_or_default();
+        let listed: String = rows
+            .iter()
+            .filter_map(|row| {
+                let pane = panes.iter().find(|pane| Some(pane.id) == row.pane_id)?;
+                let name = pane.zmx_name.clone().unwrap_or_else(|| pane.id.zmx_name());
+                Some(format!(
+                    "  name={name}\tpid={}\tclients=1\tcreated=1\n",
+                    pid_of(&row.short_id)
+                ))
+            })
+            .collect();
+        zmx_listing(&listed)
     }
 
     /// A store holding one thread in the orb project, created an hour ago.
@@ -4734,54 +3261,65 @@ mod tests {
         Ok((store, id))
     }
 
-    /// A store holding one thread in the orb project started on `model`.
-    fn store_with_model_thread(
-        short_id: &str,
-        model: &str,
-    ) -> Result<(Store, ThreadId), Report<StoreError>> {
-        let store = Store::open_in_memory()?;
-        let project_id = orb_project(&store)?;
-        let id = store
-            .insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
-                project_id,
-                short_id: short_id.to_owned(),
-                cwd: PathBuf::from(PROJECT_ROOT),
-                created_at: now_ms() - HOUR_MS,
-                model: Some(model.to_owned()),
-                permission_mode: None,
-                group_id: None,
-                zmx: None,
-            })
-            .map(|inserted| inserted.thread)?;
-        Ok((store, id))
-    }
-
     /// Saves the orb project rooted at [`PROJECT_ROOT`].
     fn orb_project(store: &Store) -> Result<ProjectId, Report<StoreError>> {
         store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 0)
     }
 
-    /// Saves a thread created at `created_at` in the orb project.
+    /// Saves thread `short_id` of `harness`, created at `created_at`, in a
+    /// new `kind` session of project `project` in `dir`, one tab of one pane.
+    fn seed_with(
+        store: &Store,
+        harness: &str,
+        project: ProjectId,
+        kind: SessionKind,
+        dir: &Path,
+        short_id: &str,
+        created_at: i64,
+    ) -> Result<Seeded, Report<StoreError>> {
+        let (session, pane) = store.insert_session(project, kind, dir, None, created_at)?;
+        let (thread, _) = store.insert_pane_thread(&NewPaneThread {
+            pane,
+            session_id: short_id.to_owned(),
+            transcript_path: None,
+            harness: HarnessId::new(harness),
+            cwd: dir.to_owned(),
+            created_at,
+        })?;
+        Ok(Seeded {
+            thread,
+            session,
+            pane,
+        })
+    }
+
+    /// Saves thread `short_id` of `harness`, created at `created_at`, in a
+    /// new session of the orb project of its own, one tab of one pane.
+    fn seed(
+        store: &Store,
+        harness: &str,
+        short_id: &str,
+        created_at: i64,
+    ) -> Result<Seeded, Report<StoreError>> {
+        let project = orb_project(store)?;
+        seed_with(
+            store,
+            harness,
+            project,
+            SessionKind::Plain,
+            Path::new(PROJECT_ROOT),
+            short_id,
+            created_at,
+        )
+    }
+
+    /// Saves a Claude thread created at `created_at` in the orb project.
     fn add_thread(
         store: &Store,
         short_id: &str,
         created_at: i64,
     ) -> Result<ThreadId, Report<StoreError>> {
-        let project_id = orb_project(store)?;
-        store
-            .insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
-                project_id,
-                short_id: short_id.to_owned(),
-                cwd: PathBuf::from(PROJECT_ROOT),
-                created_at,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-                zmx: None,
-            })
-            .map(|inserted| inserted.thread)
+        seed(store, "claude", short_id, created_at).map(|seeded| seeded.thread)
     }
 
     /// Saves `change` over the saved row of the thread `short_id`.
@@ -4803,51 +3341,49 @@ mod tests {
     }
 
     /// Starts the actor on `store` the way `on_start` does, without the ticker.
-    fn start(store: Store, host: &Arc<FakeHost>, claude_dir: &Path) -> (SessionsActor, State) {
-        start_with(store, host, &FakeGit::local(), claude_dir)
+    fn start(store: Store, claude: &Arc<FakeClaude>, claude_dir: &Path) -> (SessionsActor, State) {
+        start_with(store, claude, &FakeGit::local(), claude_dir)
     }
 
     /// Starts the actor on `store` with `git`, making worktrees under
     /// [`WORKTREES_ROOT`].
     fn start_with(
         store: Store,
-        host: &Arc<FakeHost>,
+        claude: &Arc<FakeClaude>,
         git: &Arc<FakeGit>,
         claude_dir: &Path,
     ) -> (SessionsActor, State) {
         start_in(
             store,
-            host,
+            claude,
             git,
-            &FakeTrust::accepting(),
             claude_dir,
             Path::new(ORB_ROOT),
             Path::new(INCOGNITO_ROOT),
         )
     }
 
-    /// Starts the actor on `store` with `git` and `trust`, making worktrees
-    /// under [`WORKTREES_ROOT`] and groups' folders under `orb_root`.
+    /// Starts the actor on `store` with `git`, making worktrees under
+    /// [`WORKTREES_ROOT`] and Research and Learn folders under `orb_root`.
+    /// zmx runs every bound thread's pane (see [`zmx_running`]).
     fn start_in(
         store: Store,
-        host: &Arc<FakeHost>,
+        claude: &Arc<FakeClaude>,
         git: &Arc<FakeGit>,
-        trust: &Arc<FakeTrust>,
         claude_dir: &Path,
         orb_root: &Path,
         incognito_root: &Path,
     ) -> (SessionsActor, State) {
         let state = State::default();
+        let zmx = zmx_running(&store);
         let actor = SessionsActor::restore(SessionsActorDeps {
             services: Services {
                 harnesses: Harnesses::new(vec![Arc::new(ClaudeCode::new(
-                    host.clone(),
-                    trust.clone(),
+                    claude.clone(),
                     claude_dir.to_owned(),
-                    GitService::new(git.clone()),
                 ))]),
                 git: GitService::new(git.clone()),
-                zmx: fake_zmx(),
+                zmx,
             },
             state: state.clone(),
             store,
@@ -4863,28 +3399,27 @@ mod tests {
     /// The harness the routing tests run beside Claude.
     const OTHER: &str = "other";
 
-    /// What the actor needs to run Claude over `claude` and [`OTHER`] over
-    /// `other`, sharing `state`.
+    /// What the actor needs to run Claude over `claude` and `other` beside
+    /// it, sharing `state`.
     fn deps_beside(
         store: Store,
-        claude: &Arc<FakeHost>,
-        other: &Arc<FakeHost>,
+        claude: &Arc<FakeClaude>,
+        other: &Arc<FakeHarness>,
         state: &State,
     ) -> SessionsActorDeps {
         let git = FakeGit::local();
+        let zmx = zmx_running(&store);
         SessionsActorDeps {
             services: Services {
                 harnesses: Harnesses::new(vec![
                     Arc::new(ClaudeCode::new(
                         claude.clone(),
-                        FakeTrust::accepting(),
                         PathBuf::from(NO_CLAUDE_DIR),
-                        GitService::new(git.clone()),
                     )),
-                    Arc::new(FakeHarness::new(OTHER, other.clone())),
+                    other.clone(),
                 ]),
                 git: GitService::new(git),
-                zmx: fake_zmx(),
+                zmx,
             },
             state: state.clone(),
             store,
@@ -4896,12 +3431,12 @@ mod tests {
         }
     }
 
-    /// Starts the actor on `store` with Claude over `claude` and [`OTHER`]
-    /// over `other`, the way `on_start` does, without the ticker or probes.
+    /// Starts the actor on `store` with Claude over `claude` and `other`
+    /// beside it, the way `on_start` does, without the ticker.
     fn start_beside(
         store: Store,
-        claude: &Arc<FakeHost>,
-        other: &Arc<FakeHost>,
+        claude: &Arc<FakeClaude>,
+        other: &Arc<FakeHarness>,
     ) -> (SessionsActor, State) {
         let state = State::default();
         let actor = SessionsActor::restore(deps_beside(store, claude, other, &state));
@@ -4915,110 +3450,13 @@ mod tests {
         harness: &str,
         short_id: &str,
     ) -> Result<ThreadId, Report<StoreError>> {
-        let project_id = orb_project(store)?;
-        store
-            .insert_thread(&NewThread {
-                harness: HarnessId::new(harness),
-                project_id,
-                short_id: short_id.to_owned(),
-                cwd: PathBuf::from(PROJECT_ROOT),
-                created_at: now_ms() - HOUR_MS,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-                zmx: None,
-            })
-            .map(|inserted| inserted.thread)
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_draft_creates_its_session_through_the_drafts_harness()
-    -> Result<(), Report<StoreError>> {
-        // Given a local draft of the other harness.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            harness: HarnessId::new(OTHER),
-            ..draft_row(id, DraftWorkspace::Local)
-        })?;
-        let claude = FakeHost::creating(Ok("aa"));
-        let other = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start_beside(store, &claude, &other);
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then only the other harness creates a session, in the project's root.
-        assert_eq!(
-            (claude.created_in(), other.created_in()),
-            (Vec::new(), vec![PathBuf::from(PROJECT_ROOT)]),
-            "a draft should start in the harness it was drafted for"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn other_harness_thread_shows_the_status_its_host_lists() -> Result<(), Report<StoreError>>
-    {
-        // Given a thread of the other harness, whose host lists it working.
-        let store = Store::open_in_memory()?;
-        let id = add_thread_in(&store, OTHER, "bb")?;
-        let claude = FakeHost::listing(Vec::new());
-        let other = FakeHost::listing(vec![record("bb", ThreadStatus::Working)]);
-        let (mut actor, state) = start_beside(store, &claude, &other);
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the thread shows working.
-        assert_eq!(
-            status_of(&state, id),
-            Some(ThreadStatus::Working),
-            "a thread should show the status its own harness lists"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn other_harness_thread_attaches_with_its_harness_command() -> Result<(), Report<StoreError>> {
-        // Given a saved thread `bb` of the other harness.
-        let store = Store::open_in_memory()?;
-        let id = add_thread_in(&store, OTHER, "bb")?;
-        let host = FakeHost::listing(Vec::new());
-
-        // When restoring.
-        let (_actor, state) = start_beside(store, &host, &host);
-
-        // Then it attaches with the command its harness builds.
-        assert_eq!(
-            shown(&state, id)
-                .and_then(|thread| thread.pane)
-                .map(|launch| launch.command),
-            Some(vec![OsString::from(OTHER), OsString::from("bb")]),
-            "a thread should attach through its own harness"
-        );
-        Ok(())
+        seed(store, harness, short_id, now_ms() - HOUR_MS).map(|seeded| seeded.thread)
     }
 
     /// Saves a Claude thread `short_id` in the orb project, created an hour
-    /// ago, running in the zmx session `zmx` of its harness's own, if any.
-    fn insert_thread(
-        store: &Store,
-        short_id: &str,
-        zmx: Option<ZmxSession>,
-    ) -> Result<InsertedThread, Report<StoreError>> {
-        let project_id = orb_project(store)?;
-        store.insert_thread(&NewThread {
-            harness: HarnessId::new("claude"),
-            project_id,
-            short_id: short_id.to_owned(),
-            cwd: PathBuf::from(PROJECT_ROOT),
-            created_at: now_ms() - HOUR_MS,
-            model: None,
-            permission_mode: None,
-            group_id: None,
-            zmx,
-        })
+    /// ago, in a session of its own.
+    fn insert_thread(store: &Store, short_id: &str) -> Result<Seeded, Report<StoreError>> {
+        seed(store, "claude", short_id, now_ms() - HOUR_MS)
     }
 
     /// Where pane `pane` runs, as the restored layouts say.
@@ -5034,8 +3472,8 @@ mod tests {
     fn thread_pane_runs_in_its_pane_rows_zmx_session() -> Result<(), Report<StoreError>> {
         // Given a saved thread whose harness runs no zmx session of its own.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
 
         // When restoring.
         let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -5054,17 +3492,21 @@ mod tests {
 
     #[rstest::rstest]
     fn kept_pi_session_resolves_under_orbs_folder() -> Result<(), Report<StoreError>> {
-        // Given a thread whose pane keeps zmx session `orb-abc` on dir `pi`.
-        let store = Store::open_in_memory()?;
-        let inserted = insert_thread(
-            &store,
-            "aa",
-            Some(ZmxSession {
-                name: "orb-abc".into(),
-                dir: PathBuf::from("pi"),
-            }),
-        )?;
-        let host = FakeHost::listing(Vec::new());
+        // Given a thread whose pane keeps zmx session `orb-abc` on dir `pi`,
+        // as the migration leaves a pi thread's.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        let inserted = insert_thread(&store, "aa")?;
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| {
+                conn.execute(
+                    "UPDATE panes SET zmx_name = 'orb-abc', zmx_dir = 'pi' WHERE id = ?1",
+                    [inserted.pane.0],
+                )
+            })
+            .change_context(StoreError)?;
+        let host = listing(Vec::new());
 
         // When restoring.
         let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -5082,32 +3524,24 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn pane_with_a_resume_command_starts_a_shell() -> Result<(), Report<StoreError>> {
-        // Given a thread whose pane has a resume command to type.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = dir.path().join("state.sqlite");
-        let store = Store::open(&path)?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        rusqlite::Connection::open(&path)
-            .and_then(|conn| {
-                conn.execute(
-                    "UPDATE panes SET resume = 'claude --resume s-aa' WHERE id = ?1",
-                    [inserted.pane.0],
-                )
-            })
-            .change_context(StoreError)?;
-        let host = FakeHost::listing(Vec::new());
+    fn thread_pane_starts_a_shell() -> Result<(), Report<StoreError>> {
+        // Given a saved thread in a pane.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
 
         // When restoring.
         let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
-        // Then its pane runs no command, so zmx starts a shell.
+        // Then it shows only its pane and session: nothing runs but the
+        // shell zmx starts, where the user types the agent.
         assert_eq!(
-            shown(&state, inserted.thread)
-                .and_then(|thread| thread.pane)
-                .map(|launch| launch.command),
-            Some(vec![]),
-            "a pane orb will type a resume command into starts as a shell"
+            shown(&state, inserted.thread).and_then(|thread| thread.pane),
+            Some(PaneLaunch {
+                pane: inserted.pane,
+                session: inserted.session,
+            }),
+            "a thread's pane should carry no command of its harness"
         );
         Ok(())
     }
@@ -5116,7 +3550,7 @@ mod tests {
     fn restore_loads_each_sessions_tabs_into_layouts() -> Result<(), Report<StoreError>> {
         // Given a thread's session saved with two tabs, the second shown.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
+        let inserted = insert_thread(&store, "aa")?;
         let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
         let tab = |position, pane: PaneId| TabRow {
             session_id: inserted.session,
@@ -5131,7 +3565,7 @@ mod tests {
             &[tab(0, inserted.pane), tab(1, second)],
             &[(inserted.pane, None), (second, None)],
         )?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
 
         // When restoring.
         let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -5154,8 +3588,8 @@ mod tests {
     fn restore_shows_each_saved_session() -> Result<(), Report<StoreError>> {
         // Given a thread's session in the orb project.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
 
         // When restoring.
         let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -5180,8 +3614,8 @@ mod tests {
     fn emptied_layout_settles_its_session() -> Result<(), Report<StoreError>> {
         // Given a thread's one-pane session whose last pane was closed.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state.write().layouts.close_pane(inserted.pane);
 
@@ -5240,8 +3674,8 @@ mod tests {
     fn pin_session_saves_its_pin() -> Result<(), Report<StoreError>> {
         // Given thread aa's session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When pinning it.
@@ -5260,8 +3694,8 @@ mod tests {
     fn pin_on_a_settled_session_unsettles_it() -> Result<(), Report<StoreError>> {
         // Given thread aa's session, settled.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.edit_session(inserted.session, settle_session_row);
 
@@ -5285,8 +3719,8 @@ mod tests {
     fn unpin_session_clears_its_pin() -> Result<(), Report<StoreError>> {
         // Given thread aa's session, pinned.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.pin_session(inserted.session);
 
@@ -5306,8 +3740,8 @@ mod tests {
     fn rename_session_saves_the_name() -> Result<(), Report<StoreError>> {
         // Given thread aa's session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When naming it "auth".
@@ -5326,8 +3760,8 @@ mod tests {
     fn rename_session_shows_the_name_as_its_title() -> Result<(), Report<StoreError>> {
         // Given thread aa's session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When naming it "auth".
@@ -5348,13 +3782,13 @@ mod tests {
     async fn settle_session_marks_it_settled() -> Result<(), Report<StoreError>> {
         // Given thread aa's session, idle.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
 
         // When settling it.
-        actor.settle_session(inserted.session).await;
+        actor.settle_session(inserted.session);
 
         // Then it shows and is saved settled.
         let settled = (
@@ -5378,13 +3812,13 @@ mod tests {
     async fn settle_session_with_a_working_agent_is_ignored() -> Result<(), Report<StoreError>> {
         // Given thread aa's session, its agent working.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
 
         // When settling it.
-        actor.settle_session(inserted.session).await;
+        actor.settle_session(inserted.session);
 
         // Then it stays unsettled.
         assert_eq!(
@@ -5397,42 +3831,20 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn settle_session_stops_an_idle_hosted_agent() -> Result<(), Report<StoreError>> {
-        // Given thread aa's session, its agent idle and hosted by Claude.
-        let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When settling it.
-        actor.settle_session(inserted.session).await;
-
-        // Then Claude stops aa.
-        assert_eq!(
-            host.stopped(),
-            vec!["aa".to_owned()],
-            "an idle hosted agent should be stopped"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
     async fn settle_session_kills_every_pane() -> Result<(), Report<StoreError>> {
         // Given thread aa's idle session with a second pane, and thread bb's
         // session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
+        let inserted = insert_thread(&store, "aa")?;
         let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
-        insert_thread(&store, "bb", None)?;
-        let host = FakeHost::listing(Vec::new());
+        insert_thread(&store, "bb")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         let (zmx, service) = recording_zmx();
         actor.services.zmx = service;
 
         // When settling aa's session.
-        actor.settle_session(inserted.session).await;
+        actor.settle_session(inserted.session);
 
         // Then both its panes are killed, and nothing of bb's.
         assert_eq!(
@@ -5448,14 +3860,14 @@ mod tests {
     async fn settle_session_unpins_it() -> Result<(), Report<StoreError>> {
         // Given thread aa's pinned idle session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
         actor.pin_session(inserted.session);
 
         // When settling it.
-        actor.settle_session(inserted.session).await;
+        actor.settle_session(inserted.session);
 
         // Then it is saved without its pin.
         assert_eq!(
@@ -5468,8 +3880,8 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn settling_a_pane_agents_session_stops_nothing() -> Result<(), Report<StoreError>> {
-        // Given an idle Claude in aa's pane, which no harness runs itself.
+    async fn settle_session_stops_nothing() -> Result<(), Report<StoreError>> {
+        // Given an idle Claude in aa's pane.
         let mut fx = PaneStatus::new(
             false,
             vec![interactive(&[100], ThreadStatus::Idle)],
@@ -5478,12 +3890,12 @@ mod tests {
         fx.actor.poll().await;
 
         // When settling aa's session.
-        fx.actor.settle_session(fx.thread.session).await;
+        fx.actor.settle_session(fx.thread.session);
 
         // Then nothing was asked to stop it.
         assert!(
-            fx.host.stopped().is_empty(),
-            "a pane agent has no hosted session to stop"
+            fx.host.stops().is_empty(),
+            "settling kills panes and stops nothing through a harness"
         );
         Ok(())
     }
@@ -5492,8 +3904,8 @@ mod tests {
     fn unsettle_session_keeps_it_active() -> Result<(), Report<StoreError>> {
         // Given thread aa's session, settled.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.edit_session(inserted.session, settle_session_row);
 
@@ -5514,11 +3926,11 @@ mod tests {
     async fn visit_marks_the_sessions_agents_seen() -> Result<(), Report<StoreError>> {
         // Given thread aa whose turn ended unseen.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start_unselected(store, &host);
         actor.poll().await;
-        host.set_list(Ok(vec![record("aa", ThreadStatus::Idle)]));
+        host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
         actor.poll().await;
 
         // When visiting its session.
@@ -5539,16 +3951,16 @@ mod tests {
         // Given thread aa's session with a second pane, and thread bb's
         // session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
+        let inserted = insert_thread(&store, "aa")?;
         let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
-        insert_thread(&store, "bb", None)?;
-        let host = FakeHost::listing(Vec::new());
+        insert_thread(&store, "bb")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         let (zmx, service) = recording_zmx();
         actor.services.zmx = service;
 
         // When deleting aa's session.
-        actor.delete_session(inserted.session).await;
+        actor.delete_session(inserted.session);
 
         // Then both its panes are killed, and nothing of bb's.
         assert_eq!(
@@ -5565,12 +3977,12 @@ mod tests {
     -> Result<(), Report<StoreError>> {
         // Given thread aa's session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When deleting it.
-        actor.delete_session(inserted.session).await;
+        actor.delete_session(inserted.session);
 
         // Then the store keeps no session, tab, pane or thread of it.
         let layouts = actor.store.layouts()?;
@@ -5589,16 +4001,16 @@ mod tests {
     async fn delete_threadless_session_removes_it() -> Result<(), Report<StoreError>> {
         // Given a session whose agent has ended, so no thread runs in it.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
+        let inserted = insert_thread(&store, "aa")?;
         resave(&store, "aa", |row| ThreadRow {
             pane_id: None,
             ..row
         })?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When deleting it.
-        actor.delete_session(inserted.session).await;
+        actor.delete_session(inserted.session);
 
         // Then it is neither shown nor saved.
         let kept = (
@@ -5614,16 +4026,16 @@ mod tests {
     async fn delete_session_removes_its_ended_threads() -> Result<(), Report<StoreError>> {
         // Given thread aa's session, aa having ended in it.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
+        let inserted = insert_thread(&store, "aa")?;
         resave(&store, "aa", |row| ThreadRow {
             pane_id: None,
             ..row
         })?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When deleting the session.
-        actor.delete_session(inserted.session).await;
+        actor.delete_session(inserted.session);
 
         // Then aa is neither shown nor saved.
         let kept = (
@@ -5644,7 +4056,7 @@ mod tests {
         orb_root: &Path,
         dir: &Path,
         shared: bool,
-    ) -> Result<(Store, InsertedThread), Report<StoreError>> {
+    ) -> Result<(Store, Seeded), Report<StoreError>> {
         let store = Store::open_in_memory()?;
         let project_id = store.add_project(
             &orb_root.join("research"),
@@ -5653,17 +4065,15 @@ mod tests {
             0,
         )?;
         let insert = |short_id: &str| {
-            store.insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
+            seed_with(
+                &store,
+                "claude",
                 project_id,
-                short_id: short_id.to_owned(),
-                cwd: dir.to_owned(),
-                created_at: now_ms() - HOUR_MS,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-                zmx: None,
-            })
+                SessionKind::Research,
+                dir,
+                short_id,
+                now_ms() - HOUR_MS,
+            )
         };
         let inserted = insert("aa")?;
         if shared {
@@ -5676,9 +4086,8 @@ mod tests {
     fn start_at(store: Store, orb_root: &Path) -> (SessionsActor, State) {
         start_in(
             store,
-            &FakeHost::listing(Vec::new()),
+            &listing(Vec::new()),
             &FakeGit::local(),
-            &FakeTrust::accepting(),
             Path::new(NO_CLAUDE_DIR),
             orb_root,
             Path::new(INCOGNITO_ROOT),
@@ -5696,7 +4105,7 @@ mod tests {
         let (mut actor, _state) = start_at(store, orb.path());
 
         // When deleting it.
-        actor.delete_session(inserted.session).await;
+        actor.delete_session(inserted.session);
 
         // Then its folder is gone.
         assert!(!dir.exists(), "a Research session takes its folder");
@@ -5715,7 +4124,7 @@ mod tests {
         let (mut actor, _state) = start_at(store, orb.path());
 
         // When deleting one of them.
-        actor.delete_session(inserted.session).await;
+        actor.delete_session(inserted.session);
 
         // Then the folder stays.
         assert!(dir.exists(), "a folder another session uses stays");
@@ -5734,7 +4143,7 @@ mod tests {
         let (mut actor, _state) = start_at(store, orb.path());
 
         // When deleting it.
-        actor.delete_session(inserted.session).await;
+        actor.delete_session(inserted.session);
 
         // Then that folder is still there.
         assert!(
@@ -5756,7 +4165,7 @@ mod tests {
         let (mut actor, state) = start_at(store, orb.path());
 
         // When deleting it.
-        actor.delete_session(inserted.session).await;
+        actor.delete_session(inserted.session);
 
         // Then no error shows.
         assert_eq!(
@@ -5776,7 +4185,7 @@ mod tests {
         fx.actor.poll().await;
 
         // When deleting aa's session.
-        fx.actor.delete_session(fx.thread.session).await;
+        fx.actor.delete_session(fx.thread.session);
 
         // Then the pane's file is gone.
         assert!(
@@ -5788,8 +4197,8 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn deleting_a_pane_agents_session_skips_remove() -> Result<(), Report<StoreError>> {
-        // Given an idle Claude in aa's pane, which no harness runs itself.
+    async fn delete_session_removes_nothing_through_claude() -> Result<(), Report<StoreError>> {
+        // Given an idle Claude in aa's pane.
         let mut fx = PaneStatus::new(
             false,
             vec![interactive(&[100], ThreadStatus::Idle)],
@@ -5798,59 +4207,12 @@ mod tests {
         fx.actor.poll().await;
 
         // When deleting aa's session.
-        fx.actor.delete_session(fx.thread.session).await;
+        fx.actor.delete_session(fx.thread.session);
 
-        // Then nothing was asked to remove it.
+        // Then nothing was asked of the harness.
         assert!(
-            fx.host.removed().is_empty(),
-            "a pane agent has no hosted session to remove"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_remove_keeps_the_session() -> Result<(), Report<StoreError>> {
-        // Given thread aa's session, whose hosted agent can't be removed.
-        let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-        state.write().sessions.deleting.insert(inserted.session);
-
-        // When deleting it.
-        actor.delete_session(inserted.session).await;
-
-        // Then the sidebar lists it again.
-        let listed = state
-            .read()
-            .sessions
-            .sidebar()
-            .iter()
-            .any(|row| row.item() == SidebarItem::Session(inserted.session));
-        assert!(listed, "a session whose delete failed should come back");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_remove_shows_the_reason() -> Result<(), Report<StoreError>> {
-        // Given thread aa's session, whose hosted agent can't be removed.
-        let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::refusing_remove(vec![record("aa", ThreadStatus::Idle)], "rm: busy");
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When deleting it.
-        actor.delete_session(inserted.session).await;
-
-        // Then the reason is the error.
-        assert_eq!(
-            state.read().sessions.error.as_deref(),
-            Some("rm: busy"),
-            "the mode line should show why the delete failed"
+            fx.host.stops().is_empty(),
+            "deleting kills panes and asks nothing of a harness"
         );
         Ok(())
     }
@@ -5860,13 +4222,13 @@ mod tests {
     async fn delete_session_unhides_it() -> Result<(), Report<StoreError>> {
         // Given thread aa's session, hidden as being deleted.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state.write().sessions.deleting.insert(inserted.session);
 
         // When deleting it.
-        actor.delete_session(inserted.session).await;
+        actor.delete_session(inserted.session);
 
         // Then nothing is left hidden.
         assert!(
@@ -5880,15 +4242,11 @@ mod tests {
     fn restore_keeps_a_migrated_session_jump() -> Result<(), Report<StoreError>> {
         // Given a saved jump to thread aa's session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
+        let inserted = insert_thread(&store, "aa")?;
         store.save_jumps(&[SidebarItem::Session(inserted.session)])?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the jump is in the list.
         assert_eq!(
@@ -5910,7 +4268,7 @@ mod tests {
             pane_id: None,
             ..row
         })?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling.
@@ -5929,8 +4287,8 @@ mod tests {
     fn split_pane_saves_a_new_focused_pane() -> Result<(), Report<StoreError>> {
         // Given a thread's one-pane session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When splitting it right.
@@ -5956,8 +4314,8 @@ mod tests {
     fn new_tab_saves_a_new_tab() -> Result<(), Report<StoreError>> {
         // Given a thread's one-pane session.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When opening a tab.
@@ -5978,8 +4336,8 @@ mod tests {
     fn save_layout_writes_the_sessions_tabs() -> Result<(), Report<StoreError>> {
         // Given a thread's session whose tab was renamed in the app state.
         let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state
             .write()
@@ -6010,7 +4368,7 @@ mod tests {
     fn migrated_store(path: &Path) -> Result<Store, Report<StoreError>> {
         let store = Store::open(path)?;
         for short_id in ["aa", "bb"] {
-            let pane = insert_thread(&store, short_id, None)?.pane;
+            let pane = insert_thread(&store, short_id)?.pane;
             rusqlite::Connection::open(path)
                 .and_then(|conn| {
                     conn.execute(
@@ -6025,11 +4383,11 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn stop_migrated_stops_each_marked_bg_session() -> Result<(), Report<StoreError>> {
+    async fn stop_migrated_stops_each_marked_session_once() -> Result<(), Report<StoreError>> {
         // Given panes still naming --bg sessions aa and bb.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = migrated_store(&dir.path().join("state.sqlite"))?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When stopping the migrated sessions.
@@ -6050,7 +4408,7 @@ mod tests {
         // Given panes still naming --bg sessions aa and bb.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = migrated_store(&dir.path().join("state.sqlite"))?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When stopping the migrated sessions.
@@ -6072,77 +4430,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn thread_of_an_unknown_harness_shows_gone_with_no_attach_command()
-    -> Result<(), Report<StoreError>> {
+    fn thread_of_an_unknown_harness_shows_gone() -> Result<(), Report<StoreError>> {
         // Given a saved thread of a harness orb doesn't know.
         let store = Store::open_in_memory()?;
         let id = add_thread_in(&store, "gone-harness", "aa")?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
 
         // When restoring.
         let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
-        // Then it shows gone and can't be attached.
+        // Then it shows gone.
         assert_eq!(
-            shown(&state, id).map(|thread| (thread.status, thread.pane.is_none())),
-            Some((ThreadStatus::Gone, true)),
-            "a thread of an unknown harness should be gone with no attach command"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn thread_attach_argv_passes_the_model_before_its_transcript_is_found()
-    -> Result<(), Report<StoreError>> {
-        // Given a saved thread `aa` started on sonnet, with no transcript found.
-        let (store, id) = store_with_model_thread("aa", "sonnet")?;
-        let host = FakeHost::listing(Vec::new());
-
-        // When restoring.
-        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // Then its attach command carries the model.
-        assert_eq!(
-            shown(&state, id)
-                .and_then(|thread| thread.pane)
-                .map(|launch| launch.command),
-            Some(vec![
-                OsString::from("aa"),
-                OsString::from("--model"),
-                OsString::from("sonnet"),
-            ]),
-            "an attach before the transcript is found should start on the thread's model"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn thread_attach_argv_drops_the_model_once_its_transcript_is_found()
-    -> Result<(), Report<StoreError>> {
-        // Given a thread `aa` started on sonnet whose session has a transcript.
-        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
-        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
-            .change_context(StoreError)?;
-        fs::write(&path, "").change_context(StoreError)?;
-        let (store, id) = store_with_model_thread("aa", "sonnet")?;
-        let host = FakeHost::listing(vec![SessionRecord {
-            session_id: Some("s1".to_owned()),
-            ..record("aa", ThreadStatus::Idle)
-        }]);
-        let (mut actor, state) = start(store, &host, claude_dir.path());
-
-        // When polling finds the transcript.
-        actor.poll().await;
-
-        // Then its attach command no longer carries the model.
-        assert_eq!(
-            shown(&state, id)
-                .and_then(|thread| thread.pane)
-                .map(|launch| launch.command),
-            Some(vec![OsString::from("aa")]),
-            "an attach once the transcript is found should resume without the model"
+            status_of(&state, id),
+            Some(ThreadStatus::Gone),
+            "a thread of an unknown harness should be gone"
         );
         Ok(())
     }
@@ -6154,12 +4455,15 @@ mod tests {
         let store = Store::open_in_memory()?;
         let claude_thread = add_thread_in(&store, "claude", "aa")?;
         let other_thread = add_thread_in(&store, OTHER, "bb")?;
-        let claude = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let other = FakeHost::listing(vec![record("bb", ThreadStatus::Idle)]);
+        let claude = listing(vec![record("aa", ThreadStatus::Idle)]);
+        let other = Arc::new(FakeHarness::new(
+            OTHER,
+            vec![record("bb", ThreadStatus::Idle)],
+        ));
         let (mut actor, state) = start_beside(store, &claude, &other);
         actor.poll().await;
-        other.set_list(Err("supervisor down".to_owned()));
-        claude.set_list(Ok(vec![record("aa", ThreadStatus::Working)]));
+        other.set_running(Err("supervisor down".to_owned()));
+        claude.set_running(Ok(vec![record("aa", ThreadStatus::Working)]));
         actor.poll().await;
         Ok((state, claude_thread, other_thread))
     }
@@ -6198,22 +4502,60 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn restore_publishes_a_placeholder_per_harness() -> Result<(), Report<StoreError>> {
+    fn restore_shows_each_harness_mark() -> Result<(), Report<StoreError>> {
         // Given Claude and the other harness.
-        let claude = FakeHost::listing(Vec::new());
-        let other = FakeHost::listing(Vec::new());
+        let claude = listing(Vec::new());
+        let other = Arc::new(FakeHarness::new(OTHER, Vec::new()));
 
         // When restoring.
         let (_actor, state) = start_beside(Store::open_in_memory()?, &claude, &other);
 
-        // Then each harness shows a placeholder, in registration order.
+        // Then each harness shows with its mark, in registration order.
+        let marks: Vec<(HarnessId, Option<String>)> = state
+            .read()
+            .harnesses
+            .iter()
+            .map(|info| (info.id.clone(), info.icon.clone()))
+            .collect();
         assert_eq!(
-            state.read().harnesses,
+            marks,
             vec![
-                HarnessInfo::placeholder(HarnessId::new("claude"), "Claude Code"),
-                HarnessInfo::placeholder(HarnessId::new(OTHER), OTHER),
+                (HarnessId::new("claude"), Some("✳".to_owned())),
+                (HarnessId::new(OTHER), None),
             ],
-            "restore should publish a placeholder per harness before any probe answers"
+            "restore should publish each harness's mark"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_ignores_saved_groups() -> Result<(), Report<StoreError>> {
+        // Given a store holding a group row and no session.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let project = orb_project(&Store::open(&path)?)?;
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| {
+                conn.execute(
+                    "INSERT INTO groups (project_id, kind, name, created_at)
+                     VALUES (?1, 'research', 'tokio-cancel', 1000)",
+                    [project.0],
+                )
+            })
+            .change_context(StoreError)?;
+
+        // When the actor starts.
+        let (_actor, state) = start(
+            Store::open(&path)?,
+            &listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // Then the sidebar has no row for it.
+        assert_eq!(
+            state.read().sessions.sidebar().len(),
+            0,
+            "a saved group should not show"
         );
         Ok(())
     }
@@ -6221,8 +4563,8 @@ mod tests {
     #[rstest::rstest]
     fn restore_without_integrations_shows_the_install_nudge() -> Result<(), Report<StoreError>> {
         // Given neither orb's Claude hook nor its pi extension is installed.
-        let claude = FakeHost::listing(Vec::new());
-        let other = FakeHost::listing(Vec::new());
+        let claude = listing(Vec::new());
+        let other = Arc::new(FakeHarness::new(OTHER, Vec::new()));
         let state = State::default();
         let deps = SessionsActorDeps {
             integration_missing: true,
@@ -6241,77 +4583,8 @@ mod tests {
         Ok(())
     }
 
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn probed_info_replaces_its_placeholder() -> Result<(), Report<StoreError>> {
-        // Given a running actor with Claude and the other harness.
-        let state = State::default();
-        let claude = FakeHost::listing(Vec::new());
-        let other = FakeHost::listing(Vec::new());
-        let actor_ref = spawn_sessions_actor(deps_beside(
-            Store::open_in_memory()?,
-            &claude,
-            &other,
-            &state,
-        ));
-
-        // When it handles Claude's probe.
-        actor_ref
-            .ask(Probed(models::info()))
-            .await
-            .map_err(|error| Report::new(StoreError).attach(error.to_string()))?;
-
-        // Then Claude's entry is what the probe found.
-        assert_eq!(
-            state
-                .read()
-                .harness_info(&HarnessId::new("claude"))
-                .cloned(),
-            Some(models::info()),
-            "a probe's info should replace its harness's placeholder"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn probe_notice_shows_on_the_mode_line() -> Result<(), Report<StoreError>> {
-        // Given a running actor with Claude and the other harness.
-        let state = State::default();
-        let claude = FakeHost::listing(Vec::new());
-        let other = FakeHost::listing(Vec::new());
-        let actor_ref = spawn_sessions_actor(deps_beside(
-            Store::open_in_memory()?,
-            &claude,
-            &other,
-            &state,
-        ));
-
-        // When it handles a probe that came back with a notice.
-        let notice = "pi --list-models failed: exit code 1";
-        actor_ref
-            .ask(Probed(HarnessInfo {
-                notice: Some(notice.to_owned()),
-                ..models::info()
-            }))
-            .await
-            .map_err(|error| Report::new(StoreError).attach(error.to_string()))?;
-
-        // Then the notice is on the mode line.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some(notice),
-            "a probe's notice should show on the mode line"
-        );
-        Ok(())
-    }
-
     fn error_of(state: &State) -> Option<String> {
         state.read().sessions.error.clone()
-    }
-
-    fn trust_of(state: &State) -> Option<PathBuf> {
-        state.read().sessions.trust.clone()
     }
 
     /// The thread `id` as the sidebar shows it.
@@ -6348,14 +4621,15 @@ mod tests {
     const PROMPT_LINE: &str = "{\"type\":\"user\",\"message\":{\"content\":\"Fix the parser\"}}\n";
     const AI_TITLE_LINE: &str = "{\"type\":\"ai-title\",\"aiTitle\":\"Parser fix\"}\n";
 
-    /// A Claude directory holding `lines` as the transcript of session `s1`
-    /// in [`HEX_WORKTREE`], and a store whose thread `aa` is there on `branch`.
+    /// A Claude directory holding `lines` as the transcript of conversation
+    /// `aa` in [`HEX_WORKTREE`], and a store whose thread `aa` is there on
+    /// `branch`.
     fn worktree_thread(
         lines: &str,
         branch: &str,
     ) -> Result<(tempfile::TempDir, Store, ThreadId), Report<StoreError>> {
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(HEX_WORKTREE), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(HEX_WORKTREE), "aa");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(&path, lines).change_context(StoreError)?;
@@ -6368,19 +4642,16 @@ mod tests {
         Ok((claude_dir, store, id))
     }
 
-    /// Thread `aa`'s record in session `s1` with `status`.
-    fn in_session(status: ThreadStatus) -> SessionRecord {
-        SessionRecord {
-            session_id: Some("s1".to_owned()),
-            ..record("aa", status)
-        }
+    /// The Claude in thread `aa`'s pane, `status`.
+    fn in_session(status: ThreadStatus) -> RunningAgent {
+        record("aa", status)
     }
 
     /// Polls once while thread `aa` works, then once after its turn ended.
-    async fn end_turn(actor: &mut SessionsActor, host: &FakeHost) {
-        host.set_list(Ok(vec![in_session(ThreadStatus::Working)]));
+    async fn end_turn(actor: &mut SessionsActor, host: &FakeClaude) {
+        host.set_running(Ok(vec![in_session(ThreadStatus::Working)]));
         actor.poll().await;
-        host.set_list(Ok(vec![in_session(ThreadStatus::Idle)]));
+        host.set_running(Ok(vec![in_session(ThreadStatus::Idle)]));
         actor.poll().await;
     }
 
@@ -6389,7 +4660,7 @@ mod tests {
     async fn poll_shows_the_status_of_each_threads_record() -> Result<(), Report<StoreError>> {
         // Given a saved thread and a host reporting it waiting for an approval.
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::NeedsApproval)]);
+        let host = listing(vec![record("aa", ThreadStatus::NeedsApproval)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling.
@@ -6406,35 +4677,11 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn poll_prefers_the_live_record_over_a_stale_stopped_one()
-    -> Result<(), Report<StoreError>> {
-        // Given a host listing a stale stopped record and a live idle one for the same id.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Stopped),
-            record("aa", ThreadStatus::Idle),
-        ]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the thread shows the live record's status.
-        assert_eq!(
-            status_of(&state, id),
-            Some(ThreadStatus::Idle),
-            "the live record should win over the stale one"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
     async fn poll_marks_a_claude_thread_without_a_record_stopped() -> Result<(), Report<StoreError>>
     {
         // Given a saved thread the host doesn't list, its pane's zmx session gone.
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("bb", ThreadStatus::Idle)]);
+        let host = listing(vec![record("bb", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling.
@@ -6454,7 +4701,7 @@ mod tests {
     async fn poll_stamps_a_turn_when_it_starts() -> Result<(), Report<StoreError>> {
         // Given an unstamped thread the host now reports busy.
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling.
@@ -6473,14 +4720,14 @@ mod tests {
     async fn poll_keeps_the_turn_stamp_while_the_turn_waits() -> Result<(), Report<StoreError>> {
         // Given a thread a poll saw running.
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
         let stamp = stamp_of(&state, id)
             .ok_or_else(|| Report::new(StoreError).attach("the busy poll didn't stamp the turn"))?;
 
         // When a poll sees it waiting for input.
-        host.set_list(Ok(vec![record("aa", ThreadStatus::NeedsInput)]));
+        host.set_running(Ok(vec![record("aa", ThreadStatus::NeedsInput)]));
         actor.poll().await;
 
         // Then the stamp is unchanged.
@@ -6497,12 +4744,12 @@ mod tests {
     async fn poll_clears_the_turn_stamp_when_the_turn_ends() -> Result<(), Report<StoreError>> {
         // Given a thread a poll saw running.
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
 
         // When a poll sees it idle.
-        host.set_list(Ok(vec![record("aa", ThreadStatus::Idle)]));
+        host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
         actor.poll().await;
 
         // Then the stamp is cleared.
@@ -6519,7 +4766,7 @@ mod tests {
     async fn poll_keeps_an_earlier_error() -> Result<(), Report<StoreError>> {
         // Given a failure on the mode line.
         let (store, _) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state.write().sessions.error = Some("A session is working in this directory".to_owned());
 
@@ -6545,7 +4792,7 @@ mod tests {
             ..saved(&store, "aa")?
         };
         store.save_thread(&row)?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling after the relaunch.
@@ -6565,7 +4812,7 @@ mod tests {
     async fn poll_saves_a_new_turn_stamp() -> Result<(), Report<StoreError>> {
         // Given an unstamped thread the host now reports busy.
         let (store, _) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling.
@@ -6584,7 +4831,7 @@ mod tests {
     async fn poll_waits_five_seconds_when_nothing_is_underway() -> Result<(), Report<StoreError>> {
         // Given an idle thread and orb detached.
         let (store, _) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling.
@@ -6600,7 +4847,7 @@ mod tests {
     async fn poll_waits_one_second_while_a_thread_is_busy() -> Result<(), Report<StoreError>> {
         // Given a thread the host reports busy.
         let (store, _) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling.
@@ -6616,7 +4863,7 @@ mod tests {
     async fn poll_waits_five_seconds_while_no_turn_is_underway() -> Result<(), Report<StoreError>> {
         // Given an idle thread and orb attached.
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         {
             let mut app = state.write();
@@ -6645,12 +4892,12 @@ mod tests {
     async fn failed_poll_keeps_the_last_statuses() -> Result<(), Report<StoreError>> {
         // Given a thread a poll saw idle.
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
 
         // When the next poll fails.
-        host.set_list(Err("claude: command not found".to_owned()));
+        host.set_running(Err("claude: command not found".to_owned()));
         actor.poll().await;
 
         // Then the thread still shows idle.
@@ -6667,8 +4914,8 @@ mod tests {
     async fn failed_poll_shows_the_reason() -> Result<(), Report<StoreError>> {
         // Given a host that can't list sessions.
         let (store, _) = store_with_thread("aa")?;
-        let host = FakeHost::listing(Vec::new());
-        host.set_list(Err("claude: command not found".to_owned()));
+        let host = listing(Vec::new());
+        host.set_running(Err("claude: command not found".to_owned()));
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling.
@@ -6683,61 +4930,6 @@ mod tests {
         Ok(())
     }
 
-    /// A draft of the project in `workspace` with Claude's defaults and no
-    /// branch, created at 1 s.
-    fn draft_row(project_id: ProjectId, workspace: DraftWorkspace) -> DraftRow {
-        DraftRow {
-            harness: HarnessId::new("claude"),
-            project_id,
-            workspace,
-            branch: None,
-            model: None,
-            permission_mode: None,
-            created_at: 1_000,
-        }
-    }
-
-    /// A store holding the orb project with `draft` saved for it.
-    fn store_with_draft<F>(draft: F) -> Result<(Store, ProjectId), Report<StoreError>>
-    where
-        F: FnOnce(ProjectId) -> DraftRow,
-    {
-        let store = Store::open_in_memory()?;
-        let id = orb_project(&store)?;
-        store.save_draft(&draft(id))?;
-        Ok((store, id))
-    }
-
-    /// Project `id`'s draft as the sidebar shows it.
-    fn shown_draft(state: &State, id: ProjectId) -> Option<Draft> {
-        state
-            .read()
-            .sessions
-            .projects
-            .iter()
-            .find(|project| project.id == id)
-            .and_then(|project| project.draft.clone())
-    }
-
-    /// Project `id`'s saved draft.
-    fn saved_draft(store: &Store, id: ProjectId) -> Result<Option<DraftRow>, Report<StoreError>> {
-        Ok(store
-            .load()?
-            .2
-            .into_iter()
-            .find(|draft| draft.project_id == id))
-    }
-
-    /// Settings used last with `workspace`, sonnet and plan mode.
-    fn used(workspace: LastWorkspace) -> LastUsed {
-        LastUsed {
-            harness: Some(HarnessId::new("claude")),
-            workspace,
-            model: Some("sonnet".to_owned()),
-            permission_mode: Some("plan".to_owned()),
-        }
-    }
-
     /// The fetches and worktree adds git saw, in order.
     fn fetch_and_add_steps(git: &FakeGit) -> Vec<String> {
         git.calls()
@@ -6750,903 +4942,580 @@ mod tests {
             .collect()
     }
 
-    #[rstest::rstest]
-    fn create_draft_prefills_the_projects_last_used_settings() -> Result<(), Report<StoreError>> {
-        // Given a project last started in a new worktree with sonnet in plan mode.
-        let store = Store::open_in_memory()?;
-        let id = orb_project(&store)?;
-        store.record_last_used(id, &used(LastWorkspace::NewWorktree), 10)?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When creating its draft.
-        actor.create_draft(id);
-
-        // Then the draft has that workspace, model and permission.
-        let settings =
-            shown_draft(&state, id).map(|draft| (draft.workspace, draft.model, draft.permission));
-        assert_eq!(
-            settings,
-            Some((
-                DraftWorkspace::NewWorktree,
-                Some("sonnet".to_owned()),
-                Some("plan".to_owned())
-            )),
-            "the draft should take the project's last-used settings"
-        );
-        Ok(())
+    /// The actor on a store holding the orb project alone, with `git`, after
+    /// making a session of it in `workspace`.
+    fn made_session(
+        git: &Arc<FakeGit>,
+        workspace: Workspace,
+    ) -> Result<(SessionsActor, State), Report<StoreError>> {
+        let (store, id) = store_with_project()?;
+        let (mut actor, state) =
+            start_with(store, &listing(Vec::new()), git, Path::new(NO_CLAUDE_DIR));
+        actor.new_session(id, workspace);
+        Ok((actor, state))
     }
 
-    #[rstest::rstest]
-    fn create_draft_in_a_new_project_takes_the_latest_model_and_permission()
-    -> Result<(), Report<StoreError>> {
-        // Given orb last started in a new worktree with sonnet in plan mode,
-        // and web never started.
-        let store = Store::open_in_memory()?;
-        let orb = orb_project(&store)?;
-        store.record_last_used(orb, &used(LastWorkspace::NewWorktree), 10)?;
-        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When creating web's draft.
-        actor.create_draft(web);
-
-        // Then it has orb's model and permission in a local checkout.
-        let settings =
-            shown_draft(&state, web).map(|draft| (draft.workspace, draft.model, draft.permission));
-        assert_eq!(
-            settings,
-            Some((
-                DraftWorkspace::Local,
-                Some("sonnet".to_owned()),
-                Some("plan".to_owned())
-            )),
-            "a new project should take the latest model and permission, locally"
-        );
-        Ok(())
+    /// The sessions the sidebar has, in store order.
+    fn sessions_of(state: &State) -> Vec<Session> {
+        state.read().sessions.sessions.clone()
     }
 
-    /// Settings used last in the local checkout with `harness`'s default
-    /// model and permission.
-    fn used_in(harness: &str) -> LastUsed {
-        LastUsed {
-            harness: Some(HarnessId::new(harness)),
-            workspace: LastWorkspace::Local,
-            model: None,
-            permission_mode: None,
+    /// The only session the sidebar has.
+    fn only_session(state: &State) -> Result<Session, Report<StoreError>> {
+        match sessions_of(state).as_slice() {
+            [session] => Ok(session.clone()),
+            other => Err(Report::new(StoreError).attach(format!("{} sessions", other.len()))),
         }
     }
 
-    /// The harness of project `id`'s draft as the sidebar shows it.
-    fn draft_harness(state: &State, id: ProjectId) -> Option<HarnessId> {
-        shown_draft(state, id).map(|draft| draft.harness)
-    }
-
     #[rstest::rstest]
-    fn new_draft_takes_the_projects_last_used_harness() -> Result<(), Report<StoreError>> {
-        // Given orb last started in the other harness, and web started in
-        // Claude after that.
-        let store = Store::open_in_memory()?;
-        let orb = orb_project(&store)?;
-        store.record_last_used(orb, &used_in(OTHER), 10)?;
-        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
-        store.record_last_used(web, &used_in("claude"), 20)?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start_beside(store, &host, &host);
+    fn new_session_in_the_checkout_runs_in_the_project_root() -> Result<(), Report<StoreError>> {
+        // Given / When making a session of the orb project in its checkout.
+        let (_actor, state) = made_session(&FakeGit::local(), Workspace::Checkout)?;
 
-        // When creating orb's draft.
-        actor.create_draft(orb);
-
-        // Then it runs the other harness.
+        // Then it runs in the project's root.
         assert_eq!(
-            draft_harness(&state, orb),
-            Some(HarnessId::new(OTHER)),
-            "a draft should take its project's last-used harness"
+            only_session(&state)?.dir,
+            PathBuf::from(PROJECT_ROOT),
+            "a checkout session runs in the root"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn new_draft_takes_the_latest_used_harness_without_its_own() -> Result<(), Report<StoreError>> {
-        // Given orb last started in the other harness, and web never started.
-        let store = Store::open_in_memory()?;
-        let orb = orb_project(&store)?;
-        store.record_last_used(orb, &used_in(OTHER), 10)?;
-        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start_beside(store, &host, &host);
+    fn new_session_has_one_tab_with_one_pane() -> Result<(), Report<StoreError>> {
+        // Given / When making a session of the orb project in its checkout.
+        let (_actor, state) = made_session(&FakeGit::local(), Workspace::Checkout)?;
 
-        // When creating web's draft.
-        actor.create_draft(web);
-
-        // Then it runs the other harness too.
+        // Then its layout holds one tab of one pane in the root.
+        let id = only_session(&state)?.id;
+        let app = state.read();
+        let shape = app.layouts.get(id).map(|layout| {
+            (
+                layout.tabs().len(),
+                layout
+                    .panes()
+                    .map(|pane| pane.cwd.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
         assert_eq!(
-            draft_harness(&state, web),
-            Some(HarnessId::new(OTHER)),
-            "a project never started should take the latest used harness"
+            shape,
+            Some((1, vec![PathBuf::from(PROJECT_ROOT)])),
+            "a new session holds one tab of one shell pane"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn new_draft_takes_the_default_harness_when_nothing_was_used() -> Result<(), Report<StoreError>>
-    {
-        // Given a project nothing was ever started in, with the other
-        // harness registered after Claude.
-        let store = Store::open_in_memory()?;
-        let orb = orb_project(&store)?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start_beside(store, &host, &host);
+    fn new_session_pane_runs_in_orbs_own_zmx_session() -> Result<(), Report<StoreError>> {
+        // Given / When making a session of the orb project in its checkout.
+        let (_actor, state) = made_session(&FakeGit::local(), Workspace::Checkout)?;
 
-        // When creating its draft.
-        actor.create_draft(orb);
-
-        // Then it runs the first registered harness.
+        // Then its pane runs in `orb-p<id>` on orb's pane socket dir.
+        let id = only_session(&state)?.id;
+        let app = state.read();
+        let runs: Vec<(String, ZmxSession)> = app
+            .layouts
+            .get(id)
+            .map(|layout| {
+                layout
+                    .panes()
+                    .map(|pane| (pane.id.zmx_name(), pane.zmx.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let expected: Vec<(String, ZmxSession)> = runs
+            .iter()
+            .map(|(name, _)| {
+                (
+                    name.clone(),
+                    ZmxSession {
+                        name: name.clone(),
+                        dir: PathBuf::from("/zmx"),
+                    },
+                )
+            })
+            .collect();
         assert_eq!(
-            draft_harness(&state, orb),
-            Some(HarnessId::new("claude")),
-            "with nothing used, a draft should take the default harness"
+            (runs.len(), &runs),
+            (1, &expected),
+            "a new pane runs in orb's own zmx session"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn unregistered_last_used_harness_gives_the_default_harness_and_model()
+    fn new_session_is_selected() -> Result<(), Report<StoreError>> {
+        // Given / When making a session of the orb project.
+        let (_actor, state) = made_session(&FakeGit::local(), Workspace::Checkout)?;
+
+        // Then the cursor is on it.
+        let id = only_session(&state)?.id;
+        assert_eq!(
+            state.read().sessions.cursor,
+            Some(SidebarItem::Session(id)),
+            "a new session is selected"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_session_asks_the_frontend_to_attach() -> Result<(), Report<StoreError>> {
+        // Given / When making a session of the orb project.
+        let (_actor, state) = made_session(&FakeGit::local(), Workspace::Checkout)?;
+
+        // Then the frontend is asked to attach it.
+        let id = only_session(&state)?.id;
+        assert_eq!(
+            state.read().sessions.attach,
+            Some(id),
+            "a new session is attached"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_session_ends_the_start() -> Result<(), Report<StoreError>> {
+        // Given a start in flight.
+        let (store, id) = store_with_project()?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.starting = true;
+
+        // When making a session.
+        actor.new_session(id, Workspace::Checkout);
+
+        // Then nothing is starting any more.
+        assert!(
+            !state.read().sessions.starting,
+            "a made session ends the start"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_session_in_a_new_worktree_runs_in_the_worktree_orb_made()
     -> Result<(), Report<StoreError>> {
-        // Given a project last started on sonnet in a harness orb no longer
-        // has.
-        let store = Store::open_in_memory()?;
-        let orb = orb_project(&store)?;
-        store.record_last_used(
-            orb,
-            &LastUsed {
-                model: Some("sonnet".to_owned()),
-                ..used_in("gone-harness")
+        // Given / When making a session in a new worktree from `main`.
+        let git = FakeGit::local();
+        let (_actor, state) = made_session(
+            &git,
+            Workspace::NewWorktree {
+                base: "main".to_owned(),
             },
-            10,
         )?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start_beside(store, &host, &host);
 
-        // When creating its draft.
-        actor.create_draft(orb);
-
-        // Then it runs the default harness on its default model.
+        // Then it runs in the worktree orb added, on its branch.
+        let session = only_session(&state)?;
         assert_eq!(
-            shown_draft(&state, orb).map(|draft| (draft.harness, draft.model)),
-            Some((HarnessId::new("claude"), None)),
-            "a gone harness's draft should fall back to the default harness and model"
+            Some((session.dir, session.branch.unwrap_or_default())),
+            git.added(),
+            "the session runs in the new worktree"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn remembered_previous_worktree_without_one_falls_back_to_local()
-    -> Result<(), Report<StoreError>> {
-        // Given a project last started in a previous worktree, with no thread
-        // in a worktree now.
-        let (store, _) = store_with_thread("aa")?;
-        let id = orb_project(&store)?;
-        store.record_last_used(id, &used(LastWorkspace::Previous), 10)?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+    fn new_session_in_a_new_worktree_starts_from_its_base() -> Result<(), Report<StoreError>> {
+        // Given / When making a session in a new worktree from `feat`, which
+        // origin has.
+        let git = FakeGit::with_origin(Ok(true));
+        made_session(
+            &git,
+            Workspace::NewWorktree {
+                base: "feat".to_owned(),
+            },
+        )?;
 
-        // When creating its draft.
-        actor.create_draft(id);
-
-        // Then the draft is a local checkout.
+        // Then `feat` is fetched and the worktree starts from origin's.
         assert_eq!(
-            shown_draft(&state, id).map(|draft| draft.workspace),
-            Some(DraftWorkspace::Local),
-            "a previous worktree the project lacks should fall back to local"
+            fetch_and_add_steps(&git),
+            ["fetch feat", "add from origin/feat"],
+            "a new worktree starts from its base as origin has it"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn remembered_previous_worktree_prefills_it_with_its_branch() -> Result<(), Report<StoreError>>
-    {
-        // Given a project last started in a previous worktree, and a thread
-        // in the worktree on feat.
-        let (store, _) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            cwd: PathBuf::from(HEX_WORKTREE),
-            branch: Some("feat".to_owned()),
-            ..row
-        })?;
-        let id = orb_project(&store)?;
-        store.record_last_used(id, &used(LastWorkspace::Previous), 10)?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+    fn new_worktree_whose_fetch_fails_makes_no_session() -> Result<(), Report<StoreError>> {
+        // Given / When making a session in a new worktree whose fetch fails.
+        let git = FakeGit::with_origin(Err("fatal: unable to access origin"));
+        let (_actor, state) = made_session(
+            &git,
+            Workspace::NewWorktree {
+                base: "main".to_owned(),
+            },
+        )?;
 
-        // When creating its draft.
-        actor.create_draft(id);
-
-        // Then the draft is in that worktree, on feat.
-        let workspace = shown_draft(&state, id).map(|draft| (draft.workspace, draft.branch));
-        assert_eq!(
-            workspace,
-            Some((
-                DraftWorkspace::Existing(PathBuf::from(HEX_WORKTREE)),
-                Some("feat".to_owned())
-            )),
-            "the draft should reopen the previous worktree on its branch"
+        // Then no session is made.
+        assert!(
+            sessions_of(&state).is_empty(),
+            "a failed fetch makes nothing"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn new_worktree_draft_branch_is_the_default_branch() -> Result<(), Report<StoreError>> {
-        // Given a project last started in a new worktree, whose default branch is main.
-        let store = Store::open_in_memory()?;
-        let id = orb_project(&store)?;
-        store.record_last_used(id, &used(LastWorkspace::NewWorktree), 10)?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+    fn new_worktree_whose_fetch_fails_shows_the_reason() -> Result<(), Report<StoreError>> {
+        // Given / When making a session in a new worktree whose fetch fails.
+        let git = FakeGit::with_origin(Err("fatal: unable to access origin"));
+        let (_actor, state) = made_session(
+            &git,
+            Workspace::NewWorktree {
+                base: "main".to_owned(),
+            },
+        )?;
 
-        // When creating its draft.
-        actor.create_draft(id);
-
-        // Then the draft's base branch is main.
+        // Then git's reason shows.
         assert_eq!(
-            shown_draft(&state, id)
-                .and_then(|draft| draft.branch)
-                .as_deref(),
-            Some("main"),
-            "a new worktree should start from the default branch"
+            error_of(&state).as_deref(),
+            Some("fatal: unable to access origin"),
+            "a failed fetch shows why"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn local_draft_branch_is_the_roots_current_branch() -> Result<(), Report<StoreError>> {
-        // Given a never-started project whose root is on dev.
-        let store = Store::open_in_memory()?;
-        let id = orb_project(&store)?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When creating its draft.
-        actor.create_draft(id);
-
-        // Then the local draft shows dev.
-        assert_eq!(
-            shown_draft(&state, id)
-                .and_then(|draft| draft.branch)
-                .as_deref(),
-            Some(CURRENT_BRANCH),
-            "a local draft should show the root's current branch"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn created_draft_is_saved() -> Result<(), Report<StoreError>> {
-        // Given a project without a draft.
-        let store = Store::open_in_memory()?;
-        let id = orb_project(&store)?;
-        let (mut actor, _state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When creating its draft.
-        actor.create_draft(id);
-
-        // Then the store holds a local draft on dev.
-        let saved = saved_draft(&actor.store, id)?.map(|draft| (draft.workspace, draft.branch));
-        assert_eq!(
-            saved,
-            Some((DraftWorkspace::Local, Some(CURRENT_BRANCH.to_owned()))),
-            "the new draft should be saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn create_draft_keeps_an_existing_draft() -> Result<(), Report<StoreError>> {
-        // Given a project with an opus draft, last started with sonnet.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            model: Some("opus".to_owned()),
-            ..draft_row(id, DraftWorkspace::Local)
-        })?;
-        store.record_last_used(id, &used(LastWorkspace::Local), 10)?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When asked to create its draft again.
-        actor.create_draft(id);
-
-        // Then the opus draft stays.
-        assert_eq!(
-            shown_draft(&state, id)
-                .and_then(|draft| draft.model)
-                .as_deref(),
-            Some("opus"),
-            "an existing draft should not be replaced"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn save_draft_saves_the_drafts_edits() -> Result<(), Report<StoreError>> {
-        // Given a local draft the user switched to haiku.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-        if let Some(draft) = state.write().sessions.draft_mut(id) {
-            draft.model = Some("haiku".to_owned());
-        }
-
-        // When saving it.
-        actor.save_draft(id);
-
-        // Then the saved draft is on haiku.
-        assert_eq!(
-            saved_draft(&actor.store, id)?
-                .and_then(|draft| draft.model)
-                .as_deref(),
-            Some("haiku"),
-            "the draft's edit should be saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn save_draft_fills_in_a_missing_branch() -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft without a base branch.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When saving it after its branch was cleared.
-        if let Some(draft) = state.write().sessions.draft_mut(id) {
-            draft.branch = None;
-        }
-        actor.save_draft(id);
-
-        // Then its base branch is the default branch.
-        assert_eq!(
-            shown_draft(&state, id)
-                .and_then(|draft| draft.branch)
-                .as_deref(),
-            Some("main"),
-            "a saved new-worktree draft should get the default branch"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn picking_new_worktree_for_a_draft_adds_no_worktree() -> Result<(), Report<StoreError>> {
-        // Given a local draft the user switched to a new worktree.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+    fn failed_save_removes_the_new_worktree_and_branch() -> Result<(), Report<StoreError>> {
+        // Given a project the sidebar shows but the store doesn't have.
         let git = FakeGit::local();
         let (mut actor, state) = start_with(
-            store,
-            &FakeHost::listing(Vec::new()),
+            Store::open_in_memory()?,
+            &listing(Vec::new()),
             &git,
             Path::new(NO_CLAUDE_DIR),
         );
-        if let Some(draft) = state.write().sessions.draft_mut(id) {
-            draft.workspace = DraftWorkspace::NewWorktree;
-            draft.branch = None;
-        }
+        state.write().sessions.projects.push(Project {
+            id: ProjectId(99),
+            title: "ghost".into(),
+            root: PROJECT_ROOT.into(),
+            created_at: SystemTime::UNIX_EPOCH,
+            threads: vec![],
+            repo: true,
+            removed: false,
+            kind: ProjectKind::Normal,
+        });
 
-        // When saving it.
-        actor.save_draft(id);
-
-        // Then no worktree is added before Start.
-        assert_eq!(
-            git.added(),
-            None,
-            "a new-worktree draft should add its worktree only when started"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn checkout_draft_shows_the_branch_on_the_local_draft() -> Result<(), Report<StoreError>> {
-        // Given a local draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
+        // When making a session of it in a new worktree.
+        actor.new_session(
+            ProjectId(99),
+            Workspace::NewWorktree {
+                base: "main".to_owned(),
+            },
         );
 
-        // When checking out origin/feat for it.
-        actor.checkout_draft(id, &git_ref("origin/feat", true), Path::new(PROJECT_ROOT));
-
-        // Then the draft shows the local branch feat.
-        assert_eq!(
-            shown_draft(&state, id)
-                .and_then(|draft| draft.branch)
-                .as_deref(),
-            Some("feat"),
-            "the draft should show the branch checked out in the root"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn checkout_draft_saves_the_drafts_branch() -> Result<(), Report<StoreError>> {
-        // Given a local draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (mut actor, _state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When checking out feat for it.
-        actor.checkout_draft(id, &git_ref("feat", false), Path::new(PROJECT_ROOT));
-
-        // Then the saved draft is on feat.
-        assert_eq!(
-            saved_draft(&actor.store, id)?
-                .and_then(|draft| draft.branch)
-                .as_deref(),
-            Some("feat"),
-            "the draft's new branch should be saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn checkout_draft_refused_while_the_root_is_busy() -> Result<(), Report<StoreError>> {
-        // Given a local draft and a thread working in the root.
-        let (store, _) = store_with_thread("aa")?;
-        let id = orb_project(&store)?;
-        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When checking out feat for the draft.
-        actor.checkout_draft(id, &git_ref("feat", false), Path::new(PROJECT_ROOT));
-
-        // Then the mode line says Claude is working there.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some(BUSY_DIRECTORY),
-            "a checkout under a running turn should be refused"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn refused_checkout_keeps_the_drafts_branch() -> Result<(), Report<StoreError>> {
-        // Given a local draft on main and a thread working in the root.
-        let (store, _) = store_with_thread("aa")?;
-        let id = orb_project(&store)?;
-        store.save_draft(&DraftRow {
-            branch: Some("main".to_owned()),
-            ..draft_row(id, DraftWorkspace::Local)
-        })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When checking out feat for the draft.
-        actor.checkout_draft(id, &git_ref("feat", false), Path::new(PROJECT_ROOT));
-
-        // Then the draft is still on main.
-        assert_eq!(
-            shown_draft(&state, id)
-                .and_then(|draft| draft.branch)
-                .as_deref(),
-            Some("main"),
-            "a refused checkout should leave the draft's branch"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn thread_checkout_in_the_root_updates_the_local_draft() -> Result<(), Report<StoreError>> {
-        // Given a thread in the root and a local draft on main.
-        let (store, thread) = store_with_thread("aa")?;
-        let id = orb_project(&store)?;
-        store.save_draft(&DraftRow {
-            branch: Some("main".to_owned()),
-            ..draft_row(id, DraftWorkspace::Local)
-        })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When switching the thread to feat.
-        actor.check_out(thread, &git_ref("feat", false));
-
-        // Then the draft follows the root onto feat.
-        assert_eq!(
-            shown_draft(&state, id)
-                .and_then(|draft| draft.branch)
-                .as_deref(),
-            Some("feat"),
-            "a local draft should follow checkouts in the root"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn thread_checkout_in_the_root_leaves_a_new_worktree_draft() -> Result<(), Report<StoreError>> {
-        // Given a thread in the root and a new-worktree draft based on main.
-        let (store, thread) = store_with_thread("aa")?;
-        let id = orb_project(&store)?;
-        store.save_draft(&DraftRow {
-            branch: Some("main".to_owned()),
-            ..draft_row(id, DraftWorkspace::NewWorktree)
-        })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When switching the thread to feat.
-        actor.check_out(thread, &git_ref("feat", false));
-
-        // Then the draft keeps its base main.
-        assert_eq!(
-            shown_draft(&state, id)
-                .and_then(|draft| draft.branch)
-                .as_deref(),
-            Some("main"),
-            "a new-worktree draft's base should not follow the root"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn discard_forgets_the_draft() -> Result<(), Report<StoreError>> {
-        // Given a project with a draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When discarding it.
-        actor.discard_draft(id);
-
-        // Then the project has no draft.
-        assert_eq!(
-            shown_draft(&state, id),
-            None,
-            "a discarded draft should leave the sidebar"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn discard_deletes_the_saved_draft() -> Result<(), Report<StoreError>> {
-        // Given a project with a draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (mut actor, _state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When discarding it.
-        actor.discard_draft(id);
-
-        // Then no draft is saved.
-        assert_eq!(
-            saved_draft(&actor.store, id)?,
-            None,
-            "a discarded draft should be deleted from the store"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn discard_asks_nothing_of_the_session_host() -> Result<(), Report<StoreError>> {
-        // Given a project with a draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When discarding it.
-        actor.discard_draft(id);
-
-        // Then no session was created, stopped or removed.
+        // Then the worktree and branch orb made are force-removed.
+        let (path, branch) = git
+            .added()
+            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
+        let calls = git.calls();
         assert!(
-            host.created_in().is_empty() && host.stopped().is_empty() && host.removed().is_empty(),
-            "a draft has no session to remove"
-        );
-        Ok(())
-    }
-
-    /// Project `id`'s draft as the sidebar shows it: its workspace and branch.
-    fn draft_place(state: &State, id: ProjectId) -> Option<(DraftWorkspace, Option<String>)> {
-        shown_draft(state, id).map(|draft| (draft.workspace, draft.branch))
-    }
-
-    /// The worktree the existing-worktree draft tests' draft is in.
-    const DRAFT_WORKTREE: &str = "/tmp/orb-wt";
-
-    #[rstest::rstest]
-    fn checkout_draft_in_its_worktree_shows_the_branch_on_the_draft()
-    -> Result<(), Report<StoreError>> {
-        // Given a draft in an existing worktree on feat.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            branch: Some("feat".to_owned()),
-            ..draft_row(id, DraftWorkspace::Existing(DRAFT_WORKTREE.into()))
-        })?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When checking out dev in that worktree for it.
-        actor.checkout_draft(id, &git_ref("dev", false), Path::new(DRAFT_WORKTREE));
-
-        // Then the draft stays in the worktree, on dev.
-        assert_eq!(
-            draft_place(&state, id),
-            Some((
-                DraftWorkspace::Existing(DRAFT_WORKTREE.into()),
-                Some("dev".to_owned())
-            )),
-            "the draft should show the branch checked out in its worktree"
+            calls.contains(&GitCall::RemoveWorktree { path, force: true })
+                && calls.contains(&GitCall::DeleteBranch {
+                    branch,
+                    force: true
+                }),
+            "an unsaved session leaves no worktree or branch, got {calls:?}"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn checkout_draft_in_the_root_moves_an_existing_worktree_draft_there()
-    -> Result<(), Report<StoreError>> {
-        // Given a draft in an existing worktree on feat.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            branch: Some("feat".to_owned()),
-            ..draft_row(id, DraftWorkspace::Existing(DRAFT_WORKTREE.into()))
-        })?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+    fn new_session_in_a_missing_checkout_fails_with_its_path() -> Result<(), Report<StoreError>> {
+        // Given a project whose root is gone.
+        let store = Store::open_in_memory()?;
+        let id = store.add_project(
+            Path::new("/nonexistent/gone"),
+            "gone",
+            ProjectKind::Normal,
+            0,
+        )?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
-        // When checking out the default branch main in the root for it.
-        actor.checkout_draft(id, &git_ref("main", false), Path::new(PROJECT_ROOT));
+        // When making a session in its checkout.
+        actor.new_session(id, Workspace::Checkout);
 
-        // Then the draft is a local draft on main.
-        assert_eq!(
-            draft_place(&state, id),
-            Some((DraftWorkspace::Local, Some("main".to_owned()))),
-            "a checkout in the root should take the draft back there"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn checkout_draft_in_the_root_saves_the_draft_as_local() -> Result<(), Report<StoreError>> {
-        // Given a draft in an existing worktree on feat.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            branch: Some("feat".to_owned()),
-            ..draft_row(id, DraftWorkspace::Existing(DRAFT_WORKTREE.into()))
-        })?;
-        let (mut actor, _state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When checking out main in the root for it.
-        actor.checkout_draft(id, &git_ref("main", false), Path::new(PROJECT_ROOT));
-
-        // Then the saved draft is local, on main.
-        assert_eq!(
-            saved_draft(&actor.store, id)?.map(|draft| (draft.workspace, draft.branch)),
-            Some((DraftWorkspace::Local, Some("main".to_owned()))),
-            "the draft's move to the root should be saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn checkout_draft_refused_while_its_worktree_is_busy() -> Result<(), Report<StoreError>> {
-        // Given a draft in the worktree where thread `aa` is working.
-        let (store, _) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            cwd: PathBuf::from(DRAFT_WORKTREE),
-            ..row
-        })?;
-        let id = orb_project(&store)?;
-        store.save_draft(&draft_row(
-            id,
-            DraftWorkspace::Existing(DRAFT_WORKTREE.into()),
-        ))?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When checking out dev in the worktree for the draft.
-        actor.checkout_draft(id, &git_ref("dev", false), Path::new(DRAFT_WORKTREE));
-
-        // Then the mode line says Claude is working there.
+        // Then the mode line names the missing folder.
         assert_eq!(
             error_of(&state).as_deref(),
-            Some(BUSY_DIRECTORY),
-            "a checkout under a running turn should be refused"
+            Some("project folder no longer exists: /nonexistent/gone"),
+            "a missing checkout shows its path"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn thread_checkout_in_a_worktree_updates_the_draft_there() -> Result<(), Report<StoreError>> {
-        // Given thread `aa` in a worktree and a draft in the same worktree on
-        // feat.
-        let (store, thread) = store_with_thread("aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            cwd: PathBuf::from(DRAFT_WORKTREE),
-            ..row
-        })?;
-        let id = orb_project(&store)?;
-        store.save_draft(&DraftRow {
-            branch: Some("feat".to_owned()),
-            ..draft_row(id, DraftWorkspace::Existing(DRAFT_WORKTREE.into()))
-        })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+    fn new_incognito_session_makes_its_folder() -> Result<(), Report<StoreError>> {
+        // Given orb's Incognito folder gone after the actor started.
+        let tmp = tempfile::tempdir().change_context(StoreError)?;
+        let incognito = tmp.path().join("orb-incognito");
+        let (mut actor, state) = start_in(
+            Store::open_in_memory()?,
+            &listing(Vec::new()),
+            &FakeGit::local(),
+            Path::new(NO_CLAUDE_DIR),
+            Path::new(ORB_ROOT),
+            &incognito,
+        );
+        fs::remove_dir_all(&incognito).change_context(StoreError)?;
+        let id = state
+            .read()
+            .sessions
+            .own_project(ProjectKind::Incognito)
+            .map(|project| project.id)
+            .ok_or_else(|| Report::new(StoreError).attach("no Incognito project"))?;
 
-        // When switching the thread to dev.
-        actor.check_out(thread, &git_ref("dev", false));
+        // When making an Incognito session.
+        actor.new_session(id, Workspace::Checkout);
 
-        // Then the draft follows its worktree onto dev.
+        // Then its folder is back and the session runs there.
         assert_eq!(
-            shown_draft(&state, id).and_then(|draft| draft.branch),
-            Some("dev".to_owned()),
-            "a draft should follow checkouts in its worktree"
+            (incognito.is_dir(), only_session(&state)?.dir),
+            (true, incognito.clone()),
+            "an Incognito session makes its folder first"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[case::fetched_from_origin(&["main"], "origin/main")]
-    #[case::not_on_origin(&[], "main")]
-    fn new_worktree_draft_says_where_it_starts_from(
-        #[case] on_origin: &[&str],
-        #[case] from: &str,
-    ) -> Result<(), Report<StoreError>> {
-        // Given a project with an origin that had `on_origin` at the last
-        // fetch, last started in a new worktree.
+    fn new_session_in_the_checkout_is_on_its_checked_out_branch() -> Result<(), Report<StoreError>>
+    {
+        // Given / When making a session of the orb project in its checkout.
+        let (_actor, state) = made_session(&FakeGit::local(), Workspace::Checkout)?;
+
+        // Then it shows the branch checked out there.
+        assert_eq!(
+            only_session(&state)?.branch.as_deref(),
+            Some(CURRENT_BRANCH),
+            "a checkout session is on the checkout's branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_session_in_a_missing_worktree_fails_with_its_path() -> Result<(), Report<StoreError>> {
+        // Given / When making a session in a worktree that is gone.
+        let (_actor, state) = made_session(
+            &FakeGit::local(),
+            Workspace::Existing(PathBuf::from("/nonexistent/worktree")),
+        )?;
+
+        // Then the mode line names the missing worktree.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("worktree no longer exists: /nonexistent/worktree"),
+            "a missing worktree shows its path"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_session_in_a_new_worktree_without_origin_starts_from_the_local_base()
+    -> Result<(), Report<StoreError>> {
+        // Given / When making a session in a new worktree from `feat` in a
+        // repository without an origin.
+        let git = FakeGit::local();
+        made_session(
+            &git,
+            Workspace::NewWorktree {
+                base: "feat".to_owned(),
+            },
+        )?;
+
+        // Then nothing is fetched and the worktree starts from local `feat`.
+        assert_eq!(
+            fetch_and_add_steps(&git),
+            ["add from feat"],
+            "without an origin the base is used as it is locally"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_session_from_another_remotes_ref_uses_it_as_it_is() -> Result<(), Report<StoreError>> {
+        // Given / When making a session in a new worktree from `upstream/x`.
+        let git = FakeGit::with_origin(Ok(true));
+        made_session(
+            &git,
+            Workspace::NewWorktree {
+                base: "upstream/x".to_owned(),
+            },
+        )?;
+
+        // Then origin isn't asked and the worktree starts from `upstream/x`.
+        assert_eq!(
+            fetch_and_add_steps(&git),
+            ["add from upstream/x"],
+            "another remote's ref is used as it is"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_worktree_session_shows_the_fetch_while_it_runs() -> Result<(), Report<StoreError>> {
+        // Given an origin, and git watching the app state.
+        let (store, id) = store_with_project()?;
+        let git = FakeGit::with_origin(Ok(true));
+        let (mut actor, state) =
+            start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
+        git.watch(&state);
+
+        // When making a session in a new worktree from `main`.
+        actor.new_session(
+            id,
+            Workspace::NewWorktree {
+                base: "main".to_owned(),
+            },
+        );
+
+        // Then, while git fetched, origin/main showed as being fetched.
+        assert_eq!(
+            git.fetching_seen(),
+            vec![Some("origin/main".to_owned())],
+            "the fetch shows while it runs"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_worktree_whose_fetch_fails_clears_the_fetch() -> Result<(), Report<StoreError>> {
+        // Given / When making a session in a new worktree whose fetch fails.
+        let (_actor, state) = made_session(
+            &FakeGit::with_origin(Err("fatal: unable to access origin")),
+            Workspace::NewWorktree {
+                base: "main".to_owned(),
+            },
+        )?;
+
+        // Then no fetch shows any more.
+        assert_eq!(
+            state.read().sessions.fetching,
+            None,
+            "a failed fetch stops showing"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn failed_save_in_an_existing_worktree_removes_no_worktree() -> Result<(), Report<StoreError>> {
+        // Given a project the sidebar shows but the store doesn't have, and a
+        // worktree that already exists.
+        let worktree = tempfile::tempdir().change_context(StoreError)?;
+        let git = FakeGit::local();
+        let (mut actor, state) = start_with(
+            Store::open_in_memory()?,
+            &listing(Vec::new()),
+            &git,
+            Path::new(NO_CLAUDE_DIR),
+        );
+        state.write().sessions.projects.push(Project {
+            id: ProjectId(99),
+            title: "ghost".into(),
+            root: PROJECT_ROOT.into(),
+            created_at: SystemTime::UNIX_EPOCH,
+            threads: vec![],
+            repo: true,
+            removed: false,
+            kind: ProjectKind::Normal,
+        });
+
+        // When making a session of it in that worktree.
+        actor.new_session(
+            ProjectId(99),
+            Workspace::Existing(worktree.path().to_owned()),
+        );
+
+        // Then git is asked to remove no worktree and delete no branch.
+        let calls = git.calls();
+        assert!(
+            !calls.iter().any(|call| matches!(
+                call,
+                GitCall::RemoveWorktree { .. } | GitCall::DeleteBranch { .. }
+            )),
+            "a worktree orb didn't make stays, got {calls:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_incognito_session_whose_folder_cant_be_made_shows_why() -> Result<(), Report<StoreError>>
+    {
+        // Given orb's Incognito folder under a regular file.
+        let tmp = tempfile::tempdir().change_context(StoreError)?;
+        let file = tmp.path().join("file");
+        fs::write(&file, "").change_context(StoreError)?;
+        let (mut actor, state) = start_in(
+            Store::open_in_memory()?,
+            &listing(Vec::new()),
+            &FakeGit::local(),
+            Path::new(NO_CLAUDE_DIR),
+            Path::new(ORB_ROOT),
+            &file.join("orb-incognito"),
+        );
+        let id = state
+            .read()
+            .sessions
+            .own_project(ProjectKind::Incognito)
+            .map(|project| project.id)
+            .ok_or_else(|| Report::new(StoreError).attach("no Incognito project"))?;
+
+        // When making an Incognito session.
+        actor.new_session(id, Workspace::Checkout);
+
+        // Then the mode line says the folder couldn't be made.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("couldn't make the folder"),
+            "an Incognito session needs its folder"
+        );
+        Ok(())
+    }
+
+    /// A store holding the orb project alone.
+    fn store_with_project() -> Result<(Store, ProjectId), Report<StoreError>> {
         let store = Store::open_in_memory()?;
         let id = orb_project(&store)?;
-        store.record_last_used(id, &used(LastWorkspace::NewWorktree), 10)?;
-        let (mut actor, state) = start_with(
-            store,
-            &FakeHost::listing(Vec::new()),
-            &FakeGit::tracking(on_origin),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        Ok((store, id))
+    }
 
-        // When creating its draft, based on the default branch main.
-        actor.create_draft(id);
-
-        // Then it starts from `from`.
-        assert_eq!(
-            shown_draft(&state, id).and_then(|draft| draft.from),
-            Some(from.to_owned()),
-            "the ref the new worktree would start from"
-        );
-        Ok(())
+    /// Whether project `id` shows as a git repository.
+    fn repo_of(state: &State, id: ProjectId) -> Option<bool> {
+        state
+            .read()
+            .sessions
+            .project(id)
+            .map(|project| project.repo)
     }
 
     #[rstest::rstest]
-    fn new_worktree_draft_without_origin_starts_from_its_base() -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft based on main in a repository without an
-        // origin.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            branch: Some("main".to_owned()),
-            ..draft_row(id, DraftWorkspace::NewWorktree)
-        })?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When saving it.
-        actor.save_draft(id);
-
-        // Then it starts from main as it is.
-        assert_eq!(
-            shown_draft(&state, id).and_then(|draft| draft.from),
-            Some("main".to_owned()),
-            "without an origin the base is used as it is"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn draft_of_a_non_git_project_is_not_a_repository() -> Result<(), Report<StoreError>> {
-        // Given a project whose root isn't a git repository.
-        let store = Store::open_in_memory()?;
-        let id = orb_project(&store)?;
-        let (mut actor, state) = start_with(
-            store,
-            &FakeHost::listing(Vec::new()),
-            &FakeGit::plain(Ok(())),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When creating its draft.
-        actor.create_draft(id);
-
-        // Then the draft knows it isn't in a repository.
-        assert_eq!(
-            shown_draft(&state, id).map(|draft| draft.repo),
-            Some(false),
-            "a plain directory isn't a git repository"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn restored_draft_of_a_non_git_project_is_not_a_repository() -> Result<(), Report<StoreError>> {
-        // Given a saved draft of a project whose root isn't a git repository.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+    fn restore_marks_a_project_outside_git_not_a_repo() -> Result<(), Report<StoreError>> {
+        // Given a saved project whose root isn't a git repository.
+        let (store, id) = store_with_project()?;
 
         // When the actor starts.
         let (_actor, state) = start_with(
             store,
-            &FakeHost::listing(Vec::new()),
+            &listing(Vec::new()),
             &FakeGit::plain(Ok(())),
             Path::new(NO_CLAUDE_DIR),
         );
 
-        // Then the draft knows it isn't in a repository.
+        // Then the project shows as outside git.
         assert_eq!(
-            shown_draft(&state, id).map(|draft| draft.repo),
+            repo_of(&state, id),
             Some(false),
-            "a restored draft should learn its project isn't a repository"
+            "a restored project should learn it isn't a repository"
         );
         Ok(())
     }
 
     #[rstest::rstest]
     fn init_git_runs_git_init_in_the_root() -> Result<(), Report<StoreError>> {
-        // Given a local draft of a project that isn't a git repository.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        // Given a project that isn't a git repository.
+        let (store, id) = store_with_project()?;
         let git = FakeGit::plain(Ok(()));
-        let (mut actor, _state) = start_with(
-            store,
-            &FakeHost::listing(Vec::new()),
-            &git,
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (mut actor, _state) =
+            start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
 
         // When initializing git for it.
         actor.init_git(id);
@@ -7661,12 +5530,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn initialized_draft_is_a_repository_on_the_roots_branch() -> Result<(), Report<StoreError>> {
-        // Given a local draft of a project that isn't a git repository.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+    fn init_git_marks_the_project_a_repo() -> Result<(), Report<StoreError>> {
+        // Given a project that isn't a git repository.
+        let (store, id) = store_with_project()?;
         let (mut actor, state) = start_with(
             store,
-            &FakeHost::listing(Vec::new()),
+            &listing(Vec::new()),
             &FakeGit::plain(Ok(())),
             Path::new(NO_CLAUDE_DIR),
         );
@@ -7674,22 +5543,22 @@ mod tests {
         // When initializing git for it.
         actor.init_git(id);
 
-        // Then the draft is in a repository, on the branch git reports.
+        // Then the project shows as a git repository.
         assert_eq!(
-            shown_draft(&state, id).map(|draft| (draft.repo, draft.branch)),
-            Some((true, Some(CURRENT_BRANCH.to_owned()))),
-            "the draft should now behave as a git project's"
+            repo_of(&state, id),
+            Some(true),
+            "an initialized project should be a repository"
         );
         Ok(())
     }
 
     #[rstest::rstest]
     fn failed_git_init_shows_why() -> Result<(), Report<StoreError>> {
-        // Given a draft of a non-git project where git init fails.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
+        // Given a non-git project where git init fails.
+        let (store, id) = store_with_project()?;
         let (mut actor, state) = start_with(
             store,
-            &FakeHost::listing(Vec::new()),
+            &listing(Vec::new()),
             &FakeGit::plain(Err("fatal: cannot mkdir .git: Permission denied")),
             Path::new(NO_CLAUDE_DIR),
         );
@@ -7707,650 +5576,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn non_git_new_worktree_draft_starts_in_the_root() -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft of a project that isn't a git repository.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start_with(
-            store,
-            &host,
-            &FakeGit::plain(Ok(())),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When starting it.
-        actor.start_draft(id).await;
-
-        // Then the session runs in the root.
-        assert_eq!(
-            host.created_in(),
-            vec![PathBuf::from(PROJECT_ROOT)],
-            "a non-git project's draft always starts local"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[case::local_name("feat")]
-    #[case::origin_ref("origin/feat")]
-    #[tokio::test]
-    async fn new_worktree_start_bases_on_the_drafts_branch_from_origin(
-        #[case] base: &str,
-    ) -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft based on `base`, and an origin that has feat.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            branch: Some(base.to_owned()),
-            ..draft_row(id, DraftWorkspace::NewWorktree)
-        })?;
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::with_origin(Ok(true)));
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then feat is fetched and the worktree starts from origin/feat.
-        assert_eq!(
-            fetch_and_add_steps(&git),
-            vec!["fetch feat".to_owned(), "add from origin/feat".to_owned()],
-            "the worktree should start from freshly fetched origin/feat"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn new_worktree_start_uses_another_remotes_ref_as_it_is() -> Result<(), Report<StoreError>>
-    {
-        // Given a new-worktree draft based on upstream/feat.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            branch: Some("upstream/feat".to_owned()),
-            ..draft_row(id, DraftWorkspace::NewWorktree)
-        })?;
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::with_origin(Ok(true)));
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then nothing is fetched and the worktree starts from upstream/feat.
-        assert_eq!(
-            fetch_and_add_steps(&git),
-            vec!["add from upstream/feat".to_owned()],
-            "another remote's ref should be used without a fetch"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn new_worktree_start_runs_the_session_in_the_new_worktree()
-    -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the session starts in the worktree git added.
-        assert_eq!(
-            host.created_in(),
-            git.added()
-                .map(|(path, _)| path)
-                .into_iter()
-                .collect::<Vec<_>>(),
-            "the session should start in the new worktree"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn new_worktree_thread_is_saved_on_the_worktrees_branch() -> Result<(), Report<StoreError>>
-    {
-        // Given a new-worktree draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the saved thread is on the branch orb made.
-        assert_eq!(
-            saved(&actor.store, "bb")?.branch,
-            git.added().map(|(_, branch)| branch),
-            "the new thread should be saved on its worktree's branch"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn local_thread_is_saved_on_the_roots_branch_at_start() -> Result<(), Report<StoreError>>
-    {
-        // Given a local draft still showing main, while the root is on dev.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            branch: Some("main".to_owned()),
-            ..draft_row(id, DraftWorkspace::Local)
-        })?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the saved thread is on dev.
-        assert_eq!(
-            saved(&actor.store, "bb")?.branch.as_deref(),
-            Some(CURRENT_BRANCH),
-            "the new thread should be saved on the branch its root has at start"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn start_passes_the_drafts_model_and_permission() -> Result<(), Report<StoreError>> {
-        // Given a local draft with sonnet in plan mode.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            model: Some("sonnet".to_owned()),
-            permission_mode: Some("plan".to_owned()),
-            ..draft_row(id, DraftWorkspace::Local)
-        })?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the session starts with sonnet in plan mode.
-        assert_eq!(
-            host.created_with(),
-            vec![SessionOptions {
-                model: Some("sonnet".to_owned()),
-                permission_mode: Some("plan".to_owned()),
-            }],
-            "the session should start with the draft's model and permission"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn local_draft_starts_in_the_projects_root() -> Result<(), Report<StoreError>> {
-        // Given saved orb and web projects, web with a local draft.
-        let store = Store::open_in_memory()?;
-        orb_project(&store)?;
-        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
-        store.save_draft(&draft_row(web, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting web's draft.
-        actor.start_draft(web).await;
-
-        // Then the host starts it in web's root.
-        assert_eq!(
-            host.created_in(),
-            vec![PathBuf::from(WEB_ROOT)],
-            "a local draft should start in its project's root"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn local_start_in_a_missing_project_folder_shows_why() -> Result<(), Report<StoreError>> {
-        // Given a local draft of a project whose folder no longer exists.
-        let (store, id) = {
-            let store = Store::open_in_memory()?;
-            let id = store.add_project(
-                Path::new("/nonexistent/gone"),
-                "gone",
-                ProjectKind::Normal,
-                0,
-            )?;
-            store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
-            (store, id)
-        };
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the mode line says the project folder is gone.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("project folder no longer exists: /nonexistent/gone"),
-            "a missing project folder should fail the start with its path"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn start_of_a_missing_worktree_shows_why() -> Result<(), Report<StoreError>> {
-        // Given a draft in a worktree that no longer exists.
-        let (store, id) = store_with_draft(|id| {
-            draft_row(
-                id,
-                DraftWorkspace::Existing(PathBuf::from("/nonexistent/wt")),
-            )
-        })?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the mode line says the worktree is gone.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("worktree no longer exists: /nonexistent/wt"),
-            "a missing worktree should fail the start with its path"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn start_of_a_gone_draft_shows_why() -> Result<(), Report<StoreError>> {
-        // Given a project without a draft.
-        let store = Store::open_in_memory()?;
-        let id = orb_project(&store)?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting its draft.
-        actor.start_draft(id).await;
-
-        // Then the mode line says the draft is gone.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("the draft is gone"),
-            "a start without a draft should fail"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[case::succeeded(Ok("bb"))]
-    #[case::failed(Err("claude failed"))]
-    #[tokio::test]
-    async fn start_ends_starting(
-        #[case] outcome: Result<&str, &str>,
-    ) -> Result<(), Report<StoreError>> {
-        // Given a draft start in flight.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(outcome);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.starting = true;
-
-        // When the start finishes.
-        actor.start_draft(id).await;
-
-        // Then nothing is starting any more.
-        assert!(
-            !state.read().sessions.starting,
-            "a finished start should stop showing as starting"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_start_keeps_the_draft() -> Result<(), Report<StoreError>> {
-        // Given a local draft and a host that refuses to start a session.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Err("claude failed"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the draft is still there.
-        assert!(
-            shown_draft(&state, id).is_some(),
-            "a failed start should keep the draft"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_start_shows_the_reason() -> Result<(), Report<StoreError>> {
-        // Given a local draft and a host that refuses to start a session.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Err("claude failed"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the reason is the error.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("claude failed"),
-            "the mode line should show why the start failed"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_start_adds_no_thread() -> Result<(), Report<StoreError>> {
-        // Given a local draft and a host that refuses to start a session.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Err("claude failed"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then there are still no threads.
-        assert_eq!(
-            state.read().sessions.threads().count(),
-            0,
-            "a failed start shouldn't add a thread"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_draft_start_removes_its_new_worktree() -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft and a host that refuses to start a session.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
-        let (host, git) = (FakeHost::creating(Err("claude failed")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the worktree orb made is force-removed.
-        let (path, _branch) = git
-            .added()
-            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
-        assert!(
-            git.calls()
-                .contains(&GitCall::RemoveWorktree { path, force: true }),
-            "a failed start should remove the worktree made for it"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn started_draft_leaves_the_project() -> Result<(), Report<StoreError>> {
-        // Given a local draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting it.
-        actor.start_draft(id).await;
-
-        // Then the project has no draft.
-        assert_eq!(
-            shown_draft(&state, id),
-            None,
-            "a started draft should leave the sidebar"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn started_draft_is_deleted_from_the_store() -> Result<(), Report<StoreError>> {
-        // Given a local draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting it.
-        actor.start_draft(id).await;
-
-        // Then no draft is saved.
-        assert_eq!(
-            saved_draft(&actor.store, id)?,
-            None,
-            "a started draft should be deleted"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn started_thread_is_first_in_its_project() -> Result<(), Report<StoreError>> {
-        // Given a saved thread and a local draft in the orb project.
-        let (store, _) = store_with_thread("aa")?;
-        let project = orb_project(&store)?;
-        store.save_draft(&draft_row(project, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(project).await;
-
-        // Then the new thread is the project's first.
-        let first = state
-            .read()
-            .sessions
-            .projects
-            .iter()
-            .find(|shown| shown.id == project)
-            .and_then(|shown| shown.threads.first())
-            .map(|thread| thread.id);
-        assert_eq!(
-            first,
-            Some(saved(&actor.store, "bb")?.id),
-            "the newest thread comes first"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn started_thread_is_saved_under_its_project() -> Result<(), Report<StoreError>> {
-        // Given saved orb and web projects, web with a local draft.
-        let store = Store::open_in_memory()?;
-        orb_project(&store)?;
-        let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
-        store.save_draft(&draft_row(web, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting web's draft.
-        actor.start_draft(web).await;
-
-        // Then the saved thread belongs to web.
-        assert_eq!(
-            saved(&actor.store, "bb")?.project_id,
-            web,
-            "the new thread should be saved under the draft's project"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn started_thread_saves_its_model_and_permission() -> Result<(), Report<StoreError>> {
-        // Given a local draft with sonnet in plan mode.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            model: Some("sonnet".to_owned()),
-            permission_mode: Some("plan".to_owned()),
-            ..draft_row(id, DraftWorkspace::Local)
-        })?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When starting it.
-        actor.start_draft(id).await;
-
-        // Then the saved thread remembers sonnet and plan mode.
-        let row = saved(&actor.store, "bb")?;
-        assert_eq!(
-            (row.model.as_deref(), row.permission_mode.as_deref()),
-            (Some("sonnet"), Some("plan")),
-            "the thread should save the flags it started with"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn start_records_the_last_used_settings() -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft with sonnet in plan mode.
-        let (store, id) = store_with_draft(|id| DraftRow {
-            model: Some("sonnet".to_owned()),
-            permission_mode: Some("plan".to_owned()),
-            ..draft_row(id, DraftWorkspace::NewWorktree)
-        })?;
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When starting it.
-        actor.start_draft(id).await;
-
-        // Then the project's last-used settings are those.
-        assert_eq!(
-            actor.store.last_used(id)?,
-            Some(used(LastWorkspace::NewWorktree)),
-            "a start should record its workspace kind, model and permission"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn start_with_the_draft_selected_selects_the_thread() -> Result<(), Report<StoreError>> {
-        // Given a local draft, selected.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Draft(id));
-
-        // When starting it.
-        actor.start_draft(id).await;
-
-        // Then the new thread is selected.
-        assert_eq!(
-            state
-                .read()
-                .sessions
-                .selected_thread()
-                .map(|thread| thread.id),
-            Some(saved(&actor.store, "bb")?.id),
-            "the new thread should take the draft's place under the cursor"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn start_with_the_draft_selected_asks_to_attach() -> Result<(), Report<StoreError>> {
-        // Given a local draft, selected.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Draft(id));
-
-        // When starting it.
-        actor.start_draft(id).await;
-
-        // Then the frontend is asked to attach to the new thread's session.
-        assert_eq!(
-            state.read().sessions.attach,
-            Some(session_of(&actor.store, saved(&actor.store, "bb")?.id)?),
-            "a still-selected draft's thread should be attached to"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn started_draft_thread_gets_its_own_session() -> Result<(), Report<StoreError>> {
-        // Given a local draft, selected.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Draft(id));
-
-        // When starting it.
-        actor.start_draft(id).await;
-
-        // Then the new thread's pane is laid out in a session of its own.
-        let thread = saved(&actor.store, "bb")?;
-        let laid_out = thread
-            .pane_id
-            .and_then(|pane| state.read().layouts.owner_of(pane))
-            .map(|session| state.read().layouts.session_panes(session));
-        assert_eq!(
-            laid_out,
-            Some(thread.pane_id.into_iter().collect()),
-            "a started thread should get a one-pane session"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn start_after_the_cursor_moved_does_not_ask_to_attach() -> Result<(), Report<StoreError>>
-    {
-        // Given a thread and a local draft, with the thread selected.
-        let (store, thread) = store_with_thread("aa")?;
-        let id = orb_project(&store)?;
-        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(thread.0)));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then nothing is to be attached to.
-        assert_eq!(
-            state.read().sessions.attach,
-            None,
-            "a draft the user moved away from should not steal focus"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn start_after_the_cursor_moved_keeps_the_cursor() -> Result<(), Report<StoreError>> {
-        // Given a thread and a local draft, with the thread selected.
-        let (store, thread) = store_with_thread("aa")?;
-        let id = orb_project(&store)?;
-        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(thread.0)));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the old thread stays selected.
-        assert_eq!(
-            state.read().sessions.cursor,
-            Some(SidebarItem::Session(SessionId(thread.0))),
-            "the cursor should stay where the user moved it"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn adding_a_directory_shows_it_as_a_project() -> Result<(), Report<StoreError>> {
         // Given no projects and an existing directory.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let (mut actor, state) = start(
             Store::open_in_memory()?,
-            &FakeHost::listing(Vec::new()),
+            &listing(Vec::new()),
             Path::new(NO_CLAUDE_DIR),
         );
 
@@ -8380,11 +5611,7 @@ mod tests {
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
         store.add_project(dir.path(), "web", ProjectKind::Normal, 0)?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // When adding it again.
         actor.add_project(dir.path().to_owned());
@@ -8406,7 +5633,7 @@ mod tests {
         // Given no projects.
         let (mut actor, state) = start(
             Store::open_in_memory()?,
-            &FakeHost::listing(Vec::new()),
+            &listing(Vec::new()),
             Path::new(NO_CLAUDE_DIR),
         );
 
@@ -8427,7 +5654,7 @@ mod tests {
         // Given no projects.
         let (mut actor, _state) = start(
             Store::open_in_memory()?,
-            &FakeHost::listing(Vec::new()),
+            &listing(Vec::new()),
             Path::new(NO_CLAUDE_DIR),
         );
 
@@ -8452,7 +5679,7 @@ mod tests {
     async fn poll_titles_a_thread_with_its_transcripts_prompt() -> Result<(), Report<StoreError>> {
         // Given a thread whose session's transcript has a prompt.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(
@@ -8461,10 +5688,7 @@ mod tests {
         )
         .change_context(StoreError)?;
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![SessionRecord {
-            session_id: Some("s1".to_owned()),
-            ..record("aa", ThreadStatus::Idle)
-        }]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, claude_dir.path());
 
         // When polling.
@@ -8490,7 +5714,7 @@ mod tests {
     async fn poll_titles_a_thread_with_its_custom_title() -> Result<(), Report<StoreError>> {
         // Given a thread whose transcript has a prompt, an ai-title, then a `/rename`.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(
@@ -8503,10 +5727,7 @@ mod tests {
         )
         .change_context(StoreError)?;
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![SessionRecord {
-            session_id: Some("s1".to_owned()),
-            ..record("aa", ThreadStatus::Idle)
-        }]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, claude_dir.path());
 
         // When polling.
@@ -8536,7 +5757,7 @@ mod tests {
         renamed: &str,
     ) -> Result<(tempfile::TempDir, Store, ThreadId), Report<StoreError>> {
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(&path, lines).change_context(StoreError)?;
@@ -8559,7 +5780,7 @@ mod tests {
             "orb-m1",
             "Sidebar search",
         )?;
-        let host = FakeHost::listing(vec![in_session(ThreadStatus::Idle)]);
+        let host = listing(vec![in_session(ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, claude_dir.path());
 
         // When polling.
@@ -8584,7 +5805,7 @@ mod tests {
             "orb-m1",
             "Sidebar search",
         )?;
-        let host = FakeHost::listing(vec![in_session(ThreadStatus::Idle)]);
+        let host = listing(vec![in_session(ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, claude_dir.path());
 
         // When polling.
@@ -8609,7 +5830,7 @@ mod tests {
             renamed_title: Some("Sidebar search".to_owned()),
             ..row
         })?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
 
         // When orb starts on that store.
         let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -8633,7 +5854,7 @@ mod tests {
             renamed_title: Some("Lexer".to_owned()),
             ..row
         })?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polls see its turn run and then end.
@@ -8653,15 +5874,12 @@ mod tests {
     async fn poll_shows_the_located_transcript_on_the_thread() -> Result<(), Report<StoreError>> {
         // Given a thread whose session has a transcript.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(&path, "").change_context(StoreError)?;
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![SessionRecord {
-            session_id: Some("s1".to_owned()),
-            ..record("aa", ThreadStatus::Idle)
-        }]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, claude_dir.path());
 
         // When polling.
@@ -8691,30 +5909,23 @@ mod tests {
         let b = store.add_project(Path::new("/b"), "b", ProjectKind::Normal, 2)?;
         let a = store.add_project(Path::new("/a"), "a", ProjectKind::Normal, 1)?;
         let insert = |project_id, short_id: &str, created_at| {
-            store
-                .insert_thread(&NewThread {
-                    harness: HarnessId::new("claude"),
-                    project_id,
-                    short_id: short_id.to_owned(),
-                    cwd: PathBuf::from("/a"),
-                    created_at,
-                    model: None,
-                    permission_mode: None,
-                    group_id: None,
-                    zmx: None,
-                })
-                .map(|inserted| inserted.thread)
+            seed_with(
+                &store,
+                "claude",
+                project_id,
+                SessionKind::Plain,
+                Path::new("/a"),
+                short_id,
+                created_at,
+            )
+            .map(|seeded| seeded.thread)
         };
         let a_old = insert(a, "a1", 10)?;
         let b_only = insert(b, "b1", 20)?;
         let a_new = insert(a, "a2", 30)?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the sidebar lists A's threads newest first, then B's.
         let order: Vec<ThreadId> = state
@@ -8743,11 +5954,7 @@ mod tests {
         })?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the pinned session, first in the sidebar, is selected.
         assert_eq!(
@@ -8776,11 +5983,7 @@ mod tests {
         store.save_jumps(&[SidebarItem::Session(SessionId(id.0)), gone])?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then only thread aa is in the jump list.
         assert_eq!(
@@ -8795,11 +5998,7 @@ mod tests {
     fn saving_jumps_writes_the_jump_list() -> Result<(), Report<StoreError>> {
         // Given a started actor whose jump list holds thread aa.
         let (store, id) = store_with_thread("aa")?;
-        let (actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
         state.write().jumps = JumpList::from_saved(vec![SidebarItem::Session(SessionId(id.0))]);
 
         // When saving the jump list.
@@ -8820,11 +6019,7 @@ mod tests {
         let store = store_with_width(40)?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the sidebar is 40 columns wide.
         assert_eq!(
@@ -8846,11 +6041,7 @@ mod tests {
         let store = store_with_width(saved)?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the sidebar is at the nearest bound.
         assert_eq!(
@@ -8866,7 +6057,7 @@ mod tests {
         // Given the actor on a fresh store and a sidebar resized to 44 columns.
         let (actor, state) = start(
             Store::open_in_memory()?,
-            &FakeHost::listing(Vec::new()),
+            &listing(Vec::new()),
             Path::new(NO_CLAUDE_DIR),
         );
         state.write().sidebar.width = 44;
@@ -8899,13 +6090,9 @@ mod tests {
 
     #[rstest::rstest]
     fn remove_project_marks_it_removed() -> Result<(), Report<StoreError>> {
-        // Given a project with a draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        // Given a project.
+        let (store, id) = store_with_project()?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // When removing it.
         actor.remove_project(id);
@@ -8920,28 +6107,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn remove_project_drops_its_draft() -> Result<(), Report<StoreError>> {
-        // Given a project with a draft.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // When removing it.
-        actor.remove_project(id);
-
-        // Then it has no draft.
-        assert_eq!(
-            shown_draft(&state, id),
-            None,
-            "a removed project's draft should be discarded"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn restore_shows_a_removed_project_as_removed() -> Result<(), Report<StoreError>> {
         // Given a removed project.
         let store = Store::open_in_memory()?;
@@ -8949,11 +6114,7 @@ mod tests {
         store.remove_project(id, 1_000)?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the project shows as removed.
         assert_eq!(
@@ -8968,14 +6129,13 @@ mod tests {
     /// folder.
     fn start_incognito(
         store: Store,
-        host: &Arc<FakeHost>,
+        host: &Arc<FakeClaude>,
         incognito_root: &Path,
     ) -> (SessionsActor, State) {
         start_in(
             store,
             host,
             &FakeGit::local(),
-            &FakeTrust::accepting(),
             Path::new(NO_CLAUDE_DIR),
             Path::new(ORB_ROOT),
             incognito_root,
@@ -9001,11 +6161,8 @@ mod tests {
         let root = dir.path().join("incognito");
 
         // When the actor starts.
-        let (_actor, state) = start_incognito(
-            Store::open_in_memory()?,
-            &FakeHost::listing(Vec::new()),
-            &root,
-        );
+        let (_actor, state) =
+            start_incognito(Store::open_in_memory()?, &listing(Vec::new()), &root);
 
         // Then it has an Incognito project titled Incognito.
         assert_eq!(
@@ -9025,7 +6182,7 @@ mod tests {
         store.add_project(&root, "Incognito", ProjectKind::Incognito, 0)?;
 
         // When the actor starts.
-        let (_actor, state) = start_incognito(store, &FakeHost::listing(Vec::new()), &root);
+        let (_actor, state) = start_incognito(store, &listing(Vec::new()), &root);
 
         // Then there's still one Incognito project.
         assert_eq!(
@@ -9043,11 +6200,8 @@ mod tests {
         let root = dir.path().join("incognito");
 
         // When the actor starts.
-        let (_actor, _state) = start_incognito(
-            Store::open_in_memory()?,
-            &FakeHost::listing(Vec::new()),
-            &root,
-        );
+        let (_actor, _state) =
+            start_incognito(Store::open_in_memory()?, &listing(Vec::new()), &root);
 
         // Then the folder exists.
         assert!(root.is_dir(), "start should make the Incognito folder");
@@ -9064,7 +6218,7 @@ mod tests {
         store.remove_project(id, 1)?;
 
         // When the actor starts.
-        let (_actor, state) = start_incognito(store, &FakeHost::listing(Vec::new()), &root);
+        let (_actor, state) = start_incognito(store, &listing(Vec::new()), &root);
 
         // Then it isn't removed.
         assert_eq!(
@@ -9076,71 +6230,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn incognito_start_makes_its_folder_first() -> Result<(), Report<StoreError>> {
-        // Given the Incognito project with a local draft, its folder deleted
-        // after start.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let root = dir.path().join("incognito");
-        let store = Store::open_in_memory()?;
-        let id = store.add_project(&root, "Incognito", ProjectKind::Incognito, 0)?;
-        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, _state) = start_incognito(store, &host, &root);
-        fs::remove_dir_all(&root).change_context(StoreError)?;
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the folder existed when the host started the session.
-        assert_eq!(
-            host.cwd_existed(),
-            vec![true],
-            "an Incognito start should make its folder before starting"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn incognito_start_fails_when_its_folder_cant_be_made() -> Result<(), Report<StoreError>>
-    {
-        // Given the Incognito project with a local draft, rooted under a
-        // regular file.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let file = dir.path().join("file");
-        fs::write(&file, "").change_context(StoreError)?;
-        let root = file.join("incognito");
-        let store = Store::open_in_memory()?;
-        let id = store.add_project(&root, "Incognito", ProjectKind::Incognito, 0)?;
-        store.save_draft(&draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start_incognito(store, &host, &root);
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then the mode line says the folder couldn't be made.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("couldn't make the folder"),
-            "an Incognito start should fail when its folder can't be made"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn adding_a_removed_project_restores_it() -> Result<(), Report<StoreError>> {
         // Given a directory that's a removed project.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
         let id = store.add_project(dir.path(), "web", ProjectKind::Normal, 0)?;
         store.remove_project(id, 1_000)?;
-        let (mut actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // When adding it again.
         actor.add_project(dir.path().to_owned());
@@ -9160,19 +6256,16 @@ mod tests {
         let store = Store::open_in_memory()?;
         add_thread(&store, "aa", 1_000)?;
         let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
-        let thread = store
-            .insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
-                project_id: web,
-                short_id: "bb".to_owned(),
-                cwd: PathBuf::from(WEB_ROOT),
-                created_at: 500,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-                zmx: None,
-            })
-            .map(|inserted| inserted.thread)?;
+        let thread = seed_with(
+            &store,
+            "claude",
+            web,
+            SessionKind::Plain,
+            Path::new(WEB_ROOT),
+            "bb",
+            500,
+        )
+        .map(|seeded| seeded.thread)?;
         store.save_ui(&Ui {
             sidebar_width: None,
             project_filter: Some(web),
@@ -9186,11 +6279,7 @@ mod tests {
         let (store, web, _) = store_filtered_to_web()?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the sidebar is filtered to web.
         assert_eq!(
@@ -9208,11 +6297,7 @@ mod tests {
         let (store, _, thread) = store_filtered_to_web()?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the cursor is on web's thread.
         assert_eq!(
@@ -9230,11 +6315,7 @@ mod tests {
         store.remove_project(web, 2_000)?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the sidebar lists every project.
         assert_eq!(
@@ -9250,11 +6331,7 @@ mod tests {
         // Given the actor with the orb project and the sidebar filtered to it.
         let store = Store::open_in_memory()?;
         let id = orb_project(&store)?;
-        let (actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
         state.write().sessions.filter = Some(id);
 
         // When saving the layout.
@@ -9276,11 +6353,7 @@ mod tests {
         store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1_500)?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the project shows it was added at 1.5 s.
         let added: Vec<SystemTime> = state
@@ -9305,26 +6378,19 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1)?;
-        store
-            .insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
-                project_id,
-                short_id: "t1".to_owned(),
-                cwd: PathBuf::from(PROJECT_ROOT),
-                created_at: 1_500,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-                zmx: None,
-            })
-            .map(|inserted| inserted.thread)?;
+        seed_with(
+            &store,
+            "claude",
+            project_id,
+            SessionKind::Plain,
+            Path::new(PROJECT_ROOT),
+            "t1",
+            1_500,
+        )
+        .map(|seeded| seeded.thread)?;
 
         // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the thread shows it was created at 1.5 s.
         let created: Vec<SystemTime> = state
@@ -9337,143 +6403,6 @@ mod tests {
             created,
             vec![SystemTime::UNIX_EPOCH + Duration::from_millis(1_500)],
             "a restored thread should keep when it was created"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn restore_gives_a_group_without_threads_a_draft() -> Result<(), Report<StoreError>> {
-        // Given a project with a saved Feature group in opus and no threads.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1_500)?;
-        store.insert_group(&NewGroup {
-            harness: HarnessId::new("claude"),
-            project_id,
-            kind: GroupKind::Feature,
-            name: "GT-514-login".to_owned(),
-            dir: None,
-            branch: Some("GT-514-login".to_owned()),
-            created_at: 2_000,
-            draft_model: Some("opus".to_owned()),
-            draft_permission_mode: None,
-        })?;
-
-        // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // Then the group shows a draft with its saved settings.
-        let drafts: Vec<(bool, GroupDefaults)> = state
-            .read()
-            .sessions
-            .projects
-            .iter()
-            .flat_map(|project| {
-                project
-                    .groups
-                    .iter()
-                    .map(|group| (group.draft.is_some(), group.defaults.clone()))
-            })
-            .collect();
-        assert_eq!(
-            drafts,
-            vec![(
-                true,
-                GroupDefaults {
-                    harness: HarnessId::new("claude"),
-                    model: Some("opus".to_owned()),
-                    permission: None,
-                }
-            )],
-            "a group without threads should be restored with its draft"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn restore_puts_a_saved_draft_on_its_project() -> Result<(), Report<StoreError>> {
-        // Given a project with a saved new-worktree draft on main, in opus,
-        // created at 2 s.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1_500)?;
-        store.save_draft(&DraftRow {
-            harness: HarnessId::new("claude"),
-            project_id,
-            workspace: DraftWorkspace::NewWorktree,
-            branch: Some("main".to_owned()),
-            model: Some("opus".to_owned()),
-            permission_mode: None,
-            created_at: 2_000,
-        })?;
-
-        // When the actor starts.
-        let (_actor, state) = start(
-            store,
-            &FakeHost::listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // Then the project shows that draft.
-        let drafts: Vec<Option<Draft>> = state
-            .read()
-            .sessions
-            .projects
-            .iter()
-            .filter(|project| project.kind == ProjectKind::Normal)
-            .map(|project| project.draft.clone())
-            .collect();
-        assert_eq!(
-            drafts,
-            vec![Some(Draft {
-                harness: HarnessId::new("claude"),
-                workspace: DraftWorkspace::NewWorktree,
-                branch: Some("main".to_owned()),
-                model: Some("opus".to_owned()),
-                permission: None,
-                created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(2),
-                repo: true,
-                from: Some("main".to_owned()),
-            })],
-            "a saved draft should be restored onto its project"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn new_session_id_resets_the_transcript_cursor_and_keeps_the_title()
-    -> Result<(), Report<StoreError>> {
-        // Given a titled thread part-way through its transcript, and a host
-        // reporting a new session id for it (e.g. after `/clear`).
-        let (store, _) = store_with_thread("aa")?;
-        let row = ThreadRow {
-            session_id: Some("old".to_owned()),
-            title: Some("Fix the sidebar".to_owned()),
-            transcript_path: Some(PathBuf::from("/nonexistent/old.jsonl")),
-            transcript_offset: 120,
-            ..saved(&store, "aa")?
-        };
-        store.save_thread(&row)?;
-        let host = FakeHost::listing(vec![SessionRecord {
-            session_id: Some("new".to_owned()),
-            ..record("aa", ThreadStatus::Idle)
-        }]);
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the saved cursor starts over and the title stays.
-        let row = saved(&actor.store, "aa")?;
-        assert_eq!(
-            (row.transcript_path, row.transcript_offset, row.title),
-            (None, 0, Some("Fix the sidebar".to_owned())),
-            "a new session reads its own transcript from the start"
         );
         Ok(())
     }
@@ -9495,7 +6424,7 @@ mod tests {
         // Given a working thread while another thread is selected.
         let (store, id) = store_with_thread("aa")?;
         let other = add_thread(&store, "bb", now_ms() - HOUR_MS)?;
-        let host = FakeHost::listing(vec![
+        let host = listing(vec![
             record("aa", ThreadStatus::Working),
             record("bb", ThreadStatus::Idle),
         ]);
@@ -9504,7 +6433,7 @@ mod tests {
         actor.poll().await;
 
         // When a poll sees its turn end.
-        host.set_list(Ok(vec![
+        host.set_running(Ok(vec![
             record("aa", ThreadStatus::Idle),
             record("bb", ThreadStatus::Idle),
         ]));
@@ -9524,13 +6453,13 @@ mod tests {
     async fn turn_end_on_the_selected_thread_is_seen() -> Result<(), Report<StoreError>> {
         // Given the selected thread working.
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(id.0)));
         actor.poll().await;
 
         // When a poll sees its turn end.
-        host.set_list(Ok(vec![record("aa", ThreadStatus::Idle)]));
+        host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
         actor.poll().await;
 
         // Then it is seen.
@@ -9547,13 +6476,13 @@ mod tests {
     async fn turn_end_stamps_last_activity() -> Result<(), Report<StoreError>> {
         // Given a thread a poll saw working.
         let (store, _) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
         let before = now_ms();
 
         // When a poll sees its turn end.
-        host.set_list(Ok(vec![record("aa", ThreadStatus::Idle)]));
+        host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
         actor.poll().await;
 
         // Then its last activity is the turn's end.
@@ -9570,21 +6499,18 @@ mod tests {
     -> Result<(), Report<StoreError>> {
         // Given a branchless thread a poll saw working, whose transcript names no branch.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(&path, PROMPT_LINE).change_context(StoreError)?;
         let (store, _) = store_with_thread("aa")?;
-        let working = SessionRecord {
-            session_id: Some("s1".to_owned()),
-            ..record("aa", ThreadStatus::Working)
-        };
-        let host = FakeHost::listing(vec![working.clone()]);
+        let working = record("aa", ThreadStatus::Working);
+        let host = listing(vec![working.clone()]);
         let (mut actor, _state) = start(store, &host, claude_dir.path());
         actor.poll().await;
 
         // When a poll sees its turn end.
-        host.set_list(Ok(vec![SessionRecord {
+        host.set_running(Ok(vec![RunningAgent {
             status: ThreadStatus::Idle,
             ..working
         }]));
@@ -9604,7 +6530,7 @@ mod tests {
     async fn poll_shows_the_transcript_branch() -> Result<(), Report<StoreError>> {
         // Given a thread whose transcript's prompt names a branch.
         let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
         fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
             .change_context(StoreError)?;
         fs::write(
@@ -9613,10 +6539,7 @@ mod tests {
         )
         .change_context(StoreError)?;
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![SessionRecord {
-            session_id: Some("s1".to_owned()),
-            ..record("aa", ThreadStatus::Idle)
-        }]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, claude_dir.path());
 
         // When polling.
@@ -9631,354 +6554,196 @@ mod tests {
         Ok(())
     }
 
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn move_to_new_worktree_starts_the_session_in_the_new_worktree()
-    -> Result<(), Report<StoreError>> {
-        // Given a prompt-less thread in the orb project's root.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving it to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // Then the new session starts in an orb-<hex> worktree of orb.
-        let created = host.created_in();
-        let orb_worktrees =
-            Path::new(WORKTREES_ROOT).join(Path::new(PROJECT_ROOT).file_name().unwrap_or_default());
-        let in_worktree = created.first().is_some_and(|cwd| {
-            cwd.parent() == Some(orb_worktrees.as_path())
-                && hex_branch(Path::new(WORKTREES_ROOT), cwd).is_some()
-        });
-        assert!(
-            created.len() == 1 && in_worktree,
-            "one session should start in a new orb worktree, got {created:?}"
-        );
-        Ok(())
+    /// A store whose session holds untitled thread `aa` in the orb project's
+    /// checkout, with a second pane.
+    fn movable() -> Result<(Store, Seeded, PaneId), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        let seeded = insert_thread(&store, "aa")?;
+        let second = store.insert_pane(seeded.session, Path::new(PROJECT_ROOT))?;
+        Ok((store, seeded, second))
     }
 
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn move_to_new_worktree_keeps_the_threads_row() -> Result<(), Report<StoreError>> {
-        // Given a prompt-less thread in the orb project's root.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+    /// What [`moved_to`] leaves: the actor, its state, the session's thread
+    /// and first pane, its second pane, and the zmx it called after start.
+    type Moved = (SessionsActor, State, Seeded, PaneId, Arc<FakeZmx>);
 
-        // When moving it to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
+    /// An actor on [`movable`]'s store whose session moved to `to`.
+    fn moved_to(to: Workspace, git: &Arc<FakeGit>) -> Result<Moved, Report<StoreError>> {
+        let (store, seeded, second) = movable()?;
+        let (mut actor, state) =
+            start_with(store, &listing(Vec::new()), git, Path::new(NO_CLAUDE_DIR));
+        let (zmx, service) = recording_zmx();
+        actor.services.zmx = service;
+        actor.change_workspace(seeded.session, to);
+        Ok((actor, state, seeded, second, zmx))
+    }
 
-        // Then the same thread, alone in its project, now runs in the worktree on its branch.
-        let threads: Vec<(ThreadId, PathBuf, Option<String>)> = state
+    /// The directory session `id` shows.
+    fn dir_of(state: &State, id: SessionId) -> Option<PathBuf> {
+        state
             .read()
             .sessions
-            .threads()
-            .map(|thread| (thread.id, thread.cwd.clone(), thread.branch.clone()))
-            .collect();
-        let expected = git
-            .added()
-            .map(|(path, branch)| vec![(id, path, Some(branch))]);
+            .session(id)
+            .map(|session| session.dir.clone())
+    }
+
+    #[rstest::rstest]
+    fn change_workspace_kills_every_pane() -> Result<(), Report<StoreError>> {
+        // Given a session with two panes, before any agent turn.
+        let to = tempfile::tempdir().change_context(StoreError)?;
+
+        // When moving it to another existing directory.
+        let (_actor, _state, seeded, second, zmx) =
+            moved_to(Workspace::Existing(to.path().to_owned()), &FakeGit::local())?;
+
+        // Then both its panes are killed.
         assert_eq!(
-            Some(threads),
-            expected,
-            "the thread should keep its row in the new worktree"
+            killed(&zmx),
+            vec![seeded.pane.zmx_name(), second.zmx_name()],
+            "a moved session's panes start over"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn move_removes_the_old_session() -> Result<(), Report<StoreError>> {
-        // Given a prompt-less thread whose session is aa.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+    fn change_workspace_moves_the_sessions_dir() -> Result<(), Report<StoreError>> {
+        // Given a session in the checkout, before any agent turn.
+        let to = tempfile::tempdir().change_context(StoreError)?;
 
-        // When moving it to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
+        // When moving it to another existing directory.
+        let (_actor, state, seeded, _, _) =
+            moved_to(Workspace::Existing(to.path().to_owned()), &FakeGit::local())?;
 
-        // Then aa is removed.
+        // Then it shows in that directory.
         assert_eq!(
-            host.removed(),
-            vec!["aa".to_owned()],
-            "the old session should be removed"
+            dir_of(&state, seeded.session),
+            Some(to.path().to_owned()),
+            "the session should run in its new workspace"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn move_bases_on_origin_default_when_origin_exists() -> Result<(), Report<StoreError>> {
-        // Given a repository with an origin that has main.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::with_origin(Ok(true)));
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+    fn change_workspace_saves_every_panes_cwd() -> Result<(), Report<StoreError>> {
+        // Given a session with two panes, before any agent turn.
+        let to = tempfile::tempdir().change_context(StoreError)?;
 
-        // When moving a thread to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
+        // When moving it to another existing directory.
+        let (actor, _state, _, _, _) =
+            moved_to(Workspace::Existing(to.path().to_owned()), &FakeGit::local())?;
 
-        // Then main is fetched and the worktree starts from origin/main.
-        let steps: Vec<String> = git
-            .calls()
+        // Then both panes are saved there.
+        let cwds: Vec<PathBuf> = actor
+            .store
+            .layouts()?
+            .panes
             .into_iter()
-            .filter_map(|call| match call {
-                GitCall::Fetch(branch) => Some(format!("fetch {branch}")),
-                GitCall::AddWorktree { base, .. } => Some(format!("add from {base}")),
-                _ => None,
-            })
+            .map(|pane| pane.cwd)
             .collect();
         assert_eq!(
-            steps,
-            vec!["fetch main".to_owned(), "add from origin/main".to_owned()],
-            "the worktree should start from freshly fetched origin/main"
+            cwds,
+            vec![to.path().to_owned(); 2],
+            "every pane should start in the new workspace"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn move_bases_on_local_default_without_origin() -> Result<(), Report<StoreError>> {
-        // Given a repository without an origin.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+    fn change_workspace_unbinds_the_threads_in_its_panes() -> Result<(), Report<StoreError>> {
+        // Given thread aa in a session's pane, before any agent turn.
+        let to = tempfile::tempdir().change_context(StoreError)?;
 
-        // When moving a thread to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
+        // When moving the session.
+        let (actor, _state, _, _, _) =
+            moved_to(Workspace::Existing(to.path().to_owned()), &FakeGit::local())?;
 
-        // Then nothing is fetched and the worktree starts from the local main.
-        let calls: Vec<Option<String>> = git
-            .calls()
-            .into_iter()
-            .map(|call| match call {
-                GitCall::AddWorktree { base, .. } => Some(base),
-                _ => None,
-            })
-            .collect();
+        // Then aa runs in no pane.
         assert_eq!(
-            calls,
-            vec![Some("main".to_owned())],
-            "the only call should add a worktree from main"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_fetch_fails_the_move_with_the_reason() -> Result<(), Report<StoreError>> {
-        // Given an origin that can't be reached.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::moving(Ok("bb"));
-        let git = FakeGit::with_origin(Err("fatal: unable to access origin"));
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving a thread to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // Then git's reason shows.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("fatal: unable to access origin"),
-            "the fetch's reason should show"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_fetch_adds_no_worktree() -> Result<(), Report<StoreError>> {
-        // Given an origin that can't be reached.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::moving(Ok("bb"));
-        let git = FakeGit::with_origin(Err("fatal: unable to access origin"));
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving a thread to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // Then no worktree is added.
-        assert_eq!(git.added(), None, "a failed fetch shouldn't add a worktree");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn new_worktree_start_shows_the_fetch_while_it_runs() -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft on main, an origin, and git watching the app state.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::with_origin(Ok(true)));
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-        git.watch(&state);
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then, while git fetched, the app state showed origin/main being fetched.
-        assert_eq!(
-            git.fetching_seen(),
-            vec![Some("origin/main".to_owned())],
-            "the fetch should show while it runs"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn start_clears_the_fetch_once_it_finishes() -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft on main and an origin that answers.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::with_origin(Ok(true)));
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When starting the draft.
-        actor.start_draft(id).await;
-
-        // Then no fetch shows any more.
-        assert_eq!(
-            state.read().sessions.fetching,
+            saved(&actor.store, "aa")?.pane_id,
             None,
-            "a finished fetch shouldn't keep showing"
+            "a killed agent's thread leaves its pane"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_fetch_clears_the_fetch() -> Result<(), Report<StoreError>> {
-        // Given a new-worktree draft on main and an origin that times out.
-        let (store, id) = store_with_draft(|id| draft_row(id, DraftWorkspace::NewWorktree))?;
-        let host = FakeHost::creating(Ok("bb"));
-        let git = FakeGit::with_origin(Err("git fetch origin main timed out after 15 s"));
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+    fn change_workspace_asks_the_frontend_to_attach() -> Result<(), Report<StoreError>> {
+        // Given a session before any agent turn.
+        let to = tempfile::tempdir().change_context(StoreError)?;
 
-        // When starting the draft.
-        actor.start_draft(id).await;
+        // When moving it.
+        let (_actor, state, seeded, _, _) =
+            moved_to(Workspace::Existing(to.path().to_owned()), &FakeGit::local())?;
 
-        // Then no fetch shows any more.
+        // Then the frontend is asked to attach it again.
         assert_eq!(
-            state.read().sessions.fetching,
-            None,
-            "a failed fetch shouldn't keep showing"
+            state.read().sessions.attach,
+            Some(seeded.session),
+            "fresh shells start when the frontend attaches"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_start_removes_the_new_worktree_and_branch() -> Result<(), Report<StoreError>> {
-        // Given claude refusing to start a session.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::moving(Err("claude failed to start"));
-        let git = FakeGit::local();
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving a thread to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // Then the worktree and its branch are force-removed after being added.
-        let (path, branch) = git
-            .added()
-            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
-        let cleanup: Vec<GitCall> = git.calls().into_iter().skip(1).collect();
-        assert_eq!(
-            cleanup,
-            vec![
-                GitCall::RemoveWorktree { path, force: true },
-                GitCall::DeleteBranch {
-                    branch,
-                    force: true
-                }
-            ],
-            "a failed start should remove what orb made for it"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_start_keeps_the_old_session() -> Result<(), Report<StoreError>> {
-        // Given claude refusing to start a session.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::moving(Err("claude failed to start"));
-        let git = FakeGit::local();
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving a thread to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // Then the old session isn't removed.
-        assert!(
-            host.removed().is_empty(),
-            "a failed start should keep the old session"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn move_to_existing_path_adds_no_worktree() -> Result<(), Report<StoreError>> {
-        // Given a prompt-less thread and an existing worktree directory.
-        let existing = tempfile::tempdir().change_context(StoreError)?;
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving the thread there.
-        actor
-            .move_thread(id, Workspace::Existing(existing.path().to_owned()))
-            .await;
-
-        // Then the session starts there and git adds nothing.
-        assert_eq!(
-            (host.created_in(), git.added()),
-            (vec![existing.path().to_owned()], None),
-            "a move to an existing directory should only start a session there"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn move_to_missing_path_shows_an_error() -> Result<(), Report<StoreError>> {
-        // Given a prompt-less thread and a worktree directory that is gone.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving the thread there.
-        actor
-            .move_thread(id, Workspace::Existing(PathBuf::from("/nonexistent/gone")))
-            .await;
-
-        // Then the error names the missing worktree.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("worktree no longer exists: /nonexistent/gone"),
-            "a missing worktree should fail the move"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn move_out_of_an_unused_orb_worktree_removes_it() -> Result<(), Report<StoreError>> {
-        // Given a prompt-less thread alone in an orb worktree on its hex branch.
-        let old = PathBuf::from("/nonexistent/worktrees/orb/orb-0a1b2c3d");
-        let existing = tempfile::tempdir().change_context(StoreError)?;
-        let (store, id) = store_with_thread("aa")?;
+    fn change_workspace_after_a_turn_is_refused() -> Result<(), Report<StoreError>> {
+        // Given a session whose thread is titled, so a turn has run.
+        let (store, seeded, _) = movable()?;
         resave(&store, "aa", |row| ThreadRow {
-            cwd: old.clone(),
-            branch: Some("orb/0a1b2c3d".to_owned()),
+            title: Some("Fix the parser".to_owned()),
             ..row
         })?;
-        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let to = tempfile::tempdir().change_context(StoreError)?;
 
-        // When moving the thread to another directory.
-        actor
-            .move_thread(id, Workspace::Existing(existing.path().to_owned()))
-            .await;
+        // When moving it.
+        actor.change_workspace(seeded.session, Workspace::Existing(to.path().to_owned()));
+
+        // Then it stays, locked.
+        assert_eq!(
+            (dir_of(&state, seeded.session), error_of(&state)),
+            (
+                Some(PathBuf::from(PROJECT_ROOT)),
+                Some("Workspace locked · Local checkout".to_owned())
+            ),
+            "a session that had a turn keeps its workspace"
+        );
+        Ok(())
+    }
+
+    /// A store holding sessions of the orb project in the orb worktree
+    /// `old`, for threads aa and, when `shared`, bb.
+    fn in_orb_worktree(old: &Path, shared: bool) -> Result<(Store, Seeded), Report<StoreError>> {
+        let store = Store::open_in_memory()?;
+        let project = orb_project(&store)?;
+        let insert = |short_id: &str| {
+            seed_with(
+                &store,
+                "claude",
+                project,
+                SessionKind::Plain,
+                old,
+                short_id,
+                now_ms() - HOUR_MS,
+            )
+        };
+        let seeded = insert("aa")?;
+        if shared {
+            insert("bb")?;
+        }
+        Ok((store, seeded))
+    }
+
+    #[rstest::rstest]
+    fn change_workspace_removes_the_old_orb_worktree() -> Result<(), Report<StoreError>> {
+        // Given a session alone in an orb worktree.
+        let old = PathBuf::from("/nonexistent/worktrees/orb/orb-0a1b2c3d");
+        let (store, seeded) = in_orb_worktree(&old, false)?;
+        let git = FakeGit::local();
+        let (mut actor, _state) =
+            start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving it to the checkout.
+        actor.change_workspace(seeded.session, Workspace::Checkout);
 
         // Then the old worktree and its branch are removed, without force.
         assert_eq!(
@@ -9991,556 +6756,139 @@ mod tests {
                 GitCall::DeleteBranch {
                     branch: "orb/0a1b2c3d".to_owned(),
                     force: false
-                }
+                },
             ],
-            "an orb worktree no thread uses should be removed safely"
+            "an orb worktree no session uses should go"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn move_refused_once_the_thread_has_a_transcript() -> Result<(), Report<StoreError>> {
-        // Given a thread whose session wrote a transcript since the last poll.
-        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "s1");
-        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
-            .change_context(StoreError)?;
-        fs::write(&path, "").change_context(StoreError)?;
-        let (store, id) = store_with_thread("aa")?;
-        let host = Arc::new(FakeHost {
-            create: Ok("bb".to_owned()),
-            ..FakeHost::answering(vec![SessionRecord {
-                session_id: Some("s1".to_owned()),
-                ..record("aa", ThreadStatus::Idle)
-            }])
-        });
+    fn change_workspace_keeps_an_old_worktree_another_session_uses()
+    -> Result<(), Report<StoreError>> {
+        // Given two sessions in the same orb worktree.
+        let old = PathBuf::from("/nonexistent/worktrees/orb/orb-0a1b2c3d");
+        let (store, seeded) = in_orb_worktree(&old, true)?;
         let git = FakeGit::local();
-        let (mut actor, state) = start_with(store, &host, &git, claude_dir.path());
+        let (mut actor, _state) =
+            start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
 
-        // When moving it to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
+        // When moving one of them to the checkout.
+        actor.change_workspace(seeded.session, Workspace::Checkout);
 
-        // Then the move is refused with the lock message and no session starts.
-        assert_eq!(
-            (error_of(&state).as_deref(), host.created_in()),
-            (Some("Workspace locked · Local checkout"), Vec::new()),
-            "a thread with a transcript can't change workspace"
+        // Then git removes nothing.
+        assert!(
+            git.calls().is_empty(),
+            "a worktree another session uses stays"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn moved_thread_saves_its_new_short_id_and_cwd() -> Result<(), Report<StoreError>> {
-        // Given a prompt-less thread and an existing worktree directory.
-        let existing = tempfile::tempdir().change_context(StoreError)?;
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::moving(Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving the thread there.
-        actor
-            .move_thread(id, Workspace::Existing(existing.path().to_owned()))
-            .await;
-
-        // Then the store has the thread under its new session, in the new directory.
-        let row = saved(&actor.store, "bb")?;
-        assert_eq!(
-            (row.id, row.cwd),
-            (id, existing.path().to_owned()),
-            "the move should survive a relaunch"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn move_restarts_with_the_threads_model_and_permission() -> Result<(), Report<StoreError>>
-    {
-        // Given a prompt-less thread started with sonnet in plan mode.
-        let store = Store::open_in_memory()?;
-        let id = store
-            .insert_thread(&NewThread {
-                harness: HarnessId::new("claude"),
-                project_id: orb_project(&store)?,
-                short_id: "aa".to_owned(),
-                cwd: PathBuf::from(PROJECT_ROOT),
-                created_at: now_ms() - HOUR_MS,
-                model: Some("sonnet".to_owned()),
-                permission_mode: Some("plan".to_owned()),
-                group_id: None,
-                zmx: None,
+    fn failed_change_workspace_removes_the_new_worktree() -> Result<(), Report<StoreError>> {
+        // Given a session whose store refuses to move it.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        let seeded = insert_thread(&store, "aa")?;
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER refuse BEFORE UPDATE OF dir ON sessions
+                     BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+                )
             })
-            .map(|inserted| inserted.thread)?;
-        let host = FakeHost::moving(Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+            .change_context(StoreError)?;
+        let git = FakeGit::local();
+        let (mut actor, _state) =
+            start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
 
         // When moving it to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
+        actor.change_workspace(
+            seeded.session,
+            Workspace::NewWorktree {
+                base: "main".to_owned(),
+            },
+        );
 
-        // Then its new session starts with sonnet in plan mode.
-        assert_eq!(
-            host.created_with(),
-            vec![SessionOptions {
-                model: Some("sonnet".to_owned()),
-                permission_mode: Some("plan".to_owned()),
-            }],
-            "a moved thread should keep its model and permission"
+        // Then the worktree and branch orb made are force-removed.
+        let (path, branch) = git
+            .added()
+            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
+        let calls = git.calls();
+        assert!(
+            calls.contains(&GitCall::RemoveWorktree { path, force: true })
+                && calls.contains(&GitCall::DeleteBranch {
+                    branch,
+                    force: true
+                }),
+            "a failed move leaves no worktree or branch, got {calls:?}"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn untrusted_draft_start_asks_for_trust_in_the_project_path()
+    fn failed_change_workspace_to_an_existing_worktree_removes_no_worktree()
     -> Result<(), Report<StoreError>> {
-        // Given a local draft whose project path is `/tmp/main`, and claude
-        // refusing it as untrusted.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (host, git) = (
-            FakeHost::untrusted(1, Ok("bb")),
-            FakeGit::in_project("/tmp/main"),
+        // Given a session whose store refuses to move it, and a worktree that
+        // already exists.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let worktree = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        let seeded = insert_thread(&store, "aa")?;
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER refuse BEFORE UPDATE OF dir ON sessions
+                     BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+                )
+            })
+            .change_context(StoreError)?;
+        let git = FakeGit::local();
+        let (mut actor, _state) =
+            start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
+
+        // When moving it to that worktree.
+        actor.change_workspace(
+            seeded.session,
+            Workspace::Existing(worktree.path().to_owned()),
         );
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
 
-        // When starting the draft.
-        actor.start_draft(project).await;
-
-        // Then the start waits for the project path to be trusted.
-        assert_eq!(
-            trust_of(&state),
-            Some(PathBuf::from("/tmp/main")),
-            "claude's project path should be offered for trust"
+        // Then git is asked to remove no worktree and delete no branch.
+        let calls = git.calls();
+        assert!(
+            !calls.iter().any(|call| matches!(
+                call,
+                GitCall::RemoveWorktree { .. } | GitCall::DeleteBranch { .. }
+            )),
+            "a worktree orb didn't make stays, got {calls:?}"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn untrusted_start_without_a_project_path_asks_for_trust_in_its_directory()
+    fn change_workspace_whose_fetch_fails_keeps_the_session_where_it_was()
     -> Result<(), Report<StoreError>> {
-        // Given a local draft with no project path, and claude refusing its
-        // untrusted root.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
+        // Given a session in the checkout of a project whose fetch fails.
+        let git = FakeGit::with_origin(Err("fatal: unable to access origin"));
 
-        // When starting the draft.
-        actor.start_draft(project).await;
-
-        // Then the start waits for its own directory to be trusted.
-        assert_eq!(
-            trust_of(&state),
-            Some(PathBuf::from(PROJECT_ROOT)),
-            "the start's directory should be offered for trust"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn untrusted_worktree_asks_for_trust_in_the_main_repo() -> Result<(), Report<StoreError>>
-    {
-        // Given claude refusing a new, untrusted worktree of the project.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (
-            FakeHost::untrusted(1, Ok("bb")),
-            FakeGit::in_project(PROJECT_ROOT),
-        );
-        let (mut actor, state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving a thread to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // Then the start waits for the main repository to be trusted.
-        assert_eq!(
-            trust_of(&state),
-            Some(PathBuf::from(PROJECT_ROOT)),
-            "the worktree's main repository should be offered for trust"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn untrusted_move_keeps_the_new_worktree() -> Result<(), Report<StoreError>> {
-        // Given claude refusing a new, untrusted worktree.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-
-        // When moving a thread to a new worktree.
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // Then the worktree is only added, not removed.
-        let removed = git
-            .calls()
-            .into_iter()
-            .any(|call| matches!(call, GitCall::RemoveWorktree { .. }));
-        assert!(!removed, "the worktree should wait for the retry");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn poll_does_not_retry_a_start_waiting_for_trust() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When the next poll runs.
-        actor.poll().await;
-
-        // Then no second session start is tried.
-        assert_eq!(
-            host.created_in().len(),
-            1,
-            "only the user's answer should retry the start"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn poll_waits_five_seconds_while_a_start_waits_for_trust()
-    -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When polling.
-        let next = actor.poll().await;
-
-        // Then the next poll comes at the idle pace.
-        assert_eq!(
-            next, SLOW_POLL,
-            "a pending trust shouldn't speed up polling"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn trusting_the_workspace_saves_trust_for_the_project_path()
-    -> Result<(), Report<StoreError>> {
-        // Given a local draft start waiting for `/tmp/main` to be trusted.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let (host, git, trust) = (
-            FakeHost::untrusted(1, Ok("bb")),
-            FakeGit::in_project("/tmp/main"),
-            FakeTrust::accepting(),
-        );
-        let (mut actor, _state) = start_in(
-            store,
-            &host,
+        // When moving it to a new worktree from main.
+        let (_actor, state, seeded, _, _) = moved_to(
+            Workspace::NewWorktree {
+                base: "main".to_owned(),
+            },
             &git,
-            &trust,
-            Path::new(NO_CLAUDE_DIR),
-            Path::new(ORB_ROOT),
-            Path::new(INCOGNITO_ROOT),
-        );
-        actor.start_draft(project).await;
+        )?;
 
-        // When the user trusts the workspace.
-        actor.trust_workspace().await;
-
-        // Then the project path is marked trusted.
+        // Then it stays in the checkout, with git's reason shown.
         assert_eq!(
-            trust.trusted(),
-            vec![PathBuf::from("/tmp/main")],
-            "claude's project path should be saved as trusted"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn trusting_the_workspace_starts_the_thread() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust, which claude accepts next.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When the user trusts the workspace.
-        actor.trust_workspace().await;
-
-        // Then the new thread shows.
-        assert_eq!(
-            state.read().sessions.threads().count(),
-            1,
-            "a trusted start should add the thread"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn trusted_start_refused_again_shows_the_error() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust, which claude refuses again.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(2, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When the user trusts the workspace.
-        actor.trust_workspace().await;
-
-        // Then claude's refusal shows.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some(UNTRUSTED),
-            "a second refusal should fail the start with its reason"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn trusted_start_refused_again_removes_the_new_worktree() -> Result<(), Report<StoreError>>
-    {
-        // Given a move to a new worktree waiting for trust, which claude
-        // refuses again.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::untrusted(2, Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // When the user trusts the workspace.
-        actor.trust_workspace().await;
-
-        // Then the worktree orb made is force-removed.
-        let (path, _branch) = git
-            .added()
-            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
-        assert!(
-            git.calls()
-                .contains(&GitCall::RemoveWorktree { path, force: true }),
-            "a refused retry should remove the worktree made for it"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn trusted_start_refused_again_does_not_ask_for_trust() -> Result<(), Report<StoreError>>
-    {
-        // Given a draft start waiting for trust, which claude refuses again.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(2, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When the user trusts the workspace.
-        actor.trust_workspace().await;
-
-        // Then no trust is asked for again.
-        assert_eq!(
-            trust_of(&state),
-            None,
-            "a retry should never ask for trust again"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_trust_save_shows_why() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust, and Claude's config unwritable.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) = start_in(
-            store,
-            &host,
-            &FakeGit::local(),
-            &FakeTrust::failing(),
-            Path::new(NO_CLAUDE_DIR),
-            Path::new(ORB_ROOT),
-            Path::new(INCOGNITO_ROOT),
-        );
-        actor.start_draft(project).await;
-
-        // When the user trusts the workspace.
-        actor.trust_workspace().await;
-
-        // Then the start fails, saying the folder couldn't be trusted.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("couldn't trust the folder"),
-            "an unsaved trust should fail the start"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_trust_save_removes_the_new_worktree() -> Result<(), Report<StoreError>> {
-        // Given a move to a new worktree waiting for trust, and Claude's
-        // config unwritable.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_in(
-            store,
-            &host,
-            &git,
-            &FakeTrust::failing(),
-            Path::new(NO_CLAUDE_DIR),
-            Path::new(ORB_ROOT),
-            Path::new(INCOGNITO_ROOT),
-        );
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // When the user trusts the workspace.
-        actor.trust_workspace().await;
-
-        // Then the worktree orb made is force-removed.
-        let (path, _branch) = git
-            .added()
-            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
-        assert!(
-            git.calls()
-                .contains(&GitCall::RemoveWorktree { path, force: true }),
-            "an unsaved trust should remove the worktree made for the start"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn trusting_the_workspace_without_a_waiting_start_saves_nothing()
-    -> Result<(), Report<StoreError>> {
-        // Given no start waiting for trust.
-        let (store, _project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let trust = FakeTrust::accepting();
-        let (mut actor, _state) = start_in(
-            store,
-            &FakeHost::listing(Vec::new()),
-            &FakeGit::local(),
-            &trust,
-            Path::new(NO_CLAUDE_DIR),
-            Path::new(ORB_ROOT),
-            Path::new(INCOGNITO_ROOT),
-        );
-
-        // When the user trusts the workspace.
-        actor.trust_workspace().await;
-
-        // Then nothing is marked trusted.
-        assert!(
-            trust.trusted().is_empty(),
-            "trust with nothing waiting should save nothing"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn declining_trust_removes_the_new_worktree() -> Result<(), Report<StoreError>> {
-        // Given a move to a new worktree waiting for trust.
-        let (store, id) = store_with_thread("aa")?;
-        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
-        let (mut actor, _state) = start_with(store, &host, &git, Path::new(NO_CLAUDE_DIR));
-        actor.move_thread(id, Workspace::NewWorktree).await;
-
-        // When the user declines to trust the workspace.
-        actor.decline_trust();
-
-        // Then the worktree orb made is force-removed.
-        let (path, _branch) = git
-            .added()
-            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
-        assert!(
-            git.calls()
-                .contains(&GitCall::RemoveWorktree { path, force: true }),
-            "a declined start should remove the worktree made for it"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn declining_trust_shows_workspace_not_trusted() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When the user declines to trust the workspace.
-        actor.decline_trust();
-
-        // Then the start fails as not trusted.
-        assert_eq!(
-            error_of(&state).as_deref(),
-            Some("Workspace not trusted"),
-            "a declined start should say the workspace isn't trusted"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn declining_trust_ends_the_trust_request() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When the user declines to trust the workspace.
-        actor.decline_trust();
-
-        // Then no trust is asked for any more.
-        assert_eq!(
-            trust_of(&state),
-            None,
-            "a declined start should stop asking for trust"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn declining_trust_keeps_the_draft() -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for trust.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        actor.start_draft(project).await;
-
-        // When the user declines to trust the workspace.
-        actor.decline_trust();
-
-        // Then the draft still shows.
-        assert!(
-            shown_draft(&state, project).is_some(),
-            "a declined start should keep the draft"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn declining_trust_without_a_waiting_start_shows_nothing()
-    -> Result<(), Report<StoreError>> {
-        // Given no start waiting for trust.
-        let (store, _project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When the user declines to trust the workspace.
-        actor.decline_trust();
-
-        // Then no error shows.
-        assert_eq!(
-            error_of(&state),
-            None,
-            "declining with nothing waiting should show nothing"
+            (dir_of(&state, seeded.session), error_of(&state)),
+            (
+                Some(PathBuf::from(PROJECT_ROOT)),
+                Some("fatal: unable to access origin".to_owned())
+            ),
+            "a move that can't reach its workspace keeps the session"
         );
         Ok(())
     }
@@ -10556,25 +6904,27 @@ mod tests {
         }
     }
 
-    fn branch_of(state: &State, id: ThreadId) -> Option<String> {
-        shown(state, id)?.branch
+    /// The branch session `id` shows.
+    fn branch_of(state: &State, id: SessionId) -> Option<String> {
+        state.read().sessions.session(id)?.branch.clone()
     }
 
     #[rstest::rstest]
-    fn switch_branch_checks_out_and_shows_the_branch() -> Result<(), Report<StoreError>> {
-        // Given a thread in the orb project's root.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+    fn switch_branch_checks_out_in_the_sessions_dir() -> Result<(), Report<StoreError>> {
+        // Given a session in the orb project's checkout.
+        let store = Store::open_in_memory()?;
+        let seeded = insert_thread(&store, "aa")?;
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When switching it to `feat`.
-        actor.check_out(id, &git_ref("feat", false));
+        actor.switch_branch(seeded.session, &git_ref("feat", false), false);
 
         // Then the sidebar shows it on feat.
         assert_eq!(
-            branch_of(&state, id).as_deref(),
+            branch_of(&state, seeded.session).as_deref(),
             Some("feat"),
-            "the thread should show its new branch"
+            "the session should show its new branch"
         );
         Ok(())
     }
@@ -10583,16 +6933,17 @@ mod tests {
     #[tokio::test]
     async fn switch_branch_refused_after_the_directory_became_busy()
     -> Result<(), Report<StoreError>> {
-        // Given a thread whose turn started after the picker opened.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        // Given a session whose agent's turn started after the picker opened.
+        let store = Store::open_in_memory()?;
+        let seeded = insert_thread(&store, "aa")?;
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
 
         // When switching it to `feat`.
-        actor.check_out(id, &git_ref("feat", false));
+        actor.switch_branch(seeded.session, &git_ref("feat", false), false);
 
-        // Then the mode line says Claude is working there.
+        // Then the mode line says an agent is working there.
         assert_eq!(
             error_of(&state).as_deref(),
             Some("A session is working in this directory"),
@@ -10603,17 +6954,18 @@ mod tests {
 
     #[rstest::rstest]
     fn switch_to_a_remote_ref_shows_the_local_branch_name() -> Result<(), Report<StoreError>> {
-        // Given a thread in the orb project's root.
-        let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        // Given a session in the orb project's checkout.
+        let store = Store::open_in_memory()?;
+        let seeded = insert_thread(&store, "aa")?;
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When switching it to `origin/feat`.
-        actor.check_out(id, &git_ref("origin/feat", true));
+        actor.switch_branch(seeded.session, &git_ref("origin/feat", true), false);
 
         // Then the sidebar shows the tracking branch feat.
         assert_eq!(
-            branch_of(&state, id).as_deref(),
+            branch_of(&state, seeded.session).as_deref(),
             Some("feat"),
             "a remote ref checks out as its local branch"
         );
@@ -10621,39 +6973,30 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn unstarted_default_pick_from_a_worktree_moves_to_the_root()
-    -> Result<(), Report<StoreError>> {
-        // Given a prompt-less thread in an orb worktree of a project on disk.
+    fn switch_branch_to_root_moves_the_session_to_the_checkout() -> Result<(), Report<StoreError>> {
+        // Given a session with no turn in an orb worktree of a project on disk.
         let root = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
-        let id = {
-            let project_id = store.add_project(root.path(), "orb", ProjectKind::Normal, 0)?;
-            store
-                .insert_thread(&NewThread {
-                    harness: HarnessId::new("claude"),
-                    project_id,
-                    short_id: "aa".to_owned(),
-                    cwd: Path::new(WORKTREES_ROOT).join("orb/orb-0123abcd"),
-                    created_at: now_ms() - HOUR_MS,
-                    model: None,
-                    permission_mode: None,
-                    group_id: None,
-                    zmx: None,
-                })
-                .map(|inserted| inserted.thread)?
-        };
-        let host = FakeHost::moving(Ok("bb"));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let project = store.add_project(root.path(), "orb", ProjectKind::Normal, 0)?;
+        let seeded = seed_with(
+            &store,
+            "claude",
+            project,
+            SessionKind::Plain,
+            &Path::new(WORKTREES_ROOT).join("orb/orb-0123abcd"),
+            "aa",
+            now_ms() - HOUR_MS,
+        )?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // When picking the default branch, checked out nowhere.
-        actor.switch_to_root(id, &git_ref("main", false)).await;
+        actor.switch_branch(seeded.session, &git_ref("main", false), true);
 
-        // Then its session starts over in the root.
+        // Then the session runs in the checkout.
         assert_eq!(
-            host.created_in(),
-            vec![root.path().to_owned()],
-            "the thread should move back to the root checkout"
+            dir_of(&state, seeded.session),
+            Some(root.path().to_owned()),
+            "the session should move back to the checkout"
         );
         Ok(())
     }
@@ -10664,7 +7007,7 @@ mod tests {
         // Given a thread in an orb worktree on its hex branch, titled by Claude.
         let (claude_dir, store, id) =
             worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, state) = start_with(store, &host, &FakeGit::local(), claude_dir.path());
 
         // When a poll sees its turn end.
@@ -10692,7 +7035,7 @@ mod tests {
             renamed_title: Some("Sidebar search".to_owned()),
             ..row
         })?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, state) = start_with(store, &host, &FakeGit::local(), claude_dir.path());
 
         // When a poll sees its turn end.
@@ -10715,7 +7058,7 @@ mod tests {
         // Given a Claude-titled thread in an orb worktree on another branch.
         let (claude_dir, store, _) =
             worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), "main")?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let git = FakeGit::local();
         let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
 
@@ -10732,7 +7075,7 @@ mod tests {
     async fn no_rename_with_only_a_prompt_title() -> Result<(), Report<StoreError>> {
         // Given a thread on its hex branch titled only by its first prompt.
         let (claude_dir, store, _) = worktree_thread(PROMPT_LINE, HEX_BRANCH)?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let git = FakeGit::local();
         let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
 
@@ -10750,7 +7093,7 @@ mod tests {
         // Given a Claude-titled thread on its hex branch, and `orb/parser-fix` taken.
         let (claude_dir, store, _) =
             worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let git = FakeGit::having("orb/parser-fix");
         let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
 
@@ -10772,7 +7115,7 @@ mod tests {
         // Given a Claude-titled thread on its hex branch.
         let (claude_dir, store, _) =
             worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
-        let host = FakeHost::listing(vec![in_session(ThreadStatus::Working)]);
+        let host = listing(vec![in_session(ThreadStatus::Working)]);
         let git = FakeGit::local();
         let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
 
@@ -10830,7 +7173,7 @@ mod tests {
     async fn first_poll_after_restore_queues_no_notice() -> Result<(), Report<StoreError>> {
         // Given a saved thread that was already waiting for an approval at launch.
         let (store, _) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::NeedsApproval)]);
+        let host = listing(vec![record("aa", ThreadStatus::NeedsApproval)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling for the first time.
@@ -10855,7 +7198,7 @@ mod tests {
             custom_title: Some("Parser fix".to_owned()),
             ..row
         })?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polls see its turn run and then end.
@@ -10880,12 +7223,12 @@ mod tests {
     async fn a_wait_seen_by_two_polls_queues_one_notice() -> Result<(), Report<StoreError>> {
         // Given a thread whose turn is running.
         let (store, _) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![in_session(ThreadStatus::Working)]);
+        let host = listing(vec![in_session(ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
 
         // When two polls in a row see it waiting for an approval.
-        host.set_list(Ok(vec![in_session(ThreadStatus::NeedsApproval)]));
+        host.set_running(Ok(vec![in_session(ThreadStatus::NeedsApproval)]));
         actor.poll().await;
         actor.poll().await;
 
@@ -10908,13 +7251,13 @@ mod tests {
     {
         // Given a thread whose turn is running, then marked for deletion.
         let (store, id) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![in_session(ThreadStatus::Working)]);
+        let host = listing(vec![in_session(ThreadStatus::Working)]);
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
         state.write().sessions.deleting.insert(SessionId(id.0));
 
         // When a poll sees its turn end.
-        host.set_list(Ok(vec![in_session(ThreadStatus::Idle)]));
+        host.set_running(Ok(vec![in_session(ThreadStatus::Idle)]));
         actor.poll().await;
 
         // Then no notice is queued.
@@ -10933,7 +7276,7 @@ mod tests {
         // Given orb's thread, with the sidebar filtered to another project.
         let (store, id) = store_with_thread("aa")?;
         let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
-        let host = FakeHost::listing(Vec::new());
+        let host = listing(Vec::new());
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state.write().sessions.filter = Some(web);
 
@@ -10949,20 +7292,18 @@ mod tests {
         Ok(())
     }
 
-    /// The orb project, last started with sonnet in plan mode, with the actor
-    /// started on `git` and a temp folder as orb's own directory.
+    /// The orb project, with the actor started on `git` and a temp folder as
+    /// orb's own directory.
     fn creating(
         git: &Arc<FakeGit>,
     ) -> Result<(tempfile::TempDir, ProjectId, SessionsActor, State), Report<StoreError>> {
         let orb_root = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
         let orb = orb_project(&store)?;
-        store.record_last_used(orb, &used(LastWorkspace::NewWorktree), 10)?;
         let (actor, state) = start_in(
             store,
-            &FakeHost::listing(Vec::new()),
+            &listing(Vec::new()),
             git,
-            &FakeTrust::accepting(),
             Path::new(NO_CLAUDE_DIR),
             orb_root.path(),
             Path::new(INCOGNITO_ROOT),
@@ -10970,24 +7311,13 @@ mod tests {
         Ok((orb_root, orb, actor, state))
     }
 
-    /// Every group the sidebar has, in project order.
-    fn groups_of(state: &State) -> Vec<Group> {
-        state
-            .read()
-            .sessions
-            .projects
-            .iter()
-            .flat_map(|project| project.groups.clone())
-            .collect()
-    }
-
     #[rstest::rstest]
-    fn creating_a_research_group_seeds_a_missing_template() -> Result<(), Report<StoreError>> {
+    fn new_research_session_seeds_a_missing_template() -> Result<(), Report<StoreError>> {
         // Given no Research template.
         let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
 
-        // When creating Research group `tokio-cancel`.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+        // When making Research session `tokio-cancel`.
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
 
         // Then the template is written.
         assert!(
@@ -11001,12 +7331,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn creating_a_research_group_copies_the_template() -> Result<(), Report<StoreError>> {
+    fn new_research_session_copies_the_template_into_its_folder() -> Result<(), Report<StoreError>>
+    {
         // Given no Research template.
         let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
 
-        // When creating Research group `tokio-cancel`.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+        // When making Research session `tokio-cancel`.
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
 
         // Then its folder has AGENTS.md and a CLAUDE.md link to it.
         let dir = orb_root.path().join("research/tokio-cancel");
@@ -11020,12 +7351,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn creating_a_research_group_copies_the_kit() -> Result<(), Report<StoreError>> {
+    fn new_research_session_copies_the_kit() -> Result<(), Report<StoreError>> {
         // Given no Research template.
         let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
 
-        // When creating Research group `tokio-cancel`.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+        // When making Research session `tokio-cancel`.
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
 
         // Then its folder has the kit's investigator subagent.
         assert!(
@@ -11039,12 +7370,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn creating_a_research_group_adds_the_research_project() -> Result<(), Report<StoreError>> {
+    fn new_research_session_adds_the_research_project() -> Result<(), Report<StoreError>> {
         // Given no Research project.
         let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
-        // When creating Research group `tokio-cancel`.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+        // When making Research session `tokio-cancel`.
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
 
         // Then orb's Research project shows, rooted in orb's research folder.
         let research: Vec<(String, PathBuf)> = state
@@ -11064,31 +7395,80 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn creating_a_learn_group_uses_the_learn_folder() -> Result<(), Report<StoreError>> {
+    fn new_learn_session_uses_the_learn_folder() -> Result<(), Report<StoreError>> {
         // Given no Learn project.
         let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
 
-        // When creating Learn group `rust-async`.
-        actor.create_group(GroupKind::Learn, None, "rust-async".into());
+        // When making Learn session `rust-async`.
+        actor.new_folder_session(FolderKind::Learn, "rust-async");
 
         // Then its folder is under orb's learn folder.
         assert!(
             orb_root.path().join("learn/rust-async").is_dir(),
-            "a Learn group's folder should be under learn/"
+            "a Learn session's folder should be under learn/"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn creating_a_group_keeps_a_curated_template() -> Result<(), Report<StoreError>> {
+    fn new_research_session_is_a_research_session() -> Result<(), Report<StoreError>> {
+        // Given no Research project.
+        let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+
+        // When making Research session `tokio-cancel`.
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+
+        // Then a Research session runs in its folder.
+        let session = only_session(&state)?;
+        assert_eq!(
+            (session.kind, session.dir),
+            (
+                SessionKind::Research,
+                orb_root.path().join("research/tokio-cancel")
+            ),
+            "the session should be a Research one in its folder"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_learn_session_has_one_tab_with_one_shell_pane() -> Result<(), Report<StoreError>> {
+        // Given no Learn project.
+        let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+
+        // When making Learn session `rust-async`.
+        actor.new_folder_session(FolderKind::Learn, "rust-async");
+
+        // Then its layout holds one tab of one pane in its folder.
+        let id = only_session(&state)?.id;
+        let app = state.read();
+        let shape = app.layouts.get(id).map(|layout| {
+            (
+                layout.tabs().len(),
+                layout
+                    .panes()
+                    .map(|pane| pane.cwd.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(
+            shape,
+            Some((1, vec![orb_root.path().join("learn/rust-async")])),
+            "a Learn session holds one tab of one shell pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_folder_session_keeps_a_curated_template() -> Result<(), Report<StoreError>> {
         // Given a Research template the user wrote.
         let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
         let template = orb_root.path().join("templates/research");
         fs::create_dir_all(&template).change_context(StoreError)?;
         fs::write(template.join("AGENTS.md"), "mine").change_context(StoreError)?;
 
-        // When creating Research group `tokio-cancel`.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+        // When making Research session `tokio-cancel`.
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
 
         // Then the folder gets the user's AGENTS.md.
         let text = fs::read_to_string(orb_root.path().join("research/tokio-cancel/AGENTS.md"))
@@ -11098,58 +7478,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn creating_a_group_selects_its_draft() -> Result<(), Report<StoreError>> {
-        // Given the orb project.
-        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
-
-        // When creating Feature group `GT-514-login` in it.
-        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
-
-        // Then the cursor is on the new group's draft.
-        let ids: Vec<SidebarItem> = groups_of(&state)
-            .iter()
-            .map(|group| SidebarItem::GroupDraft(group.id))
-            .collect();
-        assert_eq!(
-            (state.read().sessions.cursor, ids.len()),
-            (ids.first().copied(), 1),
-            "the new group's draft should be selected"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn creating_a_group_saves_it() -> Result<(), Report<StoreError>> {
-        // Given the orb project, last started with sonnet.
-        let (_orb_root, orb, mut actor, _state) = creating(&FakeGit::local())?;
-
-        // When creating Feature group `GT-514-login` in it.
-        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
-
-        // Then the store has it, with sonnet for its draft.
-        let saved: Vec<(String, Option<String>)> = actor
-            .store
-            .load()?
-            .3
-            .into_iter()
-            .map(|row| (row.name, row.draft_model))
-            .collect();
-        assert_eq!(
-            saved,
-            vec![("GT-514-login".to_owned(), Some("sonnet".to_owned()))],
-            "the group should be saved with the last-used model"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn creating_a_group_over_an_existing_folder_is_refused() -> Result<(), Report<StoreError>> {
+    fn new_folder_session_refused_when_its_folder_exists() -> Result<(), Report<StoreError>> {
         // Given a folder `x` already under orb's research folder.
         let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
         fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
 
-        // When creating Research group `x`.
-        actor.create_group(GroupKind::Research, None, "x".into());
+        // When making Research session `x`.
+        actor.new_folder_session(FolderKind::Research, "x");
 
         // Then the mode line says the folder exists.
         assert_eq!(
@@ -11161,87 +7496,28 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn refused_group_over_an_existing_folder_adds_no_group() -> Result<(), Report<StoreError>> {
+    fn refused_folder_session_adds_no_session() -> Result<(), Report<StoreError>> {
         // Given a folder `x` already under orb's research folder.
         let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
         fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
 
-        // When creating Research group `x`.
-        actor.create_group(GroupKind::Research, None, "x".into());
+        // When making Research session `x`.
+        actor.new_folder_session(FolderKind::Research, "x");
 
-        // Then no group shows or is saved.
-        assert_eq!(
-            (groups_of(&state).len(), actor.store.load()?.3.len()),
-            (0, 0),
-            "a refused group should leave nothing"
+        // Then no session shows.
+        assert!(
+            state.read().sessions.sessions.is_empty(),
+            "a refused session should leave nothing"
         );
         Ok(())
     }
 
-    #[rstest::rstest]
-    fn creating_a_feature_group_on_an_existing_branch_is_refused() -> Result<(), Report<StoreError>>
-    {
-        // Given the orb project, where branch `GT-514-login` exists.
-        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::having("GT-514-login"))?;
-
-        // When creating Feature group `GT-514-login` in it.
-        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
-
-        // Then the mode line says the branch exists, and no group shows.
-        assert_eq!(
-            (error_of(&state), groups_of(&state).len()),
-            (
-                Some("branch GT-514-login already exists in orb".to_owned()),
-                0
-            ),
-            "an existing branch should refuse the group"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn creating_a_feature_group_makes_no_worktree() -> Result<(), Report<StoreError>> {
-        // Given the orb project.
-        let git = FakeGit::local();
-        let (_orb_root, orb, mut actor, state) = creating(&git)?;
-
-        // When creating Feature group `GT-514-login` in it.
-        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
-
-        // Then no worktree is added and the group has no directory yet.
-        let dirs: Vec<Option<PathBuf>> = groups_of(&state).into_iter().map(|g| g.dir).collect();
-        assert_eq!(
-            (git.added(), dirs),
-            (None, vec![None]),
-            "a Feature group's worktree waits for its start"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn creating_a_taken_group_twice_is_refused() -> Result<(), Report<StoreError>> {
-        // Given Research group `tokio-cancel` just created.
-        let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
-
-        // When creating it again.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
-
-        // Then the second is refused as taken, and one group shows.
-        assert_eq!(
-            (error_of(&state), groups_of(&state).len()),
-            (Some("Group tokio-cancel already exists".to_owned()), 1),
-            "a second create of the same group should be refused"
-        );
-        Ok(())
-    }
-
-    /// Opens the name box for a new `kind` group in `project` holding `text`,
-    /// as `⏎` leaves it: waiting for the actor, with the keys.
-    fn waiting_name_box(state: &State, kind: GroupKind, project: Option<ProjectId>, text: &str) {
+    /// Opens the name box for a new `kind` session holding `text`, as `⏎`
+    /// leaves it: waiting for the actor, with the keys.
+    fn waiting_name_box(state: &State, kind: FolderKind, text: &str) {
         let mut app = state.write();
         app.rename = Some(Rename {
-            target: RenameTarget::NewGroup { kind, project },
+            target: RenameTarget::NewFolder(kind),
             input: TextInput::new(text),
             creating: true,
         });
@@ -11259,54 +7535,33 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn made_group_closes_its_name_box() -> Result<(), Report<StoreError>> {
-        // Given the name box waiting for Research group `tokio-cancel`.
+    fn made_folder_session_closes_the_name_box() -> Result<(), Report<StoreError>> {
+        // Given the name box waiting for Research session `tokio-cancel`.
         let (_orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
-        waiting_name_box(&state, GroupKind::Research, None, "tokio cancel");
+        waiting_name_box(&state, FolderKind::Research, "tokio cancel");
 
-        // When creating it.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+        // When making it.
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
 
         // Then the box is closed and the sidebar has the keys.
         assert_eq!(
             name_box_of(&state),
             (None, Focus::Sidebar),
-            "a made group should close its name box"
+            "a made session should close its name box"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn group_refused_on_an_existing_branch_keeps_its_name_box_open()
-    -> Result<(), Report<StoreError>> {
-        // Given the name box waiting for Feature group `GT-514-login` in orb,
-        // where that branch exists.
-        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::having("GT-514-login"))?;
-        waiting_name_box(&state, GroupKind::Feature, Some(orb), "GT-514 login");
-
-        // When creating it.
-        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
-
-        // Then the box stays open with the name, no longer waiting.
-        assert_eq!(
-            name_box_of(&state),
-            (Some(("GT-514 login".to_owned(), false)), Focus::Rename),
-            "an existing branch should keep the name box open"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn group_refused_on_an_existing_folder_keeps_its_name_box_open()
-    -> Result<(), Report<StoreError>> {
-        // Given the name box waiting for Research group `x`, whose folder
+    fn refused_folder_name_keeps_the_name_box_open() -> Result<(), Report<StoreError>> {
+        // Given the name box waiting for Research session `x`, whose folder
         // exists.
         let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
         fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
-        waiting_name_box(&state, GroupKind::Research, None, "x");
+        waiting_name_box(&state, FolderKind::Research, "x");
 
-        // When creating it.
-        actor.create_group(GroupKind::Research, None, "x".into());
+        // When making it.
+        actor.new_folder_session(FolderKind::Research, "x");
 
         // Then the box stays open with the name, no longer waiting.
         assert_eq!(
@@ -11318,32 +7573,33 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn made_group_outside_the_filter_clears_it() -> Result<(), Report<StoreError>> {
+    fn new_folder_session_outside_the_filter_clears_it() -> Result<(), Report<StoreError>> {
         // Given the sidebar filtered to orb.
         let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
         state.write().sessions.filter = Some(orb);
 
-        // When creating Research group `tokio-cancel`, outside orb.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+        // When making Research session `tokio-cancel`, outside orb.
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
 
         // Then the filter goes back to all projects.
         assert_eq!(
             state.read().sessions.filter,
             None,
-            "a group outside the filter should clear it"
+            "a session outside the filter should clear it"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn made_group_outside_the_filter_saves_the_cleared_filter() -> Result<(), Report<StoreError>> {
+    fn new_folder_session_outside_the_filter_saves_the_cleared_filter()
+    -> Result<(), Report<StoreError>> {
         // Given the sidebar filtered to orb, and that saved.
         let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
         state.write().sessions.filter = Some(orb);
         actor.save_ui();
 
-        // When creating Research group `tokio-cancel`, outside orb.
-        actor.create_group(GroupKind::Research, None, "tokio-cancel".into());
+        // When making Research session `tokio-cancel`, outside orb.
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
 
         // Then the store holds no filter.
         assert_eq!(
@@ -11355,909 +7611,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn made_group_inside_the_filter_keeps_it() -> Result<(), Report<StoreError>> {
-        // Given the sidebar filtered to orb.
-        let (_orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
-        state.write().sessions.filter = Some(orb);
-
-        // When creating Feature group `GT-514-login` in orb.
-        actor.create_group(GroupKind::Feature, Some(orb), "GT-514-login".into());
-
-        // Then the filter stays on orb.
-        assert_eq!(
-            state.read().sessions.filter,
-            Some(orb),
-            "a group inside the filter should keep it"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn refused_group_keeps_the_filter() -> Result<(), Report<StoreError>> {
+    fn refused_folder_session_keeps_the_filter() -> Result<(), Report<StoreError>> {
         // Given the sidebar filtered to orb, and Research folder `x` on disk.
         let (orb_root, orb, mut actor, state) = creating(&FakeGit::local())?;
         fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
         state.write().sessions.filter = Some(orb);
 
-        // When creating Research group `x`.
-        actor.create_group(GroupKind::Research, None, "x".into());
+        // When making Research session `x`.
+        actor.new_folder_session(FolderKind::Research, "x");
 
         // Then the filter stays on orb.
         assert_eq!(
             state.read().sessions.filter,
             Some(orb),
-            "a refused group should leave the filter alone"
-        );
-        Ok(())
-    }
-
-    const SLUG_BRANCH: &str = "GT-514-login";
-
-    /// A store whose orb project has a `kind` group `GT-514-login` with a
-    /// draft on opus in auto mode, in `dir` when given, and the actor started
-    /// on `host` and `git` with the group draft selected.
-    fn group_draft(
-        kind: GroupKind,
-        dir: Option<PathBuf>,
-        host: &Arc<FakeHost>,
-        git: &Arc<FakeGit>,
-    ) -> Result<(GroupId, SessionsActor, State), Report<StoreError>> {
-        let store = Store::open_in_memory()?;
-        let project_id = orb_project(&store)?;
-        let id = store.insert_group(&NewGroup {
-            harness: HarnessId::new("claude"),
-            project_id,
-            kind,
-            name: SLUG_BRANCH.to_owned(),
-            dir,
-            branch: (kind == GroupKind::Feature).then(|| SLUG_BRANCH.to_owned()),
-            created_at: 1,
-            draft_model: Some("opus".to_owned()),
-            draft_permission_mode: Some("auto".to_owned()),
-        })?;
-        let (actor, state) = start_with(store, host, git, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.cursor = Some(SidebarItem::GroupDraft(id));
-        Ok((id, actor, state))
-    }
-
-    /// Group `id` as the sidebar shows it.
-    fn shown_group(state: &State, id: GroupId) -> Option<Group> {
-        groups_of(state).into_iter().find(|group| group.id == id)
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_feature_group_draft_adds_the_worktree_on_its_slug_branch()
-    -> Result<(), Report<StoreError>> {
-        // Given a Feature group draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (id, mut actor, _state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then git adds an orb worktree on the group's slug branch.
-        let added = git
-            .added()
-            .map(|(path, branch)| (path.starts_with(WORKTREES_ROOT), branch));
-        assert_eq!(
-            added,
-            Some((true, SLUG_BRANCH.to_owned())),
-            "the worktree should be on the slug branch"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_feature_group_draft_starts_the_thread_in_the_worktree()
-    -> Result<(), Report<StoreError>> {
-        // Given a Feature group draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (id, mut actor, _state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then the session starts in the worktree git added.
-        assert_eq!(
-            host.created_in(),
-            git.added()
-                .map(|(path, _)| path)
-                .into_iter()
-                .collect::<Vec<_>>(),
-            "the first thread should start in the new worktree"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn started_feature_group_keeps_the_worktree_as_its_dir() -> Result<(), Report<StoreError>>
-    {
-        // Given a Feature group draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then the group's directory is the worktree, shown and saved.
-        let worktree = git.added().map(|(path, _)| path);
-        let saved = actor.store.load()?.3.into_iter().find_map(|row| row.dir);
-        assert_eq!(
-            (shown_group(&state, id).and_then(|group| group.dir), saved),
-            (worktree.clone(), worktree),
-            "the worktree should be the group's directory from now on"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_group_draft_puts_its_thread_in_the_group() -> Result<(), Report<StoreError>>
-    {
-        // Given a Feature group draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then the new thread is in the group, which has no draft any more.
-        let grouped: Vec<Option<GroupId>> = state
-            .read()
-            .sessions
-            .threads()
-            .map(|thread| thread.group)
-            .collect();
-        let draft = shown_group(&state, id).map(|group| group.draft.is_some());
-        assert_eq!(
-            (grouped, draft),
-            (vec![Some(id)], Some(false)),
-            "the group's first thread should replace its draft"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_selected_group_draft_selects_and_attaches_the_thread()
-    -> Result<(), Report<StoreError>> {
-        // Given a selected Feature group draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then the new thread is selected and attached.
-        let sessions = &state.read().sessions;
-        let thread = sessions.threads().next();
-        assert_eq!(
-            (sessions.cursor, sessions.attach),
-            (
-                thread.and_then(Thread::session).map(SidebarItem::Session),
-                thread.and_then(Thread::session)
-            ),
-            "the started thread should be selected and attached"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn trusted_group_draft_start_selects_and_attaches_the_thread()
-    -> Result<(), Report<StoreError>> {
-        // Given a selected Research group draft whose start waits for its
-        // folder to be trusted.
-        let folder = tempfile::tempdir().change_context(StoreError)?;
-        let (host, git) = (FakeHost::untrusted(1, Ok("bb")), FakeGit::local());
-        let (id, mut actor, state) = group_draft(
-            GroupKind::Research,
-            Some(folder.path().to_owned()),
-            &host,
-            &git,
-        )?;
-        actor.start_group_draft(id).await;
-
-        // When the user trusts the folder.
-        actor.trust_workspace().await;
-
-        // Then its thread is selected and to be attached.
-        let sessions = &state.read().sessions;
-        let thread = sessions.threads().next();
-        assert_eq!(
-            (sessions.cursor, sessions.attach),
-            (
-                thread.and_then(Thread::session).map(SidebarItem::Session),
-                thread.and_then(Thread::session)
-            ),
-            "the trusted start's thread should replace the draft and attach"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_research_group_draft_runs_in_its_folder() -> Result<(), Report<StoreError>>
-    {
-        // Given a Research group draft with its folder.
-        let folder = tempfile::tempdir().change_context(StoreError)?;
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (id, mut actor, _state) = group_draft(
-            GroupKind::Research,
-            Some(folder.path().to_owned()),
-            &host,
-            &git,
-        )?;
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then the session starts in the folder, and git adds no worktree.
-        assert_eq!(
-            (host.created_in(), git.added()),
-            (vec![folder.path().to_owned()], None),
-            "a Research group should start in its folder"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_group_draft_uses_its_model_and_permission() -> Result<(), Report<StoreError>>
-    {
-        // Given a Feature group draft on opus in auto mode.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (id, mut actor, _state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then the session starts with them.
-        assert_eq!(
-            host.created_with(),
-            vec![SessionOptions {
-                model: Some("opus".to_owned()),
-                permission_mode: Some("auto".to_owned()),
-            }],
-            "the group draft's settings should start the session"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn feature_group_start_fails_when_the_branch_appeared() -> Result<(), Report<StoreError>>
-    {
-        // Given a Feature group draft whose branch was made outside orb.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::having(SLUG_BRANCH));
-        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then the mode line says the branch exists, and the draft stays.
-        assert_eq!(
-            (
-                error_of(&state),
-                shown_group(&state, id).is_some_and(|group| group.draft.is_some())
-            ),
-            (
-                Some("branch GT-514-login already exists in orb".to_owned()),
-                true
-            ),
-            "an existing branch should refuse the start"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn failed_group_draft_start_keeps_the_draft() -> Result<(), Report<StoreError>> {
-        // Given a Feature group draft and a host that refuses to start a session.
-        let (host, git) = (FakeHost::creating(Err("claude failed")), FakeGit::local());
-        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then the group keeps its draft, and the worktree made for it is removed.
-        let removed = git.added().is_some_and(|(path, _)| {
-            git.calls()
-                .contains(&GitCall::RemoveWorktree { path, force: true })
-        });
-        assert_eq!(
-            (
-                shown_group(&state, id).is_some_and(|group| group.draft.is_some()),
-                removed
-            ),
-            (true, true),
-            "a failed start should leave the group as it was"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn turn_end_keeps_a_feature_groups_slug_branch() -> Result<(), Report<StoreError>> {
-        // Given a Claude-titled thread in an orb worktree on a group's slug branch.
-        let (claude_dir, store, _) =
-            worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), SLUG_BRANCH)?;
-        let host = FakeHost::listing(Vec::new());
-        let git = FakeGit::local();
-        let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
-
-        // When a poll sees its turn end.
-        end_turn(&mut actor, &host).await;
-
-        // Then no branch was renamed.
-        assert_eq!(git.renamed(), None, "a slug branch is never renamed");
-        Ok(())
-    }
-
-    /// Gives group `id` `draft` in the app state, with the cursor on it.
-    fn give_draft(state: &State, id: GroupId, draft: GroupDraft) {
-        let sessions = &mut state.write().sessions;
-        if let Some(group) = sessions.group_mut(id) {
-            group.draft = Some(draft);
-        }
-        sessions.cursor = Some(SidebarItem::GroupDraft(id));
-    }
-
-    /// A `kind` group in a temp folder holding thread aa, whose saved draft
-    /// is selected, with the actor started on `host` and `git`.
-    fn started_group_draft(
-        kind: GroupKind,
-        host: &Arc<FakeHost>,
-        git: &Arc<FakeGit>,
-    ) -> Result<(tempfile::TempDir, GroupId, SessionsActor, State), Report<StoreError>> {
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let (store, group, _) = store_with_group(kind, Some(dir.path()), &["aa"])?;
-        let (mut actor, state) = start_with(store, host, git, Path::new(NO_CLAUDE_DIR));
-        give_draft(&state, group, GroupDraft::default());
-        actor.save_group_draft(group);
-        Ok((dir, group, actor, state))
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_group_draft_in_a_started_feature_group_uses_its_worktree()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group in its worktree, with a draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (dir, id, mut actor, _state) = started_group_draft(GroupKind::Feature, &host, &git)?;
-
-        // When starting the draft.
-        actor.start_group_draft(id).await;
-
-        // Then the session starts in the group's worktree, and git adds none.
-        assert_eq!(
-            (host.created_in(), git.added()),
-            (vec![dir.path().to_owned()], None),
-            "a started Feature group's draft should reuse its worktree"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_group_draft_in_a_started_feature_group_takes_its_checked_out_branch()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose worktree has dev checked out,
-        // with a draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (_dir, id, mut actor, _state) = started_group_draft(GroupKind::Feature, &host, &git)?;
-
-        // When starting the draft as thread bb.
-        actor.start_group_draft(id).await;
-
-        // Then bb is saved on dev.
-        assert_eq!(
-            saved(&actor.store, "bb")?.branch.as_deref(),
-            Some(CURRENT_BRANCH),
-            "the new thread should be on the worktree's checked out branch"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_group_draft_in_a_started_group_puts_its_thread_first()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Research group holding thread aa, with a draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (_dir, id, mut actor, state) = started_group_draft(GroupKind::Research, &host, &git)?;
-
-        // When starting the draft as thread bb.
-        actor.start_group_draft(id).await;
-
-        // Then bb is listed first in the group.
-        let first = state
-            .read()
-            .sessions
-            .threads()
-            .find(|thread| thread.group == Some(id))
-            .and_then(|thread| thread.pane.clone())
-            .map(|launch| launch.command);
-        assert_eq!(
-            first,
-            Some(vec![OsString::from("bb")]),
-            "a new thread should go to the top of its group"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_group_draft_after_the_cursor_moved_keeps_the_cursor()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Research group's draft, with the cursor since moved
-        // to the shelf's header.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (_dir, id, mut actor, state) = started_group_draft(GroupKind::Research, &host, &git)?;
-        state.write().sessions.cursor = Some(SidebarItem::SettledShelf);
-
-        // When the draft starts.
-        actor.start_group_draft(id).await;
-
-        // Then the cursor stays where it is, and nothing is attached.
-        let sessions = &state.read().sessions;
-        assert_eq!(
-            (sessions.cursor, sessions.attach),
-            (Some(SidebarItem::SettledShelf), None),
-            "a moved cursor should stay put"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[case(GroupKind::Feature)]
-    #[case(GroupKind::Research)]
-    #[case(GroupKind::Learn)]
-    #[tokio::test]
-    async fn starting_a_group_draft_in_a_missing_directory_fails(
-        #[case] kind: GroupKind,
-    ) -> Result<(), Report<StoreError>> {
-        // Given a started `kind` group whose directory is gone, its draft
-        // selected and a start in flight.
-        let (store, id, _) =
-            store_with_group(kind, Some(Path::new("/nonexistent/GT-514-login")), &["aa"])?;
-        let host = FakeHost::creating(Ok("bb"));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        give_draft(&state, id, GroupDraft::default());
-        state.write().sessions.starting = true;
-
-        // When starting the draft.
-        actor.start_group_draft(id).await;
-
-        // Then the start ends with the missing folder on the mode line.
-        let sessions = &state.read().sessions;
-        assert_eq!(
-            (
-                sessions
-                    .error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("folder no longer exists")),
-                sessions.starting
-            ),
-            (true, false),
-            "a missing directory should fail the start"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_group_draft_uses_its_overrides() -> Result<(), Report<StoreError>> {
-        // Given a Feature group on opus in auto mode whose draft picked
-        // sonnet.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-        give_draft(
-            &state,
-            id,
-            GroupDraft {
-                model: Own::Set(Some("sonnet".to_owned())),
-                ..GroupDraft::default()
-            },
-        );
-
-        // When starting it.
-        actor.start_group_draft(id).await;
-
-        // Then the session starts on sonnet in the group's auto mode.
-        assert_eq!(
-            host.created_with(),
-            vec![SessionOptions {
-                model: Some("sonnet".to_owned()),
-                permission_mode: Some("auto".to_owned()),
-            }],
-            "the draft's own pick should win over the group's default"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_group_draft_clears_it() -> Result<(), Report<StoreError>> {
-        // Given a started Research group with a draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (_dir, id, mut actor, state) = started_group_draft(GroupKind::Research, &host, &git)?;
-
-        // When starting the draft.
-        actor.start_group_draft(id).await;
-
-        // Then the group shows no draft.
-        assert_eq!(
-            shown_group(&state, id).map(|group| group.draft),
-            Some(None),
-            "a started draft should leave the group"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn starting_a_group_draft_saves_the_cleared_draft() -> Result<(), Report<StoreError>> {
-        // Given a started Research group with a saved draft.
-        let (host, git) = (FakeHost::creating(Ok("bb")), FakeGit::local());
-        let (_dir, id, mut actor, _state) = started_group_draft(GroupKind::Research, &host, &git)?;
-
-        // When starting the draft.
-        actor.start_group_draft(id).await;
-
-        // Then the saved group has no draft.
-        assert_eq!(
-            saved_group(&actor.store, id)?.draft,
-            None,
-            "the cleared draft should be saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn group_draft_overrides_are_saved() -> Result<(), Report<StoreError>> {
-        // Given a group holding thread aa whose draft picked pi on its
-        // default model.
-        let (store, id, _) = store_with_group(GroupKind::Research, None, &["aa"])?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        let draft = GroupDraft {
-            harness: Own::Set(HarnessId::new("pi")),
-            model: Own::Set(None),
-            permission: Own::Group,
-        };
-        give_draft(&state, id, draft.clone());
-
-        // When saving it.
-        actor.save_group_draft(id);
-
-        // Then the saved row has the draft.
-        assert_eq!(
-            saved_group(&actor.store, id)?.draft,
-            Some(draft),
-            "the draft's overrides should be saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn threadless_group_saved_without_a_draft_still_shows_one() -> Result<(), Report<StoreError>> {
-        // Given a group with no thread, saved without a draft.
-        let (store, id, _) = store_with_group(GroupKind::Research, None, &[])?;
-        let host = FakeHost::listing(Vec::new());
-
-        // When restoring it.
-        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // Then it shows a draft that follows the group.
-        assert_eq!(
-            shown_group(&state, id).map(|group| group.draft),
-            Some(Some(GroupDraft::default())),
-            "a threadless group should always show a draft"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn new_group_takes_the_last_used_harness_with_its_model() -> Result<(), Report<StoreError>> {
-        // Given orb last started in the other harness on other-model.
-        let store = Store::open_in_memory()?;
-        let orb = orb_project(&store)?;
-        store.record_last_used(
-            orb,
-            &LastUsed {
-                model: Some("other-model".to_owned()),
-                ..used_in(OTHER)
-            },
-            10,
-        )?;
-        let host = FakeHost::listing(Vec::new());
-        let (mut actor, state) = start_beside(store, &host, &host);
-
-        // When creating Feature group `GT-514-login` in it.
-        actor.create_group(GroupKind::Feature, Some(orb), SLUG_BRANCH.into());
-
-        // Then the group's defaults are the other harness on other-model.
-        let defaults: Vec<(HarnessId, Option<String>)> = groups_of(&state)
-            .into_iter()
-            .map(|group| (group.defaults.harness, group.defaults.model))
-            .collect();
-        assert_eq!(
-            defaults,
-            vec![(HarnessId::new(OTHER), Some("other-model".to_owned()))],
-            "a new group should take the last-used harness with its model"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn saving_a_started_groups_defaults_keeps_the_rest_of_its_row()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group, switched to `main`, whose defaults
-        // were changed on its card to sonnet in plan mode.
-        let (group, mut actor, state) = started_feature_group(&FakeGit::local()).await?;
-        actor.check_out_group(group, &git_ref("main", false));
-        if let Some(defaults) = state
-            .write()
-            .sessions
-            .group_mut(group)
-            .map(|group| &mut group.defaults)
-        {
-            defaults.model = Some("sonnet".to_owned());
-            defaults.permission = Some("plan".to_owned());
-        }
-
-        // When saving them.
-        actor.save_group_draft(group);
-
-        // Then the saved row has the defaults and still its directory and
-        // branch.
-        let row = saved_group(&actor.store, group)?;
-        assert_eq!(
-            (
-                row.draft_model.as_deref(),
-                row.draft_permission_mode.as_deref(),
-                row.dir.as_deref(),
-                row.branch.as_deref()
-            ),
-            (
-                Some("sonnet"),
-                Some("plan"),
-                Some(Path::new(HEX_WORKTREE)),
-                Some("main")
-            ),
-            "the card's defaults should save onto the group's kept row"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn saving_a_started_groups_defaults_leaves_its_threads_alone()
-    -> Result<(), Report<StoreError>> {
-        // Given a started Feature group whose thread aa runs Claude's default,
-        // and whose defaults were changed to sonnet.
-        let (group, mut actor, state) = started_feature_group(&FakeGit::local()).await?;
-        if let Some(defaults) = state
-            .write()
-            .sessions
-            .group_mut(group)
-            .map(|group| &mut group.defaults)
-        {
-            defaults.model = Some("sonnet".to_owned());
-        }
-
-        // When saving them.
-        actor.save_group_draft(group);
-
-        // Then thread aa keeps its saved model.
-        assert_eq!(
-            saved(&actor.store, "aa")?.model,
-            None,
-            "a running thread keeps its model"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn group_default_harness_is_saved() -> Result<(), Report<StoreError>> {
-        // Given a group draft whose default harness was changed to the other
-        // harness.
-        let (host, git) = (FakeHost::listing(Vec::new()), FakeGit::local());
-        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-        if let Some(defaults) = state
-            .write()
-            .sessions
-            .group_mut(id)
-            .map(|group| &mut group.defaults)
-        {
-            defaults.harness = HarnessId::new(OTHER);
-        }
-
-        // When saving it.
-        actor.save_group_draft(id);
-
-        // Then the group's stored row reads back with the other harness.
-        let saved: Vec<HarnessId> = actor
-            .store
-            .load()?
-            .3
-            .into_iter()
-            .map(|row| row.harness)
-            .collect();
-        assert_eq!(
-            saved,
-            vec![HarnessId::new(OTHER)],
-            "the group's default harness should be saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn saving_a_group_draft_persists_its_model() -> Result<(), Report<StoreError>> {
-        // Given a group draft whose model was changed to sonnet.
-        let (host, git) = (FakeHost::listing(Vec::new()), FakeGit::local());
-        let (id, mut actor, state) = group_draft(GroupKind::Feature, None, &host, &git)?;
-        if let Some(defaults) = state
-            .write()
-            .sessions
-            .group_mut(id)
-            .map(|group| &mut group.defaults)
-        {
-            defaults.model = Some("sonnet".to_owned());
-        }
-
-        // When saving it.
-        actor.save_group_draft(id);
-
-        // Then the store has sonnet for the group's draft.
-        let saved: Vec<Option<String>> = actor
-            .store
-            .load()?
-            .3
-            .into_iter()
-            .map(|row| row.draft_model)
-            .collect();
-        assert_eq!(
-            saved,
-            vec![Some("sonnet".to_owned())],
-            "the group draft's model should be saved"
-        );
-        Ok(())
-    }
-
-    /// A store whose orb project has a `kind` group `GT-514-login`, in `dir`
-    /// when given, holding one thread per short id, each created an hour ago.
-    fn store_with_group(
-        kind: GroupKind,
-        dir: Option<&Path>,
-        short_ids: &[&str],
-    ) -> Result<(Store, GroupId, Vec<ThreadId>), Report<StoreError>> {
-        let store = Store::open_in_memory()?;
-        let project_id = orb_project(&store)?;
-        let group = store.insert_group(&NewGroup {
-            harness: HarnessId::new("claude"),
-            project_id,
-            kind,
-            name: SLUG_BRANCH.to_owned(),
-            dir: dir.map(Path::to_owned),
-            branch: (kind == GroupKind::Feature).then(|| SLUG_BRANCH.to_owned()),
-            created_at: 1,
-            draft_model: None,
-            draft_permission_mode: None,
-        })?;
-        let threads = short_ids
-            .iter()
-            .map(|short_id| {
-                store
-                    .insert_thread(&NewThread {
-                        harness: HarnessId::new("claude"),
-                        project_id,
-                        short_id: (*short_id).to_owned(),
-                        cwd: dir.unwrap_or(Path::new(PROJECT_ROOT)).to_owned(),
-                        created_at: now_ms() - HOUR_MS,
-                        model: None,
-                        permission_mode: None,
-                        group_id: Some(group),
-                        zmx: None,
-                    })
-                    .map(|inserted| inserted.thread)
-            })
-            .collect::<Result<_, _>>()?;
-        Ok((store, group, threads))
-    }
-
-    /// The saved row of group `id`.
-    fn saved_group(store: &Store, id: GroupId) -> Result<GroupRow, Report<StoreError>> {
-        store
-            .load()?
-            .3
-            .into_iter()
-            .find(|row| row.id == id)
-            .ok_or_else(|| Report::new(StoreError).attach(format!("group {id:?} isn't saved")))
-    }
-
-    /// A started Feature group in the orb worktree [`HEX_WORKTREE`] on
-    /// [`SLUG_BRANCH`], holding idle thread aa, polled once, on `git`.
-    async fn started_feature_group(
-        git: &Arc<FakeGit>,
-    ) -> Result<(GroupId, SessionsActor, State), Report<StoreError>> {
-        let (store, group, _) =
-            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start_with(store, &host, git, Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-        Ok((group, actor, state))
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn switching_a_groups_branch_shows_it_on_the_group() -> Result<(), Report<StoreError>> {
-        // Given a started Feature group on its slug branch.
-        let (group, mut actor, state) = started_feature_group(&FakeGit::local()).await?;
-
-        // When switching its worktree to `main`.
-        actor.check_out_group(group, &git_ref("main", false));
-
-        // Then the card shows `main`.
-        assert_eq!(
-            shown_group(&state, group).and_then(|group| group.branch),
-            Some("main".to_owned()),
-            "the group should show its new branch"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn switching_a_groups_branch_saves_it() -> Result<(), Report<StoreError>> {
-        // Given a started Feature group on its slug branch.
-        let (group, mut actor, _state) = started_feature_group(&FakeGit::local()).await?;
-
-        // When switching its worktree to `main`.
-        actor.check_out_group(group, &git_ref("main", false));
-
-        // Then the saved group is on `main`.
-        assert_eq!(
-            saved_group(&actor.store, group)?.branch.as_deref(),
-            Some("main"),
-            "the group's new branch should be saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn switching_a_groups_branch_moves_every_thread_in_it() -> Result<(), Report<StoreError>>
-    {
-        // Given a started Feature group holding idle threads aa and bb.
-        let (store, group, threads) = store_with_group(
-            GroupKind::Feature,
-            Some(Path::new(HEX_WORKTREE)),
-            &["aa", "bb"],
-        )?;
-        let host = FakeHost::listing(vec![
-            record("aa", ThreadStatus::Idle),
-            record("bb", ThreadStatus::Idle),
-        ]);
-        let (mut actor, state) =
-            start_with(store, &host, &FakeGit::local(), Path::new(NO_CLAUDE_DIR));
-        actor.poll().await;
-
-        // When switching its worktree to `main`.
-        actor.check_out_group(group, &git_ref("main", false));
-
-        // Then both threads show `main`.
-        let branches: Vec<Option<String>> =
-            threads.iter().map(|id| branch_of(&state, *id)).collect();
-        assert_eq!(
-            branches,
-            vec![Some("main".to_owned()); 2],
-            "every thread in the worktree should show the new branch"
+            "a refused session should leave the filter alone"
         );
         Ok(())
     }
@@ -12269,41 +7636,22 @@ mod tests {
         short_id: &str,
         cwd: &Path,
         branch: Option<&str>,
-    ) -> Result<InsertedThread, Report<StoreError>> {
+    ) -> Result<Seeded, Report<StoreError>> {
         let project_id = orb_project(store)?;
-        let inserted = store.insert_thread(&NewThread {
-            harness: HarnessId::new("claude"),
+        let inserted = seed_with(
+            store,
+            "claude",
             project_id,
-            short_id: short_id.to_owned(),
-            cwd: cwd.to_owned(),
-            created_at: now_ms() - HOUR_MS,
-            model: None,
-            permission_mode: None,
-            group_id: None,
-            zmx: None,
-        })?;
+            SessionKind::Plain,
+            cwd,
+            short_id,
+            now_ms() - HOUR_MS,
+        )?;
         resave(store, short_id, |row| ThreadRow {
             branch: branch.map(str::to_owned),
             ..row
         })?;
         Ok(inserted)
-    }
-
-    /// The session thread `id` runs in, as `store` has it.
-    fn session_of(store: &Store, id: ThreadId) -> Result<SessionId, Report<StoreError>> {
-        let pane = store
-            .load()?
-            .1
-            .into_iter()
-            .find(|row| row.id == id)
-            .and_then(|row| row.pane_id);
-        store
-            .layouts()?
-            .panes
-            .into_iter()
-            .find(|row| Some(row.id) == pane)
-            .map(|row| row.session_id)
-            .ok_or_else(|| Report::new(StoreError).attach("the thread has no session"))
     }
 
     /// A store whose thread `aa` has a session in [`HEX_WORKTREE`], now
@@ -12316,12 +7664,8 @@ mod tests {
 
     /// The git calls an actor on `store` and `git` makes restoring `id`.
     fn restore_calls(store: Store, git: &Arc<FakeGit>, id: SessionId) -> Vec<GitCall> {
-        let (mut actor, _state) = start_with(
-            store,
-            &FakeHost::listing(vec![]),
-            git,
-            Path::new(NO_CLAUDE_DIR),
-        );
+        let (mut actor, _state) =
+            start_with(store, &listing(vec![]), git, Path::new(NO_CLAUDE_DIR));
         actor.restore_worktree(id);
         git.calls()
     }
@@ -12444,7 +7788,7 @@ mod tests {
         let (store, id) = pruned_thread(Some("fix-parser"))?;
         let (mut actor, state) = start_with(
             store,
-            &FakeHost::listing(vec![]),
+            &listing(vec![]),
             &FakeGit::local(),
             Path::new(NO_CLAUDE_DIR),
         );
@@ -12468,7 +7812,7 @@ mod tests {
         let (store, id) = pruned_thread(Some("fix-parser"))?;
         let (mut actor, state) = start_with(
             store,
-            &FakeHost::listing(vec![]),
+            &listing(vec![]),
             &FakeGit::plain(Ok(())),
             Path::new(NO_CLAUDE_DIR),
         );
@@ -12493,7 +7837,7 @@ mod tests {
         let (store, id) = pruned_thread(Some("fix-parser"))?;
         let (mut actor, state) = start_with(
             store,
-            &FakeHost::listing(vec![]),
+            &listing(vec![]),
             &FakeGit::local(),
             Path::new(NO_CLAUDE_DIR),
         );
@@ -12506,63 +7850,6 @@ mod tests {
         assert!(
             !state.read().sessions.starting,
             "a finished restore should stop showing as starting"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn restore_keeps_starting_while_another_start_waits_for_trust()
-    -> Result<(), Report<StoreError>> {
-        // Given a draft start waiting for its folder to be trusted, and thread
-        // aa's pruned worktree.
-        let (store, project) = store_with_draft(|id| draft_row(id, DraftWorkspace::Local))?;
-        let id = insert_in(&store, "aa", Path::new(HEX_WORKTREE), Some("fix-parser"))?.session;
-        let host = FakeHost::untrusted(1, Ok("bb"));
-        let (mut actor, state) =
-            start_with(store, &host, &FakeGit::local(), Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.starting = true;
-        actor.start_draft(project).await;
-
-        // When restoring aa's worktree.
-        actor.restore_worktree(id);
-
-        // Then the waiting start still shows as starting.
-        assert!(
-            state.read().sessions.starting,
-            "a restore should not end a start that still waits for trust"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn restore_in_a_feature_group_uses_the_group_branch() -> Result<(), Report<StoreError>> {
-        // Given thread aa of a Feature group whose worktree is gone, aa saved
-        // on another branch, and the group's branch still there.
-        let (store, _, threads) =
-            store_with_group(GroupKind::Feature, Some(Path::new(HEX_WORKTREE)), &["aa"])?;
-        resave(&store, "aa", |row| ThreadRow {
-            branch: Some(HEX_BRANCH.to_owned()),
-            ..row
-        })?;
-        let id = threads
-            .first()
-            .copied()
-            .ok_or_else(|| Report::new(StoreError).attach("aa wasn't saved"))?;
-        let id = session_of(&store, id)?;
-        let git = FakeGit::having(SLUG_BRANCH);
-
-        // When restoring its worktree.
-        let calls = restore_calls(store, &git, id);
-
-        // Then the worktree comes back on the group's branch.
-        assert!(
-            calls.contains(&GitCall::AddWorktreeOn {
-                path: PathBuf::from(HEX_WORKTREE),
-                branch: SLUG_BRANCH.to_owned(),
-            }),
-            "a Feature group's thread should get the group's branch back"
         );
         Ok(())
     }
@@ -12592,7 +7879,7 @@ mod tests {
     /// folder.
     struct PaneReports {
         dir: tempfile::TempDir,
-        thread: InsertedThread,
+        thread: Seeded,
         shell: PaneId,
         actor: SessionsActor,
         state: State,
@@ -12606,19 +7893,18 @@ mod tests {
         /// The fixture, with `setup` run on its store and `aa`'s pane first.
         fn with<F>(setup: F) -> Result<Self, Report<StoreError>>
         where
-            F: FnOnce(&Store, &InsertedThread) -> Result<(), Report<StoreError>>,
+            F: FnOnce(&Store, &Seeded) -> Result<(), Report<StoreError>>,
         {
             let dir = tempfile::tempdir().change_context(StoreError)?;
             let store = Store::open_in_memory()?;
-            let thread = insert_thread(&store, "aa", None)?;
+            let thread = insert_thread(&store, "aa")?;
             let shell = store.insert_pane(thread.session, Path::new(PROJECT_ROOT))?;
             setup(&store, &thread)?;
-            let host = FakeHost::listing(Vec::new());
+            let host = listing(Vec::new());
             let (actor, state) = start_in(
                 store,
                 &host,
                 &FakeGit::local(),
-                &FakeTrust::accepting(),
                 Path::new(NO_CLAUDE_DIR),
                 dir.path(),
                 Path::new(INCOGNITO_ROOT),
@@ -12908,7 +8194,7 @@ mod tests {
         let mut fx = PaneReports::new()?;
         fx.report(fx.thread.pane, "start", "aa", Some("resume"))?;
         fx.actor.poll().await;
-        fx.actor.settle_session(fx.thread.session).await;
+        fx.actor.settle_session(fx.thread.session);
         fx.report(fx.thread.pane, "end", "aa", None)?;
 
         // When polling.
@@ -12931,7 +8217,7 @@ mod tests {
         // pane.
         let mut other = None;
         let mut fx = PaneReports::with(|store, _| {
-            other = Some(insert_thread(store, "bb", None)?);
+            other = Some(insert_thread(store, "bb")?);
             Ok(())
         })?;
         let other = other.ok_or_else(|| Report::new(StoreError).attach("bb wasn't made"))?;
@@ -13070,13 +8356,14 @@ mod tests {
     }
 
     /// Thread `aa` in a pane of its own, its harness `claude` (status from
-    /// records) or `pi` (status from pane reports), polled through a host
-    /// listing `records` and a zmx whose listing `zmx` makes from the pane,
-    /// the actor reading pane files under a scratch orb folder.
+    /// the agents it sees running) or `pi` (status from pane reports),
+    /// polled through a harness seeing `records` and a zmx whose listing `zmx`
+    /// makes from the pane, the actor reading pane files under a scratch orb
+    /// folder.
     struct PaneStatus {
         dir: tempfile::TempDir,
-        thread: InsertedThread,
-        host: Arc<FakeHost>,
+        thread: Seeded,
+        host: Arc<FakeHarness>,
         actor: SessionsActor,
         state: State,
     }
@@ -13084,7 +8371,7 @@ mod tests {
     impl PaneStatus {
         fn new<F>(
             reports: bool,
-            records: Vec<SessionRecord>,
+            records: Vec<RunningAgent>,
             zmx: F,
         ) -> Result<Self, Report<StoreError>>
         where
@@ -13093,23 +8380,21 @@ mod tests {
             let dir = tempfile::tempdir().change_context(StoreError)?;
             let store = Store::open_in_memory()?;
             let agent = if reports { "pi" } else { "claude" };
-            let thread = store.insert_thread(&NewThread {
-                harness: HarnessId::new(agent),
-                project_id: orb_project(&store)?,
-                short_id: "aa".to_owned(),
-                cwd: PathBuf::from(PROJECT_ROOT),
-                created_at: now_ms() - HOUR_MS,
-                model: None,
-                permission_mode: None,
-                group_id: None,
-                zmx: None,
-            })?;
-            let host = FakeHost::listing(records);
-            let harness: Arc<dyn Harness> = if reports {
-                Arc::new(FakeHarness::reporting(agent, host.clone()))
+            let thread = seed_with(
+                &store,
+                agent,
+                orb_project(&store)?,
+                SessionKind::Plain,
+                Path::new(PROJECT_ROOT),
+                "aa",
+                now_ms() - HOUR_MS,
+            )?;
+            let host = Arc::new(if reports {
+                FakeHarness::reporting(agent)
             } else {
-                Arc::new(FakeHarness::new(agent, host.clone()))
-            };
+                FakeHarness::new(agent, records)
+            });
+            let harness: Arc<dyn Harness> = host.clone();
             let state = State::default();
             let git = FakeGit::local();
             let actor = SessionsActor::restore(SessionsActorDeps {
@@ -13176,10 +8461,8 @@ mod tests {
     }
 
     /// A Claude the user started, whose process and parents are `ancestry`.
-    fn interactive(ancestry: &[u32], status: ThreadStatus) -> SessionRecord {
-        SessionRecord {
-            short_id: None,
-            session_id: None,
+    fn interactive(ancestry: &[u32], status: ThreadStatus) -> RunningAgent {
+        RunningAgent {
             status,
             ancestry: ancestry.to_vec(),
         }
@@ -13311,7 +8594,7 @@ mod tests {
     }
 
     /// Starts the actor on `store` over `host` with nothing selected.
-    fn start_unselected(store: Store, host: &Arc<FakeHost>) -> (SessionsActor, State) {
+    fn start_unselected(store: Store, host: &Arc<FakeClaude>) -> (SessionsActor, State) {
         let (actor, state) = start(store, host, Path::new(NO_CLAUDE_DIR));
         state.write().sessions.cursor = None;
         (actor, state)
@@ -13323,7 +8606,7 @@ mod tests {
         // Given thread aa's session idle for four days.
         let (store, _) = store_with_thread("aa")?;
         let since = session_idle_for_four_days(&store, "aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling.
@@ -13345,7 +8628,7 @@ mod tests {
         // Given thread aa's session idle for four days, with aa selected.
         let (store, id) = store_with_thread("aa")?;
         session_idle_for_four_days(&store, "aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start_unselected(store, &host);
         state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(id.0)));
 
@@ -13371,7 +8654,7 @@ mod tests {
             pinned_at: Some(now_ms() - HOUR_MS),
             ..row
         })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling.
@@ -13396,7 +8679,7 @@ mod tests {
             settled_override: Some(SettledOverride::Active),
             ..row
         })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling.
@@ -13417,7 +8700,7 @@ mod tests {
         // Given thread aa's session idle for four days, and aa now working.
         let (store, _) = store_with_thread("aa")?;
         session_idle_for_four_days(&store, "aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling.
@@ -13442,7 +8725,7 @@ mod tests {
             settled_at: Some(now_ms() - HOUR_MS),
             ..row
         })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling.
@@ -13467,7 +8750,7 @@ mod tests {
             settled_override: Some(SettledOverride::Active),
             ..row
         })?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling.
@@ -13487,12 +8770,12 @@ mod tests {
     async fn turn_end_is_its_sessions_latest_activity() -> Result<(), Report<StoreError>> {
         // Given thread aa polled while working.
         let (store, _) = store_with_thread("aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Working)]);
+        let host = listing(vec![record("aa", ThreadStatus::Working)]);
         let (mut actor, _state) = start_unselected(store, &host);
         actor.poll().await;
 
         // When polling after its turn ended.
-        host.set_list(Ok(vec![record("aa", ThreadStatus::Idle)]));
+        host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
         actor.poll().await;
 
         // Then the turn's end is the session's latest activity.
@@ -13513,7 +8796,7 @@ mod tests {
         let pane = saved(&store, "aa")?
             .pane_id
             .ok_or_else(|| Report::new(StoreError).attach("aa has no pane"))?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start_unselected(store, &host);
         let (zmx, service) = recording_zmx();
         actor.services.zmx = service;
@@ -13537,7 +8820,7 @@ mod tests {
         let (store, _) = store_with_thread("aa")?;
         session_idle_for_four_days(&store, "aa")?;
         let session = saved_session(&store, "aa")?.id;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, state) = start_unselected(store, &host);
         state.write().attached.insert(session);
 
@@ -13557,9 +8840,9 @@ mod tests {
         // Given settled session aa and unsettled session bb, zmx listing both
         // their panes.
         let store = Store::open_in_memory()?;
-        let settled = insert_thread(&store, "aa", None)?;
-        let active = insert_thread(&store, "bb", None)?;
-        let host = FakeHost::listing(Vec::new());
+        let settled = insert_thread(&store, "aa")?;
+        let active = insert_thread(&store, "bb")?;
+        let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.edit_session(settled.session, settle_session_row);
         let zmx = Arc::new(FakeZmx::new(ZmxOutput {
@@ -13591,7 +8874,7 @@ mod tests {
         // Given thread aa's session idle for four days.
         let (store, _) = store_with_thread("aa")?;
         session_idle_for_four_days(&store, "aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling, which auto-settles the session.
@@ -13611,7 +8894,7 @@ mod tests {
         // Given thread aa idle for four days.
         let (store, _) = store_with_thread("aa")?;
         idle_for_four_days(&store, "aa")?;
-        let host = FakeHost::listing(vec![record("aa", ThreadStatus::Idle)]);
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling.

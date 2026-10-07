@@ -6,7 +6,7 @@
 //! orb is still indexing transcripts at startup. Its input row holds the
 //! typed text and how many messages are listed, or `200+` when more matched,
 //! over an orange rule. Each row is one matching message: its thread's dim
-//! `<project|group>/` and bright title, then a dim one-line snippet of the
+//! `<project>/` and bright title, then a dim one-line snippet of the
 //! message with the matches lit. When the search index can't be opened, the
 //! list says why instead.
 //!
@@ -709,7 +709,7 @@ mod tests {
                     root: "/Users/me/dev/orb".into(),
                     created_at: UNIX_EPOCH,
                     removed: false,
-                    draft: None,
+                    repo: true,
                     threads: vec![Thread {
                         last_session: None,
                         harness: HarnessId::new("claude"),
@@ -731,7 +731,6 @@ mod tests {
                         model: Some("opus".to_owned()),
                         permission: None,
                     }],
-                    groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
                 ..Sessions::default()

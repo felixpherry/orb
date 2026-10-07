@@ -40,11 +40,8 @@
 //! notification; notices that arrive while it is focused are dropped, since
 //! the sidebar already shows them.
 //!
-//! When a session start waits for the user to trust a folder, the loop asks
-//! with a `No`/`Yes` confirm naming it, in place of any picker, the rename box
-//! or the sidebar search; a thread's pane that had the keys loses them, as on
-//! `<C-h>`. When a started draft's session comes up still selected, the loop
-//! attaches to it. If the user is typing in a picker, the rename box or the
+//! When a new session, or one moved to another workspace, comes up still
+//! selected, the loop attaches to it. If the user is typing in a picker, the rename box or the
 //! sidebar search, or is in a pane, it waits, and attaches once the keys are
 //! back in the sidebar, leaving them there with the pane drawn, as long as
 //! the session is still selected. Attaching to a session whose orb worktree
@@ -79,7 +76,7 @@ use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::layout::state::{Layouts, SessionLayout};
 use orb_domain::feat::notify::notifier::NotifierService;
-use orb_domain::feat::picker::state::{PickerKind, PickerState};
+use orb_domain::feat::picker::state::PickerKind;
 use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
@@ -95,7 +92,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEvent};
 use ratatui::layout::Rect;
 use wherror::Error;
 
-use crate::keymap::{self, KeyScope, Keys, Route};
+use crate::keymap::{self, Keys, Route, Scope};
 use crate::mouse::{self, Clicks, HitMap, MouseRoute};
 use crate::picker::PickerScroll;
 use crate::sidebar::{SPINNER_FRAME, SidebarScroll};
@@ -200,26 +197,7 @@ enum LoopEvent {
     StateChanged,
 }
 
-/// The folder to ask the user to trust: the one a start waits on, unless it
-/// was asked already.
-fn trust_to_open(trust: Option<&Path>, opened: Option<&Path>) -> Option<PathBuf> {
-    trust.filter(|&dir| Some(dir) != opened).map(Path::to_owned)
-}
-
-/// Where the keys go once the trust confirm closes, given where they were
-/// when it opened and the `return_to` of a picker it replaces: back to the
-/// sidebar (or the dashboard); to where a replaced picker would have
-/// returned them; to the sidebar from the rename box, the search or a pane,
-/// as `<C-h>` leaves it drawn.
-fn trust_return_to(focus: Focus, replaced: Option<Focus>) -> Focus {
-    match focus {
-        Focus::Sidebar | Focus::Dashboard => focus,
-        Focus::Picker => replaced.unwrap_or(Focus::Sidebar),
-        Focus::Rename | Focus::Search | Focus::Attached => Focus::Sidebar,
-    }
-}
-
-/// What the loop does with a started draft's request to attach to its session.
+/// What the loop does with a new session's request to attach to it.
 #[derive(Debug, PartialEq, Eq)]
 enum StartedAttach {
     /// There's no request, or its session is no longer selected: drop it.
@@ -232,7 +210,7 @@ enum StartedAttach {
     Attach { keep_keys: bool },
 }
 
-/// What to do with `started`, a started draft's session, given the selected
+/// What to do with `started`, a new session's request, given the selected
 /// session, where the keys are, and whether the request has `waited` already.
 fn started_attach(
     started: Option<SessionId>,
@@ -433,9 +411,7 @@ struct App {
     respawned: HashSet<PaneId>,
     /// Shown on the right when a thread's attach command couldn't start.
     pane_error: Option<String>,
-    /// The folder the trust confirm was opened for, while its start waits.
-    opened_trust: Option<PathBuf>,
-    /// A started draft's attach request is waiting for the keys to come back
+    /// A new session's attach request is waiting for the keys to come back
     /// to the sidebar or the dashboard.
     attach_waited: bool,
     /// The environment panes run with.
@@ -481,7 +457,7 @@ impl App {
     ) -> Self {
         let scope = {
             let state = state.read();
-            KeyScope::new(state.focus, &state)
+            Scope::of(state.focus, &state)
         };
         Self {
             state,
@@ -498,7 +474,6 @@ impl App {
             exited: Vec::new(),
             respawned: HashSet::new(),
             pane_error: None,
-            opened_trust: None,
             attach_waited: false,
             env,
             zmx,
@@ -594,7 +569,6 @@ impl App {
             self.refresh_preview();
             self.announce();
             self.reconcile();
-            self.ask_trust();
             self.open_started();
             self.sync_focus();
             let now = Instant::now();
@@ -742,8 +716,8 @@ impl App {
                             }
                             None => {
                                 // Focus and the selection also change outside
-                                // intents (the pane exits, a draft starts).
-                                let scope = KeyScope::new(focus, &self.state.read());
+                                // intents (the pane exits, a new session attaches).
+                                let scope = Scope::of(focus, &self.state.read());
                                 if *self.keys.scope() != scope {
                                     self.keys.set_scope(scope);
                                 }
@@ -850,29 +824,12 @@ impl App {
                     .try_send();
             }
             Command::Detach => self.sync_focus(),
-            Command::CreateDraft(project) => {
+            Command::NewSession { project, workspace } => {
                 let _ = self
                     .sessions
-                    .tell(sessions_actor::CreateDraft(*project))
-                    .try_send();
-            }
-            Command::SaveDraft(project) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::SaveDraft(*project))
-                    .try_send();
-            }
-            Command::CheckoutDraft {
-                project,
-                git_ref,
-                cwd,
-            } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::CheckoutDraft {
+                    .tell(sessions_actor::NewSession {
                         project: *project,
-                        git_ref: git_ref.clone(),
-                        cwd: cwd.clone(),
+                        workspace: workspace.clone(),
                     })
                     .try_send();
             }
@@ -882,56 +839,26 @@ impl App {
                     .tell(sessions_actor::InitGit(*project))
                     .try_send();
             }
-            Command::StartDraft(project) => {
+            Command::ChangeWorkspace { session, to } => {
                 let _ = self
                     .sessions
-                    .tell(sessions_actor::StartDraft(*project))
-                    .try_send();
-            }
-            Command::TrustWorkspace => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::TrustWorkspace)
-                    .try_send();
-            }
-            Command::DeclineTrust => {
-                let _ = self.sessions.tell(sessions_actor::DeclineTrust).try_send();
-            }
-            Command::DiscardDraft(project) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::DiscardDraft(*project))
-                    .try_send();
-            }
-            Command::MoveThread { thread, to } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::MoveThread {
-                        thread: *thread,
+                    .tell(sessions_actor::ChangeWorkspace {
+                        session: *session,
                         to: to.clone(),
                     })
                     .try_send();
             }
             Command::SwitchBranch {
-                thread,
+                session,
                 git_ref,
                 to_root,
             } => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::SwitchBranch {
-                        thread: *thread,
+                        session: *session,
                         git_ref: git_ref.clone(),
                         to_root: *to_root,
-                    })
-                    .try_send();
-            }
-            Command::CheckoutGroup { group, git_ref } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::CheckoutGroup {
-                        group: *group,
-                        git_ref: git_ref.clone(),
                     })
                     .try_send();
             }
@@ -1070,30 +997,13 @@ impl App {
                     .tell(sessions_actor::RemoveProject(*id))
                     .try_send();
             }
-            Command::CreateGroup {
-                kind,
-                project,
-                name,
-            } => {
+            Command::NewFolderSession { kind, name } => {
                 let _ = self
                     .sessions
-                    .tell(sessions_actor::CreateGroup {
+                    .tell(sessions_actor::NewFolderSession {
                         kind: *kind,
-                        project: *project,
                         name: name.clone(),
                     })
-                    .try_send();
-            }
-            Command::StartGroupDraft(group) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::StartGroupDraft(*group))
-                    .try_send();
-            }
-            Command::SaveGroupDraft(group) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::SaveGroupDraft(*group))
                     .try_send();
             }
         }
@@ -1110,7 +1020,7 @@ impl App {
             if !self.panes.get(&id).is_some_and(Pane::has_exited) {
                 continue;
             }
-            let Some((session, command, cwd)) = self.pane_launch(id) else {
+            let Some((session, cwd)) = self.pane_launch(id) else {
                 ended.insert(id);
                 continue;
             };
@@ -1120,7 +1030,7 @@ impl App {
                 .is_ok_and(|entries| entries.iter().any(|entry| entry.name == session.name));
             let exit = classify_exit(listed, self.respawned.contains(&id));
             let respawned = match exit {
-                PaneExit::Respawn => self.spawn_pane(id, &session, &command, &cwd),
+                PaneExit::Respawn => self.spawn_pane(id, &session, &cwd),
                 PaneExit::Ended | PaneExit::Failed => None,
             };
             match (exit, respawned) {
@@ -1195,8 +1105,8 @@ impl App {
             self.respawned.remove(id);
         }
         for id in to_spawn(&keep, &self.panes) {
-            let spawned = self.pane_launch(id).and_then(|(session, command, cwd)| {
-                self.spawn_pane(id, &session, &command, &cwd)
+            let spawned = self.pane_launch(id).and_then(|(session, cwd)| {
+                self.spawn_pane(id, &session, &cwd)
                     .map(|pane| (pane, session))
             });
             match spawned {
@@ -1222,37 +1132,7 @@ impl App {
         }
     }
 
-    /// Asks the user, with the `No`/`Yes` confirm, to trust the folder a
-    /// session start begins waiting on, once per request (see
-    /// [`trust_to_open`]). It takes the place of an open picker, the rename
-    /// box or the search; a thread's pane that had the keys loses them, as on
-    /// `<C-h>`. Where the keys go after is [`trust_return_to`].
-    fn ask_trust(&mut self) {
-        let trust = self.state.read().sessions.trust.clone();
-        let ask = trust_to_open(trust.as_deref(), self.opened_trust.as_deref());
-        self.opened_trust = trust;
-        let Some(dir) = ask else {
-            return;
-        };
-        self.keys.dismiss();
-        let from_pane = {
-            let mut app = self.state.write();
-            let return_to =
-                trust_return_to(app.focus, app.picker.as_ref().map(PickerState::return_to));
-            let from_pane = app.focus == Focus::Attached;
-            app.rename = None;
-            app.sessions.search = None;
-            app.picker = Some(PickerState::trust_workspace(dir, return_to));
-            app.focus = Focus::Picker;
-            from_pane
-        };
-        if from_pane {
-            // The pane loses the keys, as on `<C-h>`.
-            self.execute(&Command::Detach);
-        }
-    }
-
-    /// Attaches to a started draft's session while it's still selected, as
+    /// Attaches to a new session's request while it's still selected, as
     /// [`started_attach`] decides: at once, or, if the user was typing or in
     /// a pane when it came up, once the keys are back in the sidebar or the
     /// dashboard, leaving them there with the pane drawn (as `<C-h>` does). A
@@ -1397,36 +1277,23 @@ impl App {
         self.reconcile();
     }
 
-    /// Where pane `id` runs, as its layout says: its zmx session, the command
-    /// of the thread that runs in it (none for a shell pane), and its
+    /// Where pane `id` runs, as its layout says: its zmx session and its
     /// directory. `None` once no layout holds it.
-    fn pane_launch(&self, id: PaneId) -> Option<(ZmxSession, Vec<OsString>, PathBuf)> {
+    fn pane_launch(&self, id: PaneId) -> Option<(ZmxSession, PathBuf)> {
         let state = self.state.read();
         let entry = state.layouts.entry(id)?;
-        let command = state
-            .sessions
-            .threads()
-            .filter_map(|thread| thread.pane.as_ref())
-            .find(|launch| launch.pane == id)
-            .map(|launch| launch.command.clone())
-            .unwrap_or_default();
-        Some((entry.zmx.clone(), command, entry.cwd.clone()))
+        Some((entry.zmx.clone(), entry.cwd.clone()))
     }
 
-    /// Runs `zmx attach` on `session` with `command` for pane `id`, in `cwd`,
+    /// Runs `zmx attach` on `session` for pane `id`, in `cwd`, which starts
+    /// the user's shell when zmx makes the session,
     /// sized to its place in the shown layout (else the whole pane area),
     /// with orb's child environment and the pane's `ORB_PANE_ID`; `None` if
     /// it can't start.
-    fn spawn_pane(
-        &self,
-        id: PaneId,
-        session: &ZmxSession,
-        command: &[OsString],
-        cwd: &Path,
-    ) -> Option<Pane> {
+    fn spawn_pane(&self, id: PaneId, session: &ZmxSession, cwd: &Path) -> Option<Pane> {
         let tx = self.tx.clone();
         let command = PaneCommand {
-            argv: attach_argv(session, command),
+            argv: attach_argv(session, &[]),
             cwd: cwd.to_owned(),
             env: pane_env(&self.env, id),
         };
@@ -1530,7 +1397,7 @@ mod tests {
     use std::fs;
     use std::io;
     use std::os::unix::fs::symlink;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::time::UNIX_EPOCH;
 
     use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
@@ -1548,8 +1415,7 @@ mod tests {
     use super::{
         AttachPlan, PaneExit, StartedAttach, after_pane, attach_or_restore, classify_exit,
         closed_in_layouts, cursor_style, list_directories, pane_error_after, reattachable,
-        stale_preview, stale_sessions, started_attach, to_drop, to_kill, to_spawn, trust_return_to,
-        trust_to_open,
+        stale_preview, stale_sessions, started_attach, to_drop, to_kill, to_spawn,
     };
 
     /// Pane `id`, a shell in `orb-p<id>`.
@@ -1708,10 +1574,9 @@ mod tests {
                         model: None,
                         permission: None,
                     }],
-                    draft: None,
+                    repo: true,
                     removed: false,
                     kind: ProjectKind::Normal,
-                    groups: Vec::new(),
                 }],
                 ..Sessions::default()
             },
@@ -1782,60 +1647,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn trust_confirm_opens_for_a_new_trust_request() {
-        // Given a start waiting on /tmp/x and no trust confirm opened.
-        let trust = Path::new("/tmp/x");
-
-        // When deciding what to ask.
-        let open = trust_to_open(Some(trust), None);
-
-        // Then a trust confirm opens for /tmp/x.
-        assert_eq!(
-            open,
-            Some(PathBuf::from("/tmp/x")),
-            "a new trust request should open the confirm"
-        );
-    }
-
-    #[rstest::rstest]
-    fn trust_confirm_is_not_reopened_while_the_same_trust_waits() {
-        // Given a start waiting on /tmp/x whose trust confirm was opened.
-        let trust = Path::new("/tmp/x");
-
-        // When deciding what to ask.
-        let open = trust_to_open(Some(trust), Some(trust));
-
-        // Then nothing opens.
-        assert_eq!(open, None, "the same request shouldn't reopen the confirm");
-    }
-
-    #[rstest::rstest]
-    #[case::sidebar(Focus::Sidebar, None, Focus::Sidebar)]
-    #[case::dashboard(Focus::Dashboard, None, Focus::Dashboard)]
-    #[case::replaced_picker(Focus::Picker, Some(Focus::Dashboard), Focus::Dashboard)]
-    #[case::rename(Focus::Rename, None, Focus::Sidebar)]
-    #[case::search(Focus::Search, None, Focus::Sidebar)]
-    #[case::pane(Focus::Attached, None, Focus::Sidebar)]
-    fn trust_confirm_returns_the_keys_to(
-        #[case] focus: Focus,
-        #[case] replaced: Option<Focus>,
-        #[case] expected: Focus,
-    ) {
-        // Given / When the trust confirm opens with the keys in `focus`.
-        let return_to = trust_return_to(focus, replaced);
-
-        // Then it gives them back to `expected`, never to a picker.
-        assert_eq!(
-            return_to, expected,
-            "where the keys go after the confirm from {focus:?}"
-        );
-    }
-
-    #[rstest::rstest]
     #[case(Focus::Sidebar)]
     #[case(Focus::Dashboard)]
     fn started_session_still_selected_is_attached(#[case] focus: Focus) {
-        // Given thread 1 started from a draft and still selected.
+        // Given new session 1 still selected.
         let started = Some(SessionId(1));
 
         // When deciding what to do in `focus`.
@@ -1851,7 +1666,7 @@ mod tests {
 
     #[rstest::rstest]
     fn started_session_is_dropped_after_the_selection_moved() {
-        // Given thread 1 started from a draft while thread 2 is selected.
+        // Given new session 1 while session 2 is selected.
         let started = Some(SessionId(1));
 
         // When deciding what to do.
@@ -1871,7 +1686,7 @@ mod tests {
     #[case(Focus::Search)]
     #[case(Focus::Attached)]
     fn started_session_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
-        // Given thread 1 started from a draft and still selected, e.g. while
+        // Given new session 1 still selected. e.g. while
         // a picker has the keys.
         let started = Some(SessionId(1));
 
@@ -2112,7 +1927,7 @@ mod tests {
         // When deciding how to attach to it.
         let plan = attach_or_restore(&cwd, root.path());
 
-        // Then claude attach starts in it.
+        // Then its panes start in it.
         assert_eq!(plan, AttachPlan::Spawn, "an existing worktree spawns");
         Ok(())
     }
@@ -2141,7 +1956,7 @@ mod tests {
         // When deciding how to attach to it.
         let plan = attach_or_restore(&cwd, root.path());
 
-        // Then claude attach starts as it always has.
+        // Then its panes start as they always have.
         assert_eq!(
             plan,
             AttachPlan::Spawn,

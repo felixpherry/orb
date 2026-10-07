@@ -1,17 +1,14 @@
-//! orb's saved projects, threads and drafts, kept in SQLite across launches.
+//! orb's saved projects, threads and sessions, kept in SQLite across
+//! launches.
 //!
-//! For each project it keeps the directory its sessions start in and the
-//! workspace, model and permission mode its last draft started with. For each
+//! For each project it keeps the directory its sessions start in. For each
 //! thread it keeps the session ids, the titles, the git branch, how far the
 //! transcript has been read, when the running turn started, whether it is
 //! pinned or settled, when it last had activity and was last visited, and the
-//! model and permission mode its session started with. For each project's
-//! draft it keeps the session setup the user picked. It also keeps the
+//! model and permission mode its session started with. It also keeps the
 //! sidebar's width and project filter. For each project it also keeps its
-//! kind (one the user added, or orb's Research or Learn folder), and it keeps
-//! each project's groups: their kind, name, directory, branch, pin and settle
-//! state, and the session setup of their draft. Each thread keeps the group it
-//! belongs to. It also keeps the jump list's rows, oldest first. Each session
+//! kind (one the user added, or orb's Research or Learn folder). It also
+//! keeps the jump list's rows, oldest first. Each session
 //! keeps its directory and its tabs in order, each tab its split tree and
 //! focused pane, and each pane its directory, zmx session, name and the
 //! command that brings its agent back; a thread keeps the pane it runs in.
@@ -26,13 +23,9 @@ use error_stack::{Report, ResultExt};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use wherror::Error;
 
-use super::state::{
-    DraftWorkspace, GroupDraft, GroupId, GroupKind, Own, PaneId, ProjectId, ProjectKind, SessionId,
-    SessionKind, SidebarItem, ThreadId,
-};
+use super::state::{PaneId, ProjectId, ProjectKind, SessionId, SessionKind, SidebarItem, ThreadId};
 use crate::feat::harness::HarnessId;
 use crate::feat::layout::tree::{Node, Split, TileLayout};
-use crate::feat::zmx::zmx_service::ZmxSession;
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -95,8 +88,9 @@ pub struct ThreadRow {
     /// The `--permission-mode` its session started with; `None` = the
     /// harness's default.
     pub permission_mode: Option<String>,
-    /// The group the thread belongs to; `None` = a top-level thread.
-    pub group_id: Option<GroupId>,
+    /// The id of the group a store from before sessions put it in; `None`
+    /// = none.
+    pub group_id: Option<i64>,
     /// The harness its session runs in.
     pub harness: HarnessId,
     /// The pane it runs in; `None` once it has ended.
@@ -132,24 +126,6 @@ impl SettledOverride {
     }
 }
 
-/// A thread that was just created and isn't saved yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewThread {
-    pub project_id: ProjectId,
-    pub short_id: String,
-    pub cwd: PathBuf,
-    pub created_at: i64,
-    pub model: Option<String>,
-    pub permission_mode: Option<String>,
-    /// The group the thread is born in; `None` = a top-level thread.
-    pub group_id: Option<GroupId>,
-    /// The harness its session runs in.
-    pub harness: HarnessId,
-    /// The zmx session the harness runs the thread in itself (pi); `None`
-    /// for a pane orb names.
-    pub zmx: Option<ZmxSession>,
-}
-
 /// A thread an agent report started in an existing pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewPaneThread {
@@ -160,14 +136,6 @@ pub struct NewPaneThread {
     pub harness: HarnessId,
     pub cwd: PathBuf,
     pub created_at: i64,
-}
-
-/// What [`Store::insert_thread`] made: the thread and its one-pane session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InsertedThread {
-    pub thread: ThreadId,
-    pub session: SessionId,
-    pub pane: PaneId,
 }
 
 /// A saved session: what its layout needs, and its settle lifecycle.
@@ -236,109 +204,6 @@ pub struct SavedLayouts {
     pub panes: Vec<PaneRow>,
 }
 
-/// A saved group.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupRow {
-    pub id: GroupId,
-    pub project_id: ProjectId,
-    pub kind: GroupKind,
-    /// The group's slug; unique per project and kind.
-    pub name: String,
-    /// Where its sessions run; `None` for a Feature until its draft starts.
-    pub dir: Option<PathBuf>,
-    /// Feature: the branch named after the group; else `None`.
-    pub branch: Option<String>,
-    pub created_at: i64,
-    /// When the user pinned the group; `None` = not pinned.
-    pub pinned_at: Option<i64>,
-    /// Whether the group is settled or kept active; `None` = neither.
-    pub settled_override: Option<SettledOverride>,
-    /// When the group was settled.
-    pub settled_at: Option<i64>,
-    /// When the group was last un-settled.
-    pub unsettled_at: Option<i64>,
-    /// The `--model` for its draft; `None` = the harness's default.
-    pub draft_model: Option<String>,
-    /// The `--permission-mode` for its draft; `None` = the harness's default.
-    pub draft_permission_mode: Option<String>,
-    /// The harness its threads start in by default.
-    pub harness: HarnessId,
-    /// Its draft, if it has one.
-    pub draft: Option<GroupDraft>,
-}
-
-/// A group that was just created and isn't saved yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewGroup {
-    pub project_id: ProjectId,
-    pub kind: GroupKind,
-    pub name: String,
-    pub dir: Option<PathBuf>,
-    pub branch: Option<String>,
-    pub created_at: i64,
-    pub draft_model: Option<String>,
-    pub draft_permission_mode: Option<String>,
-    pub harness: HarnessId,
-}
-
-/// A saved draft: the session setup picked for a project's next thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DraftRow {
-    /// A project has at most one draft.
-    pub project_id: ProjectId,
-    pub workspace: DraftWorkspace,
-    pub branch: Option<String>,
-    /// `None` = the harness's default.
-    pub model: Option<String>,
-    /// `None` = the harness's default.
-    pub permission_mode: Option<String>,
-    pub created_at: i64,
-    /// The harness its session will run in.
-    pub harness: HarnessId,
-}
-
-/// Which kind of workspace a project's last draft started in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LastWorkspace {
-    /// The project's root.
-    Local,
-    /// A new worktree.
-    NewWorktree,
-    /// A worktree that already existed.
-    Previous,
-}
-
-impl LastWorkspace {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::NewWorktree => "new_worktree",
-            Self::Previous => "previous",
-        }
-    }
-
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "local" => Some(Self::Local),
-            "new_worktree" => Some(Self::NewWorktree),
-            "previous" => Some(Self::Previous),
-            _ => None,
-        }
-    }
-}
-
-/// The settings a project's last draft started with.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LastUsed {
-    /// `None` for a project last started before orb knew harnesses.
-    pub harness: Option<HarnessId>,
-    pub workspace: LastWorkspace,
-    /// `None` = the harness's default.
-    pub model: Option<String>,
-    /// `None` = the harness's default.
-    pub permission_mode: Option<String>,
-}
-
 /// How the user last left orb's layout; `None` = never set.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Ui {
@@ -348,15 +213,10 @@ pub struct Ui {
     pub project_filter: Option<ProjectId>,
 }
 
-/// Everything [`Store::load`] returns: projects, threads, drafts, and groups.
-pub type Saved = (
-    Vec<ProjectRow>,
-    Vec<ThreadRow>,
-    Vec<DraftRow>,
-    Vec<GroupRow>,
-);
+/// Everything [`Store::load`] returns: projects and threads.
+pub type Saved = (Vec<ProjectRow>, Vec<ThreadRow>);
 
-/// orb's database of projects, threads, drafts, and groups.
+/// orb's database of projects, threads and sessions.
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
@@ -492,8 +352,7 @@ impl Store {
         Ok(Self { conn })
     }
 
-    /// Every saved project (oldest first), thread (newest first), draft, and
-    /// group (oldest first).
+    /// Every saved project (oldest first) and thread (newest first).
     ///
     /// # Errors
     ///
@@ -517,25 +376,7 @@ impl Store {
                 thread_row,
             )
             .attach("failed to load threads")?;
-        let drafts = self
-            .query(
-                "SELECT project_id, workspace, workspace_path, branch, model, permission_mode,
-                        created_at, harness
-                 FROM drafts ORDER BY project_id",
-                draft_row,
-            )
-            .attach("failed to load drafts")?;
-        let groups = self
-            .query(
-                "SELECT id, project_id, kind, name, dir, branch, created_at, pinned_at,
-                        settled_override, settled_at, unsettled_at, draft_model,
-                        draft_permission_mode, harness, has_draft, own_harness,
-                        own_model_set, own_model, own_permission_set, own_permission
-                 FROM groups ORDER BY id",
-                group_row,
-            )
-            .attach("failed to load groups")?;
-        Ok((projects, threads, drafts, groups))
+        Ok((projects, threads))
     }
 
     /// Saves the project rooted at `root` unless one is already saved there,
@@ -567,88 +408,53 @@ impl Store {
             .attach("failed to save the project")
     }
 
-    /// Saves a new thread, last active and last visited when it was created,
-    /// with a session of its own: one tab of one pane in the thread's
-    /// directory, Incognito in the Incognito project.
+    /// Saves a new `kind` session of `project` in `dir` on `branch`, last
+    /// active and visited at `now`, with one tab holding one shell pane.
+    /// Returns the session and its pane.
     ///
     /// # Errors
     ///
-    /// Returns an error if the cwd isn't UTF-8, the short id is already saved,
-    /// the project doesn't exist, or the database can't be written.
-    pub fn insert_thread(&self, row: &NewThread) -> Result<InsertedThread, Report<StoreError>> {
-        let cwd = utf8(&row.cwd)?.to_owned();
-        let zmx_dir = row
-            .zmx
-            .as_ref()
-            .map(|zmx| utf8(&zmx.dir).map(str::to_owned))
-            .transpose()?;
+    /// Returns an error if `dir` isn't UTF-8, the project doesn't exist, or the
+    /// database can't be written.
+    pub fn insert_session(
+        &self,
+        project: ProjectId,
+        kind: SessionKind,
+        dir: &Path,
+        branch: Option<&str>,
+        now: i64,
+    ) -> Result<(SessionId, PaneId), Report<StoreError>> {
+        let dir = utf8(dir)?.to_owned();
         let tx = self
             .conn
             .unchecked_transaction()
             .change_context(StoreError)
-            .attach("failed to start saving the thread")?;
-        let inserted = (|| {
-            let thread = ThreadId(tx.query_row(
-                "INSERT INTO threads
-                   (project_id, short_id, cwd, created_at, last_activity_at, last_visited_at,
-                    model, permission_mode, group_id, harness)
-                 VALUES (?1, ?2, ?3, ?4, ?4, ?4, ?5, ?6, ?7, ?8) RETURNING id",
-                params![
-                    row.project_id.0,
-                    row.short_id,
-                    cwd,
-                    row.created_at,
-                    row.model,
-                    row.permission_mode,
-                    row.group_id.map(|group| group.0),
-                    row.harness.as_str(),
-                ],
-                |row| row.get(0),
-            )?);
-            let kind: String = tx.query_row(
-                "SELECT CASE kind WHEN 'incognito' THEN 'incognito' WHEN 'research' THEN 'research'
-                                  WHEN 'learn' THEN 'learn' ELSE 'plain' END
-                 FROM projects WHERE id = ?1",
-                [row.project_id.0],
-                |row| row.get(0),
-            )?;
-            let session = NewSession {
-                project_id: row.project_id.0,
-                kind,
-                dir: cwd.clone(),
-                name: None,
-                branch: None,
-                created_at: row.created_at,
-                pinned_at: None,
-                settled_override: None,
-                settled_at: None,
-                unsettled_at: None,
-                last_activity_at: row.created_at,
-                last_visited_at: row.created_at,
-            };
-            let pane = NewPane {
-                thread: Some(thread.0),
-                zmx_name: row.zmx.as_ref().map(|zmx| zmx.name.clone()),
-                zmx_dir,
-                ..NewPane::shell(cwd.clone())
-            };
-            let (session, panes) = insert_session(&tx, &session, &[pane])?;
-            let pane = panes
-                .first()
-                .copied()
-                .ok_or(rusqlite::Error::InvalidQuery)?;
-            Ok::<_, rusqlite::Error>(InsertedThread {
-                thread,
-                session,
-                pane,
-            })
-        })()
-        .change_context(StoreError)
-        .attach("failed to save the thread")?;
+            .attach("failed to start saving the session")?;
+        let session = NewSession {
+            project_id: project.0,
+            kind: session_kind_text(kind).to_owned(),
+            dir: dir.clone(),
+            name: None,
+            branch: branch.map(str::to_owned),
+            created_at: now,
+            pinned_at: None,
+            settled_override: None,
+            settled_at: None,
+            unsettled_at: None,
+            last_activity_at: now,
+            last_visited_at: now,
+        };
+        let (session, panes) = insert_session(&tx, &session, &[NewPane::shell(dir)])
+            .change_context(StoreError)
+            .attach("failed to save the session")?;
+        let pane = panes
+            .first()
+            .copied()
+            .ok_or_else(|| Report::new(StoreError).attach("the session has no pane"))?;
         tx.commit()
             .change_context(StoreError)
-            .attach("failed to commit the thread")?;
-        Ok(inserted)
+            .attach("failed to commit the session")?;
+        Ok((session, pane))
     }
 
     /// Every saved session, its tabs in order, and every pane.
@@ -725,7 +531,7 @@ impl Store {
         })
     }
 
-    /// Saves session `row`'s name, pin, settle and activity state.
+    /// Saves session `row`'s name, branch, pin, settle and activity state.
     ///
     /// # Errors
     ///
@@ -734,7 +540,7 @@ impl Store {
         self.conn
             .execute(
                 "UPDATE sessions SET pinned_at = ?2, settled_override = ?3, settled_at = ?4,
-                        unsettled_at = ?5, last_activity_at = ?6, name = ?7
+                        unsettled_at = ?5, last_activity_at = ?6, name = ?7, branch = ?8
                  WHERE id = ?1",
                 params![
                     row.id.0,
@@ -744,11 +550,47 @@ impl Store {
                     row.unsettled_at,
                     row.last_activity_at,
                     row.name,
+                    row.branch,
                 ],
             )
             .change_context(StoreError)
             .attach("failed to save the session")?;
         Ok(())
+    }
+
+    /// Moves `session` to `dir` on `branch`: its row's directory and branch,
+    /// and every one of its panes' directories.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `dir` isn't UTF-8 or the database can't be written.
+    pub fn move_session(
+        &self,
+        session: SessionId,
+        dir: &Path,
+        branch: Option<&str>,
+    ) -> Result<(), Report<StoreError>> {
+        let dir = utf8(dir)?;
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .change_context(StoreError)
+            .attach("failed to start moving the session")?;
+        tx.execute(
+            "UPDATE sessions SET dir = ?2, branch = ?3 WHERE id = ?1",
+            params![session.0, dir, branch],
+        )
+        .and_then(|_| {
+            tx.execute(
+                "UPDATE panes SET cwd = ?2 WHERE session_id = ?1",
+                params![session.0, dir],
+            )
+        })
+        .change_context(StoreError)
+        .attach("failed to move the session")?;
+        tx.commit()
+            .change_context(StoreError)
+            .attach("failed to commit the session's move")
     }
 
     /// Saves a new pane running a shell in `cwd` in `session`.
@@ -1011,164 +853,7 @@ impl Store {
         Ok(())
     }
 
-    /// Saves a new group.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the directory isn't UTF-8, the project already has
-    /// a group of that kind and name, the project doesn't exist, or the
-    /// database can't be written.
-    pub fn insert_group(&self, row: &NewGroup) -> Result<GroupId, Report<StoreError>> {
-        let dir = row.dir.as_deref().map(utf8).transpose()?;
-        self.conn
-            .query_row(
-                "INSERT INTO groups
-                   (project_id, kind, name, dir, branch, created_at, draft_model,
-                    draft_permission_mode, harness)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
-                params![
-                    row.project_id.0,
-                    group_kind_text(row.kind),
-                    row.name,
-                    dir,
-                    row.branch,
-                    row.created_at,
-                    row.draft_model,
-                    row.draft_permission_mode,
-                    row.harness.as_str(),
-                ],
-                |row| row.get(0),
-            )
-            .map(GroupId)
-            .change_context(StoreError)
-            .attach("failed to save the group")
-    }
-
-    /// Updates everything about a group that changes after it's created: its
-    /// directory, branch, pin and settle state, default setup and draft. Its project,
-    /// kind and name stay as inserted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the directory isn't UTF-8 or the database can't be
-    /// written.
-    pub fn save_group(&self, row: &GroupRow) -> Result<(), Report<StoreError>> {
-        let dir = row.dir.as_deref().map(utf8).transpose()?;
-        let (own_harness, (own_model_set, own_model), (own_permission_set, own_permission)) =
-            match &row.draft {
-                Some(draft) => (
-                    match &draft.harness {
-                        Own::Group => None,
-                        Own::Set(id) => Some(id.as_str()),
-                    },
-                    own_columns(&draft.model),
-                    own_columns(&draft.permission),
-                ),
-                None => (None, (false, None), (false, None)),
-            };
-        self.conn
-            .execute(
-                "UPDATE groups SET dir = ?2, pinned_at = ?3, settled_override = ?4,
-                        settled_at = ?5, unsettled_at = ?6, draft_model = ?7,
-                        draft_permission_mode = ?8, branch = ?9, harness = ?10,
-                        has_draft = ?11, own_harness = ?12, own_model_set = ?13,
-                        own_model = ?14, own_permission_set = ?15, own_permission = ?16
-                 WHERE id = ?1",
-                params![
-                    row.id.0,
-                    dir,
-                    row.pinned_at,
-                    row.settled_override.map(SettledOverride::as_str),
-                    row.settled_at,
-                    row.unsettled_at,
-                    row.draft_model,
-                    row.draft_permission_mode,
-                    row.branch,
-                    row.harness.as_str(),
-                    row.draft.is_some(),
-                    own_harness,
-                    own_model_set,
-                    own_model,
-                    own_permission_set,
-                    own_permission,
-                ],
-            )
-            .change_context(StoreError)
-            .attach("failed to update the group")?;
-        Ok(())
-    }
-
-    /// Deletes a group. The caller deletes its threads first.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a thread still belongs to the group or the database
-    /// can't be written.
-    pub fn delete_group(&self, id: GroupId) -> Result<(), Report<StoreError>> {
-        self.conn
-            .execute("DELETE FROM groups WHERE id = ?1", params![id.0])
-            .change_context(StoreError)
-            .attach("failed to delete the group")?;
-        Ok(())
-    }
-
-    /// Saves the project's draft, replacing the one it had.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the workspace path isn't UTF-8, the project doesn't
-    /// exist, or the database can't be written.
-    pub fn save_draft(&self, row: &DraftRow) -> Result<(), Report<StoreError>> {
-        let (workspace, path) = match &row.workspace {
-            DraftWorkspace::Local => ("local", None),
-            DraftWorkspace::NewWorktree => ("new_worktree", None),
-            DraftWorkspace::Existing(path) => ("existing", Some(utf8(path)?)),
-        };
-        self.conn
-            .execute(
-                "INSERT INTO drafts
-                   (project_id, workspace, workspace_path, branch, model, permission_mode,
-                    created_at, harness)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT (project_id) DO UPDATE SET
-                   workspace = excluded.workspace, workspace_path = excluded.workspace_path,
-                   branch = excluded.branch, model = excluded.model,
-                   permission_mode = excluded.permission_mode, created_at = excluded.created_at,
-                   harness = excluded.harness",
-                params![
-                    row.project_id.0,
-                    workspace,
-                    path,
-                    row.branch,
-                    row.model,
-                    row.permission_mode,
-                    row.created_at,
-                    row.harness.as_str(),
-                ],
-            )
-            .change_context(StoreError)
-            .attach("failed to save the draft")?;
-        Ok(())
-    }
-
-    /// Deletes the project's draft, if it has one.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database can't be written.
-    pub fn delete_draft(&self, project: ProjectId) -> Result<(), Report<StoreError>> {
-        self.conn
-            .execute(
-                "DELETE FROM drafts WHERE project_id = ?1",
-                params![project.0],
-            )
-            .change_context(StoreError)
-            .attach("failed to delete the draft")?;
-        Ok(())
-    }
-
-    /// Marks the project removed at `now_ms` and deletes its draft, both or
-    /// neither. Its threads stay.
+    /// Marks the project removed at `now_ms`. Its sessions stay.
     ///
     /// # Errors
     ///
@@ -1178,92 +863,13 @@ impl Store {
         project: ProjectId,
         now_ms: i64,
     ) -> Result<(), Report<StoreError>> {
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .change_context(StoreError)
-            .attach("failed to start removing the project")?;
-        tx.execute(
-            "UPDATE projects SET removed_at = ?2 WHERE id = ?1",
-            params![project.0, now_ms],
-        )
-        .change_context(StoreError)
-        .attach("failed to mark the project removed")?;
-        tx.execute(
-            "DELETE FROM drafts WHERE project_id = ?1",
-            params![project.0],
-        )
-        .change_context(StoreError)
-        .attach("failed to delete the removed project's draft")?;
-        tx.commit()
-            .change_context(StoreError)
-            .attach("failed to commit removing the project")
-    }
-
-    /// What the project's last draft started with; `None` if none has.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database can't be read.
-    pub fn last_used(&self, project: ProjectId) -> Result<Option<LastUsed>, Report<StoreError>> {
-        self.conn
-            .query_row(
-                "SELECT last_workspace, last_model, last_permission_mode, last_harness FROM projects
-                 WHERE id = ?1 AND last_used_at IS NOT NULL",
-                params![project.0],
-                last_used_row,
-            )
-            .optional()
-            .change_context(StoreError)
-            .attach("failed to read the project's last-used settings")
-    }
-
-    /// What the most recently started draft of any project started with;
-    /// `None` if no draft has started.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database can't be read.
-    pub fn latest_last_used(&self) -> Result<Option<LastUsed>, Report<StoreError>> {
-        self.conn
-            .query_row(
-                "SELECT last_workspace, last_model, last_permission_mode, last_harness FROM projects
-                 WHERE last_used_at IS NOT NULL ORDER BY last_used_at DESC, id DESC LIMIT 1",
-                [],
-                last_used_row,
-            )
-            .optional()
-            .change_context(StoreError)
-            .attach("failed to read the latest last-used settings")
-    }
-
-    /// Records what the project's draft started with, at `at_ms`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database can't be written.
-    pub fn record_last_used(
-        &self,
-        project: ProjectId,
-        used: &LastUsed,
-        at_ms: i64,
-    ) -> Result<(), Report<StoreError>> {
         self.conn
             .execute(
-                "UPDATE projects SET last_workspace = ?2, last_model = ?3,
-                        last_permission_mode = ?4, last_used_at = ?5, last_harness = ?6
-                 WHERE id = ?1",
-                params![
-                    project.0,
-                    used.workspace.as_str(),
-                    used.model,
-                    used.permission_mode,
-                    at_ms,
-                    used.harness.as_ref().map(HarnessId::as_str),
-                ],
+                "UPDATE projects SET removed_at = ?2 WHERE id = ?1",
+                params![project.0, now_ms],
             )
             .change_context(StoreError)
-            .attach("failed to record the project's last-used settings")?;
+            .attach("failed to mark the project removed")?;
         Ok(())
     }
 
@@ -1794,67 +1400,6 @@ fn project_kind(text: Option<&str>) -> ProjectKind {
     }
 }
 
-/// How a group's kind is saved.
-fn group_kind_text(kind: GroupKind) -> &'static str {
-    match kind {
-        GroupKind::Feature => "feature",
-        GroupKind::Research => "research",
-        GroupKind::Learn => "learn",
-    }
-}
-
-/// A group row; an unknown kind loads as a Feature.
-fn group_row(row: &Row<'_>) -> rusqlite::Result<GroupRow> {
-    let kind = match row.get::<_, String>(2)?.as_str() {
-        "research" => GroupKind::Research,
-        "learn" => GroupKind::Learn,
-        _ => GroupKind::Feature,
-    };
-    Ok(GroupRow {
-        id: GroupId(row.get(0)?),
-        project_id: ProjectId(row.get(1)?),
-        kind,
-        name: row.get(3)?,
-        dir: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
-        branch: row.get(5)?,
-        created_at: row.get(6)?,
-        pinned_at: row.get(7)?,
-        settled_override: row
-            .get::<_, Option<String>>(8)?
-            .as_deref()
-            .and_then(SettledOverride::parse),
-        settled_at: row.get(9)?,
-        unsettled_at: row.get(10)?,
-        draft_model: row.get(11)?,
-        draft_permission_mode: row.get(12)?,
-        harness: HarnessId::new(row.get::<_, String>(13)?),
-        draft: if row.get::<_, bool>(14)? {
-            Some(GroupDraft {
-                harness: row
-                    .get::<_, Option<String>>(15)?
-                    .map_or(Own::Group, |id| Own::Set(HarnessId::new(id))),
-                model: own(row.get(16)?, row.get(17)?),
-                permission: own(row.get(18)?, row.get(19)?),
-            })
-        } else {
-            None
-        },
-    })
-}
-
-/// A group draft's setting from its `own_*_set` flag and `own_*` value.
-fn own(set: bool, value: Option<String>) -> Own<Option<String>> {
-    if set { Own::Set(value) } else { Own::Group }
-}
-
-/// The `own_*_set` flag and `own_*` value a group draft's setting saves as.
-fn own_columns(own: &Own<Option<String>>) -> (bool, Option<&str>) {
-    match own {
-        Own::Group => (false, None),
-        Own::Set(value) => (true, value.as_deref()),
-    }
-}
-
 fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
     Ok(ThreadRow {
         id: ThreadId(row.get(0)?),
@@ -1882,32 +1427,10 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         model: row.get(19)?,
         permission_mode: row.get(20)?,
         renamed_title: row.get(21)?,
-        group_id: row.get::<_, Option<i64>>(22)?.map(GroupId),
+        group_id: row.get(22)?,
         harness: HarnessId::new(row.get::<_, String>(23)?),
         pane_id: row.get::<_, Option<i64>>(24)?.map(PaneId),
         orb_session: row.get::<_, Option<i64>>(25)?.map(SessionId),
-    })
-}
-
-/// A draft row; an unknown workspace, or `existing` without a path, loads as
-/// a local checkout.
-fn draft_row(row: &Row<'_>) -> rusqlite::Result<DraftRow> {
-    let workspace = match (
-        row.get::<_, String>(1)?.as_str(),
-        row.get::<_, Option<String>>(2)?,
-    ) {
-        ("new_worktree", _) => DraftWorkspace::NewWorktree,
-        ("existing", Some(path)) => DraftWorkspace::Existing(PathBuf::from(path)),
-        _ => DraftWorkspace::Local,
-    };
-    Ok(DraftRow {
-        project_id: ProjectId(row.get(0)?),
-        workspace,
-        branch: row.get(3)?,
-        model: row.get(4)?,
-        permission_mode: row.get(5)?,
-        created_at: row.get(6)?,
-        harness: HarnessId::new(row.get::<_, String>(7)?),
     })
 }
 
@@ -1919,6 +1442,16 @@ fn ui_row(row: &Row<'_>) -> rusqlite::Result<Ui> {
             .map(|width| u16::try_from(width.max(0)).unwrap_or(u16::MAX)),
         project_filter: row.get::<_, Option<i64>>(1)?.map(ProjectId),
     })
+}
+
+/// How session kind `kind` is saved.
+fn session_kind_text(kind: SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Plain => "plain",
+        SessionKind::Research => "research",
+        SessionKind::Learn => "learn",
+        SessionKind::Incognito => "incognito",
+    }
 }
 
 /// The session kind saved as `text`; anything orb doesn't know is Plain.
@@ -1935,8 +1468,6 @@ fn session_kind(text: &str) -> SessionKind {
 fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
     match item {
         SidebarItem::Session(id) => Some(("session", id.0)),
-        SidebarItem::Draft(id) => Some(("draft", id.0)),
-        SidebarItem::GroupDraft(id) => Some(("group_draft", id.0)),
         SidebarItem::SettledShelf => None,
     }
 }
@@ -1945,24 +1476,8 @@ fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
 fn jump_item(kind: &str, id: i64) -> Option<SidebarItem> {
     match kind {
         "session" => Some(SidebarItem::Session(SessionId(id))),
-        "draft" => Some(SidebarItem::Draft(ProjectId(id))),
-        "group_draft" => Some(SidebarItem::GroupDraft(GroupId(id))),
         _ => None,
     }
-}
-
-/// A project's last-used settings; an unknown workspace loads as local.
-fn last_used_row(row: &Row<'_>) -> rusqlite::Result<LastUsed> {
-    Ok(LastUsed {
-        workspace: row
-            .get::<_, Option<String>>(0)?
-            .as_deref()
-            .and_then(LastWorkspace::parse)
-            .unwrap_or(LastWorkspace::Local),
-        model: row.get(1)?,
-        permission_mode: row.get(2)?,
-        harness: row.get::<_, Option<String>>(3)?.map(HarnessId::new),
-    })
 }
 
 #[cfg(test)]
@@ -1978,10 +1493,9 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        DraftRow, DraftWorkspace, GroupDraft, GroupId, GroupKind, GroupRow, LastUsed,
-        LastWorkspace, MIGRATIONS, NewGroup, NewPaneThread, NewThread, Own, PaneId, ProjectId,
-        ProjectKind, SavedLayouts, SessionId, SessionKind, SessionRow, SettledOverride,
-        SidebarItem, Store, StoreError, TabRow, ThreadRow, TileLayout, Ui,
+        MIGRATIONS, NewPaneThread, PaneId, ProjectId, ProjectKind, SavedLayouts, SessionId,
+        SessionKind, SessionRow, SettledOverride, SidebarItem, Store, StoreError, TabRow,
+        ThreadRow, TileLayout, Ui,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -1990,46 +1504,36 @@ mod tests {
             .change_context(StoreError)
     }
 
-    fn new_thread(project_id: ProjectId) -> NewThread {
-        NewThread {
-            harness: HarnessId::new("claude"),
+    /// A thread and the one-pane session it runs in.
+    struct Seeded {
+        thread: super::ThreadId,
+        session: SessionId,
+        pane: PaneId,
+    }
+
+    /// Saves thread `28bf38e2` of Claude, created at 1000, in a new plain
+    /// session of project `project_id` in `/tmp/orb`.
+    fn insert_thread(store: &Store, project_id: ProjectId) -> Result<Seeded, Report<StoreError>> {
+        let (session, pane) = store.insert_session(
             project_id,
-            short_id: "28bf38e2".to_owned(),
+            SessionKind::Plain,
+            Path::new("/tmp/orb"),
+            None,
+            1_000,
+        )?;
+        let (thread, _) = store.insert_pane_thread(&NewPaneThread {
+            pane,
+            session_id: "28bf38e2".to_owned(),
+            transcript_path: None,
+            harness: HarnessId::new("claude"),
             cwd: PathBuf::from("/tmp/orb"),
             created_at: 1_000,
-            model: None,
-            permission_mode: None,
-            group_id: None,
-            zmx: None,
-        }
-    }
-
-    /// A Feature group `GT-514-login` on its branch, created at 2 s.
-    fn new_group(project_id: ProjectId) -> NewGroup {
-        NewGroup {
-            harness: HarnessId::new("claude"),
-            project_id,
-            kind: GroupKind::Feature,
-            name: "GT-514-login".to_owned(),
-            dir: None,
-            branch: Some("GT-514-login".to_owned()),
-            created_at: 2_000,
-            draft_model: Some("opus".to_owned()),
-            draft_permission_mode: None,
-        }
-    }
-
-    /// A local draft on `main` for the project, created at 2 s.
-    fn draft(project_id: ProjectId) -> DraftRow {
-        DraftRow {
-            harness: HarnessId::new("claude"),
-            project_id,
-            workspace: DraftWorkspace::Local,
-            branch: Some("main".to_owned()),
-            model: None,
-            permission_mode: None,
-            created_at: 2_000,
-        }
+        })?;
+        Ok(Seeded {
+            thread,
+            session,
+            pane,
+        })
     }
 
     #[rstest::rstest]
@@ -2106,7 +1610,7 @@ mod tests {
         }
 
         // When opening the store and loading.
-        let (_, threads, _, _) = Store::open(&path)?.load()?;
+        let (_, threads) = Store::open(&path)?.load()?;
 
         // Then it's at the latest version and both stamps are the creation time.
         let stamps: Vec<(i64, i64)> = threads
@@ -2144,7 +1648,7 @@ mod tests {
         }
 
         // When opening the store and loading.
-        let (_, threads, _, _) = Store::open(&path)?.load()?;
+        let (_, threads) = Store::open(&path)?.load()?;
 
         // Then it's at the latest version and the thread isn't AI-titled.
         let ai_titled: Vec<bool> = threads.iter().map(|row| row.ai_titled).collect();
@@ -2179,7 +1683,7 @@ mod tests {
         }
 
         // When opening the store.
-        let (_, threads, _, _) = Store::open(&path)?.load()?;
+        let (_, threads) = Store::open(&path)?.load()?;
 
         // Then it's at the latest version, the thread survives, and the new
         // table and columns exist.
@@ -2225,7 +1729,7 @@ mod tests {
         }
 
         // When opening the store.
-        let (projects, threads, drafts, _) = Store::open(&path)?.load()?;
+        let (projects, threads) = Store::open(&path)?.load()?;
 
         // Then it's at the latest version, every row survives, and the ui
         // table and removed_at column exist.
@@ -2236,12 +1740,15 @@ mod tests {
         ]
         .iter()
         .all(|sql| conn.prepare(sql).is_ok());
+        let drafts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM drafts", [], |row| row.get(0))
+            .change_context(StoreError)?;
         assert_eq!(
             (
                 user_version(&path)?,
                 projects.len(),
                 threads.len(),
-                drafts.len(),
+                drafts,
                 has_schema
             ),
             (MIGRATIONS.len(), 1, 1, 1, true),
@@ -2363,14 +1870,22 @@ mod tests {
         v9_database(&path)?;
 
         // When opening the store and loading.
-        let (_, threads, drafts, groups) = Store::open(&path)?.load()?;
+        let (_, threads) = Store::open(&path)?.load()?;
+        let saved = |sql: &str| -> Result<Vec<String>, Report<StoreError>> {
+            let conn = Connection::open(&path).change_context(StoreError)?;
+            let mut statement = conn.prepare(sql).change_context(StoreError)?;
+            statement
+                .query_map([], |row| row.get(0))
+                .and_then(Iterator::collect)
+                .change_context(StoreError)
+        };
 
         // Then every thread, draft and group runs in claude.
         let harnesses: Vec<String> = threads
             .iter()
             .map(|row| row.harness.to_string())
-            .chain(drafts.iter().map(|row| row.harness.to_string()))
-            .chain(groups.iter().map(|row| row.harness.to_string()))
+            .chain(saved("SELECT harness FROM drafts")?)
+            .chain(saved("SELECT harness FROM groups ORDER BY id")?)
             .collect();
         assert_eq!(
             harnesses,
@@ -2438,11 +1953,11 @@ mod tests {
             let store = Store::open(&path)?;
             let project_id =
                 store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-            (project_id, store.insert_thread(&new_thread(project_id))?)
+            (project_id, insert_thread(&store, project_id)?)
         };
 
         // When reopening the store and loading.
-        let (_, threads, _, _) = Store::open(&path)?.load()?;
+        let (_, threads) = Store::open(&path)?.load()?;
 
         // Then the thread comes back with the fields it was saved with.
         let expected = ThreadRow {
@@ -2452,7 +1967,7 @@ mod tests {
             orb_session: Some(inserted.session),
             project_id,
             short_id: "28bf38e2".to_owned(),
-            session_id: None,
+            session_id: Some("28bf38e2".to_owned()),
             title: None,
             custom_title: None,
             cwd: PathBuf::from("/tmp/orb"),
@@ -2612,163 +2127,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn inserted_group_loads_back() -> Result<(), Report<StoreError>> {
-        // Given a store with a project.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-
-        // When inserting a Feature group.
-        let id = store.insert_group(&new_group(project_id))?;
-
-        // Then loading returns it with the fields it was saved with.
-        let expected = GroupRow {
-            harness: HarnessId::new("claude"),
-            id,
-            project_id,
-            kind: GroupKind::Feature,
-            name: "GT-514-login".to_owned(),
-            dir: None,
-            branch: Some("GT-514-login".to_owned()),
-            created_at: 2_000,
-            pinned_at: None,
-            settled_override: None,
-            settled_at: None,
-            unsettled_at: None,
-            draft_model: Some("opus".to_owned()),
-            draft_permission_mode: None,
-            draft: None,
-        };
-        assert_eq!(
-            store.load()?.3,
-            vec![expected],
-            "the saved group should load back"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn saved_group_updates_load_back() -> Result<(), Report<StoreError>> {
-        // Given a store with one group.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        store.insert_group(&new_group(project_id))?;
-        let inserted = store
-            .load()?
-            .3
-            .pop()
-            .ok_or_else(|| Report::new(StoreError).attach("the group wasn't saved"))?;
-
-        // When saving its directory, branch, pin, settle state, and draft
-        // setup.
-        let updated = GroupRow {
-            dir: Some(PathBuf::from("/wt/orb-GT-514-login")),
-            branch: Some("GT-514-login-v2".to_owned()),
-            pinned_at: Some(3_000),
-            settled_override: Some(SettledOverride::Settled),
-            settled_at: Some(4_000),
-            unsettled_at: Some(3_500),
-            draft_model: Some("sonnet".to_owned()),
-            draft_permission_mode: Some("plan".to_owned()),
-            ..inserted
-        };
-        store.save_group(&updated)?;
-
-        // Then loading returns the updated values.
-        assert_eq!(
-            store.load()?.3,
-            vec![updated],
-            "the group updates should load back"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn group_draft_overrides_survive_a_reload() -> Result<(), Report<StoreError>> {
-        // Given a store with one group.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        store.insert_group(&new_group(project_id))?;
-        let inserted = store
-            .load()?
-            .3
-            .pop()
-            .ok_or_else(|| Report::new(StoreError).attach("the group wasn't saved"))?;
-
-        // When saving a draft with its own harness, its own default model and
-        // the group's permission.
-        let updated = GroupRow {
-            draft: Some(GroupDraft {
-                harness: Own::Set(HarnessId::new("pi")),
-                model: Own::Set(None),
-                permission: Own::Group,
-            }),
-            ..inserted
-        };
-        store.save_group(&updated)?;
-
-        // Then loading returns the same draft.
-        assert_eq!(
-            store.load()?.3,
-            vec![updated],
-            "the draft's overrides should load back"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn deleted_group_is_gone_after_reload() -> Result<(), Report<StoreError>> {
-        // Given a store with one group.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let id = store.insert_group(&new_group(project_id))?;
-
-        // When deleting it.
-        store.delete_group(id)?;
-
-        // Then loading no longer returns it.
-        assert!(
-            store.load()?.3.is_empty(),
-            "the deleted group should not load"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn inserted_thread_loads_back_with_its_group() -> Result<(), Report<StoreError>> {
-        // Given a store with a project that has a group.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let group: GroupId = store.insert_group(&new_group(project_id))?;
-
-        // When inserting a thread in the group.
-        store
-            .insert_thread(&NewThread {
-                group_id: Some(group),
-                ..new_thread(project_id)
-            })
-            .map(|inserted| inserted.thread)?;
-
-        // Then the thread loads back in that group.
-        let groups: Vec<Option<GroupId>> = store
-            .load()?
-            .1
-            .into_iter()
-            .map(|row| row.group_id)
-            .collect();
-        assert_eq!(
-            groups,
-            vec![Some(group)],
-            "the thread's group should load back"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn removed_project_loads_with_when_it_was_removed() -> Result<(), Report<StoreError>> {
         // Given a store with a project.
         let store = Store::open_in_memory()?;
@@ -2790,31 +2148,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn removing_a_project_deletes_its_draft() -> Result<(), Report<StoreError>> {
-        // Given a store with a project that has a draft.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        store.save_draft(&draft(project_id))?;
-
-        // When removing the project.
-        store.remove_project(project_id, 2_000)?;
-
-        // Then its draft no longer loads.
-        assert!(
-            store.load()?.2.is_empty(),
-            "a removed project's draft should be deleted"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn removing_a_project_keeps_its_threads() -> Result<(), Report<StoreError>> {
         // Given a store with a project that has a thread.
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        store.insert_thread(&new_thread(project_id))?;
+        insert_thread(&store, project_id)?;
 
         // When removing the project.
         store.remove_project(project_id, 2_000)?;
@@ -2871,7 +2210,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
 
         // When saving its session id, titles, transcript cursor, and turn start.
         let updated = ThreadRow {
@@ -2907,7 +2246,7 @@ mod tests {
         store.save_thread(&updated)?;
 
         // Then loading returns the updated values.
-        let (_, threads, _, _) = store.load()?;
+        let (_, threads) = store.load()?;
         assert_eq!(threads, vec![updated], "the updates should load back");
         Ok(())
     }
@@ -2922,7 +2261,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        store.insert_thread(&new_thread(project_id))?;
+        insert_thread(&store, project_id)?;
         let inserted = store
             .load()?
             .1
@@ -2944,7 +2283,7 @@ mod tests {
         store.save_thread(&updated)?;
 
         // Then loading returns them.
-        let (_, threads, _, _) = store.load()?;
+        let (_, threads) = store.load()?;
         assert_eq!(threads, vec![updated], "the settle fields should load back");
         Ok(())
     }
@@ -2955,7 +2294,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        store.insert_thread(&new_thread(project_id))?;
+        insert_thread(&store, project_id)?;
         let inserted = store
             .load()?
             .1
@@ -2989,13 +2328,13 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let thread_id = store.insert_thread(&new_thread(project_id))?.thread;
+        let thread_id = insert_thread(&store, project_id)?.thread;
 
         // When deleting it.
         store.delete_thread(thread_id)?;
 
         // Then loading no longer returns it.
-        let (_, threads, _, _) = store.load()?;
+        let (_, threads) = store.load()?;
         assert!(threads.is_empty(), "the deleted thread should not load");
         Ok(())
     }
@@ -3008,10 +2347,10 @@ mod tests {
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
 
         // When inserting a thread created at 1 s.
-        store.insert_thread(&new_thread(project_id))?;
+        insert_thread(&store, project_id)?;
 
         // Then its last activity and last visit are its creation time.
-        let (_, threads, _, _) = store.load()?;
+        let (_, threads) = store.load()?;
         let stamps: Vec<(i64, i64)> = threads
             .iter()
             .map(|row| (row.last_activity_at, row.last_visited_at))
@@ -3020,171 +2359,6 @@ mod tests {
             stamps,
             vec![(1_000, 1_000)],
             "a new thread should start seen and active at its creation"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn thread_model_and_permission_mode_load_back() -> Result<(), Report<StoreError>> {
-        // Given a store with a project.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-
-        // When inserting a thread started with sonnet in plan mode.
-        store
-            .insert_thread(&NewThread {
-                model: Some("sonnet".to_owned()),
-                permission_mode: Some("plan".to_owned()),
-                ..new_thread(project_id)
-            })
-            .map(|inserted| inserted.thread)?;
-
-        // Then loading returns its model and permission mode.
-        let flags: Vec<(Option<String>, Option<String>)> = store
-            .load()?
-            .1
-            .into_iter()
-            .map(|row| (row.model, row.permission_mode))
-            .collect();
-        assert_eq!(
-            flags,
-            vec![(Some("sonnet".to_owned()), Some("plan".to_owned()))],
-            "a thread's model and permission mode should load back"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[case(DraftWorkspace::Local)]
-    #[case(DraftWorkspace::NewWorktree)]
-    #[case(DraftWorkspace::Existing(PathBuf::from("/wt/orb-0a1b2c3d")))]
-    fn saved_draft_loads_back(#[case] workspace: DraftWorkspace) -> Result<(), Report<StoreError>> {
-        // Given a store with a project.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-
-        // When saving a draft in the workspace.
-        let draft = DraftRow {
-            workspace,
-            ..draft(project_id)
-        };
-        store.save_draft(&draft)?;
-
-        // Then loading returns it.
-        assert_eq!(store.load()?.2, vec![draft], "the draft should load back");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn saving_a_draft_again_replaces_it() -> Result<(), Report<StoreError>> {
-        // Given a store with a project that has a local draft.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        store.save_draft(&draft(project_id))?;
-
-        // When saving the project's draft with a new worktree and opus.
-        let replaced = DraftRow {
-            workspace: DraftWorkspace::NewWorktree,
-            model: Some("opus".to_owned()),
-            ..draft(project_id)
-        };
-        store.save_draft(&replaced)?;
-
-        // Then the project has one draft, the second one.
-        assert_eq!(
-            store.load()?.2,
-            vec![replaced],
-            "a project should keep one draft, the latest saved"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn deleted_draft_is_gone_after_reload() -> Result<(), Report<StoreError>> {
-        // Given a store with a project that has a draft.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        store.save_draft(&draft(project_id))?;
-
-        // When deleting the project's draft.
-        store.delete_draft(project_id)?;
-
-        // Then loading no longer returns it.
-        assert!(
-            store.load()?.2.is_empty(),
-            "the deleted draft should not load"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn recorded_last_used_reads_back() -> Result<(), Report<StoreError>> {
-        // Given a store with a project.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-
-        // When recording a new-worktree start with Default model in plan mode.
-        let used = LastUsed {
-            harness: Some(HarnessId::new("claude")),
-            workspace: LastWorkspace::NewWorktree,
-            model: None,
-            permission_mode: Some("plan".to_owned()),
-        };
-        store.record_last_used(project_id, &used, 2_000)?;
-
-        // Then the project's last-used settings are those.
-        assert_eq!(
-            store.last_used(project_id)?,
-            Some(used),
-            "the recorded settings should read back"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn unused_project_has_no_last_used() -> Result<(), Report<StoreError>> {
-        // Given a store with a project no draft has started in.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-
-        // When reading its last-used settings.
-        let used = store.last_used(project_id)?;
-
-        // Then there are none.
-        assert_eq!(used, None, "a never-used project should have no last-used");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn latest_last_used_is_the_newest_projects() -> Result<(), Report<StoreError>> {
-        // Given project a used at 3 s with opus and project b used at 2 s with
-        // sonnet.
-        let store = Store::open_in_memory()?;
-        let a = store.add_project(Path::new("/tmp/a"), "a", ProjectKind::Normal, 500)?;
-        let b = store.add_project(Path::new("/tmp/b"), "b", ProjectKind::Normal, 500)?;
-        let used = |model: &str| LastUsed {
-            harness: Some(HarnessId::new("claude")),
-            workspace: LastWorkspace::Local,
-            model: Some(model.to_owned()),
-            permission_mode: None,
-        };
-        store.record_last_used(a, &used("opus"), 3_000)?;
-        store.record_last_used(b, &used("sonnet"), 2_000)?;
-
-        // When reading the latest last-used settings.
-        let latest = store.latest_last_used()?;
-
-        // Then they are project a's.
-        assert_eq!(
-            latest,
-            Some(used("opus")),
-            "the most recently used project should win"
         );
         Ok(())
     }
@@ -3243,6 +2417,122 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn insert_session_saves_one_tab_with_one_shell_pane() -> Result<(), Report<StoreError>> {
+        // Given a store with one project.
+        let store = Store::open_in_memory()?;
+        let project = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+
+        // When inserting a session in the project's root.
+        let (session, pane) = store.insert_session(
+            project,
+            SessionKind::Plain,
+            Path::new("/tmp/orb"),
+            None,
+            1_000,
+        )?;
+
+        // Then its one tab focuses its one pane, a shell in that directory.
+        let saved = store.layouts()?;
+        let tabs: Vec<(SessionId, Option<PaneId>)> = saved
+            .tabs
+            .iter()
+            .map(|tab| (tab.session_id, tab.focus_pane))
+            .collect();
+        let panes: Vec<(PaneId, SessionId, PathBuf, Option<String>)> = saved
+            .panes
+            .iter()
+            .map(|row| (row.id, row.session_id, row.cwd.clone(), row.resume.clone()))
+            .collect();
+        assert_eq!(
+            (tabs, panes),
+            (
+                vec![(session, Some(pane))],
+                vec![(pane, session, PathBuf::from("/tmp/orb"), None)]
+            ),
+            "a new session should hold one tab of one shell pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn insert_session_saves_its_kind_and_branch() -> Result<(), Report<StoreError>> {
+        // Given a store with one project.
+        let store = Store::open_in_memory()?;
+        let project = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+
+        // When inserting a Research session on `orb/0a1b2c3d`.
+        let (session, _) = store.insert_session(
+            project,
+            SessionKind::Research,
+            Path::new("/tmp/orb/wt"),
+            Some("orb/0a1b2c3d"),
+            1_000,
+        )?;
+
+        // Then its row loads back with that kind, branch and directory.
+        let rows: Vec<(SessionId, SessionKind, Option<String>, PathBuf, i64)> = store
+            .layouts()?
+            .sessions
+            .into_iter()
+            .map(|row| (row.id, row.kind, row.branch, row.dir, row.last_activity_at))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![(
+                session,
+                SessionKind::Research,
+                Some("orb/0a1b2c3d".to_owned()),
+                PathBuf::from("/tmp/orb/wt"),
+                1_000
+            )],
+            "the session row should keep its kind and branch"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn move_session_sets_dir_branch_and_pane_cwds() -> Result<(), Report<StoreError>> {
+        // Given a session in the checkout with a second pane.
+        let store = Store::open_in_memory()?;
+        let project = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let (session, _) = store.insert_session(
+            project,
+            SessionKind::Plain,
+            Path::new("/tmp/orb"),
+            None,
+            1_000,
+        )?;
+        store.insert_pane(session, Path::new("/tmp/orb"))?;
+
+        // When moving it to a worktree on `orb/0a1b2c3d`.
+        store.move_session(session, Path::new("/tmp/wt"), Some("orb/0a1b2c3d"))?;
+
+        // Then its row and every pane point at the worktree.
+        let layouts = store.layouts()?;
+        let moved = (
+            layouts
+                .sessions
+                .iter()
+                .map(|row| (row.dir.clone(), row.branch.clone()))
+                .collect::<Vec<_>>(),
+            layouts
+                .panes
+                .iter()
+                .map(|row| row.cwd.clone())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            moved,
+            (
+                vec![(PathBuf::from("/tmp/wt"), Some("orb/0a1b2c3d".to_owned()))],
+                vec![PathBuf::from("/tmp/wt"), PathBuf::from("/tmp/wt")],
+            ),
+            "the session and its panes should move together"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
     fn jumps_round_trip_session_rows() -> Result<(), Report<StoreError>> {
         // Given a fresh store.
         let store = Store::open_in_memory()?;
@@ -3250,8 +2540,7 @@ mod tests {
         // When saving a jump list of every kind of row.
         let jumps = vec![
             SidebarItem::Session(SessionId(3)),
-            SidebarItem::GroupDraft(GroupId(9)),
-            SidebarItem::Draft(ProjectId(1)),
+            SidebarItem::Session(SessionId(4)),
         ];
         store.save_jumps(&jumps)?;
 
@@ -3962,7 +3251,7 @@ mod tests {
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
 
         // When inserting a thread.
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
 
         // Then its session has one tab holding its one pane, in its directory.
         let layouts = store.layouts()?;
@@ -3997,7 +3286,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
         let second = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
         // When saving two tabs, the second active, and a name for the second pane.
@@ -4042,7 +3331,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
         let before = store
             .layouts()?
             .sessions
@@ -4077,7 +3366,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
         let second = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
         // When saving a layout holding only the thread's pane.
@@ -4111,7 +3400,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
 
         // When deleting the session.
         store.delete_session(inserted.session)?;
@@ -4131,7 +3420,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
 
         // When deleting the session.
         store.delete_session(inserted.session)?;
@@ -4151,7 +3440,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
         let mut row = store
             .load()?
             .1
@@ -4181,7 +3470,7 @@ mod tests {
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
 
         // When inserting a thread.
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
 
         // Then it loads back in its new session.
         let sessions: Vec<Option<SessionId>> = store
@@ -4204,7 +3493,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
         let mut row = store
             .load()?
             .1
@@ -4237,7 +3526,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
         let pane = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
         // When a report starts a thread in that pane.
@@ -4271,7 +3560,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        store.insert_thread(&new_thread(project_id))?;
+        insert_thread(&store, project_id)?;
 
         // When loading the sessions.
         let found: Vec<(ProjectId, SessionKind, i64)> = store
@@ -4291,38 +3580,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(ProjectKind::Research, SessionKind::Research)]
-    #[case(ProjectKind::Learn, SessionKind::Learn)]
-    #[case(ProjectKind::Incognito, SessionKind::Incognito)]
-    fn inserted_thread_in_an_own_project_gets_its_kind(
-        #[case] project: ProjectKind,
-        #[case] expected: SessionKind,
-    ) -> Result<(), Report<StoreError>> {
-        // Given one of orb's own projects.
-        let store = Store::open_in_memory()?;
-        let project_id = store.add_project(Path::new("/tmp/own"), "own", project, 500)?;
-
-        // When inserting a thread in it.
-        store.insert_thread(&new_thread(project_id))?;
-
-        // Then its session has the project's kind.
-        let kinds: Vec<SessionKind> = store
-            .layouts()?
-            .sessions
-            .into_iter()
-            .map(|row| row.kind)
-            .collect();
-        assert_eq!(kinds, [expected], "{project:?} gives {expected:?} sessions");
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn inserted_pane_loads_back_in_its_session() -> Result<(), Report<StoreError>> {
         // Given a thread's session.
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
 
         // When inserting a pane in /tmp/logs.
         let pane = store.insert_pane(inserted.session, Path::new("/tmp/logs"))?;
@@ -4349,7 +3612,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
         let pane = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
         let mut row = store
             .load()?
@@ -4376,7 +3639,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
         let pane = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
         // When a report starts a thread in that pane.
@@ -4413,7 +3676,7 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let inserted = store.insert_thread(&new_thread(project_id))?;
+        let inserted = insert_thread(&store, project_id)?;
 
         // When setting its resume command.
         store.set_pane_resume(inserted.pane, Some("claude --resume s-1"))?;

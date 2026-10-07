@@ -1,8 +1,8 @@
 //! The sidebar's size and visibility, the last frame's row layout, and the
-//! name box, which names a thread, or a new group.
+//! name box, which names a session, a new session's folder, a tab or a pane.
 
 use crate::TextInput;
-use crate::feat::sessions::state::{GroupKind, PaneId, ProjectId, SessionId};
+use crate::feat::sessions::state::{FolderKind, PaneId, SessionId};
 
 /// The sidebar's width in columns until the user resizes it.
 pub const DEFAULT_WIDTH: u16 = 32;
@@ -64,18 +64,14 @@ impl SidebarView {
     }
 }
 
-/// What the name box names: a session, a group about to be created, a tab
-/// or a pane.
+/// What the name box names: a session, a new session's folder, a tab or a
+/// pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameTarget {
     /// The session being renamed.
     Session(SessionId),
-    /// A new `kind` group. `project` is `None` for Research/Learn, whose
-    /// project the actor finds.
-    NewGroup {
-        kind: GroupKind,
-        project: Option<ProjectId>,
-    },
+    /// The folder of a new session in orb's own `kind` folder.
+    NewFolder(FolderKind),
     /// Tab `tab` (0-based) of `owner`'s layout.
     Tab { owner: SessionId, tab: usize },
     /// A pane of the shown layout.
@@ -88,10 +84,10 @@ pub struct Rename {
     /// What the name is for.
     pub target: RenameTarget,
     /// The name being typed, starting from the session's title, or empty
-    /// for a new group.
+    /// for a new session.
     pub input: TextInput,
-    /// `⏎` asked the sessions actor for the new group: it closes the box
-    /// once the group is made, or leaves it open with its refusal.
+    /// `⏎` asked the sessions actor for the new session: it closes the box
+    /// once the session is made, or leaves it open with its refusal.
     pub creating: bool,
 }
 

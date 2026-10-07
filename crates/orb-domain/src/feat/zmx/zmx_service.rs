@@ -300,11 +300,11 @@ mod tests {
 
     #[rstest::rstest]
     fn attach_argv_with_a_command_runs_it_in_the_session() {
-        // Given orb-p7 on /z and Claude's attach command.
+        // Given orb-p7 on /z and a command to run.
         let session = orb_p7("/z");
 
         // When building the pane's command.
-        let argv = attach_argv(&session, &words(&["claude", "attach", "aa"]));
+        let argv = attach_argv(&session, &words(&["sh", "-c", "pi"]));
 
         // Then zmx attaches to the session, creating it with the command.
         assert_eq!(
@@ -316,9 +316,9 @@ mod tests {
                 "zmx",
                 "attach",
                 "orb-p7",
-                "claude",
-                "attach",
-                "aa",
+                "sh",
+                "-c",
+                "pi",
             ]),
             "the command follows the session name"
         );

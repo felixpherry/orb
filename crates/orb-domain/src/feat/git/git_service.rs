@@ -173,8 +173,8 @@ pub trait Git: Send + Sync {
     /// Returns an error if git refuses, e.g. when `new` exists.
     fn rename_branch(&self, cwd: &Path, old: &str, new: &str) -> Result<(), Report<GitError>>;
 
-    /// The project path harnesses trust for `cwd`: the root of its repository, or the
-    /// main repository's root for a worktree, as a real path. `None` outside
+    /// The project path of `cwd`: the root of its repository, or the main
+    /// repository's root for a worktree, as a real path. `None` outside
     /// git.
     fn project_path(&self, cwd: &Path) -> Option<PathBuf>;
 }
@@ -355,7 +355,7 @@ impl GitService {
         self.git.rename_branch(cwd, old, new)
     }
 
-    /// The project path harnesses trust for `cwd`; `None` outside git.
+    /// The project path of `cwd`; `None` outside git.
     pub fn project_path(&self, cwd: &Path) -> Option<PathBuf> {
         self.git.project_path(cwd)
     }

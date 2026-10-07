@@ -1,11 +1,10 @@
 //! Harnesses, the programs a thread runs in.
 //!
-//! Everything orb does differently per harness (starting and listing
-//! sessions, reading transcripts, trusting a folder, the models on offer,
-//! how to resume a conversation, and where its status comes from) lives in
-//! that harness's implementation.
-//! Each draft, group and thread stores the id of its harness, and shared
-//! code picks the harness by it.
+//! Everything orb does differently per harness (the agents it sees running,
+//! reading transcripts, how to resume a conversation, and where its status
+//! comes from) lives in that harness's implementation. Each
+//! thread stores the id of its harness, and shared code picks the harness by
+//! it.
 
 pub mod claude;
 pub mod pi;
@@ -19,7 +18,7 @@ use async_trait::async_trait;
 use error_stack::Report;
 use wherror::Error;
 
-use super::sessions::session_host::SessionHost;
+use super::sessions::state::ThreadStatus;
 use super::sessions::transcript::{Exchange, MessageRead};
 
 /// The id a harness is stored and looked up by.
@@ -45,71 +44,14 @@ impl fmt::Display for HarnessId {
     }
 }
 
-/// What the frontend shows and binds for a harness, published into AppState.
+/// How the frontend marks a harness: its id, name and sidebar mark.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessInfo {
     pub id: HarnessId,
     /// The name the user sees.
     pub label: String,
-    /// The tag a thread of this harness shows in the sidebar, if any.
-    pub tag: Option<String>,
-    /// The mark drawn before the harness's models and replies and at the end
-    /// of its threads' nodes, if it has one.
+    /// The mark beside its agent rows (`✳`, `π`).
     pub icon: Option<String>,
-    /// Why the harness can't start sessions right now, if it can't.
-    pub unavailable: Option<String>,
-    /// The models on offer; the harness's own default is implied.
-    pub models: Vec<ModelGroup>,
-    /// The permission modes on offer; empty when the harness has none.
-    pub permission_modes: Vec<String>,
-    /// Something the probe ran into, shown once on the mode line.
-    pub notice: Option<String>,
-}
-
-/// Why a harness whose probe hasn't answered can't be picked yet.
-pub const CHECKING: &str = "checking";
-
-impl HarnessInfo {
-    /// What a harness shows before its probe answers: its id and label, not
-    /// yet usable, nothing to pick.
-    pub fn placeholder(id: HarnessId, label: &str) -> Self {
-        Self {
-            id,
-            label: label.to_owned(),
-            tag: None,
-            icon: None,
-            unavailable: Some(CHECKING.to_owned()),
-            models: Vec::new(),
-            permission_modes: Vec::new(),
-            notice: None,
-        }
-    }
-
-    /// The model `value` names, by its id or one of its aliases.
-    pub fn model(&self, value: &str) -> Option<&ModelChoice> {
-        self.models
-            .iter()
-            .flat_map(|group| &group.models)
-            .find(|model| model.id == value || model.aliases.iter().any(|alias| alias == value))
-    }
-}
-
-/// Models listed together in the model picker, under an optional heading.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelGroup {
-    pub heading: Option<String>,
-    pub models: Vec<ModelChoice>,
-}
-
-/// One model the user can start a thread with.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelChoice {
-    /// What the harness is told to run.
-    pub id: String,
-    /// The name the user sees.
-    pub name: String,
-    /// Other values that name this model, such as older stored settings.
-    pub aliases: Vec<String>,
 }
 
 /// What a transcript scan found since the last offset.
@@ -154,43 +96,60 @@ pub trait TranscriptFormat: Send + Sync {
     fn messages(&self, path: &Path, offset: u64, prompt_offset: u64) -> io::Result<MessageRead>;
 }
 
-/// A harness step failed.
+/// A harness call failed. Every report carries a one-line reason as its
+/// latest `String` attachment, fit for the mode line.
 #[derive(Debug, Error)]
 #[error(debug)]
 pub struct HarnessError;
 
-/// A program a thread runs in: it hosts the sessions, writes the
-/// transcripts, and says what the user can pick when starting one.
+/// An agent the harness sees running, by process: its status and the pids
+/// from its own up to the root, which tell the pane it runs in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningAgent {
+    pub status: ThreadStatus,
+    pub ancestry: Vec<u32>,
+}
+
+/// A program a thread runs in, which writes the transcripts.
 #[async_trait]
-pub trait Harness: SessionHost + TranscriptFormat {
+pub trait Harness: TranscriptFormat {
+    /// The name its service shows in debug output.
+    fn name(&self) -> &'static str;
+
     fn id(&self) -> HarnessId;
 
-    /// The name shown before `probe` has answered.
+    /// The name the user sees.
     fn label(&self) -> &'static str;
 
-    /// Asks the harness what it offers and whether it can run.
-    async fn probe(&self) -> HarnessInfo;
-
-    /// The folder a refused start asks the user to trust.
-    fn trust_dir(&self, cwd: &Path) -> PathBuf {
-        cwd.to_owned()
-    }
-
-    /// Records the user's trust in `dir`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the trust can't be recorded.
-    fn trust(&self, _dir: &Path) -> Result<(), Report<HarnessError>> {
-        Ok(())
-    }
+    /// How the frontend marks it.
+    fn info(&self) -> HarnessInfo;
 
     /// The command typed into a pane's fresh shell to bring conversation
     /// `session_id` back.
     fn resume_command(&self, session_id: &str) -> String;
 
+    /// The agents it sees running, for harnesses that report status by
+    /// process; none for the rest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the harness can't be asked.
+    async fn running(&self) -> Result<Vec<RunningAgent>, Report<HarnessError>> {
+        Ok(Vec::new())
+    }
+
+    /// Stops the background session `short_id` the store migration replaced
+    /// with a pane; nothing for harnesses that had none.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the harness refuses or fails to stop it.
+    async fn stop_migrated(&self, _short_id: &str) -> Result<(), Report<HarnessError>> {
+        Ok(())
+    }
+
     /// Whether the agent's status comes from the reports orb's integration
-    /// writes to its pane file, rather than from the host's records.
+    /// writes to its pane file, rather than from the agents it sees running.
     fn reports_status(&self) -> bool {
         false
     }
@@ -216,20 +175,9 @@ impl Harnesses {
         &self.all
     }
 
-    /// The first registered harness's id; an empty registry gives an id no
-    /// harness answers to.
-    pub fn default_id(&self) -> HarnessId {
-        self.all
-            .first()
-            .map_or_else(|| HarnessId::new(""), |harness| harness.id())
-    }
-
-    /// A placeholder per harness, in registration order.
-    pub fn placeholders(&self) -> Vec<HarnessInfo> {
-        self.all
-            .iter()
-            .map(|harness| HarnessInfo::placeholder(harness.id(), harness.label()))
-            .collect()
+    /// How the frontend marks each harness, in registration order.
+    pub fn infos(&self) -> Vec<HarnessInfo> {
+        self.all.iter().map(|harness| harness.info()).collect()
     }
 }
 
@@ -242,94 +190,61 @@ impl fmt::Debug for Harnesses {
 
 #[cfg(test)]
 pub(crate) mod fake {
-    use std::ffi::OsString;
     use std::io;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Mutex, PoisonError};
 
     use async_trait::async_trait;
     use error_stack::Report;
 
-    use super::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat};
-    use crate::feat::sessions::session_host::{
-        AttachStart, CreatedSession, SessionHost, SessionHostError, SessionOptions, SessionRecord,
+    use super::{
+        Harness, HarnessError, HarnessId, HarnessInfo, RunningAgent, Scan, TranscriptFormat,
     };
     use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
-    /// A pi-like harness's info: tagged `pi`, no mark, available, two
-    /// provider groups of models and no permission modes.
-    pub(crate) fn pi_like() -> HarnessInfo {
-        HarnessInfo {
-            tag: Some("pi".to_owned()),
-            unavailable: None,
-            models: super::pi::models::parse(
-                "provider   model\n\
-                 anthropic  claude-x\n\
-                 anthropic  claude-y\n\
-                 openai     gpt-z\n",
-            ),
-            ..HarnessInfo::placeholder(HarnessId::new("pi"), "pi")
-        }
-    }
-
-    /// A harness named `id` that hosts through `host` and has no transcripts.
+    /// A harness named `id` with no transcripts, that sees the agents the
+    /// test scripts running and logs what it is asked to stop.
     pub(crate) struct FakeHarness {
         id: &'static str,
-        host: Arc<dyn SessionHost>,
+        /// What [`Harness::running`] answers.
+        running: Mutex<Result<Vec<RunningAgent>, String>>,
+        /// The migrated sessions [`Harness::stop_migrated`] was called on.
+        stops: Mutex<Vec<String>>,
         /// What [`Harness::reports_status`] answers.
         reports: bool,
     }
 
     impl FakeHarness {
-        pub(crate) fn new(id: &'static str, host: Arc<dyn SessionHost>) -> Self {
+        /// A harness that sees `running`.
+        pub(crate) fn new(id: &'static str, running: Vec<RunningAgent>) -> Self {
             Self {
                 id,
-                host,
+                running: Mutex::new(Ok(running)),
+                stops: Mutex::default(),
                 reports: false,
             }
         }
 
         /// A harness like pi, whose status comes from its pane reports.
-        pub(crate) fn reporting(id: &'static str, host: Arc<dyn SessionHost>) -> Self {
+        pub(crate) fn reporting(id: &'static str) -> Self {
             Self {
                 reports: true,
-                ..Self::new(id, host)
+                ..Self::new(id, Vec::new())
             }
         }
-    }
 
-    #[async_trait]
-    impl SessionHost for FakeHarness {
-        fn name(&self) -> &'static str {
-            self.host.name()
+        /// From now on [`Harness::running`] answers `running`, or fails
+        /// with the reason.
+        pub(crate) fn set_running(&self, running: Result<Vec<RunningAgent>, String>) {
+            *self.running.lock().unwrap_or_else(PoisonError::into_inner) = running;
         }
 
-        async fn create(
-            &self,
-            cwd: &Path,
-            options: &SessionOptions,
-        ) -> Result<CreatedSession, Report<SessionHostError>> {
-            self.host.create(cwd, options).await
-        }
-
-        async fn list(
-            &self,
-            short_ids: &[String],
-        ) -> Result<Vec<SessionRecord>, Report<SessionHostError>> {
-            self.host.list(short_ids).await
-        }
-
-        async fn stop(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
-            self.host.stop(short_id).await
-        }
-
-        async fn remove(&self, short_id: &str) -> Result<(), Report<SessionHostError>> {
-            self.host.remove(short_id).await
-        }
-
-        /// `[<id>, <short id>]`, so tests can tell which harness built it.
-        fn attach_argv(&self, short_id: &str, _start: &AttachStart<'_>) -> Vec<OsString> {
-            vec![OsString::from(self.id), OsString::from(short_id)]
+        /// The migrated sessions it was asked to stop, in order.
+        pub(crate) fn stops(&self) -> Vec<String> {
+            self.stops
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
         }
     }
 
@@ -363,6 +278,10 @@ pub(crate) mod fake {
 
     #[async_trait]
     impl Harness for FakeHarness {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
         fn id(&self) -> HarnessId {
             HarnessId::new(self.id)
         }
@@ -371,15 +290,32 @@ pub(crate) mod fake {
             self.id
         }
 
-        async fn probe(&self) -> HarnessInfo {
+        fn info(&self) -> HarnessInfo {
             HarnessInfo {
-                unavailable: None,
-                ..HarnessInfo::placeholder(self.id(), self.id)
+                id: self.id(),
+                label: self.id.to_owned(),
+                icon: None,
             }
         }
 
         fn resume_command(&self, session_id: &str) -> String {
             format!("{} --resume {session_id}", self.id)
+        }
+
+        async fn running(&self) -> Result<Vec<RunningAgent>, Report<HarnessError>> {
+            self.running
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .map_err(|reason| Report::new(HarnessError).attach(reason))
+        }
+
+        async fn stop_migrated(&self, short_id: &str) -> Result<(), Report<HarnessError>> {
+            self.stops
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(short_id.to_owned());
+            Ok(())
         }
 
         fn reports_status(&self) -> bool {
@@ -392,43 +328,25 @@ pub(crate) mod fake {
 mod tests {
     use std::sync::Arc;
 
-    use super::claude::supervisor::ClaudeSupervisor;
     use super::fake::FakeHarness;
-    use super::{CHECKING, HarnessId, HarnessInfo, Harnesses};
+    use super::{HarnessId, Harnesses};
 
     #[rstest::rstest]
-    fn default_id_is_the_first_registered_harness() {
+    fn infos_list_each_harness_in_registration_order() {
         // Given two harnesses, `first` registered before `second`.
-        let host = Arc::new(ClaudeSupervisor::new(Vec::new()));
         let harnesses = Harnesses::new(vec![
-            Arc::new(FakeHarness::new("first", host.clone())),
-            Arc::new(FakeHarness::new("second", host)),
+            Arc::new(FakeHarness::new("first", Vec::new())),
+            Arc::new(FakeHarness::new("second", Vec::new())),
         ]);
 
-        // When asking for the default.
-        let default = harnesses.default_id();
+        // When listing their infos.
+        let ids: Vec<HarnessId> = harnesses.infos().into_iter().map(|info| info.id).collect();
 
-        // Then it is the first one registered.
+        // Then they come in registration order.
         assert_eq!(
-            default,
-            HarnessId::new("first"),
-            "the first registered harness should be the default"
-        );
-    }
-
-    #[rstest::rstest]
-    fn placeholder_is_checking_until_its_probe_answers() {
-        // Given nothing but a harness's id and label.
-        let id = HarnessId::new("pi");
-
-        // When building its placeholder.
-        let info = HarnessInfo::placeholder(id, "pi");
-
-        // Then it can't be picked yet, because it is still being checked.
-        assert_eq!(
-            info.unavailable.as_deref(),
-            Some(CHECKING),
-            "an unprobed harness should be unavailable while checking"
+            ids,
+            [HarnessId::new("first"), HarnessId::new("second")],
+            "infos should follow registration order"
         );
     }
 }

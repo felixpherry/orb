@@ -64,7 +64,6 @@ mod tests {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(id),
-                command: vec![],
             }),
             branch: None,
             pinned_at: None,
@@ -93,9 +92,8 @@ mod tests {
                     root: "/work".into(),
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
-                    draft: None,
+                    repo: true,
                     threads: vec![thread(1), thread(2)],
-                    groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
                 cursor: Some(on(2)),

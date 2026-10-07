@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::feat::sessions::state::{Project, ThreadId};
+use crate::feat::sessions::state::{Project, Sessions};
 
 /// The longest branch slug, in bytes.
 const SLUG_MAX: usize = 40;
@@ -72,71 +72,75 @@ pub fn slug(title: &str) -> Option<String> {
     (!slug.is_empty()).then(|| slug.to_owned())
 }
 
-/// The project's previous worktree seen from `cwd`: the worktree (not the
-/// project's root, nor `cwd`) of the thread with the latest activity, other
-/// than `except`. Returns its path and branch.
+/// The project's previous worktree seen from `cwd`: the directory (not the
+/// project's root, nor `cwd`) of its session with the latest activity, and
+/// that session's branch. Sessions being deleted don't count.
 pub fn previous_worktree(
+    sessions: &Sessions,
     project: &Project,
     cwd: &Path,
-    except: Option<ThreadId>,
 ) -> Option<(PathBuf, Option<String>)> {
-    project
-        .threads
+    sessions
+        .sessions
         .iter()
-        .filter(|other| Some(other.id) != except && other.cwd != project.root && other.cwd != cwd)
-        .max_by_key(|other| other.last_activity_at)
-        .map(|other| (other.cwd.clone(), other.branch.clone()))
+        .filter(|session| {
+            session.project == project.id
+                && session.dir != project.root
+                && session.dir != cwd
+                && !sessions.deleting.contains(&session.id)
+        })
+        .max_by_key(|session| session.last_activity_at)
+        .map(|session| (session.dir.clone(), session.branch.clone()))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::feat::harness::HarnessId;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
     use super::{hex_branch, is_orb_worktree, previous_worktree, slug};
     use crate::feat::sessions::state::{
-        Project, ProjectId, ProjectKind, Thread, ThreadId, ThreadStatus,
+        Project, ProjectId, ProjectKind, Session, SessionId, SessionKind, Sessions,
     };
 
     const ROOT: &str = "/tmp/orb";
 
-    /// A thread in `cwd` on `branch`, last active `activity` seconds in.
-    fn thread(id: i64, cwd: &str, branch: &str, activity: u64) -> Thread {
-        Thread {
-            last_session: None,
-            harness: HarnessId::new("claude"),
-            id: ThreadId(id),
-            title: None,
-            cwd: PathBuf::from(cwd),
-            transcript: None,
-            status: ThreadStatus::Idle,
-            turn_started_at: None,
-            pane: None,
+    /// Session `id` of project 1 in `dir` on `branch`, last active
+    /// `activity` seconds in.
+    fn session(id: i64, dir: &str, branch: &str, activity: u64) -> Session {
+        Session {
+            id: SessionId(id),
+            project: ProjectId(1),
+            kind: SessionKind::Plain,
+            dir: PathBuf::from(dir),
+            name: None,
             branch: Some(branch.to_owned()),
+            created_at: SystemTime::UNIX_EPOCH,
             pinned_at: None,
             settled_at: None,
             active_since: SystemTime::UNIX_EPOCH,
-            created_at: SystemTime::UNIX_EPOCH,
             last_activity_at: SystemTime::UNIX_EPOCH + Duration::from_secs(activity),
-            unseen: false,
-            group: None,
-            model: None,
-            permission: None,
         }
     }
 
-    fn project(threads: Vec<Thread>) -> Project {
+    fn project() -> Project {
         Project {
             id: ProjectId(1),
             title: "orb".to_owned(),
             root: PathBuf::from(ROOT),
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
-            threads,
-            draft: None,
-            groups: vec![],
+            threads: vec![],
+            repo: true,
             kind: ProjectKind::Normal,
+        }
+    }
+
+    fn sessions(sessions: Vec<Session>) -> Sessions {
+        Sessions {
+            projects: vec![project()],
+            sessions,
+            ..Sessions::default()
         }
     }
 
@@ -203,57 +207,40 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn previous_worktree_picks_the_latest_activity_among_other_worktrees() {
-        // Given a fresh thread in the root, a root sibling active latest, and two worktree threads.
-        let fresh = thread(1, ROOT, "main", 0);
-        let project = project(vec![
-            fresh.clone(),
-            thread(2, ROOT, "main", 90),
-            thread(3, "/wt/orb-old", "orb/old", 10),
-            thread(4, "/wt/orb-new", "orb/new", 50),
+    fn previous_worktree_is_the_latest_active_sessions_dir() {
+        // Given a root session active latest and two worktree sessions.
+        let sessions = sessions(vec![
+            session(1, ROOT, "main", 90),
+            session(2, "/wt/orb-old", "orb/old", 10),
+            session(3, "/wt/orb-new", "orb/new", 50),
         ]);
 
-        // When finding the previous worktree for the fresh thread.
-        let previous = previous_worktree(&project, &fresh.cwd, Some(fresh.id));
+        // When finding the previous worktree from the root.
+        let previous = previous_worktree(&sessions, &project(), Path::new(ROOT));
 
-        // Then it's the most recently active worktree thread's directory and branch.
+        // Then it's the most recently active worktree session's directory and branch.
         assert_eq!(
             previous,
             Some((PathBuf::from("/wt/orb-new"), Some("orb/new".to_owned()))),
-            "the latest worktree thread should be the seed"
+            "the latest worktree session should be the previous worktree"
         );
     }
 
     #[rstest::rstest]
-    fn previous_worktree_is_none_without_worktree_threads() {
-        // Given a project whose threads all run in its root.
-        let fresh = thread(1, ROOT, "main", 0);
-        let project = project(vec![fresh.clone(), thread(2, ROOT, "main", 90)]);
-
-        // When finding the previous worktree.
-        let previous = previous_worktree(&project, &fresh.cwd, Some(fresh.id));
-
-        // Then there is none.
-        assert_eq!(previous, None, "root threads aren't a previous worktree");
-    }
-
-    #[rstest::rstest]
-    fn previous_worktree_from_the_root_without_an_excluded_thread_finds_the_latest() {
-        // Given a root thread active latest and two worktree threads.
-        let project = project(vec![
-            thread(1, ROOT, "main", 90),
-            thread(2, "/wt/orb-old", "orb/old", 10),
-            thread(3, "/wt/orb-new", "orb/new", 50),
+    fn previous_worktree_skips_the_root_and_cwd() {
+        // Given sessions in the root and in the worktree the picker is seen from.
+        let sessions = sessions(vec![
+            session(1, ROOT, "main", 90),
+            session(2, "/wt/orb-here", "orb/here", 50),
         ]);
 
-        // When finding the previous worktree from the root, excluding no thread.
-        let previous = previous_worktree(&project, Path::new(ROOT), None);
+        // When finding the previous worktree from that worktree.
+        let previous = previous_worktree(&sessions, &project(), Path::new("/wt/orb-here"));
 
-        // Then it's the most recently active worktree thread's directory and branch.
+        // Then there is none.
         assert_eq!(
-            previous,
-            Some((PathBuf::from("/wt/orb-new"), Some("orb/new".to_owned()))),
-            "a draft should find the latest worktree thread"
+            previous, None,
+            "neither the root nor cwd is a previous worktree"
         );
     }
 }

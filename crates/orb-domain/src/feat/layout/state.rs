@@ -2,7 +2,7 @@
 //! and the tab body's size.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
 
@@ -228,8 +228,9 @@ pub enum FocusMove {
 }
 
 /// Every session's tabs and splits. Written by the sessions actor (loading
-/// them at start, adding a pane on split, new tab or a new thread, dropping a
-/// deleted session), the intent handler (focus, resize, zoom, tab moves,
+/// them at start, adding a pane on split, new tab or a new session, pointing
+/// a moved session's panes at its new directory, dropping a deleted
+/// session), the intent handler (focus, resize, zoom, tab moves,
 /// renames, closes) and the frontend (closing panes whose program ended, the
 /// tab body's size).
 #[derive(Debug, Default)]
@@ -466,6 +467,15 @@ impl Layouts {
         }
     }
 
+    /// Points every pane of `owner`'s layout at `dir`, where they start next.
+    pub fn move_session(&mut self, owner: SessionId, dir: &Path) {
+        if let Some(layout) = self.sessions.get_mut(&owner) {
+            for entry in layout.panes.values_mut() {
+                dir.clone_into(&mut entry.cwd);
+            }
+        }
+    }
+
     /// Names tab `tab` (0-based) of `owner`'s layout; `None` clears the name.
     pub fn rename_tab(&mut self, owner: SessionId, tab: usize, name: Option<String>) {
         if let Some(tab) = self
@@ -561,6 +571,26 @@ mod tests {
         layouts.new_tab(OWNER, entry(9));
         layouts.go_to_tab(OWNER, 1);
         layouts
+    }
+
+    #[rstest::rstest]
+    fn move_session_points_every_pane_at_the_dir() {
+        // Given session 1's layout of panes 7 and 8 in /work.
+        let mut layouts = split_right();
+
+        // When moving the session to /wt.
+        layouts.move_session(OWNER, std::path::Path::new("/wt"));
+
+        // Then both panes start in /wt.
+        let cwds: Vec<_> = [7, 8]
+            .into_iter()
+            .filter_map(|id| layouts.entry(PaneId(id)).map(|entry| entry.cwd.clone()))
+            .collect();
+        assert_eq!(
+            cwds,
+            vec![std::path::PathBuf::from("/wt"); 2],
+            "every pane should start in the new directory"
+        );
     }
 
     #[rstest::rstest]

@@ -104,7 +104,7 @@ mod tests {
                     root: "/work".into(),
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
-                    draft: None,
+                    repo: true,
                     threads: vec![Thread {
                         last_session: None,
                         harness: HarnessId::new("claude"),
@@ -117,7 +117,6 @@ mod tests {
                         pane: Some(PaneLaunch {
                             pane: PaneId(1),
                             session: SessionId(1),
-                            command: vec![],
                         }),
                         branch: None,
                         pinned_at: None,
@@ -130,7 +129,6 @@ mod tests {
                         model: None,
                         permission: None,
                     }],
-                    groups: vec![],
                     kind: ProjectKind::Normal,
                 }],
                 cursor: Some(SidebarItem::Session(SessionId(1))),

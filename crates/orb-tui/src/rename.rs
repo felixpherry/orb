@@ -1,11 +1,12 @@
 //! The name box: a LazyVim-style input centred at the top of the screen,
-//! where the user types orb's own name for a thread (`Rename Session`), or
-//! the name of a new group (`New Feature group` and so on).
+//! where the user types orb's own name for a session (`Rename Session`), a
+//! tab or a pane, or the folder name of a new Research or Learn session
+//! (`New Research session`).
 
 use crate::mouse::HitMap;
 use crate::picker::visible;
 use crate::sidebar::{BLUE1, FG, YELLOW};
-use orb_domain::feat::sessions::state::GroupKind;
+use orb_domain::feat::sessions::state::FolderKind;
 use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Position, Rect};
@@ -71,18 +72,8 @@ pub(crate) fn render(rename: &Rename, area: Rect, buf: &mut Buffer, hits: &mut H
 fn title(target: RenameTarget) -> &'static str {
     match target {
         RenameTarget::Session(_) => " Rename Session ",
-        RenameTarget::NewGroup {
-            kind: GroupKind::Feature,
-            ..
-        } => " New Feature group ",
-        RenameTarget::NewGroup {
-            kind: GroupKind::Research,
-            ..
-        } => " New Research group ",
-        RenameTarget::NewGroup {
-            kind: GroupKind::Learn,
-            ..
-        } => " New Learn group ",
+        RenameTarget::NewFolder(FolderKind::Research) => " New Research session ",
+        RenameTarget::NewFolder(FolderKind::Learn) => " New Learn session ",
         RenameTarget::Tab { .. } => " Rename Tab ",
         RenameTarget::Pane(_) => " Rename Pane ",
     }
@@ -91,7 +82,7 @@ fn title(target: RenameTarget) -> &'static str {
 #[cfg(test)]
 mod tests {
     use orb_domain::TextInput;
-    use orb_domain::feat::sessions::state::{GroupKind, PaneId, ProjectId, SessionId};
+    use orb_domain::feat::sessions::state::{FolderKind, PaneId, SessionId};
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
     use ratatui::buffer::Buffer;
     use ratatui::layout::{Position, Rect};
@@ -152,17 +143,10 @@ mod tests {
     #[case(RenameTarget::Tab { owner: SessionId(1), tab: 0 }, " Rename Tab ")]
     #[case(RenameTarget::Pane(PaneId(1)), " Rename Pane ")]
     #[case(
-        RenameTarget::NewGroup { kind: GroupKind::Feature, project: Some(ProjectId(1)) },
-        " New Feature group "
+        RenameTarget::NewFolder(FolderKind::Research),
+        " New Research session "
     )]
-    #[case(
-        RenameTarget::NewGroup { kind: GroupKind::Research, project: None },
-        " New Research group "
-    )]
-    #[case(
-        RenameTarget::NewGroup { kind: GroupKind::Learn, project: None },
-        " New Learn group "
-    )]
+    #[case(RenameTarget::NewFolder(FolderKind::Learn), " New Learn session ")]
     fn box_is_titled_by_its_target(#[case] target: RenameTarget, #[case] title: &str) {
         // Given a 100-column screen.
         // When drawing the name box for the target.
