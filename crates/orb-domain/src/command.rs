@@ -32,6 +32,9 @@ pub enum Command {
     /// Add a shell to `session`'s shown tab and re-tile it; the sessions
     /// actor makes the pane.
     AddPane(SessionId),
+    /// Stack a shell with `session`'s focused pane; the sessions actor makes
+    /// the pane.
+    StackPane(SessionId),
     /// Open a tab of one new pane in `session`.
     NewTab(SessionId),
     /// Save `session`'s tabs, splits, focus and pane names as the app state

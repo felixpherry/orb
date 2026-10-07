@@ -207,6 +207,11 @@ pub struct SplitPane {
 #[derive(Debug)]
 pub struct AddPane(pub SessionId);
 
+/// Stack a new shell pane with `session`'s focused pane, show it, and save
+/// the layout.
+#[derive(Debug)]
+pub struct StackPane(pub SessionId);
+
 /// Open a tab of one new shell pane in a session, its first when it has no
 /// layout, and save the layout.
 #[derive(Debug)]
@@ -383,6 +388,18 @@ impl Message<AddPane> for SessionsActor {
 
     async fn handle(&mut self, msg: AddPane, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.add_pane(msg.0, Placement::Tile);
+    }
+}
+
+impl Message<StackPane> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: StackPane,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.add_pane(msg.0, Placement::Stack);
     }
 }
 
@@ -661,6 +678,8 @@ enum Placement {
     Tile,
     /// Splitting the shown tab's focused pane.
     Split(Split),
+    /// Stacked with the shown tab's focused pane.
+    Stack,
     /// In a new tab, or the first tab of a session without a layout.
     Tab,
 }
@@ -2065,6 +2084,7 @@ impl SessionsActor {
             match placement {
                 Placement::Tile => app.layouts.add_tiled(session, entry),
                 Placement::Split(split) => app.layouts.split(session, split, entry),
+                Placement::Stack => app.layouts.stack(session, entry),
                 Placement::Tab if first => {
                     app.layouts.insert(session, SessionLayout::of(entry));
                     app.sessions.attach = Some(session);
@@ -4465,7 +4485,7 @@ mod tests {
             .get(inserted.session)
             .map(|layout| {
                 layout
-                    .placed(ratatui::layout::Rect::new(0, 0, 80, 24), 0)
+                    .placed(ratatui::layout::Rect::new(0, 0, 80, 24))
                     .panes
             })
             .unwrap_or_default()

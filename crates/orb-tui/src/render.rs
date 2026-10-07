@@ -1389,8 +1389,8 @@ mod tests {
         // Given a stack of a named pane, an agent's pane and shells.
         let state = stacked();
 
-        // When drawing a frame.
-        let buffer = draw(&state);
+        // When drawing a frame tall enough for every row.
+        let buffer = draw_tall(&state, None);
 
         // Then the list has a row reading its name, else its agent's title, else shell.
         let right = right_side(&buffer);
@@ -1417,61 +1417,60 @@ mod tests {
         state
     }
 
-    /// How wide the stack's list is: from the tab body's left edge to the
-    /// first top-right corner.
-    fn list_width(buffer: &Buffer) -> Option<u16> {
-        let right = right_of(buffer);
-        (right.x..right.right())
-            .find(|x| {
-                buffer
-                    .cell((*x, right.y + 1))
-                    .is_some_and(|cell| cell.symbol() == "╮")
-            })
-            .map(|x| x - right.x + 1)
-    }
-
     #[rstest::rstest]
     fn stack_list_cuts_long_names() {
-        // Given a stacked pane named with 30 letters.
-        let state = stacked_naming("abcdefghijklmnopqrstuvwxyzabcd");
+        // Given a stacked pane named with 60 letters, wider than the list.
+        let state = stacked_naming(&"abcdefghij".repeat(6));
 
-        // When drawing a frame.
-        let buffer = draw(&state);
+        // When drawing a frame tall enough for every row.
+        let buffer = draw_tall(&state, None);
 
         // Then its row ends in `…`.
         let right = right_side(&buffer);
+        let row = right.lines().find(|line| line.starts_with("  abcdefghij"));
         assert!(
-            right.contains("  abcdefghijklmnopqrs…"),
+            row.is_some_and(|row| row.trim_end().ends_with('…')),
             "right side was\n{right}"
         );
     }
 
     #[rstest::rstest]
-    fn stack_list_is_as_wide_as_its_longest_name() {
-        // Given a stack whose longest title is the 11-column "Fix the bug".
+    fn stack_list_has_no_frame() {
+        // Given a stack of four panes.
         let state = stacked();
 
-        // When drawing a frame.
-        let buffer = draw(&state);
+        // When drawing a frame tall enough for every row.
+        let buffer = draw_tall(&state, None);
 
-        // Then the list is the name plus its frame, mark and a space.
-        assert_eq!(
-            list_width(&buffer),
-            Some(16),
-            "11 columns of name and 5 of chrome"
+        // Then the body's only frame is the shown pane's.
+        let right = right_of(&buffer);
+        let body = text(
+            &buffer,
+            Rect::new(right.x, right.y + 1, right.width, right.height - 1),
         );
+        assert_eq!(body.matches('╭').count(), 1, "body was\n{body}");
     }
 
     #[rstest::rstest]
-    fn stack_list_stops_at_24_columns() {
-        // Given a stacked pane named with 30 letters.
-        let state = stacked_naming("abcdefghijklmnopqrstuvwxyzabcd");
+    fn stack_list_sits_above_the_shown_pane() {
+        // Given a stack of four panes, pane 3 shown.
+        let state = stacked();
 
-        // When drawing a frame.
-        let buffer = draw(&state);
+        // When drawing a frame tall enough for every row.
+        let buffer = draw_tall(&state, None);
 
-        // Then the list is 24 columns wide.
-        assert_eq!(list_width(&buffer), Some(24), "the list's cap");
+        // Then the first body row is the first stacked pane's, and the shown
+        // pane's frame starts under the four rows.
+        let right = right_of(&buffer);
+        let first = text(&buffer, Rect::new(right.x, right.y + 1, right.width, 1));
+        let corner = buffer
+            .cell((right.x, right.y + 5))
+            .map(|cell| cell.symbol().to_owned());
+        assert_eq!(
+            (first.trim_end().to_owned(), corner),
+            ("  Fix the bug".to_owned(), Some("╭".to_owned())),
+            "the list is on top, the shown pane below"
+        );
     }
 
     /// Draws `state` on an 80x8 screen, returning the buffer and the hit map.

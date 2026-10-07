@@ -75,7 +75,7 @@ Sidebar on the left, the selected session's tabs on the right (or the start scre
 - While a project filter is set (`<C-g> f`), the input box shows the project after the `>` prompt, and only that project's sessions and Settled shelf are listed.
 - Search (`/` or `i`): the keys move to the input box, and the list keeps only sessions whose title or an agent pane's title fuzzy-matches, settled ones included, with the matched characters blue and bold.
 - Rename (`r` on a session): a LazyVim/snacks-style input box titled ` Rename Session `. The name is orb's own and beats every other title; Claude's and pi's own session names don't change.
-- The right-hand area shows the selected session's tab bar, zellij's chevron tabs after the session's name in tokyonight-moon, over its shown tab's panes, each in a rounded frame titled with its name, while orb holds that session's panes; otherwise the start screen.
+- The right-hand area shows the selected session's tab bar, zellij's chevron tabs after the session's name in tokyonight-moon, over its shown tab's panes, each in a rounded frame titled with its name, while orb holds that session's panes; otherwise the start screen. A stack is a list of its panes, one plain row each with `>` on the shown one, on top of the shown pane's frame, as zellij's stacked panes; from 11 panes the whole tab is one stack, and `<C-g> p s` stacks a new pane with the focused one.
 - The mode line is drawn like LazyVim's lualine in tokyonight-moon, on `bg_statusline`. On the left: the mode in a block of its colour (`NORMAL` blue, `PANE` teal, `PICKER` yellow, `INSERT` green; `INSERT` while typing in the rename box or the search), the selected session's branch and project, and the latest error in red. On the right: `N running` (or `fetching origin/<base>…`), the approval and input counts over every agent pane, the selected row's `at/shown` position and the local time. There are no key hints.
 
 ### Keys
@@ -104,7 +104,7 @@ Full key table:
 | `<C-g> e` | Keys to the sidebar or into the panes, whichever they aren't in |
 | `<C-g> q` | Quit orb |
 | `<C-g> s` | Toggle sidebar |
-| `<C-g> p d/r/f/x/c` | Pane: split down, split right, zoom, close, rename |
+| `<C-g> p d/r/s/f/x/c` | Pane: split down, split right, stack, zoom, close, rename |
 | `<C-g> t n/x/r/1-9` | Tab: new, close, rename, go to N |
 | `<C-g> ␣` | Session picker |
 | `<C-g> n` | New session |

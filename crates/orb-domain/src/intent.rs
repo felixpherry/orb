@@ -41,6 +41,9 @@ pub enum Intent {
     MoveFocus(NavDirection),
     /// Split the focused pane, the new shell taking the focus.
     SplitPane(Split),
+    /// Stack a new shell with the focused pane, the new shell shown and
+    /// taking the focus; outside the tab's stack, add it to that stack.
+    StackPane,
     /// Add a shell to the shown tab and re-tile it by pane count, the new
     /// shell taking the focus.
     AddPane,
@@ -196,6 +199,7 @@ impl fmt::Display for Intent {
             Self::ToggleSidebar | Self::LeavePane => "sidebar",
             Self::FocusPanes => "panes",
             Self::SwapFocus => "switch focus",
+            Self::StackPane => "stack",
             Self::MoveFocus(NavDirection::Left) => "focus left",
             Self::MoveFocus(NavDirection::Up) => "focus up",
             Self::MoveFocus(NavDirection::Down) => "focus down",

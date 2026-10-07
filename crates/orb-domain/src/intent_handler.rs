@@ -164,6 +164,10 @@ impl IntentHandler {
                 (Ok(()), Some(session)) => vec![Command::AddPane(session)],
                 _ => vec![],
             },
+            Intent::StackPane => match (validate_pane_action(state), state.shown_session()) {
+                (Ok(()), Some(session)) => vec![Command::StackPane(session)],
+                _ => vec![],
+            },
             Intent::ClosePane => close_pane(state),
             Intent::SendCtrlG => match validate_pane_action(state) {
                 Ok(()) => vec![Command::SendCtrlG],
@@ -6878,7 +6882,7 @@ mod tests {
 
     fn pane_count(state: &AppState) -> usize {
         state.shown_layout().map_or(0, |layout| {
-            layout.placed(Rect::new(0, 0, 80, 24), 0).panes.len()
+            layout.placed(Rect::new(0, 0, 80, 24)).panes.len()
         })
     }
 
@@ -6942,6 +6946,37 @@ mod tests {
             commands.is_empty(),
             "adding a pane needs the keys in a pane"
         );
+    }
+
+    #[rstest::rstest]
+    fn stack_pane_asks_the_sessions_actor_for_a_stacked_pane() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Pane);
+
+        // When stacking a pane (`<C-g> p s`).
+        let commands = IntentHandler::handle(&Intent::StackPane, &mut state);
+
+        // Then the sessions actor is asked to stack one in session 1.
+        assert_eq!(
+            commands,
+            vec![Command::StackPane(SessionId(1))],
+            "stacking goes through the sessions actor, which makes the pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn stack_pane_without_a_layout_does_nothing() {
+        // Given the keys in a pane focus with no layout shown.
+        let mut state = AppState {
+            focus: Focus::Pane,
+            ..AppState::default()
+        };
+
+        // When stacking a pane.
+        let commands = IntentHandler::handle(&Intent::StackPane, &mut state);
+
+        // Then nothing is asked for.
+        assert!(commands.is_empty(), "stacking needs a shown layout");
     }
 
     #[rstest::rstest]
@@ -7143,7 +7178,7 @@ mod tests {
         let width = |state: &AppState| {
             state
                 .shown_layout()?
-                .placed(Rect::new(0, 0, 80, 24), 0)
+                .placed(Rect::new(0, 0, 80, 24))
                 .panes
                 .into_iter()
                 .find(|place| place.pane == PaneId(50))

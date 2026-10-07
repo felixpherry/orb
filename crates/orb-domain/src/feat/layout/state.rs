@@ -159,10 +159,10 @@ impl SessionLayout {
 
     /// Where the shown tab's panes are drawn in `body`: each pane's frame on
     /// its whole tree cell. A zoomed tab places only its focused pane, over
-    /// all of `body`. A stack becomes a list `list_width` columns wide (at
-    /// most half the stack) on its left, and its expanded pane beside it at
-    /// full height.
-    pub fn placed(&self, body: Rect, list_width: u16) -> Placement {
+    /// all of `body`. A stack becomes a list of its panes, one row each, at
+    /// the top of its area and at most half its height, and its expanded
+    /// pane below it.
+    pub fn placed(&self, body: Rect) -> Placement {
         let Some(tab) = self.active_tab() else {
             return Placement::default();
         };
@@ -193,27 +193,30 @@ impl SessionLayout {
             })
             .collect();
         let stack = stack.map(|stack| {
-            let width = list_width.min(stack.area.width / 2);
-            let area = Rect::new(stack.area.x, stack.area.y, width, stack.area.height);
+            let fits = stack
+                .panes
+                .len()
+                .min(usize::from(stack.area.height / 2))
+                .max(1);
+            let rows = u16::try_from(fits).unwrap_or(u16::MAX);
+            let area = Rect::new(stack.area.x, stack.area.y, stack.area.width, rows);
             panes.push(Placed {
                 pane: stack.expanded,
                 area: Rect::new(
-                    stack.area.x + width,
-                    stack.area.y,
-                    stack.area.width - width,
-                    stack.area.height,
+                    stack.area.x,
+                    stack.area.y.saturating_add(rows),
+                    stack.area.width,
+                    stack.area.height.saturating_sub(rows),
                 ),
                 focused: tab.tree.focused() == stack.expanded,
             });
-            let inner = inside(area);
-            let fits = usize::from(inner.height);
             let start = if stack.panes.len() > fits {
                 stack
                     .panes
                     .iter()
                     .position(|id| *id == stack.expanded)
                     .unwrap_or_default()
-                    .saturating_sub(fits.saturating_sub(1))
+                    .saturating_sub(fits - 1)
             } else {
                 0
             };
@@ -221,7 +224,7 @@ impl SessionLayout {
                 .panes
                 .iter()
                 .skip(start)
-                .zip(inner.rows())
+                .zip(area.rows())
                 .map(|(id, row)| (*id, row))
                 .collect();
             StackList {
@@ -284,8 +287,8 @@ impl Placed {
     }
 }
 
-/// A stack's list of panes: its frame's outer rect, one row per pane that
-/// fits, and the pane shown beside it.
+/// A stack's list of panes: its rect, one row per pane that fits, and the
+/// pane shown below it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackList {
     pub area: Rect,
@@ -429,6 +432,20 @@ impl Layouts {
         };
         if let Some(tab) = layout.tab_mut() {
             tab.tree.split_focused(split, pane.id);
+            tab.zoomed = false;
+            layout.panes.insert(pane.id, pane);
+        }
+    }
+
+    /// Stacks `pane` with the shown tab's focused pane, or adds it to the
+    /// tab's stack when the focused pane is outside it; `pane` is shown and
+    /// takes the focus, and the tab shows every pane again.
+    pub fn stack(&mut self, owner: SessionId, pane: PaneEntry) {
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return;
+        };
+        if let Some(tab) = layout.tab_mut() {
+            tab.tree.stack_focused(pane.id);
             tab.zoomed = false;
             layout.panes.insert(pane.id, pane);
         }
@@ -712,15 +729,15 @@ mod tests {
         layouts
     }
 
-    fn placement(layouts: &Layouts, list_width: u16) -> Placement {
+    fn placement(layouts: &Layouts) -> Placement {
         layouts
             .get(OWNER)
-            .map(|layout| layout.placed(BODY, list_width))
+            .map(|layout| layout.placed(BODY))
             .unwrap_or_default()
     }
 
     fn placed(layouts: &Layouts) -> Vec<Placed> {
-        placement(layouts, 0).panes
+        placement(layouts).panes
     }
 
     fn focused(layouts: &Layouts) -> Option<PaneId> {
@@ -876,13 +893,17 @@ mod tests {
     }
 
     /// How many panes each column holds, left to right, a stack counting
-    /// every pane its list names.
+    /// every pane in it.
     fn shape(layouts: &Layouts) -> Vec<usize> {
-        let placement = placement(layouts, 0);
+        let placement = placement(layouts);
+        let stacked = layouts
+            .get(OWNER)
+            .and_then(SessionLayout::active_tab)
+            .map_or(0, |tab| tab.stacked().len());
         let mut columns: Vec<(u16, usize)> = Vec::new();
         for place in &placement.panes {
             let count = match &placement.stack {
-                Some(stack) if stack.shown == place.pane => stack.rows.len(),
+                Some(stack) if stack.shown == place.pane => stacked,
                 _ => 1,
             };
             match columns.last_mut() {
@@ -913,8 +934,8 @@ mod tests {
     #[case(14, vec![1, 4, 2])]
     #[case(16, vec![1, 4, 4])]
     #[case(17, vec![2, 4, 4])]
-    #[case(18, vec![1, 10])]
-    #[case(19, vec![1, 11])]
+    #[case(18, vec![11])]
+    #[case(19, vec![12])]
     fn closing_any_pane_re_tiles_to_the_template_for_one_fewer(
         #[case] last: i64,
         #[case] expected: Vec<usize>,
@@ -938,30 +959,30 @@ mod tests {
         );
     }
 
-    /// The stacked pane shown beside the stack's list.
+    /// The stacked pane shown below the stack's list.
     fn expanded(layouts: &Layouts) -> Option<PaneId> {
-        placement(layouts, 0).stack.map(|stack| stack.shown)
+        placement(layouts).stack.map(|stack| stack.shown)
     }
 
     /// How many panes the stack's list names besides the shown one.
     fn listed_others(layouts: &Layouts) -> usize {
-        placement(layouts, 0)
+        placement(layouts)
             .stack
             .map_or(0, |stack| stack.rows.len().saturating_sub(1))
     }
 
     #[rstest::rstest]
     fn split_in_a_stacked_tab_re_tiles_with_the_new_pane() {
-        // Given eleven tiled panes, a main pane and a stack of ten.
+        // Given eleven tiled panes, one stack.
         let mut layouts = tiled(17);
 
         // When splitting the focused pane right with pane 18.
         layouts.split(OWNER, Split::Right, entry(18));
 
-        // Then the tab is a main pane and a stack of eleven, ten beside the shown one.
+        // Then the tab is one stack of twelve, eleven listed besides the shown one.
         assert_eq!(
             (shape(&layouts), listed_others(&layouts)),
-            (vec![1, 11], 10),
+            (vec![12], 11),
             "a split in a stacked tab should add the pane and re-tile"
         );
     }
@@ -1069,51 +1090,51 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn stack_shown_pane_takes_the_stacks_full_height() {
-        // Given eleven tiled panes, a main pane and a stack of ten.
+    fn stack_list_sits_at_the_top_of_the_stack_at_full_width() {
+        // Given eleven tiled panes, one stack over the whole body.
         let layouts = tiled(17);
 
         // When placing them.
-        let height = placement(&layouts, 10)
-            .panes
-            .iter()
-            .find(|place| Some(place.pane) == expanded(&layouts))
-            .map(|place| place.area.height);
+        let list = placement(&layouts).stack.map(|stack| stack.area);
 
-        // Then the shown stacked pane is as tall as the body.
+        // Then the list takes the body's top eleven rows, full width.
         assert_eq!(
-            height,
-            Some(BODY.height),
-            "the shown pane takes the stack's height"
+            list,
+            Some(Rect::new(0, 0, 80, 11)),
+            "the list is a row per pane on top"
         );
     }
 
     #[rstest::rstest]
-    fn stack_list_sits_on_the_stacks_left_at_the_list_width() {
-        // Given eleven tiled panes, the stack in the right half.
+    fn stack_shown_pane_fills_the_rows_below_the_list() {
+        // Given eleven tiled panes, one stack over the whole body.
         let layouts = tiled(17);
 
-        // When placing them with a 10-column list.
-        let list = placement(&layouts, 10).stack.map(|stack| stack.area);
+        // When placing them.
+        let area = placement(&layouts)
+            .panes
+            .iter()
+            .find(|place| Some(place.pane) == expanded(&layouts))
+            .map(|place| place.area);
 
-        // Then the list starts at the stack's left edge, 10 columns wide.
+        // Then the shown pane takes every row under the list.
         assert_eq!(
-            list,
-            Some(Rect::new(40, 0, 10, 24)),
-            "the list takes the stack's first 10 columns"
+            area,
+            Some(Rect::new(0, 11, 80, 13)),
+            "the shown pane is pinned below the list"
         );
     }
 
     #[rstest::rstest]
     fn stack_list_is_at_most_half_the_stack() {
-        // Given eleven tiled panes, the stack 40 columns wide.
-        let layouts = tiled(17);
+        // Given fourteen tiled panes in a 24-row body.
+        let layouts = tiled(20);
 
-        // When placing them with a list wider than half the stack.
-        let width = placement(&layouts, 30).stack.map(|stack| stack.area.width);
+        // When placing them.
+        let height = placement(&layouts).stack.map(|stack| stack.area.height);
 
-        // Then the list is half the stack.
-        assert_eq!(width, Some(20), "the list stops at half the stack");
+        // Then the list is half the body's height.
+        assert_eq!(height, Some(12), "the list stops at half the stack");
     }
 
     #[rstest::rstest]
@@ -1121,10 +1142,10 @@ mod tests {
         // Given eleven tiled panes, the last stacked pane 17 shown.
         let layouts = tiled(17);
 
-        // When placing them in a body whose list fits four rows.
+        // When placing them in an 8-row body, whose list fits four rows.
         let rows: Vec<PaneId> = layouts
             .get(OWNER)
-            .and_then(|layout| layout.placed(Rect::new(0, 0, 80, 6), 10).stack)
+            .and_then(|layout| layout.placed(Rect::new(0, 0, 80, 8)).stack)
             .map(|stack| stack.rows.into_iter().map(|(pane, _)| pane).collect())
             .unwrap_or_default();
 
@@ -1133,6 +1154,26 @@ mod tests {
             rows,
             vec![PaneId(14), PaneId(15), PaneId(16), PaneId(17)],
             "the list scrolls to the shown pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn stack_on_a_lone_pane_stacks_the_new_pane_shown() {
+        // Given a lone pane 7.
+        let mut layouts = opened();
+
+        // When stacking pane 8 with it.
+        layouts.stack(OWNER, entry(8));
+
+        // Then panes 7 and 8 are a stack showing pane 8, which has the focus.
+        assert_eq!(
+            (
+                placement(&layouts).stack.map(|stack| stack.rows.len()),
+                expanded(&layouts),
+                focused(&layouts)
+            ),
+            (Some(2), Some(PaneId(8)), Some(PaneId(8))),
+            "a stack of two shows the new pane"
         );
     }
 
@@ -1277,7 +1318,7 @@ mod tests {
 
         // Then only the focused pane is placed, over the whole body.
         assert_eq!(
-            placement(&layouts, 0),
+            placement(&layouts),
             Placement {
                 panes: vec![Placed {
                     pane: PaneId(8),

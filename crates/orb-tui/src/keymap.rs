@@ -329,6 +329,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind(
+                "<leader>ps",
+                Intent::StackPane,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
                 "<leader>pf",
                 Intent::ToggleZoom,
                 KeyCategory::Navigation,
@@ -1264,6 +1270,7 @@ mod tests {
     #[case(Scope::Pane, "pf", Intent::ToggleZoom)]
     #[case(Scope::Pane, "px", Intent::ClosePane)]
     #[case(Scope::Pane, "pc", Intent::RenamePane)]
+    #[case(Scope::Pane, "ps", Intent::StackPane)]
     #[case(Scope::Pane, "tn", Intent::NewTab)]
     #[case(Scope::Sidebar, "tn", Intent::NewTab)]
     #[case(Scope::Pane, "tx", Intent::CloseTab)]
@@ -1329,7 +1336,7 @@ mod tests {
         let found = leader_popup(Scope::Pane, &[key(KeyCode::Char('p'))]).join(" ");
 
         // Then they are the pane keys.
-        assert_eq!(found, "c d f r x", "<C-g> p keys in a pane");
+        assert_eq!(found, "c d f r s x", "<C-g> p keys in a pane");
     }
 
     #[rstest::rstest]

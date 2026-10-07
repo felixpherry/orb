@@ -545,7 +545,7 @@ impl App {
                 let state = self.state.read();
                 state
                     .shown_layout()
-                    .map(|layout| tabs::placement(&state, layout, self.pane_area).panes)
+                    .map(|layout| layout.placed(self.pane_area).panes)
                     .unwrap_or_default()
             };
             for place in &placed {
@@ -876,6 +876,12 @@ impl App {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::AddPane(*session))
+                    .try_send();
+            }
+            Command::StackPane(session) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::StackPane(*session))
                     .try_send();
             }
             Command::NewTab(session) => {
@@ -1423,7 +1429,8 @@ impl App {
             state
                 .shown_layout()
                 .and_then(|layout| {
-                    tabs::placement(&state, layout, self.pane_area)
+                    layout
+                        .placed(self.pane_area)
                         .panes
                         .into_iter()
                         .find(|place| place.pane == id)
