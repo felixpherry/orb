@@ -551,7 +551,7 @@ impl Sessions {
         }
     }
 
-    /// Move the cursor to the first session the search lists, or to
+    /// Move the cursor to the first row the search lists, or to
     /// nothing when none matches. Blank text leaves the cursor where it is.
     pub fn select_first_match(&mut self) {
         if self.searching() {
@@ -559,8 +559,8 @@ impl Sessions {
         }
     }
 
-    /// Move the cursor to the next session the search lists, past
-    /// the shelf header; wraps from the last one to the first. Without a
+    /// Move the cursor to the next row the search lists, agent rows
+    /// included, past the shelf header; wraps from the last one to the first. Without a
     /// cursor, or with one on a row that's gone, selects the first.
     pub fn select_next_match(&mut self) {
         let matches = self.matches();
@@ -573,8 +573,8 @@ impl Sessions {
         }
     }
 
-    /// Move the cursor to the previous session the search lists,
-    /// past the shelf header; wraps from the first one to the last. Without
+    /// Move the cursor to the previous row the search lists, agent
+    /// rows included, past the shelf header; wraps from the first one to the last. Without
     /// a cursor, or with one on a row that's gone, selects the first.
     pub fn select_prev_match(&mut self) {
         let matches = self.matches();
@@ -902,12 +902,12 @@ impl Sessions {
             .is_some_and(|search| !search.input.text().trim().is_empty())
     }
 
-    /// The sessions listed, in display order: every row but the shelf
-    /// header and agent rows.
+    /// The rows the search steps through, in display order: every row but
+    /// the shelf header, so agent rows are stops too.
     fn matches(&self) -> Vec<SidebarItem> {
         self.items()
             .into_iter()
-            .filter(|item| matches!(item, SidebarItem::Session(_)))
+            .filter(|&item| item != SidebarItem::SettledShelf)
             .collect()
     }
 
@@ -2363,10 +2363,10 @@ mod tests {
     #[rstest::rstest]
     fn select_next_match_skips_the_shelf_header() {
         // Given "fix" matching cards 3 and 1 and settled 4, with the cursor on
-        // card 1.
+        // card 1's agent row.
         let mut sessions = searching(
             Sessions {
-                cursor: Some(on(1)),
+                cursor: Some(agent_row(1, 1)),
                 ..four_titles()
             },
             "fix",
@@ -2394,8 +2394,12 @@ mod tests {
         // When selecting the previous match.
         sessions.select_prev_match();
 
-        // Then it lands on card 1, past the header.
-        assert_eq!(sessions.cursor, Some(on(1)), "the header is skipped");
+        // Then it lands on card 1's agent row, past the header.
+        assert_eq!(
+            sessions.cursor,
+            Some(agent_row(1, 1)),
+            "the header is skipped"
+        );
     }
 
     #[rstest::rstest]
@@ -2442,20 +2446,21 @@ mod tests {
 
     #[rstest::rstest]
     fn select_next_match_stays_on_a_single_match() {
-        // Given "logout" matching only card 3, with the cursor on it.
+        // Given "lint" matching only settled 4, which has no agent row, with
+        // the cursor on it.
         let mut sessions = searching(
             Sessions {
-                cursor: Some(on(3)),
+                cursor: Some(on(4)),
                 ..four_titles()
             },
-            "logout",
+            "lint",
         );
 
         // When selecting the next match.
         sessions.select_next_match();
 
-        // Then the cursor stays on card 3.
-        assert_eq!(sessions.cursor, Some(on(3)), "a lone match stays put");
+        // Then the cursor stays on settled 4.
+        assert_eq!(sessions.cursor, Some(on(4)), "a lone match stays put");
     }
 
     #[rstest::rstest]
@@ -2866,7 +2871,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn select_next_match_skips_agent_rows() {
+    fn select_next_match_stops_on_agent_rows() {
         // Given "fix" matching cards 3 and 1 and settled 4, with the cursor on
         // card 3.
         let mut sessions = searching(
@@ -2880,11 +2885,11 @@ mod tests {
         // When selecting the next match.
         sessions.select_next_match();
 
-        // Then it lands on card 1, past card 3's agent row.
+        // Then it lands on card 3's agent row.
         assert_eq!(
             sessions.cursor,
-            Some(on(1)),
-            "search matches step from session to session"
+            Some(agent_row(3, 3)),
+            "search matches should stop on agent rows"
         );
     }
 }

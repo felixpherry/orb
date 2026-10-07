@@ -4559,8 +4559,13 @@ mod tests {
 
     #[rstest::rstest]
     fn search_next_moves_to_the_next_match() {
-        // Given "fix" matching threads 3 and 1, with the cursor on 3.
+        // Given "fix" matching threads 3 and 1, with the cursor on thread 3's
+        // agent row.
         let mut state = searching("fix", Some(3));
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(3),
+            pane: PaneId(3),
+        });
 
         // When handling PickerNext (`<C-j>`).
         IntentHandler::handle(&Intent::PickerNext, &mut state);
@@ -4581,11 +4586,35 @@ mod tests {
         // When handling PickerPrev (`<C-k>`).
         IntentHandler::handle(&Intent::PickerPrev, &mut state);
 
-        // Then the cursor is on thread 3, past the unmatched thread 2.
+        // Then the cursor is on thread 3's agent row, past the unmatched
+        // thread 2.
         assert_eq!(
             state.sessions.cursor,
-            Some(SidebarItem::Session(SessionId(3))),
+            Some(SidebarItem::Agent {
+                session: SessionId(3),
+                pane: PaneId(3),
+            }),
             "<C-k> should move to the previous match"
+        );
+    }
+
+    #[rstest::rstest]
+    fn search_next_moves_from_a_card_to_its_agent_row() {
+        // Given "fix" matching threads 3 and 1, with the cursor on thread 3's
+        // card.
+        let mut state = searching("fix", Some(3));
+
+        // When handling PickerNext (`<C-j>`).
+        IntentHandler::handle(&Intent::PickerNext, &mut state);
+
+        // Then the cursor is on thread 3's agent row.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Agent {
+                session: SessionId(3),
+                pane: PaneId(3),
+            }),
+            "<C-j> should stop on the card's agent row"
         );
     }
 
