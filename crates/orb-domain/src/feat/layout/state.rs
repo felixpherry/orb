@@ -24,13 +24,28 @@ pub struct PaneEntry {
     pub resume: Option<String>,
 }
 
-/// One tab: its name, its panes' tree, and whether it shows only the focused pane.
+/// The trees `Cmd +` and `Cmd -` can go back to. It holds only while the
+/// tab's tree is still the one the last of them left.
+#[derive(Debug, Clone, PartialEq)]
+struct ResizeHistory {
+    /// The tree the last `Cmd +` or `Cmd -` left.
+    after: TileLayout,
+    /// The trees from before each `Cmd +`, newest last; `Cmd -` goes back to them.
+    before_grow: Vec<TileLayout>,
+    /// The trees from before each `Cmd -`, newest last; `Cmd +` goes back to them.
+    before_shrink: Vec<TileLayout>,
+}
+
+/// One tab: its name, its panes' tree, whether it shows only the focused
+/// pane, and what `Cmd +` and `Cmd -` can undo.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
     /// Set by renaming the tab; unnamed tabs show only their number.
     name: Option<String>,
     tree: TileLayout,
     zoomed: bool,
+    /// Never saved: a restored tab starts without one.
+    history: Option<ResizeHistory>,
 }
 
 impl Tab {
@@ -38,12 +53,13 @@ impl Tab {
         Self::restore(None, TileLayout::new(pane))
     }
 
-    /// A saved tab: its name and tree, not zoomed.
+    /// A saved tab: its name and tree, not zoomed, with no resize history.
     pub fn restore(name: Option<String>, tree: TileLayout) -> Self {
         Self {
             name,
             tree,
             zoomed: false,
+            history: None,
         }
     }
 
@@ -72,21 +88,80 @@ impl Tab {
         self.tree.to_json()
     }
 
-    /// Grows the focused pane a step, or stacks its split when the step doesn't
-    /// fit. With no split left to grow or stack, the tab zooms unless the pane
-    /// is its only one. A zoomed tab doesn't grow, and neither does one with no
+    /// Runs `step` with the tab's resize history, emptied first when the tree
+    /// is no longer the one the last `Cmd +` or `Cmd -` left, then keeps the
+    /// history for the tree `step` leaves. Whether `step` changed the tree.
+    fn with_history<F>(&mut self, step: F) -> bool
+    where
+        F: FnOnce(&mut Self, &mut ResizeHistory) -> bool,
+    {
+        let mut history = self
+            .history
+            .take()
+            .filter(|history| history.after == self.tree)
+            .unwrap_or_else(|| ResizeHistory {
+                after: self.tree.clone(),
+                before_grow: Vec::new(),
+                before_shrink: Vec::new(),
+            });
+        let changed = step(self, &mut history);
+        history.after = self.tree.clone();
+        self.history = Some(history);
+        changed
+    }
+
+    /// Goes back to the tree from before the last `Cmd -`, or grows the
+    /// focused pane a step, or stacks its split when the step doesn't fit.
+    /// With no split left to grow or stack, the tab zooms unless the pane is
+    /// its only one. A zoomed tab doesn't grow, and neither does one with no
     /// body yet. Whether the tree changed.
     fn grow(&mut self, body: Rect) -> bool {
         if self.zoomed || body.is_empty() {
             return false;
         }
-        match self.tree.grow_focused(STEP, body) {
-            Grow::Grew | Grow::Stacked => true,
-            Grow::Stuck => {
-                self.zoomed = self.tree.pane_count() > 1;
-                false
+        self.with_history(|tab, history| match history.before_shrink.pop() {
+            Some(tree) => {
+                tab.tree = tree;
+                true
             }
+            None => {
+                let before = tab.tree.clone();
+                match tab.tree.grow_focused(STEP, body) {
+                    Grow::Grew | Grow::Stacked => {
+                        history.before_grow.push(before);
+                        true
+                    }
+                    Grow::Stuck => {
+                        tab.zoomed = tab.tree.pane_count() > 1;
+                        false
+                    }
+                }
+            }
+        })
+    }
+
+    /// Leaves a zoom, or goes back to the tree from before the last `Cmd +`,
+    /// or shrinks the focused pane a step, its ratio held between 0.1 and 0.9.
+    /// Whether the tree changed; leaving a zoom isn't a change.
+    fn shrink(&mut self, body: Rect) -> bool {
+        if self.zoomed {
+            self.zoomed = false;
+            return false;
         }
+        self.with_history(|tab, history| match history.before_grow.pop() {
+            Some(tree) => {
+                tab.tree = tree;
+                true
+            }
+            None => {
+                let before = tab.tree.clone();
+                let shrank = tab.tree.resize_focused(false, STEP, body);
+                if shrank {
+                    history.before_shrink.push(before);
+                }
+                shrank
+            }
+        })
     }
 }
 
@@ -629,16 +704,16 @@ impl Layouts {
         }
     }
 
-    /// Grows the shown tab's focused pane a step (see [`Tab::grow`]: it may
-    /// stack the pane's split, or zoom the tab), or shrinks it a step. Whether
-    /// the tree changed; a zoom alone isn't a change.
+    /// `Cmd +` (`grow`) or `Cmd -` on the shown tab's focused pane: see
+    /// [`Tab::grow`] and [`Tab::shrink`]. Each undoes the other first. Whether
+    /// the tree changed; a zoom or unzoom alone isn't a change.
     pub fn resize_focused(&mut self, owner: SessionId, grow: bool) -> bool {
         let body = self.body;
         self.tab_mut(owner).is_some_and(|tab| {
             if grow {
                 tab.grow(body)
             } else {
-                tab.tree.resize_focused(false, STEP, body)
+                tab.shrink(body)
             }
         })
     }
@@ -2038,6 +2113,161 @@ mod tests {
             tree_json(&layouts),
             before,
             "growing a zoomed tab should leave its tree alone"
+        );
+    }
+
+    /// A 14-column body: panes 7 and 8 side by side get 7 columns each, so a
+    /// `Cmd +` on pane 8 would leave pane 7 3 columns wide and stacks them instead.
+    const NARROW: Rect = Rect::new(0, 0, 14, 24);
+
+    /// `split_right()` over `NARROW`.
+    fn narrow() -> Layouts {
+        let mut layouts = split_right();
+        layouts.fit_to(NARROW);
+        layouts
+    }
+
+    /// Pane `pane`'s width when placed over `BODY`.
+    fn width(layouts: &Layouts, pane: i64) -> Option<u16> {
+        placed(layouts)
+            .into_iter()
+            .find(|place| place.pane == PaneId(pane))
+            .map(|place| place.area.width)
+    }
+
+    #[rstest::rstest]
+    fn cmd_minus_on_a_zoomed_tab_only_unzooms_it() {
+        // Given panes 7 and 8 side by side, zoomed.
+        let mut layouts = split_right();
+        layouts.toggle_zoom(OWNER);
+        let before = tree_json(&layouts);
+
+        // When pressing Cmd -.
+        layouts.resize_focused(OWNER, false);
+
+        // Then the tab is unzoomed and its tree is as it was.
+        assert_eq!(
+            (zoomed(&layouts), tree_json(&layouts)),
+            (false, before),
+            "Cmd - on a zoomed tab should only leave the zoom"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_minus_after_a_stacking_cmd_plus_restores_the_tree() {
+        // Given panes 7 and 8 over a narrow body, stacked by one Cmd +.
+        let mut layouts = narrow();
+        let before = tree_json(&layouts);
+        layouts.resize_focused(OWNER, true);
+
+        // When pressing Cmd -.
+        layouts.resize_focused(OWNER, false);
+
+        // Then the tree is the one from before the Cmd +.
+        assert_eq!(
+            tree_json(&layouts),
+            before,
+            "Cmd - should undo the Cmd + that stacked the split"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_after_a_cmd_minus_restores_the_tree() {
+        // Given panes 7 and 8 over a narrow body, shrunk once, then again
+        // up to the ratio bound.
+        let mut layouts = narrow();
+        layouts.resize_focused(OWNER, false);
+        let before = tree_json(&layouts);
+        layouts.resize_focused(OWNER, false);
+
+        // When pressing Cmd +.
+        layouts.resize_focused(OWNER, true);
+
+        // Then the tree is the one from before the second Cmd -.
+        assert_eq!(
+            tree_json(&layouts),
+            before,
+            "Cmd + should undo the last Cmd -"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_minus_replays_the_climb_back_to_the_original_tree() {
+        // Given a [1][4] tab that Cmd + climbed until it zoomed.
+        let mut layouts = climb();
+        let original = tree_json(&layouts);
+        let mut changes = 0;
+        for _ in 0..30 {
+            if zoomed(&layouts) {
+                break;
+            }
+            if layouts.resize_focused(OWNER, true) {
+                changes += 1;
+            }
+        }
+
+        // When pressing Cmd - once per change, plus once for the zoom.
+        for _ in 0..=changes {
+            layouts.resize_focused(OWNER, false);
+        }
+
+        // Then the tab is unzoomed with its original tree.
+        assert_eq!(
+            (zoomed(&layouts), tree_json(&layouts)),
+            (false, original),
+            "Cmd - should replay every Cmd + back to the original tree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_minus_after_a_focus_move_shrinks_the_newly_focused_pane() {
+        // Given pane 8 grown once, leaving pane 7 36 columns wide, and the
+        // focus moved to pane 7.
+        let mut layouts = split_right();
+        layouts.resize_focused(OWNER, true);
+        layouts.focus_pane(OWNER, PaneId(7));
+
+        // When pressing Cmd -.
+        layouts.resize_focused(OWNER, false);
+
+        // Then pane 7 shrank a step instead of the grow being undone.
+        assert_eq!(
+            width(&layouts, 7),
+            Some(32),
+            "after a focus move Cmd - should shrink the focused pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_minus_after_an_added_pane_keeps_it() {
+        // Given pane 8 grown once, then pane 9 added.
+        let mut layouts = split_right();
+        layouts.resize_focused(OWNER, true);
+        layouts.add_tiled(OWNER, entry(9));
+
+        // When pressing Cmd -.
+        layouts.resize_focused(OWNER, false);
+
+        // Then pane 9 is still placed.
+        assert!(
+            placed(&layouts).iter().any(|place| place.pane == PaneId(9)),
+            "Cmd - after an add should not bring back the tree without pane 9"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_minus_without_history_shrinks_the_pane_a_step() {
+        // Given panes 7 and 8 side by side, pane 8 40 columns wide.
+        let mut layouts = split_right();
+
+        // When pressing Cmd -.
+        layouts.resize_focused(OWNER, false);
+
+        // Then pane 8 is 4 columns narrower.
+        assert_eq!(
+            width(&layouts, 8),
+            Some(36),
+            "Cmd - with no history should shrink the focused pane a step"
         );
     }
 }

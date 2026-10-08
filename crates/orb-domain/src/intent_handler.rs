@@ -7148,6 +7148,40 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn grow_that_stacks_returns_save_layout() {
+        // Given two panes over a 14-column body, too narrow for a grow step.
+        let mut state = split_layout();
+        state.layouts.fit_to(Rect::new(0, 0, 14, 24));
+
+        // When growing.
+        let commands = IntentHandler::handle(&Intent::GrowFocused, &mut state);
+
+        // Then the stacked layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "a Cmd + that stacks the split saves the layout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_that_only_zooms_returns_no_commands() {
+        // Given two panes over a 14-column body that one Cmd + stacked.
+        let mut state = split_layout();
+        state.layouts.fit_to(Rect::new(0, 0, 14, 24));
+        IntentHandler::handle(&Intent::GrowFocused, &mut state);
+
+        // When growing again.
+        let commands = IntentHandler::handle(&Intent::GrowFocused, &mut state);
+
+        // Then nothing is saved.
+        assert!(
+            commands.is_empty(),
+            "a Cmd + that only zooms leaves the saved tree alone"
+        );
+    }
+
+    #[rstest::rstest]
     fn toggle_zoom_zooms_the_shown_tab() {
         // Given two panes side by side.
         let mut state = split_layout();
