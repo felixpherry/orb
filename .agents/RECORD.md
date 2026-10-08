@@ -292,3 +292,4 @@ Entries are added or amended **only with human approval**.
 - (layout) When a thread's last pane closes, by a close key or by its program exiting, orb opens a shell pane in the thread's directory in its place.
 - (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab with the keys in its pane.
 - (sidebar) On an agent row, `r` renames the agent's pane and `d` closes it after a confirm.
+- (tui) After orb copies a mouse selection in a pane, the mode line shows `Text copied to system clipboard` in blue where the error shows, for 2 s.

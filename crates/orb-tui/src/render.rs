@@ -62,8 +62,8 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// shows only while the keys are in it. Without a shown layout, the right
 /// side shows the start screen, with `pane_error` saying why the session
 /// couldn't start. While the sidebar has the keys, the cursor sits on the
-/// first cell of its selected row. The mode line's clock shows
-/// `now` in `tz`. Returns the sidebar's layout unless it's hidden, and how
+/// first cell of its selected row. The mode line shows the copy notice when
+/// `copied`, and its clock shows `now` in `tz`. Returns the sidebar's layout unless it's hidden, and how
 /// many rows the picker fits when it's open.
 #[expect(
     clippy::too_many_arguments,
@@ -74,6 +74,7 @@ pub(crate) fn render(
     state: &AppState,
     panes: &HashMap<PaneId, Pane>,
     pane_error: Option<&str>,
+    copied: bool,
     keys: &Keys,
     now: SystemTime,
     tz: &TimeZone,
@@ -117,7 +118,7 @@ pub(crate) fn render(
         }
         None => dashboard::render(state, pane_error, right, frame.buffer_mut()),
     }
-    mode_line::render(state, now, tz, mode_area, frame.buffer_mut());
+    mode_line::render(state, copied, now, tz, mode_area, frame.buffer_mut());
     let renaming = state
         .rename
         .as_ref()
@@ -338,6 +339,7 @@ mod tests {
                 state,
                 &HashMap::new(),
                 pane_error,
+                false,
                 keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -397,6 +399,7 @@ mod tests {
                 state,
                 panes,
                 None,
+                false,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -613,6 +616,7 @@ mod tests {
                     &state,
                     &HashMap::new(),
                     None,
+                    false,
                     &keys,
                     SystemTime::UNIX_EPOCH,
                     &TimeZone::UTC,
@@ -783,6 +787,7 @@ mod tests {
                 &state,
                 &HashMap::new(),
                 None,
+                false,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -815,6 +820,7 @@ mod tests {
                 &state,
                 &HashMap::new(),
                 None,
+                false,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -922,6 +928,7 @@ mod tests {
                 state,
                 panes,
                 None,
+                false,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -1642,6 +1649,7 @@ mod tests {
                 state,
                 &HashMap::new(),
                 None,
+                false,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -1846,6 +1854,7 @@ mod tests {
                 &state,
                 &HashMap::new(),
                 None,
+                false,
                 &Keys::new(keymap(), Scope::Sidebar),
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,

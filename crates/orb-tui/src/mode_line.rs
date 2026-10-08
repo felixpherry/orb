@@ -3,8 +3,8 @@
 //!
 //! On the left, the mode in a block of its colour, an arrow into the
 //! selected session's branch, then its place, `<project>/<title>`. Then the
-//! latest error in red and the worktree notice. On the
-//! right, `N running`, `fetching origin/<base>…` while Start fetches, or
+//! latest error in red, `Text copied to system clipboard` in blue for a moment
+//! after orb copies a selection, and the worktree notice. On the right, `N running`, `fetching origin/<base>…` while Start fetches, or
 //! `starting session…` with a spinner, how many agents need an approval or
 //! an answer, the selected row's place among the listed rows, and the local
 //! time in the mode's colour. When the line is too narrow, the right side
@@ -35,14 +35,17 @@ const ARROW_RIGHT: &str = "\u{e0b0}";
 const ARROW_LEFT: &str = "\u{e0b2}";
 /// Before the time (`nf-fa-clock_o`).
 const CLOCK: &str = "\u{f017}";
+/// Shown after orb copies a selection in a pane.
+const COPIED: &str = "Text copied to system clipboard";
 
 /// Draws the mode line into `area`: the mode, the selected row's branch and
-/// project, then the latest error in red and the worktree notice on the
-/// left; the activity, the approval and input counts, the selected row's
+/// project, then the latest error in red, the copy notice in blue when
+/// `copied`, and the worktree notice on the left; the activity, the approval and input counts, the selected row's
 /// position and the time `now` in `tz` on the right. The right side keeps
 /// its width, and the left is cut at its end.
 pub(crate) fn render(
     state: &AppState,
+    copied: bool,
     now: SystemTime,
     tz: &TimeZone,
     area: Rect,
@@ -59,6 +62,7 @@ pub(crate) fn render(
     left(
         &state.sessions,
         state.worktrees.notice.as_deref(),
+        copied,
         mode,
         colour,
     )
@@ -77,10 +81,17 @@ fn mode(state: &AppState) -> (&'static str, Color) {
 }
 
 /// a · b · c: the mode block, the branch block when there's a branch, then the
-/// project, the error and the worktree notice. On a session, the project
+/// project, the error, the copy notice when `copied` and the worktree notice.
+/// On a session, the project
 /// reads `<project>/<title>` and the branch is its lead agent's, else the
 /// one the session recorded.
-fn left(sessions: &Sessions, notice: Option<&str>, mode: &str, colour: Color) -> Line<'static> {
+fn left(
+    sessions: &Sessions,
+    notice: Option<&str>,
+    copied: bool,
+    mode: &str,
+    colour: Color,
+) -> Line<'static> {
     let (branch, project): (Option<&str>, Option<String>) = match sessions.selected_session() {
         Some(session) => (
             sessions
@@ -110,6 +121,7 @@ fn left(sessions: &Sessions, notice: Option<&str>, mode: &str, colour: Color) ->
             .as_ref()
             .map(|error| on(format!("{FAILED_ICON} {error} "), RED, BG_DARK)),
     );
+    spans.extend(copied.then(|| on(format!("{COPIED} "), BLUE, BG_DARK)));
     spans.extend(notice.map(|notice| on(format!("{WORKTREE} {notice} "), FG_DARK, BG_DARK)));
     Line::from(spans)
 }
@@ -311,9 +323,16 @@ mod tests {
 
     /// Draws `state`'s mode line `width` columns wide at `NOW` in `tz`.
     fn draw_in(state: &AppState, width: u16, tz: &TimeZone) -> Buffer {
+        draw_copied(state, false, width, tz)
+    }
+
+    /// Draws `state`'s mode line `width` columns wide at `NOW` in `tz`, with
+    /// the copy notice when `copied`.
+    fn draw_copied(state: &AppState, copied: bool, width: u16, tz: &TimeZone) -> Buffer {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
         render(
             state,
+            copied,
             SystemTime::UNIX_EPOCH + Duration::from_secs(NOW),
             tz,
             buf.area,
@@ -531,6 +550,61 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn copy_notice_shows_on_the_mode_line_in_blue() {
+        // Given a selection orb just copied.
+        let state = AppState::default();
+
+        // When drawing the mode line.
+        let buffer = draw_copied(&state, true, 120, &TimeZone::UTC);
+
+        // Then the copy notice shows in blue.
+        assert_eq!(
+            cell_at(&buffer, "Text copied to system clipboard").map(|cell| cell.fg),
+            Some(BLUE),
+            "copy notice foreground in '{}'",
+            text(&buffer)
+        );
+    }
+
+    #[rstest::rstest]
+    fn mode_line_without_a_copy_shows_no_copy_notice() {
+        // Given no recent copy.
+        let state = AppState::default();
+
+        // When drawing the mode line.
+        let buffer = draw_copied(&state, false, 120, &TimeZone::UTC);
+
+        // Then there is no copy notice.
+        let text = text(&buffer);
+        assert!(
+            !text.contains("Text copied to system clipboard"),
+            "mode line was '{text}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn copy_notice_follows_the_error() {
+        // Given a failure and a selection orb just copied.
+        let state = with_sessions(Sessions {
+            error: Some("Workspace locked".to_owned()),
+            ..Sessions::default()
+        });
+
+        // When drawing the mode line.
+        let buffer = draw_copied(&state, true, 120, &TimeZone::UTC);
+
+        // Then the copy notice starts after the error.
+        let text = text(&buffer);
+        assert!(
+            matches!(
+                (text.find("Workspace locked"), text.find("Text copied to system clipboard")),
+                (Some(error), Some(copied)) if error < copied
+            ),
+            "mode line was '{text}'"
+        );
+    }
+
+    #[rstest::rstest]
     fn notice_shows_on_the_mode_line() {
         // Given a sweep that pruned two worktrees.
         let state = AppState {
@@ -634,7 +708,7 @@ mod tests {
         let buffer = {
             let mut buf = Buffer::empty(Rect::new(0, 0, 120, 1));
             let now = SystemTime::UNIX_EPOCH + Duration::from_secs(NOW) + super::SPINNER_FRAME;
-            render(&state, now, &TimeZone::UTC, buf.area, &mut buf);
+            render(&state, false, now, &TimeZone::UTC, buf.area, &mut buf);
             buf
         };
 
@@ -790,7 +864,14 @@ mod tests {
 
         // When drawing the mode line at that instant in that zone.
         let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 1));
-        render(&AppState::default(), now, &zone, buffer.area, &mut buffer);
+        render(
+            &AppState::default(),
+            false,
+            now,
+            &zone,
+            buffer.area,
+            &mut buffer,
+        );
 
         // Then the clock shows the local time on that side of the switch.
         let text = text(&buffer);

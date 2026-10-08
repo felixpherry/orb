@@ -114,6 +114,9 @@ const EARLY_EXIT: Duration = Duration::from_secs(1);
 /// [`EARLY_EXIT`] of starting.
 const EXITED_AT_START: &str = "session exited at start";
 
+/// How long the mode line says a selection was copied.
+const COPY_NOTICE_FOR: Duration = Duration::from_secs(2);
+
 /// The frontend loop failed to draw a frame or read a terminal event.
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -406,6 +409,12 @@ where
     }
 }
 
+/// Whether the mode line still shows the copy notice that runs out at
+/// `until`.
+fn copy_notice_shown(until: Option<Instant>, now: Instant) -> bool {
+    until.is_some_and(|until| now < until)
+}
+
 /// Where the keys go once the pane is gone: from the pane to the sidebar;
 /// anywhere else (the sidebar after a click on it, a text input) they stay.
 fn after_pane(focus: Focus) -> Focus {
@@ -459,6 +468,9 @@ struct App {
     typing: HashMap<PaneId, String>,
     /// Shown on the start screen when a pane's client couldn't start.
     pane_error: Option<String>,
+    /// When the mode line's copy notice goes away; `None` when no copy is
+    /// showing.
+    copied_until: Option<Instant>,
     /// A new session's attach request is waiting for the keys to come back
     /// to the sidebar.
     attach_waited: bool,
@@ -520,6 +532,7 @@ impl App {
             respawned: HashSet::new(),
             typing: HashMap::new(),
             pane_error: None,
+            copied_until: None,
             attach_waited: false,
             env,
             zmx,
@@ -565,6 +578,7 @@ impl App {
                     &state,
                     &self.panes,
                     self.pane_error.as_deref(),
+                    copy_notice_shown(self.copied_until, Instant::now()),
                     &self.keys,
                     now,
                     &self.tz,
@@ -624,8 +638,9 @@ impl App {
     }
 
     /// When the loop must wake without an event: a pane's synchronized
-    /// update times out, or a spinner frame passes while a thread is working
-    /// or a session is starting, so the spinners and elapsed time tick.
+    /// update times out, a spinner frame passes while a thread is working
+    /// or a session is starting, so the spinners and elapsed time tick, or
+    /// the copy notice runs out, so the mode line drops it.
     fn deadline(&self) -> Option<Instant> {
         let tick = self
             .state
@@ -634,7 +649,8 @@ impl App {
             .spinning()
             .then(|| Instant::now() + SPINNER_FRAME);
         let sync = self.panes.values().filter_map(Pane::sync_deadline);
-        tick.into_iter().chain(sync).min()
+        let copied = self.copied_until.filter(|until| *until > Instant::now());
+        tick.into_iter().chain(sync).chain(copied).min()
     }
 
     /// Lays the screen of `size` out: the tab body becomes the pane area,
@@ -721,6 +737,7 @@ impl App {
             MouseRoute::Copy(id) => {
                 if let Some(text) = self.panes.get(&id).and_then(Pane::select_finish) {
                     outer_terminal::copy_to_clipboard(out, &text)?;
+                    self.copied_until = Some(now + COPY_NOTICE_FOR);
                 }
             }
             MouseRoute::Wheel(id) => {
@@ -1528,7 +1545,7 @@ mod tests {
     use std::io;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
-    use std::time::UNIX_EPOCH;
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
     use orb_domain::feat::layout::tree::Split;
@@ -1543,10 +1560,10 @@ mod tests {
     use ratatui::crossterm::cursor::SetCursorStyle;
 
     use super::{
-        AttachPlan, PaneExit, StartedAttach, after_pane, attach_at_start, attach_or_restore,
-        classify_exit, closed_in_layouts, cursor_style, list_directories, pane_error_after,
-        reattachable, resume_plan, stale_preview, stale_sessions, started_attach, to_drop, to_kill,
-        to_spawn,
+        AttachPlan, COPY_NOTICE_FOR, PaneExit, StartedAttach, after_pane, attach_at_start,
+        attach_or_restore, classify_exit, closed_in_layouts, copy_notice_shown, cursor_style,
+        list_directories, pane_error_after, reattachable, resume_plan, stale_preview,
+        stale_sessions, started_attach, to_drop, to_kill, to_spawn,
     };
 
     /// Pane `id`, a shell in `orb-p<id>`.
@@ -2186,6 +2203,32 @@ mod tests {
             Some("couldn't start the attach command"),
             "a later exit leaves the pane error as is"
         );
+    }
+
+    #[rstest::rstest]
+    fn copy_notice_shows_within_two_seconds() {
+        // Given a selection copied at `copied`.
+        let copied = Instant::now();
+        let until = Some(copied + COPY_NOTICE_FOR);
+
+        // When checking 1.9 s later.
+        let shown = copy_notice_shown(until, copied + Duration::from_millis(1900));
+
+        // Then the notice still shows.
+        assert!(shown, "the copy notice shows for 2 s");
+    }
+
+    #[rstest::rstest]
+    fn copy_notice_hides_after_two_seconds() {
+        // Given a selection copied at `copied`.
+        let copied = Instant::now();
+        let until = Some(copied + COPY_NOTICE_FOR);
+
+        // When checking 2 s later.
+        let shown = copy_notice_shown(until, copied + Duration::from_secs(2));
+
+        // Then the notice is gone.
+        assert!(!shown, "the copy notice is gone after 2 s");
     }
 
     #[rstest::rstest]
