@@ -2,7 +2,7 @@
 //! shown tab's panes laid out by its tree, each in a rounded frame titled
 //! with its name. The frame shows where the focus is: blue while the pane
 //! has the keys, grey while it has the focus and the keys are elsewhere,
-//! dim otherwise. A zoomed tab shows only its focused pane. A stack is a
+//! dim otherwise. A zoomed tab shows only its focused pane. Each stack is a
 //! centred list naming its panes, one row each between two dim bars and a
 //! `>` outside the left bar on the shown one, above the shown pane.
 
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use orb_domain::AppState;
-use orb_domain::feat::layout::state::{Placement, SessionLayout, StackList, Tab};
+use orb_domain::feat::layout::state::{Placement, SessionLayout, StackList};
 use orb_domain::feat::sessions::state::PaneId;
 use orb_term::Pane;
 use ratatui::buffer::Buffer;
@@ -34,7 +34,7 @@ pub(crate) fn areas(right: Rect) -> [Rect; 2] {
 }
 
 /// Draws `layout` into `right`: the tab bar, then each placed pane that has
-/// a client in `panes` inside its frame, and the stack's list. Records each
+/// a client in `panes` inside its frame, and each stack's list. Records each
 /// pane's screen, and whether its program reads the mouse, in `hits`.
 /// Returns the focused pane's cursor while `keys_in_pane`.
 pub(crate) fn render(
@@ -76,7 +76,7 @@ pub(crate) fn render(
             ))
             .render(place.area, buf);
     }
-    if let Some(stack) = &placement.stack {
+    for stack in &placement.stacks {
         let lit = keys_in_pane
             && placement
                 .panes
@@ -88,25 +88,22 @@ pub(crate) fn render(
             .find(|place| place.pane == stack.shown)
             .map_or(stack.area.x, |place| place.area.x);
         stack_list(state, stack, left, lit, buf, hits);
-        let order = layout.active_tab().map(Tab::stacked).unwrap_or_default();
-        hits.record_stack(stack.area, order, stack.shown);
+        hits.record_stack(stack.area, stack.panes.clone(), stack.shown);
     }
     cursor
 }
 
-/// Where `layout`'s shown tab draws its panes in `body`, its stack's list as
-/// wide as the longest stacked pane's title plus its bars and `> `. Every
-/// caller places panes through here so drawing, resizing and spawning agree.
+/// Where `layout`'s shown tab draws its panes in `body`, each stack's list as
+/// wide as its longest pane title plus its bars and `> `. Every caller
+/// places panes through here so drawing, resizing and spawning agree.
 pub(crate) fn placement(state: &AppState, layout: &SessionLayout, body: Rect) -> Placement {
-    let longest = layout
-        .active_tab()
-        .map(Tab::stacked)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|pane| Span::raw(pane_title(state, pane)).width())
-        .max();
-    let list_width = longest.map_or(0, |longest| u16::try_from(longest + 4).unwrap_or(u16::MAX));
-    layout.placed(body, list_width)
+    layout.placed(body, |panes| {
+        panes
+            .iter()
+            .map(|pane| Span::raw(pane_title(state, *pane)).width())
+            .max()
+            .map_or(0, |longest| u16::try_from(longest + 4).unwrap_or(u16::MAX))
+    })
 }
 
 /// Draws `stack`'s list: a dim bar down each side, and between them a row

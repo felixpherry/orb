@@ -6856,7 +6856,7 @@ mod tests {
 
     fn pane_count(state: &AppState) -> usize {
         state.shown_layout().map_or(0, |layout| {
-            layout.placed(Rect::new(0, 0, 80, 24), 0).panes.len()
+            layout.placed(Rect::new(0, 0, 80, 24), |_| 0).panes.len()
         })
     }
 
@@ -7128,7 +7128,7 @@ mod tests {
         let width = |state: &AppState| {
             state
                 .shown_layout()?
-                .placed(Rect::new(0, 0, 80, 24), 0)
+                .placed(Rect::new(0, 0, 80, 24), |_| 0)
                 .panes
                 .into_iter()
                 .find(|place| place.pane == PaneId(50))

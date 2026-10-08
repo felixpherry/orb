@@ -1688,6 +1688,102 @@ mod tests {
         );
     }
 
+    /// Thread 1's session showing one tab split right into two stacks: panes
+    /// 1 and 2 on the left with pane 1 expanded, panes 3 and 4 on the right
+    /// with pane 3 expanded and focused. Pane 1 runs thread 1 ("Fix the
+    /// bug"), pane 2 is named `api`, pane 3 is a shell and pane 4 is named
+    /// `web`.
+    fn two_stacks() -> AppState {
+        laid_out(|state| {
+            let tree = TileLayout::from_saved(
+                Node::Split {
+                    split: Split::Right,
+                    ratio: 0.5,
+                    first: Box::new(Node::Stack {
+                        panes: vec![PaneId(1), PaneId(2)],
+                        expanded: PaneId(1),
+                    }),
+                    second: Box::new(Node::Stack {
+                        panes: vec![PaneId(3), PaneId(4)],
+                        expanded: PaneId(3),
+                    }),
+                },
+                PaneId(3),
+            );
+            let api = PaneEntry {
+                name: Some("api".to_owned()),
+                ..entry(2)
+            };
+            let web = PaneEntry {
+                name: Some("web".to_owned()),
+                ..entry(4)
+            };
+            state.layouts.insert(
+                SessionId(1),
+                SessionLayout::restore(
+                    vec![Tab::restore(None, tree)],
+                    0,
+                    vec![entry(1), api, entry(3), web],
+                ),
+            );
+        })
+    }
+
+    #[rstest::rstest]
+    fn each_stack_list_marks_its_own_shown_pane() {
+        // Given two stacks, pane 1 shown on the left and the shell pane 3 on
+        // the right.
+        let state = two_stacks();
+
+        // When drawing a frame tall enough for every row.
+        let buffer = draw_tall(&state, None);
+
+        // Then each list has a `>` on its own shown pane's row.
+        let right = right_side(&buffer);
+        assert!(
+            right.contains("> │ Fix the bug") && right.contains("> │ shell"),
+            "right side was\n{right}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case("api", PaneId(2))]
+    #[case("web", PaneId(4))]
+    fn wheel_down_over_a_stack_list_shows_that_stacks_next_pane(
+        #[case] needle: &str,
+        #[case] expected: PaneId,
+    ) {
+        // Given two stacks drawn, pane 1 shown on the left, pane 3 on the
+        // right and focused.
+        let (buffer, hits) = draw_hits(&two_stacks());
+        let row = find(&buffer, needle);
+
+        // When wheeling down over a row of one of the lists with the keys in
+        // pane 3.
+        let route = row.map(|at| {
+            mouse::route(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: at.x,
+                    row: at.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &hits,
+                Focus::Pane,
+                Some(PaneId(3)),
+                &mut Clicks::default(),
+                Instant::now(),
+            )
+        });
+
+        // Then that stack's pane after its shown one is shown.
+        assert_eq!(
+            route,
+            Some(MouseRoute::Intents(vec![Intent::ShowStacked(expected)])),
+            "the wheel over {needle}'s list steps that stack's shown pane"
+        );
+    }
+
     #[rstest::rstest]
     fn wheel_down_over_the_drawn_stack_list_shows_the_next_pane() {
         // Given a stack drawn with pane 3 of panes 1 to 4 shown and focused.

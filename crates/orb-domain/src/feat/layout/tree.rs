@@ -5,8 +5,8 @@
 // whole cells; the tree saves to and loads from JSON; herdr's borders,
 // scrollbar lanes, swap, insert and drag-resize code is left out.
 
-//! A tab's panes as a tree of right and down splits, with at most one stack
-//! of panes sharing one area: where each pane
+//! A tab's panes as a tree of right and down splits and stacks of panes
+//! sharing one area, any number of them: where each pane
 //! lands in an area, and which pane is the neighbour in a direction.
 
 use std::cmp::{Ordering, Reverse};
@@ -133,16 +133,11 @@ impl TileLayout {
         result
     }
 
-    /// The tree's stack and the area it takes in `area`.
-    pub fn stack(&self, area: Rect) -> Option<StackInfo> {
-        stack_in(&self.root, area)
-    }
-
-    /// The panes of the tree's stack, in stack order; empty without one.
-    pub fn stacked_ids(&self) -> Vec<PaneId> {
-        self.stack(Rect::default())
-            .map(|stack| stack.panes)
-            .unwrap_or_default()
+    /// Every stack in the tree and the area it takes in `area`, in tree order.
+    pub fn stacks(&self, area: Rect) -> Vec<StackInfo> {
+        let mut stacks = Vec::new();
+        stacks_in(&self.root, area, &mut stacks);
+        stacks
     }
 
     /// Every pane id, in tree order.
@@ -169,12 +164,12 @@ impl TileLayout {
         }
     }
 
-    /// Stacks the new pane `id` with the focused pane, right after it, and
-    /// focuses it. A tree holds at most one stack, so with the focused pane
-    /// outside the stack `id` joins that stack at its end.
+    /// Stacks the new pane `id` right after the focused pane and focuses it:
+    /// in the focused pane's stack when it has one, else in a new stack of
+    /// the two.
     pub fn stack_focused(&mut self, id: PaneId) {
         let focus = self.focus;
-        match find_stack_mut(&mut self.root) {
+        match find_stack_holding_mut(&mut self.root, focus) {
             Some(panes) => {
                 let at = panes
                     .iter()
@@ -195,12 +190,15 @@ impl TileLayout {
     }
 
     /// Rebuilds the tree from the template for its pane count, panes in their
-    /// current tree order. Focus, its history and the stack's expanded pane
+    /// current tree order. Focus, its history and each stack's expanded pane
     /// stay.
     pub fn tile(&mut self) {
-        let prefer: Vec<PaneId> = [Some(self.focus), expanded_in(&self.root)]
-            .into_iter()
-            .flatten()
+        let prefer: Vec<PaneId> = std::iter::once(self.focus)
+            .chain(
+                self.stacks(Rect::default())
+                    .into_iter()
+                    .map(|stack| stack.expanded),
+            )
             .collect();
         if let Some(root) = template(&self.pane_ids(), &prefer) {
             self.root = root;
@@ -418,7 +416,7 @@ fn expand(node: &mut Node, id: PaneId) {
     }
 }
 
-/// The expanded pane of the tree's stack, if it has one.
+/// The expanded pane of the tree's first stack, if it has any.
 fn expanded_in(node: &Node) -> Option<PaneId> {
     match node {
         Node::Pane(_) => None,
@@ -690,9 +688,9 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
     }
 }
 
-fn stack_in(node: &Node, area: Rect) -> Option<StackInfo> {
+fn stacks_in(node: &Node, area: Rect, stacks: &mut Vec<StackInfo>) {
     match node {
-        Node::Pane(_) => None,
+        Node::Pane(_) => {}
         Node::Split {
             split,
             ratio,
@@ -700,9 +698,10 @@ fn stack_in(node: &Node, area: Rect) -> Option<StackInfo> {
             second,
         } => {
             let (a, b) = split_rect(area, *split, *ratio);
-            stack_in(first, a).or_else(|| stack_in(second, b))
+            stacks_in(first, a, stacks);
+            stacks_in(second, b, stacks);
         }
-        Node::Stack { panes, expanded } => Some(StackInfo {
+        Node::Stack { panes, expanded } => stacks.push(StackInfo {
             area,
             panes: panes.clone(),
             expanded: *expanded,
@@ -721,14 +720,14 @@ fn collect_ids(node: &Node, ids: &mut Vec<PaneId>) {
     }
 }
 
-/// The panes of the tree's stack, if it has one.
-fn find_stack_mut(node: &mut Node) -> Option<&mut Vec<PaneId>> {
+/// The panes of the stack holding pane `target`, if one does.
+fn find_stack_holding_mut(node: &mut Node, target: PaneId) -> Option<&mut Vec<PaneId>> {
     match node {
-        Node::Pane(_) => None,
+        Node::Stack { panes, .. } if panes.contains(&target) => Some(panes),
+        Node::Pane(_) | Node::Stack { .. } => None,
         Node::Split { first, second, .. } => {
-            find_stack_mut(first).or_else(|| find_stack_mut(second))
+            find_stack_holding_mut(first, target).or_else(|| find_stack_holding_mut(second, target))
         }
-        Node::Stack { panes, .. } => Some(panes),
     }
 }
 
@@ -1504,7 +1503,7 @@ mod tests {
 
     /// The stacked pane that gets rows of its own.
     fn expanded(layout: &TileLayout) -> Option<PaneId> {
-        layout.stack(AREA).map(|stack| stack.expanded)
+        layout.stacks(AREA).first().map(|stack| stack.expanded)
     }
 
     #[rstest::rstest]
@@ -1538,7 +1537,11 @@ mod tests {
         // Then panes 1 and 2 are a stack with pane 2 expanded and focused.
         assert_eq!(
             (
-                layout.stack(AREA).map(|stack| stack.panes),
+                layout
+                    .stacks(AREA)
+                    .into_iter()
+                    .next()
+                    .map(|stack| stack.panes),
                 expanded(&layout),
                 layout.focused()
             ),
@@ -1557,25 +1560,91 @@ mod tests {
 
         // Then pane 5 sits right after pane 2.
         assert_eq!(
-            layout.stacked_ids(),
-            vec![pane(2), pane(5), pane(3), pane(4)],
+            layout
+                .stacks(AREA)
+                .into_iter()
+                .next()
+                .map(|stack| stack.panes),
+            Some(vec![pane(2), pane(5), pane(3), pane(4)]),
             "the new pane goes right after the focused one"
         );
     }
 
     #[rstest::rstest]
-    fn stack_focused_outside_the_stack_appends_to_it() {
+    fn stack_focused_outside_every_stack_starts_a_new_one() {
         // Given pane 1 beside a stack of 2, 3 and 4, pane 1 focused.
         let mut layout = main_and_stack(3, 1);
 
         // When stacking pane 5.
         layout.stack_focused(pane(5));
 
-        // Then pane 5 joins the end of the one stack and pane 1 stays alone.
+        // Then panes 1 and 5 are a second stack beside the first.
         assert_eq!(
-            (layout.stacked_ids(), shape(&layout, AREA)),
-            (vec![pane(2), pane(3), pane(4), pane(5)], vec![1, 4]),
-            "a tab holds one stack, so the new pane joins it"
+            layout
+                .stacks(AREA)
+                .into_iter()
+                .map(|stack| stack.panes)
+                .collect::<Vec<_>>(),
+            vec![vec![pane(1), pane(5)], vec![pane(2), pane(3), pane(4)]],
+            "a pane outside every stack starts its own stack"
+        );
+    }
+
+    /// A stack of panes 1 and 2 (1 expanded) on the left half beside a stack
+    /// of panes 3 and 4 (3 expanded) on the right half. Pane `focus` has the
+    /// focus.
+    fn two_stacks(focus: i64) -> TileLayout {
+        TileLayout::from_saved(
+            split(
+                Split::Right,
+                0.5,
+                stack_of(&[1, 2], 1),
+                stack_of(&[3, 4], 3),
+            ),
+            pane(focus),
+        )
+    }
+
+    #[rstest::rstest]
+    fn stack_focused_joins_the_focused_panes_own_stack() {
+        // Given two stacks, pane 3 in the second one focused.
+        let mut layout = two_stacks(3);
+
+        // When stacking pane 5.
+        layout.stack_focused(pane(5));
+
+        // Then pane 5 sits right after pane 3 in the second stack.
+        assert_eq!(
+            layout
+                .stacks(AREA)
+                .into_iter()
+                .map(|stack| stack.panes)
+                .collect::<Vec<_>>(),
+            vec![vec![pane(1), pane(2)], vec![pane(3), pane(5), pane(4)]],
+            "the new pane joins the focused pane's own stack"
+        );
+    }
+
+    #[rstest::rstest]
+    fn stacks_lists_every_stack_in_tree_order() {
+        // Given two stacks side by side.
+        let layout = two_stacks(1);
+
+        // When listing the stacks.
+        let stacks: Vec<(Rect, Vec<PaneId>)> = layout
+            .stacks(AREA)
+            .into_iter()
+            .map(|stack| (stack.area, stack.panes))
+            .collect();
+
+        // Then the left stack comes first, then the right one, each on its half.
+        assert_eq!(
+            stacks,
+            vec![
+                (Rect::new(0, 0, 50, 40), vec![pane(1), pane(2)]),
+                (Rect::new(50, 0, 50, 40), vec![pane(3), pane(4)]),
+            ],
+            "every stack is listed in tree order with its area"
         );
     }
 

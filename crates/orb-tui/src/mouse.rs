@@ -73,8 +73,8 @@ pub(crate) struct HitMap {
     tab_targets: Vec<(Rect, usize, PaneId)>,
     /// The tab bar's `+` chevron.
     new_tab: Option<Rect>,
-    /// The stack's list, every stacked pane in order and the shown one.
-    stack: Option<(Rect, Vec<PaneId>, PaneId)>,
+    /// Each stack's list, its stacked panes in order and the shown one.
+    stacks: Vec<(Rect, Vec<PaneId>, PaneId)>,
 }
 
 /// The text line of the input that has the keys, and what `visible` drew
@@ -173,10 +173,10 @@ impl HitMap {
         self.new_tab = Some(area);
     }
 
-    /// Records the stack's list `area`, its panes in stack `order` and the
-    /// `shown` one.
+    /// Records a stack's list `area`, its panes in stack `order` and the
+    /// `shown` one, beside any stack already recorded.
     pub(crate) fn record_stack(&mut self, area: Rect, order: Vec<PaneId>, shown: PaneId) {
-        self.stack = Some((area, order, shown));
+        self.stacks.push((area, order, shown));
     }
 
     /// Records where the open picker or rename box was drawn.
@@ -394,11 +394,11 @@ pub(crate) fn route(
     }
 }
 
-/// Where a wheel notch over the stack's list goes: the next stacked pane on
-/// a scroll down, the previous on a scroll up, nothing at either end. `None`
-/// off the list.
+/// Where a wheel notch over a stack's list goes: the next pane of that stack
+/// on a scroll down, the previous on a scroll up, nothing at either end.
+/// `None` off every list.
 fn route_stack(at: Position, hits: &HitMap, kind: MouseEventKind) -> Option<MouseRoute> {
-    let (_, order, shown) = hits.stack.as_ref().filter(|(area, ..)| area.contains(at))?;
+    let (_, order, shown) = hits.stacks.iter().find(|(area, ..)| area.contains(at))?;
     let next = order
         .iter()
         .position(|id| id == shown)
