@@ -93,14 +93,6 @@ impl IntentHandler {
                 state.sessions.select_row(*item);
                 with_visit(state, vec![])
             }
-            Intent::SelectWheelNext => {
-                state.sessions.select_below();
-                with_visit(state, vec![])
-            }
-            Intent::SelectWheelPrev => {
-                state.sessions.select_above();
-                with_visit(state, vec![])
-            }
             Intent::ToggleSidebar => match (state.sidebar.hidden, state.focus) {
                 // `<C-g> e` in a pane: the keys stay in the pane.
                 (hidden, Focus::Pane) => {
@@ -6145,45 +6137,6 @@ mod tests {
             state.jumps.entries(),
             [on_thread(2), on_thread(1)],
             "a click during a search should record where it left and where it landed"
-        );
-    }
-
-    #[rstest::rstest]
-    fn select_wheel_next_on_the_last_row_stays_there() {
-        // Given threads listed 3, 2, 1 with the cursor on the last row,
-        // thread 1's agent row.
-        let mut state = three_titles();
-        let last = SidebarItem::Agent {
-            session: SessionId(1),
-            pane: PaneId(1),
-        };
-        state.sessions.cursor = Some(last);
-
-        // When handling SelectWheelNext (the wheel down).
-        IntentHandler::handle(&Intent::SelectWheelNext, &mut state);
-
-        // Then the cursor stays on thread 1's agent row.
-        assert_eq!(
-            state.sessions.cursor,
-            Some(last),
-            "the wheel shouldn't wrap past the last row"
-        );
-    }
-
-    #[rstest::rstest]
-    fn select_wheel_prev_on_the_first_row_stays_there() {
-        // Given threads listed 3, 2, 1 with the cursor on the first, thread 3.
-        let mut state = three_titles();
-        state.sessions.cursor = Some(on_thread(3));
-
-        // When handling SelectWheelPrev (the wheel up).
-        IntentHandler::handle(&Intent::SelectWheelPrev, &mut state);
-
-        // Then the cursor stays on thread 3.
-        assert_eq!(
-            state.sessions.cursor,
-            Some(on_thread(3)),
-            "the wheel shouldn't wrap past the first row"
         );
     }
 

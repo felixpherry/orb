@@ -556,9 +556,8 @@ impl App {
             }
             let now = SystemTime::now();
             let mut drawn = (None, None);
-            if self.state.read().focus == Focus::Sidebar {
-                self.sidebar_scroll.release();
-            }
+            self.sidebar_scroll
+                .follow_keys(self.state.read().focus == Focus::Sidebar);
             terminal.draw(|frame| {
                 let state = self.state.read();
                 drawn = render::render(

@@ -717,32 +717,6 @@ impl Sessions {
         }
     }
 
-    /// Move the cursor to the row below, staying on the last row. Without a
-    /// cursor, or with one on a row that's gone, selects the first row.
-    pub fn select_below(&mut self) {
-        let items = self.items();
-        let next = match self.position(&items) {
-            None => items.first(),
-            Some(at) => items.get((at + 1).min(items.len() - 1)),
-        };
-        if let Some(&next) = next {
-            self.cursor = Some(next);
-        }
-    }
-
-    /// Move the cursor to the row above, staying on the first row. Without a
-    /// cursor, or with one on a row that's gone, selects the first row.
-    pub fn select_above(&mut self) {
-        let items = self.items();
-        let prev = match self.position(&items) {
-            None => items.first(),
-            Some(at) => items.get(at.saturating_sub(1)),
-        };
-        if let Some(&prev) = prev {
-            self.cursor = Some(prev);
-        }
-    }
-
     /// Move the cursor to the first row.
     pub fn select_first(&mut self) {
         if let Some(&first) = self.items().first() {

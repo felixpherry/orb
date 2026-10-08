@@ -26,12 +26,6 @@ pub enum Intent {
     /// Select this sidebar row (a click). During a search, end it on that
     /// row as `⏎` does.
     SelectRow(SidebarItem),
-    /// Move the sidebar's cursor one row down, stopping on the last row (the
-    /// wheel).
-    SelectWheelNext,
-    /// Move the sidebar's cursor one row up, stopping on the first row (the
-    /// wheel).
-    SelectWheelPrev,
     /// Hide the sidebar, giving the right side the full width, or show it
     /// again.
     ToggleSidebar,
@@ -195,8 +189,8 @@ impl fmt::Display for Intent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Quit => "quit",
-            Self::SelectNext | Self::SelectWheelNext => "next session",
-            Self::SelectPrev | Self::SelectWheelPrev => "previous session",
+            Self::SelectNext => "next session",
+            Self::SelectPrev => "previous session",
             Self::SelectRow(_) | Self::PickerSelectRow(_) => "select",
             Self::MoveFocus(NavDirection::Right) => "focus right",
             Self::PickerNext | Self::PickerWheelNext => "next item",

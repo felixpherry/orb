@@ -7,8 +7,8 @@
 //! click on a row of a stack's list focuses its pane, and the wheel over the
 //! list shows the next stacked pane on a scroll down and the previous on a
 //! scroll up, leaving the keys where they are. The pane frames and the start
-//! screen take no clicks. The wheel moves the
-//! sidebar's selection while it has the keys, and otherwise scrolls its view. In a
+//! screen take no clicks. The wheel over the sidebar scrolls its view and
+//! never moves the selection, wherever the keys are. In a
 //! picker a click selects a row, a double-click picks it and the wheel over
 //! its list moves the selection; a click outside a picker or the rename box
 //! closes it like `Esc`. A click in the text of the sidebar search, a
@@ -381,8 +381,6 @@ pub(crate) fn route(
             route_overlay(at, hits, focus, action, clicks, now)
         }
         (_, Action::Wheel(_)) if !hits.sidebar.contains(at) => MouseRoute::Nothing,
-        (Focus::Sidebar, Action::Wheel(1)) => MouseRoute::Intents(vec![Intent::SelectWheelNext]),
-        (Focus::Sidebar, Action::Wheel(_)) => MouseRoute::Intents(vec![Intent::SelectWheelPrev]),
         (_, Action::Wheel(notch)) => MouseRoute::ScrollSidebar(notch * WHEEL_LINES),
         (_, Action::Click) => {
             let row = hits.row_at(at);
@@ -969,24 +967,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn wheel_over_the_sidebar_with_its_keys_moves_the_selection() {
-        // Given the sidebar has the keys.
-        // When wheeling down over it.
-        let routed = route_once(mouse(MouseEventKind::ScrollDown, 5, 10), Focus::Sidebar);
-
-        // Then the selection moves down.
-        assert_eq!(
-            routed,
-            MouseRoute::Intents(vec![Intent::SelectWheelNext]),
-            "the wheel should move the sidebar's selection"
-        );
-    }
-
-    #[rstest::rstest]
-    fn wheel_over_the_sidebar_from_the_pane_scrolls_its_view() {
-        // Given the attached pane has the keys.
+    #[case::sidebar(Focus::Sidebar)]
+    #[case::pane(Focus::Pane)]
+    fn wheel_over_the_sidebar_scrolls_its_view(#[case] focus: Focus) {
+        // Given the keys in the sidebar or the attached pane.
         // When wheeling down over the sidebar.
-        let routed = route_once(mouse(MouseEventKind::ScrollDown, 5, 10), Focus::Pane);
+        let routed = route_once(mouse(MouseEventKind::ScrollDown, 5, 10), focus);
 
         // Then the sidebar's view scrolls three lines.
         assert_eq!(

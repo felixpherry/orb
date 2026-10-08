@@ -71,19 +71,26 @@ pub(crate) struct SidebarScroll {
         reason = "free on no selection differs from not free"
     )]
     free: Option<Option<SidebarItem>>,
+    /// Whether the keys were in the sidebar at the last draw.
+    keys_here: bool,
 }
 
 impl SidebarScroll {
     /// Scrolls the view `lines` down (up when negative) without following
-    /// the selection, `cursor`, until it moves or `release` is called.
+    /// the selection, `cursor`, until it moves or the keys move into the
+    /// sidebar.
     pub(crate) fn scroll_free(&mut self, lines: i16, cursor: Option<SidebarItem>) {
         self.offset = self.offset.saturating_add_signed(lines);
         self.free = Some(cursor);
     }
 
-    /// Brings the view back to the selection on the next draw.
-    pub(crate) fn release(&mut self) {
-        self.free = None;
+    /// Brings the view back to the selection on the next draw when the keys
+    /// just moved into the sidebar (`in_sidebar` now, elsewhere last draw).
+    pub(crate) fn follow_keys(&mut self, in_sidebar: bool) {
+        if in_sidebar && !self.keys_here {
+            self.free = None;
+        }
+        self.keys_here = in_sidebar;
     }
 
     /// Whether this draw leaves the view where the wheel put it: only while
@@ -2705,14 +2712,35 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn released_scroll_snaps_back_to_the_selection() {
-        // Given the view wheeled down on thread 3, then released.
+    fn free_scroll_stays_while_the_keys_stay_in_the_sidebar() {
+        // Given the keys in the sidebar and the view wheeled down on thread 3.
         let sessions = three_threads(3);
         let mut scroll = SidebarScroll::default();
+        scroll.follow_keys(true);
         scroll.scroll_free(3, sessions.cursor);
-        scroll.release();
 
-        // When rendering the sidebar.
+        // When the next draw finds the keys still in the sidebar.
+        scroll.follow_keys(true);
+        let (selected_y, _) = render_with(&sessions, &mut scroll, 8);
+
+        // Then the view stays where the wheel put it.
+        assert_ne!(
+            selected_y,
+            Some(3),
+            "the view shouldn't snap back to the selection"
+        );
+    }
+
+    #[rstest::rstest]
+    fn keys_moving_into_the_sidebar_bring_the_view_back() {
+        // Given the keys in a pane and the view wheeled down on thread 3.
+        let sessions = three_threads(3);
+        let mut scroll = SidebarScroll::default();
+        scroll.follow_keys(false);
+        scroll.scroll_free(3, sessions.cursor);
+
+        // When the keys move into the sidebar.
+        scroll.follow_keys(true);
         let (selected_y, _) = render_with(&sessions, &mut scroll, 8);
 
         // Then the view follows the selection to the top of the list.

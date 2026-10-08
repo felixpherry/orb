@@ -147,7 +147,7 @@ orb captures the mouse from the moment it starts.
 - The wheel over a pane goes to its program if the program tracks the mouse. Otherwise it sends arrow keys on the alternate screen, and scrolls the pane's history everywhere else. History holds 10 000 lines, from what orb saw after it attached.
 - A left drag in a pane whose program doesn't track the mouse (a shell, plain `claude`, plain `pi`) selects text, and the release copies it through OSC 52. A double-click selects a word and a triple-click a line. Dragging past the top or bottom edge scrolls while selecting.
 - In a program that tracks the mouse, like lazygit or a fullscreen Claude, clicks and drags go to the program.
-- With the keys in the sidebar, the wheel moves the selection one row. Otherwise, with no picker or rename box open, the wheel over the sidebar scrolls only its view, 3 lines a notch. Over a picker's list it moves the picker's selection, and over the session, worktree or search picker's preview it does nothing. Neither wraps.
+- With no picker or rename box open, the wheel over the sidebar scrolls only its view, 3 lines a notch, wherever the keys are. It never moves the selection. Over a picker's list it moves the picker's selection, and over the session, worktree or search picker's preview it does nothing. Neither wraps.
 - A click outside a picker or the rename box closes it, as `Esc` does.
 - A click on the sidebar's search box starts a search, and a click in any input's text moves the cursor there.
 
