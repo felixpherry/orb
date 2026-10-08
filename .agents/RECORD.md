@@ -212,7 +212,7 @@ Entries are added or amended **only with human approval**.
 - (mouse) A click on a sidebar row or the sidebar's input box moves the keys to the sidebar, and a click on the right-hand area moves them to the dashboard or into the Claude pane shown there; the click that moves them into the pane isn't forwarded to Claude.
 - (mouse) A double-click is two clicks on the same sidebar or picker row within 500 ms.
 - (mouse) In the sidebar, a click selects a row and a double-click acts as `⏎` on it.
-- (mouse) The wheel over the sidebar moves the selection one row without wrapping while the sidebar has the keys, and otherwise, with no picker or rename box open, scrolls only its view, 3 lines a notch; the view goes back to the selection once the selection moves or the sidebar takes the keys.
+- (mouse) The wheel over the sidebar, with no picker or rename box open, scrolls only its view, 3 lines a notch, and never moves the selection; the view goes back to the selection once the selection moves or the keys move into the sidebar.
 - (mouse) Clicking the sidebar's input box starts a search; during a search, clicking a row ends it as `⏎` does on that row, and clicking the right-hand area ends it as `⏎` does and moves the keys there.
 - (mouse) A click on a dashboard menu item moves the menu cursor to it without running it.
 - (mouse) In a picker, a click selects a row, a double-click picks it, the wheel over its list moves the selection one row without wrapping (over the session, worktree or search picker's preview it does nothing), a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.
@@ -234,6 +234,7 @@ Entries are added or amended **only with human approval**.
 - (picker) The worktree picker lists every directory under `~/.orb/worktrees/<repo>/`, active ones first and unused ones last, most recently used first within each, each with its state: `active · <title>`, `settled <age>` or `no thread`.
 - (picker) The worktree picker's preview shows the worktree's path, branch, size, uncommitted changes, last commit, last use, sweep verdict, and the threads, Feature groups and drafts that use it.
 - (picker) The worktree picker's sweep verdict comes from the same rule the sweep applies.
+- (picker) The worktree picker re-lists its rows after each rescan of orb's worktrees while it's open, keeping the typed text and the selected row.
 - (keybinds) In the worktree picker, `⏎` does nothing and `<C-x>` deletes the selected worktree after a `No`/`Yes` confirm drawn over the list, which either answer returns to; it is refused, with the reason on the mode line, while a thread in it is attached or has a turn underway.
 - (worktrees) Deleting a worktree from the worktree picker force-removes it, uncommitted changes included, and keeps its branch.
 - (paths) orb persists its transcript search index to `~/.orb/userdata/search.sqlite`, which it rebuilds from the transcripts when the file is missing, can't be read, or holds another schema version.
@@ -288,5 +289,6 @@ Entries are added or amended **only with human approval**.
 - (layout) A zoomed tab draws one frame over the whole tab body.
 - (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
+- (layout) When a thread's last pane closes, by a close key or by its program exiting, orb opens a shell pane in the thread's directory in its place.
 - (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab with the keys in its pane.
 - (sidebar) On an agent row, `r` renames the agent's pane and `d` closes it after a confirm.
