@@ -22,38 +22,13 @@ Then:
 4. `Cmd n` adds a pane and re-tiles the tab, `<C-g> p r`/`p d` split the pane right/down and share the space evenly, and `<C-g> t n` opens a tab.
 5. `<C-g> q` quits orb. Every pane keeps running under zmx, and orb reattaches them when it starts again.
 
-The Cmd keys reach orb only through kitty `map` lines in `kitty.conf`, and `<C-S-h>`/`<C-S-l>` only once kitty stops using them itself:
+The Cmd keys reach orb only through kitty `map` lines, and `<C-S-h>`/`<C-S-l>` only once kitty stops using them itself (it opens its scrollback pager and switches layouts on them). From a checkout of this repo, write them with:
 
+```sh
+scripts/kitty-keys.sh
 ```
-map cmd+h send_key super+h
-map cmd+j send_key super+j
-map cmd+k send_key super+k
-map cmd+l send_key super+l
-map cmd+left send_key super+left
-map cmd+down send_key super+down
-map cmd+up send_key super+up
-map cmd+right send_key super+right
-map cmd+n send_key super+n
-map cmd+x send_key super+x
-map cmd+plus send_key super+plus
-map cmd+equal send_key super+equal
-map cmd+minus send_key super+minus
-map cmd+1 send_key super+1
-map cmd+2 send_key super+2
-map cmd+3 send_key super+3
-map cmd+4 send_key super+4
-map cmd+5 send_key super+5
-map cmd+6 send_key super+6
-map cmd+7 send_key super+7
-map cmd+8 send_key super+8
-map cmd+9 send_key super+9
-map cmd+[ send_key super+[
-map cmd+] send_key super+]
-map cmd+i send_key super+i
-map cmd+o send_key super+o
-map ctrl+shift+h no_op
-map ctrl+shift+l no_op
-```
+
+It writes `orb.conf` to kitty's config directory and adds `include orb.conf` to `kitty.conf`; running it again rewrites `orb.conf` and leaves the include alone. Reload kitty afterwards. On macOS it maps each Cmd key to Super (`map cmd+h send_key super+h`). On Linux the compositor usually owns Super (niri binds nearly all of orb's keys), so Alt stands in for Cmd: `Alt h` is orb's `Cmd h`. Those maps apply only while the focused kitty window's title starts with `orb`, which fish, and bash or zsh with kitty's shell integration, set while orb runs, so Alt and `<C-S-h>`/`<C-S-l>` keep working everywhere else. Inside orb, those Alt keys go to orb rather than the pane's shell or agent. The keys are h, j, k, l, the arrows, n, x, +, =, -, 1–9, [, ], i and o.
 
 ## Demo
 
