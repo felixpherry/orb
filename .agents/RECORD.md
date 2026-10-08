@@ -281,12 +281,17 @@ Entries are added or amended **only with human approval**.
 - (layout) Adding a pane with `Cmd n` or closing one re-tiles the tab by pane count: `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
 - (layout) From 11 panes a tab is one stack: a list naming every pane at the top, with `>` on the shown one, and the shown pane's frame below it.
 - (layout) `<C-g> p s` stacks a new pane with the focused one and shows it, until the next add, split or close re-tiles the tab.
-- (layout) A tab holds at most one stack, so `<C-g> p s` on a pane outside it adds the new pane to that stack.
+- (layout) `<C-g> p s` on a pane outside every stack starts a new stack, so a tab can hold several, each with its own list.
 - (layout) A stack's list is centred over the shown pane, as wide as its longest name with a dim bar on each side and a `>` outside the left bar on the shown row, and scrolls to keep the shown row once it would take more than half the stack's height.
 - (layout) `<C-g> p r` and `<C-g> p d` split the focused pane and share the space evenly among the panes split in that direction, until the next add or close re-tiles the tab.
 - (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
 - (layout) A zoomed tab draws one frame over the whole tab body.
+- (layout) `Cmd +` moves the focused pane's split border, or its stack's, 4 cells away from it.
+- (layout) When a `Cmd +` step would leave a pane on the other side of the split under 5 rows or 5 columns, frame included, that whole split becomes one stack showing the focused pane.
+- (layout) `Cmd +` zooms the focused pane once there is no split left to grow or stack, unless it's the tab's only pane.
+- (layout) `Cmd -` on a zoomed tab leaves the zoom, and otherwise restores the tab's tree from before its last `Cmd +`.
+- (layout) `Cmd +` restores the tab's tree from before its last `Cmd -`.
 - (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
 - (layout) When a thread's last pane closes, by a close key or by its program exiting, orb opens a shell pane in the thread's directory in its place.

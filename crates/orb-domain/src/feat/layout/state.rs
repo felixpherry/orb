@@ -2270,4 +2270,40 @@ mod tests {
             "Cmd - with no history should shrink the focused pane a step"
         );
     }
+
+    #[rstest::rstest]
+    #[case::add(|layouts: &mut Layouts| layouts.add_tiled(OWNER, entry(12)))]
+    #[case::split(|layouts: &mut Layouts| layouts.split(OWNER, Split::Right, entry(12)))]
+    #[case::close(|layouts: &mut Layouts| layouts.close_pane(PaneId(8)))]
+    fn re_tile_drops_a_stack_made_by_cmd_plus(#[case] change: fn(&mut Layouts)) {
+        // Given a [1][4] tab where Cmd + stacked part of the right column.
+        let mut layouts = climb();
+        grow_until_the_stacks_change(&mut layouts);
+
+        // When adding, splitting or closing a pane.
+        change(&mut layouts);
+
+        // Then the re-tiled tab holds no stack.
+        assert_eq!(
+            stacked(&layouts),
+            Vec::<Vec<PaneId>>::new(),
+            "a re-tile under 11 panes drops the stack Cmd + made"
+        );
+    }
+
+    #[rstest::rstest]
+    fn each_stack_list_is_centred_over_its_own_stack() {
+        // Given two stacks side by side, each 40 columns wide.
+        let layouts = two_stacks();
+
+        // When placing them with 20-column lists.
+        let lists: Vec<u16> = placement(&layouts)
+            .stacks
+            .iter()
+            .map(|stack| stack.area.x)
+            .collect();
+
+        // Then each list starts 10 columns into its own stack.
+        assert_eq!(lists, vec![10, 50], "each list is centred over its stack");
+    }
 }
