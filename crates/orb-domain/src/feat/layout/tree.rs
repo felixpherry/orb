@@ -18,6 +18,18 @@ use wherror::Error;
 
 use crate::feat::sessions::state::PaneId;
 
+/// The fewest rows a pane outside a stack keeps after a `Cmd +` step, its
+/// frame included. A stack keeps twice this, since its list takes up to
+/// half its rows.
+const MIN_PANE_ROWS: u16 = 5;
+/// The fewest columns any pane or stack keeps after a `Cmd +` step, its
+/// frame included.
+const MIN_PANE_COLS: u16 = 5;
+/// How far past 0.1–0.9 a grown ratio may land and still count as inside:
+/// steps add up in `f32`, so a ratio meant to reach a bound exactly can
+/// overshoot it by a hair. Far under one cell of any terminal.
+const RATIO_SLACK: f32 = 1e-4;
+
 /// Which way a split puts its second pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -54,6 +66,18 @@ pub struct StackInfo {
     pub area: Rect,
     pub panes: Vec<PaneId>,
     pub expanded: PaneId,
+}
+
+/// What a [`TileLayout::grow_focused`] step did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grow {
+    /// The focused pane's border moved.
+    Grew,
+    /// The focused pane's parent split became one stack showing it.
+    Stacked,
+    /// No split holds the focused pane or its stack: a lone pane, or a tree
+    /// that is one stack.
+    Stuck,
 }
 
 /// A node of the tree: one pane, a split holding two subtrees, or a stack
@@ -283,23 +307,73 @@ impl TileLayout {
     /// `grow`, away from it otherwise. The ratio stays between 0.1 and 0.9. A
     /// lone pane has no split, and nothing changes. Returns whether it changed.
     pub fn resize_focused(&mut self, grow: bool, cells: u16, area: Rect) -> bool {
-        let Some((ratio, focused_first, extent)) = parent_split(&mut self.root, area, self.focus)
+        let focus = self.focus;
+        let Some((
+            Node::Split {
+                split,
+                ratio,
+                first,
+                ..
+            },
+            area,
+        )) = parent_node(&mut self.root, area, focus)
         else {
             return false;
         };
-        if extent == 0 {
+        let Some(resized) = moved(*split, *ratio, grow == holds(first, focus), cells, area) else {
             return false;
-        }
-        let delta = f32::from(cells) / f32::from(extent);
-        let resized = if grow == focused_first {
-            *ratio + delta
-        } else {
-            *ratio - delta
-        }
-        .clamp(0.1, 0.9);
+        };
+        let resized = resized.clamp(0.1, 0.9);
         let changed = (resized - *ratio).abs() > f32::EPSILON;
         *ratio = resized;
         changed
+    }
+
+    /// Grows the focused pane `cells` columns (rows for a `Down` split) into its
+    /// sibling across its own split, or its stack's. When that would leave a pane
+    /// on the other side under [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`] (a stack
+    /// under twice the rows), or move the ratio past 0.1–0.9, the split becomes
+    /// one stack of every pane in it, showing the focused pane; stacks inside it
+    /// merge in. `Stuck` when no split holds the focused pane.
+    pub fn grow_focused(&mut self, cells: u16, area: Rect) -> Grow {
+        let focus = self.focus;
+        let Some((node, area)) = parent_node(&mut self.root, area, focus) else {
+            return Grow::Stuck;
+        };
+        if let Node::Split {
+            split,
+            ratio,
+            first,
+            second,
+        } = &mut *node
+        {
+            let focused_first = holds(first, focus);
+            let Some(resized) = moved(*split, *ratio, focused_first, cells, area) else {
+                return Grow::Stuck;
+            };
+            let fits = (0.1 - RATIO_SLACK..=0.9 + RATIO_SLACK).contains(&resized) && {
+                let (a, b) = split_rect(area, *split, resized);
+                if focused_first {
+                    roomy(second, b)
+                } else {
+                    roomy(first, a)
+                }
+            };
+            if fits {
+                *ratio = resized.clamp(0.1, 0.9);
+                return Grow::Grew;
+            }
+        }
+        let panes = {
+            let mut ids = Vec::new();
+            collect_ids(node, &mut ids);
+            ids
+        };
+        *node = Node::Stack {
+            panes,
+            expanded: focus,
+        };
+        Grow::Stacked
     }
 
     /// The tree as JSON: `{"pane":7}` or
@@ -709,6 +783,26 @@ fn stacks_in(node: &Node, area: Rect, stacks: &mut Vec<StackInfo>) {
     }
 }
 
+/// Whether `node` laid over `area` keeps every pane outside a stack at least
+/// [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`], and every stack [`MIN_PANE_COLS`]
+/// wide and twice [`MIN_PANE_ROWS`] tall.
+fn roomy(node: &Node, area: Rect) -> bool {
+    let rows = match node {
+        Node::Split {
+            split,
+            ratio,
+            first,
+            second,
+        } => {
+            let (a, b) = split_rect(area, *split, *ratio);
+            return roomy(first, a) && roomy(second, b);
+        }
+        Node::Pane(_) => MIN_PANE_ROWS,
+        Node::Stack { .. } => 2 * MIN_PANE_ROWS,
+    };
+    area.width >= MIN_PANE_COLS && area.height >= rows
+}
+
 fn collect_ids(node: &Node, ids: &mut Vec<PaneId>) {
     match node {
         Node::Pane(id) => ids.push(*id),
@@ -741,10 +835,25 @@ fn find_pane_mut(node: &mut Node, target: PaneId) -> Option<&mut Node> {
     }
 }
 
-/// The split directly holding pane `target`, or the stack holding it, laid
-/// over `area`: its ratio, whether `target` is in its first subtree, and the
-/// cells it divides (width for a right split, height for a down split).
-fn parent_split(node: &mut Node, area: Rect, target: PaneId) -> Option<(&mut f32, bool, u16)> {
+/// Whether `node` is pane `target` or a stack holding it.
+fn holds(node: &Node, target: PaneId) -> bool {
+    match node {
+        Node::Pane(id) => *id == target,
+        Node::Stack { panes, .. } => panes.contains(&target),
+        Node::Split { .. } => false,
+    }
+}
+
+/// The split directly holding pane `target`, or the stack holding it, and
+/// the part of `area` it's laid over.
+fn parent_node(node: &mut Node, area: Rect, target: PaneId) -> Option<(&mut Node, Rect)> {
+    let here = match &*node {
+        Node::Split { first, second, .. } => holds(first, target) || holds(second, target),
+        Node::Pane(_) | Node::Stack { .. } => return None,
+    };
+    if here {
+        return Some((node, area));
+    }
     let Node::Split {
         split,
         ratio,
@@ -754,23 +863,22 @@ fn parent_split(node: &mut Node, area: Rect, target: PaneId) -> Option<(&mut f32
     else {
         return None;
     };
+    let (a, b) = split_rect(area, *split, *ratio);
+    parent_node(first, a, target).or_else(|| parent_node(second, b, target))
+}
+
+/// `ratio` of a `split` split over `area`, moved `cells` columns (rows for
+/// `Down`): up when `up`, down otherwise. Unclamped; `None` when `area` has
+/// no cells that way.
+fn moved(split: Split, ratio: f32, up: bool, cells: u16, area: Rect) -> Option<f32> {
     let extent = match split {
         Split::Right => area.width,
         Split::Down => area.height,
     };
-    let holds = |node: &Node| match node {
-        Node::Pane(id) => *id == target,
-        Node::Stack { panes, .. } => panes.contains(&target),
-        Node::Split { .. } => false,
-    };
-    if holds(first) {
-        return Some((ratio, true, extent));
-    }
-    if holds(second) {
-        return Some((ratio, false, extent));
-    }
-    let (a, b) = split_rect(area, *split, *ratio);
-    parent_split(first, a, target).or_else(|| parent_split(second, b, target))
+    (extent > 0).then(|| {
+        let delta = f32::from(cells) / f32::from(extent);
+        if up { ratio + delta } else { ratio - delta }
+    })
 }
 
 fn split_node(target: PaneId, split: Split, new_id: PaneId, ratio: f32) -> Node {
@@ -857,7 +965,9 @@ fn split_rect(area: Rect, split: Split, ratio: f32) -> (Rect, Rect) {
 mod tests {
     use ratatui::layout::Rect;
 
-    use super::{NavDirection, Node, PaneInfo, Split, TileLayout, columns, find_in_direction};
+    use super::{
+        Grow, NavDirection, Node, PaneInfo, Split, TileLayout, columns, find_in_direction,
+    };
     use crate::feat::sessions::state::PaneId;
 
     const AREA: Rect = Rect::new(0, 0, 100, 40);
@@ -1842,6 +1952,154 @@ mod tests {
             ratio(&layout).is_some_and(|ratio| (ratio - 0.46).abs() < 1e-6),
             "ratio should be 0.46, got {:?}",
             ratio(&layout)
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_focused_moves_the_border_when_the_step_fits() {
+        // Given two halves of a 100-column area, the left one focused.
+        let mut layout = halves(1);
+
+        // When growing it by 4 cells.
+        let grew = layout.grow_focused(4, AREA);
+
+        // Then the split moves 4 columns right.
+        assert!(
+            grew == Grow::Grew && ratio(&layout).is_some_and(|ratio| (ratio - 0.54).abs() < 1e-6),
+            "the border should move to 0.54, got {grew:?} at {:?}",
+            ratio(&layout)
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::rows(Split::Down, Rect::new(0, 0, 100, 20))]
+    #[case::columns(Split::Right, Rect::new(0, 0, 20, 40))]
+    fn grow_focused_stacks_when_the_sibling_would_get_too_small(
+        #[case] way: Split,
+        #[case] area: Rect,
+    ) {
+        // Given panes 1 and 2 split at 0.4, pane 2 focused, with 8 cells for pane 1.
+        let mut layout = TileLayout::from_saved(
+            split(way, 0.4, Node::Pane(pane(1)), Node::Pane(pane(2))),
+            pane(2),
+        );
+
+        // When growing pane 2 by 4 cells, which would leave pane 1 with 4.
+        let grew = layout.grow_focused(4, area);
+
+        // Then the split becomes one stack showing pane 2.
+        assert_eq!(
+            (grew, layout.root),
+            (Grow::Stacked, stack_of(&[1, 2], 2)),
+            "a step that leaves the sibling under 5 cells should stack the split"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_focused_stacks_at_the_ratio_bound() {
+        // Given panes 1 and 2 split right at 0.9, pane 1 focused.
+        let mut layout = TileLayout::from_saved(
+            split(Split::Right, 0.9, Node::Pane(pane(1)), Node::Pane(pane(2))),
+            pane(1),
+        );
+
+        // When growing pane 1 by 4 cells past the bound.
+        let grew = layout.grow_focused(4, AREA);
+
+        // Then the split becomes one stack showing pane 1.
+        assert_eq!(
+            (grew, layout.root),
+            (Grow::Stacked, stack_of(&[1, 2], 1)),
+            "a step past the ratio bound should stack the split"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_focused_flattens_a_stack_in_the_sibling() {
+        // Given pane 1 above a stack of 2 and 3 in 20 rows, pane 1 focused.
+        let mut layout = TileLayout::from_saved(
+            split(Split::Down, 0.4, Node::Pane(pane(1)), stack_of(&[2, 3], 2)),
+            pane(1),
+        );
+
+        // When growing pane 1 by 4 rows, which would leave the stack 8.
+        layout.grow_focused(4, Rect::new(0, 0, 100, 20));
+
+        // Then the tree is one flat stack of 1, 2 and 3 showing pane 1.
+        assert_eq!(
+            layout.root,
+            stack_of(&[1, 2, 3], 1),
+            "the stack in the sibling should merge into the new stack"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_focused_moves_a_stacked_panes_border() {
+        // Given a stack of 1 and 2 beside pane 3, pane 1 focused.
+        let mut layout = TileLayout::from_saved(
+            split(Split::Right, 0.5, stack_of(&[1, 2], 1), Node::Pane(pane(3))),
+            pane(1),
+        );
+
+        // When growing pane 1 by 4 cells.
+        let grew = layout.grow_focused(4, AREA);
+
+        // Then the border between the stack and pane 3 moves 4 columns right.
+        assert!(
+            grew == Grow::Grew && ratio(&layout).is_some_and(|ratio| (ratio - 0.54).abs() < 1e-6),
+            "the stack's border should move to 0.54, got {grew:?} at {:?}",
+            ratio(&layout)
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::lone(TileLayout::new(pane(1)))]
+    #[case::whole_stack(TileLayout::from_saved(stack_of(&[1, 2], 1), pane(1)))]
+    fn grow_focused_without_a_parent_split_is_stuck(#[case] mut layout: TileLayout) {
+        // Given a layout with no split.
+
+        // When growing the focused pane.
+        let grew = layout.grow_focused(4, AREA);
+
+        // Then it's stuck.
+        assert_eq!(grew, Grow::Stuck, "with no split there is nothing to grow");
+    }
+
+    #[rstest::rstest]
+    fn grow_focused_keeps_unstacked_panes_at_least_five_by_five(
+        #[values(2, 3, 4, 5, 6, 7, 8, 9, 10)] n: i64,
+    ) {
+        // Given `n` tiled panes, every one at least 33 columns by 10 rows.
+        let fresh = |focus: i64| {
+            let mut layout = tiled(n);
+            layout.focus_pane(pane(focus));
+            layout
+        };
+
+        // When growing each focused pane, on its own fresh layout, until stuck.
+        let mut violations = Vec::new();
+        for focus in 1..=n {
+            let mut layout = fresh(focus);
+            for step in 0..200 {
+                if layout.grow_focused(4, AREA) == Grow::Stuck {
+                    break;
+                }
+                let stacks = layout.stacks(AREA);
+                violations.extend(
+                    layout
+                        .panes(AREA)
+                        .into_iter()
+                        .filter(|info| !stacks.iter().any(|stack| stack.panes.contains(&info.id)))
+                        .filter(|info| info.rect.width < 5 || info.rect.height < 5)
+                        .map(|info| (n, focus, step, info.id, info.rect)),
+                );
+            }
+        }
+
+        // Then no step left a pane outside a stack under 5×5.
+        assert!(
+            violations.is_empty(),
+            "a grow step left panes under 5×5: {violations:?}"
         );
     }
 }

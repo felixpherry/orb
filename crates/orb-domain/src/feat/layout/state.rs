@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
 
-use super::tree::{NavDirection, PaneInfo, Split, TileLayout, find_in_direction};
+use super::tree::{Grow, NavDirection, PaneInfo, Split, TileLayout, find_in_direction};
 use crate::feat::sessions::state::{PaneId, SessionId};
 use crate::feat::sidebar::state::STEP;
 use crate::feat::zmx::zmx_service::ZmxSession;
@@ -70,6 +70,23 @@ impl Tab {
     /// The tab's tree, as the store saves it.
     pub fn layout_json(&self) -> String {
         self.tree.to_json()
+    }
+
+    /// Grows the focused pane a step, or stacks its split when the step doesn't
+    /// fit. With no split left to grow or stack, the tab zooms unless the pane
+    /// is its only one. A zoomed tab doesn't grow, and neither does one with no
+    /// body yet. Whether the tree changed.
+    fn grow(&mut self, body: Rect) -> bool {
+        if self.zoomed || body.is_empty() {
+            return false;
+        }
+        match self.tree.grow_focused(STEP, body) {
+            Grow::Grew | Grow::Stacked => true,
+            Grow::Stuck => {
+                self.zoomed = self.tree.pane_count() > 1;
+                false
+            }
+        }
     }
 }
 
@@ -612,11 +629,18 @@ impl Layouts {
         }
     }
 
-    /// Grows (or shrinks) the focused pane a step; whether it changed.
+    /// Grows the shown tab's focused pane a step (see [`Tab::grow`]: it may
+    /// stack the pane's split, or zoom the tab), or shrinks it a step. Whether
+    /// the tree changed; a zoom alone isn't a change.
     pub fn resize_focused(&mut self, owner: SessionId, grow: bool) -> bool {
         let body = self.body;
-        self.tab_mut(owner)
-            .is_some_and(|tab| tab.tree.resize_focused(grow, STEP, body))
+        self.tab_mut(owner).is_some_and(|tab| {
+            if grow {
+                tab.grow(body)
+            } else {
+                tab.tree.resize_focused(false, STEP, body)
+            }
+        })
     }
 
     /// Shows tab `n`, counting from 1; past the last changes nothing.
@@ -1819,6 +1843,201 @@ mod tests {
                 .and_then(|entry| entry.resume.as_deref()),
             Some("claude --resume aa"),
             "resume command in the entry"
+        );
+    }
+
+    /// A tall body for the `Cmd +` climb: in 80×24 the first step on a [1][4]
+    /// column already stacks.
+    const TALL: Rect = Rect::new(0, 0, 80, 40);
+
+    /// Whether the shown tab is zoomed.
+    fn zoomed(layouts: &Layouts) -> bool {
+        layouts
+            .get(OWNER)
+            .and_then(SessionLayout::active_tab)
+            .is_some_and(Tab::zoomed)
+    }
+
+    /// The shown tab's tree as saved.
+    fn tree_json(layouts: &Layouts) -> Option<String> {
+        layouts
+            .get(OWNER)
+            .and_then(SessionLayout::active_tab)
+            .map(Tab::layout_json)
+    }
+
+    /// The shown tab placed over `TALL`.
+    fn tall_placement(layouts: &Layouts) -> Placement {
+        layouts
+            .get(OWNER)
+            .map(|layout| layout.placed(TALL, |_| LIST_WIDTH))
+            .unwrap_or_default()
+    }
+
+    /// Each stack's panes, in tree order.
+    fn stacked(layouts: &Layouts) -> Vec<Vec<PaneId>> {
+        tall_placement(layouts)
+            .stacks
+            .into_iter()
+            .map(|stack| stack.panes)
+            .collect()
+    }
+
+    /// A [1][4] tab (pane 7 | panes 8 to 11) over `TALL`, focused on pane 9.
+    fn climb() -> Layouts {
+        let mut layouts = tiled(11);
+        layouts.fit_to(TALL);
+        layouts.focus_pane(OWNER, PaneId(9));
+        layouts
+    }
+
+    /// Presses `Cmd +` until the stacks change, at most 30 times.
+    fn grow_until_the_stacks_change(layouts: &mut Layouts) {
+        let before = stacked(layouts);
+        for _ in 0..30 {
+            layouts.resize_focused(OWNER, true);
+            if stacked(layouts) != before {
+                return;
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_in_a_column_first_grows_the_pane() {
+        // Given a [1][4] tab focused on pane 9, 10 rows tall.
+        let mut layouts = climb();
+
+        // When pressing Cmd + once.
+        layouts.resize_focused(OWNER, true);
+
+        // Then pane 9 is 14 rows tall.
+        let height = tall_placement(&layouts)
+            .panes
+            .iter()
+            .find(|place| place.pane == PaneId(9))
+            .map(|place| place.area.height);
+        assert_eq!(height, Some(14), "the first step should grow pane 9 4 rows");
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_in_a_column_stacks_part_of_the_column() {
+        // Given a [1][4] tab focused on pane 9.
+        let mut layouts = climb();
+
+        // When pressing Cmd + until the stacks change.
+        grow_until_the_stacks_change(&mut layouts);
+
+        // Then pane 9 and the panes below it are one stack.
+        assert_eq!(
+            stacked(&layouts),
+            vec![vec![PaneId(9), PaneId(10), PaneId(11)]],
+            "the first stack should hold pane 9 and the panes below it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_on_a_stacked_part_stacks_the_whole_column() {
+        // Given a [1][4] tab whose panes 9 to 11 were stacked by Cmd +.
+        let mut layouts = climb();
+        grow_until_the_stacks_change(&mut layouts);
+
+        // When pressing Cmd + until the stacks change again.
+        grow_until_the_stacks_change(&mut layouts);
+
+        // Then the whole right column is one stack.
+        assert_eq!(
+            stacked(&layouts),
+            vec![vec![PaneId(8), PaneId(9), PaneId(10), PaneId(11)]],
+            "the second stack should hold the whole column"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_on_a_stacked_column_stacks_the_whole_tab() {
+        // Given a [1][4] tab whose right column was stacked by Cmd +.
+        let mut layouts = climb();
+        grow_until_the_stacks_change(&mut layouts);
+        grow_until_the_stacks_change(&mut layouts);
+
+        // When pressing Cmd + until the stacks change again.
+        grow_until_the_stacks_change(&mut layouts);
+
+        // Then every pane in the tab is one stack.
+        assert_eq!(
+            stacked(&layouts),
+            vec![vec![
+                PaneId(7),
+                PaneId(8),
+                PaneId(9),
+                PaneId(10),
+                PaneId(11)
+            ]],
+            "the third stack should hold the whole tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_on_a_whole_tab_stack_zooms_it() {
+        // Given a [1][4] tab that Cmd + stacked whole.
+        let mut layouts = climb();
+        grow_until_the_stacks_change(&mut layouts);
+        grow_until_the_stacks_change(&mut layouts);
+        grow_until_the_stacks_change(&mut layouts);
+
+        // When pressing Cmd + once more.
+        layouts.resize_focused(OWNER, true);
+
+        // Then the tab is zoomed.
+        assert!(
+            zoomed(&layouts),
+            "Cmd + on a whole-tab stack should zoom it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_on_a_stacked_tab_zooms_it() {
+        // Given a tab that is one stack of panes 7 and 8.
+        let mut layouts = opened();
+        layouts.stack(OWNER, entry(8));
+
+        // When growing the focused pane.
+        layouts.resize_focused(OWNER, true);
+
+        // Then the tab is zoomed.
+        assert!(zoomed(&layouts), "growing a one-stack tab should zoom it");
+    }
+
+    #[rstest::rstest]
+    fn grow_on_a_lone_pane_changes_nothing() {
+        // Given a tab of pane 7 alone.
+        let mut layouts = opened();
+
+        // When growing it.
+        let changed = layouts.resize_focused(OWNER, true);
+
+        // Then neither the tree nor the zoom changed.
+        assert_eq!(
+            (changed, zoomed(&layouts)),
+            (false, false),
+            "a lone pane has nothing to grow into and nothing to zoom"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_on_a_zoomed_tab_keeps_the_tree() {
+        // Given panes 7 and 8 side by side, zoomed.
+        let mut layouts = split_right();
+        layouts.toggle_zoom(OWNER);
+        let before = tree_json(&layouts);
+
+        // When growing the focused pane.
+        layouts.resize_focused(OWNER, true);
+
+        // Then the tree is as it was.
+        assert_eq!(
+            tree_json(&layouts),
+            before,
+            "growing a zoomed tab should leave its tree alone"
         );
     }
 }
