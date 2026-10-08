@@ -887,7 +887,7 @@ fn still_deletable(state: &AppState, item: SidebarItem) -> bool {
 /// Closes agent pane `pane` of `session`, answered `Yes` in its confirm:
 /// the tab it leaves re-tiles, the cursor goes to the session's card, and
 /// the layout is saved (the frontend kills the pane's program; a session
-/// whose last pane closed settles when its layout is saved).
+/// whose last pane closed gets a new shell when its layout is saved).
 fn close_agent_pane(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Command> {
     state.layouts.close_pane(pane);
     state.sessions.cursor = Some(SidebarItem::Session(session));

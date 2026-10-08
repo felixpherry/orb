@@ -177,7 +177,7 @@ The user starts `claude` or `pi` in the shell, and sets the model and permission
 
 - Every pane runs its program under zmx, as the session `orb-p<id>` on the socket dir `~/.orb/zmx`, so quitting orb leaves it running and orb reattaches at start. A new pane runs `$SHELL` in its session's directory with `ORB_PANE_ID` set.
 - Each tab's panes are a tree of right and down splits, ported from herdr's layout (Apache-2.0, `NOTICE`). Splitting, closing, zooming, resizing and moving between panes and tabs use the keys above; a click on a pane focuses it.
-- A pane closes when its program exits, a tab closes with its last pane, and a session whose last pane closes keeps no tabs and settles; `⏎` then opens one shell tab.
+- A pane closes when its program exits, a tab closes with its last pane, and a session whose last pane closes gets a new shell tab in its directory in its place, with the keys in it, and stays where it was in the sidebar.
 - Each pane keeps 10 000 lines of history, from what orb saw after it attached (zmx sends the screen on reattach, not the history). The wheel over a pane goes to its program while it tracks the mouse, sends arrow keys on the alternate screen, and otherwise scrolls the history.
 - Copy on select follows zellij: a left drag in a pane whose program doesn't track the mouse selects text, and the release copies it through OSC 52. A double-click selects a word, a triple-click a line, and dragging past the top or bottom edge scrolls. A press on another pane starts a selection only when its program doesn't track the mouse; otherwise it only focuses.
 

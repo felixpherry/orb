@@ -2098,8 +2098,9 @@ impl SessionsActor {
 
     /// Saves `session`'s tabs, active tab and pane names as the app state
     /// has them; panes no tab holds any more are deleted from the store. A
-    /// session whose layout emptied keeps no tab or pane and settles now;
-    /// nothing happens for one that is gone.
+    /// session whose layout emptied gets a new shell tab in its directory
+    /// instead, saved in turn; nothing happens for one that is gone or
+    /// being deleted.
     fn save_layout(&mut self, session: SessionId) {
         let saved = {
             let app = self.state.read();
@@ -2123,13 +2124,12 @@ impl SessionsActor {
                 (tabs, layout.active(), names)
             })
         };
-        let (tabs, active, names) = match saved {
-            Some(saved) => saved,
-            None if self.sessions.contains_key(&session) => {
-                self.edit_session(session, settle_session_row);
-                (Vec::new(), 0, Vec::new())
+        let Some((tabs, active, names)) = saved else {
+            let deleting = self.state.read().sessions.deleting.contains(&session);
+            if self.sessions.contains_key(&session) && !deleting {
+                self.add_pane(session, Placement::Tab);
             }
-            None => return,
+            return;
         };
         match self.store.save_layout(session, active, &tabs, &names) {
             Ok(dropped) => {
@@ -3677,28 +3677,106 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn emptied_layout_settles_its_session() -> Result<(), Report<StoreError>> {
-        // Given a thread's one-pane session whose last pane was closed.
-        let store = Store::open_in_memory()?;
-        let inserted = insert_thread(&store, "aa")?;
-        let host = listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().layouts.close_pane(inserted.pane);
+    fn emptied_layout_gets_one_shell_in_the_threads_directory() -> Result<(), Report<StoreError>> {
+        // Given a session whose last pane closed.
+        let (mut actor, state, inserted) = emptied_session()?;
+        let dir = actor
+            .sessions
+            .get(&inserted.session)
+            .map(|row| row.dir.clone());
 
         // When saving its layout.
         actor.save_layout(inserted.session);
 
-        // Then the store keeps no tab for it and has it settled.
-        let saved = actor.store.layouts()?;
-        let settled = saved
+        // Then its layout holds one tab of one pane in the session's directory.
+        let app = state.read();
+        let shape = app.layouts.get(inserted.session).map(|layout| {
+            (
+                layout.tabs().len(),
+                layout
+                    .panes()
+                    .map(|pane| pane.cwd.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(
+            shape,
+            dir.map(|dir| (1, vec![dir])),
+            "an emptied session should get one shell tab in its directory"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn emptied_layout_does_not_settle_its_session() -> Result<(), Report<StoreError>> {
+        // Given a session whose last pane closed.
+        let (mut actor, _state, inserted) = emptied_session()?;
+
+        // When saving its layout.
+        actor.save_layout(inserted.session);
+
+        // Then the store keeps it unsettled.
+        let settled = actor
+            .store
+            .layouts()?
             .sessions
             .iter()
             .find(|row| row.id == inserted.session)
             .and_then(|row| row.settled_override);
+        assert_eq!(settled, None, "an emptied session should not settle");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn emptied_layout_asks_to_attach_its_session() -> Result<(), Report<StoreError>> {
+        // Given a session whose last pane closed.
+        let (mut actor, state, inserted) = emptied_session()?;
+
+        // When saving its layout.
+        actor.save_layout(inserted.session);
+
+        // Then the frontend is asked to attach it.
         assert_eq!(
-            (saved.tabs.len(), settled),
-            (0, Some(SettledOverride::Settled)),
-            "a session whose last pane closed is saved empty and settled"
+            state.read().sessions.attach,
+            Some(inserted.session),
+            "the new shell should be attached"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saving_a_gone_sessions_layout_adds_nothing() -> Result<(), Report<StoreError>> {
+        // Given a store with one thread's session.
+        let store = Store::open_in_memory()?;
+        insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When saving the layout of a session that doesn't exist.
+        actor.save_layout(SessionId(999));
+
+        // Then the store still holds only the thread's pane.
+        assert_eq!(
+            actor.store.layouts()?.panes.len(),
+            1,
+            "a gone session should get no pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn emptied_layout_of_a_deleting_session_adds_nothing() -> Result<(), Report<StoreError>> {
+        // Given a session being deleted whose last pane closed.
+        let (mut actor, state, inserted) = emptied_session()?;
+        state.write().sessions.deleting.insert(inserted.session);
+
+        // When saving its layout.
+        actor.save_layout(inserted.session);
+
+        // Then it gets no layout.
+        assert!(
+            state.read().layouts.get(inserted.session).is_none(),
+            "a session being deleted should get no shell"
         );
         Ok(())
     }
@@ -4398,15 +4476,14 @@ mod tests {
         Ok(())
     }
 
-    /// A thread's session whose last pane closed and was saved, so it has no
-    /// layout.
+    /// A thread's session whose last pane closed and wasn't saved yet, so it
+    /// has no layout while the store still holds that one pane.
     fn emptied_session() -> Result<(SessionsActor, State, Seeded), Report<StoreError>> {
         let store = Store::open_in_memory()?;
         let inserted = insert_thread(&store, "aa")?;
         let host = listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         state.write().layouts.close_pane(inserted.pane);
-        actor.save_layout(inserted.session);
         Ok((actor, state, inserted))
     }
 
@@ -4453,13 +4530,13 @@ mod tests {
         // When splitting its pane.
         actor.add_pane(inserted.session, Placement::Split(Split::Right));
 
-        // Then it still has no layout and no saved pane.
+        // Then it still has no layout and no pane is added to the store.
         assert_eq!(
             (
                 state.read().layouts.get(inserted.session).is_none(),
                 actor.store.layouts()?.panes.len()
             ),
-            (true, 0),
+            (true, 1),
             "there is no pane to split"
         );
         Ok(())
@@ -4505,13 +4582,13 @@ mod tests {
         // When adding a tiled pane.
         actor.add_pane(inserted.session, Placement::Tile);
 
-        // Then it still has no layout and no saved pane.
+        // Then it still has no layout and no pane is added to the store.
         assert_eq!(
             (
                 state.read().layouts.get(inserted.session).is_none(),
                 actor.store.layouts()?.panes.len()
             ),
-            (true, 0),
+            (true, 1),
             "there is no tab to add a pane to"
         );
         Ok(())
