@@ -391,6 +391,29 @@ impl PickerState {
         self.list.set_items(items, &leaf);
     }
 
+    /// Shows `items`, a fresh [`worktree_items`], filtered by the typed text,
+    /// keeping the selected worktree selected while it's still shown. Ignored
+    /// unless this is the worktree picker.
+    pub fn show_worktrees(&mut self, items: Vec<PickerItem>) {
+        if !matches!(self.kind, PickerKind::Worktrees) {
+            return;
+        }
+        let path_of = |item: &PickerItem| match item {
+            PickerItem::Worktree { path, .. } => Some(path.clone()),
+            _ => None,
+        };
+        let selected = self.list.selected().and_then(path_of);
+        let wanted = items
+            .iter()
+            .find(|item| selected.is_some() && path_of(item) == selected)
+            .cloned();
+        let pattern = self.list.input().to_owned();
+        self.list.set_items(items, &pattern);
+        if let Some(wanted) = wanted {
+            self.list.select(&wanted);
+        }
+    }
+
     /// Shows `refs`, listed in `cwd`, filtered by the typed text. Ignored
     /// unless this is `cwd`'s branch or base picker. A branch picker selects
     /// the wanted branch when nothing is typed and, once the thread has had a
@@ -1231,6 +1254,112 @@ mod tests {
             picker.shown().count(),
             0,
             "a listing for another directory should be ignored"
+        );
+    }
+
+    /// The worktree picker's row for `orb/<name>`, matched also on `extra`.
+    fn worktree_row(name: &str, extra: &str) -> PickerItem {
+        PickerItem::Worktree {
+            path: PathBuf::from("/wt/orb").join(name),
+            label: format!("orb/{name}"),
+            split: 4,
+            extra: extra.to_owned(),
+        }
+    }
+
+    /// The paths of the shown worktree rows, in order.
+    fn shown_worktrees(picker: &PickerState) -> Vec<PathBuf> {
+        picker
+            .shown()
+            .filter_map(|(item, _)| match item {
+                PickerItem::Worktree { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn show_worktrees_lists_a_worktree_that_appeared() {
+        // Given a worktree picker showing alpha.
+        let mut picker = PickerState::worktrees(vec![worktree_row("alpha", "")], Focus::Sidebar);
+
+        // When a rescan lists alpha and beta.
+        picker.show_worktrees(vec![worktree_row("alpha", ""), worktree_row("beta", "")]);
+
+        // Then both are shown.
+        assert_eq!(
+            shown_worktrees(&picker),
+            [
+                PathBuf::from("/wt/orb/alpha"),
+                PathBuf::from("/wt/orb/beta")
+            ],
+            "a new worktree should show without reopening the picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn show_worktrees_keeps_the_typed_filter() {
+        // Given a worktree picker filtered by "beta".
+        let mut picker = PickerState::worktrees(
+            vec![worktree_row("alpha", ""), worktree_row("beta", "")],
+            Focus::Sidebar,
+        );
+        "beta".chars().for_each(|ch| {
+            picker.insert(ch);
+        });
+
+        // When a rescan lists alpha, beta and gamma.
+        picker.show_worktrees(vec![
+            worktree_row("alpha", ""),
+            worktree_row("beta", ""),
+            worktree_row("gamma", ""),
+        ]);
+
+        // Then only beta is shown.
+        assert_eq!(
+            shown_worktrees(&picker),
+            [PathBuf::from("/wt/orb/beta")],
+            "a rescan should keep the typed filter"
+        );
+    }
+
+    #[rstest::rstest]
+    fn show_worktrees_keeps_the_selected_path() {
+        // Given a worktree picker with beta selected.
+        let mut picker = PickerState::worktrees(
+            vec![worktree_row("alpha", ""), worktree_row("beta", "")],
+            Focus::Sidebar,
+        );
+        picker.list.select(&worktree_row("beta", ""));
+
+        // When a rescan lists a new first row and beta with its branch known.
+        picker.show_worktrees(vec![
+            worktree_row("aaa", ""),
+            worktree_row("alpha", ""),
+            worktree_row("beta", "main"),
+        ]);
+
+        // Then beta is still selected.
+        assert_eq!(
+            picker.selected_worktree(),
+            Some(Path::new("/wt/orb/beta")),
+            "a rescan should keep the selected worktree"
+        );
+    }
+
+    #[rstest::rstest]
+    fn show_worktrees_leaves_another_picker_alone() {
+        // Given a project picker showing nothing.
+        let mut picker = PickerState::projects(Vec::new(), Focus::Sidebar);
+
+        // When a rescan lists a worktree.
+        picker.show_worktrees(vec![worktree_row("alpha", "")]);
+
+        // Then it still shows nothing.
+        assert_eq!(
+            picker.shown().count(),
+            0,
+            "only the worktree picker should take a rescan"
         );
     }
 

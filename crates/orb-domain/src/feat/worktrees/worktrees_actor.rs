@@ -15,6 +15,7 @@ use tokio::time::MissedTickBehavior;
 use super::state::{Verdict, Worktree, users, verdict};
 use crate::common::{State, Wake};
 use crate::feat::git::git_service::{GitService, git_reason};
+use crate::feat::picker::state::worktree_items;
 
 /// How often the sweep runs after the first, at start.
 pub const SWEEP_EVERY: Duration = Duration::from_hours(1);
@@ -216,7 +217,8 @@ impl WorktreesActor {
     }
 
     /// Lists the `*/*` directories under the root, keeping what's already
-    /// known about paths still there. Only a directory whose `.git` is a file
+    /// known about paths still there, and lists them again in the worktree
+    /// picker if it's open. Only a directory whose `.git` is a file
     /// (a linked worktree) gets a repo, so git never answers for an enclosing
     /// repository.
     fn scan(&self) {
@@ -245,7 +247,16 @@ impl WorktreesActor {
                 },
             })
             .collect();
-        self.state.write().worktrees.list = list;
+        {
+            let mut app = self.state.write();
+            app.worktrees.list = list;
+            if app.picker.is_some() {
+                let items = worktree_items(&app);
+                if let Some(picker) = &mut app.picker {
+                    picker.show_worktrees(items);
+                }
+            }
+        }
         (self.wake)();
     }
 
@@ -330,11 +341,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{SWEEP_EVERY, WorktreesActor, WorktreesActorDeps, spawn_worktrees_actor};
-    use crate::AppState;
     use crate::common::State;
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
+    use crate::feat::picker::state::PickerState;
     use crate::feat::sessions::state::{Project, ProjectId, ProjectKind, Sessions};
     use crate::feat::worktrees::state::Worktree;
+    use crate::{AppState, Focus};
 
     /// The main repository the fake git names for every linked worktree.
     const REPO: &str = "/repo";
@@ -898,6 +910,31 @@ mod tests {
             state.read().worktrees.notice.as_deref(),
             Some("fatal: locked"),
             "the notice should carry git's reason"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn scan_lists_a_new_worktree_in_the_open_worktree_picker() -> io::Result<()> {
+        // Given an open worktree picker showing nothing and a new worktree on disk.
+        let root = tempfile::tempdir()?;
+        let path = worktree(&root, "orb-a1")?;
+        let git = Arc::new(FakeGit::default());
+        let (actor, state) = start(&git, &root, one_project());
+        state.write().picker = Some(PickerState::worktrees(Vec::new(), Focus::Sidebar));
+
+        // When scanning.
+        actor.scan();
+
+        // Then the picker shows the new worktree.
+        assert_eq!(
+            state
+                .read()
+                .picker
+                .as_ref()
+                .and_then(PickerState::selected_worktree),
+            Some(path.as_path()),
+            "a rescan should list a new worktree in the open picker"
         );
         Ok(())
     }
