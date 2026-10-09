@@ -922,7 +922,7 @@ pub(crate) const DARK3: Color = Color::Rgb(0x54, 0x5c, 0x7e);
 /// folders (`blue`).
 pub(crate) const BLUE: Color = Color::Rgb(0x82, 0xaa, 0xff);
 /// The `>` prompt, here and in the picker, and the picker's `default`
-/// branch badge (`cyan`).
+/// branch badge, and the message box's Messages (`cyan`).
 pub(crate) const CYAN: Color = Color::Rgb(0x86, 0xe1, 0xfc);
 /// A completed turn; the picker's current branch and new worktree; the mode
 /// line's INSERT (`green`).
@@ -939,7 +939,7 @@ pub(crate) const YELLOW: Color = Color::Rgb(0xff, 0xc7, 0x77);
 /// The input box and the pin; the rule under the picker's input and its
 /// git icon (`orange`).
 pub(crate) const ORANGE: Color = Color::Rgb(0xff, 0x96, 0x6c);
-/// Failed and gone, the mode line's error, and the which-key popup's lazygit
+/// Failed and gone, the message box's Error, and the which-key popup's lazygit
 /// icon (`red`).
 pub(crate) const RED: Color = Color::Rgb(0xff, 0x75, 0x7f);
 /// Needing input; the picker's remote branches and previous worktree
@@ -960,7 +960,7 @@ pub(crate) const LOGO: Color = Color::Rgb(0xd9, 0x77, 0x57);
 pub(crate) const APPROVAL_ICON: &str = "\u{f071}";
 /// Needing input, here and in the mode line's count (`nf-fa-question_circle`).
 pub(crate) const INPUT_ICON: &str = "\u{f059}";
-/// Failed, and before the mode line's error (`nf-fa-times_circle`).
+/// Failed, and before the message box's Error title (`nf-fa-times_circle`).
 pub(crate) const FAILED_ICON: &str = "\u{f057}";
 /// Gone (`nf-fa-ban`).
 const GONE_ICON: &str = "\u{f05e}";

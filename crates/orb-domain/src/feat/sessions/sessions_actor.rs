@@ -1317,7 +1317,7 @@ impl SessionsActor {
 
     /// Saves a new `kind` session of project `project` named `name` in `dir`
     /// on `branch` with one tab of one shell pane, shows it, selects it and asks the
-    /// frontend to attach it. The error is the mode-line text.
+    /// frontend to attach it. The error is the message box text.
     fn save_session(
         &mut self,
         project: ProjectId,
@@ -1384,7 +1384,7 @@ impl SessionsActor {
     /// folder, or a new worktree made from its base (fetched from origin
     /// first, see `add_worktree`) on `orb/<slug>` of the name when that
     /// branch doesn't exist yet, else on `orb/<hex>`, with the worktree orb
-    /// made. The error is the mode-line text.
+    /// made. The error is the message box text.
     fn reach(
         &self,
         root: &Path,
@@ -1843,7 +1843,7 @@ impl SessionsActor {
     /// Copies `kind`'s template (`<orb_root>/templates/<kind_dir>`, seeded
     /// when missing) to `root/name` and returns that folder; refused when it
     /// exists. A folder this call made is removed again on failure. The
-    /// error is the mode-line text.
+    /// error is the message box text.
     fn make_folder(
         &self,
         kind: FolderKind,
@@ -2046,7 +2046,7 @@ impl SessionsActor {
 
     /// Removes session `id`'s folder when it is a Research or Learn session
     /// in orb's own folder for its kind and no other session uses it
-    /// (already gone counts as done). The error is the mode-line text.
+    /// (already gone counts as done). The error is the message box text.
     fn clear_folder(&self, id: SessionId) -> Result<(), String> {
         let Some(row) = self.sessions.get(&id) else {
             return Ok(());

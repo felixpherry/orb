@@ -4,7 +4,7 @@
 //! 40 columns wide and grows with its text to 40% of the right side; longer
 //! lines are cut with `…`, and each line break starts a new line.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -19,6 +19,12 @@ use crate::sidebar::{BG_DARK, CYAN, FAILED_ICON, FG, RED};
 const MIN_WIDTH: u16 = 40;
 /// Before the info title (`nf-fa-info_circle`).
 const INFO_ICON: &str = "\u{f05a}";
+/// How long an info message shows.
+const INFO_FOR: Duration = Duration::from_secs(3);
+/// How long an error shows.
+const ERROR_FOR: Duration = Duration::from_secs(5);
+/// What the box says after orb copies a mouse selection.
+const COPIED: &str = "Text copied to system clipboard";
 
 /// What a message is about, which sets the box's title and colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +50,76 @@ impl Toast {
             text: text.into(),
             until,
         }
+    }
+}
+
+/// The one message the box shows, if any. A message pops when its text is
+/// new, shows for 3 s (info) or 5 s (an error), and is replaced by a newer
+/// one. When orb clears an error or notice, its message goes too.
+#[derive(Debug, Default)]
+pub(crate) struct Toasts {
+    shown: Option<Toast>,
+    seen_error: Option<String>,
+    seen_notice: Option<String>,
+}
+
+impl Toasts {
+    /// Takes in the current error and notice; pops either one whose text
+    /// changed, the error over the notice when both did.
+    pub(crate) fn observe(&mut self, error: Option<&str>, notice: Option<&str>, now: Instant) {
+        Self::track(
+            &mut self.shown,
+            &mut self.seen_notice,
+            notice,
+            ToastKind::Info,
+            now + INFO_FOR,
+        );
+        Self::track(
+            &mut self.shown,
+            &mut self.seen_error,
+            error,
+            ToastKind::Error,
+            now + ERROR_FOR,
+        );
+    }
+
+    /// Pops the copy notice.
+    pub(crate) fn copied(&mut self, now: Instant) {
+        self.shown = Some(Toast::new(ToastKind::Info, COPIED, now + INFO_FOR));
+    }
+
+    /// The message showing at `now`.
+    pub(crate) fn shown(&self, now: Instant) -> Option<&Toast> {
+        self.shown.as_ref().filter(|toast| toast.until > now)
+    }
+
+    /// When the showing message hides.
+    pub(crate) fn deadline(&self, now: Instant) -> Option<Instant> {
+        self.shown(now).map(|toast| toast.until)
+    }
+
+    fn track(
+        shown: &mut Option<Toast>,
+        seen: &mut Option<String>,
+        text: Option<&str>,
+        kind: ToastKind,
+        until: Instant,
+    ) {
+        if seen.as_deref() == text {
+            return;
+        }
+        match text {
+            Some(text) => *shown = Some(Toast::new(kind, text, until)),
+            None => {
+                if shown
+                    .as_ref()
+                    .is_some_and(|toast| toast.kind == kind && Some(&toast.text) == seen.as_ref())
+                {
+                    *shown = None;
+                }
+            }
+        }
+        *seen = text.map(str::to_owned);
     }
 }
 
@@ -97,12 +173,12 @@ pub(crate) fn render(toast: &Toast, right: Rect, buf: &mut Buffer) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    use super::{Toast, ToastKind, render};
+    use super::{COPIED, Toast, ToastKind, Toasts, render};
     use crate::sidebar::{CYAN, RED};
 
     const RIGHT: Rect = Rect::new(10, 0, 120, 30);
@@ -135,9 +211,9 @@ mod tests {
 
         // Then the top edge is cyan and titled Messages.
         let top = row(&buffer, 1);
-        let corner = drawn(&buffer, 1)[0];
+        let corner = drawn(&buffer, 1).first().copied();
         assert!(
-            top.contains("Messages") && buffer[(corner, 1)].fg == CYAN,
+            top.contains("Messages") && corner.is_some_and(|x| buffer[(x, 1)].fg == CYAN),
             "info box should be cyan with a Messages title: {top:?}"
         );
     }
@@ -150,9 +226,9 @@ mod tests {
 
         // Then the top edge is red and titled Error.
         let top = row(&buffer, 1);
-        let corner = drawn(&buffer, 1)[0];
+        let corner = drawn(&buffer, 1).first().copied();
         assert!(
-            top.contains("Error") && buffer[(corner, 1)].fg == RED,
+            top.contains("Error") && corner.is_some_and(|x| buffer[(x, 1)].fg == RED),
             "error box should be red with an Error title: {top:?}"
         );
     }
@@ -165,8 +241,12 @@ mod tests {
 
         // Then the box is 40 columns wide.
         let edge = drawn(&buffer, 1);
-        let width = edge[edge.len() - 1] - edge[0] + 1;
-        assert_eq!(width, 40, "a short message should still get a 40-column box");
+        let width = edge.first().zip(edge.last()).map(|(l, r)| r - l + 1);
+        assert_eq!(
+            width,
+            Some(40),
+            "a short message should still get a 40-column box"
+        );
     }
 
     #[rstest::rstest]
@@ -223,8 +303,137 @@ mod tests {
         // Then nothing is drawn left of the area.
         let edge = drawn(&buffer, 1);
         assert!(
-            edge.first().is_some_and(|x| *x >= right.x) && edge.last() == Some(&(right.right() - 2)),
+            edge.first().is_some_and(|x| *x >= right.x)
+                && edge.last() == Some(&(right.right() - 2)),
             "the box should fit inside a narrow area: {edge:?}"
+        );
+    }
+
+    /// A tracker that has just seen `error` at `at`.
+    fn error_seen(error: &str, at: Instant) -> Toasts {
+        let mut toasts = Toasts::default();
+        toasts.observe(Some(error), None, at);
+        toasts
+    }
+
+    #[rstest::rstest]
+    fn new_error_still_shows_just_before_five_seconds() {
+        // Given a new error observed.
+        let at = Instant::now();
+        let toasts = error_seen("boom", at);
+
+        // When 4.9 s have passed.
+        let shown = toasts.shown(at + Duration::from_millis(4900));
+
+        // Then it still shows.
+        assert_eq!(
+            shown,
+            Some(&Toast::new(
+                ToastKind::Error,
+                "boom",
+                at + Duration::from_secs(5)
+            )),
+            "an error should show for 5 s"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_error_hides_after_five_seconds() {
+        // Given a new error observed.
+        let at = Instant::now();
+        let toasts = error_seen("boom", at);
+
+        // When 5 s have passed.
+        let shown = toasts.shown(at + Duration::from_secs(5));
+
+        // Then nothing shows.
+        assert!(shown.is_none(), "an error should hide after 5 s");
+    }
+
+    #[rstest::rstest]
+    fn new_notice_hides_after_three_seconds() {
+        // Given a new notice observed.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.observe(None, Some("pruned 2 worktrees"), at);
+
+        // When 3 s have passed.
+        let shown = toasts.shown(at + Duration::from_secs(3));
+
+        // Then nothing shows.
+        assert!(shown.is_none(), "a notice should hide after 3 s");
+    }
+
+    #[rstest::rstest]
+    fn same_error_again_does_not_pop() {
+        // Given an error that already timed out.
+        let at = Instant::now();
+        let mut toasts = error_seen("boom", at);
+        let later = at + Duration::from_secs(6);
+
+        // When the same error is observed again.
+        toasts.observe(Some("boom"), None, later);
+
+        // Then nothing shows.
+        assert!(
+            toasts.shown(later).is_none(),
+            "the same error sent again should not bring the box back"
+        );
+    }
+
+    #[rstest::rstest]
+    fn error_replaces_showing_info() {
+        // Given an info toast showing.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.copied(at);
+
+        // When an error is observed.
+        toasts.observe(Some("boom"), None, at);
+
+        // Then the error shows.
+        assert_eq!(
+            toasts.shown(at).map(|toast| toast.kind),
+            Some(ToastKind::Error),
+            "a newer message should replace the one showing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cleared_error_hides_its_box() {
+        // Given an error showing.
+        let at = Instant::now();
+        let mut toasts = error_seen("boom", at);
+
+        // When the error is observed cleared, as an orb key does.
+        toasts.observe(None, None, at);
+
+        // Then nothing shows.
+        assert!(
+            toasts.shown(at).is_none(),
+            "clearing the error should hide its box"
+        );
+    }
+
+    #[rstest::rstest]
+    fn copy_shows_the_copy_notice() {
+        // Given a copy event.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.copied(at);
+
+        // When asking what shows.
+        let shown = toasts.shown(at);
+
+        // Then it is the copy notice.
+        assert_eq!(
+            shown,
+            Some(&Toast::new(
+                ToastKind::Info,
+                COPIED,
+                at + Duration::from_secs(3)
+            )),
+            "a copy should show the copy notice for 3 s"
         );
     }
 }

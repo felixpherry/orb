@@ -41,7 +41,7 @@ pub struct IntentHandler;
 
 impl IntentHandler {
     /// Apply `intent` to `state` and return the commands that must follow.
-    /// Every intent first clears the mode line's error and worktree notice,
+    /// Every intent first clears the error and worktree notice in the message box,
     /// which the user has now seen; otherwise an intent that fails validation
     /// changes nothing. After every intent, a cursor left on an agent row of
     /// a folded card unfolds it, unless a search lists the row anyway.
@@ -3431,7 +3431,7 @@ mod tests {
 
     #[rstest::rstest]
     fn next_intent_clears_the_notice() {
-        // Given a worktree notice on the mode line.
+        // Given a worktree notice in the message box.
         let mut state = state_with(vec![in_root(1)], 1);
         state.worktrees.notice = Some("pruned 2 worktrees".to_owned());
 
