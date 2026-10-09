@@ -9,9 +9,10 @@
 //! sidebar's width and project filter. For each project it also keeps its
 //! kind (one the user added, or orb's Research or Learn folder). It also
 //! keeps the jump list's rows, oldest first. Each session
-//! keeps its directory and its tabs in order, each tab its split tree and
-//! focused pane, and each pane its directory, zmx session, name and the
-//! command that brings its agent back; a thread keeps the pane it runs in.
+//! keeps its directory and its tabs in order, each tab its split tree,
+//! focused pane, swap layout and whether it was changed by hand, and each
+//! pane its directory, zmx session, name and the command that brings its
+//! agent back; a thread keeps the pane it runs in.
 //! The schema grows through an ordered list of migrations, and a database
 //! from before sessions is copied aside before it is migrated. Times are
 //! milliseconds since the Unix epoch.
@@ -30,7 +31,7 @@ use wherror::Error;
 
 use super::state::{PaneId, ProjectId, ProjectKind, SessionId, SessionKind, SidebarItem, ThreadId};
 use crate::feat::harness::HarnessId;
-use crate::feat::layout::tree::{Node, TileLayout};
+use crate::feat::layout::tree::{Node, SwapLayout, TileLayout};
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -165,6 +166,10 @@ pub struct TabRow {
     pub layout: String,
     /// Its focused pane.
     pub focus_pane: Option<PaneId>,
+    /// Where it is in zellij's swap layout list.
+    pub swap_layout: SwapLayout,
+    /// Whether it was changed by hand since its last relayout.
+    pub hand_changed: bool,
 }
 
 /// A saved pane.
@@ -301,6 +306,10 @@ const MIGRATIONS: &[Migration] = &[
      WHERE id NOT IN (SELECT group_id FROM threads WHERE group_id IS NOT NULL);
 "),
     Migration::Code(v11),
+    Migration::Sql("
+    ALTER TABLE tabs ADD COLUMN swap_layout TEXT NOT NULL DEFAULT 'vertical';
+    ALTER TABLE tabs ADD COLUMN hand_changed INTEGER NOT NULL DEFAULT 0;
+"),
 ];
 
 /// Takes the store at `path` for this process: an exclusive lock on the
@@ -512,8 +521,9 @@ impl Store {
             .attach("failed to load sessions")?;
         let tabs = self
             .query(
-                "SELECT session_id, position, name, layout, focus_pane FROM tabs
-                 ORDER BY session_id, position",
+                "SELECT session_id, position, name, layout, focus_pane, swap_layout,
+                        hand_changed
+                 FROM tabs ORDER BY session_id, position",
                 |row| {
                     Ok(TabRow {
                         session_id: SessionId(row.get(0)?),
@@ -521,6 +531,8 @@ impl Store {
                         name: row.get(2)?,
                         layout: row.get(3)?,
                         focus_pane: row.get::<_, Option<i64>>(4)?.map(PaneId),
+                        swap_layout: swap_layout(&row.get::<_, String>(5)?),
+                        hand_changed: row.get(6)?,
                     })
                 },
             )
@@ -659,14 +671,17 @@ impl Store {
             tx.execute("DELETE FROM tabs WHERE session_id = ?1", [session.0])?;
             for tab in tabs {
                 tx.execute(
-                    "INSERT INTO tabs (session_id, position, name, layout, focus_pane)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO tabs (session_id, position, name, layout, focus_pane,
+                                       swap_layout, hand_changed)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         session.0,
                         tab.position,
                         tab.name,
                         tab.layout,
-                        tab.focus_pane.map(|pane| pane.0)
+                        tab.focus_pane.map(|pane| pane.0),
+                        swap_layout_text(tab.swap_layout),
+                        tab.hand_changed
                     ],
                 )?;
             }
@@ -1450,6 +1465,29 @@ fn session_kind(text: &str) -> SessionKind {
     }
 }
 
+/// How a tab's swap layout is saved.
+fn swap_layout_text(layout: SwapLayout) -> &'static str {
+    match layout {
+        SwapLayout::Base => "base",
+        SwapLayout::Vertical => "vertical",
+        SwapLayout::Horizontal => "horizontal",
+        SwapLayout::Stacked => "stacked",
+        SwapLayout::HalfStacked => "half-stacked",
+    }
+}
+
+/// The swap layout saved as `text`; anything orb doesn't know is vertical,
+/// as tabs saved before swap layouts load.
+fn swap_layout(text: &str) -> SwapLayout {
+    match text {
+        "base" => SwapLayout::Base,
+        "horizontal" => SwapLayout::Horizontal,
+        "stacked" => SwapLayout::Stacked,
+        "half-stacked" => SwapLayout::HalfStacked,
+        _ => SwapLayout::Vertical,
+    }
+}
+
 /// How a jump-list row is saved: its kind and id; the Settled header and
 /// agent rows aren't.
 fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
@@ -1478,6 +1516,8 @@ mod tests {
 
     use error_stack::{Report, ResultExt};
     use rusqlite::Connection;
+
+    use crate::feat::layout::tree::SwapLayout;
 
     use super::{
         MIGRATIONS, NewPaneThread, PaneId, ProjectId, ProjectKind, SavedLayouts, SessionId,
@@ -1941,6 +1981,52 @@ mod tests {
             has_draft,
             vec![(1, false), (2, true)],
             "migration v10 should give a draft only to a group without threads"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn migrating_a_v11_database_loads_its_tabs_vertical_and_untouched()
+    -> Result<(), Report<StoreError>> {
+        // Given a database at schema version 11 holding one tab.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        {
+            let conn = Connection::open(&path).change_context(StoreError)?;
+            for sql in MIGRATIONS
+                .get(..11)
+                .ok_or_else(|| Report::new(StoreError).attach("no v11 migrations"))?
+            {
+                sql.apply(&conn).change_context(StoreError)?;
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, root, title, created_at) VALUES (1, '/tmp/orb', 'orb', 500);
+                 INSERT INTO sessions (id, project_id, dir, created_at) VALUES (1, 1, '/tmp/orb', 1000);
+                 INSERT INTO panes (id, session_id, cwd) VALUES (7, 1, '/tmp/orb');
+                 INSERT INTO tabs (session_id, position, layout, focus_pane)
+                 VALUES (1, 0, '{\"pane\":7}', 7);
+                 PRAGMA user_version = 11;",
+            )
+            .change_context(StoreError)?;
+        }
+
+        // When opening the store and loading its layouts.
+        let tabs: Vec<(String, SwapLayout, bool)> = Store::open(&path)?
+            .layouts()?
+            .tabs
+            .into_iter()
+            .map(|tab| (tab.layout, tab.swap_layout, tab.hand_changed))
+            .collect();
+
+        // Then it's at the latest version and the tab is vertical, unmarked
+        // and keeps its tree.
+        assert_eq!(
+            (user_version(&path)?, tabs),
+            (
+                MIGRATIONS.len(),
+                vec![("{\"pane\":7}".to_owned(), SwapLayout::Vertical, false)]
+            ),
+            "migration v12 should load old tabs vertical and untouched"
         );
         Ok(())
     }
@@ -3326,6 +3412,8 @@ mod tests {
                 name: Some("agent".to_owned()),
                 layout: format!("{{\"pane\":{}}}", inserted.pane.0),
                 focus_pane: Some(inserted.pane),
+                swap_layout: SwapLayout::Vertical,
+                hand_changed: false,
             },
             TabRow {
                 session_id: inserted.session,
@@ -3333,6 +3421,8 @@ mod tests {
                 name: None,
                 layout: format!("{{\"pane\":{}}}", second.0),
                 focus_pane: Some(second),
+                swap_layout: SwapLayout::Vertical,
+                hand_changed: false,
             },
         ];
         store.save_layout(
@@ -3350,6 +3440,41 @@ mod tests {
             (layouts.tabs, active, names),
             (tabs, vec![1], vec![None, Some("logs".to_owned())]),
             "the saved layout should load back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saved_tab_keeps_its_swap_layout_and_mark() -> Result<(), Report<StoreError>> {
+        // Given a thread's session.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = insert_thread(&store, project_id)?;
+
+        // When saving its tab half-stacked and changed by hand.
+        let tab = TabRow {
+            session_id: inserted.session,
+            position: 0,
+            name: None,
+            layout: format!("{{\"pane\":{}}}", inserted.pane.0),
+            focus_pane: Some(inserted.pane),
+            swap_layout: SwapLayout::HalfStacked,
+            hand_changed: true,
+        };
+        store.save_layout(inserted.session, 0, &[tab], &[(inserted.pane, None)])?;
+
+        // Then the tab loads back half-stacked and marked.
+        let tabs: Vec<(SwapLayout, bool)> = store
+            .layouts()?
+            .tabs
+            .into_iter()
+            .map(|tab| (tab.swap_layout, tab.hand_changed))
+            .collect();
+        assert_eq!(
+            tabs,
+            vec![(SwapLayout::HalfStacked, true)],
+            "the tab's swap layout and mark should load back"
         );
         Ok(())
     }
@@ -3405,6 +3530,8 @@ mod tests {
             name: None,
             layout: format!("{{\"pane\":{}}}", inserted.pane.0),
             focus_pane: Some(inserted.pane),
+            swap_layout: SwapLayout::Vertical,
+            hand_changed: false,
         };
         let dropped = store.save_layout(inserted.session, 0, &[tab], &[(inserted.pane, None)])?;
 

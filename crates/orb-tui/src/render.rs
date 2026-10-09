@@ -232,7 +232,7 @@ mod tests {
     use jiff::tz::TimeZone;
     use orb_domain::Intent;
     use orb_domain::feat::layout::state::{PaneEntry, SessionLayout, Tab};
-    use orb_domain::feat::layout::tree::{Node, Split, TileLayout};
+    use orb_domain::feat::layout::tree::{Node, Split, SwapLayout, TileLayout};
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::search::state::SearchProgress;
@@ -1499,7 +1499,7 @@ mod tests {
             state.layouts.insert(
                 SessionId(1),
                 SessionLayout::restore(
-                    vec![Tab::restore(None, tree)],
+                    vec![Tab::restore(None, tree, SwapLayout::Vertical, false)],
                     0,
                     vec![entry(1), api, entry(3), entry(4)],
                 ),
@@ -1729,7 +1729,7 @@ mod tests {
             state.layouts.insert(
                 SessionId(1),
                 SessionLayout::restore(
-                    vec![Tab::restore(None, tree)],
+                    vec![Tab::restore(None, tree, SwapLayout::Vertical, false)],
                     0,
                     vec![entry(1), api, entry(3), web],
                 ),

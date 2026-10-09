@@ -57,21 +57,23 @@ pub struct Tab {
 
 impl Tab {
     fn new(pane: PaneId) -> Self {
-        Self {
-            swap_layout: SwapLayout::Base,
-            ..Self::restore(None, TileLayout::new(pane))
-        }
+        Self::restore(None, TileLayout::new(pane), SwapLayout::Base, false)
     }
 
-    /// A saved tab: its name and tree, vertical and untouched, not zoomed,
-    /// with no resize history.
-    pub fn restore(name: Option<String>, tree: TileLayout) -> Self {
+    /// A saved tab: its name, tree, swap layout and mark, not zoomed, with no
+    /// resize history.
+    pub fn restore(
+        name: Option<String>,
+        tree: TileLayout,
+        swap_layout: SwapLayout,
+        hand_changed: bool,
+    ) -> Self {
         Self {
             name,
             tree,
             zoomed: false,
-            swap_layout: SwapLayout::Vertical,
-            hand_changed: false,
+            swap_layout,
+            hand_changed,
             history: None,
         }
     }
@@ -1070,7 +1072,12 @@ mod tests {
         };
 
         // When restoring it.
-        let tab = Tab::restore(Some("logs".into()), tree.clone());
+        let tab = Tab::restore(
+            Some("logs".into()),
+            tree.clone(),
+            SwapLayout::Vertical,
+            false,
+        );
 
         // Then it has that name, tree and focus.
         assert_eq!(

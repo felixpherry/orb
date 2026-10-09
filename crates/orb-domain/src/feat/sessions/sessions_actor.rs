@@ -2116,6 +2116,8 @@ impl SessionsActor {
                         name: tab.name().map(str::to_owned),
                         layout: tab.layout_json(),
                         focus_pane: Some(tab.focused()),
+                        swap_layout: tab.swap_layout(),
+                        hand_changed: tab.hand_changed(),
                     })
                     .collect();
                 let names: Vec<(PaneId, Option<String>)> = layout
@@ -2726,10 +2728,11 @@ struct RestoredLayouts {
     error: Option<&'static str>,
 }
 
-/// Every saved session's layout: its tabs by position, each focused on its
-/// saved pane (else its first), showing its saved tab, with where each pane
-/// runs. A tab whose tree doesn't read is left out, and so is a session left
-/// with no tab. Nothing comes back when the store can't be read.
+/// Every saved session's layout: its tabs by position, each in its saved swap
+/// layout with its mark, focused on its saved pane (else its first), showing
+/// its saved tab, with where each pane runs. A tab whose tree doesn't read is
+/// left out, and so is a session left with no tab. Nothing comes back when the
+/// store can't be read.
 fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> RestoredLayouts {
     let Ok(saved) = store.layouts() else {
         return RestoredLayouts {
@@ -2751,7 +2754,12 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
                 .filter_map(|tab| {
                     let focus = tab.focus_pane.unwrap_or(PaneId(0));
                     match TileLayout::from_json(&tab.layout, focus) {
-                        Ok(tree) => Some(Tab::restore(tab.name.clone(), tree)),
+                        Ok(tree) => Some(Tab::restore(
+                            tab.name.clone(),
+                            tree,
+                            tab.swap_layout,
+                            tab.hand_changed,
+                        )),
                         Err(_) => {
                             unread = true;
                             None
@@ -2922,8 +2930,8 @@ mod tests {
     use crate::feat::harness::fake::FakeHarness;
     use crate::feat::harness::{Harness, Harnesses, RunningAgent};
     use crate::feat::jumps::state::JumpList;
-    use crate::feat::layout::state::test_entry;
-    use crate::feat::layout::tree::Split;
+    use crate::feat::layout::state::{SessionLayout, test_entry};
+    use crate::feat::layout::tree::{Split, SwapLayout};
     use crate::feat::sessions::state::{
         FolderKind, Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind,
         Session, SessionId, SessionKind, SidebarItem, Thread, ThreadId, ThreadStatus,
@@ -3625,6 +3633,8 @@ mod tests {
             name: None,
             layout: format!("{{\"pane\":{}}}", pane.0),
             focus_pane: Some(pane),
+            swap_layout: SwapLayout::Vertical,
+            hand_changed: false,
         };
         store.save_layout(
             inserted.session,
@@ -3647,6 +3657,41 @@ mod tests {
             restored,
             Some((2, 1, Some(second))),
             "the saved tabs should come back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_keeps_each_tabs_swap_layout_and_mark() -> Result<(), Report<StoreError>> {
+        // Given a thread's session saved with one horizontal tab changed by hand.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let tab = TabRow {
+            session_id: inserted.session,
+            position: 0,
+            name: None,
+            layout: format!("{{\"pane\":{}}}", inserted.pane.0),
+            focus_pane: Some(inserted.pane),
+            swap_layout: SwapLayout::Horizontal,
+            hand_changed: true,
+        };
+        store.save_layout(inserted.session, 0, &[tab], &[(inserted.pane, None)])?;
+        let host = listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then its tab is horizontal and marked.
+        let restored = state
+            .read()
+            .layouts
+            .get(inserted.session)
+            .and_then(SessionLayout::active_tab)
+            .map(|tab| (tab.swap_layout(), tab.hand_changed()));
+        assert_eq!(
+            restored,
+            Some((SwapLayout::Horizontal, true)),
+            "the tab's swap layout and mark should come back"
         );
         Ok(())
     }
@@ -4622,6 +4667,35 @@ mod tests {
             names,
             vec![Some("agent".to_owned())],
             "the tab's name should be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn save_layout_writes_each_tabs_swap_layout_and_mark() -> Result<(), Report<StoreError>> {
+        // Given a thread's one-pane session moved to horizontal, then split.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().layouts.next_swap_layout(inserted.session);
+        actor.add_pane(inserted.session, Placement::Split(Split::Right));
+
+        // When saving its layout.
+        actor.save_layout(inserted.session);
+
+        // Then the store has the tab horizontal and marked.
+        let tabs: Vec<(SwapLayout, bool)> = actor
+            .store
+            .layouts()?
+            .tabs
+            .into_iter()
+            .map(|tab| (tab.swap_layout, tab.hand_changed))
+            .collect();
+        assert_eq!(
+            tabs,
+            vec![(SwapLayout::Horizontal, true)],
+            "the tab's swap layout and mark should be saved"
         );
         Ok(())
     }
