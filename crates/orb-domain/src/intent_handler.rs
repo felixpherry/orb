@@ -239,7 +239,7 @@ impl IntentHandler {
             ) {
                 (Ok(()), Ok(()), Some(project)) => {
                     let mut commands = unfilter(state, project);
-                    commands.extend(new_session(state, project, Workspace::Checkout));
+                    commands.extend(new_session(state, project, Workspace::Checkout, None));
                     commands
                 }
                 _ => vec![],
@@ -483,25 +483,29 @@ impl IntentHandler {
                         .cloned();
                     pick_move_workspace(state, session, choice)
                 }
-                Some(&PickerKind::Workspace {
-                    target: PickTarget::New(project),
+                Some(PickerKind::Workspace {
+                    target: PickTarget::New { project, name },
                 }) => {
+                    let (project, name) = (*project, name.clone());
                     let choice = close_picker(state)
                         .as_ref()
                         .and_then(PickerState::selected)
                         .cloned();
-                    pick_new_workspace(state, project, choice)
+                    pick_new_workspace(state, project, name, choice)
                 }
-                Some(&PickerKind::Base {
-                    target: PickTarget::New(project),
+                Some(PickerKind::Base {
+                    target: PickTarget::New { project, name },
                     ..
-                }) => match close_picker(state).as_ref().and_then(PickerState::selected) {
-                    Some(PickerItem::Branch(row)) => {
-                        let base = row.git_ref.name.clone();
-                        new_session(state, project, Workspace::NewWorktree { base })
+                }) => {
+                    let (project, name) = (*project, name.clone());
+                    match close_picker(state).as_ref().and_then(PickerState::selected) {
+                        Some(PickerItem::Branch(row)) => {
+                            let base = row.git_ref.name.clone();
+                            new_session(state, project, Workspace::NewWorktree { base }, name)
+                        }
+                        _ => vec![],
                     }
-                    _ => vec![],
-                },
+                }
                 Some(&PickerKind::Base {
                     target: PickTarget::Move(session),
                     ..
@@ -902,22 +906,46 @@ fn delete_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
 }
 
 /// Picks `project` in the new-session picker: a filter to another project
-/// goes back to all projects; a git project goes on to the workspace picker,
-/// any other gets its session in its checkout at once.
+/// goes back to all projects, and the empty `New session` name box opens,
+/// giving the keys back to where the picker was opened from when it closes.
 fn pick_project(state: &mut AppState, project: ProjectId) -> Vec<Command> {
+    if state.sessions.project(project).is_none() {
+        return vec![];
+    }
+    let return_to = state.focus;
+    let commands = unfilter(state, project);
+    state.rename = Some(Rename {
+        target: RenameTarget::NewSession { project, return_to },
+        input: TextInput::default(),
+        creating: false,
+    });
+    state.focus = Focus::Rename;
+    commands
+}
+
+/// `⏎` in the `New session` box: the keys go back to `return_to`; a git
+/// project goes on to the workspace picker, any other gets its session in
+/// its checkout at once. A blank name leaves the session unnamed.
+fn confirm_session_name(
+    state: &mut AppState,
+    project: ProjectId,
+    return_to: Focus,
+) -> Vec<Command> {
+    let name = state.rename.take().and_then(|rename| {
+        let name = rename.input.text().trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    });
+    state.focus = return_to;
     let Some(found) = state.sessions.project(project) else {
         return vec![];
     };
-    let picker = found.repo.then(|| {
-        let items = workspace_items(&state.sessions, found, &found.root, false);
-        PickerState::workspace(PickTarget::New(project), items, state.focus)
-    });
-    let mut commands = unfilter(state, project);
-    match picker {
-        Some(picker) => open_picker(state, picker),
-        None => commands.extend(new_session(state, project, Workspace::Checkout)),
+    if !found.repo {
+        return new_session(state, project, Workspace::Checkout, name);
     }
-    commands
+    let items = workspace_items(&state.sessions, found, &found.root, false);
+    let picker = PickerState::workspace(PickTarget::New { project, name }, items, return_to);
+    open_picker(state, picker);
+    vec![]
 }
 
 /// Clears a sidebar filter to a project other than `project`, asking for
@@ -939,20 +967,22 @@ fn unfilter(state: &mut AppState, project: ProjectId) -> Vec<Command> {
 fn pick_new_workspace(
     state: &mut AppState,
     project: ProjectId,
+    name: Option<String>,
     choice: Option<PickerItem>,
 ) -> Vec<Command> {
     match choice {
         Some(PickerItem::Workspace(WorkspaceChoice::Current { .. })) => {
-            new_session(state, project, Workspace::Checkout)
+            new_session(state, project, Workspace::Checkout, name)
         }
         Some(PickerItem::Workspace(WorkspaceChoice::Previous { path, .. })) => {
-            new_session(state, project, Workspace::Existing(path))
+            new_session(state, project, Workspace::Existing(path), name)
         }
         Some(PickerItem::Workspace(WorkspaceChoice::NewWorktree)) => {
             let Some(root) = state.sessions.project(project).map(|p| p.root.clone()) else {
                 return vec![];
             };
-            let picker = PickerState::base(PickTarget::New(project), root.clone(), state.focus);
+            let target = PickTarget::New { project, name };
+            let picker = PickerState::base(target, root.clone(), state.focus);
             open_picker(state, picker);
             vec![Command::ListBranches(root)]
         }
@@ -960,17 +990,27 @@ fn pick_new_workspace(
     }
 }
 
-/// Asks for a new session of `project` in `workspace`, one at a time: marks
-/// the start and records the row it leaves as a jump (`attach_session`
-/// records the new session's row when the frontend attaches it).
-fn new_session(state: &mut AppState, project: ProjectId, workspace: Workspace) -> Vec<Command> {
+/// Asks for a new session of `project` in `workspace`, named `name`, one at
+/// a time: marks the start and records the row it leaves as a jump
+/// (`attach_session` records the new session's row when the frontend
+/// attaches it).
+fn new_session(
+    state: &mut AppState,
+    project: ProjectId,
+    workspace: Workspace,
+    name: Option<String>,
+) -> Vec<Command> {
     if validate_new_session(state).is_err() {
         return vec![];
     }
     state.sessions.starting = true;
     state.jumps.jump(state.sessions.cursor, None);
     vec![
-        Command::NewSession { project, workspace },
+        Command::NewSession {
+            project,
+            workspace,
+            name,
+        },
         Command::SaveJumps,
     ]
 }
@@ -1415,6 +1455,26 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
                 ..
             }),
         ) => return confirm_folder_name(state),
+        (
+            Intent::PickerConfirm,
+            Some(Rename {
+                target: RenameTarget::NewSession { project, return_to },
+                ..
+            }),
+        ) => {
+            let (project, return_to) = (*project, *return_to);
+            return confirm_session_name(state, project, return_to);
+        }
+        (
+            Intent::PickerCancel,
+            Some(Rename {
+                target: RenameTarget::NewSession { return_to, .. },
+                ..
+            }),
+        ) => {
+            state.focus = *return_to;
+            state.rename = None;
+        }
         (Intent::PickerConfirm, _) => {
             state.focus = Focus::Sidebar;
             let Some(rename) = state.rename.take() else {
@@ -1424,7 +1484,7 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
             let name = (!name.is_empty()).then(|| name.to_owned());
             return match rename.target {
                 RenameTarget::Session(session) => vec![Command::RenameSession { session, name }],
-                RenameTarget::NewFolder(_) => vec![],
+                RenameTarget::NewFolder(_) | RenameTarget::NewSession { .. } => vec![],
                 // The keys go back to the panes.
                 RenameTarget::Tab { owner, tab } => {
                     state.layouts.rename_tab(owner, tab, name);
@@ -2605,19 +2665,44 @@ mod tests {
         state
     }
 
+    /// The `New session` box for beta, outside git, holding `name`.
+    fn naming_non_git(name: &str) -> AppState {
+        let mut state = picking_non_git();
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+        type_name(&mut state, name);
+        state
+    }
+
+    /// Types `name` into the open box.
+    fn type_name(state: &mut AppState, name: &str) {
+        for ch in name.chars() {
+            IntentHandler::handle(&Intent::PickerInput(ch), state);
+        }
+    }
+
     /// Alpha's new-session workspace picker, alpha holding a session in
-    /// `/wt/alpha-1`, with `choice` highlighted.
-    fn choosing_new_workspace(choice: &WorkspaceChoice) -> AppState {
+    /// `/wt/alpha-1`, named `name` in the `New session` box, with `choice`
+    /// highlighted.
+    fn choosing_named_workspace(choice: &WorkspaceChoice, name: &str) -> AppState {
         let mut state = picking(Focus::Sidebar);
         state.sessions.sessions = vec![session_in(5, 1, "/wt/alpha-1")];
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+        type_name(&mut state, name);
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
         highlight(&mut state, &PickerItem::Workspace(choice.clone()));
         state
     }
 
-    /// Alpha's base branch picker for a new worktree, listing `main`.
-    fn choosing_base() -> AppState {
-        let mut state = choosing_new_workspace(&WorkspaceChoice::NewWorktree);
+    /// Alpha's new-session workspace picker, alpha holding a session in
+    /// `/wt/alpha-1`, unnamed, with `choice` highlighted.
+    fn choosing_new_workspace(choice: &WorkspaceChoice) -> AppState {
+        choosing_named_workspace(choice, "")
+    }
+
+    /// Alpha's base branch picker for a new worktree of a session named
+    /// `name`, listing `main`.
+    fn choosing_named_base(name: &str) -> AppState {
+        let mut state = choosing_named_workspace(&WorkspaceChoice::NewWorktree, name);
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
         if let Some(picker) = &mut state.picker {
             picker.show_branches(
@@ -2628,43 +2713,173 @@ mod tests {
         state
     }
 
+    /// Alpha's base branch picker for a new worktree, unnamed, listing
+    /// `main`.
+    fn choosing_base() -> AppState {
+        choosing_named_base("")
+    }
+
     #[rstest::rstest]
-    fn picking_a_git_project_opens_the_workspace_picker() {
-        // Given the project picker with alpha, a git project, highlighted.
+    fn picking_a_project_opens_the_empty_new_session_box() {
+        // Given the project picker opened from the sidebar with alpha
+        // highlighted.
         let mut state = picking(Focus::Sidebar);
 
         // When handling PickerConfirm.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then alpha's new-session workspace picker is open.
+        // Then the empty New session box for alpha takes the keys, and no
+        // picker is open.
+        assert_eq!(
+            (
+                state.focus,
+                state.picker.is_none(),
+                state
+                    .rename
+                    .map(|rename| (rename.target, rename.input.text().to_owned())),
+            ),
+            (
+                Focus::Rename,
+                true,
+                Some((
+                    RenameTarget::NewSession {
+                        project: ProjectId(1),
+                        return_to: Focus::Sidebar,
+                    },
+                    String::new(),
+                )),
+            ),
+            "picking a project asks for the session's name first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn naming_a_git_project_session_opens_the_workspace_picker() {
+        // Given the New session box for alpha, a git project, holding `api`.
+        let mut state = picking(Focus::Sidebar);
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+        type_name(&mut state, "api");
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then alpha's new-session workspace picker is open, carrying the
+        // name.
         assert_eq!(
             state.picker.as_ref().map(PickerState::kind),
             Some(&PickerKind::Workspace {
-                target: PickTarget::New(ProjectId(1))
+                target: PickTarget::New {
+                    project: ProjectId(1),
+                    name: Some("api".to_owned()),
+                }
             }),
             "a git project goes on to the workspace picker"
         );
     }
 
     #[rstest::rstest]
-    fn picking_a_project_outside_git_returns_new_session_in_its_checkout() {
-        // Given the project picker with beta, outside git, highlighted.
-        let mut state = picking_non_git();
+    fn naming_a_session_outside_git_returns_new_session_with_the_name() {
+        // Given the New session box for beta, outside git, holding ` api `.
+        let mut state = naming_non_git(" api ");
 
         // When handling PickerConfirm.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then a session in beta's checkout is asked for at once.
+        // Then a session named `api` in beta's checkout is asked for at once.
         assert_eq!(
             commands,
             vec![
                 Command::NewSession {
                     project: ProjectId(2),
                     workspace: Workspace::Checkout,
+                    name: Some("api".to_owned()),
                 },
                 Command::SaveJumps,
             ],
-            "a project outside git gets its session in its checkout"
+            "a project outside git gets its named session in its checkout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn blank_session_name_returns_unnamed_new_session() {
+        // Given the New session box for beta, outside git, holding spaces.
+        let mut state = naming_non_git("  ");
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then an unnamed session in beta's checkout is asked for.
+        assert_eq!(
+            commands,
+            vec![
+                Command::NewSession {
+                    project: ProjectId(2),
+                    workspace: Workspace::Checkout,
+                    name: None,
+                },
+                Command::SaveJumps,
+            ],
+            "a blank name leaves the session unnamed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cancelling_the_new_session_box_makes_no_session() {
+        // Given the New session box for beta, outside git, holding `api`.
+        let mut state = naming_non_git("api");
+
+        // When handling PickerCancel.
+        let commands = IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then nothing is asked for, nothing is starting and no box or
+        // picker is open.
+        assert_eq!(
+            (
+                commands,
+                state.sessions.starting,
+                state.rename.is_none(),
+                state.picker.is_none()
+            ),
+            (vec![], false, true, true),
+            "Esc in the New session box cancels the new session"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(Focus::Sidebar)]
+    #[case(Focus::Pane)]
+    fn cancelling_the_new_session_box_gives_the_keys_back(#[case] from: Focus) {
+        // Given the New session box, the project picker opened from `from`.
+        let mut state = picking(from);
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the keys are back where `<C-g> n` was pressed.
+        assert_eq!(state.focus, from, "Esc gives the keys back");
+    }
+
+    #[rstest::rstest]
+    fn picking_a_base_carries_the_session_name() {
+        // Given alpha's base picker for a session named `api`, `main`
+        // highlighted.
+        let mut state = choosing_named_base("api");
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then a session named `api` in a new worktree from `main` is asked
+        // for.
+        assert!(
+            commands.contains(&Command::NewSession {
+                project: ProjectId(1),
+                workspace: Workspace::NewWorktree {
+                    base: "main".to_owned()
+                },
+                name: Some("api".to_owned()),
+            }),
+            "the name rides the workspace and base pickers, got {commands:?}"
         );
     }
 
@@ -2681,6 +2896,7 @@ mod tests {
             commands.contains(&Command::NewSession {
                 project: ProjectId(1),
                 workspace: Workspace::Checkout,
+                name: None,
             }),
             "the current checkout should make a session there, got {commands:?}"
         );
@@ -2702,6 +2918,7 @@ mod tests {
             commands.contains(&Command::NewSession {
                 project: ProjectId(1),
                 workspace: Workspace::Existing("/wt/alpha-1".into()),
+                name: None,
             }),
             "the previous worktree should make a session there, got {commands:?}"
         );
@@ -2719,7 +2936,10 @@ mod tests {
         assert_eq!(
             state.picker.as_ref().map(PickerState::kind),
             Some(&PickerKind::Base {
-                target: PickTarget::New(ProjectId(1)),
+                target: PickTarget::New {
+                    project: ProjectId(1),
+                    name: None,
+                },
                 root: "/alpha".into(),
             }),
             "a new worktree asks for its base branch"
@@ -2757,6 +2977,7 @@ mod tests {
                 workspace: Workspace::NewWorktree {
                     base: "main".to_owned()
                 },
+                name: None,
             }),
             "a picked base should make a session in a new worktree, got {commands:?}"
         );
@@ -2764,8 +2985,8 @@ mod tests {
 
     #[rstest::rstest]
     fn new_session_pick_marks_starting() {
-        // Given the project picker with beta, outside git, highlighted.
-        let mut state = picking_non_git();
+        // Given the New session box for beta, outside git.
+        let mut state = naming_non_git("");
 
         // When handling PickerConfirm.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -2779,9 +3000,9 @@ mod tests {
 
     #[rstest::rstest]
     fn new_session_pick_while_starting_returns_nothing() {
-        // Given the project picker with beta, outside git, highlighted, while
-        // a start is in flight.
-        let mut state = picking_non_git();
+        // Given the New session box for beta, outside git, while a start is
+        // in flight.
+        let mut state = naming_non_git("");
         state.sessions.starting = true;
 
         // When handling PickerConfirm.
@@ -3996,6 +4217,18 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn new_incognito_opens_no_name_box() {
+        // Given the Incognito project.
+        let mut state = incognito();
+
+        // When handling NewIncognito.
+        IntentHandler::handle(&Intent::NewIncognito, &mut state);
+
+        // Then no name box is open.
+        assert!(state.rename.is_none(), "␣i asks no name");
+    }
+
+    #[rstest::rstest]
     fn new_incognito_returns_new_session_in_the_incognito_checkout() {
         // Given the Incognito project.
         let mut state = incognito();
@@ -4008,6 +4241,7 @@ mod tests {
             commands.contains(&Command::NewSession {
                 project: ProjectId(2),
                 workspace: Workspace::Checkout,
+                name: None,
             }),
             "NewIncognito should ask for a session in the Incognito folder, got {commands:?}"
         );
@@ -4989,8 +5223,8 @@ mod tests {
 
     #[rstest::rstest]
     fn new_session_pick_records_the_row_it_leaves() {
-        // Given the project picker opened from alpha's thread 11, on beta,
-        // which is outside git.
+        // Given the New session box for beta, outside git, opened from
+        // alpha's thread 11.
         let mut state = with_projects(&["alpha", "beta"]);
         if let Some(project) = state.sessions.projects.first_mut() {
             project.threads = vec![thread(11, ThreadStatus::Idle)];
@@ -5001,8 +5235,9 @@ mod tests {
         state.sessions.cursor = Some(on_thread(11));
         IntentHandler::handle(&Intent::NewSession, &mut state);
         highlight(&mut state, &project_row(2, "beta"));
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // When picking beta.
+        // When confirming the name.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
         // Then thread 11 is recorded; the new session's row follows when the

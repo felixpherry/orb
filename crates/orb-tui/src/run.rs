@@ -919,12 +919,17 @@ impl App {
                     pane.key(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
                 }
             }
-            Command::NewSession { project, workspace } => {
+            Command::NewSession {
+                project,
+                workspace,
+                name,
+            } => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::NewSession {
                         project: *project,
                         workspace: workspace.clone(),
+                        name: name.clone(),
                     })
                     .try_send();
             }

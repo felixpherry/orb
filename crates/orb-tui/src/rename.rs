@@ -1,7 +1,7 @@
 //! The name box: a LazyVim-style input centred at the top of the screen,
 //! where the user types orb's own name for a session (`Rename Session`), a
-//! tab, a pane or an agent's pane (`Rename Agent`), or the folder name of a new Research or Learn session
-//! (`New Research session`).
+//! tab, a pane or an agent's pane (`Rename Agent`), the folder name of a new Research or Learn session
+//! (`New Research session`), or the name of a new session (`New session`).
 
 use crate::mouse::HitMap;
 use crate::picker::visible;
@@ -77,14 +77,15 @@ fn title(target: RenameTarget) -> &'static str {
         RenameTarget::Tab { .. } => " Rename Tab ",
         RenameTarget::Pane(_) => " Rename Pane ",
         RenameTarget::Agent(_) => " Rename Agent ",
+        RenameTarget::NewSession { .. } => " New session ",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use orb_domain::TextInput;
-    use orb_domain::feat::sessions::state::{FolderKind, PaneId, SessionId};
+    use orb_domain::feat::sessions::state::{FolderKind, PaneId, ProjectId, SessionId};
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget};
+    use orb_domain::{Focus, TextInput};
     use ratatui::buffer::Buffer;
     use ratatui::layout::{Position, Rect};
 
@@ -149,6 +150,10 @@ mod tests {
         " New Research session "
     )]
     #[case(RenameTarget::NewFolder(FolderKind::Learn), " New Learn session ")]
+    #[case(
+        RenameTarget::NewSession { project: ProjectId(1), return_to: Focus::Sidebar },
+        " New session "
+    )]
     fn box_is_titled_by_its_target(#[case] target: RenameTarget, #[case] title: &str) {
         // Given a 100-column screen.
         // When drawing the name box for the target.

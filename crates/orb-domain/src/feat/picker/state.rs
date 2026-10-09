@@ -20,10 +20,13 @@ use crate::{AppState, Focus};
 
 /// What a workspace or base picker sets up: a new session in a project, or
 /// an existing session's move.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickTarget {
-    /// A new session of the project.
-    New(ProjectId),
+    /// A new session of `project`, named `name` in the `New session` box.
+    New {
+        project: ProjectId,
+        name: Option<String>,
+    },
     /// An existing session's new workspace.
     Move(SessionId),
 }
@@ -1376,8 +1379,14 @@ mod tests {
 
     /// Project 1's base picker for a new worktree of [`CWD`], showing `refs`.
     fn base_listing(refs: Vec<GitRef>) -> PickerState {
-        let mut picker =
-            PickerState::base(PickTarget::New(ProjectId(1)), CWD.into(), Focus::Sidebar);
+        let mut picker = PickerState::base(
+            PickTarget::New {
+                project: ProjectId(1),
+                name: None,
+            },
+            CWD.into(),
+            Focus::Sidebar,
+        );
         picker.show_branches(Path::new(CWD), refs);
         picker
     }

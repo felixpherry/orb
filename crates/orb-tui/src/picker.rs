@@ -930,7 +930,7 @@ mod tests {
     #[case(workspace(), "Workspace")]
     #[case(branches(vec![branch("main", None)]), "Branches")]
     #[case(
-        PickerState::base(PickTarget::New(ProjectId(1)), "/work".into(), Focus::Sidebar),
+        PickerState::base(PickTarget::New { project: ProjectId(1), name: None }, "/work".into(), Focus::Sidebar),
         "New worktree from"
     )]
     #[case(

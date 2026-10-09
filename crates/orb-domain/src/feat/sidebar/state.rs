@@ -2,8 +2,8 @@
 //! name box, which names a session, a new session's folder, a tab, a pane
 //! or an agent's pane.
 
-use crate::TextInput;
-use crate::feat::sessions::state::{FolderKind, PaneId, SessionId};
+use crate::feat::sessions::state::{FolderKind, PaneId, ProjectId, SessionId};
+use crate::{Focus, TextInput};
 
 /// The sidebar's width in columns until the user resizes it.
 pub const DEFAULT_WIDTH: u16 = 32;
@@ -80,6 +80,12 @@ pub enum RenameTarget {
     /// An agent's pane, renamed from its sidebar row; the keys go back to the
     /// sidebar.
     Agent(PaneId),
+    /// The name of a new session of `project`, asked right after the project
+    /// pick; the keys go back to `return_to`, where `<C-g> n` was pressed.
+    NewSession {
+        project: ProjectId,
+        return_to: Focus,
+    },
 }
 
 /// The name box: what it names, and the name typed so far.

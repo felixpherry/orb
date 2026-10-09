@@ -238,11 +238,13 @@ pub struct KillSettled;
 #[derive(Debug, Reply)]
 pub struct NextPoll(pub Duration);
 
-/// Make a session of `project` in `workspace`, with one shell pane.
+/// Make a session of `project` in `workspace`, with one shell pane, named
+/// `name`.
 #[derive(Debug)]
 pub struct NewSession {
     pub project: ProjectId,
     pub workspace: Workspace,
+    pub name: Option<String>,
 }
 
 /// Make a project's root a git repository.
@@ -472,10 +474,14 @@ impl Message<NewSession> for SessionsActor {
 
     async fn handle(
         &mut self,
-        NewSession { project, workspace }: NewSession,
+        NewSession {
+            project,
+            workspace,
+            name,
+        }: NewSession,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.new_session(project, workspace);
+        self.new_session(project, workspace, name);
     }
 }
 
@@ -1282,13 +1288,13 @@ impl SessionsActor {
         }
     }
 
-    /// Makes a session of project `id` in `workspace` with one tab running a
-    /// shell, selects it and asks the frontend to attach it. The checkout or
+    /// Makes a session of project `id` in `workspace`, named `name`, with one
+    /// tab running a shell, selects it and asks the frontend to attach it. The checkout or
     /// an existing worktree must still be a folder; a new worktree is made
     /// from its base (fetched from origin first, see `add_worktree`); the
     /// Incognito project's folder is made first. On failure the reason
     /// shows, and a worktree orb made for it is removed with its branch.
-    fn new_session(&mut self, id: ProjectId, workspace: Workspace) {
+    fn new_session(&mut self, id: ProjectId, workspace: Workspace, name: Option<String>) {
         let Some((root, kind)) = self.project_of(id) else {
             return self.end_start(Err("the project is gone".to_owned()));
         };
@@ -1300,7 +1306,7 @@ impl SessionsActor {
             Err(error) => return self.end_start(Err(error)),
         };
         let branch = self.branch_of(&dir, made.as_ref());
-        let result = self.save_session(id, session_kind(kind), &dir, branch);
+        let result = self.save_session(id, session_kind(kind), &dir, branch, name);
         if result.is_err()
             && let Some(made) = &made
         {
@@ -1309,8 +1315,8 @@ impl SessionsActor {
         self.end_start(result);
     }
 
-    /// Saves a new `kind` session of project `project` in `dir` on `branch`
-    /// with one tab of one shell pane, shows it, selects it and asks the
+    /// Saves a new `kind` session of project `project` named `name` in `dir`
+    /// on `branch` with one tab of one shell pane, shows it, selects it and asks the
     /// frontend to attach it. The error is the mode-line text.
     fn save_session(
         &mut self,
@@ -1318,17 +1324,18 @@ impl SessionsActor {
         kind: SessionKind,
         dir: &Path,
         branch: Option<String>,
+        name: Option<String>,
     ) -> Result<(), String> {
         let now = now_ms();
         let (id, pane) = self
             .store
-            .insert_session(project, kind, dir, branch.as_deref(), now)
+            .insert_session(project, kind, dir, branch.as_deref(), name.as_deref(), now)
             .map_err(|_report| NEW_SESSION_UNSAVED.to_owned())?;
         let row = SessionRow {
             id,
             project_id: project,
             kind,
-            name: None,
+            name,
             branch,
             created_at: now,
             dir: dir.to_owned(),
@@ -1794,7 +1801,7 @@ impl SessionsActor {
         }
         let made = project.and_then(|id| {
             let dir = self.make_folder(kind, kind_dir, &root, name)?;
-            let saved = self.save_session(id, session_kind(project_kind), &dir, None);
+            let saved = self.save_session(id, session_kind(project_kind), &dir, None, None);
             if saved.is_err() {
                 let _ = fs::remove_dir_all(&dir);
             }
@@ -3352,7 +3359,7 @@ mod tests {
         short_id: &str,
         created_at: i64,
     ) -> Result<Seeded, Report<StoreError>> {
-        let (session, pane) = store.insert_session(project, kind, dir, None, created_at)?;
+        let (session, pane) = store.insert_session(project, kind, dir, None, None, created_at)?;
         let (thread, _) = store.insert_pane_thread(&NewPaneThread {
             pane,
             session_id: short_id.to_owned(),
@@ -5341,11 +5348,61 @@ mod tests {
         git: &Arc<FakeGit>,
         workspace: Workspace,
     ) -> Result<(SessionsActor, State), Report<StoreError>> {
+        made_named_session(git, workspace, None)
+    }
+
+    /// The actor on a store holding the orb project alone, with `git`, after
+    /// making a session of it named `name` in `workspace`.
+    fn made_named_session(
+        git: &Arc<FakeGit>,
+        workspace: Workspace,
+        name: Option<&str>,
+    ) -> Result<(SessionsActor, State), Report<StoreError>> {
         let (store, id) = store_with_project()?;
         let (mut actor, state) =
             start_with(store, &listing(Vec::new()), git, Path::new(NO_CLAUDE_DIR));
-        actor.new_session(id, workspace);
+        actor.new_session(id, workspace, name.map(str::to_owned));
         Ok((actor, state))
+    }
+
+    #[rstest::rstest]
+    fn named_new_session_shows_the_name_as_its_title() -> Result<(), Report<StoreError>> {
+        // Given / When making a session named `api` in the checkout.
+        let (_actor, state) =
+            made_named_session(&FakeGit::local(), Workspace::Checkout, Some("api"))?;
+
+        // Then its title is the name.
+        let app = state.read();
+        let titles: Vec<String> = app
+            .sessions
+            .sessions
+            .iter()
+            .map(|session| app.sessions.title(session))
+            .collect();
+        assert_eq!(titles, ["api"], "the New session name is the title");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn named_new_session_saves_the_name() -> Result<(), Report<StoreError>> {
+        // Given / When making a session named `api` in the checkout.
+        let (actor, state) =
+            made_named_session(&FakeGit::local(), Workspace::Checkout, Some("api"))?;
+
+        // Then the store returns the name.
+        let id = state
+            .read()
+            .sessions
+            .sessions
+            .first()
+            .map(|session| session.id);
+        assert_eq!(
+            id.and_then(|id| saved_session_row(&actor.store, id))
+                .and_then(|row| row.name),
+            Some("api".to_owned()),
+            "the New session name should be saved"
+        );
+        Ok(())
     }
 
     /// The sessions the sidebar has, in store order.
@@ -5476,7 +5533,7 @@ mod tests {
         state.write().sessions.starting = true;
 
         // When making a session.
-        actor.new_session(id, Workspace::Checkout);
+        actor.new_session(id, Workspace::Checkout, None);
 
         // Then nothing is starting any more.
         assert!(
@@ -5595,6 +5652,7 @@ mod tests {
             Workspace::NewWorktree {
                 base: "main".to_owned(),
             },
+            None,
         );
 
         // Then the worktree and branch orb made are force-removed.
@@ -5626,7 +5684,7 @@ mod tests {
         let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // When making a session in its checkout.
-        actor.new_session(id, Workspace::Checkout);
+        actor.new_session(id, Workspace::Checkout, None);
 
         // Then the mode line names the missing folder.
         assert_eq!(
@@ -5659,7 +5717,7 @@ mod tests {
             .ok_or_else(|| Report::new(StoreError).attach("no Incognito project"))?;
 
         // When making an Incognito session.
-        actor.new_session(id, Workspace::Checkout);
+        actor.new_session(id, Workspace::Checkout, None);
 
         // Then its folder is back and the session runs there.
         assert_eq!(
@@ -5759,6 +5817,7 @@ mod tests {
             Workspace::NewWorktree {
                 base: "main".to_owned(),
             },
+            None,
         );
 
         // Then, while git fetched, origin/main showed as being fetched.
@@ -5816,6 +5875,7 @@ mod tests {
         actor.new_session(
             ProjectId(99),
             Workspace::Existing(worktree.path().to_owned()),
+            None,
         );
 
         // Then git is asked to remove no worktree and delete no branch.
@@ -5853,7 +5913,7 @@ mod tests {
             .ok_or_else(|| Report::new(StoreError).attach("no Incognito project"))?;
 
         // When making an Incognito session.
-        actor.new_session(id, Workspace::Checkout);
+        actor.new_session(id, Workspace::Checkout, None);
 
         // Then the mode line says the folder couldn't be made.
         assert_eq!(

@@ -40,10 +40,12 @@ pub enum Command {
     /// Save `session`'s tabs, splits, focus and pane names as the app state
     /// has them.
     SaveLayout(SessionId),
-    /// Make a session of `project` in `workspace`, with one shell.
+    /// Make a session of `project` in `workspace`, with one shell, named
+    /// `name`.
     NewSession {
         project: ProjectId,
         workspace: Workspace,
+        name: Option<String>,
     },
     /// Make the project's root a git repository (`git init`).
     InitGit(ProjectId),

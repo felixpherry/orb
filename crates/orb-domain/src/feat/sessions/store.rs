@@ -436,8 +436,8 @@ impl Store {
             .attach("failed to save the project")
     }
 
-    /// Saves a new `kind` session of `project` in `dir` on `branch`, last
-    /// active and visited at `now`, with one tab holding one shell pane.
+    /// Saves a new `kind` session of `project` named `name` in `dir` on
+    /// `branch`, last active and visited at `now`, with one tab holding one shell pane.
     /// Returns the session and its pane.
     ///
     /// # Errors
@@ -450,6 +450,7 @@ impl Store {
         kind: SessionKind,
         dir: &Path,
         branch: Option<&str>,
+        name: Option<&str>,
         now: i64,
     ) -> Result<(SessionId, PaneId), Report<StoreError>> {
         let dir = utf8(dir)?.to_owned();
@@ -462,7 +463,7 @@ impl Store {
             project_id: project.0,
             kind: session_kind_text(kind).to_owned(),
             dir: dir.clone(),
-            name: None,
+            name: name.map(str::to_owned),
             branch: branch.map(str::to_owned),
             created_at: now,
             pinned_at: None,
@@ -1546,6 +1547,7 @@ mod tests {
             SessionKind::Plain,
             Path::new("/tmp/orb"),
             None,
+            None,
             1_000,
         )?;
         let (thread, _) = store.insert_pane_thread(&NewPaneThread {
@@ -2485,6 +2487,7 @@ mod tests {
             SessionKind::Plain,
             Path::new("/tmp/orb"),
             None,
+            None,
             1_000,
         )?;
 
@@ -2523,6 +2526,7 @@ mod tests {
             SessionKind::Research,
             Path::new("/tmp/orb/wt"),
             Some("orb/0a1b2c3d"),
+            None,
             1_000,
         )?;
 
@@ -2556,6 +2560,7 @@ mod tests {
             project,
             SessionKind::Plain,
             Path::new("/tmp/orb"),
+            None,
             None,
             1_000,
         )?;
