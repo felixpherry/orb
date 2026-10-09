@@ -106,7 +106,7 @@ Entries are added or amended **only with human approval**.
 - (zellij) Tool handoff focuses an existing pane of the same name, switching to its tab, instead of opening a second one.
 - (zellij) A draft's tools open in its worktree, or in the project root for a local or new-worktree draft.
 - (zellij) Tool panes run with orb's own `NO_COLOR`, not the zellij server's.
-- (zellij) A zellij call that runs longer than 2 s is killed; when it was opening a tool, the mode line then shows `zellij timed out (session renamed? restart orb)`.
+- (zellij) A zellij call that runs longer than 2 s is killed; when it was opening a tool, the message box then shows `zellij timed out (session renamed? restart orb)`.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
 - (keybinds) In the sidebar, the dashboard or the attached pane, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
@@ -116,7 +116,7 @@ Entries are added or amended **only with human approval**.
 - (sidebar) Picking a project in `␣n` outside the project filter clears the filter.
 - (keybinds) `<C-x>` in the project filter removes the highlighted project after a `No`/`Yes` confirm.
 - (projects) A removed project is hidden from `␣n` and the project filter and loses its draft; its threads stay, and adding it again with `␣p` restores it.
-- (sessions) Deleting a thread hides it at once; if `claude rm` fails, it reappears and the mode line shows the reason.
+- (sessions) Deleting a thread hides it at once; if `claude rm` fails, it reappears and the message box shows the reason.
 - (notify) While orb's pane isn't focused, orb sends a desktop notification on macOS and Linux when a thread finishes a turn, needs approval, or needs input.
 - (notify) While its last focus event says it's focused, orb still notifies if `zellij action list-clients` shows no client on its pane, because zellij sends no focus-out on a tab switch.
 - (notify) On macOS, notifications are delivered through `terminal-notifier` when it's on `PATH` at startup, and through `osascript` otherwise, or when terminal-notifier fails.
@@ -151,7 +151,7 @@ Entries are added or amended **only with human approval**.
 - (tui) Typed text too long for the sidebar search, a picker's input or the rename box shows its end, keeping the cursor in view.
 - (groups) A group is a Feature, Research or Learn group whose threads all run in one directory: a Feature group's worktree, or `~/.orb/research/<name>/` or `~/.orb/learn/<name>/`.
 - (keybinds) `␣gf` picks a project and a name and adds a Feature group; `␣gr`/`␣gl` take a name and add a Research/Learn group; each starts with a draft.
-- (keybinds) The group name box is the rename box titled `New Feature group`, `New Research group` or `New Learn group`; after `⏎` it stays open until orb has made the group, and a refused name leaves it open with the reason on the mode line.
+- (keybinds) The group name box is the rename box titled `New Feature group`, `New Research group` or `New Learn group`; after `⏎` it stays open until orb has made the group, and a refused name leaves it open with the reason in the message box.
 - (groups) A group name is refused when the project already has a group of that kind with its slug (`Group <slug> already exists`), when a Feature group's branch already exists (`branch <slug> already exists in <project>`), or when a Research/Learn folder already exists (`~/.orb/<kind>/<slug> already exists`).
 - (groups) A group's slug is its name with each run of whitespace turned into `-`, case kept; a name using `/ \ ~ ^ : ? * [` or `..`, or starting with `-` or `.`, is refused with `Name can't use <char>`.
 - (groups) A Feature group's worktree is created when its first draft starts, on a branch named for the group's slug, which orb never renames.
@@ -177,7 +177,7 @@ Entries are added or amended **only with human approval**.
 - (groups) Deleting a group runs `claude rm` for each of its threads, then deletes the group and its directory: its own folder under `~/.orb/<kind>/`, or its worktree (`git worktree remove --force`) and then the slug branch orb made for it (`git branch -d`).
 - (groups) Deleting a Feature group whose slug branch has commits `git branch -d` calls unmerged (not in its upstream if it has one, else not in `HEAD`) is refused before anything is touched or hidden, with `branch <slug> has unmerged commits`; a branch the group was switched to with `␣b` is never deleted.
 - (groups) Deleting a Feature group keeps its worktree and branch, showing `kept the worktree: another thread works in it`, while a thread outside the group still works in that worktree.
-- (groups) If a thread's `claude rm` fails while its group is being deleted, that thread and the group stay, with the reason on the mode line.
+- (groups) If a thread's `claude rm` fails while its group is being deleted, that thread and the group stay, with the reason in the message box.
 - (picker) `d` on a group's card asks `Delete group and its worktree?` for a started Feature group, `Delete group and its folder?` for a Research or Learn group, and `Delete group?` for a Feature group that never started.
 - (groups) A group always keeps a thread once it has one, and its draft before that; `d` on its last thread, or on the draft of a group with no thread, is refused with `Group needs at least one draft or thread`.
 - (keybinds) `␣b` (and the dashboard's `b`) on a started Feature group's card switches its worktree's branch for the group and every thread in it; `␣b` isn't bound on a group's other rows, and `␣w` is bound on none.
@@ -227,7 +227,7 @@ Entries are added or amended **only with human approval**.
 - (worktrees) A worktree under `~/.orb/worktrees/` is pruned once nothing uses it, or once no draft uses it and every thread and Feature group in it has been settled, the latest for at least 3 days.
 - (worktrees) Pruning skips a worktree with uncommitted changes or untracked files, and one whose thread is attached or has a turn underway.
 - (worktrees) Pruning removes the worktree's directory and keeps its branch.
-- (worktrees) orb sweeps for worktrees to prune at start and then every hour, showing `pruned N worktrees` on the mode line when it removes any.
+- (worktrees) orb sweeps for worktrees to prune at start and then every hour, showing `pruned N worktrees` in the message box when it removes any.
 - (worktrees) Attaching to a thread whose worktree is gone first recreates it at the same path on the thread's branch, or on a new branch of that name from the project's default branch when the branch is gone.
 - (groups) Deleting a Feature group whose worktree was pruned deletes the group and its slug branch without the worktree removal.
 - (keybinds) `␣sw` in the sidebar or dashboard opens the worktree picker, under the `+search` which-key group.
@@ -235,7 +235,7 @@ Entries are added or amended **only with human approval**.
 - (picker) The worktree picker's preview shows the worktree's path, branch, size, uncommitted changes, last commit, last use, sweep verdict, and the threads, Feature groups and drafts that use it.
 - (picker) The worktree picker's sweep verdict comes from the same rule the sweep applies.
 - (picker) The worktree picker re-lists its rows after each rescan of orb's worktrees while it's open, keeping the typed text and the selected row.
-- (keybinds) In the worktree picker, `⏎` does nothing and `<C-x>` deletes the selected worktree after a `No`/`Yes` confirm drawn over the list, which either answer returns to; it is refused, with the reason on the mode line, while a thread in it is attached or has a turn underway.
+- (keybinds) In the worktree picker, `⏎` does nothing and `<C-x>` deletes the selected worktree after a `No`/`Yes` confirm drawn over the list, which either answer returns to; it is refused, with the reason in the message box, while a thread in it is attached or has a turn underway.
 - (worktrees) Deleting a worktree from the worktree picker force-removes it, uncommitted changes included, and keeps its branch.
 - (paths) orb persists its transcript search index to `~/.orb/userdata/search.sqlite`, which it rebuilds from the transcripts when the file is missing, can't be read, or holds another schema version.
 - (search) The search index holds the prompts the user typed and Claude's text replies from every orb thread's transcripts, settled threads included; tool calls, tool output and thinking are left out.
@@ -263,7 +263,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) Deleting a pi thread ends its zmx session and removes its socket; its session file stays in pi's sessions directory.
 - (pane) An attach pane whose program exits within about a second of starting shows `session exited at start`.
 - (drafts) On a pi draft, the model picker lists `Default`, then the models `pi --list-models` printed at orb's start under a heading per provider, labelled `provider/model`, which orb passes to `--model`.
-- (drafts) When `pi --list-models` fails at orb's start, the mode line shows its reason once and pi's model picker lists only `Default`.
+- (drafts) When `pi --list-models` fails at orb's start, the message box shows its reason once and pi's model picker lists only `Default`.
 - (drafts) Picking another harness resets a draft's model and permission to `Default`.
 - (drafts) The harness picker lists Claude Code and pi, each disabled as `checking` until orb's startup probe of it answers, and pi disabled as `pi not found` or `zmx not found` when either was missing from `PATH` at orb's start.
 - (keybinds) On a group's draft, `⏎` starts it, and `␣h`/`␣m`/`␣a` override the group's default for that draft alone; it has no workspace or base-branch pick.
