@@ -74,7 +74,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In a picker, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, wrapping from the last to the first and back, `<C-d>`/`<C-u>` move half a page, stopping at the ends, `⏎` picks, and `Esc` cancels.
 - (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
-- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, the selected thread's or draft's branch and project (`<project>/<group>` in a group), and the latest error in red on the left; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
+- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the selected thread's or draft's branch and project (`<project>/<group>` in a group) on the left; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
 - (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
 - (picker) Every picker but the session, worktree and search pickers is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide (wider when its name needs it) with its name centred in the top border, a > prompt over an orange rule, numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
@@ -140,7 +140,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) On the dashboard, `j`/`k` or `↓`/`↑` move the menu cursor, wrapping from the last item to the first and back, `⏎` runs the highlighted item, and an item's letter runs it directly.
 - (dashboard) The menu cursor starts on the first item (Open/Start session on a thread or draft, Branch on a started Feature group's card, Harness on any other card, else New session) and goes back there whenever the selection changes.
 - (dashboard) While the Settled shelf's header is selected, the dashboard's context line shows the shelf hint.
-- (dashboard) When the Claude pane fails to start, the reason shows in red under the dashboard's footer; other errors, such as a failed `claude --bg` or `claude agents`, show on the mode line.
+- (dashboard) When the Claude pane fails to start, the reason shows in red under the dashboard's footer; other errors, such as a failed `claude --bg` or `claude agents`, show in the message box.
 - (dashboard) While the dashboard has the keys, a steady block cursor sits on the first cell of the highlighted item's label.
 - (pane) orb keeps a separate attach pane (`claude attach`, or `zmx attach` for pi) for each attached thread, and selecting another thread leaves it running.
 - (pane) orb is attached to a thread from `⏎` into its pane until `<C-\>`, settling or deleting the thread or its group detaches it, or its Claude exits.
@@ -304,7 +304,10 @@ Entries are added or amended **only with human approval**.
 - (layout) When a thread's last pane closes, by a close key or by its program exiting, orb opens a shell pane in the thread's directory in its place.
 - (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab with the keys in its pane.
 - (sidebar) On an agent row, `r` renames the agent's pane and `d` closes it after a confirm.
-- (tui) After orb copies a mouse selection in a pane, the mode line shows `Text copied to system clipboard` in blue where the error shows, for 2 s.
+- (tui) After orb copies a mouse selection in a pane, the message box shows `Text copied to system clipboard`.
 - (keybinds) `<C-g> n` asks for a name in a `New session` box right after the project pick, before any workspace or base pick; `Esc` there cancels the new session.
 - (sessions) A new session's name from the `New session` box is its `r` name, and an empty one leaves it unnamed.
 - (sessions) A session's title is its `r` name, else the first of its agents' titles, else its directory's name.
+- (tui) Errors and notices show in a message box like LazyVim's notifier, just under the tab bar at the right edge, titled Error in red or Messages in cyan.
+- (tui) The message box is at least 40 columns wide and at most 40% of the pane, and cuts longer lines with `…`.
+- (tui) The message box hides after 3 s for info or 5 s for errors, a newer message replaces it, and the same message sent again does not bring it back.
