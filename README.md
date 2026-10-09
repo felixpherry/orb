@@ -77,7 +77,7 @@ The recording comes from a scripted environment of dummy repos and stand-in agen
 | `Cmd x` | Close the pane |
 | `Cmd +` / `Cmd =`, `Cmd -` | Grow / shrink the focused pane or the sidebar |
 | `Cmd 1` to `Cmd 9` | Go to tab N |
-| `Cmd [` / `Cmd ]` | Previous / next tab |
+| `Cmd [` / `Cmd ]` | Previous / next swap layout for the shown tab (BASE, vertical, horizontal, stacked, half-stacked; skips ones that don't fit, wraps; a tab changed by hand first gets its own layout back) |
 | `Cmd i` / `Cmd o` | Move the tab left / right |
 | `<C-[>` / `<C-]>` | Jump back / forward through the jump list |
 | `<C-S-h>` / `<C-S-l>` | Move the keys to the sidebar (showing it if hidden) / into the shown session's panes |

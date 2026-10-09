@@ -61,10 +61,11 @@ pub enum Intent {
     RenamePane,
     /// Show tab N, counting from 1.
     GoToTab(usize),
-    /// Show the next tab, wrapping to the first.
-    NextTab,
-    /// Show the previous tab, wrapping to the last.
-    PreviousTab,
+    /// Re-tile the shown tab in the next swap layout that fits, wrapping;
+    /// a tab changed by hand gets its own layout back first.
+    NextSwapLayout,
+    /// As `NextSwapLayout`, backwards.
+    PreviousSwapLayout,
     /// Swap the shown tab with the one before it.
     MoveTabLeft,
     /// Swap the shown tab with the one after it.
@@ -214,8 +215,8 @@ impl fmt::Display for Intent {
             Self::RenameTab => "rename tab",
             Self::RenamePane => "rename pane",
             Self::GoToTab(_) => "tab",
-            Self::NextTab => "next tab",
-            Self::PreviousTab => "previous tab",
+            Self::NextSwapLayout => "next layout",
+            Self::PreviousSwapLayout => "previous layout",
             Self::MoveTabLeft => "move tab left",
             Self::MoveTabRight => "move tab right",
             Self::FocusPane(_) => "focus pane",
@@ -284,8 +285,8 @@ mod tests {
     #[case(Intent::RenameTab, "rename tab")]
     #[case(Intent::RenamePane, "rename pane")]
     #[case(Intent::GoToTab(3), "tab")]
-    #[case(Intent::NextTab, "next tab")]
-    #[case(Intent::PreviousTab, "previous tab")]
+    #[case(Intent::NextSwapLayout, "next layout")]
+    #[case(Intent::PreviousSwapLayout, "previous layout")]
     #[case(Intent::MoveTabLeft, "move tab left")]
     #[case(Intent::MoveTabRight, "move tab right")]
     #[case(Intent::FocusPane(PaneId(-1)), "focus pane")]

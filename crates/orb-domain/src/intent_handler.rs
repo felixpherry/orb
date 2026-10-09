@@ -177,8 +177,8 @@ impl IntentHandler {
             Intent::RenameTab => rename_tab(state),
             Intent::RenamePane => rename_pane(state),
             Intent::GoToTab(n) => on_tabs(state, |layouts, owner| layouts.go_to_tab(owner, *n)),
-            Intent::NextTab => on_tabs(state, Layouts::next_tab),
-            Intent::PreviousTab => on_tabs(state, Layouts::previous_tab),
+            Intent::NextSwapLayout => on_tabs(state, Layouts::next_swap_layout),
+            Intent::PreviousSwapLayout => on_tabs(state, Layouts::previous_swap_layout),
             Intent::MoveTabLeft => on_tabs(state, Layouts::move_tab_left),
             Intent::MoveTabRight => on_tabs(state, Layouts::move_tab_right),
             Intent::FocusPane(pane) => {
@@ -1611,7 +1611,7 @@ mod tests {
     use crate::feat::git::git_service::{GitRef, WorktreeFacts};
     use crate::feat::jumps::state::JumpList;
     use crate::feat::layout::state::{Layouts, SessionLayout, Tab, test_entry};
-    use crate::feat::layout::tree::{NavDirection, Split};
+    use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
     use crate::feat::picker::list::{PickerItem, WorkspaceChoice};
     use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
     use crate::feat::sessions::state::{
@@ -6851,6 +6851,13 @@ mod tests {
         state.shown_layout().map(SessionLayout::active)
     }
 
+    fn shown_swap_layout(state: &AppState) -> Option<SwapLayout> {
+        state
+            .shown_layout()
+            .and_then(SessionLayout::active_tab)
+            .map(Tab::swap_layout)
+    }
+
     fn tab_count(state: &AppState) -> usize {
         state.shown_layout().map_or(0, |layout| layout.tabs().len())
     }
@@ -7662,16 +7669,51 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn next_tab_shows_the_next() {
-        // Given two tabs, the first shown.
-        let mut state = two_tabs();
-        IntentHandler::handle(&Intent::GoToTab(1), &mut state);
+    fn next_swap_layout_moves_a_lone_pane_tab_to_vertical() {
+        // Given one pane in a fresh tab (BASE).
+        let mut state = with_layout(Focus::Pane);
 
-        // When showing the next tab.
-        IntentHandler::handle(&Intent::NextTab, &mut state);
+        // When handling Intent::NextSwapLayout.
+        IntentHandler::handle(&Intent::NextSwapLayout, &mut state);
 
-        // Then the second tab is shown.
-        assert_eq!(shown_tab(&state), Some(1), "Cmd ] shows the next tab");
+        // Then the shown tab is vertical.
+        assert_eq!(
+            shown_swap_layout(&state),
+            Some(SwapLayout::Vertical),
+            "Cmd ] steps BASE to vertical"
+        );
+    }
+
+    #[rstest::rstest]
+    fn previous_swap_layout_wraps_a_lone_pane_tab_to_horizontal() {
+        // Given one pane in a fresh tab (BASE).
+        let mut state = with_layout(Focus::Pane);
+
+        // When handling Intent::PreviousSwapLayout.
+        IntentHandler::handle(&Intent::PreviousSwapLayout, &mut state);
+
+        // Then the shown tab is horizontal (half-stacked and stacked don't fit 1 pane).
+        assert_eq!(
+            shown_swap_layout(&state),
+            Some(SwapLayout::Horizontal),
+            "Cmd [ wraps BASE back to horizontal"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_saves_the_layout() {
+        // Given one pane in a fresh tab.
+        let mut state = with_layout(Focus::Pane);
+
+        // When handling Intent::NextSwapLayout.
+        let commands = IntentHandler::handle(&Intent::NextSwapLayout, &mut state);
+
+        // Then session 1's layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "a swap layout step should be saved"
+        );
     }
 
     #[rstest::rstest]

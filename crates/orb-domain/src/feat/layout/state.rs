@@ -799,21 +799,6 @@ impl Layouts {
         }
     }
 
-    /// Shows the next tab, wrapping to the first.
-    pub fn next_tab(&mut self, owner: SessionId) {
-        if let Some(layout) = self.sessions.get_mut(&owner) {
-            layout.active = (layout.active + 1) % layout.tabs.len().max(1);
-        }
-    }
-
-    /// Shows the previous tab, wrapping to the last.
-    pub fn previous_tab(&mut self, owner: SessionId) {
-        if let Some(layout) = self.sessions.get_mut(&owner) {
-            let count = layout.tabs.len().max(1);
-            layout.active = (layout.active + count - 1) % count;
-        }
-    }
-
     /// Re-tiles the shown tab in the next swap layout that fits, wrapping; a
     /// tab changed by hand gets its own layout back first.
     pub fn next_swap_layout(&mut self, owner: SessionId) {
@@ -1839,31 +1824,6 @@ mod tests {
             (Some(1), Some(PaneId(8))),
             "the new tab is shown"
         );
-    }
-
-    #[rstest::rstest]
-    fn next_tab_wraps_to_the_first() {
-        // Given three tabs, the last shown.
-        let mut layouts = three_tabs();
-        layouts.go_to_tab(OWNER, 3);
-
-        // When showing the next tab.
-        layouts.next_tab(OWNER);
-
-        // Then the first is shown.
-        assert_eq!(active(&layouts), Some(0), "next wraps to the first");
-    }
-
-    #[rstest::rstest]
-    fn previous_tab_wraps_to_the_last() {
-        // Given three tabs, the first shown.
-        let mut layouts = three_tabs();
-
-        // When showing the previous tab.
-        layouts.previous_tab(OWNER);
-
-        // Then the last is shown.
-        assert_eq!(active(&layouts), Some(2), "previous wraps to the last");
     }
 
     #[rstest::rstest]

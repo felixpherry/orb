@@ -454,8 +454,8 @@ fn cmd_route(key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('+' | '=') => Some(Intent::GrowFocused),
         KeyCode::Char('-') => Some(Intent::ShrinkFocused),
         KeyCode::Char(digit @ '1'..='9') => digit.to_digit(10).map(|n| Intent::GoToTab(n as usize)),
-        KeyCode::Char('[') => Some(Intent::PreviousTab),
-        KeyCode::Char(']') => Some(Intent::NextTab),
+        KeyCode::Char('[') => Some(Intent::PreviousSwapLayout),
+        KeyCode::Char(']') => Some(Intent::NextSwapLayout),
         KeyCode::Char('i') => Some(Intent::MoveTabLeft),
         KeyCode::Char('o') => Some(Intent::MoveTabRight),
         _ => None,
@@ -931,8 +931,8 @@ mod tests {
     #[case(KeyCode::Char('7'), Intent::GoToTab(7))]
     #[case(KeyCode::Char('8'), Intent::GoToTab(8))]
     #[case(KeyCode::Char('9'), Intent::GoToTab(9))]
-    #[case(KeyCode::Char('['), Intent::PreviousTab)]
-    #[case(KeyCode::Char(']'), Intent::NextTab)]
+    #[case(KeyCode::Char('['), Intent::PreviousSwapLayout)]
+    #[case(KeyCode::Char(']'), Intent::NextSwapLayout)]
     #[case(KeyCode::Char('i'), Intent::MoveTabLeft)]
     #[case(KeyCode::Char('o'), Intent::MoveTabRight)]
     fn cmd_keys_route_to_their_intents(
