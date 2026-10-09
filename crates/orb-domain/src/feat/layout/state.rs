@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
 
-use super::tree::{
-    Grow, NavDirection, PaneInfo, Split, Step, SwapLayout, TileLayout, find_in_direction,
-};
+use super::tree::{Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction};
 use crate::feat::sessions::state::{PaneId, SessionId};
 use crate::feat::zmx::zmx_service::ZmxSession;
 
@@ -178,10 +176,9 @@ impl Tab {
         changed
     }
 
-    /// Goes back to the tree from before the last `Cmd -`, or grows the
-    /// focused pane a step, or stacks its split when the step doesn't fit.
-    /// With no split left to grow or stack, the tab zooms unless the pane is
-    /// its only one. A zoomed tab doesn't grow, and neither does one with no
+    /// Goes back to the tree from before the last `Cmd -`, or grows or
+    /// stacks the focused pane as zellij's stacked resize does. With nothing
+    /// left to grow or stack, the tab zooms unless the pane is its only one. A zoomed tab doesn't grow, and neither does one with no
     /// body yet. Whether the tree changed.
     fn grow(&mut self, body: Rect) -> bool {
         if self.zoomed || body.is_empty() {
@@ -194,7 +191,7 @@ impl Tab {
             }
             None => {
                 let before = tab.tree.clone();
-                match tab.tree.grow_focused(Step::of(body), body) {
+                match tab.tree.grow_focused(body) {
                     Grow::Grew | Grow::Stacked => {
                         history.before_grow.push(before);
                         true
@@ -209,7 +206,8 @@ impl Tab {
     }
 
     /// Leaves a zoom, or goes back to the tree from before the last `Cmd +`,
-    /// or shrinks the focused pane a step, its ratio held between 0.1 and 0.9.
+    /// or breaks a pane out of the focused stack, or shrinks the focused pane,
+    /// as zellij's stacked resize does.
     /// Whether the tree changed; leaving a zoom isn't a change.
     fn shrink(&mut self, body: Rect) -> bool {
         if self.zoomed {
@@ -223,7 +221,7 @@ impl Tab {
             }
             None => {
                 let before = tab.tree.clone();
-                let shrank = tab.tree.resize_focused(false, Step::of(body), body);
+                let shrank = tab.tree.shrink_focused(body);
                 if shrank {
                     history.before_shrink.push(before);
                 }
@@ -2029,65 +2027,71 @@ mod tests {
         }
     }
 
-    #[rstest::rstest]
-    fn cmd_plus_in_a_column_first_grows_the_pane() {
-        // Given a [1][4] tab focused on pane 9, 10 rows tall.
-        let mut layouts = climb();
-
-        // When pressing Cmd + once.
-        layouts.resize_focused(OWNER, true);
-
-        // Then pane 9 is 12 rows tall: 5% of the 40-row tab.
-        let height = tall_placement(&layouts)
-            .panes
-            .iter()
-            .find(|place| place.pane == PaneId(9))
-            .map(|place| place.area.height);
-        assert_eq!(height, Some(12), "the first step should grow pane 9 2 rows");
+    /// Presses `Cmd +` `times` times.
+    fn grow_times(layouts: &mut Layouts, times: usize) {
+        for _ in 0..times {
+            layouts.resize_focused(OWNER, true);
+        }
     }
 
     #[rstest::rstest]
-    fn cmd_plus_in_a_column_stacks_part_of_the_column() {
-        // Given a [1][4] tab focused on pane 9.
+    fn cmd_plus_in_a_column_stacks_the_pane_above() {
+        // Given a [1][4] tab focused on pane 9, 10 rows tall below pane 8.
         let mut layouts = climb();
 
-        // When pressing Cmd + until the stacks change.
-        grow_until_the_stacks_change(&mut layouts);
+        // When pressing Cmd + once, 12 rows more than pane 8 can give.
+        layouts.resize_focused(OWNER, true);
 
-        // Then pane 9 and the panes below it are one stack.
+        // Then panes 8 and 9 are one stack.
         assert_eq!(
             stacked(&layouts),
-            vec![vec![PaneId(9), PaneId(10), PaneId(11)]],
-            "the first stack should hold pane 9 and the panes below it"
+            vec![vec![PaneId(8), PaneId(9)]],
+            "the first Cmd + should stack pane 9 with the pane above"
         );
     }
 
     #[rstest::rstest]
-    fn cmd_plus_on_a_stacked_part_stacks_the_whole_column() {
-        // Given a [1][4] tab whose panes 9 to 11 were stacked by Cmd +.
+    fn cmd_plus_three_times_stacks_the_whole_column() {
+        // Given a [1][4] tab focused on pane 9.
         let mut layouts = climb();
-        grow_until_the_stacks_change(&mut layouts);
 
-        // When pressing Cmd + until the stacks change again.
-        grow_until_the_stacks_change(&mut layouts);
+        // When pressing Cmd + three times.
+        grow_times(&mut layouts, 3);
 
         // Then the whole right column is one stack.
         assert_eq!(
             stacked(&layouts),
             vec![vec![PaneId(8), PaneId(9), PaneId(10), PaneId(11)]],
-            "the second stack should hold the whole column"
+            "the stack should take in the panes below, one per press"
         );
     }
 
     #[rstest::rstest]
-    fn cmd_plus_on_a_stacked_column_stacks_the_whole_tab() {
-        // Given a [1][4] tab whose right column was stacked by Cmd +.
+    fn cmd_plus_on_a_stacked_column_grows_it_30_percent_left() {
+        // Given a [1][4] tab whose right column Cmd + stacked.
         let mut layouts = climb();
-        grow_until_the_stacks_change(&mut layouts);
-        grow_until_the_stacks_change(&mut layouts);
+        grow_times(&mut layouts, 3);
 
-        // When pressing Cmd + until the stacks change again.
-        grow_until_the_stacks_change(&mut layouts);
+        // When pressing Cmd + once more.
+        layouts.resize_focused(OWNER, true);
+
+        // Then pane 7 is 24 columns narrower: 30% of the 80-column tab.
+        let width = tall_placement(&layouts)
+            .panes
+            .iter()
+            .find(|place| place.pane == PaneId(7))
+            .map(|place| place.area.width);
+        assert_eq!(width, Some(16), "the column should grow 24 columns left");
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_on_a_grown_column_stacks_the_whole_tab() {
+        // Given a [1][4] tab whose stacked right column Cmd + grew left.
+        let mut layouts = climb();
+        grow_times(&mut layouts, 4);
+
+        // When pressing Cmd + once more.
+        layouts.resize_focused(OWNER, true);
 
         // Then every pane in the tab is one stack.
         assert_eq!(
@@ -2099,7 +2103,7 @@ mod tests {
                 PaneId(10),
                 PaneId(11)
             ]],
-            "the third stack should hold the whole tab"
+            "the last stack should hold the whole tab"
         );
     }
 
@@ -2107,9 +2111,7 @@ mod tests {
     fn cmd_plus_on_a_whole_tab_stack_zooms_it() {
         // Given a [1][4] tab that Cmd + stacked whole.
         let mut layouts = climb();
-        grow_until_the_stacks_change(&mut layouts);
-        grow_until_the_stacks_change(&mut layouts);
-        grow_until_the_stacks_change(&mut layouts);
+        grow_times(&mut layouts, 5);
 
         // When pressing Cmd + once more.
         layouts.resize_focused(OWNER, true);
@@ -2204,7 +2206,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn cmd_plus_on_a_200_column_tab_moves_a_left_right_border_10_columns() {
+    fn cmd_plus_on_a_200_column_tab_moves_a_left_right_border_60_columns() {
         // Given panes 7 and 8 side by side over a 200-column body, 8 focused.
         let mut layouts = split_right();
         layouts.fit_to(HUGE);
@@ -2213,17 +2215,17 @@ mod tests {
         // When pressing Cmd +.
         layouts.resize_focused(OWNER, true);
 
-        // Then pane 8 is 10 columns wider: 5% of the tab.
+        // Then pane 8 is 60 columns wider: 30% of the tab.
         let after = huge_area(&layouts, 8).map(|area| area.width);
         assert_eq!(
             after,
-            before.map(|width| width + 10),
-            "Cmd + moves 5% of the tab's width"
+            before.map(|width| width + 60),
+            "Cmd + moves 30% of the tab's width"
         );
     }
 
     #[rstest::rstest]
-    fn cmd_plus_on_a_60_row_tab_moves_a_top_bottom_border_3_rows() {
+    fn cmd_plus_on_a_60_row_tab_moves_a_top_bottom_border_18_rows() {
         // Given pane 8 below pane 7 over a 60-row body, 8 focused.
         let mut layouts = opened();
         layouts.split(OWNER, Split::Down, entry(8));
@@ -2233,17 +2235,17 @@ mod tests {
         // When pressing Cmd +.
         layouts.resize_focused(OWNER, true);
 
-        // Then pane 8 is 3 rows taller: 5% of the tab.
+        // Then pane 8 is 18 rows taller: 30% of the tab.
         let after = huge_area(&layouts, 8).map(|area| area.height);
         assert_eq!(
             after,
-            before.map(|height| height + 3),
-            "Cmd + moves 5% of the tab's height"
+            before.map(|height| height + 18),
+            "Cmd + moves 30% of the tab's height"
         );
     }
 
     #[rstest::rstest]
-    fn cmd_minus_after_a_5_percent_cmd_plus_restores_the_tree() {
+    fn cmd_minus_after_a_30_percent_cmd_plus_restores_the_tree() {
         // Given panes 7 and 8 side by side over a 200-column body, grown once.
         let mut layouts = split_right();
         layouts.fit_to(HUGE);
@@ -2295,9 +2297,8 @@ mod tests {
 
     #[rstest::rstest]
     fn cmd_plus_after_a_cmd_minus_restores_the_tree() {
-        // Given panes 7 and 8 over a narrow body, shrunk once, then again
-        // up to the ratio bound.
-        let mut layouts = narrow();
+        // Given panes 7 and 8 side by side, pane 8 shrunk twice.
+        let mut layouts = split_right();
         layouts.resize_focused(OWNER, false);
         let before = tree_json(&layouts);
         layouts.resize_focused(OWNER, false);
@@ -2343,7 +2344,7 @@ mod tests {
 
     #[rstest::rstest]
     fn cmd_minus_after_a_focus_move_shrinks_the_newly_focused_pane() {
-        // Given pane 8 grown once, leaving pane 7 36 columns wide, and the
+        // Given pane 8 grown once, leaving pane 7 16 columns wide, and the
         // focus moved to pane 7.
         let mut layouts = split_right();
         layouts.resize_focused(OWNER, true);
@@ -2352,10 +2353,11 @@ mod tests {
         // When pressing Cmd -.
         layouts.resize_focused(OWNER, false);
 
-        // Then pane 7 shrank a step instead of the grow being undone.
+        // Then pane 7 shrank 5% (4 columns), since 30% doesn't fit, instead
+        // of the grow being undone.
         assert_eq!(
             width(&layouts, 7),
-            Some(32),
+            Some(12),
             "after a focus move Cmd - should shrink the focused pane"
         );
     }
@@ -2385,10 +2387,10 @@ mod tests {
         // When pressing Cmd -.
         layouts.resize_focused(OWNER, false);
 
-        // Then pane 8 is 4 columns narrower.
+        // Then pane 8 is 24 columns narrower: 30% of the 80-column tab.
         assert_eq!(
             width(&layouts, 8),
-            Some(36),
+            Some(16),
             "Cmd - with no history should shrink the focused pane a step"
         );
     }
@@ -2567,17 +2569,17 @@ mod tests {
 
     #[rstest::rstest]
     fn closing_a_pane_keeps_a_stack_made_by_cmd_plus() {
-        // Given a [1][4] tab where Cmd + stacked panes 9 to 11.
+        // Given a [1][4] tab where Cmd + stacked panes 8 and 9.
         let mut layouts = climb();
         grow_until_the_stacks_change(&mut layouts);
 
         // When closing pane 7.
         layouts.close_pane(PaneId(7));
 
-        // Then panes 9 to 11 are still one stack.
+        // Then panes 8 and 9 are still one stack.
         assert_eq!(
             stacked(&layouts),
-            vec![vec![PaneId(9), PaneId(10), PaneId(11)]],
+            vec![vec![PaneId(8), PaneId(9)]],
             "a close in a marked tab keeps the stack Cmd + made"
         );
     }

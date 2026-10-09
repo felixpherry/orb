@@ -7382,10 +7382,10 @@ mod tests {
         // When growing.
         IntentHandler::handle(&Intent::GrowFocused, &mut state);
 
-        // Then pane 50 is 4 columns wider.
+        // Then pane 50 is 24 columns wider: 30% of the 80-column tab.
         assert_eq!(
             width(&state),
-            before.map(|width| width + 4),
+            before.map(|width| width + 24),
             "Cmd + grows the focused pane"
         );
     }

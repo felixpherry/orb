@@ -1,8 +1,7 @@
 // Adapted from herdr (https://github.com/herdrdev/herdr), src/layout.rs at
 // commit 3d9d2b18, licensed under the Apache License, Version 2.0. Modified
 // for orb: pane ids come from the caller instead of a global counter; splits
-// are `Split::{Right, Down}`; resizing moves the focused pane's own split by
-// whole cells; the tree saves to and loads from JSON; herdr's borders,
+// are `Split::{Right, Down}`; resizing follows zellij's stacked resize; the tree saves to and loads from JSON; herdr's borders,
 // scrollbar lanes, swap, insert and drag-resize code is left out.
 
 //! A tab's panes as a tree of right and down splits and stacks of panes
@@ -25,43 +24,18 @@ const MIN_PANE_ROWS: u16 = 5;
 /// The fewest columns any pane or stack keeps after a `Cmd +` step, its
 /// frame included.
 const MIN_PANE_COLS: u16 = 5;
-/// How far past 0.1–0.9 a grown ratio may land and still count as inside:
-/// steps add up in `f32`, so a ratio meant to reach a bound exactly can
-/// overshoot it by a hair. Far under one cell of any terminal.
-const RATIO_SLACK: f32 = 1e-4;
 
-/// How much of the tab `Cmd +`/`Cmd -` move a split border by, in percent of
-/// the tab body's width or height: zellij's `RESIZE_PERCENT`
-/// (`zellij-server/src/panes/tiled_panes/tiled_pane_grid.rs`).
-pub const RESIZE_PERCENT: f32 = 5.0;
+/// zellij's `RESIZE_PERCENT` (`tiled_panes/tiled_pane_grid.rs`): the
+/// `Cmd +`/`Cmd -` step, in percent of the tab, when the stacked one has
+/// nowhere to go, and the least share of the tab a moved pane keeps.
+const RESIZE_PERCENT: f32 = 5.0;
+/// The share of the tab zellij's stacked resize tries first
+/// (`stacked_resize_pane_with_id` in `tiled_panes/mod.rs`).
+const STACKED_RESIZE_PERCENT: f32 = 30.0;
 
-/// How far one `Cmd +`/`Cmd -` moves a split border: `cols` for a
-/// left/right split, `rows` for a top/bottom one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Step {
-    pub cols: u16,
-    pub rows: u16,
-}
-
-impl Step {
-    /// [`RESIZE_PERCENT`] of `body`'s width and height, rounded, at least 1
-    /// cell each.
-    pub fn of(body: Rect) -> Self {
-        let cells =
-            |extent: u16| ((f32::from(extent) * RESIZE_PERCENT / 100.0).round() as u16).max(1);
-        Self {
-            cols: cells(body.width),
-            rows: cells(body.height),
-        }
-    }
-
-    /// The cells this step moves a `split` border by.
-    fn along(self, split: Split) -> u16 {
-        match split {
-            Split::Right => self.cols,
-            Split::Down => self.rows,
-        }
-    }
+/// `percent` of `extent` cells, rounded, at least 1.
+fn cells(extent: u16, percent: f32) -> u16 {
+    ((f32::from(extent) * percent / 100.0).round() as u16).max(1)
 }
 
 /// Which way a split puts its second pane.
@@ -419,80 +393,221 @@ impl TileLayout {
         }
     }
 
-    /// Moves the focused pane's own split border (its parent split) by
-    /// `step`'s columns, or rows for a `Down` split: towards the sibling when
-    /// `grow`, away from it otherwise. The ratio stays between 0.1 and 0.9. A
-    /// lone pane has no split, and nothing changes. Returns whether it changed.
-    pub fn resize_focused(&mut self, grow: bool, step: Step, area: Rect) -> bool {
-        let focus = self.focus;
-        let Some((
-            Node::Split {
-                split,
-                ratio,
-                first,
-                ..
-            },
-            area,
-        )) = parent_node(&mut self.root, area, focus)
+    /// zellij's stacked `Cmd +`: towards the first neighbour above, below,
+    /// left or right that lines up with the focused pane (or its stack) along
+    /// its whole edge, grows it [`STACKED_RESIZE_PERCENT`] of the tab, or
+    /// when that leaves a pane there too small, stacks it with that
+    /// neighbour. With no such neighbour it grows [`RESIZE_PERCENT`] any way
+    /// that fits; `Stuck` when nothing fits.
+    pub fn grow_focused(&mut self, body: Rect) -> Grow {
+        for dir in [
+            NavDirection::Up,
+            NavDirection::Down,
+            NavDirection::Left,
+            NavDirection::Right,
+        ] {
+            if !self.lined_up(body, dir) {
+                continue;
+            }
+            if self.resize_toward(body, dir, true, STACKED_RESIZE_PERCENT) {
+                return Grow::Grew;
+            }
+            if self.stack_toward(body, dir) {
+                return Grow::Stacked;
+            }
+        }
+        if self.resize_any(body, true, RESIZE_PERCENT) {
+            Grow::Grew
+        } else {
+            Grow::Stuck
+        }
+    }
+
+    /// zellij's stacked `Cmd -`: breaks one pane out of the focused pane's
+    /// stack, else shrinks the focused pane [`STACKED_RESIZE_PERCENT`] of the
+    /// tab, else [`RESIZE_PERCENT`], any way that fits. Whether it changed.
+    pub fn shrink_focused(&mut self, body: Rect) -> bool {
+        self.unstack_focused()
+            || self.resize_any(body, false, STACKED_RESIZE_PERCENT)
+            || self.resize_any(body, false, RESIZE_PERCENT)
+    }
+
+    /// zellij's resize with no direction: the first of the corners (right
+    /// and down, left and down, right and up, left and up), then the sides
+    /// (right, down, left, up) where both moves fit.
+    fn resize_any(&mut self, body: Rect, grow: bool, percent: f32) -> bool {
+        use NavDirection::{Down, Left, Right, Up};
+        let order = [
+            (Right, Some(Down)),
+            (Left, Some(Down)),
+            (Right, Some(Up)),
+            (Left, Some(Up)),
+            (Right, None),
+            (Down, None),
+            (Left, None),
+            (Up, None),
+        ];
+        for (main, sub) in order {
+            let mut layout = self.clone();
+            if layout.resize_toward(body, main, grow, percent)
+                && sub.is_none_or(|sub| layout.resize_toward(body, sub, grow, percent))
+            {
+                *self = layout;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Moves the focused unit's (pane's or stack's) edge facing `dir` by
+    /// `percent` of the tab that way: out when `grow`, in otherwise, with
+    /// every pane along the same border. Nothing changes, and `false`, when
+    /// the edge is the tab's or a moved pane would end under
+    /// [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`] (a stack twice the rows) or
+    /// under [`RESIZE_PERCENT`] of the tab.
+    fn resize_toward(&mut self, body: Rect, dir: NavDirection, grow: bool, percent: f32) -> bool {
+        let Some(edge) = edge(&self.root, body, self.focus, dir) else {
+            return false;
+        };
+        let (region_start, region_len) = along(edge.region, edge.split);
+        let cells = cells(along(body, edge.split).1, percent);
+        let back = matches!(dir, NavDirection::Up | NavDirection::Left) == grow;
+        let to = if back {
+            edge.border.checked_sub(cells)
+        } else {
+            edge.border.checked_add(cells)
+        };
+        let Some(to) = to.filter(|to| (region_start + 1..region_start + region_len).contains(to))
         else {
             return false;
         };
-        let up = grow == holds(first, focus);
-        let Some(resized) = moved(*split, *ratio, up, step.along(*split), area) else {
+        let before = leaves_of(&self.root, body, self.focus);
+        let Some(after) = shifted(&before, &edge, to) else {
             return false;
         };
-        let resized = resized.clamp(0.1, 0.9);
-        let changed = (resized - *ratio).abs() > f32::EPSILON;
-        *ratio = resized;
-        changed
+        let fits = after
+            .iter()
+            .zip(&before)
+            .all(|(a, b)| a.rect == b.rect || a.roomy(body));
+        if fits {
+            fit(&mut self.root, &after);
+        }
+        fits
     }
 
-    /// Grows the focused pane `step`'s columns (rows for a `Down` split) into its
-    /// sibling across its own split, or its stack's. When that would leave a pane
-    /// on the other side under [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`] (a stack
-    /// under twice the rows), or move the ratio past 0.1–0.9, the split becomes
-    /// one stack of every pane in it, showing the focused pane; stacks inside it
-    /// merge in. `Stuck` when no split holds the focused pane.
-    pub fn grow_focused(&mut self, step: Step, area: Rect) -> Grow {
-        let focus = self.focus;
-        let Some((node, area)) = parent_node(&mut self.root, area, focus) else {
-            return Grow::Stuck;
+    /// Whether the focused unit has zellij's direct neighbours towards
+    /// `dir`: panes or stacks touching its edge that lie within its sides
+    /// and together cover the whole edge.
+    fn lined_up(&self, body: Rect, dir: NavDirection) -> bool {
+        let leaves = leaves_of(&self.root, body, self.focus);
+        let Some(unit) = leaves.iter().find(|leaf| leaf.focused) else {
+            return false;
         };
-        if let Node::Split {
-            split,
-            ratio,
-            first,
-            second,
-        } = &mut *node
-        {
-            let focused_first = holds(first, focus);
-            let cells = step.along(*split);
-            let Some(resized) = moved(*split, *ratio, focused_first, cells, area) else {
-                return Grow::Stuck;
-            };
-            let fits = (0.1 - RATIO_SLACK..=0.9 + RATIO_SLACK).contains(&resized) && {
-                let (a, b) = split_rect(area, *split, resized);
-                if focused_first {
-                    roomy(second, b)
-                } else {
-                    roomy(first, a)
-                }
-            };
-            if fits {
-                *ratio = resized.clamp(0.1, 0.9);
-                return Grow::Grew;
-            }
+        let split = axis(dir);
+        let (start, len) = along(unit.rect, split);
+        let (side, width) = across(unit.rect, split);
+        let touching: Vec<(u16, u16)> = leaves
+            .iter()
+            .filter(|leaf| {
+                let (n_start, n_len) = along(leaf.rect, split);
+                let touches = match dir {
+                    NavDirection::Up | NavDirection::Left => n_start + n_len == start,
+                    NavDirection::Down | NavDirection::Right => n_start == start + len,
+                };
+                let (n_side, n_width) = across(leaf.rect, split);
+                touches && ranges_overlap(side, width, n_side, n_width)
+            })
+            .map(|leaf| across(leaf.rect, split))
+            .filter(|(n_side, n_width)| *n_side >= side && n_side + n_width <= side + width)
+            .collect();
+        touching.iter().any(|(n_side, _)| *n_side == side)
+            && touching
+                .iter()
+                .any(|(n_side, n_width)| n_side + n_width == side + width)
+    }
+
+    /// zellij's `stack_pane_*`: makes the focused unit and its neighbours
+    /// across the edge facing `dir` one stack showing the focused pane, over
+    /// both their areas. Only when the unit spans the whole border; `false`
+    /// otherwise.
+    // ponytail: a unit narrower than its border doesn't stack, since the tree can't hold a stack
+    // across two subtrees; restructure the tree if zellij's aligned-neighbour stacks matter
+    fn stack_toward(&mut self, body: Rect, dir: NavDirection) -> bool {
+        let Some(edge) = edge(&self.root, body, self.focus, dir) else {
+            return false;
+        };
+        let before = leaves_of(&self.root, body, self.focus);
+        let Some(unit) = before.iter().find(|leaf| leaf.focused).copied() else {
+            return false;
+        };
+        if across(unit.rect, edge.split) != across(edge.region, edge.split) {
+            return false;
         }
-        let panes = {
-            let mut ids = Vec::new();
-            collect_ids(node, &mut ids);
-            ids
+        let unit_first = matches!(dir, NavDirection::Down | NavDirection::Right);
+        let root = std::mem::replace(&mut self.root, Node::Pane(self.focus));
+        let mut stacked = Vec::new();
+        self.root = stack_at(root, body, &edge, unit_first, self.focus, &mut stacked);
+        let rect = before
+            .iter()
+            .filter(|leaf| stacked.contains(&leaf.key))
+            .fold(unit.rect, |rect, leaf| rect.union(leaf.rect));
+        let mut after: Vec<Leaf> = before
+            .into_iter()
+            .filter(|leaf| !stacked.contains(&leaf.key))
+            .collect();
+        let key = match find_holding_mut(&mut self.root, self.focus) {
+            Some(Node::Stack { panes, .. }) => panes.first().copied(),
+            _ => None,
         };
-        *node = Node::Stack {
-            panes,
-            expanded: focus,
+        after.extend(key.map(|key| Leaf {
+            key,
+            rect,
+            stack: true,
+            focused: true,
+        }));
+        fit(&mut self.root, &after);
+        true
+    }
+
+    /// zellij's `break_pane_out_of_stack`: the focused pane's stack gives its
+    /// top pane (when the shown pane is its last) or its bottom pane a
+    /// 1/n share of its rows, above or below it. `false` outside a stack.
+    fn unstack_focused(&mut self) -> bool {
+        let Some(node) = find_holding_mut(&mut self.root, self.focus) else {
+            return false;
         };
-        Grow::Stacked
+        let Node::Stack { panes, expanded } = node else {
+            return false;
+        };
+        let (mut panes, expanded) = (std::mem::take(panes), *expanded);
+        let count = panes.len() as f32;
+        let up = panes.last() == Some(&expanded);
+        let out = if up {
+            panes.remove(0)
+        } else {
+            panes.pop().unwrap_or(expanded)
+        };
+        let Some(rest) = stack(panes, expanded) else {
+            return false;
+        };
+        let out = Box::new(Node::Pane(out));
+        let rest = Box::new(rest);
+        *node = if up {
+            Node::Split {
+                split: Split::Down,
+                ratio: 1.0 / count,
+                first: out,
+                second: rest,
+            }
+        } else {
+            Node::Split {
+                split: Split::Down,
+                ratio: (count - 1.0) / count,
+                first: rest,
+                second: out,
+            }
+        };
+        true
     }
 
     /// The tree as JSON: `{"pane":7}` or
@@ -903,26 +1018,6 @@ fn stacks_in(node: &Node, area: Rect, stacks: &mut Vec<StackInfo>) {
     }
 }
 
-/// Whether `node` laid over `area` keeps every pane outside a stack at least
-/// [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`], and every stack [`MIN_PANE_COLS`]
-/// wide and twice [`MIN_PANE_ROWS`] tall.
-fn roomy(node: &Node, area: Rect) -> bool {
-    let rows = match node {
-        Node::Split {
-            split,
-            ratio,
-            first,
-            second,
-        } => {
-            let (a, b) = split_rect(area, *split, *ratio);
-            return roomy(first, a) && roomy(second, b);
-        }
-        Node::Pane(_) => MIN_PANE_ROWS,
-        Node::Stack { .. } => 2 * MIN_PANE_ROWS,
-    };
-    area.width >= MIN_PANE_COLS && area.height >= rows
-}
-
 fn collect_ids(node: &Node, ids: &mut Vec<PaneId>) {
     match node {
         Node::Pane(id) => ids.push(*id),
@@ -971,16 +1066,196 @@ fn holds(node: &Node, target: PaneId) -> bool {
     }
 }
 
-/// The split directly holding pane `target`, or the stack holding it, and
-/// the part of `area` it's laid over.
-fn parent_node(node: &mut Node, area: Rect, target: PaneId) -> Option<(&mut Node, Rect)> {
-    let here = match &*node {
-        Node::Split { first, second, .. } => holds(first, target) || holds(second, target),
-        Node::Pane(_) | Node::Stack { .. } => return None,
-    };
-    if here {
-        return Some((node, area));
+/// A leaf of the tree laid over an area: a pane outside a stack, or a
+/// stack, named by its first pane.
+#[derive(Debug, Clone, Copy)]
+struct Leaf {
+    key: PaneId,
+    rect: Rect,
+    stack: bool,
+    /// The focused pane is this pane or in this stack.
+    focused: bool,
+}
+
+impl Leaf {
+    /// Whether the leaf keeps [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`] (a stack
+    /// twice the rows) and [`RESIZE_PERCENT`] of `body` each way.
+    fn roomy(&self, body: Rect) -> bool {
+        let rows = if self.stack {
+            2 * MIN_PANE_ROWS
+        } else {
+            MIN_PANE_ROWS
+        };
+        let cols = MIN_PANE_COLS.max(cells(body.width, RESIZE_PERCENT));
+        let rows = rows.max(cells(body.height, RESIZE_PERCENT));
+        self.rect.width >= cols && self.rect.height >= rows
     }
+}
+
+/// `node`'s leaves laid over `area`, in tree order.
+fn leaves_of(node: &Node, area: Rect, focus: PaneId) -> Vec<Leaf> {
+    fn walk(node: &Node, area: Rect, focus: PaneId, out: &mut Vec<Leaf>) {
+        match node {
+            Node::Pane(id) => out.push(Leaf {
+                key: *id,
+                rect: area,
+                stack: false,
+                focused: *id == focus,
+            }),
+            Node::Stack { panes, .. } => out.extend(panes.first().map(|&key| Leaf {
+                key,
+                rect: area,
+                stack: true,
+                focused: panes.contains(&focus),
+            })),
+            Node::Split {
+                split,
+                ratio,
+                first,
+                second,
+            } => {
+                let (a, b) = split_rect(area, *split, *ratio);
+                walk(first, a, focus, out);
+                walk(second, b, focus, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, area, focus, &mut out);
+    out
+}
+
+/// Sets every split's ratio so each leaf lands on its rect in `leaves`.
+/// Returns the area `node` covers.
+fn fit(node: &mut Node, leaves: &[Leaf]) -> Option<Rect> {
+    let rect_of = |key: PaneId| {
+        leaves
+            .iter()
+            .find(|leaf| leaf.key == key)
+            .map(|leaf| leaf.rect)
+    };
+    match node {
+        Node::Pane(id) => rect_of(*id),
+        Node::Stack { panes, .. } => rect_of(*panes.first()?),
+        Node::Split {
+            split,
+            ratio,
+            first,
+            second,
+        } => {
+            let a = fit(first, leaves)?;
+            let b = fit(second, leaves)?;
+            let (first_len, second_len) = (along(a, *split).1, along(b, *split).1);
+            *ratio = f32::from(first_len) / f32::from(first_len + second_len).max(1.0);
+            Some(a.union(b))
+        }
+    }
+}
+
+/// The split kind whose border a move towards `dir` crosses.
+fn axis(dir: NavDirection) -> Split {
+    match dir {
+        NavDirection::Left | NavDirection::Right => Split::Right,
+        NavDirection::Up | NavDirection::Down => Split::Down,
+    }
+}
+
+/// `rect`'s start and length in the direction a `split` split divides.
+fn along(rect: Rect, split: Split) -> (u16, u16) {
+    match split {
+        Split::Right => (rect.x, rect.width),
+        Split::Down => (rect.y, rect.height),
+    }
+}
+
+/// `rect`'s start and length across the direction a `split` split divides.
+fn across(rect: Rect, split: Split) -> (u16, u16) {
+    match split {
+        Split::Right => (rect.y, rect.height),
+        Split::Down => (rect.x, rect.width),
+    }
+}
+
+/// The border a unit's edge sits on: the nearest split of kind `split`
+/// with the unit on one side, the area it's laid over, and where its
+/// border runs.
+struct Edge {
+    region: Rect,
+    split: Split,
+    border: u16,
+}
+
+/// The border of the focused unit's edge facing `dir`; `None` at the tab's
+/// edge.
+fn edge(root: &Node, body: Rect, focus: PaneId, dir: NavDirection) -> Option<Edge> {
+    let split = axis(dir);
+    let unit_first = matches!(dir, NavDirection::Down | NavDirection::Right);
+    let (mut node, mut area, mut found) = (root, body, None);
+    while let Node::Split {
+        split: kind,
+        ratio,
+        first,
+        second,
+    } = node
+    {
+        let (a, b) = split_rect(area, *kind, *ratio);
+        let in_first = contains(first, focus);
+        if *kind == split && in_first == unit_first {
+            found = Some(Edge {
+                region: area,
+                split,
+                border: along(b, split).0,
+            });
+        }
+        (node, area) = if in_first { (first, a) } else { (second, b) };
+    }
+    found
+}
+
+/// Whether pane `target` is in `node`.
+fn contains(node: &Node, target: PaneId) -> bool {
+    match node {
+        Node::Split { first, second, .. } => contains(first, target) || contains(second, target),
+        Node::Pane(_) | Node::Stack { .. } => holds(node, target),
+    }
+}
+
+/// `leaves` with `edge`'s border moved to `to`: each leaf in its region
+/// that starts on the border starts at `to`, each that ends on it ends
+/// there. `None` when a leaf would have no cells left.
+fn shifted(leaves: &[Leaf], edge: &Edge, to: u16) -> Option<Vec<Leaf>> {
+    leaves
+        .iter()
+        .map(|leaf| {
+            let inside = edge.region.intersection(leaf.rect) == leaf.rect;
+            let (start, len) = along(leaf.rect, edge.split);
+            let (start, len) = match () {
+                () if inside && start == edge.border => (to, (start + len).checked_sub(to)?),
+                () if inside && start + len == edge.border => (start, to.checked_sub(start)?),
+                () => (start, len),
+            };
+            let (side, width) = across(leaf.rect, edge.split);
+            let rect = match edge.split {
+                Split::Right => Rect::new(start, side, len, width),
+                Split::Down => Rect::new(side, start, width, len),
+            };
+            (len > 0).then_some(Leaf { rect, ..*leaf })
+        })
+        .collect()
+}
+
+/// `node` with the split at `edge` rebuilt as zellij's `stack_pane_*` does:
+/// the unit beside the border (on the first side when `unit_first`) leaves
+/// its side and joins the leaf or run of leaves across the border in one
+/// stack showing `focus`. `stacked` gets the keys of every leaf merged.
+fn stack_at(
+    node: Node,
+    area: Rect,
+    edge: &Edge,
+    unit_first: bool,
+    focus: PaneId,
+    stacked: &mut Vec<PaneId>,
+) -> Node {
     let Node::Split {
         split,
         ratio,
@@ -988,24 +1263,159 @@ fn parent_node(node: &mut Node, area: Rect, target: PaneId) -> Option<(&mut Node
         second,
     } = node
     else {
-        return None;
+        return node;
     };
-    let (a, b) = split_rect(area, *split, *ratio);
-    parent_node(first, a, target).or_else(|| parent_node(second, b, target))
+    if area != edge.region || split != edge.split {
+        let (a, b) = split_rect(area, split, ratio);
+        let (first, second) = if contains(&first, focus) {
+            (
+                Box::new(stack_at(*first, a, edge, unit_first, focus, stacked)),
+                second,
+            )
+        } else {
+            (
+                first,
+                Box::new(stack_at(*second, b, edge, unit_first, focus, stacked)),
+            )
+        };
+        return Node::Split {
+            split,
+            ratio,
+            first,
+            second,
+        };
+    }
+    let (unit_side, other) = if unit_first {
+        (*first, *second)
+    } else {
+        (*second, *first)
+    };
+    let mut unit_ids = Vec::new();
+    let rest = drop_touching(unit_side, split, !unit_first, &mut unit_ids);
+    let mut merged = Vec::new();
+    let other = replace_touching(other, split, unit_first, &mut |across| {
+        let mut ids = Vec::new();
+        collect_ids(&across, &mut ids);
+        merged = across_keys(&across);
+        let panes = if unit_first {
+            unit_ids.iter().chain(&ids).copied().collect()
+        } else {
+            ids.iter().chain(&unit_ids).copied().collect()
+        };
+        Node::Stack {
+            panes,
+            expanded: focus,
+        }
+    });
+    stacked.extend(merged);
+    stacked.extend(unit_ids.first().copied());
+    match rest {
+        None => other,
+        Some(rest) if unit_first => split_pair(split, other, rest, false),
+        Some(rest) => split_pair(split, other, rest, true),
+    }
 }
 
-/// `ratio` of a `split` split over `area`, moved `cells` columns (rows for
-/// `Down`): up when `up`, down otherwise. Unclamped; `None` when `area` has
-/// no cells that way.
-fn moved(split: Split, ratio: f32, up: bool, cells: u16, area: Rect) -> Option<f32> {
-    let extent = match split {
-        Split::Right => area.width,
-        Split::Down => area.height,
-    };
-    (extent > 0).then(|| {
-        let delta = f32::from(cells) / f32::from(extent);
-        if up { ratio + delta } else { ratio - delta }
-    })
+/// The split of `a` and `b`, `a` first when `a_first`; its ratio is set by
+/// [`fit`].
+fn split_pair(split: Split, a: Node, b: Node, a_first: bool) -> Node {
+    let (first, second) = if a_first { (a, b) } else { (b, a) };
+    Node::Split {
+        split,
+        ratio: 0.5,
+        first: Box::new(first),
+        second: Box::new(second),
+    }
+}
+
+/// The keys of `node`'s leaves.
+fn across_keys(node: &Node) -> Vec<PaneId> {
+    leaves_of(node, Rect::default(), PaneId(0))
+        .into_iter()
+        .map(|leaf| leaf.key)
+        .collect()
+}
+
+/// `node` without its leaf on the border side (`first` when
+/// `touch_first`) through `split` splits; `ids` gets that leaf's panes.
+/// `None` when `node` is that leaf.
+fn drop_touching(
+    node: Node,
+    split: Split,
+    touch_first: bool,
+    ids: &mut Vec<PaneId>,
+) -> Option<Node> {
+    match node {
+        Node::Split {
+            split: kind,
+            ratio,
+            first,
+            second,
+        } if kind == split => {
+            let (touching, far) = if touch_first {
+                (*first, *second)
+            } else {
+                (*second, *first)
+            };
+            Some(match drop_touching(touching, split, touch_first, ids) {
+                None => far,
+                Some(kept) => {
+                    let (first, second) = if touch_first {
+                        (kept, far)
+                    } else {
+                        (far, kept)
+                    };
+                    Node::Split {
+                        split,
+                        ratio,
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    }
+                }
+            })
+        }
+        leaf => {
+            collect_ids(&leaf, ids);
+            None
+        }
+    }
+}
+
+/// `node` with the subtree on the border side (`first` when `touch_first`)
+/// through `split` splits replaced by `with` of it.
+fn replace_touching(
+    node: Node,
+    split: Split,
+    touch_first: bool,
+    with: &mut dyn FnMut(Node) -> Node,
+) -> Node {
+    match node {
+        Node::Split {
+            split: kind,
+            ratio,
+            first,
+            second,
+        } if kind == split => {
+            let (first, second) = if touch_first {
+                (
+                    Box::new(replace_touching(*first, split, touch_first, with)),
+                    second,
+                )
+            } else {
+                (
+                    first,
+                    Box::new(replace_touching(*second, split, touch_first, with)),
+                )
+            };
+            Node::Split {
+                split,
+                ratio,
+                first,
+                second,
+            }
+        }
+        other => with(other),
+    }
 }
 
 fn split_node(first: Node, split: Split, new_id: PaneId, ratio: f32) -> Node {
@@ -1093,23 +1503,12 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        Grow, NavDirection, Node, PaneInfo, Split, Step, SwapLayout, TileLayout, columns,
+        Grow, NavDirection, Node, PaneInfo, Split, SwapLayout, TileLayout, columns,
         find_in_direction,
     };
     use crate::feat::sessions::state::PaneId;
 
     const AREA: Rect = Rect::new(0, 0, 100, 40);
-
-    /// A 4-cell step both ways.
-    const FOUR: Step = Step { cols: 4, rows: 4 };
-
-    #[rstest::rstest]
-    #[case(Rect::new(0, 0, 200, 60), Step { cols: 10, rows: 3 })]
-    #[case(Rect::new(0, 0, 15, 10), Step { cols: 1, rows: 1 })]
-    #[case(Rect::new(0, 0, 4, 4), Step { cols: 1, rows: 1 })]
-    fn step_is_5_percent_of_the_body_at_least_1_cell(#[case] body: Rect, #[case] step: Step) {
-        assert_eq!(Step::of(body), step, "5% of the body, rounded, at least 1");
-    }
 
     fn pane(id: i64) -> PaneId {
         PaneId(id)
@@ -1474,76 +1873,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn resize_grows_the_focused_first_pane_by_whole_cells() {
-        // Given two halves of a 100-column area, the left one focused.
-        let mut layout = halves(1);
-
-        // When growing it by 4 cells.
-        layout.resize_focused(true, FOUR, AREA);
-
-        // Then the split moves 4 columns right.
-        assert!(
-            ratio(&layout).is_some_and(|ratio| (ratio - 0.54).abs() < 1e-6),
-            "ratio should be 0.54, got {:?}",
-            ratio(&layout)
-        );
-    }
-
-    #[rstest::rstest]
-    fn resize_grows_the_focused_second_pane_towards_its_sibling() {
-        // Given two halves of a 100-column area, the right one focused.
-        let mut layout = halves(2);
-
-        // When growing it by 4 cells.
-        layout.resize_focused(true, FOUR, AREA);
-
-        // Then the split moves 4 columns left.
-        assert!(
-            ratio(&layout).is_some_and(|ratio| (ratio - 0.46).abs() < 1e-6),
-            "ratio should be 0.46, got {:?}",
-            ratio(&layout)
-        );
-    }
-
-    #[rstest::rstest]
-    #[case(0.9, true)]
-    #[case(0.1, false)]
-    fn resize_stops_at_the_ratio_bounds(#[case] start: f32, #[case] grow: bool) {
-        // Given a split at its bound, the left pane focused.
-        let mut layout = TileLayout::from_saved(
-            split(
-                Split::Right,
-                start,
-                Node::Pane(pane(1)),
-                Node::Pane(pane(2)),
-            ),
-            pane(1),
-        );
-
-        // When resizing past the bound.
-        let changed = layout.resize_focused(grow, FOUR, AREA);
-
-        // Then the ratio stays at the bound.
-        assert_eq!(
-            (changed, ratio(&layout)),
-            (false, Some(start)),
-            "the ratio should stay at its bound"
-        );
-    }
-
-    #[rstest::rstest]
-    fn resize_of_a_lone_pane_changes_nothing() {
-        // Given a layout of one pane.
-        let mut layout = TileLayout::new(pane(1));
-
-        // When growing it.
-        let changed = layout.resize_focused(true, FOUR, AREA);
-
-        // Then nothing changed.
-        assert!(!changed, "a lone pane has no split to move");
-    }
-
-    #[rstest::rstest]
     fn layout_json_roundtrips() {
         // Given a three-pane tree focused on pane 3.
         let mut layout = TileLayout::new(pane(1));
@@ -1734,7 +2063,7 @@ mod tests {
     fn add_tiled_evens_out_a_resized_tab() {
         // Given three tiled panes with the focused pane's border moved.
         let mut layout = tiled(3);
-        layout.resize_focused(true, Step { cols: 10, rows: 10 }, AREA);
+        layout.grow_focused(AREA);
 
         // When adding pane 4.
         layout.add_tiled(pane(4), SwapLayout::Vertical);
@@ -2303,129 +2632,239 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn resize_from_a_stacked_pane_moves_the_main_and_stack_border() {
-        // Given pane 1 beside a stack of 2, 3 and 4, the expanded pane 3 focused.
-        let mut layout = main_and_stack(3, 3);
-
-        // When growing it by 4 cells.
-        layout.resize_focused(true, FOUR, AREA);
-
-        // Then the border between pane 1 and the stack moves 4 columns left.
-        assert!(
-            ratio(&layout).is_some_and(|ratio| (ratio - 0.46).abs() < 1e-6),
-            "ratio should be 0.46, got {:?}",
-            ratio(&layout)
-        );
-    }
-
-    #[rstest::rstest]
-    fn grow_focused_moves_the_border_when_the_step_fits() {
-        // Given two halves of a 100-column area, the left one focused.
-        let mut layout = halves(1);
-
-        // When growing it by 4 cells.
-        let grew = layout.grow_focused(FOUR, AREA);
-
-        // Then the split moves 4 columns right.
-        assert!(
-            grew == Grow::Grew && ratio(&layout).is_some_and(|ratio| (ratio - 0.54).abs() < 1e-6),
-            "the border should move to 0.54, got {grew:?} at {:?}",
-            ratio(&layout)
-        );
-    }
-
-    #[rstest::rstest]
-    #[case::rows(Split::Down, Rect::new(0, 0, 100, 20))]
-    #[case::columns(Split::Right, Rect::new(0, 0, 20, 40))]
-    fn grow_focused_stacks_when_the_sibling_would_get_too_small(
-        #[case] way: Split,
-        #[case] area: Rect,
+    #[case::left(1, 0.8)]
+    #[case::right(2, 0.2)]
+    fn grow_moves_a_side_by_side_border_30_percent_of_the_tab(
+        #[case] focus: i64,
+        #[case] expected: f32,
     ) {
-        // Given panes 1 and 2 split at 0.4, pane 2 focused, with 8 cells for pane 1.
-        let mut layout = TileLayout::from_saved(
-            split(way, 0.4, Node::Pane(pane(1)), Node::Pane(pane(2))),
-            pane(2),
-        );
+        // Given two halves of a 100-column area, pane `focus` focused.
+        let mut layout = halves(focus);
 
-        // When growing pane 2 by 4 cells, which would leave pane 1 with 4.
-        let grew = layout.grow_focused(FOUR, area);
+        // When growing it.
+        let grew = layout.grow_focused(AREA);
 
-        // Then the split becomes one stack showing pane 2.
-        assert_eq!(
-            (grew, layout.root),
-            (Grow::Stacked, stack_of(&[1, 2], 2)),
-            "a step that leaves the sibling under 5 cells should stack the split"
+        // Then the border moves 30 columns away from it.
+        assert!(
+            grew == Grow::Grew && ratio(&layout).is_some_and(|r| (r - expected).abs() < 1e-6),
+            "the border should move to {expected}, got {grew:?} at {:?}",
+            ratio(&layout)
         );
     }
 
     #[rstest::rstest]
-    fn grow_focused_stacks_at_the_ratio_bound() {
-        // Given panes 1 and 2 split right at 0.9, pane 1 focused.
+    fn grow_tries_the_neighbours_above_first() {
+        // Given panes 1 and 2 side by side above pane 3, pane 3 focused.
         let mut layout = TileLayout::from_saved(
-            split(Split::Right, 0.9, Node::Pane(pane(1)), Node::Pane(pane(2))),
+            split(
+                Split::Down,
+                0.5,
+                split(Split::Right, 0.5, Node::Pane(pane(1)), Node::Pane(pane(2))),
+                Node::Pane(pane(3)),
+            ),
+            pane(3),
+        );
+
+        // When growing it.
+        layout.grow_focused(AREA);
+
+        // Then pane 3 grows 12 rows up: 30% of the 40-row tab.
+        let height = layout
+            .panes(AREA)
+            .into_iter()
+            .find(|info| info.id == pane(3))
+            .map(|info| info.rect.height);
+        assert_eq!(height, Some(32), "pane 3 should grow up first");
+    }
+
+    #[rstest::rstest]
+    fn grow_skips_a_neighbour_wider_than_the_pane() {
+        // Given panes 1 and 2 side by side above pane 3, pane 1 focused.
+        let mut layout = TileLayout::from_saved(
+            split(
+                Split::Down,
+                0.5,
+                split(Split::Right, 0.5, Node::Pane(pane(1)), Node::Pane(pane(2))),
+                Node::Pane(pane(3)),
+            ),
             pane(1),
         );
 
-        // When growing pane 1 by 4 cells past the bound.
-        let grew = layout.grow_focused(FOUR, AREA);
+        // When growing it.
+        layout.grow_focused(AREA);
 
-        // Then the split becomes one stack showing pane 1.
+        // Then pane 1 grows right into pane 2, not down into the wider pane 3.
+        let rect = layout
+            .panes(AREA)
+            .into_iter()
+            .find(|info| info.id == pane(1))
+            .map(|info| info.rect);
+        assert_eq!(
+            rect,
+            Some(Rect::new(0, 0, 80, 20)),
+            "pane 1 should skip pane 3 and grow right"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_stacks_when_30_percent_does_not_fit() {
+        // Given panes 1 and 2 split right at 0.8, pane 1 focused.
+        let mut layout = TileLayout::from_saved(
+            split(Split::Right, 0.8, Node::Pane(pane(1)), Node::Pane(pane(2))),
+            pane(1),
+        );
+
+        // When growing pane 1, which would leave pane 2 no columns.
+        let grew = layout.grow_focused(AREA);
+
+        // Then the two become one stack showing pane 1.
         assert_eq!(
             (grew, layout.root),
             (Grow::Stacked, stack_of(&[1, 2], 1)),
-            "a step past the ratio bound should stack the split"
+            "a step that doesn't fit should stack the neighbour"
         );
     }
 
     #[rstest::rstest]
-    fn grow_focused_flattens_a_stack_in_the_sibling() {
-        // Given pane 1 above a stack of 2 and 3 in 20 rows, pane 1 focused.
+    fn grow_stacks_only_the_neighbour_touching_the_pane() {
+        // Given panes 1 and 2 (15 rows each) above pane 3 (10 rows), pane 3
+        // focused.
         let mut layout = TileLayout::from_saved(
-            split(Split::Down, 0.4, Node::Pane(pane(1)), stack_of(&[2, 3], 2)),
+            split(
+                Split::Down,
+                0.75,
+                split(Split::Down, 0.5, Node::Pane(pane(1)), Node::Pane(pane(2))),
+                Node::Pane(pane(3)),
+            ),
+            pane(3),
+        );
+
+        // When growing pane 3, which would leave pane 2 3 rows.
+        layout.grow_focused(AREA);
+
+        // Then panes 2 and 3 are one stack below pane 1, which keeps its 15 rows.
+        assert_eq!(
+            layout.root,
+            split(
+                Split::Down,
+                0.375,
+                Node::Pane(pane(1)),
+                stack_of(&[2, 3], 3)
+            ),
+            "only the pane touching pane 3 should join its stack"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_stacks_the_neighbour_below_under_the_pane() {
+        // Given pane 1 (30 rows) above panes 2 and 3 (5 rows each), pane 1
+        // focused.
+        let mut layout = TileLayout::from_saved(
+            split(
+                Split::Down,
+                0.75,
+                Node::Pane(pane(1)),
+                split(Split::Down, 0.5, Node::Pane(pane(2)), Node::Pane(pane(3))),
+            ),
             pane(1),
         );
 
-        // When growing pane 1 by 4 rows, which would leave the stack 8.
-        layout.grow_focused(FOUR, Rect::new(0, 0, 100, 20));
+        // When growing pane 1, which would leave pane 2 no rows.
+        layout.grow_focused(AREA);
 
-        // Then the tree is one flat stack of 1, 2 and 3 showing pane 1.
+        // Then panes 1 and 2 are one stack above pane 3, which keeps its 5 rows.
         assert_eq!(
             layout.root,
-            stack_of(&[1, 2, 3], 1),
-            "the stack in the sibling should merge into the new stack"
+            split(
+                Split::Down,
+                0.875,
+                stack_of(&[1, 2], 1),
+                Node::Pane(pane(3))
+            ),
+            "the pane below should join pane 1's stack"
         );
     }
 
     #[rstest::rstest]
-    fn grow_focused_moves_a_stacked_panes_border() {
+    fn grow_moves_a_stacks_border() {
         // Given a stack of 1 and 2 beside pane 3, pane 1 focused.
         let mut layout = TileLayout::from_saved(
             split(Split::Right, 0.5, stack_of(&[1, 2], 1), Node::Pane(pane(3))),
             pane(1),
         );
 
-        // When growing pane 1 by 4 cells.
-        let grew = layout.grow_focused(FOUR, AREA);
+        // When growing pane 1.
+        layout.grow_focused(AREA);
 
-        // Then the border between the stack and pane 3 moves 4 columns right.
+        // Then the border between the stack and pane 3 moves 30 columns right.
         assert!(
-            grew == Grow::Grew && ratio(&layout).is_some_and(|ratio| (ratio - 0.54).abs() < 1e-6),
-            "the stack's border should move to 0.54, got {grew:?} at {:?}",
+            ratio(&layout).is_some_and(|r| (r - 0.8).abs() < 1e-6),
+            "the stack's border should move to 0.8, got {:?}",
             ratio(&layout)
         );
     }
 
     #[rstest::rstest]
+    #[case::thirty_percent(0.5, 0.2)]
+    #[case::five_percent_when_thirty_does_not_fit(0.25, 0.2)]
+    fn shrink_moves_the_border_towards_the_pane(#[case] start: f32, #[case] expected: f32) {
+        // Given panes 1 and 2 split right at `start`, pane 1 focused.
+        let mut layout = TileLayout::from_saved(
+            split(
+                Split::Right,
+                start,
+                Node::Pane(pane(1)),
+                Node::Pane(pane(2)),
+            ),
+            pane(1),
+        );
+
+        // When shrinking pane 1.
+        layout.shrink_focused(AREA);
+
+        // Then the border lands at `expected`.
+        assert!(
+            ratio(&layout).is_some_and(|r| (r - expected).abs() < 1e-6),
+            "the border should move to {expected}, got {:?}",
+            ratio(&layout)
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::shown_last_breaks_out_the_top(
+        3,
+        split(Split::Down, 1.0 / 3.0, Node::Pane(pane(1)), stack_of(&[2, 3], 3))
+    )]
+    #[case::shown_first_breaks_out_the_bottom(
+        1,
+        split(Split::Down, 2.0 / 3.0, stack_of(&[1, 2], 1), Node::Pane(pane(3)))
+    )]
+    fn shrink_breaks_a_pane_out_of_the_stack(#[case] shown: i64, #[case] expected: Node) {
+        // Given a stack of 1, 2 and 3 showing pane `shown`.
+        let mut layout = TileLayout::from_saved(stack_of(&[1, 2, 3], shown), pane(shown));
+
+        // When shrinking.
+        layout.shrink_focused(AREA);
+
+        // Then one pane leaves the stack with a third of its rows.
+        assert_eq!(layout.root, expected, "Cmd - should break a pane out");
+    }
+
+    #[rstest::rstest]
     #[case::lone(TileLayout::new(pane(1)))]
     #[case::whole_stack(TileLayout::from_saved(stack_of(&[1, 2], 1), pane(1)))]
-    fn grow_focused_without_a_parent_split_is_stuck(#[case] mut layout: TileLayout) {
+    fn grow_focused_without_a_neighbour_is_stuck(#[case] mut layout: TileLayout) {
         // Given a layout with no split.
 
         // When growing the focused pane.
-        let grew = layout.grow_focused(FOUR, AREA);
+        let grew = layout.grow_focused(AREA);
 
         // Then it's stuck.
-        assert_eq!(grew, Grow::Stuck, "with no split there is nothing to grow");
+        assert_eq!(
+            grew,
+            Grow::Stuck,
+            "with no neighbour there is nothing to grow"
+        );
     }
 
     #[rstest::rstest]
@@ -2444,7 +2883,7 @@ mod tests {
         for focus in 1..=n {
             let mut layout = fresh(focus);
             for step in 0..200 {
-                if layout.grow_focused(FOUR, AREA) == Grow::Stuck {
+                if layout.grow_focused(AREA) == Grow::Stuck {
                     break;
                 }
                 let stacks = layout.stacks(AREA);
