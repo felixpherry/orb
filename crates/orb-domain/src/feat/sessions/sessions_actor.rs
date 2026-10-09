@@ -202,8 +202,8 @@ pub struct SplitPane {
     pub split: Split,
 }
 
-/// Add a shell pane to `session`'s shown tab, re-tile the tab, and save the
-/// layout.
+/// Add a shell pane to `session`'s shown tab, re-tile the tab unless it was
+/// changed by hand, and save the layout.
 #[derive(Debug)]
 pub struct AddPane(pub SessionId);
 
@@ -674,7 +674,7 @@ impl Message<RestoreWorktree> for SessionsActor {
 /// Where [`SessionsActor::add_pane`] puts the new shell.
 #[derive(Debug, Clone, Copy)]
 enum Placement {
-    /// In the shown tab, re-tiled by pane count.
+    /// In the shown tab, re-tiled by pane count unless it was changed by hand.
     Tile,
     /// Splitting the shown tab's focused pane.
     Split(Split),
@@ -2050,11 +2050,12 @@ impl SessionsActor {
     }
 
     /// Adds a shell pane in `session`'s directory where `placement` says: in
-    /// the shown tab re-tiled by pane count, splitting the focused pane, or
-    /// in a new tab. A session with no layout (its last pane closed) gets a
-    /// first tab of that shell from [`Placement::Tab`] and is attached once
-    /// it's saved; the other placements do nothing there. Then saves the
-    /// layout. A pane that can't be saved shows why.
+    /// the shown tab re-tiled by pane count unless it was changed by hand,
+    /// splitting the focused pane, or in a new tab. A session with no layout
+    /// (its last pane closed) gets a first tab of that shell from
+    /// [`Placement::Tab`] and is attached once it's saved; the other
+    /// placements do nothing there. Then saves the layout. A pane that can't
+    /// be saved shows why.
     fn add_pane(&mut self, session: SessionId, placement: Placement) {
         let Some(dir) = self.sessions.get(&session).map(|row| row.dir.clone()) else {
             return;

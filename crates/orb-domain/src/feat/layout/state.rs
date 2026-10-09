@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
 
-use super::tree::{Grow, NavDirection, PaneInfo, Split, TileLayout, find_in_direction};
+use super::tree::{Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction};
 use crate::feat::sessions::state::{PaneId, SessionId};
 use crate::feat::sidebar::state::STEP;
 use crate::feat::zmx::zmx_service::ZmxSession;
@@ -37,30 +37,90 @@ struct ResizeHistory {
 }
 
 /// One tab: its name, its panes' tree, whether it shows only the focused
-/// pane, and what `Cmd +` and `Cmd -` can undo.
+/// pane, its swap layout and whether it was changed by hand, and what
+/// `Cmd +` and `Cmd -` can undo.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
     /// Set by renaming the tab; unnamed tabs show only their number.
     name: Option<String>,
     tree: TileLayout,
     zoomed: bool,
+    /// Where the tab is in zellij's swap layout list.
+    swap_layout: SwapLayout,
+    /// Changed by hand: a split, a stack, or a `Cmd +`/`Cmd -` that changed
+    /// the tree. Adds and closes don't re-tile while it's set; a relayout
+    /// clears it.
+    hand_changed: bool,
     /// Never saved: a restored tab starts without one.
     history: Option<ResizeHistory>,
 }
 
 impl Tab {
     fn new(pane: PaneId) -> Self {
-        Self::restore(None, TileLayout::new(pane))
+        Self {
+            swap_layout: SwapLayout::Base,
+            ..Self::restore(None, TileLayout::new(pane))
+        }
     }
 
-    /// A saved tab: its name and tree, not zoomed, with no resize history.
+    /// A saved tab: its name and tree, vertical and untouched, not zoomed,
+    /// with no resize history.
     pub fn restore(name: Option<String>, tree: TileLayout) -> Self {
         Self {
             name,
             tree,
             zoomed: false,
+            swap_layout: SwapLayout::Vertical,
+            hand_changed: false,
             history: None,
         }
+    }
+
+    /// The tab's swap layout.
+    pub fn swap_layout(&self) -> SwapLayout {
+        self.swap_layout
+    }
+
+    /// Whether the tab was changed by hand since its last relayout.
+    pub fn hand_changed(&self) -> bool {
+        self.hand_changed
+    }
+
+    /// Re-tiles the tab in the first swap layout that fits its pane count,
+    /// clears the mark and shows every pane, as zellij's `swap_tiled_panes`
+    /// does. `cycle` is `None` for an add or close (the search starts at the
+    /// tab's own layout, forwards) and `Some(back)` for `Cmd ]`/`Cmd [`, which
+    /// first steps one layout that way unless the tab was changed by hand.
+    fn relayout(&mut self, cycle: Option<bool>) {
+        let step = cycle.is_some() && !self.hand_changed;
+        if let Some(layout) =
+            self.swap_layout
+                .fitting(self.tree.pane_count(), step, cycle == Some(true))
+        {
+            self.swap_layout = layout;
+            self.tree.tile(layout);
+        }
+        self.hand_changed = false;
+        self.zoomed = false;
+    }
+
+    /// Adds pane `id`, focused, and shows every pane: an untouched tab
+    /// re-tiles in the first swap layout from its own that fits one more
+    /// pane; a tab changed by hand places it beside the focused pane in
+    /// `body`.
+    fn add_tiled(&mut self, id: PaneId, body: Rect) {
+        let fitting = self
+            .swap_layout
+            .fitting(self.tree.pane_count() + 1, false, false);
+        match (self.hand_changed, fitting) {
+            (true, _) => self.tree.add_beside_focus(id, body),
+            (false, Some(layout)) => {
+                self.swap_layout = layout;
+                self.tree.add_tiled(id, layout);
+            }
+            (false, None) => {}
+        }
+        self.zoomed = false;
     }
 
     /// The name the user gave the tab, if any.
@@ -530,10 +590,10 @@ impl Layouts {
         self.body = body;
     }
 
-    /// Splits the shown tab's focused pane `split` with `pane`, which takes
-    /// the focus, sharing the space evenly along that direction; a tab holding
-    /// a stack re-tiles with `pane` added instead. The tab shows every pane
-    /// again.
+    /// Splits the shown tab's focused pane, or its whole stack when it's
+    /// stacked, `split` with `pane`, which takes the focus, sharing the space
+    /// evenly along that direction. The tab shows every pane again and is
+    /// marked changed by hand.
     pub fn split(&mut self, owner: SessionId, split: Split, pane: PaneEntry) {
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
@@ -541,13 +601,14 @@ impl Layouts {
         if let Some(tab) = layout.tab_mut() {
             tab.tree.split_focused(split, pane.id);
             tab.zoomed = false;
+            tab.hand_changed = true;
             layout.panes.insert(pane.id, pane);
         }
     }
 
     /// Stacks `pane` with the shown tab's focused pane, joining the focused
     /// pane's stack when it has one; `pane` is shown and takes the focus, and
-    /// the tab shows every pane again.
+    /// the tab shows every pane again and is marked changed by hand.
     pub fn stack(&mut self, owner: SessionId, pane: PaneEntry) {
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
@@ -555,19 +616,21 @@ impl Layouts {
         if let Some(tab) = layout.tab_mut() {
             tab.tree.stack_focused(pane.id);
             tab.zoomed = false;
+            tab.hand_changed = true;
             layout.panes.insert(pane.id, pane);
         }
     }
 
-    /// Adds `pane` to the shown tab and re-tiles the tab by pane count;
+    /// Adds `pane` to the shown tab: an untouched tab re-tiles in its swap
+    /// layout, a tab changed by hand places it beside the focused pane.
     /// `pane` takes the focus and the tab shows every pane again.
     pub fn add_tiled(&mut self, owner: SessionId, pane: PaneEntry) {
+        let body = self.body;
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
         };
         if let Some(tab) = layout.tab_mut() {
-            tab.tree.add_tiled(pane.id);
-            tab.zoomed = false;
+            tab.add_tiled(pane.id, body);
             layout.panes.insert(pane.id, pane);
         }
     }
@@ -583,7 +646,8 @@ impl Layouts {
 
     /// Moves the shown tab's focused pane to a new tab after the last one and
     /// shows it, as zellij's break pane does; the tab it leaves is re-tiled
-    /// by pane count. A tab of one pane stays as it is.
+    /// in its swap layout unless it was changed by hand. A tab of one pane
+    /// stays as it is.
     pub fn break_pane(&mut self, owner: SessionId) {
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
@@ -595,14 +659,19 @@ impl Layouts {
         if tab.tree.pane_ids().len() < 2 || !tab.tree.close_pane(pane) {
             return;
         }
-        tab.tree.tile();
-        tab.zoomed = false;
+        if tab.hand_changed {
+            tab.zoomed = false;
+        } else {
+            tab.relayout(None);
+        }
         layout.tabs.push(Tab::new(pane));
         layout.active = layout.tabs.len() - 1;
     }
 
-    /// Closes `pane` wherever it is. The tab it leaves is re-tiled by pane
-    /// count; a tab left without panes goes, and the tab before it is shown;
+    /// Closes `pane` wherever it is. The tab it leaves is re-tiled in its
+    /// swap layout unless it was changed by hand, when the closed pane's
+    /// neighbour takes its space; a tab left without panes goes, and the tab
+    /// before it is shown;
     /// a layout left without tabs goes.
     pub fn close_pane(&mut self, pane: PaneId) {
         let Some(owner) = self.owner_of(pane) else {
@@ -617,8 +686,8 @@ impl Layouts {
         let emptied = layout.tabs.get_mut(index).is_some_and(|tab| {
             tab.zoomed = false;
             let closed = tab.tree.close_pane(pane);
-            if closed {
-                tab.tree.tile();
+            if closed && !tab.hand_changed {
+                tab.relayout(None);
             }
             !closed
         });
@@ -706,15 +775,18 @@ impl Layouts {
 
     /// `Cmd +` (`grow`) or `Cmd -` on the shown tab's focused pane: see
     /// [`Tab::grow`] and [`Tab::shrink`]. Each undoes the other first. Whether
-    /// the tree changed; a zoom or unzoom alone isn't a change.
+    /// the tree changed, which marks the tab changed by hand; a zoom or
+    /// unzoom alone isn't a change.
     pub fn resize_focused(&mut self, owner: SessionId, grow: bool) -> bool {
         let body = self.body;
         self.tab_mut(owner).is_some_and(|tab| {
-            if grow {
+            let changed = if grow {
                 tab.grow(body)
             } else {
                 tab.shrink(body)
-            }
+            };
+            tab.hand_changed |= changed;
+            changed
         })
     }
 
@@ -739,6 +811,21 @@ impl Layouts {
         if let Some(layout) = self.sessions.get_mut(&owner) {
             let count = layout.tabs.len().max(1);
             layout.active = (layout.active + count - 1) % count;
+        }
+    }
+
+    /// Re-tiles the shown tab in the next swap layout that fits, wrapping; a
+    /// tab changed by hand gets its own layout back first.
+    pub fn next_swap_layout(&mut self, owner: SessionId) {
+        if let Some(tab) = self.tab_mut(owner) {
+            tab.relayout(Some(false));
+        }
+    }
+
+    /// As [`Self::next_swap_layout`], backwards.
+    pub fn previous_swap_layout(&mut self, owner: SessionId) {
+        if let Some(tab) = self.tab_mut(owner) {
+            tab.relayout(Some(true));
         }
     }
 
@@ -842,7 +929,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{FocusMove, Layouts, Placed, Placement, SessionLayout, Tab, test_entry as entry};
-    use crate::feat::layout::tree::{NavDirection, Split, TileLayout};
+    use crate::feat::layout::tree::{NavDirection, Split, SwapLayout, TileLayout};
     use crate::feat::sessions::state::{PaneId, SessionId};
 
     const OWNER: SessionId = SessionId(1);
@@ -1072,7 +1159,7 @@ mod tests {
     #[case(13, vec![2, 4])]
     #[case(14, vec![1, 4, 2])]
     #[case(16, vec![1, 4, 4])]
-    #[case(17, vec![2, 4, 4])]
+    #[case(17, vec![10])]
     #[case(18, vec![11])]
     #[case(19, vec![12])]
     fn closing_any_pane_re_tiles_to_the_template_for_one_fewer(
@@ -1107,28 +1194,20 @@ mod tests {
             .map(|stack| stack.shown)
     }
 
-    /// How many panes the stack's list names besides the shown one.
-    fn listed_others(layouts: &Layouts) -> usize {
-        placement(layouts)
-            .stacks
-            .into_iter()
-            .next()
-            .map_or(0, |stack| stack.rows.len().saturating_sub(1))
-    }
-
     #[rstest::rstest]
-    fn split_in_a_stacked_tab_re_tiles_with_the_new_pane() {
+    fn split_in_a_stacked_tab_splits_the_whole_stack() {
         // Given eleven tiled panes, one stack.
         let mut layouts = tiled(17);
 
         // When splitting the focused pane right with pane 18.
         layouts.split(OWNER, Split::Right, entry(18));
 
-        // Then the tab is one stack of twelve, eleven listed besides the shown one.
+        // Then the stack of eleven stays whole and pane 18 takes the right half.
+        let stack_sizes: Vec<usize> = stacked(&layouts).iter().map(Vec::len).collect();
         assert_eq!(
-            (shape(&layouts), listed_others(&layouts)),
-            (vec![12], 11),
-            "a split in a stacked tab should add the pane and re-tile"
+            (stack_sizes, area(&layouts, 18)),
+            (vec![11], Some(Rect::new(40, 0, 40, 24))),
+            "a split in a stacked tab should split the whole stack"
         );
     }
 
@@ -2272,23 +2351,416 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::add(|layouts: &mut Layouts| layouts.add_tiled(OWNER, entry(12)))]
-    #[case::split(|layouts: &mut Layouts| layouts.split(OWNER, Split::Right, entry(12)))]
-    #[case::close(|layouts: &mut Layouts| layouts.close_pane(PaneId(8)))]
-    fn re_tile_drops_a_stack_made_by_cmd_plus(#[case] change: fn(&mut Layouts)) {
+    fn next_swap_layout_drops_a_stack_made_by_cmd_plus() {
         // Given a [1][4] tab where Cmd + stacked part of the right column.
         let mut layouts = climb();
         grow_until_the_stacks_change(&mut layouts);
 
-        // When adding, splitting or closing a pane.
-        change(&mut layouts);
+        // When moving to the next swap layout.
+        layouts.next_swap_layout(OWNER);
 
-        // Then the re-tiled tab holds no stack.
+        // Then the re-applied vertical layout holds no stack.
         assert_eq!(
             stacked(&layouts),
             Vec::<Vec<PaneId>>::new(),
-            "a re-tile under 11 panes drops the stack Cmd + made"
+            "re-applying the vertical layout drops the stack Cmd + made"
         );
+    }
+
+    /// The shown tab's swap layout and whether it was changed by hand.
+    fn swap(layouts: &Layouts) -> Option<(SwapLayout, bool)> {
+        layouts
+            .get(OWNER)
+            .and_then(SessionLayout::active_tab)
+            .map(|tab| (tab.swap_layout(), tab.hand_changed()))
+    }
+
+    /// The shown tab's swap layout.
+    fn swap_layout(layouts: &Layouts) -> Option<SwapLayout> {
+        swap(layouts).map(|(layout, _)| layout)
+    }
+
+    /// Whether the shown tab was changed by hand.
+    fn hand_changed(layouts: &Layouts) -> bool {
+        swap(layouts).is_some_and(|(_, marked)| marked)
+    }
+
+    /// Pane `pane`'s cell when placed over `BODY`.
+    fn area(layouts: &Layouts, pane: i64) -> Option<Rect> {
+        placed(layouts)
+            .into_iter()
+            .find(|place| place.pane == PaneId(pane))
+            .map(|place| place.area)
+    }
+
+    /// Pane 7 over panes 8 and 9, top to bottom, pane 9 focused.
+    fn three_down() -> Layouts {
+        let mut layouts = opened();
+        layouts.split(OWNER, Split::Down, entry(8));
+        layouts.split(OWNER, Split::Down, entry(9));
+        layouts
+    }
+
+    #[rstest::rstest]
+    fn new_tab_starts_on_base_untouched() {
+        // Given / When opening a layout of pane 7.
+        let layouts = opened();
+
+        // Then its tab is on BASE and unmarked.
+        assert_eq!(
+            swap(&layouts),
+            Some((SwapLayout::Base, false)),
+            "a new tab starts on BASE, untouched"
+        );
+    }
+
+    #[rstest::rstest]
+    fn second_pane_moves_an_untouched_base_tab_to_vertical() {
+        // Given a tab of pane 7.
+        let mut layouts = opened();
+
+        // When adding pane 8.
+        layouts.add_tiled(OWNER, entry(8));
+
+        // Then the tab is vertical.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Vertical),
+            "BASE doesn't fit two panes, vertical does"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_tiled_in_an_untouched_tab_re_tiles_it() {
+        // Given six tiled panes, laid out [2][4].
+        let mut layouts = tiled(12);
+
+        // When adding pane 13.
+        layouts.add_tiled(OWNER, entry(13));
+
+        // Then the seven are laid out [1][4][2].
+        assert_eq!(
+            shape(&layouts),
+            vec![1, 4, 2],
+            "an add in an untouched tab re-tiles it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn eleventh_pane_moves_an_untouched_tab_to_stacked() {
+        // Given ten tiled panes.
+        let mut layouts = tiled(16);
+
+        // When adding an eleventh.
+        layouts.add_tiled(OWNER, entry(17));
+
+        // Then the tab is stacked.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Stacked),
+            "eleven panes overflow vertical and horizontal into stacked"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::split(opened, |layouts: &mut Layouts| layouts.split(OWNER, Split::Right, entry(8)))]
+    #[case::stack(opened, |layouts: &mut Layouts| layouts.stack(OWNER, entry(8)))]
+    #[case::cmd_plus(climb, |layouts: &mut Layouts| { layouts.resize_focused(OWNER, true); })]
+    #[case::cmd_minus(|| tiled(8), |layouts: &mut Layouts| { layouts.resize_focused(OWNER, false); })]
+    fn hand_changes_mark_the_tab(#[case] given: fn() -> Layouts, #[case] change: fn(&mut Layouts)) {
+        // Given an untouched tab.
+        let mut layouts = given();
+
+        // When changing it by hand.
+        change(&mut layouts);
+
+        // Then the tab is marked.
+        assert!(hand_changed(&layouts), "a hand change should mark the tab");
+    }
+
+    #[rstest::rstest]
+    fn zoom_does_not_mark_the_tab() {
+        // Given two tiled panes.
+        let mut layouts = tiled(8);
+
+        // When zooming.
+        layouts.toggle_zoom(OWNER);
+
+        // Then the tab is unmarked.
+        assert!(!hand_changed(&layouts), "a zoom isn't a hand change");
+    }
+
+    #[rstest::rstest]
+    fn overflow_stack_does_not_mark_the_tab() {
+        // Given ten tiled panes.
+        let mut layouts = tiled(16);
+
+        // When adding an eleventh, which stacks the tab.
+        layouts.add_tiled(OWNER, entry(17));
+
+        // Then the tab is unmarked.
+        assert!(
+            !hand_changed(&layouts),
+            "overflowing into stacked isn't a hand change"
+        );
+    }
+
+    #[rstest::rstest]
+    fn closing_a_pane_in_a_split_tab_moves_no_other_pane() {
+        // Given pane 7 over panes 8 and 9, split by hand.
+        let mut layouts = three_down();
+        let before = area(&layouts, 7);
+
+        // When closing pane 9.
+        layouts.close_pane(PaneId(9));
+
+        // Then pane 7 keeps its cell.
+        assert_eq!(
+            area(&layouts, 7),
+            before,
+            "a close in a split tab should leave the other panes alone"
+        );
+    }
+
+    #[rstest::rstest]
+    fn closing_a_pane_keeps_a_stack_made_by_cmd_plus() {
+        // Given a [1][4] tab where Cmd + stacked panes 9 to 11.
+        let mut layouts = climb();
+        grow_until_the_stacks_change(&mut layouts);
+
+        // When closing pane 7.
+        layouts.close_pane(PaneId(7));
+
+        // Then panes 9 to 11 are still one stack.
+        assert_eq!(
+            stacked(&layouts),
+            vec![vec![PaneId(9), PaneId(10), PaneId(11)]],
+            "a close in a marked tab keeps the stack Cmd + made"
+        );
+    }
+
+    #[rstest::rstest]
+    fn break_pane_from_a_split_tab_keeps_its_shape() {
+        // Given pane 7 over panes 8 and 9, split by hand, pane 9 focused.
+        let mut layouts = three_down();
+        let before = area(&layouts, 7);
+
+        // When breaking pane 9 out and going back to the first tab.
+        layouts.break_pane(OWNER);
+        layouts.go_to_tab(OWNER, 1);
+
+        // Then pane 7 keeps its cell.
+        assert_eq!(
+            area(&layouts, 7),
+            before,
+            "breaking a pane out of a split tab should leave the others alone"
+        );
+    }
+
+    #[rstest::rstest]
+    fn untouched_stacked_tab_stays_stacked_at_three_panes() {
+        // Given four tiled panes moved on to stacked.
+        let mut layouts = tiled(10);
+        layouts.next_swap_layout(OWNER);
+        layouts.next_swap_layout(OWNER);
+
+        // When closing pane 10.
+        layouts.close_pane(PaneId(10));
+
+        // Then the tab is still one stack, of three.
+        assert_eq!(
+            (swap_layout(&layouts), shape(&layouts)),
+            (Some(SwapLayout::Stacked), vec![3]),
+            "stacked fits three panes, so the tab stays stacked"
+        );
+    }
+
+    #[rstest::rstest]
+    fn overflowed_tab_stays_stacked_when_closed_back_down() {
+        // Given eleven tiled panes, overflowed into stacked.
+        let mut layouts = tiled(17);
+
+        // When closing panes 9 to 17, leaving two.
+        for pane in 9..=17 {
+            layouts.close_pane(PaneId(pane));
+        }
+
+        // Then the tab is still stacked.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Stacked),
+            "an overflowed tab stays stacked down to two panes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn overflowed_tab_closed_to_one_pane_wraps_to_base() {
+        // Given eleven tiled panes, overflowed into stacked.
+        let mut layouts = tiled(17);
+
+        // When closing panes 8 to 17, leaving one.
+        for pane in 8..=17 {
+            layouts.close_pane(PaneId(pane));
+        }
+
+        // Then the tab is on BASE.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Base),
+            "one pane fits neither stacked layout, so the search wraps to BASE"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_tiled_in_a_split_tab_splits_the_focused_pane() {
+        // Given panes 7 and 8 side by side, split by hand, pane 8 focused.
+        let mut layouts = split_right();
+        let before = area(&layouts, 7);
+
+        // When adding pane 9.
+        layouts.add_tiled(OWNER, entry(9));
+
+        // Then pane 9 sits below pane 8 and pane 7 keeps its cell.
+        let (eight, nine) = (area(&layouts, 8), area(&layouts, 9));
+        assert_eq!(
+            (
+                area(&layouts, 7),
+                nine.map(|rect| rect.x) == eight.map(|rect| rect.x),
+                nine.map(|rect| rect.y) > eight.map(|rect| rect.y)
+            ),
+            (before, true, true),
+            "an add in a split tab should halve only the focused pane, got 8 {eight:?}, 9 {nine:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_steps_vertical_to_horizontal() {
+        // Given three tiled panes, vertical.
+        let mut layouts = tiled(9);
+
+        // When moving to the next swap layout.
+        layouts.next_swap_layout(OWNER);
+
+        // Then the tab is horizontal.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Horizontal),
+            "next after vertical is horizontal"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_steps_horizontal_to_stacked() {
+        // Given five tiled panes moved on to horizontal.
+        let mut layouts = tiled(11);
+        layouts.next_swap_layout(OWNER);
+
+        // When moving to the next swap layout.
+        layouts.next_swap_layout(OWNER);
+
+        // Then the tab is stacked.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Stacked),
+            "next after horizontal is stacked"
+        );
+    }
+
+    #[rstest::rstest]
+    fn previous_swap_layout_from_two_vertical_panes_is_stacked() {
+        // Given two tiled panes, vertical.
+        let mut layouts = tiled(8);
+
+        // When moving to the previous swap layout.
+        layouts.previous_swap_layout(OWNER);
+
+        // Then the tab is stacked.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Stacked),
+            "BASE and half-stacked don't fit two panes, so previous wraps to stacked"
+        );
+    }
+
+    #[rstest::rstest]
+    fn second_previous_swap_layout_from_two_vertical_panes_is_horizontal() {
+        // Given two tiled panes moved back to stacked.
+        let mut layouts = tiled(8);
+        layouts.previous_swap_layout(OWNER);
+
+        // When moving to the previous swap layout again.
+        layouts.previous_swap_layout(OWNER);
+
+        // Then the tab is horizontal.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Horizontal),
+            "previous before stacked is horizontal"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_on_a_changed_tab_reapplies_its_layout() {
+        // Given three tiled panes, vertical, resized by Cmd -.
+        let mut layouts = tiled(9);
+        layouts.resize_focused(OWNER, false);
+
+        // When moving to the next swap layout.
+        layouts.next_swap_layout(OWNER);
+
+        // Then the tab is vertical again and unmarked.
+        assert_eq!(
+            swap(&layouts),
+            Some((SwapLayout::Vertical, false)),
+            "the first press on a changed tab re-applies its layout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn second_next_swap_layout_on_a_changed_tab_steps() {
+        // Given three vertical panes resized by Cmd -, then re-applied.
+        let mut layouts = tiled(9);
+        layouts.resize_focused(OWNER, false);
+        layouts.next_swap_layout(OWNER);
+
+        // When moving to the next swap layout again.
+        layouts.next_swap_layout(OWNER);
+
+        // Then the tab is horizontal.
+        assert_eq!(
+            swap(&layouts),
+            Some((SwapLayout::Horizontal, false)),
+            "the second press on a changed tab steps"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_on_a_lone_pane_moves_base_to_vertical() {
+        // Given a tab of pane 7, on BASE.
+        let mut layouts = opened();
+
+        // When moving to the next swap layout.
+        layouts.next_swap_layout(OWNER);
+
+        // Then the tab is vertical.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Vertical),
+            "next after BASE is vertical, which fits one pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_shows_every_pane_of_a_zoomed_tab() {
+        // Given two tiled panes, zoomed.
+        let mut layouts = tiled(8);
+        layouts.toggle_zoom(OWNER);
+
+        // When moving to the next swap layout.
+        layouts.next_swap_layout(OWNER);
+
+        // Then the tab isn't zoomed.
+        assert!(!zoomed(&layouts), "a swap layout change should unzoom");
     }
 
     #[rstest::rstest]

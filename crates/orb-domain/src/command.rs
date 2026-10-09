@@ -29,8 +29,8 @@ pub enum Command {
     SendCtrlG,
     /// Split `session`'s focused pane `split`; the sessions actor makes the pane.
     SplitPane { session: SessionId, split: Split },
-    /// Add a shell to `session`'s shown tab and re-tile it; the sessions
-    /// actor makes the pane.
+    /// Add a shell to `session`'s shown tab and re-tile it unless it was
+    /// changed by hand; the sessions actor makes the pane.
     AddPane(SessionId),
     /// Stack a shell with `session`'s focused pane; the sessions actor makes
     /// the pane.

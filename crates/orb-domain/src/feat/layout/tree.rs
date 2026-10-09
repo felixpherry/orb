@@ -80,6 +80,59 @@ pub enum Grow {
     Stuck,
 }
 
+/// A tab's place in zellij's list of swap layouts, in list order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapLayout {
+    /// The tab's starting shape: one pane.
+    Base,
+    /// Columns of panes (orb's grid).
+    Vertical,
+    /// Rows of panes: vertical turned on its side.
+    Horizontal,
+    /// One stack of every pane.
+    Stacked,
+    /// The first pane on the left half, the rest stacked on the right.
+    HalfStacked,
+}
+
+impl SwapLayout {
+    const ALL: [Self; 5] = [
+        Self::Base,
+        Self::Vertical,
+        Self::Horizontal,
+        Self::Stacked,
+        Self::HalfStacked,
+    ];
+
+    /// Whether the layout has a template for `n` panes.
+    fn fits(self, n: usize) -> bool {
+        match self {
+            Self::Base => n == 1,
+            Self::Vertical | Self::Horizontal => (1..=10).contains(&n),
+            Self::Stacked => n >= 2,
+            Self::HalfStacked => n >= 3,
+        }
+    }
+
+    /// The first layout that fits `n` panes, starting at this one (at the
+    /// one after it when `step`), going backwards when `back`, wrapping;
+    /// `None` when none fits after a full turn.
+    pub fn fitting(self, n: usize, step: bool, back: bool) -> Option<Self> {
+        let len = Self::ALL.len();
+        let at = self as usize;
+        (usize::from(step)..usize::from(step) + len)
+            .map(|offset| {
+                if back {
+                    (at + 2 * len - offset) % len
+                } else {
+                    (at + offset) % len
+                }
+            })
+            .filter_map(|index| Self::ALL.get(index).copied())
+            .find(|layout| layout.fits(n))
+    }
+}
+
 /// A node of the tree: one pane, a split holding two subtrees, or a stack
 /// of panes sharing one area.
 #[derive(Debug, Clone, PartialEq)]
@@ -171,20 +224,15 @@ impl TileLayout {
         ids
     }
 
-    /// Splits the focused pane `split`, the new pane `id` going right after it
-    /// and taking the focus. The run of `split` splits the two panes join is
-    /// re-divided into equal shares. A layout holding a stack has no manual
-    /// shape to keep: `id` is added and the layout re-tiled instead.
+    /// Splits the focused pane, or its whole stack when it's stacked, `split`:
+    /// the new pane `id` goes right after it and takes the focus, and the run
+    /// of `split` splits the two join is re-divided into equal shares.
     pub fn split_focused(&mut self, split: Split, id: PaneId) {
-        match expanded_in(&self.root) {
-            Some(_) => self.add_tiled(id),
-            None => {
-                if let Some(node) = find_pane_mut(&mut self.root, self.focus) {
-                    *node = split_node(self.focus, split, id, 0.5);
-                    even_run(&mut self.root, split, id);
-                    self.set_focus(id);
-                }
-            }
+        if let Some(node) = find_holding_mut(&mut self.root, self.focus) {
+            let held = std::mem::replace(node, Node::Pane(id));
+            *node = split_node(held, split, id, 0.5);
+            even_run(&mut self.root, split, id);
+            self.set_focus(id);
         }
     }
 
@@ -202,7 +250,7 @@ impl TileLayout {
                 panes.insert(at, id);
             }
             None => {
-                if let Some(node) = find_pane_mut(&mut self.root, focus) {
+                if let Some(node) = find_holding_mut(&mut self.root, focus) {
                     *node = Node::Stack {
                         panes: vec![focus, id],
                         expanded: id,
@@ -213,10 +261,44 @@ impl TileLayout {
         self.set_focus(id);
     }
 
-    /// Rebuilds the tree from the template for its pane count, panes in their
-    /// current tree order. Focus, its history and each stack's expanded pane
-    /// stay.
-    pub fn tile(&mut self) {
+    /// Adds pane `id`, focused, where zellij puts a new pane in a tab changed
+    /// by hand: into the focused pane's stack when it has one; else it halves
+    /// the focused pane's cell in `area`, top and bottom when it's tall (rows
+    /// × [`CELL_RATIO`] over its columns, and over 20 rows), left and right
+    /// when it's over 60 columns; else the two are stacked. No other pane
+    /// moves.
+    pub fn add_beside_focus(&mut self, id: PaneId, area: Rect) {
+        let focus = self.focus;
+        let stacked = self
+            .stacks(area)
+            .iter()
+            .any(|stack| stack.panes.contains(&focus));
+        let split = self
+            .panes(area)
+            .into_iter()
+            .find(|info| info.id == focus && !stacked)
+            .and_then(|info| {
+                let (rows, cols) = (info.rect.height, info.rect.width);
+                if rows.saturating_mul(CELL_RATIO) > cols && rows > 20 {
+                    Some(Split::Down)
+                } else if cols > 60 {
+                    Some(Split::Right)
+                } else {
+                    None
+                }
+            });
+        match split.zip(find_holding_mut(&mut self.root, focus)) {
+            Some((split, node)) => {
+                *node = split_node(Node::Pane(focus), split, id, 0.5);
+                self.set_focus(id);
+            }
+            None => self.stack_focused(id),
+        }
+    }
+
+    /// Rebuilds the tree from `layout`'s template, panes in their current
+    /// tree order. Focus, its history and each stack's expanded pane stay.
+    pub fn tile(&mut self, layout: SwapLayout) {
         let prefer: Vec<PaneId> = std::iter::once(self.focus)
             .chain(
                 self.stacks(Rect::default())
@@ -224,19 +306,20 @@ impl TileLayout {
                     .map(|stack| stack.expanded),
             )
             .collect();
-        if let Some(root) = template(&self.pane_ids(), &prefer) {
+        if let Some(root) = template_for(layout, &self.pane_ids(), &prefer) {
             self.root = root;
         }
     }
 
-    /// Adds pane `id` last in reading order, re-tiles, and focuses it.
-    pub fn add_tiled(&mut self, id: PaneId) {
+    /// Adds pane `id` last in reading order, re-tiles in `layout`, and
+    /// focuses it.
+    pub fn add_tiled(&mut self, id: PaneId, layout: SwapLayout) {
         let ids = {
             let mut ids = self.pane_ids();
             ids.push(id);
             ids
         };
-        if let Some(root) = template(&ids, &[id]) {
+        if let Some(root) = template_for(layout, &ids, &[id]) {
             self.root = root;
             self.set_focus(id);
         }
@@ -490,15 +573,6 @@ fn expand(node: &mut Node, id: PaneId) {
     }
 }
 
-/// The expanded pane of the tree's first stack, if it has any.
-fn expanded_in(node: &Node) -> Option<PaneId> {
-    match node {
-        Node::Pane(_) => None,
-        Node::Split { first, second, .. } => expanded_in(first).or_else(|| expanded_in(second)),
-        Node::Stack { expanded, .. } => Some(*expanded),
-    }
-}
-
 /// `panes` as a stack expanding `expanded`, or its first pane when
 /// `expanded` isn't one of them. One pane is just that pane; none is nothing.
 fn stack(panes: Vec<PaneId>, expanded: PaneId) -> Option<Node> {
@@ -594,31 +668,27 @@ fn range_center_distance(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> 
 
 // --- Tree operations ---
 
-/// Column sizes for `n` panes, first column first; the flag says the last
-/// column is a stack. From 11 panes that's one stack of every pane.
-fn columns(n: usize) -> (Vec<usize>, bool) {
+/// Line sizes for `n` panes, first line first (zellij's vertical and
+/// horizontal, 1–10 panes).
+fn columns(n: usize) -> Vec<usize> {
     match n {
-        0 => (vec![], false),
-        1 => (vec![1], false),
-        11.. => (vec![n], true),
+        0 => vec![],
+        1 => vec![1],
         _ => {
-            let cols = {
-                let mut cols = vec![1];
-                let mut rest = n - 1;
-                while rest > 0 {
-                    let take = rest.min(4);
-                    cols.push(take);
-                    rest -= take;
+            let mut cols = vec![1];
+            let mut rest = n - 1;
+            while rest > 0 {
+                let take = rest.min(4);
+                cols.push(take);
+                rest -= take;
+            }
+            if cols.len() > 2 && cols.last() == Some(&1) {
+                cols.pop();
+                if let Some(first) = cols.first_mut() {
+                    *first += 1;
                 }
-                if cols.len() > 2 && cols.last() == Some(&1) {
-                    cols.pop();
-                    if let Some(first) = cols.first_mut() {
-                        *first += 1;
-                    }
-                }
-                cols
-            };
-            (cols, false)
+            }
+            cols
         }
     }
 }
@@ -641,30 +711,44 @@ fn even_chain(mut nodes: Vec<Node>, split: Split) -> Option<Node> {
     )
 }
 
-/// The template tree for `ids` in reading order: columns from [`columns`],
-/// filled top to bottom, first column first. A stacked last column expands
-/// the first of `prefer` it holds, else its last pane. `None` for no ids.
-fn template(ids: &[PaneId], prefer: &[PaneId]) -> Option<Node> {
-    let (cols, stacked) = columns(ids.len());
+/// `ids` in reading order as lines from [`columns`] chained `across` in
+/// equal shares, the panes in each line chained the other way: columns for
+/// `Right`, rows for `Down`.
+fn grid(ids: &[PaneId], across: Split) -> Option<Node> {
+    let along = match across {
+        Split::Right => Split::Down,
+        Split::Down => Split::Right,
+    };
     let mut rest = ids.iter().copied();
-    let columns = cols
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &k)| {
-            let panes: Vec<PaneId> = rest.by_ref().take(k).collect();
-            if stacked && index + 1 == cols.len() {
-                let expanded = prefer
-                    .iter()
-                    .copied()
-                    .find(|id| panes.contains(id))
-                    .or_else(|| panes.last().copied())?;
-                stack(panes, expanded)
-            } else {
-                even_chain(panes.into_iter().map(Node::Pane).collect(), Split::Down)
-            }
-        })
+    let lines = columns(ids.len())
+        .into_iter()
+        .filter_map(|k| even_chain(rest.by_ref().take(k).map(Node::Pane).collect(), along))
         .collect();
-    even_chain(columns, Split::Right)
+    even_chain(lines, across)
+}
+
+/// `layout`'s tree for `ids` in reading order. A stack expands the first of
+/// `prefer` it holds, else its last pane. `None` for no ids.
+fn template_for(layout: SwapLayout, ids: &[PaneId], prefer: &[PaneId]) -> Option<Node> {
+    let expanded = |panes: &[PaneId]| {
+        prefer
+            .iter()
+            .copied()
+            .find(|id| panes.contains(id))
+            .or_else(|| panes.last().copied())
+    };
+    match layout {
+        SwapLayout::Base | SwapLayout::Vertical => grid(ids, Split::Right),
+        SwapLayout::Horizontal => grid(ids, Split::Down),
+        SwapLayout::Stacked => stack(ids.to_vec(), expanded(ids)?),
+        SwapLayout::HalfStacked => {
+            let (first, rest) = ids.split_first()?;
+            even_chain(
+                vec![Node::Pane(*first), stack(rest.to_vec(), expanded(rest)?)?],
+                Split::Right,
+            )
+        }
+    }
 }
 
 /// `node`'s run of `split` splits, flattened: every subtree under it that
@@ -825,13 +909,20 @@ fn find_stack_holding_mut(node: &mut Node, target: PaneId) -> Option<&mut Vec<Pa
     }
 }
 
-fn find_pane_mut(node: &mut Node, target: PaneId) -> Option<&mut Node> {
+/// zellij's cell height-to-width ratio: kitty-style 8×16 cells.
+// ponytail: fixed cell ratio, read the terminal's pixel cell size if splits pick the wrong way
+const CELL_RATIO: u16 = 2;
+
+/// Pane `target`'s node, or the stack holding it.
+fn find_holding_mut(node: &mut Node, target: PaneId) -> Option<&mut Node> {
+    if holds(node, target) {
+        return Some(node);
+    }
     match node {
-        Node::Pane(id) if *id == target => Some(node),
-        Node::Pane(_) | Node::Stack { .. } => None,
         Node::Split { first, second, .. } => {
-            find_pane_mut(first, target).or_else(|| find_pane_mut(second, target))
+            find_holding_mut(first, target).or_else(|| find_holding_mut(second, target))
         }
+        Node::Pane(_) | Node::Stack { .. } => None,
     }
 }
 
@@ -881,11 +972,11 @@ fn moved(split: Split, ratio: f32, up: bool, cells: u16, area: Rect) -> Option<f
     })
 }
 
-fn split_node(target: PaneId, split: Split, new_id: PaneId, ratio: f32) -> Node {
+fn split_node(first: Node, split: Split, new_id: PaneId, ratio: f32) -> Node {
     Node::Split {
         split,
         ratio,
-        first: Box::new(Node::Pane(target)),
+        first: Box::new(first),
         second: Box::new(Node::Pane(new_id)),
     }
 }
@@ -966,7 +1057,8 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        Grow, NavDirection, Node, PaneInfo, Split, TileLayout, columns, find_in_direction,
+        Grow, NavDirection, Node, PaneInfo, Split, SwapLayout, TileLayout, columns,
+        find_in_direction,
     };
     use crate::feat::sessions::state::PaneId;
 
@@ -1027,13 +1119,45 @@ mod tests {
         }
     }
 
-    /// A layout of panes 1 to `n`, each added with `add_tiled`.
+    /// A layout of panes 1 to `n`, each added with `add_tiled` in vertical.
     fn tiled(n: i64) -> TileLayout {
-        let mut layout = TileLayout::new(pane(1));
+        tiled_as(n, SwapLayout::Vertical)
+    }
+
+    /// A layout of panes 1 to `n`, each added with `add_tiled` in `layout`.
+    fn tiled_as(n: i64, layout: SwapLayout) -> TileLayout {
+        let mut tree = TileLayout::new(pane(1));
         for id in 2..=n {
-            layout.add_tiled(pane(id));
+            tree.add_tiled(pane(id), layout);
         }
+        tree
+    }
+
+    /// How many panes each row holds, top to bottom.
+    fn rows_of(layout: &TileLayout, area: Rect) -> Vec<usize> {
         layout
+            .panes(area)
+            .chunk_by(|a, b| a.rect.y == b.rect.y)
+            .map(<[PaneInfo]>::len)
+            .collect()
+    }
+
+    /// Every pane's rect in `area`, in tree order.
+    fn rects_in(layout: &TileLayout, area: Rect) -> Vec<(PaneId, Rect)> {
+        layout
+            .panes(area)
+            .into_iter()
+            .map(|info| (info.id, info.rect))
+            .collect()
+    }
+
+    /// Every stack's panes, in tree order.
+    fn stacked(layout: &TileLayout) -> Vec<Vec<PaneId>> {
+        layout
+            .stacks(AREA)
+            .into_iter()
+            .map(|stack| stack.panes)
+            .collect()
     }
 
     /// The pane rects in `area`, one list per column, left to right.
@@ -1446,7 +1570,7 @@ mod tests {
     #[case(10, vec![2, 4, 4])]
     fn columns_follow_the_template_table(#[case] n: usize, #[case] expected: Vec<usize>) {
         // Given / When / Then the column sizes for n panes match the table.
-        assert_eq!(columns(n), (expected, false), "columns for {n} panes");
+        assert_eq!(columns(n), expected, "columns for {n} panes");
     }
 
     #[rstest::rstest]
@@ -1537,7 +1661,7 @@ mod tests {
         let mut layout = tiled(5);
 
         // When adding pane 6.
-        layout.add_tiled(pane(6));
+        layout.add_tiled(pane(6), SwapLayout::Vertical);
 
         // Then two panes sit in the first column and four in the second.
         assert_eq!(shape(&layout, AREA), vec![2, 4], "six panes tile [2][4]");
@@ -1549,7 +1673,7 @@ mod tests {
         let mut layout = tiled(5);
 
         // When adding pane 6.
-        layout.add_tiled(pane(6));
+        layout.add_tiled(pane(6), SwapLayout::Vertical);
 
         // Then pane 6 has the focus.
         assert_eq!(
@@ -1566,7 +1690,7 @@ mod tests {
         layout.resize_focused(true, 10, AREA);
 
         // When adding pane 4.
-        layout.add_tiled(pane(4));
+        layout.add_tiled(pane(4), SwapLayout::Vertical);
 
         // Then the tab is one column then three, every size even again.
         let columns = columns_of(&layout, AREA);
@@ -1617,9 +1741,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn eleven_tiled_panes_are_one_stack_of_eleven() {
-        // Given eleven tiled panes.
-        let layout = tiled(11);
+    fn stacked_template_is_one_stack_of_every_pane() {
+        // Given eleven panes tiled in stacked.
+        let layout = tiled_as(11, SwapLayout::Stacked);
 
         // When laying them out.
         let collapsed = layout
@@ -1634,6 +1758,87 @@ mod tests {
             (vec![11], 10),
             "eleven panes tile as one stack"
         );
+    }
+
+    #[rstest::rstest]
+    fn stacked_template_expands_the_focused_pane() {
+        // Given four panes tiled vertical, pane 2 focused.
+        let mut layout = tiled(4);
+        layout.focus_pane(pane(2));
+
+        // When re-tiling in stacked.
+        layout.tile(SwapLayout::Stacked);
+
+        // Then pane 2 is the stack's expanded pane.
+        assert_eq!(
+            expanded(&layout),
+            Some(pane(2)),
+            "the focused pane should be expanded"
+        );
+    }
+
+    #[rstest::rstest]
+    fn half_stacked_template_puts_the_first_pane_on_the_left_half() {
+        // Given four panes tiled in half-stacked.
+        let layout = tiled_as(4, SwapLayout::HalfStacked);
+
+        // When laying them out.
+        let left = info(&layout, 1).map(|info| info.rect);
+
+        // Then pane 1 takes the left half and panes 2 to 4 are one stack.
+        assert_eq!(
+            (left, stacked(&layout)),
+            (
+                Some(Rect::new(0, 0, 50, 40)),
+                vec![vec![pane(2), pane(3), pane(4)]]
+            ),
+            "half-stacked puts pane 1 on the left half beside one stack"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(1, vec![1])]
+    #[case(2, vec![1, 1])]
+    #[case(3, vec![1, 2])]
+    #[case(4, vec![1, 3])]
+    #[case(5, vec![1, 4])]
+    #[case(6, vec![2, 4])]
+    #[case(7, vec![1, 4, 2])]
+    #[case(8, vec![1, 4, 3])]
+    #[case(9, vec![1, 4, 4])]
+    #[case(10, vec![2, 4, 4])]
+    fn horizontal_template_lays_rows_from_the_table(#[case] n: i64, #[case] expected: Vec<usize>) {
+        // Given n panes tiled in horizontal.
+        let layout = tiled_as(n, SwapLayout::Horizontal);
+
+        // When laying them out.
+        let rows = rows_of(&layout, AREA);
+
+        // Then each row holds the table's pane count.
+        assert_eq!(rows, expected, "rows for {n} panes");
+    }
+
+    #[rstest::rstest]
+    #[case(SwapLayout::Base, 1, true)]
+    #[case(SwapLayout::Base, 2, false)]
+    #[case(SwapLayout::Vertical, 10, true)]
+    #[case(SwapLayout::Vertical, 11, false)]
+    #[case(SwapLayout::Horizontal, 10, true)]
+    #[case(SwapLayout::Horizontal, 11, false)]
+    #[case(SwapLayout::Stacked, 1, false)]
+    #[case(SwapLayout::Stacked, 2, true)]
+    #[case(SwapLayout::HalfStacked, 2, false)]
+    #[case(SwapLayout::HalfStacked, 3, true)]
+    fn swap_layout_fits_from_the_table(
+        #[case] layout: SwapLayout,
+        #[case] n: usize,
+        #[case] fits: bool,
+    ) {
+        // Given / When searching for a fitting layout from the layout itself.
+        let found = layout.fitting(n, false, false);
+
+        // Then it finds itself only when it fits n panes.
+        assert_eq!(found == Some(layout), fits, "{layout:?} fitting {n} panes");
     }
 
     #[rstest::rstest]
@@ -1816,11 +2021,11 @@ mod tests {
 
     #[rstest::rstest]
     fn add_tiled_expands_the_new_pane() {
-        // Given eleven tiled panes.
-        let mut layout = tiled(11);
+        // Given eleven panes tiled in stacked.
+        let mut layout = tiled_as(11, SwapLayout::Stacked);
 
         // When adding pane 12.
-        layout.add_tiled(pane(12));
+        layout.add_tiled(pane(12), SwapLayout::Stacked);
 
         // Then pane 12 is the expanded pane of the stack.
         assert_eq!(
@@ -1832,8 +2037,8 @@ mod tests {
 
     #[rstest::rstest]
     fn split_in_a_stacked_layout_focuses_the_new_pane() {
-        // Given eleven tiled panes, pane 5 focused.
-        let mut layout = tiled(11);
+        // Given eleven panes tiled in stacked, pane 5 focused.
+        let mut layout = tiled_as(11, SwapLayout::Stacked);
         layout.focus_pane(pane(5));
 
         // When splitting it right with pane 12.
@@ -1848,9 +2053,120 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn split_of_a_stacked_pane_keeps_its_stack_whole() {
+        // Given pane 1 beside a stack of 2, 3 and 4, pane 3 focused.
+        let mut layout = main_and_stack(3, 3);
+
+        // When splitting it right with pane 5.
+        layout.split_focused(Split::Right, pane(5));
+
+        // Then the stack still holds panes 2, 3 and 4.
+        assert_eq!(
+            stacked(&layout),
+            vec![vec![pane(2), pane(3), pane(4)]],
+            "a split should take the whole stack, not one pane out of it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_beside_focus_in_a_stack_joins_it() {
+        // Given pane 1 beside a stack of 2, 3 and 4, pane 3 focused.
+        let mut layout = main_and_stack(3, 3);
+
+        // When adding pane 5 beside the focus.
+        layout.add_beside_focus(pane(5), AREA);
+
+        // Then pane 5 joins the stack right after pane 3.
+        assert_eq!(
+            stacked(&layout),
+            vec![vec![pane(2), pane(3), pane(5), pane(4)]],
+            "a new pane beside a stacked focus joins its stack"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_beside_focus_splits_a_tall_pane_top_and_bottom() {
+        // Given a lone pane 1 in a 60×40 area.
+        let area = Rect::new(0, 0, 60, 40);
+        let mut layout = TileLayout::new(pane(1));
+
+        // When adding pane 2 beside the focus.
+        layout.add_beside_focus(pane(2), area);
+
+        // Then pane 2 sits below pane 1.
+        assert_eq!(
+            rects_in(&layout, area),
+            vec![
+                (pane(1), Rect::new(0, 0, 60, 20)),
+                (pane(2), Rect::new(0, 20, 60, 20)),
+            ],
+            "a tall pane is halved top and bottom"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_beside_focus_halves_only_the_focused_pane() {
+        // Given panes 1 and 2 side by side in a 200×48 area, pane 1 focused.
+        let area = Rect::new(0, 0, 200, 48);
+        let mut layout = halves(1);
+
+        // When adding pane 3 beside the focus.
+        layout.add_beside_focus(pane(3), area);
+
+        // Then pane 1 is halved and pane 2 keeps its width.
+        let widths: Vec<u16> = layout
+            .panes(area)
+            .iter()
+            .map(|info| info.rect.width)
+            .collect();
+        assert_eq!(
+            widths,
+            vec![50, 50, 100],
+            "only the focused pane should be halved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_beside_focus_splits_a_wide_pane_left_and_right() {
+        // Given a lone pane 1 in a 200×24 area.
+        let area = Rect::new(0, 0, 200, 24);
+        let mut layout = TileLayout::new(pane(1));
+
+        // When adding pane 2 beside the focus.
+        layout.add_beside_focus(pane(2), area);
+
+        // Then pane 2 sits beside pane 1.
+        assert_eq!(
+            rects_in(&layout, area),
+            vec![
+                (pane(1), Rect::new(0, 0, 100, 24)),
+                (pane(2), Rect::new(100, 0, 100, 24)),
+            ],
+            "a wide pane is halved left and right"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_beside_focus_stacks_a_small_pane() {
+        // Given a lone pane 1 in a 50×18 area.
+        let area = Rect::new(0, 0, 50, 18);
+        let mut layout = TileLayout::new(pane(1));
+
+        // When adding pane 2 beside the focus.
+        layout.add_beside_focus(pane(2), area);
+
+        // Then panes 1 and 2 are one stack.
+        assert_eq!(
+            stacked(&layout),
+            vec![vec![pane(1), pane(2)]],
+            "a pane too small to split is stacked with the new one"
+        );
+    }
+
+    #[rstest::rstest]
     fn stack_layout_json_roundtrips() {
-        // Given twelve tiled panes with pane 5 expanded and pane 1 focused.
-        let mut layout = tiled(12);
+        // Given twelve panes tiled in stacked with pane 5 expanded and pane 1 focused.
+        let mut layout = tiled_as(12, SwapLayout::Stacked);
         layout.focus_pane(pane(5));
         layout.focus_pane(pane(1));
 

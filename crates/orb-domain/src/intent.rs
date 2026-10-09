@@ -38,8 +38,8 @@ pub enum Intent {
     /// Stack a new shell with the focused pane, the new shell shown and
     /// taking the focus; outside the tab's stack, add it to that stack.
     StackPane,
-    /// Add a shell to the shown tab and re-tile it by pane count, the new
-    /// shell taking the focus.
+    /// Add a shell to the shown tab and re-tile it by pane count unless it
+    /// was changed by hand, the new shell taking the focus.
     AddPane,
     /// Close the focused pane; on the thread's own pane, detach the thread.
     ClosePane,
