@@ -1,8 +1,9 @@
 // Adapted from herdr (https://github.com/herdrdev/herdr), src/layout.rs at
 // commit 3d9d2b18, licensed under the Apache License, Version 2.0. Modified
 // for orb: pane ids come from the caller instead of a global counter; splits
-// are `Split::{Right, Down}`; resizing follows zellij's stacked resize; the tree saves to and loads from JSON; herdr's borders,
-// scrollbar lanes, swap, insert and drag-resize code is left out.
+// are `Split::{Right, Down}`; resizing grows, stacks and zooms panes; the
+// tree saves to and loads from JSON; herdr's borders, scrollbar lanes, swap,
+// insert and drag-resize code is left out.
 
 //! A tab's panes as a tree of right and down splits and stacks of panes
 //! sharing one area, any number of them: where each pane
@@ -25,12 +26,10 @@ const MIN_PANE_ROWS: u16 = 5;
 /// frame included.
 const MIN_PANE_COLS: u16 = 5;
 
-/// zellij's `RESIZE_PERCENT` (`tiled_panes/tiled_pane_grid.rs`): the
-/// `Cmd +`/`Cmd -` step, in percent of the tab, when the stacked one has
+/// The `Cmd +`/`Cmd -` step, in percent of the tab, when the stacked one has
 /// nowhere to go, and the least share of the tab a moved pane keeps.
 const RESIZE_PERCENT: f32 = 5.0;
-/// The share of the tab zellij's stacked resize tries first
-/// (`stacked_resize_pane_with_id` in `tiled_panes/mod.rs`).
+/// The share of the tab `Cmd +`/`Cmd -` try first.
 const STACKED_RESIZE_PERCENT: f32 = 30.0;
 
 /// `percent` of `extent` cells, rounded, at least 1.
@@ -88,7 +87,7 @@ pub enum Grow {
     Stuck,
 }
 
-/// A tab's place in zellij's list of swap layouts, in list order.
+/// A tab's place in the list of swap layouts, in list order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapLayout {
     /// The tab's starting shape: one pane.
@@ -269,8 +268,8 @@ impl TileLayout {
         self.set_focus(id);
     }
 
-    /// Adds pane `id`, focused, where zellij puts a new pane in a tab changed
-    /// by hand: into the focused pane's stack when it has one; else it halves
+    /// Adds pane `id`, focused, where a new pane goes in a tab changed by
+    /// hand: into the focused pane's stack when it has one; else it halves
     /// the focused pane's cell in `area`, top and bottom when it's tall (rows
     /// × [`CELL_RATIO`] over its columns, and over 20 rows), left and right
     /// when it's over 60 columns; else the two are stacked. No other pane
@@ -393,7 +392,7 @@ impl TileLayout {
         }
     }
 
-    /// zellij's stacked `Cmd +`: towards the first neighbour above, below,
+    /// `Cmd +`: towards the first neighbour above, below,
     /// left or right that lines up with the focused pane (or its stack) along
     /// its whole edge, grows it [`STACKED_RESIZE_PERCENT`] of the tab, or
     /// when that leaves a pane there too small, stacks it with that
@@ -423,7 +422,7 @@ impl TileLayout {
         }
     }
 
-    /// zellij's stacked `Cmd -`: breaks one pane out of the focused pane's
+    /// `Cmd -`: breaks one pane out of the focused pane's
     /// stack, else shrinks the focused pane [`STACKED_RESIZE_PERCENT`] of the
     /// tab, else [`RESIZE_PERCENT`], any way that fits. Whether it changed.
     pub fn shrink_focused(&mut self, body: Rect) -> bool {
@@ -432,7 +431,7 @@ impl TileLayout {
             || self.resize_any(body, false, RESIZE_PERCENT)
     }
 
-    /// zellij's resize with no direction: the first of the corners (right
+    /// A resize with no direction: the first of the corners (right
     /// and down, left and down, right and up, left and up), then the sides
     /// (right, down, left, up) where both moves fit.
     fn resize_any(&mut self, body: Rect, grow: bool, percent: f32) -> bool {
@@ -495,7 +494,7 @@ impl TileLayout {
         fits
     }
 
-    /// Whether the focused unit has zellij's direct neighbours towards
+    /// Whether the focused unit has direct neighbours towards
     /// `dir`: panes or stacks touching its edge that lie within its sides
     /// and together cover the whole edge.
     fn lined_up(&self, body: Rect, dir: NavDirection) -> bool {
@@ -526,12 +525,12 @@ impl TileLayout {
                 .any(|(n_side, n_width)| n_side + n_width == side + width)
     }
 
-    /// zellij's `stack_pane_*`: makes the focused unit and its neighbours
+    /// Makes the focused unit and its neighbours
     /// across the edge facing `dir` one stack showing the focused pane, over
     /// both their areas. Only when the unit spans the whole border; `false`
     /// otherwise.
     // ponytail: a unit narrower than its border doesn't stack, since the tree can't hold a stack
-    // across two subtrees; restructure the tree if zellij's aligned-neighbour stacks matter
+    // across two subtrees; restructure the tree if aligned-neighbour stacks matter
     fn stack_toward(&mut self, body: Rect, dir: NavDirection) -> bool {
         let Some(edge) = edge(&self.root, body, self.focus, dir) else {
             return false;
@@ -569,7 +568,7 @@ impl TileLayout {
         true
     }
 
-    /// zellij's `break_pane_out_of_stack`: the focused pane's stack gives its
+    /// The focused pane's stack gives its
     /// top pane (when the shown pane is its last) or its bottom pane a
     /// 1/n share of its rows, above or below it. `false` outside a stack.
     fn unstack_focused(&mut self) -> bool {
@@ -819,8 +818,8 @@ fn range_center_distance(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> 
 
 // --- Tree operations ---
 
-/// Line sizes for `n` panes, first line first (zellij's vertical and
-/// horizontal, 1–10 panes).
+/// Line sizes for `n` panes, first line first (the vertical and
+/// horizontal layouts, 1–10 panes).
 fn columns(n: usize) -> Vec<usize> {
     match n {
         0 => vec![],
@@ -1040,7 +1039,7 @@ fn find_stack_holding_mut(node: &mut Node, target: PaneId) -> Option<&mut Vec<Pa
     }
 }
 
-/// zellij's cell height-to-width ratio: kitty-style 8×16 cells.
+/// The cell height-to-width ratio: kitty-style 8×16 cells.
 // ponytail: fixed cell ratio, read the terminal's pixel cell size if splits pick the wrong way
 const CELL_RATIO: u16 = 2;
 
@@ -1244,10 +1243,10 @@ fn shifted(leaves: &[Leaf], edge: &Edge, to: u16) -> Option<Vec<Leaf>> {
         .collect()
 }
 
-/// `node` with the split at `edge` rebuilt as zellij's `stack_pane_*` does:
-/// the unit beside the border (on the first side when `unit_first`) leaves
-/// its side and joins the leaf or run of leaves across the border in one
-/// stack showing `focus`. `stacked` gets the keys of every leaf merged.
+/// `node` with the split at `edge` rebuilt so that the unit beside the
+/// border (on the first side when `unit_first`) leaves its side and joins
+/// the leaf or run of leaves across the border in one stack showing
+/// `focus`. `stacked` gets the keys of every leaf merged.
 fn stack_at(
     node: Node,
     area: Rect,

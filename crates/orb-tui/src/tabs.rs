@@ -173,7 +173,7 @@ pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
         .unwrap_or_else(|| "shell".to_owned())
 }
 
-/// The tab bar, like zellij's: the shown session's name, then a chevron per
+/// The tab bar: the shown session's name, then a chevron per
 /// tab with the shown one bold on blue, then a ` + ` chevron. Tabs that
 /// don't fit are counted in `← +N` / `+N →` chips, keeping the shown tab.
 /// Then, right-aligned, the `Cmd <[]>` hint and the shown tab's swap layout
@@ -300,7 +300,7 @@ fn right_chip(n: usize) -> String {
     format!(" +{n} → ")
 }
 
-/// What the tab bar calls `layout`, in caps as zellij does.
+/// What the tab bar calls `layout`, in caps.
 fn swap_layout_name(layout: SwapLayout) -> &'static str {
     match layout {
         SwapLayout::Base => "BASE",
@@ -312,7 +312,7 @@ fn swap_layout_name(layout: SwapLayout) -> &'static str {
 }
 
 /// Which tabs fit in `room` columns, given each tab chevron's `widths`,
-/// following zellij: start from the shown tab `active` and add neighbours,
+/// starting from the shown tab `active` and add neighbours,
 /// alternating sides from the left, while they and the chips counting the
 /// rest fit. The shown tab is always in, even when it alone overflows.
 fn visible_tabs(widths: &[u16], active: usize, room: u16) -> Range<usize> {

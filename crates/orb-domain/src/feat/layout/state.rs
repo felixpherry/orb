@@ -44,7 +44,7 @@ pub struct Tab {
     name: Option<String>,
     tree: TileLayout,
     zoomed: bool,
-    /// Where the tab is in zellij's swap layout list.
+    /// Where the tab is in the swap layout list.
     swap_layout: SwapLayout,
     /// Changed by hand: a split, a stack, or a `Cmd +`/`Cmd -` that changed
     /// the tree. Adds and closes don't re-tile while it's set; a relayout
@@ -93,9 +93,8 @@ impl Tab {
     }
 
     /// Re-tiles the tab in the first swap layout that fits its pane count,
-    /// clears the mark and shows every pane, as zellij's `swap_tiled_panes`
-    /// does. `cycle` is `None` for an add or close (the search starts at the
-    /// tab's own layout, forwards) and `Some(back)` for `Cmd ]`/`Cmd [`, which
+    /// clears the mark and shows every pane. `cycle` is `None` for an add or
+    /// close (the search starts at the tab's own layout, forwards) and `Some(back)` for `Cmd ]`/`Cmd [`, which
     /// first steps one layout that way unless the tab was changed by hand.
     fn relayout(&mut self, cycle: Option<bool>) {
         let step = cycle.is_some() && !self.hand_changed;
@@ -177,8 +176,9 @@ impl Tab {
     }
 
     /// Goes back to the tree from before the last `Cmd -`, or grows or
-    /// stacks the focused pane as zellij's stacked resize does. With nothing
-    /// left to grow or stack, the tab zooms unless the pane is its only one. A zoomed tab doesn't grow, and neither does one with no
+    /// stacks the focused pane. With nothing left to grow or stack, the tab
+    /// zooms unless the pane is its only one. A zoomed tab doesn't grow, and
+    /// neither does one with no
     /// body yet. Whether the tree changed.
     fn grow(&mut self, body: Rect) -> bool {
         if self.zoomed || body.is_empty() {
@@ -206,8 +206,7 @@ impl Tab {
     }
 
     /// Leaves a zoom, or goes back to the tree from before the last `Cmd +`,
-    /// or breaks a pane out of the focused stack, or shrinks the focused pane,
-    /// as zellij's stacked resize does.
+    /// or breaks a pane out of the focused stack, or shrinks the focused pane.
     /// Whether the tree changed; leaving a zoom isn't a change.
     fn shrink(&mut self, body: Rect) -> bool {
         if self.zoomed {
@@ -651,7 +650,7 @@ impl Layouts {
     }
 
     /// Moves the shown tab's focused pane to a new tab after the last one and
-    /// shows it, as zellij's break pane does; the tab it leaves is re-tiled
+    /// shows it; the tab it leaves is re-tiled
     /// in its swap layout unless it was changed by hand. A tab of one pane
     /// stays as it is.
     pub fn break_pane(&mut self, owner: SessionId) {

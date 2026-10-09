@@ -166,7 +166,7 @@ pub struct TabRow {
     pub layout: String,
     /// Its focused pane.
     pub focus_pane: Option<PaneId>,
-    /// Where it is in zellij's swap layout list.
+    /// Where it is in the swap layout list.
     pub swap_layout: SwapLayout,
     /// Whether it was changed by hand since its last relayout.
     pub hand_changed: bool,

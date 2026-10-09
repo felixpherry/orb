@@ -14,7 +14,7 @@
 //! closes it like `Esc`. A click in the text of the sidebar search, a
 //! picker's input or the rename box moves its cursor there.
 //!
-//! Panes follow zellij's rules. The wheel over any pane goes to its program
+//! The wheel over any pane goes to its program
 //! while the program reads the mouse, sends arrow keys while it's on the
 //! alternate screen, and otherwise scrolls the pane's history. A left press
 //! on the focused pane goes to its program while it reads the mouse, and
@@ -412,9 +412,8 @@ fn route_stack(at: Position, hits: &HitMap, kind: MouseEventKind) -> Option<Mous
     }))
 }
 
-/// Where a click or wheel notch on the tab bar goes, as zellij's tab bar
-/// does: a click on a tab or a chip shows that tab with the keys in its
-/// focused pane, a click on `+` opens a tab, and the wheel shows the next
+/// Where a click or wheel notch on the tab bar goes: a click on a tab or a
+/// chip shows that tab with the keys in its focused pane, a click on `+` opens a tab, and the wheel shows the next
 /// tab on a scroll up and the previous on a scroll down, without wrapping.
 /// Other clicks on the bar do nothing. `None` off the bar, or while a picker
 /// or the rename box is open (a click there closes it).
