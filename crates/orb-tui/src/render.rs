@@ -1,6 +1,7 @@
 //! Draws a frame: the sidebar on the left, the shown session's tabs or the
 //! start screen on the right, the mode line at the bottom, and the which-key
-//! popup on top while a key sequence is pending.
+//! popup on top while a key sequence is pending. The message box is drawn
+//! over everything but the mode line.
 //! While the sidebar is hidden, the right side takes the full width.
 //! An open picker is drawn over everything but the mode line, without the
 //! popup (the session and worktree pickers in their own snacks layout), and
@@ -39,6 +40,7 @@ use crate::search_picker;
 use crate::session_picker;
 use crate::sidebar::{self, SidebarScroll};
 use crate::tabs;
+use crate::toast::{self, Toast};
 use crate::which_key;
 use crate::worktree_picker;
 
@@ -75,6 +77,7 @@ pub(crate) fn render(
     panes: &HashMap<PaneId, Pane>,
     pane_error: Option<&str>,
     copied: bool,
+    toast: Option<&Toast>,
     keys: &Keys,
     now: SystemTime,
     tz: &TimeZone,
@@ -168,6 +171,9 @@ pub(crate) fn render(
         (Focus::Sidebar, Some(y), _) => frame.set_cursor_position((sidebar_area.x, y)),
         (Focus::Search, _, Some(cursor)) => frame.set_cursor_position(cursor),
         _ => {}
+    }
+    if let Some(toast) = toast {
+        toast::render(toast, right, frame.buffer_mut());
     }
     for cell in &mut frame.buffer_mut().content {
         if cell.bg == Color::Reset {
@@ -340,6 +346,7 @@ mod tests {
                 &HashMap::new(),
                 pane_error,
                 false,
+                None,
                 keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -400,6 +407,7 @@ mod tests {
                 panes,
                 None,
                 false,
+                None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -617,6 +625,7 @@ mod tests {
                     &HashMap::new(),
                     None,
                     false,
+                    None,
                     &keys,
                     SystemTime::UNIX_EPOCH,
                     &TimeZone::UTC,
@@ -788,6 +797,7 @@ mod tests {
                 &HashMap::new(),
                 None,
                 false,
+                None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -821,6 +831,7 @@ mod tests {
                 &HashMap::new(),
                 None,
                 false,
+                None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -929,6 +940,7 @@ mod tests {
                 panes,
                 None,
                 false,
+                None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -1739,6 +1751,7 @@ mod tests {
                 &HashMap::new(),
                 None,
                 false,
+                None,
                 &keys,
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,
@@ -1944,6 +1957,7 @@ mod tests {
                 &HashMap::new(),
                 None,
                 false,
+                None,
                 &Keys::new(keymap(), Scope::Sidebar),
                 SystemTime::UNIX_EPOCH,
                 &TimeZone::UTC,

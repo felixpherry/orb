@@ -579,6 +579,7 @@ impl App {
                     &self.panes,
                     self.pane_error.as_deref(),
                     copy_notice_shown(self.copied_until, Instant::now()),
+                    None,
                     &self.keys,
                     now,
                     &self.tz,

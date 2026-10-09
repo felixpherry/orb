@@ -16,6 +16,7 @@ mod sidebar;
 mod tabs;
 #[cfg(test)]
 mod test_support;
+mod toast;
 mod which_key;
 mod worktree_picker;
 
