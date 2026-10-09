@@ -224,7 +224,7 @@ Entries are added or amended **only with human approval**.
 - (mouse) The wheel over the tab bar shows the next tab on a scroll up and the previous one on a scroll down, without wrapping.
 - (mouse) The wheel over a stack's list shows the next stacked pane on a scroll down and the previous one on a scroll up, without wrapping, and leaves the keys where they are.
 - (mouse) A click on the input line of the sidebar search, a picker or the rename box moves its text cursor to the grapheme under it, to the first shown grapheme on the prompt, or to the end past the text.
-- (worktrees) A worktree under `~/.orb/worktrees/` is pruned once nothing uses it, or once no draft uses it and every thread and Feature group in it has been settled, the latest for at least 7 days.
+- (worktrees) A worktree under `~/.orb/worktrees/` is pruned once nothing uses it, or once no draft uses it and every thread and Feature group in it has been settled, the latest for at least 3 days.
 - (worktrees) Pruning skips a worktree with uncommitted changes or untracked files, and one whose thread is attached or has a turn underway.
 - (worktrees) Pruning removes the worktree's directory and keeps its branch.
 - (worktrees) orb sweeps for worktrees to prune at start and then every hour, showing `pruned N worktrees` on the mode line when it removes any.
