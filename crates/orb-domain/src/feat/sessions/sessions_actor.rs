@@ -1301,7 +1301,7 @@ impl SessionsActor {
         if kind == ProjectKind::Incognito && fs::create_dir_all(&root).is_err() {
             return self.end_start(Err(FOLDER_UNMADE.to_owned()));
         }
-        let (dir, made) = match self.reach(&root, workspace) {
+        let (dir, made) = match self.reach(&root, workspace, name.as_deref()) {
             Ok(reached) => reached,
             Err(error) => return self.end_start(Err(error)),
         };
@@ -1379,12 +1379,18 @@ impl SessionsActor {
             .map(|project| (project.root.clone(), project.kind))
     }
 
-    /// Where `to` is for a session of the project rooted at `root`: the
-    /// checkout or an existing worktree, which must still be a folder, or a
-    /// new worktree made from its base (fetched from origin first, see
-    /// `add_worktree`), with the worktree orb made. The error is the
-    /// mode-line text.
-    fn reach(&self, root: &Path, to: Workspace) -> Result<(PathBuf, Option<MadeWorktree>), String> {
+    /// Where `to` is for a session named `name` of the project rooted at
+    /// `root`: the checkout or an existing worktree, which must still be a
+    /// folder, or a new worktree made from its base (fetched from origin
+    /// first, see `add_worktree`) on `orb/<slug>` of the name when that
+    /// branch doesn't exist yet, else on `orb/<hex>`, with the worktree orb
+    /// made. The error is the mode-line text.
+    fn reach(
+        &self,
+        root: &Path,
+        to: Workspace,
+        name: Option<&str>,
+    ) -> Result<(PathBuf, Option<MadeWorktree>), String> {
         match to {
             Workspace::Checkout if root.is_dir() => Ok((root.to_owned(), None)),
             Workspace::Checkout => Err(format!(
@@ -1395,10 +1401,15 @@ impl SessionsActor {
             Workspace::Existing(path) => {
                 Err(format!("worktree no longer exists: {}", path.display()))
             }
-            Workspace::NewWorktree { base } => self
-                .add_worktree(root, Some(&base), None)
-                .map(|made| (made.path.clone(), Some(made)))
-                .map_err(|report| git_reason(&report)),
+            Workspace::NewWorktree { base } => {
+                let branch = name
+                    .and_then(slug)
+                    .map(|slug| format!("orb/{slug}"))
+                    .filter(|branch| !self.services.git.branch_exists(root, branch));
+                self.add_worktree(root, Some(&base), branch.as_deref())
+                    .map(|made| (made.path.clone(), Some(made)))
+                    .map_err(|report| git_reason(&report))
+            }
         }
     }
 
@@ -1429,10 +1440,13 @@ impl SessionsActor {
 
     /// The work of [`Self::change_workspace`], up to asking for the attach.
     fn move_session(&mut self, id: SessionId, to: Workspace) -> Result<(), String> {
-        let (project, old_dir, old_branch) = self
+        let (project, old_dir, old_branch, name) = self
             .sessions
             .get(&id)
-            .map(|row| (row.project_id, row.dir.clone(), row.branch.clone()))
+            .map(|row| {
+                let (dir, branch, name) = (row.dir.clone(), row.branch.clone(), row.name.clone());
+                (row.project_id, dir, branch, name)
+            })
             .ok_or_else(|| "the session is gone".to_owned())?;
         let (root, _) = self
             .project_of(project)
@@ -1445,7 +1459,7 @@ impl SessionsActor {
             };
             return Err(format!("Workspace locked · {workspace}"));
         }
-        let (dir, made) = self.reach(&root, to)?;
+        let (dir, made) = self.reach(&root, to, name.as_deref())?;
         let branch = self.branch_of(&dir, made.as_ref());
         if self
             .store
@@ -5561,6 +5575,69 @@ mod tests {
             Some((session.dir, session.branch.unwrap_or_default())),
             git.added(),
             "the session runs in the new worktree"
+        );
+        Ok(())
+    }
+
+    /// The branch of the only session after making one named `name` in a
+    /// new worktree from `main` with `git`, and the `orb/<hex>` branch of
+    /// its directory.
+    fn named_worktree_branch(
+        git: &Arc<FakeGit>,
+        name: Option<&str>,
+    ) -> Result<(Option<String>, Option<String>), Report<StoreError>> {
+        let (actor, state) = made_named_session(
+            git,
+            Workspace::NewWorktree {
+                base: "main".to_owned(),
+            },
+            name,
+        )?;
+        let session = only_session(&state)?;
+        let hex = super::hex_branch(&actor.worktrees_root, &session.dir);
+        Ok((session.branch, hex))
+    }
+
+    #[rstest::rstest]
+    fn named_new_session_worktree_is_on_the_name_slug_branch() -> Result<(), Report<StoreError>> {
+        // Given / When making a session named `Fix Login!` in a new worktree.
+        let (branch, _) = named_worktree_branch(&FakeGit::local(), Some("Fix Login!"))?;
+
+        // Then it is on `orb/fix-login`.
+        assert_eq!(
+            branch.as_deref(),
+            Some("orb/fix-login"),
+            "a named session's worktree branch is its name's slug"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn named_new_session_worktree_is_on_a_hex_branch_when_the_slug_branch_exists()
+    -> Result<(), Report<StoreError>> {
+        // Given `orb/fix-login` already exists.
+        let git = FakeGit::having("orb/fix-login");
+
+        // When making a session named `Fix Login!` in a new worktree.
+        let (branch, hex) = named_worktree_branch(&git, Some("Fix Login!"))?;
+
+        // Then it is on its directory's `orb/<hex>` branch.
+        assert!(
+            branch.is_some() && branch == hex,
+            "an existing slug branch falls back to orb/<hex>, got {branch:?} vs {hex:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn unnamed_new_session_worktree_is_on_a_hex_branch() -> Result<(), Report<StoreError>> {
+        // Given / When making an unnamed session in a new worktree.
+        let (branch, hex) = named_worktree_branch(&FakeGit::local(), None)?;
+
+        // Then it is on its directory's `orb/<hex>` branch.
+        assert!(
+            branch.is_some() && branch == hex,
+            "an unnamed session's worktree is on orb/<hex>, got {branch:?} vs {hex:?}"
         );
         Ok(())
     }
