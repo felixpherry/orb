@@ -1220,6 +1220,95 @@ mod tests {
         );
     }
 
+    /// The foreground, background and boldness of the tab bar cell where
+    /// `needle` starts.
+    fn bar_style(buffer: &Buffer, needle: &str) -> Option<(Color, Color, bool)> {
+        find_in_bar(buffer, needle)
+            .and_then(|at| buffer.cell(at))
+            .map(|cell| (cell.fg, cell.bg, cell.modifier.contains(Modifier::BOLD)))
+    }
+
+    #[rstest::rstest]
+    fn swap_layout_name_is_lit_on_an_untouched_tab() {
+        // Given a tab whose second pane was tiled in, untouched by hand.
+        let state = laid_out(|state| state.layouts.add_tiled(SessionId(1), entry(2)));
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then its layout name is bold black on blue, like the shown tab.
+        assert_eq!(
+            bar_style(&buffer, "VERTICAL"),
+            Some((BLACK, BLUE, true)),
+            "the lit layout name"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_layout_name_is_dim_on_a_tab_changed_by_hand() {
+        // Given a tab split by hand.
+        let state = laid_out(|state| {
+            state.layouts.split(SessionId(1), Split::Right, entry(2));
+        });
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then its layout name is dim, like the other tabs.
+        assert_eq!(
+            bar_style(&buffer, "BASE"),
+            Some((COMMENT, GUTTER, false)),
+            "the dim layout name"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_layout_indicator_ends_the_tab_bar() {
+        // Given a tab whose second pane was tiled in.
+        let state = laid_out(|state| state.layouts.add_tiled(SessionId(1), entry(2)));
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the bar ends with the keys' hint and the layout name.
+        let bar = tab_bar(&buffer);
+        assert!(
+            bar.trim_end()
+                .ends_with(" Cmd <[]> \u{e0b0} VERTICAL \u{e0b0}"),
+            "tab bar was '{bar}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn one_pane_tab_draws_no_swap_layout_indicator() {
+        // Given a tab with one pane.
+        let state = shown(Focus::Sidebar);
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the bar has no swap layout indicator.
+        let bar = tab_bar(&buffer);
+        assert!(!bar.contains("Cmd <[]>"), "tab bar was '{bar}'");
+    }
+
+    #[rstest::rstest]
+    fn swap_layout_indicator_gives_way_to_tabs() {
+        // Given ten tabs, too many for the bar, the shown one with two panes.
+        let state = {
+            let mut state = ten_tabs(1);
+            state.layouts.add_tiled(SessionId(1), entry(11));
+            state
+        };
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the indicator is dropped.
+        let bar = tab_bar(&buffer);
+        assert!(!bar.contains("Cmd <[]>"), "tab bar was '{bar}'");
+    }
+
     /// Thread 1's session with ten tabs, tab `shown` (1-based) shown.
     fn ten_tabs(shown: usize) -> AppState {
         laid_out(|state| {

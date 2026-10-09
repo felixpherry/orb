@@ -88,6 +88,11 @@ impl Tab {
         self.hand_changed
     }
 
+    /// How many panes the tab holds, stacked or not.
+    pub fn pane_count(&self) -> usize {
+        self.tree.pane_count()
+    }
+
     /// Re-tiles the tab in the first swap layout that fits its pane count,
     /// clears the mark and shows every pane, as zellij's `swap_tiled_panes`
     /// does. `cycle` is `None` for an add or close (the search starts at the

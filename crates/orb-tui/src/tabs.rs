@@ -11,6 +11,7 @@ use std::ops::Range;
 
 use orb_domain::AppState;
 use orb_domain::feat::layout::state::{Placement, SessionLayout, StackList};
+use orb_domain::feat::layout::tree::SwapLayout;
 use orb_domain::feat::sessions::state::PaneId;
 use orb_term::Pane;
 use ratatui::buffer::Buffer;
@@ -21,10 +22,12 @@ use ratatui::widgets::{Block, BorderType, Widget};
 
 use crate::mouse::HitMap;
 use crate::session_picker::cut_right;
-use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER};
+use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER, ORANGE};
 
 /// The trailing chevron's text.
 const PLUS: &str = " + ";
+/// The swap layout keys' hint, before the layout's name.
+const SWAP_KEYS: &str = " Cmd <[]> ";
 /// The powerline arrow each chevron starts and ends with.
 const ARROW: &str = "\u{e0b0}";
 
@@ -173,6 +176,9 @@ pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
 /// The tab bar, like zellij's: the shown session's name, then a chevron per
 /// tab with the shown one bold on blue, then a ` + ` chevron. Tabs that
 /// don't fit are counted in `← +N` / `+N →` chips, keeping the shown tab.
+/// Then, right-aligned, the `Cmd <[]>` hint and the shown tab's swap layout
+/// name, lit while the tab is untouched and dim once it's changed by hand; a
+/// 1-pane tab has none, and it's dropped when the tabs leave no room for it.
 /// Records the bar, each tab and chip with the tab it shows, and the `+` in
 /// `hits`.
 fn tab_bar(
@@ -237,6 +243,24 @@ fn tab_bar(
         hits.record_new_tab(plus);
     }
     chevron(&mut spans, PLUS.to_owned(), rest);
+    if let Some(tab) = layout.active_tab().filter(|tab| tab.pane_count() > 1) {
+        let hint = Span::styled(
+            SWAP_KEYS,
+            Style::new()
+                .fg(ORANGE)
+                .bg(BLACK)
+                .add_modifier(Modifier::BOLD),
+        );
+        let name = format!(" {} ", swap_layout_name(tab.swap_layout()));
+        let width = span_width(&hint).saturating_add(chevron_width(&name));
+        let left = bar.right().saturating_sub(x);
+        if left >= width {
+            spans.push(Span::raw(" ".repeat(usize::from(left - width))));
+            spans.push(hint);
+            let style = if tab.hand_changed() { rest } else { shown };
+            chevron(&mut spans, name, style);
+        }
+    }
     Line::from(spans).render(bar, buf);
 }
 
@@ -274,6 +298,17 @@ fn left_chip(n: usize) -> String {
 /// Counts the `n` tabs hidden right of the bar.
 fn right_chip(n: usize) -> String {
     format!(" +{n} → ")
+}
+
+/// What the tab bar calls `layout`, in caps as zellij does.
+fn swap_layout_name(layout: SwapLayout) -> &'static str {
+    match layout {
+        SwapLayout::Base => "BASE",
+        SwapLayout::Vertical => "VERTICAL",
+        SwapLayout::Horizontal => "HORIZONTAL",
+        SwapLayout::Stacked => "STACKED",
+        SwapLayout::HalfStacked => "HALF-STACKED",
+    }
 }
 
 /// Which tabs fit in `room` columns, given each tab chevron's `widths`,
