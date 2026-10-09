@@ -279,7 +279,7 @@ Entries are added or amended **only with human approval**.
 - (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
 - (search) `␣sg` indexes pi threads' session files alongside Claude transcripts.
 - (layout) Adding a pane with `Cmd n` or closing one in a tab not changed by hand re-tiles it in the tab's swap layout, where vertical is `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
-- (layout) From 11 panes a tab is one stack: a list naming every pane at the top, with `>` on the shown one, and the shown pane's frame below it.
+- (layout) A tab not changed by hand whose pane count no longer fits its swap layout moves on to the next one that fits and stays there, so from 11 panes it is one stack (a list naming every pane at the top, `>` on the shown one, the shown pane's frame below) and stays stacked when closed back down to 2 panes.
 - (layout) `<C-g> p s` stacks a new pane with the focused one and shows it.
 - (layout) `<C-g> p s` on a pane outside every stack starts a new stack, so a tab can hold several, each with its own list.
 - (layout) A stack's list is centred over the shown pane, as wide as its longest name with a dim bar on each side and a `>` outside the left bar on the shown row, and scrolls to keep the shown row once it would take more than half the stack's height.
@@ -295,6 +295,11 @@ Entries are added or amended **only with human approval**.
 - (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
 - (layout) Closing a pane in a tab changed by hand gives its space to its neighbour and moves no other pane.
+- (layout) Each tab has a swap layout from zellij's list: BASE (1 pane), vertical and horizontal (1–10), stacked (from 2), half-stacked (from 3). `Cmd ]` and `Cmd [` move it to the next or previous one that fits its pane count, wrapping; on a tab changed by hand the first press re-applies its current layout.
+- (layout) Splitting, stacking, or a `Cmd +` or `Cmd -` that changes the panes (not a zoom alone) marks a tab as changed by hand until the next `Cmd [` or `Cmd ]`.
+- (layout) `Cmd n` in a tab changed by hand adds the pane to the focused pane's stack, else halves the focused pane top/bottom when it's tall and left/right when it's wide, leaving other panes their size, else stacks the two.
+- (layout) The tab bar ends, right-aligned, with `Cmd <[]>` and the shown tab's swap layout name in caps, lit while the tab is untouched and dim once it's changed by hand; it's hidden on a 1-pane tab and dropped when the tabs leave no room.
+- (sessions) Each tab's swap layout and changed-by-hand mark persist to orb's database; tabs saved before then load as vertical and unmarked.
 - (layout) When a thread's last pane closes, by a close key or by its program exiting, orb opens a shell pane in the thread's directory in its place.
 - (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab with the keys in its pane.
 - (sidebar) On an agent row, `r` renames the agent's pane and `d` closes it after a confirm.
