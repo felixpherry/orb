@@ -94,8 +94,9 @@ impl Tab {
 
     /// Re-tiles the tab in the first swap layout that fits its pane count,
     /// clears the mark and shows every pane. `cycle` is `None` for an add or
-    /// close (the search starts at the tab's own layout, forwards) and `Some(back)` for `Cmd ]`/`Cmd [`, which
-    /// first steps one layout that way unless the tab was changed by hand.
+    /// close (the search starts at the tab's own layout, forwards) and
+    /// `Some(back)` for `Cmd ]`/`Cmd [`, which first steps one layout that way
+    /// unless the tab was changed by hand.
     fn relayout(&mut self, cycle: Option<bool>) {
         let step = cycle.is_some() && !self.hand_changed;
         if let Some(layout) =

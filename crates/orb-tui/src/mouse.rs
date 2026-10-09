@@ -412,11 +412,12 @@ fn route_stack(at: Position, hits: &HitMap, kind: MouseEventKind) -> Option<Mous
     }))
 }
 
-/// Where a click or wheel notch on the tab bar goes: a click on a tab or a
-/// chip shows that tab with the keys in its focused pane, a click on `+` opens a tab, and the wheel shows the next
-/// tab on a scroll up and the previous on a scroll down, without wrapping.
-/// Other clicks on the bar do nothing. `None` off the bar, or while a picker
-/// or the rename box is open (a click there closes it).
+/// Where a click or wheel notch on the tab bar goes: a click on a tab or a chip
+/// shows that tab with the keys in its focused pane, a click on `+` opens a
+/// tab, and the wheel shows the next tab on a scroll up and the previous on a
+/// scroll down, without wrapping. Other clicks on the bar do nothing. `None`
+/// off the bar, or while a picker or the rename box is open (a click there
+/// closes it).
 fn route_tab_bar(
     at: Position,
     hits: &HitMap,
