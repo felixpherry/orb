@@ -915,3 +915,108 @@ Tags as in §6.
 
 ### orb's pane file
 - `~/.orb/panes/<pane id>.json`, written by orb's hook and extension through a temp file and a rename: `{"agent":"claude"|"pi","event":"start"|"working"|"idle"|"end","session_id":"…","transcript":"/abs/path"?,"source":"…"?,"at":<unix ms>}`. `source` is Claude's `SessionStart` source, or pi's latest `session_start` reason. A thread keeps its pane under a new id only when `source` is `clear` (Claude) or `new` (pi).
+
+## 22. Swap layouts (verified 2026-10-09, zellij 0.45.0)
+
+Probed on this machine in throwaway zellij 0.45.0 sessions (`osp-<n>`), each held by a Python `pty.fork()` client and driven with `zellij --session <name> action …` (5 s timeout per call, `ZELLIJ*` stripped). The client set the window to 200×50 cells at 8×16 px (other sizes where noted) and answered zellij's `CSI 16 t` cell-size query with `CSI 6;16;8 t`, as kitty would. The config dir held only `session_serialization false`, `default_shell "/bin/sh"`, `show_startup_tips false`, `show_release_notes false` and an empty `layouts/`, so `--new-session-with-layout default` loaded the built-in default layout with its swap layouts (`zellij setup --dump-swap-layout default`). The tab area is 200×48 at y=1, between the tab bar and the status bar. Where a pane's focus mattered, the key went through the client's PTY (`ESC n` = `Alt n`, `ESC ]` = `Alt ]`) so it acted as the user would. Tags as in §6; **[verified: source]** = read from the v0.45.0 source.
+
+### Default swap layouts **[verified]**
+- The list is BASE, vertical, horizontal, stacked, half-stacked. BASE is inserted first with `ExactPanes` set to the tab's starting pane count. **[verified: source]** (`zellij-server/src/tab/swap_layouts.rs:38-56`)
+- zellij counts the tab-bar and status-bar plugin panes when it checks `max_panes`/`min_panes` (`visible_panes_count` is every tiled pane, plugins included). **[verified: source]** (`swap_layouts.rs:181-197`, `panes/tiled_panes/mod.rs:2995`). So with the default layout's two bars, the KDL numbers are 2 more than the panes the user sees.
+- Fit in panes the user sees:
+
+  | Layout | KDL | Fits |
+  |---|---|---|
+  | BASE | exact 3 | 1 |
+  | vertical | max 5 / 8 / 12 | 1–10 (templates for ≤3, ≤6, ≤10) |
+  | horizontal | max 4 / 8 / 12 | 1–10 (templates for ≤2, ≤6, ≤10) |
+  | stacked | min 4 | 2 and up |
+  | half-stacked | min 5 | 3 and up |
+
+- Rings seen with `next-swap-layout`, starting from the layout the add chose: 1 pane: BASE → vertical → horizontal → BASE. 2 panes: vertical → horizontal → stacked → vertical. 3–10 panes: vertical → horizontal → stacked → half-stacked → vertical. 11–13 panes: stacked ↔ half-stacked.
+- A 1-pane tab reports no layout name (`active_swap_layout_name: null`), whatever its position, and the tab bar shows no indicator. zellij hides it for a single pane. **[verified: source]** (`tab/mod.rs:1890-1902`)
+
+### Shapes **[verified]**
+Vertical: columns left to right, panes per column. Horizontal: rows top to bottom, panes per row. `—` = doesn't fit.
+
+| Panes | vertical | horizontal | stacked | half-stacked |
+|---|---|---|---|---|
+| 1 | `[1]` | `[1]` | — | — |
+| 2 | `[1][1]` | `[1][1]` | stack of 2 | — |
+| 3 | `[1][2]` | `[1][2]` | stack of 3 | `[1][stack 2]` |
+| 4 | `[1][3]` | `[1][3]` | stack of 4 | `[1][stack 3]` |
+| 5 | `[1][4]` | `[1][4]` | stack of 5 | `[1][stack 4]` |
+| 6 | `[2][4]` | `[2][4]` | stack of 6 | `[1][stack 5]` |
+| 7 | `[1][4][2]` | `[1][4][2]` | stack of 7 | `[1][stack 6]` |
+| 8 | `[1][4][3]` | `[1][4][3]` | stack of 8 | `[1][stack 7]` |
+| 9 | `[1][4][4]` | `[1][4][4]` | stack of 9 | `[1][stack 8]` |
+| 10 | `[2][4][4]` | `[2][4][4]` | stack of 10 | `[1][stack 9]` |
+| 11 | — | — | stack of 11 | `[1][stack 10]` |
+| 12 | — | — | stack of 12 | `[1][stack 11]` |
+| 13 | — | — | stack of 13 | `[1][stack 12]` |
+
+- Horizontal is vertical turned on its side: the same counts, as rows.
+- **Equal shares.** Columns share the width equally and panes in a column share its height equally; zellij writes them as percentages and the first cells take the rounding. Vertical, 7 panes: column 1 `x0 67×48`; column 2 `x67 67×12` at y 1, 13, 25, 37; column 3 `x134 66×24` at y 1, 25. Horizontal, 7 panes: rows 16 high; row 1 one pane `200×16`, row 2 four panes `50×16`, row 3 two panes `100×16`.
+- **Reading order.** The template's slots fill left to right, top to bottom (the `children` slot first, which is why 7 panes are `[1][4][2]` and not `[3][4]`). The pane just added takes the last slot and is focused. Which older pane lands in which slot follows where the panes were before, not their ids (vertical 6 → 7 put ids `1 | 2 4 0 5 | 3 6`).
+- **Stacks.** The expanded member is the focused pane. `list-panes` gives every member the whole stack's rect; the expanded one is the member with `is_suppressed: false`.
+- **Half-stacked** splits the width 50/50: one pane `100×48` on the left, the stack `100×48` on the right. The left pane is the first pane in the previous layout's order.
+- Frames: a lone pane has no frame (content = pane). With 2 or more, `pane_*` includes the frame and `pane_content_*` is the inside.
+
+### Overflow **[verified]**
+- The 11th pane overflows both vertical and horizontal. Adding it to an unchanged vertical tab moves the tab to **stacked** (horizontal doesn't fit 11, stacked is next). From horizontal it also moves to stacked.
+- It stays there: closing back down from 13 keeps the tab stacked at every count down to 2, from vertical and from horizontal. At 1 pane stacked no longer fits, half-stacked doesn't either, and the search wraps to BASE.
+- A stacked tab dropping from 4 panes to 3 stays **stacked** (stacked fits from 2).
+- Adding or closing re-tiles without stepping: zellij sets the mark just before the re-tile so the search starts at the current layout (`tab/mod.rs:7305-7310`). **[verified: source]**
+
+### Path **[verified]**
+- Vertical and horizontal at 6–9 panes have the same shape whether reached by adding panes or by cycling back with `next-swap-layout`. Only which pane id sits in which slot differs.
+- Vertical at 7 panes is `[1][4][2]` both ways.
+
+### Changed by hand **[verified]**
+- `list-tabs --json` gives the mark as `is_swap_layout_dirty` and the layout as `active_swap_layout_name`.
+- These set the mark: a split (`new-pane -d right`), `stack-panes`, and `resize increase right`. A split doesn't re-tile: in a 3-pane vertical tab it halved the focused pane, giving `[1][2][1]`.
+- These don't: `new-pane` and `close-pane` in an unchanged tab (each re-tiled it), and `toggle-fullscreen`.
+- One `next-swap-layout` on a marked tab re-applies its current layout and clears the mark (vertical, marked → vertical, re-tiled, unmarked). The second press steps on (→ horizontal). `previous-swap-layout` does the same in reverse (the second press → half-stacked). This matches `swap_tiled_panes`, which steps only when the tab is unmarked (`swap_layouts.rs:217-260`). **[verified: source]**
+- On a zoomed, unmarked tab, `next-swap-layout` unzooms and steps.
+- `previous-swap-layout` from vertical at 2 panes goes to **stacked**, then horizontal, since stacked fits 2.
+- Splitting a fresh 1-pane tab leaves it on BASE, marked. That is the dim `BASE` in the user's screenshots.
+- Closing a pane in a marked tab doesn't re-tile. Its sibling takes the space: closing the full-height left pane of `[1][2]` left the two right panes at `200×24` each.
+
+### New pane in a changed tab **[verified]**
+`Alt n` sent through the client to the focused pane of a marked tab:
+
+| Case | Client | Focused pane | Result |
+|---|---|---|---|
+| a | 200×50, ratio 2 | `100×48` (left half) | split right: `50×48` + `50×48` |
+| a′ | 200×50, no cell-size reply | `100×48` | split down: `100×24` + `100×24` |
+| b | 200×50 | `200×24` (top half) | split right: `100×24` + `100×24` |
+| c | 120×60 | `60×58` | split down: `60×29` + `60×29` |
+| d | 100×20 | `50×18` | stacked with the new pane |
+| e | 200×50 | a member of a `stack-panes` stack | joins that stack |
+| f | 200×50, CLI `new-pane --near-current-pane` | `100×48` | same as a |
+
+- The rule is zellij's `split_pane` (`panes/tiled_panes/tiled_pane_grid.rs:1404-1428`). It splits down when `rows × ratio > cols` and `rows > 20`, else right when `cols > 60`, else it stacks the focused pane with the new one. A focused pane already in a stack takes the new pane into that stack (`panes/tiled_panes/mod.rs:373-392`). **[verified: source]**
+- Rows and cols are the pane's full size, frame included.
+- The ratio is `round(cell height px / cell width px)` from the terminal's `CSI 16 t` reply, 4 when there's no reply (`DEFAULT_CURSOR_HEIGHT_WIDTH_RATIO`). Cases a and a′ split the same `100×48` pane right and down: zellij used **2** for 8×16 cells and 4 with no reply.
+- Only the focused pane is halved. Other panes in the same row or column keep their size (a: `[50][50][100]`, not thirds).
+- The new pane is the right or bottom half and takes focus.
+
+### Driving the probe **[verified]**
+- `zellij --layout X --session S` adds tabs to an existing session in 0.45; a new session needs `--new-session-with-layout X --session S`.
+- The session name has to fit the socket path under `$TMPDIR/zellij-<uid>/contract_version_1/`: a 25-character name was refused ("session name must be less than 0 characters"), a 10-character one worked.
+- `current-tab-info --json` printed nothing from the CLI. `list-tabs --json` carries `active`, `active_swap_layout_name`, `is_swap_layout_dirty`, `viewport_*` and `tab_id`.
+- `list-panes --all --json` also lists a hidden `zellij:link` plugin pane; filter on `is_plugin`.
+- The CLI keeps its own focus. A bare `new-pane` or `close-pane` acts on the pane the CLI last created or focused, not on the user's focused pane, and `is_focused` can be true on two panes. Use `--near-current-pane`, `close-pane --pane-id`, or keys through the client.
+- `dump-layout` marks a stack with `stacked=true` and its expanded member with `expanded=true`. Its pane order isn't id order.
+- zellij asks the terminal for `CSI 14 t` and `CSI 16 t` once at start.
+
+### What this means for orb
+- orb's `columns()` (`tree.rs:599-624`) matches zellij's vertical exactly for 1–10 panes, and its `11..` → one stack matches zellij's overflow at 11.
+- orb's `even_chain` equal shares match zellij's percentages. zellij's rounding gives the extra cell to the first columns (67/67/66).
+- Horizontal = `columns()` turned on its side: rows chained `Down`, panes in a row chained `Right`.
+- In terminal panes, the fit rules are: BASE `n == 1`, vertical and horizontal `1..=10`, stacked `n >= 2`, half-stacked `n >= 3`. That's zellij's KDL numbers minus its two bar panes.
+- Stacked: one stack, the focused pane expanded. Half-stacked: the first pane alone on the left at 50%, the rest stacked on the right.
+- Overflow lands on stacked and stays. A stacked tab at 3 panes stays stacked.
+- A marked tab re-applies its layout on the first `Cmd ]`/`Cmd [` and steps on the second.
+- Marked `Cmd n`: zellij's thresholds with ratio 2 (kitty's 8×16-style cells). It halves only the focused pane, with no even spread over the run.
+- A 1-pane tab has no swap layout name in zellij's tab bar.
