@@ -287,10 +287,11 @@ Entries are added or amended **only with human approval**.
 - (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
 - (layout) A zoomed tab draws one frame over the whole tab body.
-- (layout) `Cmd +` moves the focused pane's split border, or its stack's, away from it by 5% of the tab's width or height in that split's direction, at least 1 cell.
-- (layout) When a `Cmd +` step would leave a pane on the other side of the split under 5 rows or 5 columns, frame included, that whole split becomes one stack showing the focused pane.
-- (layout) `Cmd +` zooms the focused pane once there is no split left to grow or stack, unless it's the tab's only pane.
+- (layout) `Cmd +` grows the focused pane, or its stack, 30% of the tab towards the first neighbour above, below, left or right that lines up with its whole edge.
+- (layout) When that 30% would leave a pane there under 5 rows or 5 columns or 5% of the tab, `Cmd +` stacks the focused pane with the panes touching it on that side.
+- (layout) With no lined-up neighbour `Cmd +` grows 5% any way that fits, and zooms once nothing fits, unless it's the tab's only pane.
 - (layout) `Cmd -` on a zoomed tab leaves the zoom, and otherwise restores the tab's tree from before its last `Cmd +`.
+- (layout) `Cmd -` with nothing to restore breaks one pane out of the focused stack, else shrinks the focused pane 30%, else 5%.
 - (layout) `Cmd +` restores the tab's tree from before its last `Cmd -`.
 - (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
