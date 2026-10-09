@@ -278,12 +278,12 @@ Entries are added or amended **only with human approval**.
 - (sidebar) A lone thread's node ends its third line with its harness's icon: `✳` for Claude, nothing for pi.
 - (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
 - (search) `␣sg` indexes pi threads' session files alongside Claude transcripts.
-- (layout) Adding a pane with `Cmd n` or closing one re-tiles the tab by pane count: `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
+- (layout) Adding a pane with `Cmd n` or closing one in a tab not changed by hand re-tiles it in the tab's swap layout, where vertical is `[1][n-1]` up to 5 panes, then `[2][4]`, `[1][4][2]`, `[1][4][3]`, `[1][4][4]`, `[2][4][4]`, with equal column widths and row heights.
 - (layout) From 11 panes a tab is one stack: a list naming every pane at the top, with `>` on the shown one, and the shown pane's frame below it.
-- (layout) `<C-g> p s` stacks a new pane with the focused one and shows it, until the next add, split or close re-tiles the tab.
+- (layout) `<C-g> p s` stacks a new pane with the focused one and shows it.
 - (layout) `<C-g> p s` on a pane outside every stack starts a new stack, so a tab can hold several, each with its own list.
 - (layout) A stack's list is centred over the shown pane, as wide as its longest name with a dim bar on each side and a `>` outside the left bar on the shown row, and scrolls to keep the shown row once it would take more than half the stack's height.
-- (layout) `<C-g> p r` and `<C-g> p d` split the focused pane and share the space evenly among the panes split in that direction, until the next add or close re-tiles the tab.
+- (layout) `<C-g> p r` and `<C-g> p d` split the focused pane, or its whole stack, and share the space evenly among the panes split in that direction.
 - (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
 - (layout) A zoomed tab draws one frame over the whole tab body.
@@ -294,6 +294,7 @@ Entries are added or amended **only with human approval**.
 - (layout) `Cmd +` restores the tab's tree from before its last `Cmd -`.
 - (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
+- (layout) Closing a pane in a tab changed by hand gives its space to its neighbour and moves no other pane.
 - (layout) When a thread's last pane closes, by a close key or by its program exiting, orb opens a shell pane in the thread's directory in its place.
 - (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab with the keys in its pane.
 - (sidebar) On an agent row, `r` renames the agent's pane and `d` closes it after a confirm.

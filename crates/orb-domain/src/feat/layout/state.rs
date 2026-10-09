@@ -2639,6 +2639,43 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn next_swap_layout_steps_stacked_to_half_stacked() {
+        // Given five tiled panes moved on to stacked.
+        let mut layouts = tiled(11);
+        layouts.next_swap_layout(OWNER);
+        layouts.next_swap_layout(OWNER);
+
+        // When moving to the next swap layout.
+        layouts.next_swap_layout(OWNER);
+
+        // Then the tab is half-stacked.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::HalfStacked),
+            "next after stacked is half-stacked"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_wraps_half_stacked_past_base_to_vertical() {
+        // Given five tiled panes moved on to half-stacked.
+        let mut layouts = tiled(11);
+        for _ in 0..3 {
+            layouts.next_swap_layout(OWNER);
+        }
+
+        // When moving to the next swap layout.
+        layouts.next_swap_layout(OWNER);
+
+        // Then the tab is vertical.
+        assert_eq!(
+            swap_layout(&layouts),
+            Some(SwapLayout::Vertical),
+            "BASE doesn't fit five panes, so next wraps past it to vertical"
+        );
+    }
+
+    #[rstest::rstest]
     fn previous_swap_layout_from_two_vertical_panes_is_stacked() {
         // Given two tiled panes, vertical.
         let mut layouts = tiled(8);
