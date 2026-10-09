@@ -11,7 +11,7 @@ use crate::feat::git::git_service::WorktreeFacts;
 use crate::feat::sessions::state::{Project, Session, SessionId, Thread};
 
 /// How long after the newest settle a worktree is pruned.
-pub const PRUNE_AFTER: Duration = Duration::from_hours(7 * 24);
+pub const PRUNE_AFTER: Duration = Duration::from_hours(3 * 24);
 
 /// Every worktree under `~/.orb/worktrees/<repo>/`, as the worktrees actor
 /// last read them.
@@ -312,9 +312,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn worktree_whose_sessions_settled_a_week_ago_is_prunable() {
-        // Given a thread in the worktree settled eight days ago.
-        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 8)]);
+    fn worktree_whose_sessions_settled_four_days_ago_is_prunable() {
+        // Given a thread in the worktree settled four days ago.
+        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 4)]);
 
         // When judging it with clean facts.
         let verdict = verdict_at(&app, Some(&facts(0)));
@@ -323,14 +323,14 @@ mod tests {
         assert_eq!(
             verdict,
             Verdict::PruneNow,
-            "8 settled days is past the limit"
+            "4 settled days is past the limit"
         );
     }
 
     #[rstest::rstest]
-    fn verdict_after_six_settled_days_is_prune_in_one_day() {
-        // Given a thread in the worktree settled six days ago.
-        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 6)]);
+    fn verdict_after_two_settled_days_is_prune_in_one_day() {
+        // Given a thread in the worktree settled two days ago.
+        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 2)]);
 
         // When judging it with clean facts.
         let verdict = verdict_at(&app, Some(&facts(0)));
@@ -339,16 +339,16 @@ mod tests {
         assert_eq!(
             verdict,
             Verdict::PruneIn(days(1)),
-            "6 settled days leaves one"
+            "2 settled days leaves one"
         );
     }
 
     #[rstest::rstest]
     fn verdict_of_two_users_counts_from_the_newest_settle() {
-        // Given two threads in the worktree, settled ten and six days ago.
+        // Given two threads in the worktree, settled ten and two days ago.
         let app = settle(
             app(vec![project(vec![thread(1, WT), thread(2, WT)])]),
-            &[(1, 10), (2, 6)],
+            &[(1, 10), (2, 2)],
         );
 
         // When judging it with clean facts.

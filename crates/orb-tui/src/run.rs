@@ -54,7 +54,7 @@
 //! once it's back.
 //!
 //! orb captures the mouse throughout and maps each event through the last
-//! frame's hit map, following zellij's rules (see [`mouse`]). The wheel
+//! frame's hit map (see [`mouse`]). The wheel
 //! scrolls a pane's history unless its program reads the mouse or is on the
 //! alternate screen. A drag in a pane whose program doesn't read the mouse
 //! selects its text, and the release copies it to the clipboard through
@@ -920,12 +920,17 @@ impl App {
                     pane.key(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
                 }
             }
-            Command::NewSession { project, workspace } => {
+            Command::NewSession {
+                project,
+                workspace,
+                name,
+            } => {
                 let _ = self
                     .sessions
                     .tell(sessions_actor::NewSession {
                         project: *project,
                         workspace: workspace.clone(),
+                        name: name.clone(),
                     })
                     .try_send();
             }

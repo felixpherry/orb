@@ -80,7 +80,7 @@ Entries are added or amended **only with human approval**.
 - (picker) Every picker but the session, worktree and search pickers is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide (wider when its name needs it) with its name centred in the top border, a > prompt over an orange rule, numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
 - (picker) A picker shows its keys dim in its bottom border: `⏎ add · Tab open · Esc close` when adding a project, `⏎ filter · <C-x> remove · Esc close` in the project filter, `⏎ confirm · Esc cancel` in the remove, settle, delete, discard, delete-worktree, trust and Initialize Git confirms, and `⏎ select · Esc close` otherwise; the session, worktree and search pickers show no keys.
 - (identity) **orb** is a terminal-based, vim-first manager for concurrent Claude Code and pi sessions across projects and git worktrees, written in Rust (edition 2024).
-- (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>`, on branch `orb/<hex>`, or on the group's slug branch for a Feature group.
+- (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>`, on branch `orb/<slug>` of the session's name when it was named and that branch doesn't exist, else `orb/<hex>`.
 - (worktrees) A new worktree starts from its draft's base branch (the default branch for `␣w` and for a Feature group) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
 - (worktrees) Start's `git fetch` from `origin` is bounded by 15 s, after which git is killed and the start fails with `git fetch origin <base> timed out after 15 s`.
 - (worktrees) A session start that fails removes the worktree and branch orb created for it.
@@ -224,7 +224,7 @@ Entries are added or amended **only with human approval**.
 - (mouse) The wheel over the tab bar shows the next tab on a scroll up and the previous one on a scroll down, without wrapping.
 - (mouse) The wheel over a stack's list shows the next stacked pane on a scroll down and the previous one on a scroll up, without wrapping, and leaves the keys where they are.
 - (mouse) A click on the input line of the sidebar search, a picker or the rename box moves its text cursor to the grapheme under it, to the first shown grapheme on the prompt, or to the end past the text.
-- (worktrees) A worktree under `~/.orb/worktrees/` is pruned once nothing uses it, or once no draft uses it and every thread and Feature group in it has been settled, the latest for at least 7 days.
+- (worktrees) A worktree under `~/.orb/worktrees/` is pruned once nothing uses it, or once no draft uses it and every thread and Feature group in it has been settled, the latest for at least 3 days.
 - (worktrees) Pruning skips a worktree with uncommitted changes or untracked files, and one whose thread is attached or has a turn underway.
 - (worktrees) Pruning removes the worktree's directory and keeps its branch.
 - (worktrees) orb sweeps for worktrees to prune at start and then every hour, showing `pruned N worktrees` on the mode line when it removes any.
@@ -287,10 +287,11 @@ Entries are added or amended **only with human approval**.
 - (layout) Each pane is drawn in a rounded frame with its name, else its agent's title, else `shell`, in the top edge.
 - (layout) A pane's frame is blue while the pane has the keys, grey while it has the focus and the keys are elsewhere, and dim otherwise.
 - (layout) A zoomed tab draws one frame over the whole tab body.
-- (layout) `Cmd +` moves the focused pane's split border, or its stack's, 4 cells away from it.
-- (layout) When a `Cmd +` step would leave a pane on the other side of the split under 5 rows or 5 columns, frame included, that whole split becomes one stack showing the focused pane.
-- (layout) `Cmd +` zooms the focused pane once there is no split left to grow or stack, unless it's the tab's only pane.
+- (layout) `Cmd +` grows the focused pane, or its stack, 30% of the tab towards the first neighbour above, below, left or right that lines up with its whole edge.
+- (layout) When that 30% would leave a pane there under 5 rows or 5 columns or 5% of the tab, `Cmd +` stacks the focused pane with the panes touching it on that side.
+- (layout) With no lined-up neighbour `Cmd +` grows 5% any way that fits, and zooms once nothing fits, unless it's the tab's only pane.
 - (layout) `Cmd -` on a zoomed tab leaves the zoom, and otherwise restores the tab's tree from before its last `Cmd +`.
+- (layout) `Cmd -` with nothing to restore breaks one pane out of the focused stack, else shrinks the focused pane 30%, else 5%.
 - (layout) `Cmd +` restores the tab's tree from before its last `Cmd -`.
 - (layout) The tab bar is drawn like zellij's in tokyonight-moon: the session's name, else its branch, then a chevron per tab with the shown tab bold on blue, then a `+` chevron.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
@@ -304,3 +305,6 @@ Entries are added or amended **only with human approval**.
 - (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab with the keys in its pane.
 - (sidebar) On an agent row, `r` renames the agent's pane and `d` closes it after a confirm.
 - (tui) After orb copies a mouse selection in a pane, the mode line shows `Text copied to system clipboard` in blue where the error shows, for 2 s.
+- (keybinds) `<C-g> n` asks for a name in a `New session` box right after the project pick, before any workspace or base pick; `Esc` there cancels the new session.
+- (sessions) A new session's name from the `New session` box is its `r` name, and an empty one leaves it unnamed.
+- (sessions) A session's title is its `r` name, else the first of its agents' titles, else its directory's name.

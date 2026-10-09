@@ -910,12 +910,12 @@ mod tests {
     )]
     #[case::prune_now(lone(None, Some(facts(0))), "prunes at next sweep", RED)]
     #[case::prune_in_days(
-        settled_for(Duration::from_hours(48), Some(facts(0))),
-        "prunes in 5d",
+        settled_for(Duration::from_hours(24), Some(facts(0))),
+        "prunes in 2d",
         YELLOW
     )]
     #[case::prune_in_hours(
-        settled_for(Duration::from_mins(7 * 24 * 60 - 150), Some(facts(0))),
+        settled_for(Duration::from_mins(3 * 24 * 60 - 150), Some(facts(0))),
         "prunes in 3h",
         YELLOW
     )]
