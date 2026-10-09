@@ -30,6 +30,40 @@ const MIN_PANE_COLS: u16 = 5;
 /// overshoot it by a hair. Far under one cell of any terminal.
 const RATIO_SLACK: f32 = 1e-4;
 
+/// How much of the tab `Cmd +`/`Cmd -` move a split border by, in percent of
+/// the tab body's width or height: zellij's `RESIZE_PERCENT`
+/// (`zellij-server/src/panes/tiled_panes/tiled_pane_grid.rs`).
+pub const RESIZE_PERCENT: f32 = 5.0;
+
+/// How far one `Cmd +`/`Cmd -` moves a split border: `cols` for a
+/// left/right split, `rows` for a top/bottom one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Step {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl Step {
+    /// [`RESIZE_PERCENT`] of `body`'s width and height, rounded, at least 1
+    /// cell each.
+    pub fn of(body: Rect) -> Self {
+        let cells =
+            |extent: u16| ((f32::from(extent) * RESIZE_PERCENT / 100.0).round() as u16).max(1);
+        Self {
+            cols: cells(body.width),
+            rows: cells(body.height),
+        }
+    }
+
+    /// The cells this step moves a `split` border by.
+    fn along(self, split: Split) -> u16 {
+        match split {
+            Split::Right => self.cols,
+            Split::Down => self.rows,
+        }
+    }
+}
+
 /// Which way a split puts its second pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -386,10 +420,10 @@ impl TileLayout {
     }
 
     /// Moves the focused pane's own split border (its parent split) by
-    /// `cells` columns, or rows for a `Down` split: towards the sibling when
+    /// `step`'s columns, or rows for a `Down` split: towards the sibling when
     /// `grow`, away from it otherwise. The ratio stays between 0.1 and 0.9. A
     /// lone pane has no split, and nothing changes. Returns whether it changed.
-    pub fn resize_focused(&mut self, grow: bool, cells: u16, area: Rect) -> bool {
+    pub fn resize_focused(&mut self, grow: bool, step: Step, area: Rect) -> bool {
         let focus = self.focus;
         let Some((
             Node::Split {
@@ -403,7 +437,8 @@ impl TileLayout {
         else {
             return false;
         };
-        let Some(resized) = moved(*split, *ratio, grow == holds(first, focus), cells, area) else {
+        let up = grow == holds(first, focus);
+        let Some(resized) = moved(*split, *ratio, up, step.along(*split), area) else {
             return false;
         };
         let resized = resized.clamp(0.1, 0.9);
@@ -412,13 +447,13 @@ impl TileLayout {
         changed
     }
 
-    /// Grows the focused pane `cells` columns (rows for a `Down` split) into its
+    /// Grows the focused pane `step`'s columns (rows for a `Down` split) into its
     /// sibling across its own split, or its stack's. When that would leave a pane
     /// on the other side under [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`] (a stack
     /// under twice the rows), or move the ratio past 0.1–0.9, the split becomes
     /// one stack of every pane in it, showing the focused pane; stacks inside it
     /// merge in. `Stuck` when no split holds the focused pane.
-    pub fn grow_focused(&mut self, cells: u16, area: Rect) -> Grow {
+    pub fn grow_focused(&mut self, step: Step, area: Rect) -> Grow {
         let focus = self.focus;
         let Some((node, area)) = parent_node(&mut self.root, area, focus) else {
             return Grow::Stuck;
@@ -431,6 +466,7 @@ impl TileLayout {
         } = &mut *node
         {
             let focused_first = holds(first, focus);
+            let cells = step.along(*split);
             let Some(resized) = moved(*split, *ratio, focused_first, cells, area) else {
                 return Grow::Stuck;
             };
@@ -1057,12 +1093,23 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        Grow, NavDirection, Node, PaneInfo, Split, SwapLayout, TileLayout, columns,
+        Grow, NavDirection, Node, PaneInfo, Split, Step, SwapLayout, TileLayout, columns,
         find_in_direction,
     };
     use crate::feat::sessions::state::PaneId;
 
     const AREA: Rect = Rect::new(0, 0, 100, 40);
+
+    /// A 4-cell step both ways.
+    const FOUR: Step = Step { cols: 4, rows: 4 };
+
+    #[rstest::rstest]
+    #[case(Rect::new(0, 0, 200, 60), Step { cols: 10, rows: 3 })]
+    #[case(Rect::new(0, 0, 15, 10), Step { cols: 1, rows: 1 })]
+    #[case(Rect::new(0, 0, 4, 4), Step { cols: 1, rows: 1 })]
+    fn step_is_5_percent_of_the_body_at_least_1_cell(#[case] body: Rect, #[case] step: Step) {
+        assert_eq!(Step::of(body), step, "5% of the body, rounded, at least 1");
+    }
 
     fn pane(id: i64) -> PaneId {
         PaneId(id)
@@ -1432,7 +1479,7 @@ mod tests {
         let mut layout = halves(1);
 
         // When growing it by 4 cells.
-        layout.resize_focused(true, 4, AREA);
+        layout.resize_focused(true, FOUR, AREA);
 
         // Then the split moves 4 columns right.
         assert!(
@@ -1448,7 +1495,7 @@ mod tests {
         let mut layout = halves(2);
 
         // When growing it by 4 cells.
-        layout.resize_focused(true, 4, AREA);
+        layout.resize_focused(true, FOUR, AREA);
 
         // Then the split moves 4 columns left.
         assert!(
@@ -1474,7 +1521,7 @@ mod tests {
         );
 
         // When resizing past the bound.
-        let changed = layout.resize_focused(grow, 4, AREA);
+        let changed = layout.resize_focused(grow, FOUR, AREA);
 
         // Then the ratio stays at the bound.
         assert_eq!(
@@ -1490,7 +1537,7 @@ mod tests {
         let mut layout = TileLayout::new(pane(1));
 
         // When growing it.
-        let changed = layout.resize_focused(true, 4, AREA);
+        let changed = layout.resize_focused(true, FOUR, AREA);
 
         // Then nothing changed.
         assert!(!changed, "a lone pane has no split to move");
@@ -1687,7 +1734,7 @@ mod tests {
     fn add_tiled_evens_out_a_resized_tab() {
         // Given three tiled panes with the focused pane's border moved.
         let mut layout = tiled(3);
-        layout.resize_focused(true, 10, AREA);
+        layout.resize_focused(true, Step { cols: 10, rows: 10 }, AREA);
 
         // When adding pane 4.
         layout.add_tiled(pane(4), SwapLayout::Vertical);
@@ -2261,7 +2308,7 @@ mod tests {
         let mut layout = main_and_stack(3, 3);
 
         // When growing it by 4 cells.
-        layout.resize_focused(true, 4, AREA);
+        layout.resize_focused(true, FOUR, AREA);
 
         // Then the border between pane 1 and the stack moves 4 columns left.
         assert!(
@@ -2277,7 +2324,7 @@ mod tests {
         let mut layout = halves(1);
 
         // When growing it by 4 cells.
-        let grew = layout.grow_focused(4, AREA);
+        let grew = layout.grow_focused(FOUR, AREA);
 
         // Then the split moves 4 columns right.
         assert!(
@@ -2301,7 +2348,7 @@ mod tests {
         );
 
         // When growing pane 2 by 4 cells, which would leave pane 1 with 4.
-        let grew = layout.grow_focused(4, area);
+        let grew = layout.grow_focused(FOUR, area);
 
         // Then the split becomes one stack showing pane 2.
         assert_eq!(
@@ -2320,7 +2367,7 @@ mod tests {
         );
 
         // When growing pane 1 by 4 cells past the bound.
-        let grew = layout.grow_focused(4, AREA);
+        let grew = layout.grow_focused(FOUR, AREA);
 
         // Then the split becomes one stack showing pane 1.
         assert_eq!(
@@ -2339,7 +2386,7 @@ mod tests {
         );
 
         // When growing pane 1 by 4 rows, which would leave the stack 8.
-        layout.grow_focused(4, Rect::new(0, 0, 100, 20));
+        layout.grow_focused(FOUR, Rect::new(0, 0, 100, 20));
 
         // Then the tree is one flat stack of 1, 2 and 3 showing pane 1.
         assert_eq!(
@@ -2358,7 +2405,7 @@ mod tests {
         );
 
         // When growing pane 1 by 4 cells.
-        let grew = layout.grow_focused(4, AREA);
+        let grew = layout.grow_focused(FOUR, AREA);
 
         // Then the border between the stack and pane 3 moves 4 columns right.
         assert!(
@@ -2375,7 +2422,7 @@ mod tests {
         // Given a layout with no split.
 
         // When growing the focused pane.
-        let grew = layout.grow_focused(4, AREA);
+        let grew = layout.grow_focused(FOUR, AREA);
 
         // Then it's stuck.
         assert_eq!(grew, Grow::Stuck, "with no split there is nothing to grow");
@@ -2397,7 +2444,7 @@ mod tests {
         for focus in 1..=n {
             let mut layout = fresh(focus);
             for step in 0..200 {
-                if layout.grow_focused(4, AREA) == Grow::Stuck {
+                if layout.grow_focused(FOUR, AREA) == Grow::Stuck {
                     break;
                 }
                 let stacks = layout.stacks(AREA);

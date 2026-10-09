@@ -7392,9 +7392,9 @@ mod tests {
 
     #[rstest::rstest]
     fn grow_that_stacks_returns_save_layout() {
-        // Given two panes over a 14-column body, too narrow for a grow step.
+        // Given two panes over a 10-column body, too narrow for a grow step.
         let mut state = split_layout();
-        state.layouts.fit_to(Rect::new(0, 0, 14, 24));
+        state.layouts.fit_to(Rect::new(0, 0, 10, 24));
 
         // When growing.
         let commands = IntentHandler::handle(&Intent::GrowFocused, &mut state);
@@ -7409,9 +7409,9 @@ mod tests {
 
     #[rstest::rstest]
     fn grow_that_only_zooms_returns_no_commands() {
-        // Given two panes over a 14-column body that one Cmd + stacked.
+        // Given two panes over a 10-column body that one Cmd + stacked.
         let mut state = split_layout();
-        state.layouts.fit_to(Rect::new(0, 0, 14, 24));
+        state.layouts.fit_to(Rect::new(0, 0, 10, 24));
         IntentHandler::handle(&Intent::GrowFocused, &mut state);
 
         // When growing again.

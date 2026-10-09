@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
 
-use super::tree::{Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction};
+use super::tree::{
+    Grow, NavDirection, PaneInfo, Split, Step, SwapLayout, TileLayout, find_in_direction,
+};
 use crate::feat::sessions::state::{PaneId, SessionId};
-use crate::feat::sidebar::state::STEP;
 use crate::feat::zmx::zmx_service::ZmxSession;
 
 /// Where a pane's program runs: its zmx session and directory, the name the
@@ -193,7 +194,7 @@ impl Tab {
             }
             None => {
                 let before = tab.tree.clone();
-                match tab.tree.grow_focused(STEP, body) {
+                match tab.tree.grow_focused(Step::of(body), body) {
                     Grow::Grew | Grow::Stacked => {
                         history.before_grow.push(before);
                         true
@@ -222,7 +223,7 @@ impl Tab {
             }
             None => {
                 let before = tab.tree.clone();
-                let shrank = tab.tree.resize_focused(false, STEP, body);
+                let shrank = tab.tree.resize_focused(false, Step::of(body), body);
                 if shrank {
                     history.before_shrink.push(before);
                 }
@@ -2036,13 +2037,13 @@ mod tests {
         // When pressing Cmd + once.
         layouts.resize_focused(OWNER, true);
 
-        // Then pane 9 is 14 rows tall.
+        // Then pane 9 is 12 rows tall: 5% of the 40-row tab.
         let height = tall_placement(&layouts)
             .panes
             .iter()
             .find(|place| place.pane == PaneId(9))
             .map(|place| place.area.height);
-        assert_eq!(height, Some(14), "the first step should grow pane 9 4 rows");
+        assert_eq!(height, Some(12), "the first step should grow pane 9 2 rows");
     }
 
     #[rstest::rstest]
@@ -2167,9 +2168,10 @@ mod tests {
         );
     }
 
-    /// A 14-column body: panes 7 and 8 side by side get 7 columns each, so a
-    /// `Cmd +` on pane 8 would leave pane 7 3 columns wide and stacks them instead.
-    const NARROW: Rect = Rect::new(0, 0, 14, 24);
+    /// A 10-column body: panes 7 and 8 side by side get 5 columns each, so a
+    /// 1-column `Cmd +` on pane 8 would leave pane 7 4 columns wide and stacks
+    /// them instead.
+    const NARROW: Rect = Rect::new(0, 0, 10, 24);
 
     /// `split_right()` over `NARROW`.
     fn narrow() -> Layouts {
@@ -2184,6 +2186,75 @@ mod tests {
             .into_iter()
             .find(|place| place.pane == PaneId(pane))
             .map(|place| place.area.width)
+    }
+
+    /// A 200 × 60 body.
+    const HUGE: Rect = Rect::new(0, 0, 200, 60);
+
+    /// Pane `pane`'s area when placed over `HUGE`.
+    fn huge_area(layouts: &Layouts, pane: i64) -> Option<Rect> {
+        layouts
+            .get(OWNER)
+            .map(|layout| layout.placed(HUGE, |_| LIST_WIDTH))
+            .unwrap_or_default()
+            .panes
+            .into_iter()
+            .find(|place| place.pane == PaneId(pane))
+            .map(|place| place.area)
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_on_a_200_column_tab_moves_a_left_right_border_10_columns() {
+        // Given panes 7 and 8 side by side over a 200-column body, 8 focused.
+        let mut layouts = split_right();
+        layouts.fit_to(HUGE);
+        let before = huge_area(&layouts, 8).map(|area| area.width);
+
+        // When pressing Cmd +.
+        layouts.resize_focused(OWNER, true);
+
+        // Then pane 8 is 10 columns wider: 5% of the tab.
+        let after = huge_area(&layouts, 8).map(|area| area.width);
+        assert_eq!(
+            after,
+            before.map(|width| width + 10),
+            "Cmd + moves 5% of the tab's width"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_plus_on_a_60_row_tab_moves_a_top_bottom_border_3_rows() {
+        // Given pane 8 below pane 7 over a 60-row body, 8 focused.
+        let mut layouts = opened();
+        layouts.split(OWNER, Split::Down, entry(8));
+        layouts.fit_to(HUGE);
+        let before = huge_area(&layouts, 8).map(|area| area.height);
+
+        // When pressing Cmd +.
+        layouts.resize_focused(OWNER, true);
+
+        // Then pane 8 is 3 rows taller: 5% of the tab.
+        let after = huge_area(&layouts, 8).map(|area| area.height);
+        assert_eq!(
+            after,
+            before.map(|height| height + 3),
+            "Cmd + moves 5% of the tab's height"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_minus_after_a_5_percent_cmd_plus_restores_the_tree() {
+        // Given panes 7 and 8 side by side over a 200-column body, grown once.
+        let mut layouts = split_right();
+        layouts.fit_to(HUGE);
+        let before = tree_json(&layouts);
+        layouts.resize_focused(OWNER, true);
+
+        // When pressing Cmd -.
+        layouts.resize_focused(OWNER, false);
+
+        // Then the tree is the one from before the Cmd +.
+        assert_eq!(tree_json(&layouts), before, "Cmd - undoes the Cmd +");
     }
 
     #[rstest::rstest]
