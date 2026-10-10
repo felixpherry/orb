@@ -60,17 +60,31 @@ impl Toast {
 pub(crate) struct Toasts {
     shown: Option<Toast>,
     seen_error: Option<String>,
-    seen_notice: Option<String>,
+    seen_worktree_notice: Option<String>,
+    seen_project_notice: Option<String>,
 }
 
 impl Toasts {
-    /// Takes in the current error and notice; pops either one whose text
-    /// changed, the error over the notice when both did.
-    pub(crate) fn observe(&mut self, error: Option<&str>, notice: Option<&str>, now: Instant) {
+    /// Takes in the current error, worktree notice and project notice; pops
+    /// any one whose text changed, the error over a notice when both did.
+    pub(crate) fn observe(
+        &mut self,
+        error: Option<&str>,
+        worktree_notice: Option<&str>,
+        project_notice: Option<&str>,
+        now: Instant,
+    ) {
         Self::track(
             &mut self.shown,
-            &mut self.seen_notice,
-            notice,
+            &mut self.seen_worktree_notice,
+            worktree_notice,
+            ToastKind::Info,
+            now + INFO_FOR,
+        );
+        Self::track(
+            &mut self.shown,
+            &mut self.seen_project_notice,
+            project_notice,
             ToastKind::Info,
             now + INFO_FOR,
         );
@@ -312,7 +326,7 @@ mod tests {
     /// A tracker that has just seen `error` at `at`.
     fn error_seen(error: &str, at: Instant) -> Toasts {
         let mut toasts = Toasts::default();
-        toasts.observe(Some(error), None, at);
+        toasts.observe(Some(error), None, None, at);
         toasts
     }
 
@@ -355,7 +369,7 @@ mod tests {
         // Given a new notice observed.
         let at = Instant::now();
         let mut toasts = Toasts::default();
-        toasts.observe(None, Some("pruned 2 worktrees"), at);
+        toasts.observe(None, Some("pruned 2 worktrees"), None, at);
 
         // When 3 s have passed.
         let shown = toasts.shown(at + Duration::from_secs(3));
@@ -372,7 +386,7 @@ mod tests {
         let later = at + Duration::from_secs(6);
 
         // When the same error is observed again.
-        toasts.observe(Some("boom"), None, later);
+        toasts.observe(Some("boom"), None, None, later);
 
         // Then nothing shows.
         assert!(
@@ -389,7 +403,7 @@ mod tests {
         toasts.copied(at);
 
         // When an error is observed.
-        toasts.observe(Some("boom"), None, at);
+        toasts.observe(Some("boom"), None, None, at);
 
         // Then the error shows.
         assert_eq!(
@@ -406,7 +420,7 @@ mod tests {
         let mut toasts = error_seen("boom", at);
 
         // When the error is observed cleared, as an orb key does.
-        toasts.observe(None, None, at);
+        toasts.observe(None, None, None, at);
 
         // Then nothing shows.
         assert!(
@@ -434,6 +448,63 @@ mod tests {
                 at + Duration::from_secs(3)
             )),
             "a copy should show the copy notice for 3 s"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_project_notice_pops_as_info() {
+        // Given no message showing.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+
+        // When a project notice is observed.
+        toasts.observe(None, None, Some("Added project orb"), at);
+
+        // Then it shows as info for 3 s.
+        assert_eq!(
+            toasts.shown(at),
+            Some(&Toast::new(
+                ToastKind::Info,
+                "Added project orb",
+                at + Duration::from_secs(3)
+            )),
+            "a new project notice should pop as info"
+        );
+    }
+
+    #[rstest::rstest]
+    fn error_wins_over_project_notice_in_same_frame() {
+        // Given no message showing.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+
+        // When an error and a project notice change in the same frame.
+        toasts.observe(Some("boom"), None, Some("Added project orb"), at);
+
+        // Then the error shows.
+        assert_eq!(
+            toasts.shown(at).map(|toast| toast.kind),
+            Some(ToastKind::Error),
+            "the error should win over the notice"
+        );
+    }
+
+    #[rstest::rstest]
+    fn same_project_notice_after_clear_pops_again() {
+        // Given a project notice seen, timed out, then cleared by a key.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.observe(None, None, Some("Added project orb"), at);
+        let later = at + Duration::from_secs(4);
+        toasts.observe(None, None, None, later);
+
+        // When the same notice is observed again.
+        toasts.observe(None, None, Some("Added project orb"), later);
+
+        // Then it shows again.
+        assert!(
+            toasts.shown(later).is_some(),
+            "adding the same project again should pop the notice again"
         );
     }
 }

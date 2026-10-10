@@ -41,7 +41,7 @@ pub struct IntentHandler;
 
 impl IntentHandler {
     /// Apply `intent` to `state` and return the commands that must follow.
-    /// Every intent first clears the error and worktree notice in the message box,
+    /// Every intent first clears the error and the notices in the message box,
     /// which the user has now seen; otherwise an intent that fails validation
     /// changes nothing. After every intent, a cursor left on an agent row of
     /// a folded card unfolds it, unless a search lists the row anyway.
@@ -51,6 +51,7 @@ impl IntentHandler {
     )]
     pub fn handle(intent: &Intent, state: &mut AppState) -> Vec<Command> {
         state.sessions.error = None;
+        state.sessions.notice = None;
         state.worktrees.notice = None;
         let commands = match intent {
             Intent::Quit => {
@@ -3441,6 +3442,22 @@ mod tests {
         // Then the notice is gone.
         assert_eq!(
             state.worktrees.notice, None,
+            "the user has seen the notice once they press a key"
+        );
+    }
+
+    #[rstest::rstest]
+    fn any_intent_clears_the_sessions_notice() {
+        // Given an Added project notice in the message box.
+        let mut state = state_with(vec![in_root(1)], 1);
+        state.sessions.notice = Some("Added project web".to_owned());
+
+        // When handling the next intent.
+        IntentHandler::handle(&Intent::SelectNext, &mut state);
+
+        // Then the notice is gone.
+        assert_eq!(
+            state.sessions.notice, None,
             "the user has seen the notice once they press a key"
         );
     }

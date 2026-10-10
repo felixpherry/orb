@@ -1773,10 +1773,14 @@ impl SessionsActor {
             match added {
                 Ok(id) => {
                     sessions.error = None;
+                    sessions.notice = Some(format!("Added project {title}"));
                     let repo = self.services.git.project_path(&root).is_some();
                     show_project(sessions, id, title, root, ProjectKind::Normal, repo, now);
                 }
-                Err(error) => sessions.error = Some(error),
+                Err(error) => {
+                    sessions.error = Some(error);
+                    sessions.notice = None;
+                }
             }
         }
         (self.wake)();
@@ -2938,7 +2942,7 @@ mod tests {
 
     use super::{
         FAST_POLL, Placement, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms,
-        settle_session_row,
+        project_title, settle_session_row,
     };
     use crate::Focus;
     use crate::TextInput;
@@ -6200,6 +6204,71 @@ mod tests {
                 .iter()
                 .any(|project| project.root == Path::new("/nonexistent/project")),
             "a missing directory shouldn't be saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_a_directory_shows_added_notice() -> Result<(), Report<StoreError>> {
+        // Given no projects and an existing directory.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let (mut actor, state) = start(
+            Store::open_in_memory()?,
+            &listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When adding it as a project.
+        actor.add_project(dir.path().to_owned());
+
+        // Then the notice names the project.
+        let expected = format!("Added project {}", project_title(dir.path()));
+        assert_eq!(
+            state.read().sessions.notice.as_deref(),
+            Some(expected.as_str()),
+            "adding a project should say it was added"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_an_existing_project_shows_added_notice() -> Result<(), Report<StoreError>> {
+        // Given a directory that's already a saved project.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let store = Store::open_in_memory()?;
+        store.add_project(dir.path(), "web", ProjectKind::Normal, 0)?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // When adding it again.
+        actor.add_project(dir.path().to_owned());
+
+        // Then the notice says it was added.
+        let expected = format!("Added project {}", project_title(dir.path()));
+        assert_eq!(
+            state.read().sessions.notice.as_deref(),
+            Some(expected.as_str()),
+            "re-adding a project should still say it was added"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn adding_a_missing_directory_leaves_no_notice() -> Result<(), Report<StoreError>> {
+        // Given a notice already showing.
+        let (mut actor, state) = start(
+            Store::open_in_memory()?,
+            &listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+        state.write().sessions.notice = Some("Added project web".to_owned());
+
+        // When adding a path that doesn't exist.
+        actor.add_project(PathBuf::from("/nonexistent/project"));
+
+        // Then there's no notice.
+        assert!(
+            state.read().sessions.notice.is_none(),
+            "a failed add shouldn't leave an Added notice"
         );
         Ok(())
     }

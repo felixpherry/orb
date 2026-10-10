@@ -338,7 +338,7 @@ pub struct Search {
 
 /// orb's projects, sessions and threads, and where the sidebar's cursor is.
 ///
-/// Written by the sessions actor (projects, `sessions`, `error`, `starting`
+/// Written by the sessions actor (projects, `sessions`, `error`, `notice`, `starting`
 /// when a start ends, `fetching`, `attach`, the cursor and `filter`
 /// after a restore, the cursor on a new session, removing a session from
 /// `deleting`, pushing `notices`) and by the intent handler (the cursor on
@@ -364,6 +364,9 @@ pub struct Sessions {
     pub fetching: Option<String>,
     /// The latest failure; shown until the next intent or a later success.
     pub error: Option<String>,
+    /// A notice for the message box, like a project just added; shown until
+    /// the next intent. Written only by the sessions actor.
+    pub notice: Option<String>,
     /// A new session, or a session whose worktree was recreated, for the
     /// frontend to attach to.
     pub attach: Option<SessionId>,

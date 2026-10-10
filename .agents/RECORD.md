@@ -311,3 +311,5 @@ Entries are added or amended **only with human approval**.
 - (tui) Errors and notices show in a message box like LazyVim's notifier, just under the tab bar at the right edge, titled Error in red or Messages in cyan.
 - (tui) The message box is at least 40 columns wide and at most 40% of the pane, and cuts longer lines with `…`.
 - (tui) The message box hides after 3 s for info or 5 s for errors, a newer message replaces it, and the same message sent again does not bring it back.
+- (projects) Adding a project with `␣p` shows `Added project <name>` in the message box, even when the project was already added or had been removed.
+- (projects) When adding a project with `␣p` fails, the message box shows the reason as an error.

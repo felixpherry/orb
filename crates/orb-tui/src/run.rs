@@ -567,6 +567,7 @@ impl App {
                 self.toasts.observe(
                     state.sessions.error.as_deref(),
                     state.worktrees.notice.as_deref(),
+                    state.sessions.notice.as_deref(),
                     Instant::now(),
                 );
             }
