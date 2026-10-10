@@ -297,7 +297,7 @@ Entries are added or amended **only with human approval**.
 - (layout) When the tabs don't fit, the tab bar keeps the shown tab and its nearest neighbours, alternating left and right, and counts the rest in `← +N` and `+N →` chips.
 - (layout) Closing a pane in a tab changed by hand gives its space to its neighbour and moves no other pane.
 - (layout) Each tab has a swap layout from zellij's list: BASE (1 pane), vertical and horizontal (1–10), stacked (from 2), half-stacked (from 3). `Cmd ]` and `Cmd [` move it to the next or previous one that fits its pane count, wrapping; on a tab changed by hand the first press re-applies its current layout.
-- (layout) Splitting, stacking, or a `Cmd +` or `Cmd -` that changes the panes (not a zoom alone) marks a tab as changed by hand until the next `Cmd [` or `Cmd ]`.
+- (layout) Splitting, stacking, a resize-mode step, or a `Cmd +` or `Cmd -` that changes the panes (not a zoom alone) marks a tab as changed by hand until the next `Cmd [` or `Cmd ]`.
 - (layout) `Cmd n` in a tab changed by hand adds the pane to the focused pane's stack, else halves the focused pane top/bottom when it's tall and left/right when it's wide, leaving other panes their size, else stacks the two.
 - (layout) The tab bar ends, right-aligned, with `Cmd <[]>` and the shown tab's swap layout name in caps, lit while the tab is untouched and dim once it's changed by hand; it's hidden on a 1-pane tab and dropped when the tabs leave no room.
 - (sessions) Each tab's swap layout and changed-by-hand mark persist to orb's database; tabs saved before then load as vertical and unmarked.
@@ -313,3 +313,8 @@ Entries are added or amended **only with human approval**.
 - (tui) The message box hides after 3 s for info or 5 s for errors, a newer message replaces it, and the same message sent again does not bring it back.
 - (projects) Adding a project with `␣p` shows `Added project <name>` in the message box, even when the project was already added or had been removed.
 - (projects) When adding a project with `␣p` fails, the message box shows the reason as an error.
+- (keybinds) `<C-g> r` in a pane enters resize mode, where `h/j/k/l` or the arrow keys push the focused pane's border on that side out 5% of the tab, `H/J/K/L` pull it in 5%, and `+`/`=`/`-` act as `Cmd +`/`Cmd -`.
+- (keybinds) In resize mode, pushing a border out toward the tab's edge (or past a neighbour's minimum size) pulls the opposite border in 5% instead; pulling a border in toward the tab's edge does nothing.
+- (keybinds) `<C-g> m` in a pane enters move mode, where `h/j/k/l` or the arrow keys swap the focused pane with its neighbour on that side and `n`/`Tab`/`p` swap it with the next or previous pane, wrapping, with the focus staying on the moved pane.
+- (tui) The mode line reads `RESIZE` or `MOVE` while that mode is on, and a which-key style box lists the mode's keys.
+- (layout) Moving a pane swaps two panes without changing the tab's shape, so it doesn't mark the tab changed by hand.
