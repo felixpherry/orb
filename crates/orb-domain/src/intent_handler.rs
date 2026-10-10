@@ -180,7 +180,15 @@ impl IntentHandler {
                 state.pane_mode = None;
                 vec![]
             }
-            Intent::ResizeFocused { dir, grow } => resize_side(state, *dir, *grow),
+            Intent::ResizeFocused { dir, grow } => save_if_changed(state, |layouts, owner| {
+                layouts.resize_side(owner, *dir, *grow)
+            }),
+            Intent::MovePane(dir) => {
+                save_if_changed(state, |layouts, owner| layouts.move_pane(owner, *dir))
+            }
+            Intent::MovePaneInOrder { forward } => save_if_changed(state, |layouts, owner| {
+                layouts.move_pane_in_order(owner, *forward)
+            }),
             Intent::NewTab => match (validate_tab_action(state), state.shown_session()) {
                 (Ok(()), Some(session)) => vec![Command::NewTab(session)],
                 _ => vec![],
@@ -1379,13 +1387,14 @@ fn close_tab(state: &mut AppState) -> Vec<Command> {
     vec![Command::SaveLayout(owner)]
 }
 
-/// Resize mode's step on the focused pane's `dir` border; saves the layout
-/// when the tree changed.
-fn resize_side(state: &mut AppState, dir: NavDirection, grow: bool) -> Vec<Command> {
+/// Runs `edit` on the shown layout while the keys are in one of its panes,
+/// saving the layout when it reports a change.
+fn save_if_changed<F>(state: &mut AppState, edit: F) -> Vec<Command>
+where
+    F: FnOnce(&mut Layouts, SessionId) -> bool,
+{
     let mut changed = false;
-    let owner = in_pane(state, |layouts, owner| {
-        changed = layouts.resize_side(owner, dir, grow);
-    });
+    let owner = in_pane(state, |layouts, owner| changed = edit(layouts, owner));
     owner
         .filter(|_| changed)
         .map(Command::SaveLayout)
@@ -7542,6 +7551,80 @@ mod tests {
             commands.is_empty(),
             "resize mode on a zoomed tab changes nothing"
         );
+    }
+
+    #[rstest::rstest]
+    fn move_pane_that_moves_returns_save_layout() {
+        // Given shell pane 50 split off on the right and focused.
+        let mut state = split_layout();
+
+        // When moving it left.
+        let commands = IntentHandler::handle(&Intent::MovePane(NavDirection::Left), &mut state);
+
+        // Then the layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "a move that swaps panes saves the layout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_pane_in_order_on_a_lone_pane_returns_no_commands() {
+        // Given the keys in a lone pane.
+        let mut state = with_layout(Focus::Pane);
+
+        // When moving it to the next pane.
+        let commands =
+            IntentHandler::handle(&Intent::MovePaneInOrder { forward: true }, &mut state);
+
+        // Then nothing is saved.
+        assert!(commands.is_empty(), "a lone pane has nothing to swap with");
+    }
+
+    #[rstest::rstest]
+    fn move_pane_keeps_the_focus_on_the_moved_pane() {
+        // Given shell pane 50 split off on the right and focused.
+        let mut state = split_layout();
+
+        // When moving it left.
+        IntentHandler::handle(&Intent::MovePane(NavDirection::Left), &mut state);
+
+        // Then pane 50 still has the focus.
+        assert_eq!(
+            shown_focus(&state),
+            Some(PaneId(50)),
+            "the focus follows the moved pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_pane_on_a_zoomed_tab_returns_no_commands() {
+        // Given two panes side by side, zoomed.
+        let mut state = split_layout();
+        IntentHandler::handle(&Intent::ToggleZoom, &mut state);
+
+        // When moving the focused pane left.
+        let commands = IntentHandler::handle(&Intent::MovePane(NavDirection::Left), &mut state);
+
+        // Then nothing is saved.
+        assert!(
+            commands.is_empty(),
+            "move mode on a zoomed tab changes nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_pane_in_the_sidebar_does_nothing() {
+        // Given two panes side by side, the keys in the sidebar.
+        let mut state = split_layout();
+        state.focus = Focus::Sidebar;
+
+        // When moving the focused pane left.
+        let commands = IntentHandler::handle(&Intent::MovePane(NavDirection::Left), &mut state);
+
+        // Then nothing is saved.
+        assert!(commands.is_empty(), "a move needs the keys in a pane");
     }
 
     #[rstest::rstest]

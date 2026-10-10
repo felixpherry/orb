@@ -59,6 +59,12 @@ pub enum Intent {
     /// Move the focused pane's border facing `dir` out (`grow`) or in by 5%
     /// of the tab.
     ResizeFocused { dir: NavDirection, grow: bool },
+    /// Swap the focused pane with its neighbour toward `dir`; the focus
+    /// moves with it.
+    MovePane(NavDirection),
+    /// Swap the focused pane with the next (`forward`) or previous pane,
+    /// wrapping; the focus moves with it.
+    MovePaneInOrder { forward: bool },
     /// Open a tab with one shell, shown.
     NewTab,
     /// Close the shown tab; one holding a pane a thread runs in detaches the thread.
@@ -223,6 +229,9 @@ impl fmt::Display for Intent {
             Self::ExitPaneMode => "exit mode",
             Self::ResizeFocused { grow: true, .. } => "grow side",
             Self::ResizeFocused { grow: false, .. } => "shrink side",
+            Self::MovePane(_) => "move pane",
+            Self::MovePaneInOrder { forward: true } => "move next",
+            Self::MovePaneInOrder { forward: false } => "move previous",
             Self::NewTab => "new tab",
             Self::CloseTab => "close tab",
             Self::RenameTab => "rename tab",

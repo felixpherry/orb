@@ -413,6 +413,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case::resize(PaneMode::Resize, " RESIZE ")]
+    #[case::move_(PaneMode::Move, " MOVE ")]
     fn mode_line_names_the_pane_mode(#[case] mode: PaneMode, #[case] block: &str) {
         // Given a selected thread with the keys in a pane in that mode.
         let state = AppState {

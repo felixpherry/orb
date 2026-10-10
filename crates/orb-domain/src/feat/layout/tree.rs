@@ -453,6 +453,43 @@ impl TileLayout {
             || (grow && self.resize_toward(body, dir.opposite(), false, RESIZE_PERCENT))
     }
 
+    /// Move mode's step: swaps the focused pane with the pane `dir` of it,
+    /// the one a directional focus move would reach. Whether it moved.
+    pub fn swap_toward(&mut self, body: Rect, dir: NavDirection) -> bool {
+        let panes = self.panes(body);
+        let target = panes
+            .iter()
+            .find(|info| info.is_focused)
+            .and_then(|focused| find_in_direction(focused, dir, &panes));
+        target.is_some_and(|target| self.swap_with(target))
+    }
+
+    /// Move mode's step in tree order: swaps the focused pane with the next
+    /// (`forward`) or previous pane, wrapping. Whether it moved; a lone pane
+    /// doesn't.
+    pub fn swap_in_order(&mut self, forward: bool) -> bool {
+        let ids = self.pane_ids();
+        let target = ids.iter().position(|id| *id == self.focus).and_then(|at| {
+            let n = ids.len();
+            let step = if forward { 1 } else { n - 1 };
+            let next = (at + step) % n;
+            ids.get(next).copied()
+        });
+        target.is_some_and(|target| self.swap_with(target))
+    }
+
+    /// Swaps the focused pane and `target` wherever they sit (a pane, a
+    /// stack entry, a stack's shown pane); the focus stays on the moved
+    /// pane, shown if it landed in a stack. The tree's shape doesn't change.
+    fn swap_with(&mut self, target: PaneId) -> bool {
+        if target == self.focus {
+            return false;
+        }
+        swap_ids(&mut self.root, self.focus, target);
+        self.set_focus(self.focus);
+        true
+    }
+
     /// A resize with no direction: the first of the corners (right
     /// and down, left and down, right and up, left and up), then the sides
     /// (right, down, left, up) where both moves fit.
@@ -742,6 +779,26 @@ fn expand(node: &mut Node, id: PaneId) {
             expand(second, id);
         }
         _ => {}
+    }
+}
+
+/// Swaps ids `a` and `b` everywhere in `node`.
+fn swap_ids(node: &mut Node, a: PaneId, b: PaneId) {
+    let swap = |id: &mut PaneId| match *id {
+        x if x == a => *id = b,
+        x if x == b => *id = a,
+        _ => {}
+    };
+    match node {
+        Node::Pane(id) => swap(id),
+        Node::Split { first, second, .. } => {
+            swap_ids(first, a, b);
+            swap_ids(second, a, b);
+        }
+        Node::Stack { panes, expanded } => {
+            panes.iter_mut().for_each(swap);
+            swap(expanded);
+        }
     }
 }
 
@@ -2948,6 +3005,161 @@ mod tests {
 
         // Then the tree is unchanged.
         assert_eq!(layout, before, "no pane goes under the minimum size");
+    }
+
+    #[rstest::rstest]
+    fn swap_toward_swaps_the_two_panes_ids() {
+        // Given panes 1 and 2 side by side, pane 1 focused.
+        let mut layout = halves(1);
+        let cells: Vec<Rect> = rects(&layout).into_iter().map(|(_, rect)| rect).collect();
+
+        // When moving pane 1 right.
+        layout.swap_toward(AREA, NavDirection::Right);
+
+        // Then pane 2 takes the left cell and pane 1 the right, sizes unchanged.
+        let expected: Vec<_> = [pane(2), pane(1)].into_iter().zip(cells).collect();
+        assert_eq!(rects(&layout), expected, "the two panes should trade cells");
+    }
+
+    #[rstest::rstest]
+    fn swap_toward_keeps_the_focus_on_the_moved_pane() {
+        // Given panes 1 and 2 side by side, pane 1 focused.
+        let mut layout = halves(1);
+
+        // When moving pane 1 right.
+        layout.swap_toward(AREA, NavDirection::Right);
+
+        // Then pane 1 still has the focus.
+        assert_eq!(
+            layout.focused(),
+            pane(1),
+            "the focus follows the moved pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_toward_past_the_tabs_edge_changes_nothing() {
+        // Given panes 1 and 2 side by side, pane 1 focused on the left edge.
+        let mut layout = halves(1);
+        let before = layout.clone();
+
+        // When moving pane 1 left.
+        let moved = layout.swap_toward(AREA, NavDirection::Left);
+
+        // Then nothing moved.
+        assert!(
+            !moved && layout == before,
+            "a move past the tab's edge should change nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_in_order_forward_on_the_last_pane_swaps_with_the_first() {
+        // Given panes 1 to 3 tiled, pane 3 focused.
+        let mut layout = tiled(3);
+
+        // When moving pane 3 to the next pane.
+        layout.swap_in_order(true);
+
+        // Then it wraps and swaps with pane 1.
+        assert_eq!(
+            layout.pane_ids(),
+            vec![pane(3), pane(2), pane(1)],
+            "next on the last pane should swap with the first"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_in_order_backward_on_the_first_pane_swaps_with_the_last() {
+        // Given panes 1 to 3 tiled, pane 1 focused.
+        let mut layout = tiled(3);
+        layout.focus_pane(pane(1));
+
+        // When moving pane 1 to the previous pane.
+        layout.swap_in_order(false);
+
+        // Then it wraps and swaps with pane 3.
+        assert_eq!(
+            layout.pane_ids(),
+            vec![pane(3), pane(2), pane(1)],
+            "previous on the first pane should swap with the last"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_in_order_on_a_lone_pane_changes_nothing() {
+        // Given a layout of pane 1.
+        let mut layout = TileLayout::new(pane(1));
+
+        // When moving it to the next pane.
+        let moved = layout.swap_in_order(true);
+
+        // Then nothing moved.
+        assert!(!moved, "a lone pane has nothing to swap with");
+    }
+
+    #[rstest::rstest]
+    fn swap_toward_down_in_a_stack_swaps_with_the_next_stacked_pane() {
+        // Given pane 1 beside a stack of 2, 3 and 4, pane 2 shown and focused.
+        let mut layout = main_and_stack(2, 2);
+
+        // When moving pane 2 down.
+        layout.swap_toward(AREA, NavDirection::Down);
+
+        // Then pane 2 trades places with pane 3 in the stack.
+        assert_eq!(
+            stacked(&layout),
+            vec![vec![pane(3), pane(2), pane(4)]],
+            "a move down in a stack should swap with the next stacked pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_toward_down_in_a_stack_keeps_the_moved_pane_shown() {
+        // Given pane 1 beside a stack of 2, 3 and 4, pane 2 shown and focused.
+        let mut layout = main_and_stack(2, 2);
+
+        // When moving pane 2 down.
+        layout.swap_toward(AREA, NavDirection::Down);
+
+        // Then pane 2 is still the stack's shown pane.
+        assert_eq!(
+            expanded(&layout),
+            Some(pane(2)),
+            "the moved pane should stay shown in the stack"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_into_a_stack_shows_the_moved_pane_in_the_stack() {
+        // Given pane 1 focused beside a stack of 2, 3 and 4, pane 2 shown.
+        let mut layout = main_and_stack(2, 1);
+
+        // When moving pane 1 right.
+        layout.swap_toward(AREA, NavDirection::Right);
+
+        // Then pane 1 takes pane 2's place in the stack and is shown.
+        assert_eq!(
+            (stacked(&layout), expanded(&layout)),
+            (vec![vec![pane(1), pane(3), pane(4)]], Some(pane(1))),
+            "the moved pane should take the stack's shown slot"
+        );
+    }
+
+    #[rstest::rstest]
+    fn swap_into_a_stack_puts_the_shown_pane_in_the_moved_panes_cell() {
+        // Given pane 1 focused beside a stack of 2, 3 and 4, pane 2 shown.
+        let mut layout = main_and_stack(2, 1);
+
+        // When moving pane 1 right.
+        layout.swap_toward(AREA, NavDirection::Right);
+
+        // Then pane 2 sits on the left half.
+        assert_eq!(
+            info(&layout, 2).map(|info| info.rect),
+            Some(Rect::new(0, 0, 50, 40)),
+            "the stack's shown pane should land in the moved pane's cell"
+        );
     }
 
     #[rstest::rstest]

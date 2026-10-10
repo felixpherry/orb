@@ -360,6 +360,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind(
+                "<leader>m",
+                Intent::EnterPaneMode(PaneMode::Move),
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
                 "<leader><c-g>",
                 Intent::SendCtrlG,
                 KeyCategory::Navigation,
@@ -490,6 +496,7 @@ fn mode_key(mode: PaneMode, key: KeyEvent) -> Option<Intent> {
         return None;
     }
     let side = |dir, grow| Some(Intent::ResizeFocused { dir, grow });
+    let swap = |dir| Some(Intent::MovePane(dir));
     match (mode, key.code) {
         (_, KeyCode::Esc | KeyCode::Enter) => Some(Intent::ExitPaneMode),
         (PaneMode::Resize, KeyCode::Char('h') | KeyCode::Left) => side(Left, true),
@@ -502,6 +509,14 @@ fn mode_key(mode: PaneMode, key: KeyEvent) -> Option<Intent> {
         (PaneMode::Resize, KeyCode::Char('L')) => side(Right, false),
         (PaneMode::Resize, KeyCode::Char('+' | '=')) => Some(Intent::GrowFocused),
         (PaneMode::Resize, KeyCode::Char('-')) => Some(Intent::ShrinkFocused),
+        (PaneMode::Move, KeyCode::Char('h') | KeyCode::Left) => swap(Left),
+        (PaneMode::Move, KeyCode::Char('j') | KeyCode::Down) => swap(Down),
+        (PaneMode::Move, KeyCode::Char('k') | KeyCode::Up) => swap(Up),
+        (PaneMode::Move, KeyCode::Char('l') | KeyCode::Right) => swap(Right),
+        (PaneMode::Move, KeyCode::Char('n') | KeyCode::Tab) => {
+            Some(Intent::MovePaneInOrder { forward: true })
+        }
+        (PaneMode::Move, KeyCode::Char('p')) => Some(Intent::MovePaneInOrder { forward: false }),
         _ => None,
     }
 }
@@ -1307,20 +1322,57 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::esc(KeyCode::Esc)]
-    #[case::enter(KeyCode::Enter)]
-    fn esc_and_enter_leave_resize_mode(#[case] code: KeyCode) {
-        // Given resize mode.
+    #[case::resize_esc(PaneMode::Resize, KeyCode::Esc)]
+    #[case::resize_enter(PaneMode::Resize, KeyCode::Enter)]
+    #[case::move_esc(PaneMode::Move, KeyCode::Esc)]
+    #[case::move_enter(PaneMode::Move, KeyCode::Enter)]
+    fn esc_and_enter_leave_a_pane_mode(#[case] mode: PaneMode, #[case] code: KeyCode) {
+        // Given the pane mode on.
 
         // When pressing the key.
-        let intent = mode_route(PaneMode::Resize, key(code));
+        let intent = mode_route(mode, key(code));
 
         // Then the mode ends.
         assert_eq!(
             intent,
             Some(Intent::ExitPaneMode),
-            "{code:?} in resize mode"
+            "{code:?} in {mode:?} mode"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::shift_h(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT))]
+    #[case::leader(LEADER)]
+    fn other_keys_do_nothing_in_move_mode(#[case] pressed: KeyEvent) {
+        // Given move mode.
+
+        // When pressing a key the mode doesn't use.
+        let intent = mode_route(PaneMode::Move, pressed);
+
+        // Then nothing happens.
+        assert_eq!(intent, None, "{pressed:?} in move mode");
+    }
+
+    #[rstest::rstest]
+    #[case::h(key(KeyCode::Char('h')), Intent::MovePane(NavDirection::Left))]
+    #[case::left(key(KeyCode::Left), Intent::MovePane(NavDirection::Left))]
+    #[case::j(key(KeyCode::Char('j')), Intent::MovePane(NavDirection::Down))]
+    #[case::down(key(KeyCode::Down), Intent::MovePane(NavDirection::Down))]
+    #[case::k(key(KeyCode::Char('k')), Intent::MovePane(NavDirection::Up))]
+    #[case::up(key(KeyCode::Up), Intent::MovePane(NavDirection::Up))]
+    #[case::l(key(KeyCode::Char('l')), Intent::MovePane(NavDirection::Right))]
+    #[case::right(key(KeyCode::Right), Intent::MovePane(NavDirection::Right))]
+    #[case::n(key(KeyCode::Char('n')), Intent::MovePaneInOrder { forward: true })]
+    #[case::tab(key(KeyCode::Tab), Intent::MovePaneInOrder { forward: true })]
+    #[case::p(key(KeyCode::Char('p')), Intent::MovePaneInOrder { forward: false })]
+    fn move_mode_keys_map_to_their_moves(#[case] pressed: KeyEvent, #[case] expected: Intent) {
+        // Given move mode.
+
+        // When pressing a move key.
+        let intent = mode_route(PaneMode::Move, pressed);
+
+        // Then it swaps the focused pane that way.
+        assert_eq!(intent, Some(expected), "{pressed:?} in move mode");
     }
 
     #[rstest::rstest]
@@ -1478,6 +1530,8 @@ mod tests {
     #[case(Scope::Pane, "q", Intent::Quit)]
     #[case(Scope::Pane, "r", Intent::EnterPaneMode(PaneMode::Resize))]
     #[case(Scope::PaneIncognito, "r", Intent::EnterPaneMode(PaneMode::Resize))]
+    #[case(Scope::Pane, "m", Intent::EnterPaneMode(PaneMode::Move))]
+    #[case(Scope::PaneIncognito, "m", Intent::EnterPaneMode(PaneMode::Move))]
     #[case(Scope::Sidebar, "q", Intent::Quit)]
     #[case(Scope::SidebarEmpty, "q", Intent::Quit)]
     fn leader_keys_yield_their_intents(
@@ -1508,8 +1562,8 @@ mod tests {
     #[case(Scope::Sidebar, "/ Space W a b e f g i n q t w")]
     #[case(Scope::SidebarEmpty, "/ Space W a e f g i n q")]
     #[case(Scope::SidebarIncognito, "/ Space W a e f g i n q t")]
-    #[case(Scope::Pane, "/ <C-g> Space W a b e g i n p q r t w")]
-    #[case(Scope::PaneIncognito, "/ <C-g> Space W a e g i n p q r t")]
+    #[case(Scope::Pane, "/ <C-g> Space W a b e g i m n p q r t w")]
+    #[case(Scope::PaneIncognito, "/ <C-g> Space W a e g i m n p q r t")]
     #[case(Scope::SidebarAgent, "/ Space W a b e f g i n q t w")]
     #[case(Scope::SidebarAgentIncognito, "/ Space W a e f g i n q t")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {

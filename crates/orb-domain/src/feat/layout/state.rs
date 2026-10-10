@@ -809,6 +809,23 @@ impl Layouts {
         })
     }
 
+    /// Move mode's step on `owner`'s shown tab: see
+    /// [`TileLayout::swap_toward`]. Never changes tab. A zoomed tab, or one
+    /// with no body yet, doesn't change. Whether a pane moved; the tab's
+    /// shape is unchanged, so it isn't marked changed by hand.
+    pub fn move_pane(&mut self, owner: SessionId, dir: NavDirection) -> bool {
+        let body = self.body;
+        self.tab_mut(owner)
+            .is_some_and(|tab| !tab.zoomed && !body.is_empty() && tab.tree.swap_toward(body, dir))
+    }
+
+    /// Move mode's next/previous step: see [`TileLayout::swap_in_order`]. A
+    /// zoomed tab doesn't change. Whether a pane moved; not changed by hand.
+    pub fn move_pane_in_order(&mut self, owner: SessionId, forward: bool) -> bool {
+        self.tab_mut(owner)
+            .is_some_and(|tab| !tab.zoomed && tab.tree.swap_in_order(forward))
+    }
+
     /// Shows tab `n`, counting from 1; past the last changes nothing.
     pub fn go_to_tab(&mut self, owner: SessionId, n: usize) {
         if let Some(layout) = self.sessions.get_mut(&owner)
@@ -2213,6 +2230,79 @@ mod tests {
         assert!(
             hand_changed(&layouts),
             "a resize-mode step should mark the tab changed by hand"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_pane_does_not_mark_the_tab_changed_by_hand() {
+        // Given an untouched tab of panes 7 and 8, pane 8 focused.
+        let mut layouts = opened();
+        layouts.add_tiled(OWNER, entry(8));
+
+        // When moving pane 8 left.
+        layouts.move_pane(OWNER, NavDirection::Left);
+
+        // Then the tab is still untouched.
+        assert!(
+            !hand_changed(&layouts),
+            "a move keeps the tab's shape, so it isn't changed by hand"
+        );
+    }
+
+    #[rstest::rstest]
+    fn moved_order_survives_a_re_tile_on_add() {
+        // Given an untouched tab of panes 7, 8 and 9, pane 9 moved before pane 8.
+        let mut layouts = opened();
+        layouts.add_tiled(OWNER, entry(8));
+        layouts.add_tiled(OWNER, entry(9));
+        layouts.move_pane_in_order(OWNER, false);
+
+        // When adding pane 10, which re-tiles the tab.
+        layouts.add_tiled(OWNER, entry(10));
+
+        // Then the panes keep the moved order.
+        let order: Vec<_> = placed(&layouts)
+            .into_iter()
+            .map(|place| place.pane)
+            .collect();
+        assert_eq!(
+            order,
+            vec![PaneId(7), PaneId(9), PaneId(8), PaneId(10)],
+            "a re-tile should keep the order a move left"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_pane_on_a_zoomed_tab_keeps_the_tree() {
+        // Given panes 7 and 8 side by side, zoomed.
+        let mut layouts = split_right();
+        layouts.toggle_zoom(OWNER);
+        let before = tree_json(&layouts);
+
+        // When moving the focused pane left.
+        layouts.move_pane(OWNER, NavDirection::Left);
+
+        // Then the tree is as it was.
+        assert_eq!(
+            tree_json(&layouts),
+            before,
+            "move mode on a zoomed tab should leave its tree alone"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_pane_never_changes_tab() {
+        // Given three tabs, the first (pane 7 alone) shown.
+        let mut layouts = three_tabs();
+
+        // When moving pane 7 left.
+        layouts.move_pane(OWNER, NavDirection::Left);
+
+        // Then the first tab is still shown.
+        assert_eq!(
+            active(&layouts),
+            Some(0),
+            "a move past the tab's edge should not change tab"
         );
     }
 
