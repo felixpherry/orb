@@ -316,5 +316,6 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `<C-g> r` in a pane enters resize mode, where `h/j/k/l` or the arrow keys push the focused pane's border on that side out 5% of the tab, `H/J/K/L` pull it in 5%, and `+`/`=`/`-` act as `Cmd +`/`Cmd -`.
 - (keybinds) In resize mode, pushing a border out toward the tab's edge (or past a neighbour's minimum size) pulls the opposite border in 5% instead; pulling a border in toward the tab's edge does nothing.
 - (keybinds) `<C-g> m` in a pane enters move mode, where `h/j/k/l` or the arrow keys swap the focused pane with its neighbour on that side and `n`/`Tab`/`p` swap it with the next or previous pane, wrapping, with the focus staying on the moved pane.
+- (keybinds) Resize and move mode last until `Esc` or `⏎`, until the keys leave the pane, or until a mouse action orb handles itself (a click on another pane, the sidebar or the tab bar, or a tab-bar scroll); clicks, scrolling and selecting inside the focused pane leave it on. While either is on, no key reaches the pane's program, and `Cmd` keys still work.
 - (tui) The mode line reads `RESIZE` or `MOVE` while that mode is on, and a which-key style box lists the mode's keys.
 - (layout) Moving a pane swaps two panes without changing the tab's shape, so it doesn't mark the tab changed by hand.
