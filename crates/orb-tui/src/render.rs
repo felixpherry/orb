@@ -162,7 +162,11 @@ pub(crate) fn render(
             None
         }
         (None, None) => {
-            which_key::render(keys, sidebar_area.union(right), frame.buffer_mut());
+            let area = sidebar_area.union(right);
+            match state.pane_mode() {
+                Some(mode) => which_key::render_mode(mode, area, frame.buffer_mut()),
+                None => which_key::render(keys, area, frame.buffer_mut()),
+            }
             None
         }
     };
@@ -247,7 +251,7 @@ mod tests {
     };
     use orb_domain::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use orb_domain::feat::zmx::zmx_service::ZmxSession;
-    use orb_domain::{AppState, Focus, TextInput};
+    use orb_domain::{AppState, Focus, PaneMode, TextInput};
     use orb_term::{Pane, PaneCommand, PaneSize};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1960,5 +1964,40 @@ mod tests {
 
         // Then there's no sidebar layout to replace the last drawn one.
         assert_eq!(sidebar_layout, None, "a hidden sidebar isn't laid out");
+    }
+
+    #[rstest::rstest]
+    fn pane_mode_draws_its_key_box() {
+        // Given move mode on in a shown pane.
+        let state = AppState {
+            pane_mode: Some(PaneMode::Move),
+            ..shown(Focus::Pane)
+        };
+
+        // When drawing a frame.
+        let buffer = draw_tall(&state, None);
+
+        // Then the move key box is drawn.
+        let text = text(&buffer, buffer.area);
+        assert!(text.contains("╭ MOVE "), "the mode's key box should show");
+    }
+
+    #[rstest::rstest]
+    fn pane_mode_draws_no_key_box_away_from_the_pane() {
+        // Given a resize mode left over with the keys in the sidebar.
+        let state = AppState {
+            pane_mode: Some(PaneMode::Resize),
+            ..shown(Focus::Sidebar)
+        };
+
+        // When drawing a frame.
+        let buffer = draw_tall(&state, None);
+
+        // Then no mode key box is drawn.
+        let text = text(&buffer, buffer.area);
+        assert!(
+            !text.contains("RESIZE") && !text.contains("esc/⏎ exit"),
+            "a mode away from the pane should draw no box"
+        );
     }
 }

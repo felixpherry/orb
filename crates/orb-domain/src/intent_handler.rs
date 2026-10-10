@@ -1280,6 +1280,7 @@ fn attach_session(state: &mut AppState) -> Vec<Command> {
 /// attached to. A settled session is un-settled first. A session with no
 /// layout (its last pane closed) gets a tab of one shell; the sessions actor
 /// then asks to attach it, and the keys stay in the sidebar until then.
+/// The keys always arrive with no pane mode on.
 fn show_pane(state: &mut AppState) -> Vec<Command> {
     let selected = state
         .sessions
@@ -1288,6 +1289,7 @@ fn show_pane(state: &mut AppState) -> Vec<Command> {
     match (validate_attach(state), selected) {
         (Ok(()), Some((id, settled))) if state.layouts.get(id).is_some() => {
             state.focus = Focus::Pane;
+            state.pane_mode = None;
             state.attached.insert(id);
             settled
                 .then_some(Command::UnsettleSession(id))
@@ -7666,6 +7668,19 @@ mod tests {
 
         // Then no mode is on.
         assert_eq!(state.pane_mode(), None, "Esc or Enter leaves the mode");
+    }
+
+    #[rstest::rstest]
+    fn entering_a_pane_starts_with_no_pane_mode() {
+        // Given resize mode left over with the keys in the sidebar.
+        let mut state = with_layout(Focus::Sidebar);
+        state.pane_mode = Some(PaneMode::Resize);
+
+        // When attaching to the selected session.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the keys arrive in the pane with no mode on.
+        assert_eq!(state.pane_mode(), None, "a pane is entered with no mode");
     }
 
     #[rstest::rstest]

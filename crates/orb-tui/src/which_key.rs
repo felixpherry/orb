@@ -5,8 +5,10 @@
 //! which-key's order (letters and digits before symbols, lowercase before its
 //! capital), and `esc close  ⌫ back` sits on the last row. The popup is as
 //! tall as its rows; on a shorter screen the rows that don't fit are cut off.
+//! While a pane mode is on, the same box lists that mode's keys instead,
+//! titled with the mode and ending in `esc/⏎ exit`.
 
-use orb_domain::Intent;
+use orb_domain::{Intent, PaneMode};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -40,7 +42,56 @@ pub(crate) fn render(keys: &Keys, area: Rect, buf: &mut Buffer) {
         return;
     }
     let entries = entries(keys);
-    if entries.is_empty() || area.height < 4 {
+    if entries.is_empty() {
+        return;
+    }
+    draw_box(&path(keys), &entries, &help(), area, buf);
+}
+
+/// Draws the key box for pane mode `mode` inside `area`, the screen above
+/// the mode line: the mode's name in the top border, one row per key with
+/// each arrow beside its letter, and `esc/⏎ exit` on the last row.
+pub(crate) fn render_mode(mode: PaneMode, area: Rect, buf: &mut Buffer) {
+    let (title, keys): (&str, &[(&str, &str)]) = match mode {
+        PaneMode::Resize => (
+            "RESIZE",
+            &[
+                ("h ←", "grow left"),
+                ("j ↓", "grow down"),
+                ("k ↑", "grow up"),
+                ("l →", "grow right"),
+                ("H", "shrink left"),
+                ("J", "shrink down"),
+                ("K", "shrink up"),
+                ("L", "shrink right"),
+                ("+", "grow"),
+                ("-", "shrink"),
+            ],
+        ),
+        PaneMode::Move => (
+            "MOVE",
+            &[
+                ("h ←", "move left"),
+                ("j ↓", "move down"),
+                ("k ↑", "move up"),
+                ("l →", "move right"),
+                ("n ⇥", "next"),
+                ("p", "previous"),
+            ],
+        ),
+    };
+    let entries: Vec<Entry> = keys
+        .iter()
+        .map(|(key, desc)| mode_entry(key, desc))
+        .collect();
+    draw_box(title, &entries, &exit_help(), area, buf);
+}
+
+/// A rounded float in the bottom-right of `area` with `title` in its top
+/// border, `entries` as rows and `foot` on the last row. Nothing is drawn
+/// when `area` is too short for a row between the borders and the foot.
+fn draw_box(title: &str, entries: &[Entry], foot: &Line<'_>, area: Rect, buf: &mut Buffer) {
+    if area.height < 4 {
         return;
     }
     let key_width = entries.iter().map(|e| width(&e.key)).max().unwrap_or(1);
@@ -49,7 +100,7 @@ pub(crate) fn render(keys: &Keys, area: Rect, buf: &mut Buffer) {
         .map(|e| row_width(e, key_width))
         .max()
         .unwrap_or(0)
-        .max(help().width());
+        .max(foot.width());
     let popup = {
         let width = to_u16(inner_width + 4).min(area.width);
         let height = to_u16(entries.len() + 3).min(area.height);
@@ -64,7 +115,7 @@ pub(crate) fn render(keys: &Keys, area: Rect, buf: &mut Buffer) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BORDER))
-        .title(Line::from(span(format!(" {} ", path(keys)), ORANGE)));
+        .title(Line::from(span(format!(" {title} "), ORANGE)));
     let inner = block.inner(popup);
     block.render(popup, buf);
     let x = inner.x + 1;
@@ -73,7 +124,19 @@ pub(crate) fn render(keys: &Keys, area: Rect, buf: &mut Buffer) {
     for (entry, y) in entries.iter().zip(inner.y..inner.y + rows) {
         buf.set_line(x, y, &row(entry, key_width), max_width);
     }
-    buf.set_line(x, inner.bottom() - 1, &help(), max_width);
+    buf.set_line(x, inner.bottom() - 1, foot, max_width);
+}
+
+/// A mode box row: `key` and what it does, with the popup's default icon.
+fn mode_entry(key: &str, desc: &str) -> Entry {
+    Entry {
+        code: KeyCode::Null,
+        key: key.to_owned(),
+        desc: desc.to_owned(),
+        icon: "\u{f111}",
+        colour: DARK5,
+        group: false,
+    }
 }
 
 /// The keys under the pending sequence, in which-key's order: letters and
@@ -182,6 +245,11 @@ fn help() -> Line<'static> {
     ])
 }
 
+/// `esc/⏎ exit`.
+fn exit_help() -> Line<'static> {
+    Line::from(vec![span("esc/⏎ ", CYAN), span("exit", COMMENT)])
+}
+
 /// A floating box on `BG_DARK`.
 fn float(area: Rect, buf: &mut Buffer) {
     Clear.render(area, buf);
@@ -203,14 +271,14 @@ fn to_u16(n: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use orb_domain::Intent;
+    use orb_domain::{Intent, PaneMode};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
     use ratatui::style::Color;
     use ratatui_which_key::Keymap;
 
-    use super::render;
+    use super::{render, render_mode};
     use crate::keymap::{KeyCategory, Keys, LEADER, Scope, keymap, press};
     use crate::sidebar::{BLUE2, PURPLE};
 
@@ -484,5 +552,59 @@ mod tests {
             Some((icon.to_owned(), colour)),
             "the icon on the {pressed} row"
         );
+    }
+
+    /// A buffer the size of `SCREEN` with `mode`'s key box drawn on it.
+    fn draw_mode(mode: PaneMode) -> Buffer {
+        let mut buffer = Buffer::empty(SCREEN);
+        render_mode(mode, SCREEN, &mut buffer);
+        buffer
+    }
+
+    #[rstest::rstest]
+    #[case::move_(PaneMode::Move, &["h ←", "j ↓", "k ↑", "l →", "n ⇥", "p"])]
+    #[case::resize(
+        PaneMode::Resize,
+        &["h ←", "j ↓", "k ↑", "l →", "H", "J", "K", "L", "+", "-"]
+    )]
+    fn mode_box_lists_the_modes_keys(#[case] mode: PaneMode, #[case] expected: &[&str]) {
+        // Given a pane mode on.
+
+        // When drawing its key box.
+        let buffer = draw_mode(mode);
+
+        // Then the row keys are the mode's keys, each arrow beside its letter.
+        let keys: Vec<String> = lines(&buffer)
+            .iter()
+            .filter_map(|line| line.split_once('➜'))
+            .map(|(key, _)| key.trim_matches([' ', '│']).to_owned())
+            .collect();
+        assert_eq!(keys, expected, "the mode box rows");
+    }
+
+    #[rstest::rstest]
+    fn mode_box_top_border_names_the_mode() {
+        // Given move mode on.
+
+        // When drawing its key box.
+        let buffer = draw_mode(PaneMode::Move);
+
+        // Then the top border carries ` MOVE `.
+        let titled = lines(&buffer).iter().any(|line| line.contains("╭ MOVE "));
+        assert!(titled, "the top border should name the mode");
+    }
+
+    #[rstest::rstest]
+    fn mode_box_foot_reads_esc_enter_exit() {
+        // Given resize mode on.
+
+        // When drawing its key box.
+        let buffer = draw_mode(PaneMode::Resize);
+
+        // Then a row reads `esc/⏎ exit`.
+        let foot = lines(&buffer)
+            .iter()
+            .any(|line| line.contains("esc/⏎ exit"));
+        assert!(foot, "the foot should say how to leave the mode");
     }
 }

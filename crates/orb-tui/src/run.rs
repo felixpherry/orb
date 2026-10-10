@@ -407,6 +407,21 @@ where
     }
 }
 
+/// Handles a mouse event's intents in order after ending any pane mode;
+/// `execute` runs each intent's commands before the next intent is handled.
+fn handle_mouse_intents<F>(state: &State, intents: &[Intent], mut execute: F)
+where
+    F: FnMut(&Command),
+{
+    IntentHandler::handle(&Intent::ExitPaneMode, &mut state.write());
+    for intent in intents {
+        let commands = IntentHandler::handle(intent, &mut state.write());
+        for command in &commands {
+            execute(command);
+        }
+    }
+}
+
 /// Where the keys go once the pane is gone: from the pane to the sidebar;
 /// anywhere else (the sidebar after a click on it, a text input) they stay.
 fn after_pane(focus: Focus) -> Focus {
@@ -758,18 +773,15 @@ impl App {
         Some((self.panes.get(&id)?, self.hits.pane_area(id)?))
     }
 
-    /// Runs a mouse event's intents, ending any key sequence in progress.
+    /// Runs a mouse event's intents, ending any key sequence in progress and
+    /// any pane mode.
     fn run_mouse_intents(&mut self, intents: &[Intent]) {
         if intents.is_empty() {
             return;
         }
         self.keys.dismiss();
-        for intent in intents {
-            let commands = IntentHandler::handle(intent, &mut self.state.write());
-            for command in &commands {
-                self.execute(command);
-            }
-        }
+        let state = self.state.clone();
+        handle_mouse_intents(&state, intents, |command| self.execute(command));
     }
 
     fn handle<W>(&mut self, event: LoopEvent, out: &mut W) -> io::Result<()>
@@ -1569,14 +1581,14 @@ mod tests {
         ThreadId, ThreadStatus,
     };
     use orb_domain::feat::zmx::zmx_service::ZmxSession;
-    use orb_domain::{AppState, Focus};
+    use orb_domain::{AppState, Focus, Intent, PaneMode, State};
     use ratatui::crossterm::cursor::SetCursorStyle;
 
     use super::{
         AttachPlan, PaneExit, StartedAttach, after_pane, attach_at_start, attach_or_restore,
-        classify_exit, closed_in_layouts, cursor_style, list_directories, pane_error_after,
-        reattachable, resume_plan, stale_preview, stale_sessions, started_attach, to_drop, to_kill,
-        to_spawn,
+        classify_exit, closed_in_layouts, cursor_style, handle_mouse_intents, list_directories,
+        pane_error_after, reattachable, resume_plan, stale_preview, stale_sessions, started_attach,
+        to_drop, to_kill, to_spawn,
     };
 
     /// Pane `id`, a shell in `orb-p<id>`.
@@ -2264,5 +2276,21 @@ mod tests {
             "a directory orb didn't make spawns"
         );
         Ok(())
+    }
+
+    #[rstest::rstest]
+    fn mouse_intents_end_the_pane_mode() {
+        // Given move mode on in a pane.
+        let state = State::new(AppState {
+            focus: Focus::Pane,
+            pane_mode: Some(PaneMode::Move),
+            ..AppState::default()
+        });
+
+        // When a click runs its intents.
+        handle_mouse_intents(&state, &[Intent::GoToTab(1)], |_| {});
+
+        // Then no mode is on.
+        assert_eq!(state.read().pane_mode(), None, "a click ends the mode");
     }
 }
