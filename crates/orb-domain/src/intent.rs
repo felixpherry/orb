@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::PaneMode;
 use crate::feat::layout::tree::{NavDirection, Split};
 use crate::feat::sessions::state::{FolderKind, PaneId, SidebarItem};
 
@@ -51,6 +52,13 @@ pub enum Intent {
     GrowFocused,
     /// Shrink the focused pane, or narrow the sidebar while it has the keys.
     ShrinkFocused,
+    /// Turn on a pane mode; only while the keys are in a pane.
+    EnterPaneMode(PaneMode),
+    /// Turn the pane mode off.
+    ExitPaneMode,
+    /// Move the focused pane's border facing `dir` out (`grow`) or in by 5%
+    /// of the tab.
+    ResizeFocused { dir: NavDirection, grow: bool },
     /// Open a tab with one shell, shown.
     NewTab,
     /// Close the shown tab; one holding a pane a thread runs in detaches the thread.
@@ -210,6 +218,11 @@ impl fmt::Display for Intent {
             Self::BreakPane => "break pane",
             Self::GrowFocused => "grow",
             Self::ShrinkFocused => "shrink",
+            Self::EnterPaneMode(PaneMode::Resize) => "resize mode",
+            Self::EnterPaneMode(PaneMode::Move) => "move mode",
+            Self::ExitPaneMode => "exit mode",
+            Self::ResizeFocused { grow: true, .. } => "grow side",
+            Self::ResizeFocused { grow: false, .. } => "shrink side",
             Self::NewTab => "new tab",
             Self::CloseTab => "close tab",
             Self::RenameTab => "rename tab",

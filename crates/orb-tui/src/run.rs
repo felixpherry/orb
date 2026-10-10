@@ -778,11 +778,19 @@ impl App {
     {
         match event {
             LoopEvent::Input(Event::Key(key)) if key.kind != KeyEventKind::Release => {
-                let focus = self.state.read().focus;
-                let intent = match focus {
+                let (focus, mode) = {
+                    let state = self.state.read();
+                    (state.focus, state.pane_mode())
+                };
+                let intent = match (focus, mode) {
                     // The rename box and the search take the picker's keys.
-                    Focus::Picker | Focus::Rename | Focus::Search => keymap::picker_route(key),
-                    Focus::Sidebar | Focus::Pane => {
+                    (Focus::Picker | Focus::Rename | Focus::Search, _) => keymap::picker_route(key),
+                    (Focus::Pane, Some(mode)) => {
+                        // A pane mode takes every key; none reaches the pane's program.
+                        self.keys.dismiss();
+                        keymap::mode_route(mode, key)
+                    }
+                    (Focus::Sidebar | Focus::Pane, _) => {
                         match keymap::route(key, focus == Focus::Pane, self.keys.is_pending()) {
                             Route::Intent(intent) => {
                                 // A Cmd key or a jump ends any key sequence in progress.

@@ -23,7 +23,7 @@ use std::fmt;
 
 use orb_domain::feat::layout::tree::{NavDirection, Split};
 use orb_domain::feat::sessions::state::{FolderKind, SessionKind, Sessions};
-use orb_domain::{AppState, Focus, Intent};
+use orb_domain::{AppState, Focus, Intent, PaneMode};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_which_key::{Keymap, WhichKeyState};
 
@@ -354,6 +354,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind(
+                "<leader>r",
+                Intent::EnterPaneMode(PaneMode::Resize),
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
                 "<leader><c-g>",
                 Intent::SendCtrlG,
                 KeyCategory::Navigation,
@@ -462,6 +468,44 @@ fn cmd_route(key: KeyEvent) -> Option<Intent> {
     }
 }
 
+/// What `key` does while pane mode `mode` is on: the Cmd keys, `<C-S-h>`
+/// and `<C-S-l>` and the jump keys as usual, then the mode's own keys.
+/// `None` means the key does nothing; it never reaches the pane.
+pub(crate) fn mode_route(mode: PaneMode, key: KeyEvent) -> Option<Intent> {
+    cmd_route(key)
+        .or_else(|| ctrl_shift_route(key))
+        .or_else(|| jump_route(key))
+        .or_else(|| mode_key(mode, key))
+}
+
+/// A pane mode's own keys. A shifted letter is matched by its case alone,
+/// as `press` does.
+fn mode_key(mode: PaneMode, key: KeyEvent) -> Option<Intent> {
+    use NavDirection::{Down, Left, Right, Up};
+    let modifiers = match key.code {
+        KeyCode::Char(_) => key.modifiers - KeyModifiers::SHIFT,
+        _ => key.modifiers,
+    };
+    if modifiers != KeyModifiers::NONE {
+        return None;
+    }
+    let side = |dir, grow| Some(Intent::ResizeFocused { dir, grow });
+    match (mode, key.code) {
+        (_, KeyCode::Esc | KeyCode::Enter) => Some(Intent::ExitPaneMode),
+        (PaneMode::Resize, KeyCode::Char('h') | KeyCode::Left) => side(Left, true),
+        (PaneMode::Resize, KeyCode::Char('j') | KeyCode::Down) => side(Down, true),
+        (PaneMode::Resize, KeyCode::Char('k') | KeyCode::Up) => side(Up, true),
+        (PaneMode::Resize, KeyCode::Char('l') | KeyCode::Right) => side(Right, true),
+        (PaneMode::Resize, KeyCode::Char('H')) => side(Left, false),
+        (PaneMode::Resize, KeyCode::Char('J')) => side(Down, false),
+        (PaneMode::Resize, KeyCode::Char('K')) => side(Up, false),
+        (PaneMode::Resize, KeyCode::Char('L')) => side(Right, false),
+        (PaneMode::Resize, KeyCode::Char('+' | '=')) => Some(Intent::GrowFocused),
+        (PaneMode::Resize, KeyCode::Char('-')) => Some(Intent::ShrinkFocused),
+        _ => None,
+    }
+}
+
 /// What `key` does in an open picker; `None` when it does nothing.
 pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
@@ -499,12 +543,13 @@ mod tests {
         FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
         SidebarItem, Thread, ThreadId, ThreadStatus,
     };
-    use orb_domain::{Focus, Intent};
+    use orb_domain::{Focus, Intent, PaneMode};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui_which_key::{Key, NodeResult};
 
     use super::{
-        Keys, LEADER, Route, Scope, Selection, cmd_route, keymap, picker_route, press, route,
+        Keys, LEADER, Route, Scope, Selection, cmd_route, keymap, mode_route, picker_route, press,
+        route,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
 
@@ -1245,6 +1290,136 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn leader_r_is_unbound_in_the_sidebar() {
+        // Given `<C-g>` pressed in the sidebar.
+        let mut keys = Keys::new(keymap(), Scope::Sidebar);
+        press(&mut keys, LEADER);
+
+        // When pressing `r`.
+        let intent = press(&mut keys, key(KeyCode::Char('r')));
+
+        // Then nothing happens and no sequence is left waiting.
+        assert_eq!(
+            (intent, keys.is_pending()),
+            (None, false),
+            "<C-g> r should do nothing in the sidebar"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::esc(KeyCode::Esc)]
+    #[case::enter(KeyCode::Enter)]
+    fn esc_and_enter_leave_resize_mode(#[case] code: KeyCode) {
+        // Given resize mode.
+
+        // When pressing the key.
+        let intent = mode_route(PaneMode::Resize, key(code));
+
+        // Then the mode ends.
+        assert_eq!(
+            intent,
+            Some(Intent::ExitPaneMode),
+            "{code:?} in resize mode"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::letter(key(KeyCode::Char('x')))]
+    #[case::leader(LEADER)]
+    fn other_keys_do_nothing_in_resize_mode(#[case] pressed: KeyEvent) {
+        // Given resize mode.
+
+        // When pressing a key the mode doesn't use.
+        let intent = mode_route(PaneMode::Resize, pressed);
+
+        // Then nothing happens.
+        assert_eq!(intent, None, "{pressed:?} in resize mode");
+    }
+
+    #[rstest::rstest]
+    #[case::plus('+', Intent::GrowFocused)]
+    #[case::equals('=', Intent::GrowFocused)]
+    #[case::minus('-', Intent::ShrinkFocused)]
+    fn plus_equals_minus_act_as_cmd_plus_minus_in_resize_mode(
+        #[case] c: char,
+        #[case] expected: Intent,
+    ) {
+        // Given resize mode.
+
+        // When pressing the key.
+        let intent = mode_route(PaneMode::Resize, key(KeyCode::Char(c)));
+
+        // Then it does what Cmd with that key does.
+        assert_eq!(intent, Some(expected), "{c:?} in resize mode");
+    }
+
+    #[rstest::rstest]
+    #[case::h(key(KeyCode::Char('h')), NavDirection::Left, true)]
+    #[case::left(key(KeyCode::Left), NavDirection::Left, true)]
+    #[case::j(key(KeyCode::Char('j')), NavDirection::Down, true)]
+    #[case::down(key(KeyCode::Down), NavDirection::Down, true)]
+    #[case::k(key(KeyCode::Char('k')), NavDirection::Up, true)]
+    #[case::up(key(KeyCode::Up), NavDirection::Up, true)]
+    #[case::l(key(KeyCode::Char('l')), NavDirection::Right, true)]
+    #[case::right(key(KeyCode::Right), NavDirection::Right, true)]
+    #[case::shift_h(
+        KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT),
+        NavDirection::Left,
+        false
+    )]
+    #[case::bare_h(key(KeyCode::Char('H')), NavDirection::Left, false)]
+    #[case::shift_j(
+        KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT),
+        NavDirection::Down,
+        false
+    )]
+    #[case::shift_k(
+        KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
+        NavDirection::Up,
+        false
+    )]
+    #[case::shift_l(
+        KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT),
+        NavDirection::Right,
+        false
+    )]
+    fn resize_mode_keys_map_to_their_sides(
+        #[case] pressed: KeyEvent,
+        #[case] dir: NavDirection,
+        #[case] grow: bool,
+    ) {
+        // Given resize mode.
+
+        // When pressing a side key.
+        let intent = mode_route(PaneMode::Resize, pressed);
+
+        // Then it moves that side's border out (lower case) or in (capital).
+        assert_eq!(
+            intent,
+            Some(Intent::ResizeFocused { dir, grow }),
+            "{pressed:?} in resize mode"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cmd_keys_still_work_in_resize_mode() {
+        // Given resize mode.
+
+        // When pressing Cmd h.
+        let intent = mode_route(
+            PaneMode::Resize,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::SUPER),
+        );
+
+        // Then the focus moves left, as outside the mode.
+        assert_eq!(
+            intent,
+            Some(Intent::MoveFocus(NavDirection::Left)),
+            "Cmd h in resize mode"
+        );
+    }
+
+    #[rstest::rstest]
     fn space_is_unbound_in_the_sidebar() {
         // Given the keymap in the sidebar on a session.
         let mut keys = Keys::new(keymap(), Scope::Sidebar);
@@ -1301,6 +1476,8 @@ mod tests {
     #[case(Scope::Pane, "t9", Intent::GoToTab(9))]
     #[case(Scope::Pane, "\x07", Intent::SendCtrlG)]
     #[case(Scope::Pane, "q", Intent::Quit)]
+    #[case(Scope::Pane, "r", Intent::EnterPaneMode(PaneMode::Resize))]
+    #[case(Scope::PaneIncognito, "r", Intent::EnterPaneMode(PaneMode::Resize))]
     #[case(Scope::Sidebar, "q", Intent::Quit)]
     #[case(Scope::SidebarEmpty, "q", Intent::Quit)]
     fn leader_keys_yield_their_intents(
@@ -1331,8 +1508,8 @@ mod tests {
     #[case(Scope::Sidebar, "/ Space W a b e f g i n q t w")]
     #[case(Scope::SidebarEmpty, "/ Space W a e f g i n q")]
     #[case(Scope::SidebarIncognito, "/ Space W a e f g i n q t")]
-    #[case(Scope::Pane, "/ <C-g> Space W a b e g i n p q t w")]
-    #[case(Scope::PaneIncognito, "/ <C-g> Space W a e g i n p q t")]
+    #[case(Scope::Pane, "/ <C-g> Space W a b e g i n p q r t w")]
+    #[case(Scope::PaneIncognito, "/ <C-g> Space W a e g i n p q r t")]
     #[case(Scope::SidebarAgent, "/ Space W a b e f g i n q t w")]
     #[case(Scope::SidebarAgentIncognito, "/ Space W a e f g i n q t")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {

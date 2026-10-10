@@ -796,6 +796,19 @@ impl Layouts {
         })
     }
 
+    /// Resize mode's step on `owner`'s shown tab: see
+    /// [`TileLayout::resize_side`]. A zoomed tab, or one with no body yet,
+    /// doesn't change. Whether the tree changed, which marks the tab changed
+    /// by hand.
+    pub fn resize_side(&mut self, owner: SessionId, dir: NavDirection, grow: bool) -> bool {
+        let body = self.body;
+        self.tab_mut(owner).is_some_and(|tab| {
+            let changed = !tab.zoomed && !body.is_empty() && tab.tree.resize_side(body, dir, grow);
+            tab.hand_changed |= changed;
+            changed
+        })
+    }
+
     /// Shows tab `n`, counting from 1; past the last changes nothing.
     pub fn go_to_tab(&mut self, owner: SessionId, n: usize) {
         if let Some(layout) = self.sessions.get_mut(&owner)
@@ -2167,6 +2180,39 @@ mod tests {
             tree_json(&layouts),
             before,
             "growing a zoomed tab should leave its tree alone"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_side_on_a_zoomed_tab_keeps_the_tree() {
+        // Given panes 7 and 8 side by side, zoomed.
+        let mut layouts = split_right();
+        layouts.toggle_zoom(OWNER);
+        let before = tree_json(&layouts);
+
+        // When pushing the focused pane's left border out.
+        layouts.resize_side(OWNER, NavDirection::Left, true);
+
+        // Then the tree is as it was.
+        assert_eq!(
+            tree_json(&layouts),
+            before,
+            "resize mode on a zoomed tab should leave its tree alone"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_side_marks_the_tab_changed_by_hand() {
+        // Given panes 7 and 8 side by side, pane 8 focused.
+        let mut layouts = split_right();
+
+        // When pushing pane 8's left border out.
+        layouts.resize_side(OWNER, NavDirection::Left, true);
+
+        // Then the tab is changed by hand.
+        assert!(
+            hand_changed(&layouts),
+            "a resize-mode step should mark the tab changed by hand"
         );
     }
 

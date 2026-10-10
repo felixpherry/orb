@@ -56,6 +56,18 @@ pub enum NavDirection {
     Down,
 }
 
+impl NavDirection {
+    /// The direction facing the other way.
+    fn opposite(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+        }
+    }
+}
+
 /// Where a pane lands in an area, and whether it has the focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneInfo {
@@ -429,6 +441,16 @@ impl TileLayout {
         self.unstack_focused()
             || self.resize_any(body, false, STACKED_RESIZE_PERCENT)
             || self.resize_any(body, false, RESIZE_PERCENT)
+    }
+
+    /// Resize mode's step: moves the focused unit's (pane's or stack's) edge
+    /// facing `dir` [`RESIZE_PERCENT`] of the tab, out when `grow`, in
+    /// otherwise. A grow that can't go that way (the tab's edge, or a
+    /// neighbour that would get too small) pulls the opposite edge in
+    /// instead; a shrink never falls back. Whether it changed.
+    pub fn resize_side(&mut self, body: Rect, dir: NavDirection, grow: bool) -> bool {
+        self.resize_toward(body, dir, grow, RESIZE_PERCENT)
+            || (grow && self.resize_toward(body, dir.opposite(), false, RESIZE_PERCENT))
     }
 
     /// A resize with no direction: the first of the corners (right
@@ -2847,6 +2869,85 @@ mod tests {
 
         // Then one pane leaves the stack with a third of its rows.
         assert_eq!(layout.root, expected, "Cmd - should break a pane out");
+    }
+
+    /// Whether the root split's ratio is `expected`, give or take a rounding.
+    fn ratio_is(layout: &TileLayout, expected: f32) -> bool {
+        ratio(layout).is_some_and(|ratio| (ratio - expected).abs() < 1e-3)
+    }
+
+    #[rstest::rstest]
+    fn resize_side_out_moves_the_border_5_percent() {
+        // Given panes 1 and 2 side by side, pane 1 focused.
+        let mut layout = halves(1);
+
+        // When pushing pane 1's right border out.
+        layout.resize_side(AREA, NavDirection::Right, true);
+
+        // Then the border sits 5% of the tab further right.
+        assert!(
+            ratio_is(&layout, 0.55),
+            "the right border should move right 5%, got {:?}",
+            ratio(&layout)
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_side_in_moves_the_border_back_5_percent() {
+        // Given panes 1 and 2 side by side, pane 1 focused.
+        let mut layout = halves(1);
+
+        // When pulling pane 1's right border in.
+        layout.resize_side(AREA, NavDirection::Right, false);
+
+        // Then the border sits 5% of the tab further left.
+        assert!(
+            ratio_is(&layout, 0.45),
+            "the right border should move left 5%, got {:?}",
+            ratio(&layout)
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_side_growing_toward_the_tabs_edge_pulls_the_opposite_border_in() {
+        // Given panes 1 and 2 side by side, pane 1 focused, its left edge the tab's.
+        let mut layout = halves(1);
+
+        // When pushing pane 1's left border out.
+        layout.resize_side(AREA, NavDirection::Left, true);
+
+        // Then its right border moves in 5% instead.
+        assert!(
+            ratio_is(&layout, 0.45),
+            "a grow at the tab's edge should pull the opposite border in, got {:?}",
+            ratio(&layout)
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_side_shrinking_toward_the_tabs_edge_changes_nothing() {
+        // Given panes 1 and 2 side by side, pane 1 focused, its left edge the tab's.
+        let mut layout = halves(1);
+        let before = layout.clone();
+
+        // When pulling pane 1's left border in.
+        layout.resize_side(AREA, NavDirection::Left, false);
+
+        // Then the tree is unchanged.
+        assert_eq!(layout, before, "the tab's edge never moves");
+    }
+
+    #[rstest::rstest]
+    fn resize_side_never_leaves_a_pane_under_the_minimum() {
+        // Given panes 1 and 2 side by side in a 10-column tab, pane 1 focused.
+        let mut layout = halves(1);
+        let before = layout.clone();
+
+        // When pushing pane 1's right border out (pane 2 would get 4 columns).
+        layout.resize_side(Rect::new(0, 0, 10, 40), NavDirection::Right, true);
+
+        // Then the tree is unchanged.
+        assert_eq!(layout, before, "no pane goes under the minimum size");
     }
 
     #[rstest::rstest]

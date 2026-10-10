@@ -13,7 +13,7 @@ pub mod feat;
 mod intent;
 mod intent_handler;
 
-pub use app_state::{AppState, Focus};
+pub use app_state::{AppState, Focus, PaneMode};
 pub use command::Command;
 pub use common::{
     Finished, Services, State, TextInput, Wake, ancestry, parse_parents, run_within, tilde,

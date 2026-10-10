@@ -170,6 +170,17 @@ impl IntentHandler {
                 .map_or_else(Vec::new, |owner| vec![Command::SaveLayout(owner)]),
             Intent::GrowFocused => grow_or_shrink(state, true),
             Intent::ShrinkFocused => grow_or_shrink(state, false),
+            Intent::EnterPaneMode(mode) => {
+                if validate_pane_action(state).is_ok() {
+                    state.pane_mode = Some(*mode);
+                }
+                vec![]
+            }
+            Intent::ExitPaneMode => {
+                state.pane_mode = None;
+                vec![]
+            }
+            Intent::ResizeFocused { dir, grow } => resize_side(state, *dir, *grow),
             Intent::NewTab => match (validate_tab_action(state), state.shown_session()) {
                 (Ok(()), Some(session)) => vec![Command::NewTab(session)],
                 _ => vec![],
@@ -1368,6 +1379,20 @@ fn close_tab(state: &mut AppState) -> Vec<Command> {
     vec![Command::SaveLayout(owner)]
 }
 
+/// Resize mode's step on the focused pane's `dir` border; saves the layout
+/// when the tree changed.
+fn resize_side(state: &mut AppState, dir: NavDirection, grow: bool) -> Vec<Command> {
+    let mut changed = false;
+    let owner = in_pane(state, |layouts, owner| {
+        changed = layouts.resize_side(owner, dir, grow);
+    });
+    owner
+        .filter(|_| changed)
+        .map(Command::SaveLayout)
+        .into_iter()
+        .collect()
+}
+
 /// Grows (`grow`) or shrinks what has the keys: the sidebar, saving its new
 /// width, or the focused pane.
 fn grow_or_shrink(state: &mut AppState, grow: bool) -> Vec<Command> {
@@ -1683,7 +1708,7 @@ mod tests {
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
     use crate::feat::worktrees::state::{Worktree, Worktrees};
-    use crate::{AppState, Command, Focus, Intent, IntentHandler, TextInput};
+    use crate::{AppState, Command, Focus, Intent, IntentHandler, PaneMode, TextInput};
     use ratatui::layout::Rect;
 
     /// Claude's setting row for `value`.
@@ -7439,6 +7464,125 @@ mod tests {
             commands.is_empty(),
             "a Cmd + that only zooms leaves the saved tree alone"
         );
+    }
+
+    /// Shell pane 50's width in the 80-column tab.
+    fn pane_50_width(state: &AppState) -> Option<u16> {
+        state
+            .shown_layout()?
+            .placed(Rect::new(0, 0, 80, 24), |_| 0)
+            .panes
+            .into_iter()
+            .find(|place| place.pane == PaneId(50))
+            .map(|place| place.area.width)
+    }
+
+    #[rstest::rstest]
+    fn resize_side_grows_the_focused_pane_5_percent() {
+        // Given shell pane 50 split off on the right and focused.
+        let mut state = split_layout();
+        let before = pane_50_width(&state);
+
+        // When pushing its left border out.
+        IntentHandler::handle(
+            &Intent::ResizeFocused {
+                dir: NavDirection::Left,
+                grow: true,
+            },
+            &mut state,
+        );
+
+        // Then pane 50 is 4 columns wider: 5% of the 80-column tab.
+        assert_eq!(
+            pane_50_width(&state),
+            before.map(|width| width + 4),
+            "a resize-mode step moves the border 5% of the tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_side_that_changes_the_tree_returns_save_layout() {
+        // Given shell pane 50 split off on the right and focused.
+        let mut state = split_layout();
+
+        // When pushing its left border out.
+        let commands = IntentHandler::handle(
+            &Intent::ResizeFocused {
+                dir: NavDirection::Left,
+                grow: true,
+            },
+            &mut state,
+        );
+
+        // Then the layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "a resize-mode step that changes the tree saves the layout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_side_on_a_zoomed_tab_returns_no_commands() {
+        // Given two panes side by side, zoomed.
+        let mut state = split_layout();
+        IntentHandler::handle(&Intent::ToggleZoom, &mut state);
+
+        // When pushing the focused pane's left border out.
+        let commands = IntentHandler::handle(
+            &Intent::ResizeFocused {
+                dir: NavDirection::Left,
+                grow: true,
+            },
+            &mut state,
+        );
+
+        // Then nothing is saved.
+        assert!(
+            commands.is_empty(),
+            "resize mode on a zoomed tab changes nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_pane_mode_in_a_pane_turns_it_on() {
+        // Given the keys in a pane.
+        let mut state = with_layout(Focus::Pane);
+
+        // When entering resize mode.
+        IntentHandler::handle(&Intent::EnterPaneMode(PaneMode::Resize), &mut state);
+
+        // Then resize mode is on.
+        assert_eq!(
+            state.pane_mode(),
+            Some(PaneMode::Resize),
+            "<C-g> r in a pane turns resize mode on"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_pane_mode_in_the_sidebar_does_nothing() {
+        // Given the keys in the sidebar.
+        let mut state = with_layout(Focus::Sidebar);
+
+        // When entering resize mode.
+        IntentHandler::handle(&Intent::EnterPaneMode(PaneMode::Resize), &mut state);
+
+        // Then no mode is turned on.
+        assert_eq!(state.pane_mode, None, "a pane mode needs a pane");
+    }
+
+    #[rstest::rstest]
+    fn exit_pane_mode_turns_it_off() {
+        // Given resize mode on in a pane.
+        let mut state = with_layout(Focus::Pane);
+        state.pane_mode = Some(PaneMode::Resize);
+
+        // When leaving the mode.
+        IntentHandler::handle(&Intent::ExitPaneMode, &mut state);
+
+        // Then no mode is on.
+        assert_eq!(state.pane_mode(), None, "Esc or Enter leaves the mode");
     }
 
     #[rstest::rstest]

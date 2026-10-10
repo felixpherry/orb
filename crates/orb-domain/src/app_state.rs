@@ -30,6 +30,15 @@ pub enum Focus {
     Search,
 }
 
+/// A sticky mode the keys can be in while they are in a pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneMode {
+    /// Keys push and pull the focused pane's borders.
+    Resize,
+    /// Keys swap the focused pane with another.
+    Move,
+}
+
 /// Everything the frontend needs to draw a frame and decide whether to exit.
 #[derive(Debug, Default)]
 pub struct AppState {
@@ -37,6 +46,10 @@ pub struct AppState {
     pub should_quit: bool,
     /// Where the user's keys currently go.
     pub focus: Focus,
+    /// The pane mode the user turned on, if any; it only counts while the keys
+    /// are in a pane (see [`AppState::pane_mode`]). Written by the intent
+    /// handler.
+    pub pane_mode: Option<PaneMode>,
     /// orb's projects and their sessions.
     pub sessions: Sessions,
     /// The sidebar's width, visibility and last layout.
@@ -76,6 +89,11 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The pane mode in force: the one turned on, while the keys are in a pane.
+    pub fn pane_mode(&self) -> Option<PaneMode> {
+        self.pane_mode.filter(|_| self.focus == Focus::Pane)
+    }
+
     /// The session the right-hand area shows: the selected one, while it is
     /// attached and has a layout.
     pub fn shown_session(&self) -> Option<SessionId> {
@@ -99,7 +117,7 @@ impl AppState {
 mod tests {
     use std::time::SystemTime;
 
-    use super::AppState;
+    use super::{AppState, Focus, PaneMode};
     use crate::feat::harness::HarnessId;
     use crate::feat::layout::state::{PaneEntry, SessionLayout};
     use crate::feat::sessions::state::{
@@ -207,5 +225,21 @@ mod tests {
             shown.is_none(),
             "an unattached thread shows the start screen"
         );
+    }
+
+    #[rstest::rstest]
+    fn pane_mode_is_none_outside_a_pane() {
+        // Given resize mode turned on while the keys are in the sidebar.
+        let state = AppState {
+            focus: Focus::Sidebar,
+            pane_mode: Some(PaneMode::Resize),
+            ..AppState::default()
+        };
+
+        // When asking for the pane mode in force.
+        let mode = state.pane_mode();
+
+        // Then there is none.
+        assert_eq!(mode, None, "a pane mode only counts in a pane");
     }
 }

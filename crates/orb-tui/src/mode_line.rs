@@ -15,7 +15,7 @@ use std::time::SystemTime;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use orb_domain::feat::sessions::state::{Sessions, SidebarItem, SidebarRow, ThreadStatus};
-use orb_domain::{AppState, Focus};
+use orb_domain::{AppState, Focus, PaneMode};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
@@ -24,7 +24,7 @@ use ratatui::widgets::Widget;
 
 use crate::sidebar::{
     APPROVAL_ICON, BG_DARK, BLACK, BLUE, BRANCH, CYAN, FG_DARK, FOLDER, GREEN, GREEN1, GUTTER,
-    INPUT_ICON, ORANGE, SPINNER, SPINNER_FRAME, YELLOW,
+    INPUT_ICON, MAGENTA, ORANGE, SPINNER, SPINNER_FRAME, YELLOW,
 };
 
 /// Closes a left block into the next (Nerd Font `nf-pl-left_hard_divider`).
@@ -60,7 +60,11 @@ pub(crate) fn render(
 /// The mode's name and colour.
 fn mode(state: &AppState) -> (&'static str, Color) {
     match state.focus {
-        Focus::Pane => ("PANE", GREEN1),
+        Focus::Pane => match state.pane_mode() {
+            Some(PaneMode::Resize) => ("RESIZE", ORANGE),
+            Some(PaneMode::Move) => ("MOVE", MAGENTA),
+            None => ("PANE", GREEN1),
+        },
         Focus::Sidebar => ("NORMAL", BLUE),
         Focus::Picker => ("PICKER", YELLOW),
         Focus::Rename | Focus::Search => ("INSERT", GREEN),
@@ -213,7 +217,7 @@ mod tests {
         Thread, ThreadId, ThreadStatus,
     };
     use orb_domain::feat::worktrees::state::Worktrees;
-    use orb_domain::{AppState, Focus};
+    use orb_domain::{AppState, Focus, PaneMode};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
     use ratatui::style::Color;
@@ -403,6 +407,23 @@ mod tests {
         let buffer = draw(&state);
 
         // Then the mode block names that mode.
+        let text = text(&buffer);
+        assert!(text.starts_with(block), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    #[case::resize(PaneMode::Resize, " RESIZE ")]
+    fn mode_line_names_the_pane_mode(#[case] mode: PaneMode, #[case] block: &str) {
+        // Given a selected thread with the keys in a pane in that mode.
+        let state = AppState {
+            pane_mode: Some(mode),
+            ..selected(Focus::Pane)
+        };
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the mode block names the pane mode.
         let text = text(&buffer);
         assert!(text.starts_with(block), "mode line was '{text}'");
     }
