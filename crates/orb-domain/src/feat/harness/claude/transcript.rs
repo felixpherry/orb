@@ -4,7 +4,8 @@
 //! projects directory. orb reads only the lines added since its last look, so
 //! each line is parsed once, and titles a thread by the latest title the user
 //! gave with `/rename`, else Claude's latest generated title, else the first
-//! real prompt. The same pass notes the git branch the latest prompt ran on.
+//! real prompt, counting the text typed after a slash command. The same pass
+//! notes the git branch the latest prompt ran on.
 //!
 //! For the session picker's preview it also reads a transcript's tail into
 //! its last few exchanges: a prompt, the tools Claude ran, and Claude's last
@@ -127,19 +128,46 @@ fn text_field(line: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The first line of a prompt the user typed, or `None` for anything else
-/// Claude records as a user line.
+/// The first line of a prompt the user typed, or of the text typed after a
+/// slash command, or `None` for anything else Claude records as a user line.
 fn prompt(line: &Value) -> Option<String> {
-    prompt_text(line)?
-        .lines()
-        .next()
-        .map(|first| first.trim().to_owned())
+    match prompt_text(line) {
+        Some(text) => text.lines().next().map(|first| first.trim().to_owned()),
+        None => command_args(line)?
+            .lines()
+            .map(str::trim)
+            .find(|first| !first.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+/// The text typed after a slash command, trimmed, or `None` for a command
+/// typed bare and anything that isn't a command.
+fn command_args(line: &Value) -> Option<&str> {
+    let text = user_text(line)?;
+    if !text.starts_with("<command-message>") && !text.starts_with("<command-name>") {
+        return None;
+    }
+    let (_, rest) = text.split_once("<command-args>")?;
+    let (args, _) = rest.split_once("</command-args>")?;
+    Some(args.trim()).filter(|args| !args.is_empty())
 }
 
 /// The whole prompt the user typed, trimmed, or `None` for anything else
 /// Claude records as a user line (skill bodies, commands, tool results,
 /// interruptions).
 fn prompt_text(line: &Value) -> Option<&str> {
+    let text = user_text(line)?;
+    match text {
+        "" => None,
+        _ if text.starts_with('<') || text.starts_with("[Request interrupted") => None,
+        _ => Some(text),
+    }
+}
+
+/// The text of a user line Claude didn't add itself, trimmed: the string
+/// content or the first text block.
+fn user_text(line: &Value) -> Option<&str> {
     if line.get("isMeta").and_then(Value::as_bool) == Some(true) {
         return None;
     }
@@ -151,13 +179,8 @@ fn prompt_text(line: &Value) -> Option<&str> {
             .get("text")?
             .as_str()?,
         _ => return None,
-    }
-    .trim();
-    match text {
-        "" => None,
-        _ if text.starts_with('<') || text.starts_with("[Request interrupted") => None,
-        _ => Some(text),
-    }
+    };
+    Some(text.trim())
 }
 
 /// How much of a transcript's end the preview reads.
@@ -340,6 +363,8 @@ mod tests {
     };
 
     const PROMPT: &str = r#"{"type":"user","message":{"role":"user","content":"Fix the parser\nIt drops the last line"}}"#;
+
+    const COMMAND: &str = r#"{"type":"user","message":{"content":"<command-message>plan</command-message>\n<command-name>/plan</command-name>\n<command-args>fix parser\nand the lexer</command-args>"}}"#;
 
     fn write_transcript(dir: &Path, lines: &[&str]) -> io::Result<PathBuf> {
         let path = dir.join("session.jsonl");
@@ -552,6 +577,9 @@ mod tests {
     #[case::command_name(
         r#"{"type":"user","message":{"content":"<command-name>/plan</command-name>"}}"#
     )]
+    #[case::empty_command_args(
+        r#"{"type":"user","message":{"content":"<command-name>/plan</command-name>\n<command-args></command-args>"}}"#
+    )]
     #[case::local_command_caveat(r#"{"type":"user","message":{"content":"<local-command-caveat>Caveat: do not respond</local-command-caveat>"}}"#)]
     #[case::tool_result(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#)]
     #[case::interrupted(r#"{"type":"user","message":{"content":"[Request interrupted by user]"}}"#)]
@@ -582,6 +610,86 @@ mod tests {
             title.as_deref(),
             Some("What's in this screenshot?"),
             "title should come from the text block"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn command_args_title_the_thread() -> io::Result<()> {
+        // Given a transcript that starts with a slash command and its args.
+        // When scanning it.
+        let title = title_of(&[COMMAND])?;
+
+        // Then the title comes from the args.
+        assert_eq!(
+            title.as_deref(),
+            Some("fix parser"),
+            "the command's args should title the thread"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn command_args_title_the_thread_by_their_first_line_only() -> io::Result<()> {
+        // Given a slash command whose args span two lines.
+        // When scanning it.
+        let title = title_of(&[COMMAND])?;
+
+        // Then the second line is left out of the title.
+        assert!(
+            title
+                .as_deref()
+                .is_some_and(|title| !title.contains("lexer")),
+            "only the args' first line should title the thread, got {title:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn command_args_starting_blank_title_by_their_first_text_line() -> io::Result<()> {
+        // Given a slash command whose args begin with blank lines.
+        // When scanning it.
+        let title = title_of(&[
+            r#"{"type":"user","message":{"content":"<command-name>/plan</command-name>\n<command-args>\n\nfix parser</command-args>"}}"#,
+        ])?;
+
+        // Then the title is the first line with text.
+        assert_eq!(
+            title.as_deref(),
+            Some("fix parser"),
+            "blank leading lines should be skipped"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn ai_title_replaces_the_command_args_title() -> io::Result<()> {
+        // Given a slash command followed by a generated title.
+        // When scanning it.
+        let title = title_of(&[COMMAND, r#"{"type":"ai-title","aiTitle":"Parser fix"}"#])?;
+
+        // Then the generated title wins.
+        assert_eq!(
+            title.as_deref(),
+            Some("Parser fix"),
+            "a later ai-title should replace the args title"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn text_block_of_a_command_array_titles_the_thread() -> io::Result<()> {
+        // Given a slash command stored as a text block in a content array.
+        // When scanning it.
+        let title = title_of(&[
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"<command-name>/plan</command-name>\n<command-args>fix parser</command-args>"}]}}"#,
+        ])?;
+
+        // Then the title comes from the block's args.
+        assert_eq!(
+            title.as_deref(),
+            Some("fix parser"),
+            "a command text block should title the thread"
         );
         Ok(())
     }
@@ -727,6 +835,7 @@ mod tests {
     #[case::command_name(
         r#"{"type":"user","message":{"content":"<command-name>/plan</command-name>"}}"#
     )]
+    #[case::command_with_args(COMMAND)]
     #[case::tool_result(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#)]
     #[case::interrupted(r#"{"type":"user","message":{"content":"[Request interrupted by user]"}}"#)]
     fn non_prompt_user_lines_open_no_exchange(#[case] line: &str) -> io::Result<()> {
