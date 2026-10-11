@@ -416,7 +416,7 @@ T3 facts are read from the T3 Code source at commit `f5ef0ddb90a8c36584e181b1913
 - `claude --version` prints `2.1.283 (Claude Code)`.
 - `--model <model>`: "Model for the current session. Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name (e.g. 'claude-fable-5')."
 - `--permission-mode <mode>`: "Permission mode to use for the session (choices: "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")". `--help` doesn't describe the modes.
-- `-n, --name <name>`: "Set a display name for this session (shown in the prompt box, /resume picker, and terminal title)". orb passes no `-n` (see the roadmap's thread-title decision).
+- `-n, --name <name>`: "Set a display name for this session (shown in the prompt box, /resume picker, and terminal title)". orb passes no `-n` (see decisions.md, thread title).
 - `--bg` **honours** `--model` and `--permission-mode`, unlike `--session-id` (§1). `claude --bg --model sonnet --permission-mode plan` started idle, and once attached Claude showed "Sonnet 5" in the prompt box and "plan mode on". `--model haiku --permission-mode acceptEdits` showed "Haiku 4.5" and "accept edits on". **[verified]**
 - Without the flags, the session uses whatever Claude's own settings give. That's orb's `Default`, which passes no flag.
 
