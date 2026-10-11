@@ -217,8 +217,6 @@ pub struct PaneRow {
     pub zmx_dir: Option<PathBuf>,
     /// The command to type into a fresh shell to bring its agent back.
     pub resume: Option<String>,
-    /// A Claude `--bg` session the migration replaced, still to stop.
-    pub migrated_bg: Option<String>,
     /// The name the user gave it.
     pub name: Option<String>,
 }
@@ -536,8 +534,9 @@ impl Store {
     }
 
     /// Saves a new `kind` session of `project` named `name` in `dir` on
-    /// `branch`, last active and visited at `now`, with one tab holding one shell pane.
-    /// Returns the session and its pane.
+    /// `branch`, last active and visited at `now`, with one shell pane in
+    /// `dir` and no tab: the caller saves its layout. Returns the session
+    /// and its pane.
     ///
     /// # Errors
     ///
@@ -552,33 +551,31 @@ impl Store {
         name: Option<&str>,
         now: i64,
     ) -> Result<(SessionId, PaneId), Report<StoreError>> {
-        let dir = utf8(dir)?.to_owned();
         let tx = self
             .conn
             .unchecked_transaction()
             .change_context(StoreError)
             .attach("failed to start saving the session")?;
-        let session = NewSession {
-            project_id: project.0,
-            kind: session_kind_text(kind).to_owned(),
-            dir: dir.clone(),
-            name: name.map(str::to_owned),
-            branch: branch.map(str::to_owned),
-            created_at: now,
-            pinned_at: None,
-            settled_override: None,
-            settled_at: None,
-            unsettled_at: None,
-            last_activity_at: now,
-            last_visited_at: now,
-        };
-        let (session, panes) = insert_session(&tx, &session, &[NewPane::shell(dir)])
+        let session = tx
+            .query_row(
+                "INSERT INTO sessions
+                   (project_id, kind, dir, name, branch, created_at, last_activity_at,
+                    last_visited_at, active_tab)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6, 0) RETURNING id",
+                params![
+                    project.0,
+                    session_kind_text(kind),
+                    utf8(dir)?,
+                    name,
+                    branch,
+                    now
+                ],
+                |row| row.get(0),
+            )
+            .map(SessionId)
             .change_context(StoreError)
             .attach("failed to save the session")?;
-        let pane = panes
-            .first()
-            .copied()
-            .ok_or_else(|| Report::new(StoreError).attach("the session has no pane"))?;
+        let pane = self.insert_pane(session, dir)?;
         tx.commit()
             .change_context(StoreError)
             .attach("failed to commit the session")?;
@@ -661,7 +658,7 @@ impl Store {
             .attach("failed to load floats")?;
         let panes = self
             .query(
-                "SELECT id, session_id, cwd, zmx_name, zmx_dir, resume, migrated_bg, name
+                "SELECT id, session_id, cwd, zmx_name, zmx_dir, resume, name
                  FROM panes ORDER BY id",
                 |row| {
                     Ok(PaneRow {
@@ -671,8 +668,7 @@ impl Store {
                         zmx_name: row.get(3)?,
                         zmx_dir: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
                         resume: row.get(5)?,
-                        migrated_bg: row.get(6)?,
-                        name: row.get(7)?,
+                        name: row.get(6)?,
                     })
                 },
             )
@@ -958,24 +954,6 @@ impl Store {
         Ok(())
     }
 
-    /// Forgets the `--bg` sessions `panes` replaced, once they're stopped.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database can't be written.
-    pub fn clear_migrated_bg(&self, panes: &[PaneId]) -> Result<(), Report<StoreError>> {
-        for pane in panes {
-            self.conn
-                .execute(
-                    "UPDATE panes SET migrated_bg = NULL WHERE id = ?1",
-                    [pane.0],
-                )
-                .change_context(StoreError)
-                .attach("failed to clear a pane's --bg session")?;
-        }
-        Ok(())
-    }
-
     /// Updates everything about a thread that changes after it's created: its
     /// session and directory (a thread can move to another workspace), titles,
     /// branch, transcript position, turn start, activity and visit stamps,
@@ -1016,19 +994,6 @@ impl Store {
             )
             .change_context(StoreError)
             .attach("failed to update the thread")?;
-        Ok(())
-    }
-
-    /// Deletes a thread. Its project stays.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database can't be written.
-    pub fn delete_thread(&self, id: ThreadId) -> Result<(), Report<StoreError>> {
-        self.conn
-            .execute("DELETE FROM threads WHERE id = ?1", params![id.0])
-            .change_context(StoreError)
-            .attach("failed to delete the thread")?;
         Ok(())
     }
 
@@ -1836,7 +1801,8 @@ mod tests {
     }
 
     /// Saves thread `28bf38e2` of Claude, created at 1000, in a new plain
-    /// session of project `project_id` in `/tmp/orb`.
+    /// session of project `project_id` in `/tmp/orb`, one saved tab of one
+    /// pane.
     fn insert_thread(store: &Store, project_id: ProjectId) -> Result<Seeded, Report<StoreError>> {
         let (session, pane) = store.insert_session(
             project_id,
@@ -1845,6 +1811,13 @@ mod tests {
             None,
             None,
             1_000,
+        )?;
+        store.save_layout(
+            session,
+            0,
+            &[lone_tab(session, pane)],
+            &SessionFloats::default(),
+            &[(pane, None)],
         )?;
         let (thread, _) = store.insert_pane_thread(&NewPaneThread {
             pane,
@@ -2747,23 +2720,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn deleted_thread_is_gone_after_reload() -> Result<(), Report<StoreError>> {
-        // Given a store with one thread.
-        let store = Store::open_in_memory()?;
-        let project_id =
-            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        let thread_id = insert_thread(&store, project_id)?.thread;
-
-        // When deleting it.
-        store.delete_thread(thread_id)?;
-
-        // Then loading no longer returns it.
-        let (_, threads) = store.load()?;
-        assert!(threads.is_empty(), "the deleted thread should not load");
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn inserted_thread_starts_seen_and_active_at_creation() -> Result<(), Report<StoreError>> {
         // Given a store with a project.
         let store = Store::open_in_memory()?;
@@ -2841,7 +2797,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn insert_session_saves_one_tab_with_one_shell_pane() -> Result<(), Report<StoreError>> {
+    fn insert_session_saves_one_shell_pane_and_no_tab() -> Result<(), Report<StoreError>> {
         // Given a store with one project.
         let store = Store::open_in_memory()?;
         let project = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
@@ -2856,7 +2812,7 @@ mod tests {
             1_000,
         )?;
 
-        // Then its one tab focuses its one pane, a shell in that directory.
+        // Then it holds one shell pane in that directory and no tab.
         let saved = store.layouts()?;
         let tabs: Vec<(SessionId, Option<PaneId>)> = saved
             .tabs
@@ -2871,10 +2827,10 @@ mod tests {
         assert_eq!(
             (tabs, panes),
             (
-                vec![(session, Some(pane))],
+                vec![],
                 vec![(pane, session, PathBuf::from("/tmp/orb"), None)]
             ),
-            "a new session should hold one tab of one shell pane"
+            "a new session row should hold one shell pane and leave its tab to the layout save"
         );
         Ok(())
     }
@@ -4878,29 +4834,6 @@ mod tests {
             vec![Some("claude --resume s-1".to_owned())],
             "the resume command should be saved"
         );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn cleared_bg_marker_loads_back_empty() -> Result<(), Report<StoreError>> {
-        // Given a migrated v10 database with a Claude pane still to stop.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = migrated_v10(dir.path())?;
-        let pane = PaneId(pane_of(&path, 3)?);
-        let store = Store::open(&path)?;
-
-        // When clearing its marker.
-        store.clear_migrated_bg(&[pane])?;
-
-        // Then it loads back without one.
-        let marker: Vec<Option<String>> = store
-            .layouts()?
-            .panes
-            .into_iter()
-            .filter(|row| row.id == pane)
-            .map(|row| row.migrated_bg)
-            .collect();
-        assert_eq!(marker, vec![None], "a cleared marker should stay cleared");
         Ok(())
     }
 

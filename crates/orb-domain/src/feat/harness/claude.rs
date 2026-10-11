@@ -1,6 +1,5 @@
-//! Claude Code: the interactive Claudes it runs, seen by process,
-//! transcripts under its config dir, and the one stop of a background
-//! session the store's migration replaced.
+//! Claude Code: the interactive Claudes it runs, seen by process, and
+//! transcripts under its config dir.
 
 pub mod supervisor;
 pub mod transcript;
@@ -92,14 +91,6 @@ impl Harness for ClaudeCode {
     async fn running(&self) -> Result<Vec<RunningAgent>, Report<HarnessError>> {
         self.agents.list().await
     }
-
-    async fn live_background(&self) -> Result<Vec<String>, Report<HarnessError>> {
-        self.agents.live_background().await
-    }
-
-    async fn stop_migrated(&self, short_id: &str) -> Result<(), Report<HarnessError>> {
-        self.agents.stop(short_id).await
-    }
 }
 
 #[cfg(test)]
@@ -115,14 +106,9 @@ pub(crate) mod fake {
     use super::supervisor::ClaudeAgents;
     use crate::feat::harness::{HarnessError, RunningAgent};
 
-    /// A `claude` that runs the agents and live background sessions the test
-    /// scripts and logs the sessions it is asked to stop.
+    /// A `claude` that runs the agents the test scripts.
     pub(crate) struct FakeClaude {
         running: Mutex<Result<Vec<RunningAgent>, String>>,
-        live: Mutex<Result<Vec<String>, String>>,
-        /// The session whose stop never finishes.
-        hangs: Mutex<Option<String>>,
-        stopped: Mutex<Vec<String>>,
         /// How many times `list` was called.
         lists: AtomicUsize,
     }
@@ -132,9 +118,6 @@ pub(crate) mod fake {
         pub(crate) fn running(running: Vec<RunningAgent>) -> Self {
             Self {
                 running: Mutex::new(Ok(running)),
-                live: Mutex::new(Ok(Vec::new())),
-                hangs: Mutex::default(),
-                stopped: Mutex::default(),
                 lists: AtomicUsize::new(0),
             }
         }
@@ -144,28 +127,9 @@ pub(crate) mod fake {
             self.lists.load(Ordering::SeqCst)
         }
 
-        /// From now on `live_background` answers `live`, or fails with the
-        /// reason.
-        pub(crate) fn set_live(&self, live: Result<Vec<String>, String>) {
-            *self.live.lock().unwrap_or_else(PoisonError::into_inner) = live;
-        }
-
-        /// From now on stopping `short_id` never finishes.
-        pub(crate) fn hang_on(&self, short_id: &str) {
-            *self.hangs.lock().unwrap_or_else(PoisonError::into_inner) = Some(short_id.to_owned());
-        }
-
         /// From now on `list` answers `running`, or fails with the reason.
         pub(crate) fn set_running(&self, running: Result<Vec<RunningAgent>, String>) {
             *self.running.lock().unwrap_or_else(PoisonError::into_inner) = running;
-        }
-
-        /// The sessions `stop` was called on, in order.
-        pub(crate) fn stopped(&self) -> Vec<String> {
-            self.stopped
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
         }
     }
 
@@ -183,61 +147,5 @@ pub(crate) mod fake {
                 .clone()
                 .map_err(|reason| Report::new(HarnessError).attach(reason))
         }
-
-        async fn live_background(&self) -> Result<Vec<String>, Report<HarnessError>> {
-            self.live
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-                .map_err(|reason| Report::new(HarnessError).attach(reason))
-        }
-
-        async fn stop(&self, short_id: &str) -> Result<(), Report<HarnessError>> {
-            let hangs = self
-                .hangs
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_deref()
-                == Some(short_id);
-            if hangs {
-                std::future::pending::<()>().await;
-            }
-            self.stopped
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(short_id.to_owned());
-            Ok(())
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    use error_stack::Report;
-
-    use super::ClaudeCode;
-    use super::fake::FakeClaude;
-    use crate::feat::harness::{Harness, HarnessError};
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn claude_stop_migrated_runs_claude_stop() -> Result<(), Report<HarnessError>> {
-        // Given Claude Code over a fake `claude`.
-        let agents = Arc::new(FakeClaude::running(Vec::new()));
-        let claude = ClaudeCode::new(agents.clone(), PathBuf::from("/nonexistent/claude"));
-
-        // When stopping the migrated session 28bf38e2.
-        claude.stop_migrated("28bf38e2").await?;
-
-        // Then `claude stop 28bf38e2` was asked for.
-        assert_eq!(
-            agents.stopped(),
-            ["28bf38e2"],
-            "the migrated session should be stopped through claude"
-        );
-        Ok(())
     }
 }

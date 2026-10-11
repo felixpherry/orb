@@ -326,3 +326,5 @@ Entries are added or amended **only with human approval**.
 - (sidebar) An agent row shows only while a tab or float holds its pane, and goes away as soon as the pane closes.
 - (sidebar) The `/` search matches an agent row by the name it shows (the pane's name, else the agent's title).
 - (integration) A pane's report file is deleted when the pane's saved row is.
+- (store) A new session is saved through the normal layout save; its first tab keeps its swap layout.
+- (start) orb no longer stops old `claude --bg` sessions at start.

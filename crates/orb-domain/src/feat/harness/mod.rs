@@ -138,26 +138,6 @@ pub trait Harness: TranscriptFormat {
         Ok(Vec::new())
     }
 
-    /// The ids of its background sessions that still run and need stopping;
-    /// none for harnesses that have none.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the harness can't be asked.
-    async fn live_background(&self) -> Result<Vec<String>, Report<HarnessError>> {
-        Ok(Vec::new())
-    }
-
-    /// Stops the background session `short_id` the store migration replaced
-    /// with a pane; nothing for harnesses that had none.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the harness refuses or fails to stop it.
-    async fn stop_migrated(&self, _short_id: &str) -> Result<(), Report<HarnessError>> {
-        Ok(())
-    }
-
     /// Whether the agent's status comes from the reports orb's integration
     /// writes to its pane file, rather than from the agents it sees running.
     fn reports_status(&self) -> bool {
@@ -213,13 +193,11 @@ pub(crate) mod fake {
     use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
     /// A harness named `id` with no transcripts, that sees the agents the
-    /// test scripts running and logs what it is asked to stop.
+    /// test scripts running.
     pub(crate) struct FakeHarness {
         id: &'static str,
         /// What [`Harness::running`] answers.
         running: Mutex<Result<Vec<RunningAgent>, String>>,
-        /// The migrated sessions [`Harness::stop_migrated`] was called on.
-        stops: Mutex<Vec<String>>,
         /// What [`Harness::reports_status`] answers.
         reports: bool,
     }
@@ -230,7 +208,6 @@ pub(crate) mod fake {
             Self {
                 id,
                 running: Mutex::new(Ok(running)),
-                stops: Mutex::default(),
                 reports: false,
             }
         }
@@ -247,14 +224,6 @@ pub(crate) mod fake {
         /// with the reason.
         pub(crate) fn set_running(&self, running: Result<Vec<RunningAgent>, String>) {
             *self.running.lock().unwrap_or_else(PoisonError::into_inner) = running;
-        }
-
-        /// The migrated sessions it was asked to stop, in order.
-        pub(crate) fn stops(&self) -> Vec<String> {
-            self.stops
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
         }
     }
 
@@ -318,14 +287,6 @@ pub(crate) mod fake {
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
                 .map_err(|reason| Report::new(HarnessError).attach(reason))
-        }
-
-        async fn stop_migrated(&self, short_id: &str) -> Result<(), Report<HarnessError>> {
-            self.stops
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(short_id.to_owned());
-            Ok(())
         }
 
         fn reports_status(&self) -> bool {

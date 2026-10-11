@@ -105,7 +105,7 @@ use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
 use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{hex, hex_branch, is_orb_worktree, new_worktree_path, slug};
 use crate::feat::harness::{
-    Harness, HarnessError, HarnessId, RunningAgent, Scan, TranscriptFormat, claude,
+    Harness, HarnessError, HarnessId, RunningAgent, Scan, TranscriptFormat,
 };
 use crate::feat::integration::pane_file::{AgentEvent, AgentReport, PaneFiles};
 use crate::feat::integration::{NUDGE, panes_dir};
@@ -228,14 +228,6 @@ pub struct NewTab(pub SessionId);
 /// them.
 #[derive(Debug)]
 pub struct SaveLayout(pub SessionId);
-
-/// Stop the Claude `--bg` sessions the store's migration to sessions turned
-/// into panes, so they don't fight the `claude --resume` those panes run.
-/// orb waits for it before the frontend starts, so no pane types
-/// `claude --resume` while its `--bg` session still runs. The function is
-/// told how many sessions are about to be stopped, once, when any are.
-#[derive(Debug)]
-pub struct StopMigrated(pub fn(usize));
 
 /// Kill the panes zmx still runs for sessions that are already settled.
 #[derive(Debug)]
@@ -441,18 +433,6 @@ impl Message<SaveLayout> for SessionsActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.save_layout(msg.0);
-    }
-}
-
-impl Message<StopMigrated> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        msg: StopMigrated,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.stop_migrated(msg.0).await;
     }
 }
 
@@ -1387,14 +1367,18 @@ impl SessionsActor {
     }
 
     /// Ends a session start: stops showing it as starting, and shows
-    /// `result`'s error, or clears the error and polls the new session now.
+    /// `result`'s error, or polls the new session now. A success leaves the
+    /// message box alone, so an error the start ran into on the way (a
+    /// layout that didn't save) still shows.
     fn end_start(&self, result: Result<(), String>) {
         let succeeded = result.is_ok();
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
             sessions.starting = false;
-            sessions.error = result.err();
+            if let Err(error) = result {
+                sessions.error = Some(error);
+            }
         }
         (self.wake)();
         if succeeded {
@@ -1432,8 +1416,9 @@ impl SessionsActor {
     }
 
     /// Saves a new `kind` session of project `project` named `name` in `dir`
-    /// on `branch` with one tab of one shell pane, shows it, selects it and asks the
-    /// frontend to attach it. The error is the message box text.
+    /// on `branch` with one tab of one shell pane, saved through the layout
+    /// save, shows it, selects it and asks the frontend to attach it. The
+    /// error is the message box text.
     fn save_session(
         &mut self,
         project: ProjectId,
@@ -1471,7 +1456,6 @@ impl SessionsActor {
             zmx_name: None,
             zmx_dir: None,
             resume: None,
-            migrated_bg: None,
             name: None,
         };
         let entry = pane_entry(&self.services, &self.orb_root, &pane);
@@ -1484,6 +1468,7 @@ impl SessionsActor {
             sessions.attach = Some(id);
         }
         self.sessions.insert(id, row);
+        self.save_layout(id);
         Ok(())
     }
 
@@ -2329,7 +2314,6 @@ impl SessionsActor {
             zmx_name: None,
             zmx_dir: None,
             resume: None,
-            migrated_bg: None,
             name: None,
         };
         let entry = pane_entry(&self.services, &self.orb_root, &row);
@@ -2522,80 +2506,6 @@ impl SessionsActor {
             }
         }
         (self.wake)();
-    }
-
-    /// Stops each `--bg` session a migrated pane still names that Claude
-    /// lists as live, through Claude, in pane order, ignoring failures (a
-    /// session already gone is fine), and forgets each one as soon as its
-    /// stop returns, so an interrupted start keeps its progress. The rest are
-    /// forgotten without a stop; if Claude can't list them, every one is
-    /// stopped. `announce` hears how many stops will run, when any will.
-    /// Without Claude registered nothing happens and the markers stay.
-    async fn stop_migrated(&mut self, announce: fn(usize)) {
-        let Some(claude) = self
-            .services
-            .harnesses
-            .get(&HarnessId::new(claude::ID))
-            .cloned()
-        else {
-            return;
-        };
-        let marked: Vec<(PaneId, String)> = match self.store.layouts() {
-            Ok(saved) => {
-                let mut marked: Vec<(PaneId, String)> = saved
-                    .panes
-                    .into_iter()
-                    .filter_map(|pane| Some((pane.id, pane.migrated_bg?)))
-                    .collect();
-                marked.sort_by_key(|(pane, _)| pane.0);
-                marked
-            }
-            Err(report) => {
-                self.services.log.error(
-                    "couldn't read the panes of old claude --bg sessions",
-                    &report,
-                );
-                return;
-            }
-        };
-        if marked.is_empty() {
-            return;
-        }
-        let (live, ended): (Vec<_>, Vec<_>) = match claude.live_background().await {
-            Ok(live) => marked
-                .into_iter()
-                .partition(|(_, short_id)| live.contains(short_id)),
-            Err(report) => {
-                self.services
-                    .log
-                    .error("couldn't list claude --bg sessions", &report);
-                (marked, Vec::new())
-            }
-        };
-        self.forget_migrated(&ended.iter().map(|(pane, _)| *pane).collect::<Vec<_>>());
-        if !live.is_empty() {
-            announce(live.len());
-        }
-        for (pane, short_id) in &live {
-            if let Err(report) = claude.stop_migrated(short_id).await {
-                self.services.log.error(
-                    &format!("couldn't stop old claude --bg session {short_id}"),
-                    &report,
-                );
-            }
-            self.forget_migrated(&[*pane]);
-        }
-    }
-
-    /// Forgets the `--bg` sessions `panes` named in the store.
-    fn forget_migrated(&mut self, panes: &[PaneId]) {
-        if panes.is_empty() {
-            return;
-        }
-        if let Err(report) = self.store.clear_migrated_bg(panes) {
-            self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
-            (self.wake)();
-        }
     }
 
     /// Shows a harness failure in the mode line.
@@ -3393,9 +3303,9 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        ChangeWorkspace, DeleteSession, FAST_POLL, Placement, SLOW_POLL, SaveLayout, SessionsActor,
-        SessionsActorDeps, SettleSession, notice_kind, now_ms, project_title, settle_session_row,
-        spawn_sessions_actor,
+        ChangeWorkspace, DeleteSession, FAST_POLL, Placement, SAVE_FAILED, SLOW_POLL, SaveLayout,
+        SessionsActor, SessionsActorDeps, SettleSession, notice_kind, now_ms, project_title,
+        settle_session_row, spawn_sessions_actor,
     };
     use crate::Focus;
     use crate::TextInput;
@@ -3409,7 +3319,7 @@ mod tests {
     use crate::feat::harness::{Harness, Harnesses, RunningAgent};
     use crate::feat::jumps::state::JumpList;
     use crate::feat::layout::floats::{FloatLayout, FloatRect};
-    use crate::feat::layout::state::{SessionLayout, test_entry};
+    use crate::feat::layout::state::{SessionLayout, Tab, test_entry};
     use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
     use crate::feat::sessions::state::{
         FolderKind, Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind,
@@ -3825,7 +3735,8 @@ mod tests {
     }
 
     /// Saves thread `short_id` of `harness`, created at `created_at`, in a
-    /// new `kind` session of project `project` in `dir`, one tab of one pane.
+    /// new `kind` session of project `project` in `dir`, one saved tab of one
+    /// pane.
     fn seed_with(
         store: &Store,
         harness: &str,
@@ -3836,6 +3747,21 @@ mod tests {
         created_at: i64,
     ) -> Result<Seeded, Report<StoreError>> {
         let (session, pane) = store.insert_session(project, kind, dir, None, None, created_at)?;
+        store.save_layout(
+            session,
+            0,
+            &[TabRow {
+                session_id: session,
+                position: 0,
+                name: None,
+                layout: format!("{{\"pane\":{}}}", pane.0),
+                focus_pane: Some(pane),
+                swap_layout: SwapLayout::Vertical,
+                hand_changed: false,
+            }],
+            &SessionFloats::default(),
+            &[(pane, None)],
+        )?;
         let (thread, _) = store.insert_pane_thread(&NewPaneThread {
             pane,
             session_id: short_id.to_owned(),
@@ -5083,28 +5009,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[tokio::test]
-    async fn settle_session_stops_nothing() -> Result<(), Report<StoreError>> {
-        // Given an idle Claude in aa's pane.
-        let mut fx = PaneStatus::new(
-            false,
-            vec![interactive(&[100], ThreadStatus::Idle)],
-            running,
-        )?;
-        fx.actor.poll().await;
-
-        // When settling aa's session.
-        fx.actor.settle_session(fx.thread.session);
-
-        // Then nothing was asked to stop it.
-        assert!(
-            fx.host.stops().is_empty(),
-            "settling kills panes and stops nothing through a harness"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn unsettle_session_keeps_it_active() -> Result<(), Report<StoreError>> {
         // Given thread aa's session, settled.
         let store = Store::open_in_memory()?;
@@ -5439,28 +5343,6 @@ mod tests {
         assert!(
             !fx.file(fx.shell).exists(),
             "a pane's report file should go with its dropped row"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn delete_session_removes_nothing_through_claude() -> Result<(), Report<StoreError>> {
-        // Given an idle Claude in aa's pane.
-        let mut fx = PaneStatus::new(
-            false,
-            vec![interactive(&[100], ThreadStatus::Idle)],
-            running,
-        )?;
-        fx.actor.poll().await;
-
-        // When deleting aa's session.
-        fx.actor.delete_session(fx.thread.session);
-
-        // Then nothing was asked of the harness.
-        assert!(
-            fx.host.stops().is_empty(),
-            "deleting kills panes and asks nothing of a harness"
         );
         Ok(())
     }
@@ -5986,128 +5868,6 @@ mod tests {
             tabs,
             vec![(SwapLayout::Horizontal, true)],
             "the tab's swap layout and mark should be saved"
-        );
-        Ok(())
-    }
-
-    /// A store at `path` holding Claude threads `aa` and `bb`, whose panes
-    /// still name their `--bg` sessions, as the migration leaves them.
-    fn migrated_store(path: &Path) -> Result<Store, Report<StoreError>> {
-        let store = Store::open(path)?;
-        for short_id in ["aa", "bb"] {
-            let pane = insert_thread(&store, short_id)?.pane;
-            rusqlite::Connection::open(path)
-                .and_then(|conn| {
-                    conn.execute(
-                        "UPDATE panes SET migrated_bg = ?2 WHERE id = ?1",
-                        rusqlite::params![pane.0, short_id],
-                    )
-                })
-                .change_context(StoreError)?;
-        }
-        Store::open(path)
-    }
-
-    /// The `--bg` sessions panes in `actor`'s store still name.
-    fn still_marked(actor: &SessionsActor) -> Result<Vec<String>, Report<StoreError>> {
-        Ok(actor
-            .store
-            .layouts()?
-            .panes
-            .into_iter()
-            .filter_map(|pane| pane.migrated_bg)
-            .collect())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn stop_migrated_stops_only_live_sessions() -> Result<(), Report<StoreError>> {
-        // Given panes still naming --bg sessions aa and bb, of which Claude
-        // lists only bb as live.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let store = migrated_store(&dir.path().join("state.sqlite"))?;
-        let host = listing(Vec::new());
-        host.set_live(Ok(vec!["bb".to_owned()]));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When stopping the migrated sessions.
-        actor.stop_migrated(|_| {}).await;
-
-        // Then Claude stopped bb alone.
-        assert_eq!(
-            host.stopped(),
-            vec!["bb".to_owned()],
-            "only a live --bg session should be stopped"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn stop_migrated_forgets_sessions_that_are_not_live() -> Result<(), Report<StoreError>> {
-        // Given panes still naming --bg sessions aa and bb, neither of which
-        // Claude lists as live (done, stopped, failed or gone).
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let store = migrated_store(&dir.path().join("state.sqlite"))?;
-        let host = listing(Vec::new());
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When stopping the migrated sessions.
-        actor.stop_migrated(|_| {}).await;
-
-        // Then no pane names a --bg session any more.
-        let marked = still_marked(&actor)?;
-        assert!(
-            marked.is_empty(),
-            "sessions with nothing to stop should be forgotten: {marked:?}"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn stop_migrated_forgets_each_session_as_its_stop_returns()
-    -> Result<(), Report<StoreError>> {
-        // Given live --bg sessions aa and bb, where stopping bb never ends.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let store = migrated_store(&dir.path().join("state.sqlite"))?;
-        let host = listing(Vec::new());
-        host.set_live(Ok(vec!["aa".to_owned(), "bb".to_owned()]));
-        host.hang_on("bb");
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When the stops are interrupted while bb's runs.
-        let _ = tokio::time::timeout(Duration::from_millis(100), actor.stop_migrated(|_| {})).await;
-
-        // Then only bb is still named.
-        assert_eq!(
-            still_marked(&actor)?,
-            vec!["bb".to_owned()],
-            "aa should be forgotten once its stop returned"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn stop_migrated_stops_every_session_when_claude_cant_list()
-    -> Result<(), Report<StoreError>> {
-        // Given panes still naming --bg sessions aa and bb, and a Claude that
-        // can't list its sessions.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let store = migrated_store(&dir.path().join("state.sqlite"))?;
-        let host = listing(Vec::new());
-        host.set_live(Err("claude agents failed".to_owned()));
-        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-
-        // When stopping the migrated sessions.
-        actor.stop_migrated(|_| {}).await;
-
-        // Then Claude stopped aa and then bb.
-        assert_eq!(
-            host.stopped(),
-            vec!["aa".to_owned(), "bb".to_owned()],
-            "every marked --bg session should be stopped in pane order"
         );
         Ok(())
     }
@@ -6762,6 +6522,70 @@ mod tests {
             shape,
             Some((1, vec![PathBuf::from(PROJECT_ROOT)])),
             "a new session holds one tab of one shell pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_session_saves_its_first_tab_as_base() -> Result<(), Report<StoreError>> {
+        // Given / When making a session of the orb project in its checkout.
+        let (actor, state) = made_session(&FakeGit::local(), Workspace::Checkout)?;
+
+        // Then its saved first tab has the BASE swap layout, as in memory.
+        let id = only_session(&state)?.id;
+        let saved: Vec<SwapLayout> = actor
+            .store
+            .layouts()?
+            .tabs
+            .into_iter()
+            .filter(|tab| tab.session_id == id)
+            .map(|tab| tab.swap_layout)
+            .collect();
+        let shown: Vec<SwapLayout> = state
+            .read()
+            .layouts
+            .get(id)
+            .map(|layout| layout.tabs().iter().map(Tab::swap_layout).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            (saved, shown),
+            (vec![SwapLayout::Base], vec![SwapLayout::Base]),
+            "a new session's first tab should be saved with the swap layout it has in memory"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_session_whose_first_tab_wont_save_shows_the_save_error() -> Result<(), Report<StoreError>>
+    {
+        // Given a store holding the orb project that refuses to save any tab.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        let id = orb_project(&store)?;
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER refuse BEFORE INSERT ON tabs
+                     BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+                )
+            })
+            .change_context(StoreError)?;
+        let (mut actor, state) = start_with(
+            store,
+            &listing(Vec::new()),
+            &FakeGit::local(),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When making a session of it in its checkout.
+        actor.new_session(id, Workspace::Checkout, None);
+
+        // Then the message box says orb couldn't save its state.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some(SAVE_FAILED),
+            "a new session whose first tab wasn't saved should say so"
         );
         Ok(())
     }
@@ -10500,7 +10324,6 @@ mod tests {
     struct PaneStatus {
         dir: tempfile::TempDir,
         thread: Seeded,
-        host: Arc<FakeHarness>,
         actor: SessionsActor,
         state: State,
     }
@@ -10526,12 +10349,11 @@ mod tests {
                 "aa",
                 now_ms() - HOUR_MS,
             )?;
-            let host = Arc::new(if reports {
+            let harness: Arc<dyn Harness> = Arc::new(if reports {
                 FakeHarness::reporting(agent)
             } else {
                 FakeHarness::new(agent, records)
             });
-            let harness: Arc<dyn Harness> = host.clone();
             let state = State::default();
             let git = FakeGit::local();
             let actor = SessionsActor::restore(SessionsActorDeps {
@@ -10552,7 +10374,6 @@ mod tests {
             Ok(Self {
                 dir,
                 thread,
-                host,
                 actor,
                 state,
             })
