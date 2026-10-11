@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::PaneMode;
 use crate::feat::layout::tree::{NavDirection, Split};
+use crate::feat::picker::state::SessionFilter;
 use crate::feat::sessions::state::{FolderKind, PaneId, SidebarItem};
 
 /// A user action produced by the keymap and applied by the
@@ -206,11 +207,12 @@ pub enum Intent {
     /// `g` in list mode: pressed twice, select the first item.
     PickerG,
     /// Ask to remove the project highlighted in the projects screen, or to
-    /// delete the worktree highlighted in the worktree picker (`d`).
+    /// delete the worktree highlighted in the worktree picker, or to delete
+    /// the session highlighted in the session picker (`d`).
     PickerRemove,
-    /// Show or hide settled threads in the session picker, keeping the typed
-    /// text.
-    PickerToggleSettled,
+    /// Filter the session picker's list to `SessionFilter`, or back to all
+    /// when it is already the filter (`a`/`b`/`w`/`i`/`s` in list mode).
+    PickerFilter(SessionFilter),
 }
 
 /// The label the which-key popup shows for the intent.
@@ -295,7 +297,7 @@ impl fmt::Display for Intent {
             Self::PickerLast => "last item",
             Self::PickerG => "first item",
             Self::PickerRemove => "remove",
-            Self::PickerToggleSettled => "toggle settled",
+            Self::PickerFilter(_) => "filter",
         })
     }
 }
@@ -304,6 +306,7 @@ impl fmt::Display for Intent {
 mod tests {
     use super::Intent;
     use crate::feat::layout::tree::{NavDirection, Split};
+    use crate::feat::picker::state::SessionFilter;
     use crate::feat::sessions::state::{FolderKind, PaneId};
 
     #[rstest::rstest]
@@ -338,7 +341,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(Intent::OpenSessionPicker, "sessions")]
-    #[case(Intent::PickerToggleSettled, "toggle settled")]
+    #[case(Intent::PickerFilter(SessionFilter::Blocked), "filter")]
     fn session_picker_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the session picker's intents.
         assert_eq!(intent.to_string(), expected, "which-key label");

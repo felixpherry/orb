@@ -13,10 +13,55 @@ use crate::feat::git::git_service::GitRef;
 use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList};
 use crate::feat::sessions::state::{
     NEW_THREAD, PaneId, Project, ProjectId, Session, SessionId, Sessions, Thread, ThreadId,
+    ThreadStatus, most_urgent,
 };
 use crate::feat::sessions::transcript::{Exchange, Role};
 use crate::feat::worktrees::state::{User, order, users};
 use crate::{AppState, Focus};
+
+/// Which threads the session picker lists (`a`/`b`/`w`/`i`/`s`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFilter {
+    /// Every unsettled thread.
+    All,
+    /// Unsettled threads waiting for an approval or an answer.
+    Blocked,
+    /// Unsettled threads running a turn.
+    Working,
+    /// Unsettled threads that are idle, not polled yet, or have no agent.
+    Idle,
+    /// Only settled threads.
+    Settled,
+}
+
+impl SessionFilter {
+    /// Whether `session` is listed under this filter, judged by its most
+    /// urgent agent's status. Failed, stopped and gone sessions show only
+    /// under `All`.
+    fn lists(self, sessions: &Sessions, session: &Session) -> bool {
+        let settled = session.settled_at.is_some();
+        let status = most_urgent(sessions.agents(session.id)).map(|thread| thread.status);
+        match self {
+            Self::All => !settled,
+            Self::Settled => settled,
+            Self::Blocked => {
+                !settled
+                    && matches!(
+                        status,
+                        Some(ThreadStatus::NeedsApproval | ThreadStatus::NeedsInput)
+                    )
+            }
+            Self::Working => !settled && status == Some(ThreadStatus::Working),
+            Self::Idle => {
+                !settled
+                    && matches!(
+                        status,
+                        None | Some(ThreadStatus::Idle | ThreadStatus::Unknown)
+                    )
+            }
+        }
+    }
+}
 
 /// What a workspace or base picker sets up: a new session in a project, or
 /// an existing session's move.
@@ -69,9 +114,9 @@ pub enum PickerKind {
     DeleteSession { session: SessionId, folder: bool },
     /// `d` on an agent row: confirm closing its pane.
     ClosePane { pane: PaneId, session: SessionId },
-    /// `<C-g> Space`: pick a thread to jump into. `settled` is whether
-    /// settled threads are listed; `<C-s>` flips it.
-    Sessions { settled: bool },
+    /// `<C-g> Space`: pick a thread to jump into, listing the threads
+    /// `filter` lets through.
+    Sessions { filter: SessionFilter },
     /// `<C-g> W`: orb's worktrees, to look over and delete.
     Worktrees,
     /// `d` in the worktree picker: confirm force-removing the worktree at
@@ -153,11 +198,13 @@ impl PickerState {
         }
     }
 
-    /// The session picker over `items`, in the order given, with settled
-    /// threads hidden, opening in list mode.
+    /// The session picker over `items`, in the order given, on all threads,
+    /// settled ones hidden, opening in list mode.
     pub fn sessions(items: Vec<PickerItem>, return_to: Focus) -> Self {
         Self {
-            kind: PickerKind::Sessions { settled: false },
+            kind: PickerKind::Sessions {
+                filter: SessionFilter::All,
+            },
             list: PickerList::new(items),
             return_to,
             home: PathBuf::new(),
@@ -543,15 +590,19 @@ impl PickerState {
         }
     }
 
-    /// Shows or hides settled threads in the session picker, re-listing
-    /// `sessions`' threads under the typed text and selecting the best match.
-    /// Other pickers ignore it.
-    pub fn toggle_settled(&mut self, sessions: &Sessions) {
-        let PickerKind::Sessions { settled } = &mut self.kind else {
+    /// Applies `pressed` in the session picker, or goes back to all when it
+    /// is already the filter, re-listing `sessions`' threads under the typed
+    /// text and selecting the best match. Other pickers ignore it.
+    pub fn set_filter(&mut self, pressed: SessionFilter, sessions: &Sessions) {
+        let PickerKind::Sessions { filter } = &mut self.kind else {
             return;
         };
-        *settled = !*settled;
-        let items = session_items(sessions, *settled);
+        *filter = if *filter == pressed {
+            SessionFilter::All
+        } else {
+            pressed
+        };
+        let items = session_items(sessions, *filter);
         let pattern = self.list.input().to_owned();
         self.list.set_items(items, &pattern);
     }
@@ -918,9 +969,9 @@ pub fn expand(dir_text: &str, home: &Path) -> PathBuf {
 /// project filter (removed projects too), newest chat first by the latest
 /// chat of its agents, else its own last activity, ties to the higher id. The
 /// selected session is listed like any other. Sessions being deleted, and
-/// settled sessions unless `settled`, are left out. Each row previews its
-/// most recently active agent.
-pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
+/// sessions `filter` leaves out, are left out. Each row previews its most
+/// recently active agent.
+pub fn session_items(sessions: &Sessions, filter: SessionFilter) -> Vec<PickerItem> {
     let mut rows: Vec<(SystemTime, i64, PickerItem)> = sessions
         .sessions
         .iter()
@@ -930,7 +981,7 @@ pub fn session_items(sessions: &Sessions, settled: bool) -> Vec<PickerItem> {
                 .is_none_or(|filter| filter == session.project)
         })
         .filter(|session| !sessions.deleting.contains(&session.id))
-        .filter(|session| settled || session.settled_at.is_none())
+        .filter(|session| filter.lists(sessions, session))
         .filter_map(|session| {
             let project = sessions.project(session.project)?;
             let lead = sessions
@@ -1022,7 +1073,10 @@ mod tests {
 
     use std::time::UNIX_EPOCH;
 
-    use super::{PickTarget, PickerState, expand, hit_label, session_items, split_path};
+    use super::{
+        PickTarget, PickerKind, PickerState, SessionFilter, expand, hit_label, session_items,
+        split_path,
+    };
     use crate::Focus;
     use crate::feat::git::git_service::GitRef;
     use crate::feat::picker::list::PickerItem;
@@ -1824,7 +1878,7 @@ mod tests {
         let sessions = orb_sessions(vec![agent(1, "api", 10), agent(2, "ui", 20)]);
 
         // When listing the session picker's rows.
-        let items = session_items(&sessions, false);
+        let items = session_items(&sessions, SessionFilter::All);
 
         // Then session 2 comes first.
         assert_eq!(
@@ -1835,10 +1889,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::hidden(false, vec![SessionId(1)])]
-    #[case::shown(true, vec![SessionId(2), SessionId(1)])]
-    fn session_items_leave_out_settled_sessions_until_shown(
-        #[case] settled: bool,
+    #[case::all(SessionFilter::All, vec![SessionId(1)])]
+    #[case::settled(SessionFilter::Settled, vec![SessionId(2)])]
+    fn session_items_list_settled_sessions_only_under_settled(
+        #[case] filter: SessionFilter,
         #[case] expected: Vec<SessionId>,
     ) {
         // Given session 1 and settled session 2.
@@ -1847,11 +1901,133 @@ mod tests {
             session.settled_at = Some(UNIX_EPOCH + Duration::from_secs(20));
         }
 
-        // When listing the rows with settled sessions `settled`.
-        let items = session_items(&sessions, settled);
+        // When listing the rows under `filter`.
+        let items = session_items(&sessions, filter);
 
-        // Then the settled session shows only when asked for.
-        assert_eq!(session_ids(&items), expected, "settled shown: {settled}");
+        // Then the settled session shows only under Settled, alone.
+        assert_eq!(session_ids(&items), expected, "filter: {filter:?}");
+    }
+
+    /// `thread` with status `status`.
+    fn with_status(thread: Thread, status: ThreadStatus) -> Thread {
+        Thread { status, ..thread }
+    }
+
+    #[rstest::rstest]
+    #[case::approval_blocked(ThreadStatus::NeedsApproval, SessionFilter::Blocked, true)]
+    #[case::input_blocked(ThreadStatus::NeedsInput, SessionFilter::Blocked, true)]
+    #[case::working(ThreadStatus::Working, SessionFilter::Working, true)]
+    #[case::idle(ThreadStatus::Idle, SessionFilter::Idle, true)]
+    #[case::unknown_idle(ThreadStatus::Unknown, SessionFilter::Idle, true)]
+    #[case::idle_not_working(ThreadStatus::Idle, SessionFilter::Working, false)]
+    #[case::working_not_blocked(ThreadStatus::Working, SessionFilter::Blocked, false)]
+    #[case::failed_not_blocked(ThreadStatus::Failed, SessionFilter::Blocked, false)]
+    #[case::failed_not_working(ThreadStatus::Failed, SessionFilter::Working, false)]
+    #[case::failed_not_idle(ThreadStatus::Failed, SessionFilter::Idle, false)]
+    #[case::failed_all(ThreadStatus::Failed, SessionFilter::All, true)]
+    #[case::stopped_not_blocked(ThreadStatus::Stopped, SessionFilter::Blocked, false)]
+    #[case::stopped_not_working(ThreadStatus::Stopped, SessionFilter::Working, false)]
+    #[case::stopped_not_idle(ThreadStatus::Stopped, SessionFilter::Idle, false)]
+    #[case::stopped_all(ThreadStatus::Stopped, SessionFilter::All, true)]
+    #[case::gone_not_blocked(ThreadStatus::Gone, SessionFilter::Blocked, false)]
+    #[case::gone_not_working(ThreadStatus::Gone, SessionFilter::Working, false)]
+    #[case::gone_not_idle(ThreadStatus::Gone, SessionFilter::Idle, false)]
+    #[case::gone_all(ThreadStatus::Gone, SessionFilter::All, true)]
+    fn session_items_filter_by_status(
+        #[case] status: ThreadStatus,
+        #[case] filter: SessionFilter,
+        #[case] listed: bool,
+    ) {
+        // Given session 1, its agent `status`.
+        let sessions = orb_sessions(vec![with_status(agent(1, "api", 10), status)]);
+
+        // When listing the rows under `filter`.
+        let items = session_items(&sessions, filter);
+
+        // Then the session is listed only when the filter lets it through.
+        assert_eq!(
+            !items.is_empty(),
+            listed,
+            "{status:?} under {filter:?} listed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn session_without_agents_is_idle() {
+        // Given session 1 with no agents left.
+        let mut sessions = orb_sessions(vec![agent(1, "api", 10)]);
+        for project in &mut sessions.projects {
+            project.threads.clear();
+        }
+
+        // When listing the rows under Idle.
+        let items = session_items(&sessions, SessionFilter::Idle);
+
+        // Then session 1 is listed.
+        assert_eq!(
+            session_ids(&items),
+            vec![SessionId(1)],
+            "a session with no agents should count as idle"
+        );
+    }
+
+    #[rstest::rstest]
+    fn set_filter_twice_goes_back_to_all() {
+        // Given the session picker filtered to working threads.
+        let sessions = orb_sessions(vec![agent(1, "api", 10)]);
+        let mut picker =
+            PickerState::sessions(session_items(&sessions, SessionFilter::All), Focus::Sidebar);
+        picker.set_filter(SessionFilter::Working, &sessions);
+
+        // When setting the working filter again.
+        picker.set_filter(SessionFilter::Working, &sessions);
+
+        // Then the picker is back on all.
+        assert_eq!(
+            picker.kind(),
+            &PickerKind::Sessions {
+                filter: SessionFilter::All
+            },
+            "the same filter twice should go back to all"
+        );
+    }
+
+    #[rstest::rstest]
+    fn set_filter_keeps_the_typed_text() {
+        // Given the session picker over `api` and `ui`, with `api` typed.
+        let sessions = orb_sessions(vec![agent(1, "api", 10), agent(2, "ui", 20)]);
+        let mut picker =
+            PickerState::sessions(session_items(&sessions, SessionFilter::All), Focus::Sidebar);
+        for ch in ['a', 'p', 'i'] {
+            picker.insert(ch);
+        }
+
+        // When filtering to idle threads.
+        picker.set_filter(SessionFilter::Idle, &sessions);
+
+        // Then the typed text stays.
+        assert_eq!(
+            picker.input(),
+            "api",
+            "filtering should keep the typed text"
+        );
+    }
+
+    #[rstest::rstest]
+    fn set_filter_in_another_picker_changes_nothing() {
+        // Given the worktree picker over no rows.
+        let sessions = orb_sessions(vec![agent(1, "api", 10)]);
+        let mut picker = PickerState::worktrees(vec![], Focus::Sidebar);
+
+        // When filtering to settled threads.
+        picker.set_filter(SessionFilter::Settled, &sessions);
+
+        // Then it is still the empty worktree picker.
+        assert_eq!(
+            (picker.kind(), picker.total()),
+            (&PickerKind::Worktrees, 0),
+            "other pickers should ignore the filter"
+        );
     }
 
     #[rstest::rstest]
@@ -1860,7 +2036,8 @@ mod tests {
         let sessions = orb_sessions(vec![agent(1, "api", 10)]);
 
         // When opening the session picker over its rows.
-        let picker = PickerState::sessions(session_items(&sessions, false), Focus::Sidebar);
+        let picker =
+            PickerState::sessions(session_items(&sessions, SessionFilter::All), Focus::Sidebar);
 
         // Then the selected row previews thread 1.
         assert_eq!(

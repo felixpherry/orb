@@ -22,7 +22,7 @@
 use std::fmt;
 
 use orb_domain::feat::layout::tree::{NavDirection, Split};
-use orb_domain::feat::picker::state::PickerKind;
+use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
 use orb_domain::feat::sessions::state::{FolderKind, SessionKind, Sessions};
 use orb_domain::{AppState, Focus, Intent, PaneMode};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -550,7 +550,7 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
 /// What `key` does in a list-mode picker of `kind` (the projects screen and
 /// the session and worktree pickers until `/`); `None` when it does nothing.
 /// Letters are commands here, not filter text; `a` adds a project in the
-/// projects screen.
+/// projects screen, and `a`/`b`/`w`/`i`/`s` filter the session picker.
 pub(crate) fn picker_list_route(kind: &PickerKind, key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE)
@@ -569,6 +569,18 @@ pub(crate) fn picker_list_route(kind: &PickerKind, key: KeyEvent) -> Option<Inte
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Intent::PickerCancel),
         (KeyCode::Char('a'), KeyModifiers::NONE) if *kind == PickerKind::ManageProjects => {
             Some(Intent::AddProject)
+        }
+        (KeyCode::Char(letter @ ('a' | 'b' | 'w' | 'i' | 's')), KeyModifiers::NONE)
+            if matches!(kind, PickerKind::Sessions { .. }) =>
+        {
+            let filter = match letter {
+                'b' => SessionFilter::Blocked,
+                'w' => SessionFilter::Working,
+                'i' => SessionFilter::Idle,
+                's' => SessionFilter::Settled,
+                _ => SessionFilter::All,
+            };
+            Some(Intent::PickerFilter(filter))
         }
         _ => None,
     }
@@ -593,7 +605,7 @@ mod tests {
         picker_route, press, route,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
-    use orb_domain::feat::picker::state::PickerKind;
+    use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -703,6 +715,59 @@ mod tests {
             Some(Intent::AddProject),
             "a in the projects screen should add a project"
         );
+    }
+
+    #[rstest::rstest]
+    #[case('a', SessionFilter::All)]
+    #[case('b', SessionFilter::Blocked)]
+    #[case('w', SessionFilter::Working)]
+    #[case('i', SessionFilter::Idle)]
+    #[case('s', SessionFilter::Settled)]
+    fn session_list_letters_filter(#[case] letter: char, #[case] filter: SessionFilter) {
+        // Given / When routing `letter` in the session picker's list.
+        let intent = picker_list_route(
+            &PickerKind::Sessions {
+                filter: SessionFilter::All,
+            },
+            key(KeyCode::Char(letter)),
+        );
+
+        // Then it filters the list.
+        assert_eq!(
+            intent,
+            Some(Intent::PickerFilter(filter)),
+            "{letter} should filter the session list"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case('b')]
+    #[case('w')]
+    #[case('i')]
+    #[case('s')]
+    fn filter_letters_do_nothing_in_the_worktree_list(#[case] letter: char) {
+        // Given / When routing `letter` in the worktree picker's list.
+        let intent = picker_list_route(&PickerKind::Worktrees, key(KeyCode::Char(letter)));
+
+        // Then it does nothing.
+        assert_eq!(
+            intent, None,
+            "{letter} should do nothing in the worktree list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn ctrl_s_does_nothing_in_the_session_list() {
+        // Given / When routing <C-s> in the session picker's list.
+        let intent = picker_list_route(
+            &PickerKind::Sessions {
+                filter: SessionFilter::All,
+            },
+            ctrl('s'),
+        );
+
+        // Then it does nothing.
+        assert_eq!(intent, None, "<C-s> should do nothing in the session list");
     }
 
     #[rstest::rstest]

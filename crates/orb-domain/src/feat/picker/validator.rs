@@ -1,7 +1,8 @@
 //! Checks whether the open picker's keys can proceed: `⏎` picking a project
 //! or adding a directory, `Tab` opening one, `d` removing a project in the
 //! projects screen, `⏎` picking a session in the session or search picker,
-//! and `d` deleting a worktree.
+//! `d` deleting a session in the session picker, and `d` deleting a
+//! worktree.
 
 use std::time::SystemTime;
 
@@ -184,6 +185,40 @@ pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
     }
 }
 
+/// Why deleting the session picker's highlighted session can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum DeleteListedSessionError {
+    /// The session picker isn't open.
+    NoPicker,
+    /// No session row is highlighted.
+    NoSession,
+    /// The row's session is gone or already being deleted.
+    Gone,
+}
+
+/// Allow `d` on the session picker's highlighted session.
+///
+/// # Errors
+///
+/// Returns [`DeleteListedSessionError::NoPicker`] unless the session picker
+/// is open, [`DeleteListedSessionError::NoSession`] when no session row is
+/// highlighted, and [`DeleteListedSessionError::Gone`] when the row's
+/// session is gone or being deleted.
+pub fn validate_delete_listed_session(state: &AppState) -> Result<(), DeleteListedSessionError> {
+    let picker = match &state.picker {
+        Some(picker) if matches!(picker.kind(), PickerKind::Sessions { .. }) => picker,
+        _ => return Err(DeleteListedSessionError::NoPicker),
+    };
+    let Some(&PickerItem::Session { id, .. }) = picker.selected() else {
+        return Err(DeleteListedSessionError::NoSession);
+    };
+    match state.sessions.session(id) {
+        Some(_) if !state.sessions.deleting.contains(&id) => Ok(()),
+        _ => Err(DeleteListedSessionError::Gone),
+    }
+}
+
 /// Why deleting a worktree can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
@@ -240,10 +275,10 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        AddDirectoryError, DeleteWorktreeError, OpenDirectoryError, PickProjectError,
-        PickSessionError, RemoveProjectError, validate_add_directory, validate_delete_worktree,
-        validate_open_directory, validate_pick_project, validate_pick_session,
-        validate_remove_project,
+        AddDirectoryError, DeleteListedSessionError, DeleteWorktreeError, OpenDirectoryError,
+        PickProjectError, PickSessionError, RemoveProjectError, validate_add_directory,
+        validate_delete_listed_session, validate_delete_worktree, validate_open_directory,
+        validate_pick_project, validate_pick_session, validate_remove_project,
     };
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
@@ -587,6 +622,45 @@ mod tests {
             result,
             Err(PickSessionError::Deleted),
             "a deleted thread can't be jumped into"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_listed_session_rejected_when_session_gone() {
+        // Given thread 1's session highlighted in the session picker, but no
+        // longer in the sidebar.
+        let state = AppState {
+            picker: Some(picking_thread_1()),
+            ..AppState::default()
+        };
+
+        // When validating `d`.
+        let result = validate_delete_listed_session(&state);
+
+        // Then validation fails with Gone.
+        assert_eq!(
+            result,
+            Err(DeleteListedSessionError::Gone),
+            "a gone session can't be deleted"
+        );
+    }
+
+    #[rstest::rstest]
+    fn delete_listed_session_rejected_outside_the_session_picker() {
+        // Given the project picker open.
+        let state = AppState {
+            picker: Some(PickerState::projects(vec![alpha()], Focus::Sidebar)),
+            ..AppState::default()
+        };
+
+        // When validating `d`.
+        let result = validate_delete_listed_session(&state);
+
+        // Then validation fails with NoPicker.
+        assert_eq!(
+            result,
+            Err(DeleteListedSessionError::NoPicker),
+            "only the session picker deletes sessions"
         );
     }
 

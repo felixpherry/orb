@@ -2,8 +2,8 @@
 //! a float over the sidebar and the right side holding a list box and a
 //! preview box, side by side from 120 columns and stacked below that.
 //!
-//! The list box is titled `Sessions`, with a lit `s` while settled sessions
-//! show. Its input row holds the typed text and how many sessions are shown
+//! The list box is titled `Sessions`, followed by the active filter
+//! (`Sessions · blocked`) unless it shows all. Its input row holds the typed text and how many sessions are shown
 //! out of those listed, over an orange rule. Each row is a session's status
 //! icon (its most urgent agent's), its dim `<project>/` and bright title,
 //! and how long its agent has worked or since its last chat; status and time
@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::picker::list::{Matches, PickerItem};
-use orb_domain::feat::picker::state::{PickerKind, PickerState};
+use orb_domain::feat::picker::state::{PickerKind, PickerState, SessionFilter};
 use orb_domain::feat::sessions::state::{Session, SessionId, Sessions, Thread, ThreadStatus};
 use orb_domain::feat::sessions::transcript::Exchange;
 use ratatui::buffer::Buffer;
@@ -114,21 +114,20 @@ pub(crate) fn boxed(title: Option<Line<'static>>) -> Block<'static> {
     }
 }
 
-/// ` Sessions `, then a lit ` s ` and a space while settled threads show,
-/// the way snacks lights its toggles.
-fn title(settled: bool) -> Line<'static> {
-    let mut spans = vec![span(" Sessions ", BLUE)];
-    if settled {
-        spans.push(Span::styled(
-            " s ",
-            Style::new()
-                .fg(BLUE)
-                .bg(VISUAL)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw(" "));
-    }
-    Line::from(spans)
+/// ` Sessions `, or ` Sessions · <filter> ` unless `filter` is all.
+fn title(filter: SessionFilter) -> Line<'static> {
+    let name = match filter {
+        SessionFilter::All => None,
+        SessionFilter::Blocked => Some("blocked"),
+        SessionFilter::Working => Some("working"),
+        SessionFilter::Idle => Some("idle"),
+        SessionFilter::Settled => Some("settled"),
+    };
+    let text = name.map_or_else(
+        || " Sessions ".to_owned(),
+        |name| format!(" Sessions · {name} "),
+    );
+    Line::from(span(text, BLUE))
 }
 
 /// The list box: title, input row with the count, orange rule, rows.
@@ -147,8 +146,11 @@ fn render_list(
     scroll: &mut PickerScroll,
     hits: &mut HitMap,
 ) -> (usize, Position) {
-    let settled = matches!(picker.kind(), PickerKind::Sessions { settled: true });
-    let block = boxed(Some(title(settled)));
+    let filter = match picker.kind() {
+        PickerKind::Sessions { filter } => *filter,
+        _ => SessionFilter::All,
+    };
+    let block = boxed(Some(title(filter)));
     let inner = block.inner(area);
     block.render(area, buf);
     let [input, rule, rows] = Layout::vertical([
@@ -679,7 +681,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use orb_domain::Focus;
-    use orb_domain::feat::picker::state::{PickerState, session_items};
+    use orb_domain::feat::picker::state::{PickerState, SessionFilter, session_items};
     use orb_domain::feat::sessions::state::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
         ThreadStatus,
@@ -754,9 +756,9 @@ mod tests {
         }
     }
 
-    /// The session picker over `sessions`, settled threads hidden.
+    /// The session picker over `sessions`, on all threads.
     fn picker(sessions: &Sessions) -> PickerState {
-        PickerState::sessions(session_items(sessions, false), Focus::Sidebar)
+        PickerState::sessions(session_items(sessions, SessionFilter::All), Focus::Sidebar)
     }
 
     /// Types `text` into `picker`.
@@ -916,36 +918,38 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn showing_settled_lights_an_s_after_the_title() {
-        // Given a settled thread, with settled threads shown.
-        let sessions = settled(sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]));
+    #[case(SessionFilter::Blocked, " Sessions · blocked ")]
+    #[case(SessionFilter::Working, " Sessions · working ")]
+    #[case(SessionFilter::Idle, " Sessions · idle ")]
+    #[case(SessionFilter::Settled, " Sessions · settled ")]
+    fn title_names_the_active_filter(#[case] filter: SessionFilter, #[case] expected: &str) {
+        // Given the session picker filtered to `filter`.
+        let sessions = two();
         let mut picker = picker(&sessions);
-        picker.toggle_settled(&sessions);
+        picker.set_filter(filter, &sessions);
 
         // When drawing the picker.
         let (buf, _) = draw(&picker, &sessions, 140, 30);
 
-        // Then the `s` after ` Sessions ` is lit.
-        let lit = find(&buf, "Sessions")
-            .and_then(|(x, y)| buf.cell((x + 10, y)))
-            .map(|cell| (cell.symbol().to_owned(), cell.bg));
-        assert_eq!(lit, Some(("s".to_owned(), VISUAL)), "the s should be lit");
+        // Then the title row names the filter.
+        let title = line_of(&buf, "Sessions");
+        assert!(title.contains(expected), "title row was {title}");
     }
 
     #[rstest::rstest]
-    fn hiding_settled_lights_no_s() {
-        // Given a settled and an active thread, with settled threads hidden.
-        let sessions = settled(sessions(vec![
-            thread(1, "Fix the bug", ThreadStatus::Idle),
-            thread(2, "Write docs", ThreadStatus::Idle),
-        ]));
+    fn title_on_all_names_no_filter() {
+        // Given the session picker on all threads.
+        let sessions = two();
 
         // When drawing the picker.
         let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
 
-        // Then the title row holds no ` s `.
+        // Then the title row is ` Sessions ` with no filter after it.
         let title = line_of(&buf, "Sessions");
-        assert!(!title.contains(" s "), "title row was {title}");
+        assert!(
+            title.contains(" Sessions ") && !title.contains('·'),
+            "title row was {title}"
+        );
     }
 
     #[rstest::rstest]
@@ -1016,7 +1020,7 @@ mod tests {
         // Given a settled thread, with settled threads shown.
         let sessions = settled(sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]));
         let mut picker = picker(&sessions);
-        picker.toggle_settled(&sessions);
+        picker.set_filter(SessionFilter::Settled, &sessions);
 
         // When drawing the stacked picker, the list above the preview.
         let (buf, _) = draw(&picker, &sessions, 100, 30);

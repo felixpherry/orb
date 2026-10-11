@@ -17,11 +17,12 @@ use crate::feat::layout::validator::{
 use crate::feat::pane::validator::validate_attach;
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
 use crate::feat::picker::state::{
-    PickTarget, PickerKind, PickerState, session_items, worktree_items,
+    PickTarget, PickerKind, PickerState, SessionFilter, session_items, worktree_items,
 };
 use crate::feat::picker::validator::{
-    DeleteWorktreeError, validate_add_directory, validate_delete_worktree, validate_open_directory,
-    validate_pick_project, validate_pick_session, validate_remove_project,
+    DeleteWorktreeError, validate_add_directory, validate_delete_listed_session,
+    validate_delete_worktree, validate_open_directory, validate_pick_project,
+    validate_pick_session, validate_remove_project,
 };
 use crate::feat::sessions::state::{
     FolderKind, PaneId, Project, ProjectId, ProjectKind, Search, SessionId, SessionKind, Sessions,
@@ -296,7 +297,7 @@ impl IntentHandler {
                 _ => vec![],
             },
             Intent::OpenSessionPicker => {
-                let items = session_items(&state.sessions, false);
+                let items = session_items(&state.sessions, SessionFilter::All);
                 open_picker(state, PickerState::sessions(items, state.focus));
                 preview_command(state)
             }
@@ -616,6 +617,11 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
+                Some(&PickerKind::DeleteSession { session, .. })
+                    if state.picker.as_ref().and_then(PickerState::under).is_some() =>
+                {
+                    leave_delete_listed_session(state, session)
+                }
                 Some(&PickerKind::DeleteSession { session, .. }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::Confirm(true))
@@ -687,6 +693,7 @@ impl IntentHandler {
             }
             Intent::PickerRemove => match state.picker.as_ref().map(PickerState::kind) {
                 Some(PickerKind::Worktrees) => ask_delete_worktree(state),
+                Some(PickerKind::Sessions { .. }) => ask_delete_listed_session(state),
                 _ => match (
                     validate_remove_project(state),
                     state.picker.as_ref().and_then(PickerState::selected),
@@ -702,10 +709,10 @@ impl IntentHandler {
                     _ => vec![],
                 },
             },
-            Intent::PickerToggleSettled => {
+            Intent::PickerFilter(pressed) => {
                 let before = picked(state);
                 if let Some(picker) = &mut state.picker {
-                    picker.toggle_settled(&state.sessions);
+                    picker.set_filter(*pressed, &state.sessions);
                 }
                 with_preview(state, before, vec![])
             }
@@ -810,9 +817,7 @@ impl IntentHandler {
                     vec![]
                 }
                 (Ok(()), Some(SidebarItem::Session(id))) => {
-                    let folder = state.sessions.session(id).is_some_and(|session| {
-                        matches!(session.kind, SessionKind::Research | SessionKind::Learn)
-                    });
+                    let folder = deletes_folder(state, id);
                     open_picker(state, PickerState::delete_session(id, folder, state.focus));
                     vec![]
                 }
@@ -977,13 +982,21 @@ fn close_agent_pane(state: &mut AppState, session: SessionId, pane: PaneId) -> V
 }
 
 /// Hides `session` at once, detaches it, drops it from the jump list, moves
-/// the cursor to the neighbouring row, and asks for the delete.
+/// the sidebar cursor to the neighbouring row when it was on `session`, and
+/// asks for the delete.
 fn delete_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
+    let on_it = state
+        .sessions
+        .selected_session()
+        .map(|selected| selected.id)
+        == Some(session);
     let neighbour = state.sessions.row_neighbour(SidebarItem::Session(session));
     state.sessions.deleting.insert(session);
     state.attached.remove(&session);
     state.jumps.remove(SidebarItem::Session(session));
-    state.sessions.cursor = neighbour;
+    if on_it {
+        state.sessions.cursor = neighbour;
+    }
     with_visit(
         state,
         vec![Command::DeleteSession(session), Command::SaveJumps],
@@ -1286,6 +1299,54 @@ fn ask_delete_worktree(state: &mut AppState) -> Vec<Command> {
         }
     }
     vec![]
+}
+
+/// `d` in the session picker's list: the sidebar's delete confirm (the
+/// folder variant for a Research or Learn session) over the list.
+fn ask_delete_listed_session(state: &mut AppState) -> Vec<Command> {
+    let (Ok(()), Some(&PickerItem::Session { id: session, .. })) = (
+        validate_delete_listed_session(state),
+        state.picker.as_ref().and_then(PickerState::selected),
+    ) else {
+        return vec![];
+    };
+    let folder = deletes_folder(state, session);
+    if let Some(list) = state.picker.take() {
+        let return_to = list.return_to();
+        state.picker = Some(PickerState::delete_session(session, folder, return_to).over(list));
+    }
+    vec![]
+}
+
+/// Whether deleting `session` also deletes its Research or Learn folder.
+fn deletes_folder(state: &AppState, session: SessionId) -> bool {
+    state
+        .sessions
+        .session(session)
+        .is_some_and(|session| matches!(session.kind, SessionKind::Research | SessionKind::Learn))
+}
+
+/// Ends the delete confirm over the session picker: `Yes` on a session that
+/// still exists and isn't being deleted deletes it and goes back to the list
+/// without its row, loading the new selection's preview; anything else goes
+/// back to the list as it was.
+fn leave_delete_listed_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
+    let yes = state.picker.as_ref().and_then(PickerState::selected)
+        == Some(&PickerItem::Confirm(true))
+        && listed_session_deletable(state, session);
+    back_to_list(state, yes);
+    if !yes {
+        return vec![];
+    }
+    let mut commands = delete_session(state, session);
+    commands.extend(preview_command(state));
+    commands
+}
+
+/// Whether `session`, answered `Yes` over the session picker, still exists
+/// and isn't already being deleted.
+fn listed_session_deletable(state: &AppState, session: SessionId) -> bool {
+    state.sessions.session(session).is_some() && !state.sessions.deleting.contains(&session)
 }
 
 /// Ends the delete-worktree confirm: `Yes` returns `DeleteWorktree` for its
@@ -1776,7 +1837,7 @@ mod tests {
     use crate::feat::layout::state::{Layouts, SessionLayout, Tab, test_entry};
     use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
     use crate::feat::picker::list::{PickerItem, WorkspaceChoice};
-    use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
+    use crate::feat::picker::state::{PickTarget, PickerKind, PickerState, SessionFilter};
     use crate::feat::sessions::state::{
         FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search, Session,
         SessionId, SessionKind, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
@@ -6182,7 +6243,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn toggling_settled_lists_a_settled_thread() {
+    fn filter_settled_lists_a_settled_thread() {
         // Given the session picker over settled thread 1 and idle thread 2.
         let mut state = open_sessions(settle(
             state_at(
@@ -6192,13 +6253,64 @@ mod tests {
             &[1],
         ));
 
-        // When handling PickerToggleSettled.
-        IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+        // When handling PickerFilter(Settled).
+        IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Settled), &mut state);
 
         // Then thread 1 is listed.
         assert!(
             session_ids(&state).contains(&SessionId(1)),
-            "toggling settled should list settled threads"
+            "the settled filter should list settled threads"
+        );
+    }
+
+    /// The kind of the open picker.
+    fn picker_kind(state: &AppState) -> Option<PickerKind> {
+        state.picker.as_ref().map(|picker| picker.kind().clone())
+    }
+
+    #[rstest::rstest]
+    fn pressing_the_active_filter_again_lists_all() {
+        // Given the session picker filtered to blocked threads.
+        let mut state = open_sessions(state_at(
+            vec![thread(1, ThreadStatus::Idle)],
+            SidebarItem::SettledShelf,
+        ));
+        IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Blocked), &mut state);
+
+        // When handling PickerFilter(Blocked) again.
+        IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Blocked), &mut state);
+
+        // Then the picker is back on all.
+        assert_eq!(
+            picker_kind(&state),
+            Some(PickerKind::Sessions {
+                filter: SessionFilter::All
+            }),
+            "the same filter twice should go back to all"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reopening_the_session_picker_starts_on_all() {
+        // Given the session picker filtered to settled threads, then closed.
+        let mut state = open_sessions(state_at(
+            vec![thread(1, ThreadStatus::Idle)],
+            SidebarItem::SettledShelf,
+        ));
+        IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Settled), &mut state);
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // When opening the session picker again.
+        let state = open_sessions(state);
+
+        // Then it starts on all.
+        assert_eq!(
+            picker_kind(&state),
+            Some(PickerKind::Sessions {
+                filter: SessionFilter::All
+            }),
+            "every opening should start on all"
         );
     }
 
@@ -6311,7 +6423,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn toggle_settled_with_text_typed_lists_the_settled_match() {
+    fn filter_with_text_typed_lists_the_matching_settled_thread() {
         // Given the session picker over settled `alpha` (1) and `beta` (2),
         // with `alpha` typed, which shows nothing.
         let state = settle(
@@ -6326,24 +6438,24 @@ mod tests {
         );
         let mut state = typed(open_sessions(state), &['a', 'l', 'p', 'h', 'a']);
 
-        // When handling PickerToggleSettled.
-        IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+        // When handling PickerFilter(Settled).
+        IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Settled), &mut state);
 
         // Then only `alpha` is shown, still filtered by the typed text.
         assert_eq!(
             session_ids(&state),
             [SessionId(1)],
-            "toggling should keep the typed text"
+            "filtering should keep the typed text"
         );
     }
 
     #[rstest::rstest]
-    fn toggle_settled_in_another_picker_changes_nothing() {
+    fn filter_in_another_picker_changes_nothing() {
         // Given the project picker over alpha and beta.
         let mut state = picking(Focus::Sidebar);
 
-        // When handling PickerToggleSettled.
-        IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+        // When handling PickerFilter(Settled).
+        IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Settled), &mut state);
 
         // Then it's still the project picker over both projects.
         assert_eq!(
@@ -6352,7 +6464,7 @@ mod tests {
                 .as_ref()
                 .map(|picker| (picker.kind().clone(), picker.total())),
             Some((PickerKind::Projects, 2)),
-            "other pickers should ignore the settled toggle"
+            "other pickers should ignore the filter"
         );
     }
 
@@ -6362,6 +6474,182 @@ mod tests {
         let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
         IntentHandler::handle(&Intent::PickerNext, &mut state);
         state
+    }
+
+    /// The kinds of the open picker and the list under it.
+    fn picker_and_under(state: &AppState) -> Option<(PickerKind, Option<PickerKind>)> {
+        state.picker.as_ref().map(|picker| {
+            (
+                picker.kind().clone(),
+                picker.under().map(|under| under.kind().clone()),
+            )
+        })
+    }
+
+    /// The session picker's kind on all threads.
+    fn all_sessions() -> PickerKind {
+        PickerKind::Sessions {
+            filter: SessionFilter::All,
+        }
+    }
+
+    #[rstest::rstest]
+    fn d_in_the_session_picker_opens_delete_session_over_the_list() {
+        // Given the session picker on thread 1.
+        let mut state = picking_thread_1();
+
+        // When handling PickerRemove.
+        IntentHandler::handle(&Intent::PickerRemove, &mut state);
+
+        // Then thread 1's delete confirm is open over the session picker.
+        assert_eq!(
+            picker_and_under(&state),
+            Some((
+                PickerKind::DeleteSession {
+                    session: SessionId(1),
+                    folder: false,
+                },
+                Some(all_sessions()),
+            )),
+            "d should ask to delete the session over the list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn d_on_a_research_session_asks_the_folder_variant() {
+        // Given the session picker on thread 1, a Research session.
+        let mut state = picking_thread_1();
+        if let Some(session) = state
+            .sessions
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == SessionId(1))
+        {
+            session.kind = SessionKind::Research;
+        }
+
+        // When handling PickerRemove.
+        IntentHandler::handle(&Intent::PickerRemove, &mut state);
+
+        // Then the confirm says the folder goes too.
+        assert_eq!(
+            picker_kind(&state),
+            Some(PickerKind::DeleteSession {
+                session: SessionId(1),
+                folder: true,
+            }),
+            "a Research session should ask the folder variant"
+        );
+    }
+
+    #[rstest::rstest]
+    fn d_on_a_gone_session_in_the_session_picker_does_nothing() {
+        // Given the session picker on thread 1, whose session is being
+        // deleted.
+        let mut state = picking_thread_1();
+        state.sessions.deleting.insert(SessionId(1));
+
+        // When handling PickerRemove.
+        IntentHandler::handle(&Intent::PickerRemove, &mut state);
+
+        // Then the session picker stays open with nothing over it.
+        assert_eq!(
+            picker_and_under(&state),
+            Some((all_sessions(), None)),
+            "d on a gone session should do nothing"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_over_the_session_picker_returns_delete_session() {
+        // Given Yes highlighted in thread 1's delete confirm over the list.
+        let mut state = picking_thread_1();
+        answer_yes(&Intent::PickerRemove, &mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to delete it.
+        assert!(
+            commands.contains(&Command::DeleteSession(SessionId(1))),
+            "Yes over the list should delete the session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_over_the_session_picker_drops_the_row() {
+        // Given Yes highlighted in thread 1's delete confirm over the list.
+        let mut state = picking_thread_1();
+        answer_yes(&Intent::PickerRemove, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the session list is back without thread 1's row.
+        assert_eq!(
+            (picker_kind(&state), session_ids(&state)),
+            (Some(all_sessions()), vec![SessionId(2)]),
+            "the deleted session's row should go"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_over_the_session_picker_leaves_the_sidebar_cursor_elsewhere() {
+        // Given the sidebar cursor on thread 2, and Yes highlighted in
+        // thread 1's delete confirm over the list.
+        let mut state = picking_thread_1();
+        answer_yes(&Intent::PickerRemove, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sidebar cursor stays on thread 2.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(SidebarItem::Session(SessionId(2))),
+            "a cursor on another session should stay put"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_over_the_session_picker_after_the_session_went_returns_to_the_list() {
+        // Given Yes highlighted in thread 1's delete confirm over the list,
+        // and then thread 1's session starts being deleted.
+        let mut state = picking_thread_1();
+        answer_yes(&Intent::PickerRemove, &mut state);
+        state.sessions.deleting.insert(SessionId(1));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing is asked, and the list is back with its row.
+        assert_eq!(
+            (commands, picker_kind(&state), session_ids(&state)),
+            (
+                vec![],
+                Some(all_sessions()),
+                vec![SessionId(2), SessionId(1)]
+            ),
+            "Yes on a gone session should only go back to the list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn no_over_the_session_picker_returns_to_the_list() {
+        // Given No highlighted in thread 1's delete confirm over the list.
+        let mut state = picking_thread_1();
+        IntentHandler::handle(&Intent::PickerRemove, &mut state);
+        highlight(&mut state, &PickerItem::Confirm(false));
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the session list is back with both rows.
+        assert_eq!(
+            (picker_kind(&state), session_ids(&state)),
+            (Some(all_sessions()), vec![SessionId(2), SessionId(1)]),
+            "No should go back to the list as it was"
+        );
     }
 
     #[rstest::rstest]
@@ -6740,24 +7028,27 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn showing_settled_threads_loads_the_newly_selected_threads_preview() {
-        // Given settled thread 1, last active at 30 s, hidden above thread 2.
+    fn filter_settled_loads_the_newly_selected_threads_preview() {
+        // Given settled thread 1, last active at 30 s, hidden, and thread 2
+        // selected.
         let mut state = settled_last_active_at(30);
 
-        // When handling PickerToggleSettled.
-        let commands = IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+        // When handling PickerFilter(Settled).
+        let commands =
+            IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Settled), &mut state);
 
         // Then thread 1's preview is loaded.
         assert_eq!(commands, [load(1)], "the new selection should be loaded");
     }
 
     #[rstest::rstest]
-    fn showing_settled_threads_that_keeps_the_selection_loads_no_preview() {
-        // Given settled thread 1, last active at 5 s, hidden below thread 2.
+    fn filter_that_keeps_the_selection_loads_no_preview() {
+        // Given settled thread 1 hidden, and idle thread 2 selected.
         let mut state = settled_last_active_at(5);
 
-        // When handling PickerToggleSettled.
-        let commands = IntentHandler::handle(&Intent::PickerToggleSettled, &mut state);
+        // When handling PickerFilter(Idle), which still lists thread 2.
+        let commands =
+            IntentHandler::handle(&Intent::PickerFilter(SessionFilter::Idle), &mut state);
 
         // Then nothing is loaded.
         assert!(commands.is_empty(), "the same selection needs no new read");
