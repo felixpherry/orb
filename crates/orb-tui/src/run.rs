@@ -149,11 +149,21 @@ impl Frontend {
         })
     }
 
-    /// Runs orb's TUI until the user quits. Session commands go to
-    /// `sessions`; worktree commands go to `worktrees`; search commands go
-    /// to `search`; a thread whose worktree under `worktrees_root` is gone has
-    /// it recreated before attaching; the branch picker's refs come from
-    /// `git`; panes run with `env` and attach through `zmx`; notices are
+    /// Quits orb the way `<C-g> q` does, from outside the loop. A quit sent
+    /// before the loop starts is handled on its first turn.
+    pub fn quitter(&self) -> Wake {
+        let tx = self.tx.clone();
+        Arc::new(move || {
+            let _ = tx.send(LoopEvent::Quit);
+        })
+    }
+
+    /// Runs orb's TUI until the user quits or [`Frontend::quitter`] is called.
+    /// Session commands go to `sessions`; worktree commands go to
+    /// `worktrees`; search commands go to `search`; a thread whose worktree
+    /// under `worktrees_root` is gone has it recreated before attaching; the
+    /// branch picker's refs come from `git`; panes run with `env` and attach
+    /// through `zmx`; notices are
     /// announced through `notifier` while orb's terminal isn't focused;
     /// problems are written to `log`. The first frame is drawn before the
     /// panes of open sessions reconnect. The terminal is restored on exit and
@@ -213,6 +223,8 @@ enum LoopEvent {
     Pane(PaneId, PaneEvent),
     /// An actor changed the state.
     StateChanged,
+    /// orb was asked to quit from outside (a signal).
+    Quit,
 }
 
 /// What the loop does with a new session's request to attach to it.
@@ -933,6 +945,9 @@ impl App {
             LoopEvent::Input(_) => {}
             LoopEvent::Pane(id, PaneEvent::Broken) => self.drop_broken(id),
             LoopEvent::StateChanged => self.relist_projects(),
+            LoopEvent::Quit => {
+                IntentHandler::handle(&Intent::Quit, &mut self.state.write());
+            }
             LoopEvent::Pane(id, PaneEvent::Exited) => self.exited.push(id),
             LoopEvent::InputFailed(error) => return Err(error),
             LoopEvent::Pane(_, PaneEvent::Clipboard(text)) => {
@@ -2968,6 +2983,22 @@ mod tests {
             test.zmx.killed(),
             [pane(2).zmx_name()],
             "a closed broken pane's session is killed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn a_quit_event_ends_the_loop() -> io::Result<()> {
+        // Given a loop with nothing open.
+        let mut test = loop_app(FakeZmx::listing(""), keeps_running)?;
+
+        // When a quit event arrives, as a signal sends it.
+        test.app.handle(LoopEvent::Quit, &mut io::sink())?;
+
+        // Then the loop's quit flag is set, so it ends after its next draw.
+        assert!(
+            test.state.read().should_quit,
+            "a quit event should end the loop"
         );
         Ok(())
     }

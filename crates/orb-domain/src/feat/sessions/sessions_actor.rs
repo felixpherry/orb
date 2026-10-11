@@ -10760,6 +10760,50 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn a_layout_save_sent_before_shutdown_is_stored_after_it()
+    -> Result<(), Report<StoreError>> {
+        // Given a store file with thread aa, the actor started through its
+        // mailbox, and aa's tab renamed in the app state.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        let inserted = insert_thread(&store, "aa")?;
+        let zmx = zmx_running(&store);
+        let host = listing(Vec::new());
+        let (actor, state) = spawned(store, &host, zmx).await?;
+        state
+            .write()
+            .layouts
+            .rename_tab(inserted.session, 0, Some("agent".into()));
+
+        // When sending a save for aa's layout without waiting, then shutting
+        // the actor down.
+        actor
+            .tell(SaveLayout(inserted.session))
+            .await
+            .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))?;
+        tokio::time::timeout(LIMIT, crate::stop_gracefully(&actor))
+            .await
+            .change_context(StoreError)
+            .attach("the actor didn't stop in time")?;
+
+        // Then the store file has the tab's name.
+        let names: Vec<Option<String>> = Store::open(&path)?
+            .layouts()?
+            .tabs
+            .into_iter()
+            .map(|tab| tab.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![Some("agent".to_owned())],
+            "a layout save sent before shutdown should be stored after it"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn kill_settled_at_start_kills_only_settled_panes() -> Result<(), Report<StoreError>> {
         // Given session aa settled before start and session bb not, zmx
         // listing both their panes.

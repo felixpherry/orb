@@ -42,7 +42,7 @@ pub enum PaneMode {
 /// Everything the frontend needs to draw a frame and decide whether to exit.
 #[derive(Debug, Default)]
 pub struct AppState {
-    /// Set when the user asked to quit; the frontend loop exits when true.
+    /// Set when the user or a signal asked orb to quit; the frontend loop exits when true.
     pub should_quit: bool,
     /// Where the user's keys currently go.
     pub focus: Focus,

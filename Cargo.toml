@@ -33,7 +33,7 @@ portable-pty = "0.9"
 terminput = "0.5"
 terminput-crossterm = "0.4"
 base64 = "0.22"
-tokio = { version = "1.53", features = ["rt-multi-thread", "process", "time", "sync", "macros"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "process", "time", "sync", "macros", "signal"] }
 kameo = "0.22"
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }

@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 use std::{panic, thread};
 
@@ -33,16 +34,23 @@ use orb_domain::feat::worktrees::worktrees_actor::{
 use orb_domain::feat::zmx::zmx_cli::ZmxCli;
 use orb_domain::feat::zmx::zmx_service::ZmxService;
 use orb_domain::{
-    AppState, Finished, Log, Services, State, ancestry, ends_orb, panic_text, parse_parents,
-    run_within,
+    AppState, Finished, Log, Services, State, Wake, ancestry, ends_orb, panic_text, parse_parents,
+    run_within, stop_gracefully,
 };
 use orb_tui::{Frontend, PANE_READER_THREAD};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use wherror::Error;
 
 /// orb couldn't start, or its frontend failed.
 #[derive(Debug, Error)]
 #[error(debug)]
 struct OrbError;
+
+/// How long quitting waits for the workers to finish what they had queued.
+const QUIT_CAP: Duration = Duration::from_secs(2);
+
+/// How long quitting waits for the runtime's tasks after the workers stopped.
+const RUNTIME_SHUTDOWN: Duration = Duration::from_millis(200);
 
 fn main() -> Result<(), Report<OrbError>> {
     let home = std::env::var_os("HOME")
@@ -102,7 +110,9 @@ fn upgrade_policy(home: &Path, args: &[OsString]) -> Upgrade {
     )
 }
 
-/// Everything after the log opens: integrations, store, actors, frontend.
+/// Everything after the log opens: integrations, store, actors, frontend,
+/// then the shutdown in order.
+#[expect(clippy::too_many_lines, reason = "start-up and shutdown read in order")]
 fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbError>> {
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let claude_dir = integration::claude_dir(config_dir, &home);
@@ -117,18 +127,19 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
     let tz = TimeZone::system();
     let notifier = desktop_notifier();
     let store_path = orb_root.join("userdata/state.sqlite");
-    let _store_lock = store::lock(&store_path).change_context(OrbError)?;
+    let store_lock = store::lock(&store_path).change_context(OrbError)?;
     let store = Store::open_live(&store_path, upgrade_policy(&home, &args), log)
         .change_context(OrbError)?;
     let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
-    let _context = runtime.enter();
+    let context = runtime.enter();
     let state = State::new(AppState {
         home,
         ..AppState::default()
     });
     let frontend = Frontend::new(tz);
+    quit_on_signals(frontend.quitter(), log);
     let services = {
         let git = GitService::new(Arc::new(GitCli::new(env.clone())), log.clone());
         let claude = ClaudeCode::new(Arc::new(ClaudeSupervisor::new(env.clone())), claude_dir);
@@ -183,7 +194,8 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
         wake: frontend.waker(),
         log: log.clone(),
     });
-    frontend
+    let workers = (sessions.clone(), worktrees.clone(), search.clone());
+    let ended = frontend
         .run(
             state,
             sessions,
@@ -197,7 +209,53 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
             notifier,
             log.clone(),
         )
-        .change_context(OrbError)
+        .change_context(OrbError);
+    let stopped = runtime.block_on(tokio::time::timeout(QUIT_CAP, async {
+        tokio::join!(
+            stop_gracefully(&workers.0),
+            stop_gracefully(&workers.1),
+            stop_gracefully(&workers.2)
+        )
+    }));
+    if stopped.is_err() {
+        log.line("quit", "workers still busy after 2 s");
+    }
+    drop(workers);
+    drop(context);
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    drop(store_lock);
+    ended
+}
+
+/// Quits orb, as `<C-g> q` does, on SIGTERM, SIGINT or SIGHUP. A signal orb
+/// can't listen for is logged and keeps its default.
+fn quit_on_signals(quit: Wake, log: &Log) {
+    let mut streams: Vec<Signal> = [
+        (SignalKind::terminate(), "SIGTERM"),
+        (SignalKind::interrupt(), "SIGINT"),
+        (SignalKind::hangup(), "SIGHUP"),
+    ]
+    .into_iter()
+    .filter_map(|(kind, name)| {
+        signal(kind)
+            .inspect_err(|error| log.line("signal", &format!("can't listen for {name}: {error}")))
+            .ok()
+    })
+    .collect();
+    tokio::spawn(async move {
+        std::future::poll_fn(|cx| {
+            if streams
+                .iter_mut()
+                .any(|stream| stream.poll_recv(cx).is_ready())
+            {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        quit();
+    });
 }
 
 /// Where orb's integrations live: under `orb_root`, `claude_dir`, and pi's

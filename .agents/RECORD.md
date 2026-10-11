@@ -229,6 +229,8 @@ Entries are added or amended **only with human approval**.
 - (sessions) Panes migrated from pi threads keep their `orb-<32 hex>` zmx session under `~/.orb/pi`.
 - (pane) A pane whose zmx session is gone gets a fresh shell, and orb types its agent's resume command (`claude --resume <id>` or `pi --session-id <id>`) once the shell first prints.
 - (sessions) Quitting orb does not stop Claude or pi sessions.
+- (tui) Quitting orb lets the workers finish what they had queued, for at most 2 s, before orb exits, and the store lock is released after that.
+- (tui) SIGTERM, SIGINT and SIGHUP quit orb the same way `<C-g> q` does, with the terminal restored.
 - (sessions) A pi agent's status is the latest report orb's pi extension wrote to its pane file, and it reads as stopped once its pane's zmx session is gone.
 - (sessions) A pi agent is only ever working, idle or stopped, because its pane reports carry only those states.
 - (sessions) A pi thread's title is a name an older orb's `r` saved, else its latest `/name`, else its first prompt, else "New thread".
