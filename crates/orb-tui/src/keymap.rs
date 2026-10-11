@@ -542,8 +542,29 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
         (KeyCode::Enter, KeyModifiers::NONE) => Some(Intent::PickerConfirm),
         (KeyCode::Tab, KeyModifiers::NONE) => Some(Intent::PickerOpen),
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Intent::PickerCancel),
-        (KeyCode::Char('x'), KeyModifiers::CONTROL) => Some(Intent::PickerRemove),
-        (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Intent::PickerToggleSettled),
+        _ => None,
+    }
+}
+
+/// What `key` does in a list-mode picker (the session and worktree pickers
+/// until `/`); `None` when it does nothing. Letters are commands here, not
+/// filter text.
+pub(crate) fn picker_list_route(key: KeyEvent) -> Option<Intent> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE)
+        | (KeyCode::Char('j'), KeyModifiers::CONTROL) => Some(Intent::PickerNext),
+        (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE)
+        | (KeyCode::Char('k'), KeyModifiers::CONTROL) => Some(Intent::PickerPrev),
+        (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Intent::PickerG),
+        (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT) => Some(Intent::PickerLast),
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Intent::PickerHalfPageDown),
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Intent::PickerHalfPageUp),
+        (KeyCode::Char('/'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+            Some(Intent::PickerStartSearch)
+        }
+        (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Intent::PickerRemove),
+        (KeyCode::Enter, KeyModifiers::NONE) => Some(Intent::PickerConfirm),
+        (KeyCode::Esc, KeyModifiers::NONE) => Some(Intent::PickerCancel),
         _ => None,
     }
 }
@@ -563,8 +584,8 @@ mod tests {
     use ratatui_which_key::{Key, NodeResult};
 
     use super::{
-        Keys, LEADER, Route, Scope, Selection, cmd_route, keymap, mode_route, picker_route, press,
-        route,
+        Keys, LEADER, Route, Scope, Selection, cmd_route, keymap, mode_route, picker_list_route,
+        picker_route, press, route,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
 
@@ -597,7 +618,6 @@ mod tests {
     #[case(key(KeyCode::Enter), Intent::PickerConfirm)]
     #[case(key(KeyCode::Tab), Intent::PickerOpen)]
     #[case(key(KeyCode::Esc), Intent::PickerCancel)]
-    #[case(ctrl('s'), Intent::PickerToggleSettled)]
     fn picker_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
         // Given / When routing the key in an open picker.
         let intent = picker_route(pressed);
@@ -611,15 +631,58 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn ctrl_x_asks_to_remove_in_the_picker() {
-        // Given / When routing `<C-x>` in an open picker.
-        let intent = picker_route(ctrl('x'));
+    #[case(ctrl('x'))]
+    #[case(ctrl('s'))]
+    fn ctrl_x_and_ctrl_s_do_nothing_in_the_picker(#[case] pressed: KeyEvent) {
+        // Given / When routing the key in an open picker.
+        let intent = picker_route(pressed);
 
-        // Then it asks to remove the highlighted project.
+        // Then nothing happens.
+        assert_eq!(intent, None, "the key should be unbound in the picker");
+    }
+
+    #[rstest::rstest]
+    #[case(key(KeyCode::Char('j')), Intent::PickerNext)]
+    #[case(key(KeyCode::Char('k')), Intent::PickerPrev)]
+    #[case(key(KeyCode::Down), Intent::PickerNext)]
+    #[case(key(KeyCode::Up), Intent::PickerPrev)]
+    #[case(ctrl('j'), Intent::PickerNext)]
+    #[case(ctrl('k'), Intent::PickerPrev)]
+    #[case(key(KeyCode::Char('g')), Intent::PickerG)]
+    #[case(
+        KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        Intent::PickerLast
+    )]
+    #[case(ctrl('d'), Intent::PickerHalfPageDown)]
+    #[case(ctrl('u'), Intent::PickerHalfPageUp)]
+    #[case(key(KeyCode::Char('/')), Intent::PickerStartSearch)]
+    #[case(key(KeyCode::Char('d')), Intent::PickerRemove)]
+    #[case(key(KeyCode::Enter), Intent::PickerConfirm)]
+    #[case(key(KeyCode::Esc), Intent::PickerCancel)]
+    fn list_picker_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
+        // Given / When routing the key in a list-mode picker.
+        let intent = picker_list_route(pressed);
+
+        // Then it yields its intent.
         assert_eq!(
-            intent,
-            Some(Intent::PickerRemove),
-            "<C-x> should remove in the picker"
+            intent.as_ref(),
+            Some(&expected),
+            "the key for {expected} in a list-mode picker"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case('q')]
+    #[case('x')]
+    #[case('z')]
+    fn letters_do_nothing_in_a_list_picker(#[case] letter: char) {
+        // Given / When routing a letter in a list-mode picker.
+        let intent = picker_list_route(key(KeyCode::Char(letter)));
+
+        // Then it neither filters nor acts.
+        assert_eq!(
+            intent, None,
+            "{letter} should do nothing in a list-mode picker"
         );
     }
 

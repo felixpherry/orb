@@ -192,6 +192,12 @@ pub enum Intent {
     /// Close the picker without picking, or the rename box without renaming.
     /// In the sidebar search, end it and put the cursor back.
     PickerCancel,
+    /// Move a list-mode picker's keys into its input box (`/`).
+    PickerStartSearch,
+    /// Select the picker's last item (`G` in list mode).
+    PickerLast,
+    /// `g` in list mode: pressed twice, select the first item.
+    PickerG,
     /// Ask to remove the project highlighted in the project filter.
     PickerRemove,
     /// Show or hide settled threads in the session picker, keeping the typed
@@ -259,7 +265,7 @@ impl fmt::Display for Intent {
             Self::SelectLast => "bottom",
             Self::TogglePin => "pin",
             Self::Rename => "rename",
-            Self::Search => "search",
+            Self::Search | Self::PickerStartSearch => "search",
             Self::ToggleSettle => "settle",
             Self::Delete | Self::PickerBackspace => "delete",
             Self::Unfold => "open",
@@ -277,6 +283,8 @@ impl fmt::Display for Intent {
             Self::PickerConfirm => "pick",
             Self::PickerOpen => "open directory",
             Self::PickerCancel => "cancel",
+            Self::PickerLast => "last item",
+            Self::PickerG => "first item",
             Self::PickerRemove => "remove",
             Self::PickerToggleSettled => "toggle settled",
         })

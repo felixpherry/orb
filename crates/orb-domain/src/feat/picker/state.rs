@@ -96,6 +96,19 @@ pub struct SearchPreview {
     pub messages: Vec<(i64, Role, String)>,
 }
 
+/// How a picker takes letters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerMode {
+    /// Typing filters; the picker has no list mode.
+    Filter,
+    /// List mode: letters are commands. `pending_g` is whether the first
+    /// `g` of `gg` was pressed.
+    List { pending_g: bool },
+    /// A list-mode picker's search: typing filters until `Esc` goes back
+    /// to the list.
+    Search,
+}
+
 /// The open picker.
 #[derive(Debug)]
 pub struct PickerState {
@@ -116,6 +129,8 @@ pub struct PickerState {
     /// The worktree list a delete confirm was opened over; the confirm
     /// returns to it.
     under: Option<Box<PickerState>>,
+    /// Whether letters filter or act as list keys.
+    mode: PickerMode,
 }
 
 impl PickerState {
@@ -131,11 +146,12 @@ impl PickerState {
             preview: None,
             search_preview: None,
             under: None,
+            mode: PickerMode::Filter,
         }
     }
 
     /// The session picker over `items`, in the order given, with settled
-    /// threads hidden.
+    /// threads hidden, opening in list mode.
     pub fn sessions(items: Vec<PickerItem>, return_to: Focus) -> Self {
         Self {
             kind: PickerKind::Sessions { settled: false },
@@ -147,13 +163,16 @@ impl PickerState {
             preview: None,
             search_preview: None,
             under: None,
+            mode: PickerMode::List { pending_g: false },
         }
     }
 
-    /// The worktree picker over `items`, in the order given.
+    /// The worktree picker over `items`, in the order given, opening in list
+    /// mode.
     pub fn worktrees(items: Vec<PickerItem>, return_to: Focus) -> Self {
         Self {
             kind: PickerKind::Worktrees,
+            mode: PickerMode::List { pending_g: false },
             ..Self::projects(items, return_to)
         }
     }
@@ -194,6 +213,7 @@ impl PickerState {
             preview: None,
             search_preview: None,
             under: None,
+            mode: PickerMode::Filter,
         }
     }
 
@@ -251,6 +271,7 @@ impl PickerState {
             preview: None,
             search_preview: None,
             under: None,
+            mode: PickerMode::Filter,
         }
     }
 
@@ -266,6 +287,7 @@ impl PickerState {
             preview: None,
             search_preview: None,
             under: None,
+            mode: PickerMode::Filter,
         }
     }
 
@@ -292,6 +314,7 @@ impl PickerState {
             preview: None,
             search_preview: None,
             under: None,
+            mode: PickerMode::Filter,
         }
     }
 
@@ -308,6 +331,7 @@ impl PickerState {
             preview: None,
             search_preview: None,
             under: None,
+            mode: PickerMode::Filter,
         }
     }
 
@@ -323,6 +347,7 @@ impl PickerState {
             preview: None,
             search_preview: None,
             under: None,
+            mode: PickerMode::Filter,
         }
     }
 
@@ -345,6 +370,7 @@ impl PickerState {
             preview: None,
             search_preview: None,
             under: None,
+            mode: PickerMode::Filter,
         };
         (picker, home)
     }
@@ -668,6 +694,54 @@ impl PickerState {
     /// Moves the selection up half a page.
     pub fn half_page_up(&mut self) {
         self.list.half_page_up(self.page);
+    }
+
+    /// Whether the picker is in list mode, where letters are commands.
+    pub fn listing(&self) -> bool {
+        matches!(self.mode, PickerMode::List { .. })
+    }
+
+    /// Whether a list-mode picker is in its search mode.
+    pub fn searching(&self) -> bool {
+        self.mode == PickerMode::Search
+    }
+
+    /// Moves a list-mode picker's keys into its input box. Other pickers
+    /// ignore it.
+    pub fn start_search(&mut self) {
+        if self.listing() {
+            self.mode = PickerMode::Search;
+        }
+    }
+
+    /// Takes a searching picker back to its list, keeping the typed text.
+    pub fn leave_search(&mut self) {
+        if self.searching() {
+            self.mode = PickerMode::List { pending_g: false };
+        }
+    }
+
+    /// `g` in list mode: the second of `gg` selects the first item, the first
+    /// waits for it.
+    pub fn press_g(&mut self) {
+        if let PickerMode::List { pending_g } = &mut self.mode {
+            if *pending_g {
+                self.list.first();
+            }
+            *pending_g = !*pending_g;
+        }
+    }
+
+    /// Any key but `g` ends a `gg` in progress.
+    pub fn forget_g(&mut self) {
+        if let PickerMode::List { pending_g } = &mut self.mode {
+            *pending_g = false;
+        }
+    }
+
+    /// Selects the last item.
+    pub fn last(&mut self) {
+        self.list.last();
     }
 
     /// Selects shown row `index` unless it's a heading, disabled or past the end.
@@ -1801,5 +1875,56 @@ mod tests {
             Some(SessionId(1)),
             "a hit on an ended thread should open its session"
         );
+    }
+
+    fn other_picker(which: &str) -> PickerState {
+        match which {
+            "projects" => PickerState::projects(vec![], Focus::Sidebar),
+            "project_filter" => PickerState::project_filter(vec![], None, Focus::Sidebar),
+            "remove_project" => PickerState::remove_project(ProjectId(1), Focus::Sidebar),
+            "directories" => PickerState::directories(PathBuf::from("/home"), Focus::Sidebar).0,
+            _ => PickerState::search(Focus::Sidebar),
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::worktrees(PickerState::worktrees(vec![], Focus::Sidebar))]
+    #[case::sessions(PickerState::sessions(vec![], Focus::Sidebar))]
+    fn list_mode_pickers_open_listing(#[case] picker: PickerState) {
+        // Given / When opening a list-mode picker.
+
+        // Then it is in list mode.
+        assert!(picker.listing(), "the picker should open in list mode");
+    }
+
+    #[rstest::rstest]
+    #[case("projects")]
+    #[case("project_filter")]
+    #[case("remove_project")]
+    #[case("directories")]
+    #[case("search")]
+    fn other_pickers_never_list(#[case] which: &str) {
+        // Given / When opening a picker without list mode.
+        let picker = other_picker(which);
+
+        // Then it is not in list mode.
+        assert!(!picker.listing(), "the {which} picker should not list");
+    }
+
+    #[rstest::rstest]
+    #[case("projects")]
+    #[case("project_filter")]
+    #[case("remove_project")]
+    #[case("directories")]
+    #[case("search")]
+    fn other_pickers_ignore_start_search(#[case] which: &str) {
+        // Given a picker without list mode.
+        let mut picker = other_picker(which);
+
+        // When starting a search.
+        picker.start_search();
+
+        // Then it is not in a list-mode picker's search mode.
+        assert!(!picker.searching(), "the {which} picker should not search");
     }
 }

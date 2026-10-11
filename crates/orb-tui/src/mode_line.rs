@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
+use orb_domain::feat::picker::state::PickerState;
 use orb_domain::feat::sessions::state::{Sessions, SidebarItem, SidebarRow, ThreadStatus};
 use orb_domain::{AppState, Focus, PaneMode};
 use ratatui::buffer::Buffer;
@@ -66,6 +67,9 @@ fn mode(state: &AppState) -> (&'static str, Color) {
             None => ("PANE", GREEN1),
         },
         Focus::Sidebar => ("NORMAL", BLUE),
+        Focus::Picker if state.picker.as_ref().is_some_and(PickerState::searching) => {
+            ("INSERT", GREEN)
+        }
         Focus::Picker => ("PICKER", YELLOW),
         Focus::Rename | Focus::Search => ("INSERT", GREEN),
     }
@@ -212,6 +216,7 @@ mod tests {
 
     use crate::test_support::sessions_for;
     use jiff::tz::{self, TimeZone};
+    use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::sessions::state::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
         Thread, ThreadId, ThreadStatus,
@@ -394,6 +399,45 @@ mod tests {
         // Then the mode is INSERT.
         let text = text(&buffer);
         assert!(text.starts_with(" INSERT "), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn mode_line_shows_insert_in_a_list_pickers_search() {
+        // Given the session picker in search mode with the keys.
+        let picker = {
+            let mut picker = PickerState::sessions(vec![], Focus::Sidebar);
+            picker.start_search();
+            picker
+        };
+        let state = AppState {
+            focus: Focus::Picker,
+            picker: Some(picker),
+            ..AppState::default()
+        };
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the mode is INSERT.
+        let text = text(&buffer);
+        assert!(text.starts_with(" INSERT "), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn mode_line_shows_picker_in_a_list_pickers_list() {
+        // Given the session picker in list mode with the keys.
+        let state = AppState {
+            focus: Focus::Picker,
+            picker: Some(PickerState::sessions(vec![], Focus::Sidebar)),
+            ..AppState::default()
+        };
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the mode is PICKER.
+        let text = text(&buffer);
+        assert!(text.starts_with(" PICKER "), "mode line was '{text}'");
     }
 
     #[rstest::rstest]

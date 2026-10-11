@@ -83,7 +83,7 @@ use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::layout::state::{Layouts, SessionLayout};
 use orb_domain::feat::notify::notifier::NotifierService;
-use orb_domain::feat::picker::state::PickerKind;
+use orb_domain::feat::picker::state::{PickerKind, PickerState};
 use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
@@ -790,11 +790,14 @@ impl App {
     {
         match event {
             LoopEvent::Input(Event::Key(key)) if key.kind != KeyEventKind::Release => {
-                let (focus, mode) = {
+                let (focus, mode, listing) = {
                     let state = self.state.read();
-                    (state.focus, state.pane_mode())
+                    let listing = state.picker.as_ref().is_some_and(PickerState::listing);
+                    (state.focus, state.pane_mode(), listing)
                 };
                 let intent = match (focus, mode) {
+                    // A list-mode picker takes letters as commands until `/`.
+                    (Focus::Picker, _) if listing => keymap::picker_list_route(key),
                     // The rename box and the search take the picker's keys.
                     (Focus::Picker | Focus::Rename | Focus::Search, _) => keymap::picker_route(key),
                     (Focus::Pane, Some(mode)) => {

@@ -45,6 +45,7 @@ impl IntentHandler {
     /// which the user has now seen; otherwise an intent that fails validation
     /// changes nothing. After every intent, a cursor left on an agent row of
     /// a folded card unfolds it, unless a search lists the row anyway.
+    /// Every intent but `PickerG` also ends a `gg` in progress.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per intent keeps every input decision in one match"
@@ -53,6 +54,11 @@ impl IntentHandler {
         state.sessions.error = None;
         state.sessions.notice = None;
         state.worktrees.notice = None;
+        if *intent != Intent::PickerG
+            && let Some(picker) = state.picker.as_mut()
+        {
+            picker.forget_g();
+        }
         let commands = match intent {
             Intent::Quit => {
                 state.should_quit = true;
@@ -412,6 +418,7 @@ impl IntentHandler {
             }
             Intent::PickerCursorTo(index) => {
                 if let Some(picker) = &mut state.picker {
+                    picker.start_search();
                     picker.cursor_to(*index);
                 }
                 vec![]
@@ -441,6 +448,26 @@ impl IntentHandler {
                 let before = picked(state);
                 if let Some(picker) = &mut state.picker {
                     picker.half_page_up();
+                }
+                with_preview(state, before, vec![])
+            }
+            Intent::PickerStartSearch => {
+                if let Some(picker) = &mut state.picker {
+                    picker.start_search();
+                }
+                vec![]
+            }
+            Intent::PickerLast => {
+                let before = picked(state);
+                if let Some(picker) = &mut state.picker {
+                    picker.last();
+                }
+                with_preview(state, before, vec![])
+            }
+            Intent::PickerG => {
+                let before = picked(state);
+                if let Some(picker) = &mut state.picker {
+                    picker.press_g();
                 }
                 with_preview(state, before, vec![])
             }
@@ -610,6 +637,12 @@ impl IntentHandler {
                     _ => vec![],
                 },
             },
+            Intent::PickerCancel if state.picker.as_ref().is_some_and(PickerState::searching) => {
+                if let Some(picker) = &mut state.picker {
+                    picker.leave_search();
+                }
+                vec![]
+            }
             Intent::PickerCancel => match state.picker.as_ref().map(PickerState::kind) {
                 Some(PickerKind::DeleteWorktree { .. }) => {
                     back_to_worktrees(state, false);
@@ -1185,7 +1218,7 @@ fn close_picker(state: &mut AppState) -> Option<PickerState> {
     Some(picker)
 }
 
-/// `<C-x>` in the worktree picker: the `No`/`Yes` confirm over the list, or
+/// `d` in the worktree picker's list: the `No`/`Yes` confirm over the list, or
 /// on an attached or mid-turn row, why it can't be deleted on the mode line.
 fn ask_delete_worktree(state: &mut AppState) -> Vec<Command> {
     let why = match validate_delete_worktree(state) {
@@ -6239,6 +6272,7 @@ mod tests {
     #[case::select_row(Intent::PickerSelectRow(2), 3)]
     #[case::wheel_next(Intent::PickerWheelNext, 3)]
     #[case::wheel_prev(Intent::PickerWheelPrev, 1)]
+    #[case::last(Intent::PickerLast, 3)]
     fn moving_in_the_session_picker_loads_the_new_selections_preview(
         #[case] intent: Intent,
         #[case] expected: i64,
@@ -6864,6 +6898,176 @@ mod tests {
 
         // Then no picker is open.
         assert!(state.picker.is_none(), "Esc on the list should close it");
+    }
+
+    /// The worktree picker opened over orb's worktrees, then `intents`
+    /// handled.
+    fn worktree_picker_after(intents: &[Intent]) -> AppState {
+        let mut state = worktree_state();
+        IntentHandler::handle(&Intent::OpenWorktreePicker, &mut state);
+        for intent in intents {
+            IntentHandler::handle(intent, &mut state);
+        }
+        state
+    }
+
+    #[rstest::rstest]
+    fn picker_start_search_moves_the_keys_to_the_input() {
+        // Given the worktree picker open in list mode.
+        let mut state = worktree_picker_after(&[]);
+
+        // When handling PickerStartSearch.
+        IntentHandler::handle(&Intent::PickerStartSearch, &mut state);
+
+        // Then the picker is in search mode.
+        assert!(
+            state.picker.as_ref().is_some_and(PickerState::searching),
+            "/ should enter search mode"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_cancel_in_search_mode_returns_to_the_list() {
+        // Given the worktree picker in search mode with `o` typed.
+        let mut state =
+            worktree_picker_after(&[Intent::PickerStartSearch, Intent::PickerInput('o')]);
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the picker is open in list mode with the keys.
+        assert!(
+            state.picker.as_ref().is_some_and(PickerState::listing) && state.focus == Focus::Picker,
+            "Esc in search mode should go back to the list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_cancel_in_search_mode_keeps_the_typed_text() {
+        // Given the worktree picker in search mode with `o` typed.
+        let mut state =
+            worktree_picker_after(&[Intent::PickerStartSearch, Intent::PickerInput('o')]);
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the typed text is still there.
+        assert_eq!(
+            state.picker.as_ref().map(PickerState::input),
+            Some("o"),
+            "Esc in search mode should keep the filter"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_cancel_in_search_mode_with_nothing_typed_returns_to_the_list() {
+        // Given the worktree picker in search mode with nothing typed.
+        let mut state = worktree_picker_after(&[Intent::PickerStartSearch]);
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the picker is open in list mode.
+        assert!(
+            state.picker.as_ref().is_some_and(PickerState::listing),
+            "Esc in an empty search should go back to the list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_cancel_in_list_mode_closes_the_picker() {
+        // Given the worktree picker open in list mode from the sidebar.
+        let mut state = worktree_picker_after(&[]);
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the picker is closed and the sidebar has the keys back.
+        assert!(
+            state.picker.is_none() && state.focus == Focus::Sidebar,
+            "Esc in list mode should close the picker"
+        );
+    }
+
+    #[rstest::rstest]
+    fn g_twice_selects_the_first_row() {
+        // Given the worktree picker on its second row.
+        let mut state = worktree_picker_after(&[Intent::PickerNext, Intent::PickerG]);
+
+        // When handling the second PickerG.
+        IntentHandler::handle(&Intent::PickerG, &mut state);
+
+        // Then the first row is selected.
+        assert_eq!(
+            picked_worktree(&state),
+            Some(PathBuf::from(USED)),
+            "gg should select the first row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn g_then_another_key_then_g_keeps_the_selection() {
+        // Given the worktree picker after `g` then a move to the second row.
+        let mut state = worktree_picker_after(&[Intent::PickerG, Intent::PickerNext]);
+
+        // When handling PickerG again.
+        IntentHandler::handle(&Intent::PickerG, &mut state);
+
+        // Then the second row stays selected.
+        assert_eq!(
+            picked_worktree(&state),
+            Some(PathBuf::from(ORPHAN)),
+            "a key between the g presses should cancel gg"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_last_selects_the_last_row() {
+        // Given the worktree picker on its first row.
+        let mut state = worktree_picker_after(&[]);
+
+        // When handling PickerLast.
+        IntentHandler::handle(&Intent::PickerLast, &mut state);
+
+        // Then the last row is selected.
+        assert_eq!(
+            picked_worktree(&state),
+            Some(PathBuf::from(ORPHAN)),
+            "G should select the last row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_list_pickers_input_enters_search_mode() {
+        // Given the worktree picker open in list mode.
+        let mut state = worktree_picker_after(&[]);
+
+        // When clicking its input box.
+        IntentHandler::handle(&Intent::PickerCursorTo(0), &mut state);
+
+        // Then the picker is in search mode.
+        assert!(
+            state.picker.as_ref().is_some_and(PickerState::searching),
+            "a click on the input should enter search mode"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_filter_pickers_input_keeps_it_filtering() {
+        // Given the project picker open.
+        let mut state = picking(Focus::Sidebar);
+
+        // When clicking its input box.
+        IntentHandler::handle(&Intent::PickerCursorTo(0), &mut state);
+
+        // Then the picker neither searches nor lists.
+        assert!(
+            state
+                .picker
+                .as_ref()
+                .is_some_and(|picker| !picker.searching() && !picker.listing()),
+            "a click should leave a type-to-filter picker as it was"
+        );
     }
 
     /// Search hit `id` in `thread`, on `/t/<thread>.jsonl`.

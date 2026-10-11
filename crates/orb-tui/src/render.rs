@@ -8,8 +8,8 @@
 //! so is the rename box while it has the keys. A confirm opened over a
 //! picker draws on top of it, and only the confirm takes clicks.
 //! The terminal's cursor is shown only where the keys are: on the sidebar's
-//! selected row, at the text cursor of the picker, the rename box or the
-//! sidebar search, or in the focused pane.
+//! selected row, at the text cursor of the picker (unless the picker is in
+//! list mode), the rename box or the sidebar search, or in the focused pane.
 //! Each frame records where it drew the sidebar's rows and input box, the
 //! shown panes, the pickers' rows and the rename box, so a click maps back
 //! to them.
@@ -126,35 +126,15 @@ pub(crate) fn render(
         .as_ref()
         .filter(|_| state.focus == Focus::Rename);
     let picker_page = match (&state.picker, renaming) {
-        (Some(picker), _) => {
-            let area = sidebar_area.union(right);
-            let buf = frame.buffer_mut();
-            let (rows, cursor) = match picker.under() {
-                Some(list) => {
-                    render_picker(
-                        list,
-                        state,
-                        now,
-                        area,
-                        buf,
-                        picker_scroll,
-                        &mut HitMap::default(),
-                    );
-                    render_picker(
-                        picker,
-                        state,
-                        now,
-                        area,
-                        buf,
-                        &mut PickerScroll::default(),
-                        hits,
-                    )
-                }
-                None => render_picker(picker, state, now, area, buf, picker_scroll, hits),
-            };
-            frame.set_cursor_position(cursor);
-            Some(rows)
-        }
+        (Some(picker), _) => Some(render_open_picker(
+            frame,
+            picker,
+            state,
+            now,
+            sidebar_area.union(right),
+            picker_scroll,
+            hits,
+        )),
         (None, Some(rename)) => {
             let cursor =
                 rename::render(rename, sidebar_area.union(right), frame.buffer_mut(), hits);
@@ -184,6 +164,48 @@ pub(crate) fn render(
         }
     }
     (sidebar_layout, picker_page)
+}
+
+/// Draws the open `picker` into `area`, over the picker it was opened over
+/// if any, and shows the text cursor unless the picker is in list mode.
+/// Returns how many rows a page of its list holds.
+fn render_open_picker(
+    frame: &mut Frame,
+    picker: &PickerState,
+    state: &AppState,
+    now: SystemTime,
+    area: Rect,
+    picker_scroll: &mut PickerScroll,
+    hits: &mut HitMap,
+) -> usize {
+    let buf = frame.buffer_mut();
+    let (rows, cursor) = match picker.under() {
+        Some(list) => {
+            render_picker(
+                list,
+                state,
+                now,
+                area,
+                buf,
+                picker_scroll,
+                &mut HitMap::default(),
+            );
+            render_picker(
+                picker,
+                state,
+                now,
+                area,
+                buf,
+                &mut PickerScroll::default(),
+                hits,
+            )
+        }
+        None => render_picker(picker, state, now, area, buf, picker_scroll, hits),
+    };
+    if !picker.listing() {
+        frame.set_cursor_position(cursor);
+    }
+    rows
 }
 
 /// Draws `picker` over `area` with its own look, the session and worktree
@@ -951,6 +973,43 @@ mod tests {
             .cursor_visible()
             .then(|| terminal.get_cursor_position().ok())
             .flatten()
+    }
+
+    #[rstest::rstest]
+    fn list_mode_picker_shows_no_cursor() {
+        // Given an open worktree picker in list mode with the keys.
+        let state = AppState {
+            focus: Focus::Picker,
+            picker: Some(PickerState::worktrees(vec![], Focus::Sidebar)),
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let cursor = cursor_of(&state, &HashMap::new());
+
+        // Then the cursor is hidden.
+        assert_eq!(cursor, None, "no cursor in a list-mode picker");
+    }
+
+    #[rstest::rstest]
+    fn search_mode_picker_shows_the_cursor() {
+        // Given an open worktree picker in search mode with the keys.
+        let picker = {
+            let mut picker = PickerState::worktrees(vec![], Focus::Sidebar);
+            picker.start_search();
+            picker
+        };
+        let state = AppState {
+            focus: Focus::Picker,
+            picker: Some(picker),
+            ..AppState::default()
+        };
+
+        // When drawing a frame.
+        let cursor = cursor_of(&state, &HashMap::new());
+
+        // Then the cursor shows.
+        assert!(cursor.is_some(), "a searching picker shows its cursor");
     }
 
     #[rstest::rstest]

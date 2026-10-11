@@ -250,6 +250,16 @@ impl PickerList {
         self.move_up((page / 2).max(1));
     }
 
+    /// Selects the first enabled shown item.
+    pub fn first(&mut self) {
+        self.move_up(self.selection);
+    }
+
+    /// Selects the last enabled shown item.
+    pub fn last(&mut self) {
+        self.move_down(self.shown.len());
+    }
+
     /// Selects shown row `index` when it's there and can be selected;
     /// otherwise stays.
     pub fn select_row(&mut self, index: usize) {
