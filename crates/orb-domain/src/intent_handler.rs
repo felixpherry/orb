@@ -1212,25 +1212,35 @@ fn detach_moving(state: &mut AppState, session: SessionId, command: Command) -> 
 /// Jumps to `session`, picked in the search picker: puts the cursor on it
 /// and attaches like `⏎` on its row, recording the move as a jump.
 fn pick_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
-    pick(state, SidebarItem::Session(session))
+    let card = SidebarItem::Session(session);
+    pick(state, card, card)
 }
 
 /// Jumps to agent `pane` of `session`, picked in the session picker: shows
 /// the pane in its tab, puts the cursor on its agent row and moves the keys
-/// into it like `⏎` on that row, recording the move as a jump.
+/// into it like `⏎` on that row, recording the move as a jump to its
+/// session's card, the row a jump can land on.
 fn pick_agent(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Command> {
     state.layouts.reveal(session, pane);
-    let mut commands = pick(state, SidebarItem::Agent { session, pane });
+    let mut commands = pick(
+        state,
+        SidebarItem::Agent { session, pane },
+        SidebarItem::Session(session),
+    );
     commands.push(Command::SaveLayout(session));
     commands
 }
 
-/// Puts the cursor on `target`, records the move as a jump and attaches its
-/// session.
-fn pick(state: &mut AppState, target: SidebarItem) -> Vec<Command> {
-    let from = state.sessions.cursor;
-    state.sessions.cursor = Some(target);
-    let mut commands = record_jump(state, from);
+/// Puts the cursor on `cursor`, records the move as a jump to `jump_to` and
+/// attaches its session. Staying on the same row or session isn't a jump.
+fn pick(state: &mut AppState, cursor: SidebarItem, jump_to: SidebarItem) -> Vec<Command> {
+    let from = state.sessions.cursor.replace(cursor);
+    let mut commands = if from == Some(cursor) || from == Some(jump_to) {
+        vec![]
+    } else {
+        state.jumps.jump(from, Some(jump_to));
+        vec![Command::SaveJumps]
+    };
     commands.extend(show_pane(state));
     with_visit(state, commands)
 }
@@ -6868,18 +6878,78 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn picking_an_agent_records_the_row_left_then_its_row() {
+    fn picking_an_agent_records_the_row_left_then_its_session() {
         // Given the session picker on thread 1, opened on thread 2.
         let mut state = picking_thread_1();
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then thread 2, then thread 1's agent row, are recorded.
+        // Then thread 2, then thread 1's card, are recorded.
         assert_eq!(
             state.jumps.entries(),
-            [on_thread(2), agent_row_1()],
-            "picking should record where it left and where it landed"
+            [on_thread(2), on_thread(1)],
+            "picking should record where it left and the session it landed in"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jumping_back_past_a_picked_agent_then_forward_returns_to_its_session() {
+        // Given thread 1's agent picked from thread 2, then two `<C-[>`
+        // (thread 1's card, then thread 2).
+        let mut state = picking_thread_1();
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // When handling JumpForward.
+        IntentHandler::handle(&Intent::JumpForward, &mut state);
+
+        // Then the cursor is back on thread 1.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(1)),
+            "forward should return to the picked session"
+        );
+    }
+
+    /// Picks thread `id`'s agent in the session picker opened from `state`.
+    fn pick_agent_of(state: &mut AppState, id: i64) {
+        IntentHandler::handle(&Intent::OpenSessionPicker, state);
+        for _ in 0..3 {
+            if super::picked(state).0 == Some(ThreadId(id)) {
+                break;
+            }
+            IntentHandler::handle(&Intent::PickerNext, state);
+        }
+        IntentHandler::handle(&Intent::PickerConfirm, state);
+    }
+
+    #[rstest::rstest]
+    fn jumping_back_after_chained_agent_picks_reaches_the_middle_session() {
+        // Given threads 1-3 on thread 3, then thread 2's agent picked, then
+        // thread 1's agent picked, and one `<C-[>` landing on thread 1's
+        // card.
+        let mut state = state_with(
+            vec![
+                thread(1, ThreadStatus::Idle),
+                thread(2, ThreadStatus::Idle),
+                thread(3, ThreadStatus::Idle),
+            ],
+            3,
+        );
+        pick_agent_of(&mut state, 2);
+        pick_agent_of(&mut state, 1);
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // When handling JumpBack again.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the cursor is on thread 2.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(2)),
+            "back should reach the session picked in the middle"
         );
     }
 
