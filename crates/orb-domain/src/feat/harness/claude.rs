@@ -104,7 +104,10 @@ impl Harness for ClaudeCode {
 
 #[cfg(test)]
 pub(crate) mod fake {
-    use std::sync::{Mutex, PoisonError};
+    use std::sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use async_trait::async_trait;
     use error_stack::Report;
@@ -120,6 +123,8 @@ pub(crate) mod fake {
         /// The session whose stop never finishes.
         hangs: Mutex<Option<String>>,
         stopped: Mutex<Vec<String>>,
+        /// How many times `list` was called.
+        lists: AtomicUsize,
     }
 
     impl FakeClaude {
@@ -130,7 +135,13 @@ pub(crate) mod fake {
                 live: Mutex::new(Ok(Vec::new())),
                 hangs: Mutex::default(),
                 stopped: Mutex::default(),
+                lists: AtomicUsize::new(0),
             }
+        }
+
+        /// How many times `list` was called.
+        pub(crate) fn lists(&self) -> usize {
+            self.lists.load(Ordering::SeqCst)
         }
 
         /// From now on `live_background` answers `live`, or fails with the
@@ -165,6 +176,7 @@ pub(crate) mod fake {
         }
 
         async fn list(&self) -> Result<Vec<RunningAgent>, Report<HarnessError>> {
+            self.lists.fetch_add(1, Ordering::SeqCst);
             self.running
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

@@ -2,16 +2,21 @@
 //!
 //! Every `git` process runs against the directory it's given (`git -C`), with
 //! orb's child environment, no stdin, and no terminal prompts, so a remote
-//! that wants credentials fails instead of drawing over orb. A fetch is killed
-//! after 15 s, so an origin that can't be reached fails the fetch instead of
-//! hanging it. When git fails, the first line it printed to stderr becomes the
-//! reason.
+//! that wants credentials fails instead of drawing over orb. When git fails,
+//! the first line it printed to stderr becomes the reason.
 //!
-//! A worktree's size comes from `du`, run with the same environment.
+//! Every git call has a time limit and is killed past it, so a git stuck on a
+//! lock or a slow disk fails instead of hanging its caller. A call that only
+//! reads gets 5 s and is run once more if it times out; one that changes a
+//! repository gets 60 s and is never run again; a fetch gets 15 s, so an
+//! origin that can't be reached fails the fetch.
+//!
+//! A worktree's size comes from `du`, run with the same environment. `du` gets
+//! 10 s, and a worktree it can't size in time has no size.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
 
 use error_stack::Report;
@@ -22,16 +27,28 @@ use crate::common::{Finished, run_within};
 /// What `git fetch` prints when the remote lacks the branch.
 const MISSING_REMOTE_REF: &str = "couldn't find remote ref";
 
+/// How long a git call that only reads may take; one that times out is run once more.
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a git call that changes a repository may take.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long `git fetch` may take before orb gives up on origin.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long `du` may take to size a worktree.
+const DU_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Runs the `git` on `PATH`.
 #[derive(Debug, Clone)]
 pub struct GitCli {
     /// The environment every `git` process gets.
     env: Vec<(OsString, OsString)>,
+    /// How long a read may take before it's killed.
+    read_limit: Duration,
+    /// How long a write may take before it's killed.
+    write_limit: Duration,
     /// How long a fetch may take before it's killed.
     fetch_limit: Duration,
+    /// How long `du` may take before it's killed.
+    du_limit: Duration,
 }
 
 impl GitCli {
@@ -39,7 +56,10 @@ impl GitCli {
     pub fn new(env: Vec<(OsString, OsString)>) -> Self {
         Self {
             env,
+            read_limit: READ_TIMEOUT,
+            write_limit: WRITE_TIMEOUT,
             fetch_limit: FETCH_TIMEOUT,
+            du_limit: DU_TIMEOUT,
         }
     }
 
@@ -60,19 +80,14 @@ impl GitCli {
         command
     }
 
-    fn output<I, S>(&self, dir: &Path, args: I) -> Result<Output, Report<GitError>>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        self.command(dir, args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(couldnt_run)
-    }
-
-    /// Runs git in `dir`; returns its stdout.
-    fn run<I, S>(&self, dir: &Path, args: I) -> Result<String, Report<GitError>>
+    /// Runs git in `dir` for at most `limit`, `tries` times in all while it times out.
+    fn output<I, S>(
+        &self,
+        dir: &Path,
+        args: I,
+        limit: Duration,
+        tries: u32,
+    ) -> Result<Output, Report<GitError>>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -81,38 +96,84 @@ impl GitCli {
             .into_iter()
             .map(|arg| arg.as_ref().to_owned())
             .collect();
-        let output = self.output(dir, &args)?;
+        for _ in 0..tries {
+            if let Finished::Exited(output) =
+                run_within(self.command(dir, &args), limit).map_err(couldnt_run)?
+            {
+                return Ok(output);
+            }
+        }
+        let reason = format!(
+            "git {} timed out after {} s",
+            subcommand(&args),
+            limit.as_secs()
+        );
+        Err(Report::new(GitError).attach(reason))
+    }
+
+    /// Runs git in `dir` like [`Self::output`]; returns its stdout.
+    fn stdout<I, S>(
+        &self,
+        dir: &Path,
+        args: I,
+        limit: Duration,
+        tries: u32,
+    ) -> Result<String, Report<GitError>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args: Vec<OsString> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_owned())
+            .collect();
+        let output = self.output(dir, &args, limit, tries)?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
-            let subcommand = args
-                .first()
-                .map_or_else(String::new, |arg| arg.to_string_lossy().into_owned());
-            Err(failure(&output, &subcommand))
+            Err(failure(&output, &subcommand(&args)))
         }
     }
 
-    /// Whether git exits 0 in `dir`.
+    /// Runs a git that changes a repository in `dir`; returns its stdout.
+    fn run<I, S>(&self, dir: &Path, args: I) -> Result<String, Report<GitError>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.stdout(dir, args, self.write_limit, 1)
+    }
+
+    /// Runs a git that only reads in `dir`, once more if it times out; returns its stdout.
+    fn read<I, S>(&self, dir: &Path, args: I) -> Result<String, Report<GitError>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.stdout(dir, args, self.read_limit, 2)
+    }
+
+    /// Whether a git that only reads exits 0 in `dir`.
     fn succeeds<I, S>(&self, dir: &Path, args: I) -> bool
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.output(dir, args)
+        self.output(dir, args, self.read_limit, 2)
             .is_ok_and(|output| output.status.success())
     }
 
     /// `origin/HEAD`'s branch.
     fn origin_head(&self, repo: &Path) -> Option<String> {
         let target = self
-            .run(repo, ["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .read(repo, ["symbolic-ref", "refs/remotes/origin/HEAD"])
             .ok()?;
         non_empty(target.trim().strip_prefix("refs/remotes/origin/")?)
     }
 
     /// The branch checked out in `dir`; none on a detached HEAD.
     fn current_branch(&self, dir: &Path) -> Option<String> {
-        non_empty(self.run(dir, ["branch", "--show-current"]).ok()?.trim())
+        non_empty(self.read(dir, ["branch", "--show-current"]).ok()?.trim())
     }
 }
 
@@ -122,7 +183,7 @@ impl Git for GitCli {
     }
 
     fn refs(&self, cwd: &Path) -> Result<Vec<GitRef>, Report<GitError>> {
-        let listed = self.run(
+        let listed = self.read(
             cwd,
             [
                 "for-each-ref",
@@ -131,7 +192,7 @@ impl Git for GitCli {
                 "refs/remotes",
             ],
         )?;
-        let worktrees = checked_out(&self.run(cwd, ["worktree", "list", "--porcelain", "-z"])?);
+        let worktrees = checked_out(&self.read(cwd, ["worktree", "list", "--porcelain", "-z"])?);
         Ok(ordered(
             &listed,
             self.current_branch(cwd).as_deref(),
@@ -227,13 +288,13 @@ impl Git for GitCli {
 
     fn worktree_facts(&self, path: &Path) -> Result<WorktreeFacts, Report<GitError>> {
         // `status` goes first: it is the call that fails outside a repository.
-        let changes = self.run(path, ["status", "--porcelain"])?.lines().count();
+        let changes = self.read(path, ["status", "--porcelain"])?.lines().count();
         let branch = self
-            .run(path, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .read(path, ["symbolic-ref", "--quiet", "--short", "HEAD"])
             .ok()
             .and_then(|out| non_empty(out.trim()));
         let last_commit = self
-            .run(path, ["log", "-1", "--format=%ct%x00%s"])
+            .read(path, ["log", "-1", "--format=%ct%x00%s"])
             .ok()
             .and_then(|out| last_commit(&out));
         Ok(WorktreeFacts {
@@ -244,14 +305,18 @@ impl Git for GitCli {
     }
 
     fn disk_usage(&self, path: &Path) -> Option<u64> {
-        let output = Command::new("du")
-            .arg("-sk")
-            .arg(path)
-            .env_clear()
-            .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
+        let command = {
+            let mut command = Command::new("du");
+            command
+                .arg("-sk")
+                .arg(path)
+                .env_clear()
+                .envs(self.env.iter().map(|(key, value)| (key, value)));
+            command
+        };
+        let Finished::Exited(output) = run_within(command, self.du_limit).ok()? else {
+            return None;
+        };
         // `du` exits 1 when it can't read some files but still prints the total.
         String::from_utf8_lossy(&output.stdout)
             .split_whitespace()
@@ -318,7 +383,7 @@ impl Git for GitCli {
 
     fn project_path(&self, cwd: &Path) -> Option<PathBuf> {
         let common = self
-            .run(
+            .read(
                 cwd,
                 ["rev-parse", "--path-format=absolute", "--git-common-dir"],
             )
@@ -338,6 +403,12 @@ fn failure(output: &Output, subcommand: &str) -> Report<GitError> {
         .find(|line| !line.is_empty())
         .map_or_else(|| format!("git {subcommand} failed"), str::to_owned);
     Report::new(GitError).attach(reason)
+}
+
+/// The git subcommand `args` start with, for a reason; empty when there are none.
+fn subcommand(args: &[OsString]) -> String {
+    args.first()
+        .map_or_else(String::new, |arg| arg.to_string_lossy().into_owned())
 }
 
 /// The reason when git can't be started at all.
@@ -496,7 +567,9 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::net::TcpListener;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::{Duration, SystemTime};
 
     use error_stack::{Report, ResultExt};
@@ -526,6 +599,58 @@ mod tests {
 
         fn git(&self) -> GitCli {
             GitCli::new(self.env.clone())
+        }
+
+        /// A git whose `program` (on `PATH` before the real one) is a shell
+        /// `script`, and whose reads, writes and `du` may take `limit`.
+        fn faking(
+            &self,
+            program: &str,
+            script: &str,
+            limit: Duration,
+        ) -> Result<GitCli, Report<GitError>> {
+            let bin = self.path("bin");
+            fs::create_dir_all(&bin).change_context(GitError)?;
+            let fake = bin.join(program);
+            fs::write(
+                &fake,
+                format!("#!/bin/sh\n[ -n \"$WARMING\" ] && exit 0\n{script}\n"),
+            )
+            .change_context(GitError)?;
+            fs::set_permissions(&fake, fs::Permissions::from_mode(0o755))
+                .change_context(GitError)?;
+            // macOS checks a new program on its first run, which can take
+            // longer than a test's limit; run it once so the tests time only
+            // the script.
+            Command::new(&fake)
+                .env("WARMING", "1")
+                .status()
+                .change_context(GitError)?;
+            let path = {
+                let mut path = OsString::from(bin);
+                path.push(":");
+                path.push(std::env::var_os("PATH").unwrap_or_default());
+                path
+            };
+            let env = self
+                .env
+                .iter()
+                .filter(|(key, _)| key != "PATH")
+                .cloned()
+                .chain([("PATH".into(), path)])
+                .collect();
+            Ok(GitCli {
+                read_limit: limit,
+                write_limit: limit,
+                du_limit: limit,
+                ..GitCli::new(env)
+            })
+        }
+
+        /// How many times a fake that logs each run to `$HOME/runs` ran.
+        fn runs(&self) -> Result<usize, Report<GitError>> {
+            let runs = fs::read_to_string(self.path("runs")).change_context(GitError)?;
+            Ok(runs.lines().count())
         }
 
         fn path(&self, name: &str) -> PathBuf {
@@ -1024,8 +1149,8 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/repo.git");
         sandbox.run(&repo, ["remote", "add", "origin", &url])?;
         let git = GitCli {
-            env: sandbox.env.clone(),
             fetch_limit: Duration::from_secs(1),
+            ..sandbox.git()
         };
 
         // When fetching `main`.
@@ -1275,6 +1400,97 @@ mod tests {
         assert!(
             size.is_some_and(|kb| kb > 0),
             "a non-empty directory should take space, got {size:?}"
+        );
+        Ok(())
+    }
+
+    /// A fake that hangs until it's killed.
+    const HANGS: &str = "exec sleep 10";
+
+    /// A fake that logs each run, then hangs.
+    const LOGS_AND_HANGS: &str = "echo run >> \"$HOME/runs\"\nexec sleep 10";
+
+    /// A fake that hangs the first time, and reports one changed file after.
+    const HANGS_ONCE: &str = "[ -e \"$HOME/tried\" ] && { echo '?? file'; exit 0; }\ntouch \"$HOME/tried\"\nexec sleep 10";
+
+    #[rstest::rstest]
+    fn a_read_that_outlives_its_limit_times_out() -> Result<(), Report<GitError>> {
+        // Given a git that hangs, and a read limit of 200 ms.
+        let sandbox = Sandbox::new()?;
+        let git = sandbox.faking("git", HANGS, Duration::from_millis(200))?;
+
+        // When reading a worktree's facts.
+        let reason = reason(git.worktree_facts(sandbox.home.path()));
+
+        // Then the read fails as timed out.
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("timed out")),
+            "a read that outlives its limit should time out, got {reason:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn a_read_that_times_out_once_is_tried_again() -> Result<(), Report<GitError>> {
+        // Given a git that hangs the first time and answers after.
+        let sandbox = Sandbox::new()?;
+        let git = sandbox.faking("git", HANGS_ONCE, Duration::from_millis(200))?;
+
+        // When reading a worktree's facts.
+        let facts = git.worktree_facts(sandbox.home.path());
+
+        // Then the second try's answer comes back.
+        assert_eq!(
+            facts.ok().map(|facts| facts.changes),
+            Some(1),
+            "a read that timed out once should be tried again"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn a_read_is_tried_at_most_twice() -> Result<(), Report<GitError>> {
+        // Given a git that always hangs.
+        let sandbox = Sandbox::new()?;
+        let git = sandbox.faking("git", LOGS_AND_HANGS, Duration::from_millis(200))?;
+
+        // When asking whether the repo has an origin.
+        git.has_origin(sandbox.home.path());
+
+        // Then git ran twice.
+        assert_eq!(sandbox.runs()?, 2, "a read should be tried at most twice");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn a_write_that_times_out_is_not_tried_again() -> Result<(), Report<GitError>> {
+        // Given a git that always hangs.
+        let sandbox = Sandbox::new()?;
+        let git = sandbox.faking("git", LOGS_AND_HANGS, Duration::from_millis(200))?;
+
+        // When making a repository.
+        let _ = git.init(&sandbox.path("new"));
+
+        // Then git ran once.
+        assert_eq!(sandbox.runs()?, 1, "a write should not be tried again");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn disk_usage_of_a_du_that_outlives_its_limit_is_unknown() -> Result<(), Report<GitError>> {
+        // Given a `du` that answers only after 10 s, and a limit of 200 ms.
+        let sandbox = Sandbox::new()?;
+        let git = sandbox.faking("du", "sleep 10\necho \"4\t$1\"", Duration::from_millis(200))?;
+
+        // When measuring a directory.
+        let size = git.disk_usage(sandbox.home.path());
+
+        // Then its size is unknown.
+        assert_eq!(
+            size, None,
+            "a du that outlives its limit should give no size"
         );
         Ok(())
     }

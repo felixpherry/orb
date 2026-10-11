@@ -50,6 +50,7 @@ Entries are added or amended **only with human approval**.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
 - (sessions) zmx hosts every pane's program, as the zmx session `orb-p<id>` on `~/.orb/zmx`.
 - (sessions) Agent status is polled every second while a turn is underway in any agent pane and every 5 seconds otherwise; a Claude agent's comes from `claude agents --json --all`, matched to its pane by process ancestry.
+- (sessions) The poll asks `claude agents` only while a pane holds a Claude thread.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
 - (sessions) A Claude thread's title is a name an older orb's `r` saved, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, where a prompt that starts with a slash command counts by the text typed after the command, else "New thread".
 - (sidebar) The sidebar lists orb's sessions as one list across projects, each a three-line card (its most urgent agent's status icon, title and time; its project and status word; its branch), followed by one row per agent pane.
@@ -86,6 +87,8 @@ Entries are added or amended **only with human approval**.
 - (worktrees) New worktrees are created with `git worktree add` at `~/.orb/worktrees/<repo>/orb-<hex>`, on branch `orb/<slug>` of the session's name when it was named and that branch doesn't exist, else `orb/<hex>`.
 - (worktrees) A new worktree starts from the base branch picked for it (the default branch listed first) fetched from `origin`, or from the local branch when there is no `origin` or the branch isn't on it; a failed fetch fails the start.
 - (worktrees) Start's `git fetch` from `origin` is bounded by 15 s, after which git is killed and the start fails with `git fetch origin <base> timed out after 15 s`.
+- (arch) Every git command orb runs has a time limit — 5 s for one that only reads, 60 s for one that changes a repository, 15 s for a fetch — after which git is killed and the call fails as timed out.
+- (arch) A git command that only reads and times out is run once more before orb gives up.
 - (worktrees) A session start that fails removes the worktree and branch orb created for it.
 - (worktrees) After a thread's turn ends, orb renames its `orb/<hex>` branch to `orb/<slug>` from the thread's title; the directory keeps its name.
 - (worktrees) Deleting a session leaves its worktree on disk for the sweep to prune.
@@ -196,6 +199,7 @@ Entries are added or amended **only with human approval**.
 - (worktrees) Pruning skips a worktree with uncommitted changes or untracked files, and one with an attached session or an agent mid-turn.
 - (worktrees) Pruning removes the worktree's directory and keeps its branch.
 - (worktrees) orb sweeps for worktrees to prune at start and then every hour, showing `pruned N worktrees` in the message box when it removes any.
+- (worktrees) A worktree's size is given up after 10 s of `du`, and the worktree then shows no size.
 - (worktrees) Attaching to a session whose worktree is gone first recreates it at the same path on the session's branch, or on a new branch of that name from the project's default branch when the branch is gone.
 - (keybinds) `<C-g> W` in the sidebar or a pane opens the worktree picker.
 - (picker) The worktree picker lists every directory under `~/.orb/worktrees/<repo>/`, active ones first and unused ones last, most recently used first within each, each with its state: `active · <title>`, `settled <age>` or `no session`.

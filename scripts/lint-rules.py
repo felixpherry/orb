@@ -9,9 +9,13 @@
 - zmx list sites: each file's production `zmx … .list(` count must match the
   reviewed ZMX_LIST_SITES, so a new site fails until someone checks that a
   failed list there keeps panes rather than closing or killing them.
+- Unlimited programs: a `.output()` call anywhere in Rust code (tests too)
+  outside the timed runners in OUTPUT_ALLOWED fails, since it runs a program
+  with no time limit.
 
 `--self-test` plants a bad name, a bad phrase, a dropped kill, a dropped
-report and an unreviewed zmx list site, and exits 0 only if all are reported.
+report, an unreviewed zmx list site and an unlimited `.output()`, and exits 0
+only if all are reported.
 """
 
 import re
@@ -65,6 +69,12 @@ ZMX_LIST_SITES = {
     "crates/orb-domain/src/feat/sessions/sessions_actor.rs": 2,
     # poll: error -> that dir's panes left as they were (poll_leaves_a_pane_thread_as_it_was_when_zmx_cant_list)
     # kill_settled: error -> empty -> nothing killed (kill_settled_kills_nothing_when_zmx_cant_list)
+}
+
+# Files that may call `.output()`: each one runs it under its own time limit.
+OUTPUT = re.compile(r"\.output\(\)")
+OUTPUT_ALLOWED = {
+    "crates/orb-domain/src/feat/harness/claude/supervisor.rs": "the async timed runner: tokio timeout over output() with kill_on_drop",
 }
 
 SPAN = re.compile(r"`([^`\n]+)`")
@@ -161,6 +171,17 @@ def check_zmx_lists(label, text):
     ]
 
 
+def check_outputs(label, text):
+    """Report `.output()` calls, which run a program with no time limit."""
+    if label in OUTPUT_ALLOWED:
+        return []
+    return [
+        f"{label}:{text.count(chr(10), 0, found.start()) + 1}: "
+        ".output() runs a program with no time limit; use run_within"
+        for found in OUTPUT.finditer(text)
+    ]
+
+
 def rust_files():
     for code_dir in CODE_DIRS:
         for path in sorted((ROOT / code_dir).rglob("*.rs")):
@@ -176,9 +197,10 @@ def self_test():
     kill = check_drops("self-test", "fn f() {\n    let _ = zmx\n        .kill(&s);\n}\n")
     report = check_drops("self-test", "fn f() {\n    x.map_err(|_report| X);\n}\n")
     zmx = check_zmx_lists("self-test", "fn f() {\n    self.zmx\n        .list(dir);\n}\n")
-    for line in names + deny + kill + report + zmx:
+    output = check_outputs("self-test", "fn f() {\n    c.output();\n}\n")
+    for line in names + deny + kill + report + zmx + output:
         print(line)
-    if not names or not deny or not kill or not report or not zmx:
+    if not names or not deny or not kill or not report or not zmx or not output:
         print("self-test: a check did not fail on its planted text")
         return 1
     print("self-test: every check reported its planted text")
@@ -197,6 +219,7 @@ def main():
         text = path.read_text()
         reports += check_drops(rel, text)
         reports += check_zmx_lists(rel, text)
+        reports += check_outputs(rel, text)
     for report in reports:
         print(report)
     if reports:

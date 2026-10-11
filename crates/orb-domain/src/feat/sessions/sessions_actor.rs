@@ -1078,15 +1078,27 @@ impl SessionsActor {
     }
 
     /// Asks the harnesses what every agent is doing and shows it.
-    /// A harness that can't be asked leaves its threads as they were; the
-    /// others still update, and the failure is returned after.
+    /// A harness no pane holds a thread of isn't asked and counts as running
+    /// nothing. A harness that can't be asked leaves its threads as they were;
+    /// the others still update, and the failure is returned after.
     async fn sync(&mut self) -> Result<(), Report<HarnessError>> {
         let mut listed: HashMap<HarnessId, Vec<RunningAgent>> = HashMap::new();
         let mut failure = None;
         for harness in self.services.harnesses.all() {
+            let id = harness.id();
+            let held = self.rows.iter().any(|row| {
+                row.harness == id
+                    && row
+                        .pane_id
+                        .is_some_and(|pane| self.panes.contains_key(&pane))
+            });
+            if !held {
+                listed.insert(id, Vec::new());
+                continue;
+            }
             match harness.running().await {
                 Ok(agents) => {
-                    listed.insert(harness.id(), agents);
+                    listed.insert(id, agents);
                 }
                 Err(report) => failure = Some(report),
             }
@@ -6237,6 +6249,32 @@ mod tests {
             state.read().sessions.error.as_deref(),
             Some("claude: command not found"),
             "the mode line should show why the poll failed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn poll_doesnt_ask_claude_while_no_pane_holds_a_claude_thread()
+    -> Result<(), Report<StoreError>> {
+        // Given a Claude thread whose agent has ended, so no pane holds it.
+        let store = Store::open_in_memory()?;
+        insert_thread(&store, "aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            pane_id: None,
+            ..row
+        })?;
+        let host = listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When polling.
+        actor.poll().await;
+
+        // Then claude is never asked what it runs.
+        assert_eq!(
+            host.lists(),
+            0,
+            "no pane holds a Claude thread, so the poll shouldn't ask claude"
         );
         Ok(())
     }
