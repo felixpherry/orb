@@ -105,7 +105,7 @@ impl AppState {
     /// pane while that pane runs an agent, else its card.
     pub fn entry_row(&self, id: SessionId) -> SidebarItem {
         match self.layouts.get(id).and_then(SessionLayout::focused) {
-            Some(pane) if self.sessions.runs_agent(id, pane) => {
+            Some(pane) if self.sessions.runs_agent(id, pane, &self.layouts) => {
                 SidebarItem::Agent { session: id, pane }
             }
             _ => SidebarItem::Session(id),

@@ -122,7 +122,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) An `r` name is kept only in orb's store; Claude's own session name doesn't change.
 - (keybinds) In the sidebar, `r` on a session opens a Rename Session box filled in with its title; `⏎` saves, an empty `⏎` clears the `r` name, and `Esc` cancels.
 - (keybinds) In the sidebar, `/` or `i` moves the keys to its input box; typing filters, `<C-j>`/`<C-k>` or `↓`/`↑` move between matches, wrapping from the last to the first and back, `⏎` clears the text and keeps the cursor on the match (or, with no match, acts as `Esc`), and `Esc` clears it and puts the cursor back where it was.
-- (sidebar) While searching, the sidebar lists the sessions whose title, or one of whose agents' titles, fuzzy-matches the typed text, in sidebar order and including settled ones, with matched characters highlighted.
+- (sidebar) While searching, the sidebar lists the sessions whose title, or the name one of their agent rows shows, fuzzy-matches the typed text, in sidebar order and including settled ones, with matched characters highlighted.
 - (sidebar) The input box shows the search text after the > prompt, after the filtered project if there is one.
 - (sidebar) While the sidebar has the keys, a steady block cursor sits on the first cell of the selected row.
 - (tui) The rename box, the sidebar search and the pickers show a steady bar cursor.
@@ -321,3 +321,8 @@ Entries are added or amended **only with human approval**.
 - (repo) Every layout operation that keeps its panes (30 of them, in `tree_operation_loses_no_pane`) has a test that no pane is lost, closing a pane or a tab has a test that only its panes go (`closing_loses_only_the_closed_panes`), and every layout save path (split, stack, float, close, partial load) has a test that every saved pane row is still held by a tab, a float or a tab whose tree didn't read (`layout_save_leaves_every_pane_row_held`).
 - (repo) `just lint` fails when a file's count of `zmx list` call sites differs from the reviewed list (orb-tui's run.rs 4, the sessions actor 2), where each site is noted with why a failed list keeps the panes and the test that guards it.
 - (pane) A pane that stopped showing after an error and is then closed in its layout has its zmx session killed, like any other closed pane; detaching its session leaves its program running. (Adds to the Phase 3 crash entry.)
+- (panes) Each pane's facts (where it runs, its name, its resume command) are kept once, in its session's layout; panes orb couldn't read at start keep their saved rows until their tab reads again.
+- (panes) A saved pane row that no tab or float held at start, in a session whose tabs all read, is dropped by that session's next layout save, and settling, deleting or moving the session still kills its program.
+- (sidebar) An agent row shows only while a tab or float holds its pane, and goes away as soon as the pane closes.
+- (sidebar) The `/` search matches an agent row by the name it shows (the pane's name, else the agent's title).
+- (integration) A pane's report file is deleted when the pane's saved row is.

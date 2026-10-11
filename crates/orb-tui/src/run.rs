@@ -1887,7 +1887,9 @@ mod tests {
     use tempfile::TempDir;
     use tokio::runtime::Runtime;
 
-    use crate::test_support::{FakeZmx, NoGit, pane, session as session_id, sessions_for};
+    use crate::test_support::{
+        FakeZmx, NoGit, layouts_for, pane, session as session_id, sessions_for,
+    };
 
     use super::{
         App, AttachPlan, ExitOutcome, LoopEvent, PREVIEW_EVERY, PaneExit, StartedAttach,
@@ -3129,7 +3131,11 @@ mod tests {
                 ..Sessions::default()
             };
             state.picker = Some(PickerState::sessions(
-                session_items(&state.sessions, &Layouts::default(), SessionFilter::All),
+                session_items(
+                    &state.sessions,
+                    &layouts_for(&state.sessions.projects),
+                    SessionFilter::All,
+                ),
                 Focus::Sidebar,
             ));
         }

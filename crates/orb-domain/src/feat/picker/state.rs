@@ -994,7 +994,7 @@ pub fn session_items(
         .flat_map(|(session, project)| {
             let (prefix, split) = session_label(sessions, project, session);
             sessions
-                .agent_rows(session.id)
+                .agent_rows(session.id, layouts)
                 .into_iter()
                 .filter(move |(agent, _)| filter.lists(session, agent))
                 .map(move |(agent, pane)| {
@@ -1094,7 +1094,7 @@ mod tests {
     use crate::feat::picker::list::PickerItem;
     use crate::feat::sessions::state::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
-        ThreadStatus, sessions_for,
+        ThreadStatus, layouts_for, sessions_for,
     };
     use crate::feat::sessions::transcript::Exchange;
     use std::time::Duration;
@@ -1923,7 +1923,11 @@ mod tests {
         let sessions = two_agents();
 
         // When listing the session picker's rows.
-        let items = session_items(&sessions, &Layouts::default(), SessionFilter::All);
+        let items = session_items(
+            &sessions,
+            &layouts_for(&sessions.projects),
+            SessionFilter::All,
+        );
 
         // Then each agent has a row.
         assert_eq!(items.len(), 2, "one row per agent");
@@ -1938,7 +1942,11 @@ mod tests {
         }
 
         // When listing the session picker's rows.
-        let items = session_items(&sessions, &Layouts::default(), SessionFilter::All);
+        let items = session_items(
+            &sessions,
+            &layouts_for(&sessions.projects),
+            SessionFilter::All,
+        );
 
         // Then nothing is listed.
         assert!(items.is_empty(), "a session without agents has no row");
@@ -1964,7 +1972,11 @@ mod tests {
         }
 
         // When listing the session picker's rows.
-        let items = session_items(&sessions, &Layouts::default(), SessionFilter::All);
+        let items = session_items(
+            &sessions,
+            &layouts_for(&sessions.projects),
+            SessionFilter::All,
+        );
 
         // Then its row is `work/auth/fix`.
         assert_eq!(
@@ -2008,7 +2020,11 @@ mod tests {
         }]);
 
         // When listing the session picker's rows.
-        let items = session_items(&sessions, &Layouts::default(), SessionFilter::All);
+        let items = session_items(
+            &sessions,
+            &layouts_for(&sessions.projects),
+            SessionFilter::All,
+        );
 
         // Then its row ends in `New thread`.
         assert!(
@@ -2024,7 +2040,11 @@ mod tests {
         let sessions = two_agents();
 
         // When listing the session picker's rows.
-        let items = session_items(&sessions, &Layouts::default(), SessionFilter::All);
+        let items = session_items(
+            &sessions,
+            &layouts_for(&sessions.projects),
+            SessionFilter::All,
+        );
 
         // Then agent 2 comes first.
         assert_eq!(
@@ -2040,7 +2060,11 @@ mod tests {
         let sessions = two_agents();
 
         // When listing the rows under Working.
-        let items = session_items(&sessions, &Layouts::default(), SessionFilter::Working);
+        let items = session_items(
+            &sessions,
+            &layouts_for(&sessions.projects),
+            SessionFilter::Working,
+        );
 
         // Then only agent 2 is listed.
         assert_eq!(
@@ -2056,7 +2080,11 @@ mod tests {
         let sessions = two_agents();
 
         // When listing the rows under Idle.
-        let items = session_items(&sessions, &Layouts::default(), SessionFilter::Idle);
+        let items = session_items(
+            &sessions,
+            &layouts_for(&sessions.projects),
+            SessionFilter::Idle,
+        );
 
         // Then agent 1 is listed.
         assert_eq!(
@@ -2075,7 +2103,11 @@ mod tests {
         }
 
         // When listing the rows under Settled.
-        let items = session_items(&sessions, &Layouts::default(), SessionFilter::Settled);
+        let items = session_items(
+            &sessions,
+            &layouts_for(&sessions.projects),
+            SessionFilter::Settled,
+        );
 
         // Then both agents are listed.
         assert_eq!(
@@ -2105,7 +2137,11 @@ mod tests {
             );
         }
         let mut picker = PickerState::sessions(
-            session_items(&sessions, &Layouts::default(), SessionFilter::All),
+            session_items(
+                &sessions,
+                &layouts_for(&sessions.projects),
+                SessionFilter::All,
+            ),
             Focus::Sidebar,
         );
 
@@ -2153,7 +2189,7 @@ mod tests {
         }
 
         // When listing the rows under `filter`.
-        let items = session_items(&sessions, &Layouts::default(), filter);
+        let items = session_items(&sessions, &layouts_for(&sessions.projects), filter);
 
         // Then the settled session shows only under Settled, alone.
         assert_eq!(session_ids(&items), expected, "filter: {filter:?}");
@@ -2193,7 +2229,7 @@ mod tests {
         let sessions = orb_sessions(vec![with_status(agent(1, "api", 10), status)]);
 
         // When listing the rows under `filter`.
-        let items = session_items(&sessions, &Layouts::default(), filter);
+        let items = session_items(&sessions, &layouts_for(&sessions.projects), filter);
 
         // Then the session is listed only when the filter lets it through.
         assert_eq!(
@@ -2208,13 +2244,25 @@ mod tests {
         // Given the session picker filtered to working threads.
         let sessions = orb_sessions(vec![agent(1, "api", 10)]);
         let mut picker = PickerState::sessions(
-            session_items(&sessions, &Layouts::default(), SessionFilter::All),
+            session_items(
+                &sessions,
+                &layouts_for(&sessions.projects),
+                SessionFilter::All,
+            ),
             Focus::Sidebar,
         );
-        picker.set_filter(SessionFilter::Working, &sessions, &Layouts::default());
+        picker.set_filter(
+            SessionFilter::Working,
+            &sessions,
+            &layouts_for(&sessions.projects),
+        );
 
         // When setting the working filter again.
-        picker.set_filter(SessionFilter::Working, &sessions, &Layouts::default());
+        picker.set_filter(
+            SessionFilter::Working,
+            &sessions,
+            &layouts_for(&sessions.projects),
+        );
 
         // Then the picker is back on all.
         assert_eq!(
@@ -2231,7 +2279,11 @@ mod tests {
         // Given the session picker over `api` and `ui`, with `api` typed.
         let sessions = orb_sessions(vec![agent(1, "api", 10), agent(2, "ui", 20)]);
         let mut picker = PickerState::sessions(
-            session_items(&sessions, &Layouts::default(), SessionFilter::All),
+            session_items(
+                &sessions,
+                &layouts_for(&sessions.projects),
+                SessionFilter::All,
+            ),
             Focus::Sidebar,
         );
         for ch in ['a', 'p', 'i'] {
@@ -2239,7 +2291,11 @@ mod tests {
         }
 
         // When filtering to idle threads.
-        picker.set_filter(SessionFilter::Idle, &sessions, &Layouts::default());
+        picker.set_filter(
+            SessionFilter::Idle,
+            &sessions,
+            &layouts_for(&sessions.projects),
+        );
 
         // Then the typed text stays.
         assert_eq!(
@@ -2256,7 +2312,11 @@ mod tests {
         let mut picker = PickerState::worktrees(vec![], Focus::Sidebar);
 
         // When filtering to settled threads.
-        picker.set_filter(SessionFilter::Settled, &sessions, &Layouts::default());
+        picker.set_filter(
+            SessionFilter::Settled,
+            &sessions,
+            &layouts_for(&sessions.projects),
+        );
 
         // Then it is still the empty worktree picker.
         assert_eq!(
@@ -2273,7 +2333,11 @@ mod tests {
 
         // When opening the session picker over its rows.
         let picker = PickerState::sessions(
-            session_items(&sessions, &Layouts::default(), SessionFilter::All),
+            session_items(
+                &sessions,
+                &layouts_for(&sessions.projects),
+                SessionFilter::All,
+            ),
             Focus::Sidebar,
         );
 

@@ -98,7 +98,7 @@ pub const SETTLE_IN_PROGRESS: &str = "Can't settle while a session is working";
 /// agents has a turn underway.
 pub fn validate_toggle_settle(state: &AppState) -> Result<(), ToggleSettleError> {
     let sessions = &state.sessions;
-    if sessions.selected_agent().is_some() {
+    if sessions.selected_agent(&state.layouts).is_some() {
         return Err(ToggleSettleError::OnAgent);
     }
     match sessions.selected_session() {
@@ -134,7 +134,7 @@ pub enum TogglePinError {
 /// [`TogglePinError::NoSession`] without a selected session.
 pub fn validate_toggle_pin(state: &AppState) -> Result<(), TogglePinError> {
     match (
-        state.sessions.selected_agent(),
+        state.sessions.selected_agent(&state.layouts),
         state.sessions.selected_session(),
     ) {
         (Some(_), _) => Err(TogglePinError::OnAgent),
@@ -240,7 +240,9 @@ pub fn validate_unfold(state: &AppState) -> Result<FoldTarget, UnfoldError> {
         Some(SidebarItem::SettledShelf) => Ok(FoldTarget::Shelf),
         Some(SidebarItem::Session(id)) => match sessions.session(id) {
             Some(session) if session.settled_at.is_some() => Err(UnfoldError::Settled),
-            Some(_) if !sessions.agent_rows(id).is_empty() => Ok(FoldTarget::Card(id)),
+            Some(_) if !sessions.agent_rows(id, &state.layouts).is_empty() => {
+                Ok(FoldTarget::Card(id))
+            }
             _ => Err(UnfoldError::NoAgents),
         },
         Some(SidebarItem::Agent { .. }) | None => Err(UnfoldError::NotOnCard),
@@ -278,7 +280,9 @@ pub fn validate_fold(state: &AppState) -> Result<FoldTarget, FoldError> {
                 Ok(FoldTarget::Shelf)
             }
             Some(session) if session.settled_at.is_some() => Err(FoldError::NotInShelf),
-            Some(_) if !sessions.agent_rows(id).is_empty() => Ok(FoldTarget::Card(id)),
+            Some(_) if !sessions.agent_rows(id, &state.layouts).is_empty() => {
+                Ok(FoldTarget::Card(id))
+            }
             _ => Err(FoldError::NoAgents),
         },
         None => Err(FoldError::NoSelection),
@@ -298,7 +302,7 @@ mod tests {
     };
     use crate::feat::sessions::state::{
         FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
-        SidebarItem, Thread, ThreadId, ThreadStatus, sessions_for,
+        SidebarItem, Thread, ThreadId, ThreadStatus, layouts_for, sessions_for,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::{AppState, TextInput};
@@ -413,6 +417,7 @@ mod tests {
             ..AppState::default()
         };
         state.sessions.sessions = sessions_for(&state.sessions.projects);
+        state.layouts = layouts_for(&state.sessions.projects);
         state
     }
 

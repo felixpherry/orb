@@ -111,7 +111,7 @@ use crate::feat::integration::pane_file::{AgentEvent, AgentReport, PaneFiles};
 use crate::feat::integration::{NUDGE, panes_dir};
 use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::floats::{Float, FloatLayout, Floats};
-use crate::feat::layout::state::{PaneEntry, SessionLayout, Tab};
+use crate::feat::layout::state::{Layouts, PaneEntry, SessionLayout, Tab};
 use crate::feat::layout::tree::{Split, TileLayout};
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
 use crate::feat::zmx::zmx_service::{ZmxEntry, ZmxSession};
@@ -180,8 +180,6 @@ pub struct SessionsActor {
     poke: Arc<Notify>,
     /// The saved threads, as last written to the store.
     rows: Vec<ThreadRow>,
-    /// The saved panes, as last written to the store.
-    panes: HashMap<PaneId, PaneRow>,
     /// Each saved session: its directory, where its new panes start, and
     /// its settle lifecycle.
     sessions: HashMap<SessionId, SessionRow>,
@@ -752,7 +750,6 @@ impl SessionsActor {
             now_ms(),
         );
         let RestoredLayouts {
-            panes,
             sessions: session_rows,
             layouts,
             unread,
@@ -778,13 +775,26 @@ impl SessionsActor {
             ),
         };
         let error = error.or(layouts_error);
+        {
+            let mut app = state.write();
+            for (session, layout) in layouts {
+                app.layouts.insert(session, layout);
+            }
+        }
+        let threads: Vec<Thread> = {
+            let app = state.read();
+            rows.iter()
+                .map(|row| unpolled(&services, row, &app.layouts, &unread))
+                .collect()
+        };
         let projects: Vec<Project> = projects
             .into_iter()
             .map(|project| Project {
                 threads: rows
                     .iter()
-                    .filter(|row| row.project_id == project.id)
-                    .map(|row| unpolled(&services, row, &panes))
+                    .zip(&threads)
+                    .filter(|(row, _)| row.project_id == project.id)
+                    .map(|(_, thread)| thread.clone())
                     .collect(),
                 // ponytail: one git call per project at start; cache it if
                 // many projects make start-up slow.
@@ -814,13 +824,11 @@ impl SessionsActor {
             )
         };
         {
-            let mut app = state.write();
+            let mut guard = state.write();
+            let app = &mut *guard;
             app.sidebar.width = ui.sidebar_width.map_or(DEFAULT_WIDTH, clamp_width);
             app.jumps = jumps;
             app.harnesses = services.harnesses.infos();
-            for (session, layout) in layouts {
-                app.layouts.insert(session, layout);
-            }
             let sessions = &mut app.sessions;
             sessions.projects = projects;
             sessions.sessions = {
@@ -830,7 +838,7 @@ impl SessionsActor {
             };
             sessions.cursor = None;
             sessions.partial_load = partial_load;
-            sessions.filter_to(filter);
+            sessions.filter_to(filter, &app.layouts);
             sessions.error = error.or_else(|| integration_missing.then(|| NUDGE.to_owned()));
         }
         wake();
@@ -844,7 +852,6 @@ impl SessionsActor {
             wake,
             poke: Arc::default(),
             rows,
-            panes,
             sessions: session_rows,
             unread,
             pane_reports: HashMap::new(),
@@ -910,7 +917,12 @@ impl SessionsActor {
         pane: PaneId,
         report: &AgentReport,
     ) -> Result<(), Report<StoreError>> {
-        let Some(cwd) = self.panes.get(&pane).map(|row| row.cwd.clone()) else {
+        let home = {
+            let app = self.state.read();
+            pane_home(&app.layouts, &self.unread, pane)
+                .map(|(session, entry)| (session, entry.cwd.clone()))
+        };
+        let Some((session, cwd)) = home else {
             return Ok(());
         };
         let id = HarnessId::new(report.agent.clone());
@@ -921,9 +933,8 @@ impl SessionsActor {
         let holds = |row: &ThreadRow| row.short_id == sid || row.session_id.as_deref() == Some(sid);
         let current = self.rows.iter().position(|row| row.pane_id == Some(pane));
         let settled = self
-            .panes
-            .get(&pane)
-            .and_then(|row| self.sessions.get(&row.session_id))
+            .sessions
+            .get(&session)
             .is_some_and(|session| session.settled_override == Some(SettledOverride::Settled));
         if report.event == AgentEvent::End && settled {
             return Ok(());
@@ -973,10 +984,9 @@ impl SessionsActor {
                     .and_then(|row| row.pane_id)
                     .filter(|&old| old != pane);
                 self.unbind(current)?;
-                let session = self.panes.get(&pane).map(|row| row.session_id);
                 if let Some(row) = self.rows.get_mut(j) {
                     row.pane_id = Some(pane);
-                    row.orb_session = session;
+                    row.orb_session = Some(session);
                     take_session(row, sid);
                     take_transcript(row, report.transcript.as_ref());
                     self.store.save_thread(row)?;
@@ -987,7 +997,7 @@ impl SessionsActor {
             }
             (current, None) => {
                 self.unbind(current)?;
-                self.start_pane_thread(pane, cwd, id, report)?;
+                self.start_pane_thread(pane, session, cwd, id, report)?;
             }
         }
         Ok(())
@@ -1002,11 +1012,12 @@ impl SessionsActor {
         Ok(())
     }
 
-    /// Saves and shows a thread `report` started in `pane`, in the project of
-    /// the pane's session, at the top of its threads.
+    /// Saves and shows a thread `report` started in `pane` of `session`, in
+    /// the project of the pane's session, at the top of its threads.
     fn start_pane_thread(
         &mut self,
         pane: PaneId,
+        session: SessionId,
         cwd: PathBuf,
         harness: HarnessId,
         report: &AgentReport,
@@ -1040,9 +1051,12 @@ impl SessionsActor {
             renamed_title: None,
             harness,
             pane_id: Some(pane),
-            orb_session: self.panes.get(&pane).map(|row| row.session_id),
+            orb_session: Some(session),
         };
-        let thread = unpolled(&self.services, &row, &self.panes);
+        let thread = {
+            let app = self.state.read();
+            unpolled(&self.services, &row, &app.layouts, &self.unread)
+        };
         self.rows.push(row);
         if let Some(project) = self
             .state
@@ -1061,16 +1075,28 @@ impl SessionsActor {
     /// Saves pane `pane`'s resume command, unless it already has it, and
     /// shows it in the pane's layout entry.
     fn set_resume(&mut self, pane: PaneId, resume: Option<&str>) -> Result<(), Report<StoreError>> {
-        let Some(row) = self.panes.get_mut(&pane) else {
+        let current = {
+            let app = self.state.read();
+            pane_home(&app.layouts, &self.unread, pane).map(|(_, entry)| entry.resume.clone())
+        };
+        let Some(current) = current else {
             return Ok(());
         };
-        if row.resume.as_deref() != resume {
+        if current.as_deref() != resume {
             self.store.set_pane_resume(pane, resume)?;
-            row.resume = resume.map(str::to_owned);
+            let resume = resume.map(str::to_owned);
             self.state
                 .write()
                 .layouts
-                .remember_resume(pane, row.resume.clone());
+                .remember_resume(pane, resume.clone());
+            if let Some(entry) = self
+                .unread
+                .values_mut()
+                .flat_map(|kept| &mut kept.panes)
+                .find(|entry| entry.id == pane)
+            {
+                entry.resume = resume;
+            }
         }
         Ok(())
     }
@@ -1082,13 +1108,18 @@ impl SessionsActor {
     async fn sync(&mut self) -> Result<(), Report<HarnessError>> {
         let mut listed: HashMap<HarnessId, Vec<RunningAgent>> = HashMap::new();
         let mut failure = None;
+        let known: HashSet<PaneId> = {
+            let app = self.state.read();
+            self.rows
+                .iter()
+                .filter_map(|row| row.pane_id)
+                .filter(|&pane| pane_home(&app.layouts, &self.unread, pane).is_some())
+                .collect()
+        };
         for harness in self.services.harnesses.all() {
             let id = harness.id();
             let held = self.rows.iter().any(|row| {
-                row.harness == id
-                    && row
-                        .pane_id
-                        .is_some_and(|pane| self.panes.contains_key(&pane))
+                row.harness == id && row.pane_id.is_some_and(|pane| known.contains(&pane))
             });
             if !held {
                 listed.insert(id, Vec::new());
@@ -1110,17 +1141,14 @@ impl SessionsActor {
     /// (one `zmx list` per socket dir; a dir zmx can't list leaves its panes
     /// out) and the agents matched to the panes their processes run under.
     fn live(&self, listed: &HashMap<HarnessId, Vec<RunningAgent>>) -> Live {
-        let bound: Vec<(PaneId, ZmxSession)> = self
-            .rows
-            .iter()
-            .filter_map(|row| self.panes.get(&row.pane_id?))
-            .map(|pane| {
-                (
-                    pane.id,
-                    pane_entry(&self.services, &self.orb_root, pane).zmx,
-                )
-            })
-            .collect();
+        let bound: Vec<(PaneId, ZmxSession)> = {
+            let app = self.state.read();
+            self.rows
+                .iter()
+                .filter_map(|row| pane_home(&app.layouts, &self.unread, row.pane_id?))
+                .map(|(_, entry)| (entry.id, entry.zmx.clone()))
+                .collect()
+        };
         let dirs: HashMap<&Path, Option<Vec<ZmxEntry>>> = bound
             .iter()
             .map(|(_, zmx)| zmx.dir.as_path())
@@ -1174,6 +1202,7 @@ impl SessionsActor {
             Some(SidebarItem::Session(id) | SidebarItem::Agent { session: id, .. }) => Some(id),
             _ => None,
         };
+        let owners = self.row_pane_owners();
         let mut statuses = Vec::with_capacity(self.rows.len());
         let mut error = None;
         let mut renamed = Vec::new();
@@ -1201,11 +1230,7 @@ impl SessionsActor {
                 }
             }
             let in_selected = selected.is_some()
-                && row
-                    .pane_id
-                    .and_then(|pane| self.panes.get(&pane))
-                    .map(|pane| pane.session_id)
-                    == selected;
+                && row.pane_id.and_then(|pane| owners.get(&pane).copied()) == selected;
             follow_activity(row, status, was_in_progress, in_selected, now);
             if *row != before
                 && let Err(report) = self.store.save_thread(row)
@@ -1222,9 +1247,10 @@ impl SessionsActor {
                 error = Some(failed);
             }
         }
-        let changed_sessions = self.follow_sessions(&statuses, now, &mut error);
+        let changed_sessions = self.follow_sessions(&statuses, &owners, now, &mut error);
         let changed = {
-            let mut app = self.state.write();
+            let mut guard = self.state.write();
+            let app = &mut *guard;
             let sessions = &mut app.sessions;
             let mut changed = false;
             if let Some(error) = error {
@@ -1242,7 +1268,12 @@ impl SessionsActor {
                     changed = true;
                 }
                 if let Some(thread) = thread_mut(sessions, row.id) {
-                    changed |= show(thread, row, status, pane_launch(row, &self.panes));
+                    changed |= show(
+                        thread,
+                        row,
+                        status,
+                        pane_launch(row, &app.layouts, &self.unread),
+                    );
                 }
             }
             for id in changed_sessions {
@@ -1261,14 +1292,29 @@ impl SessionsActor {
         }
     }
 
+    /// The session of each saved thread's pane that a layout or unread tab
+    /// holds.
+    fn row_pane_owners(&self) -> HashMap<PaneId, SessionId> {
+        let app = self.state.read();
+        self.rows
+            .iter()
+            .filter_map(|row| {
+                let pane = row.pane_id?;
+                pane_home(&app.layouts, &self.unread, pane).map(|(session, _)| (pane, session))
+            })
+            .collect()
+    }
+
     /// Follows each session's settle lifecycle (see [`follow_session`]) from
     /// its agent threads' polled rows and `statuses` (index-aligned with the
     /// rows; `None` where a thread wasn't polled, which leaves its session as
-    /// it was), saving the ones that changed. Sets `error` when a save fails.
-    /// Returns the sessions that changed.
+    /// it was) and `owners` (each row's pane's session), saving the ones that
+    /// changed. Sets `error` when a save fails. Returns the sessions that
+    /// changed.
     fn follow_sessions(
         &mut self,
         statuses: &[Option<ThreadStatus>],
+        owners: &HashMap<PaneId, SessionId>,
         now: i64,
         error: &mut Option<String>,
     ) -> Vec<SessionId> {
@@ -1279,9 +1325,7 @@ impl SessionsActor {
                 .iter()
                 .zip(statuses)
                 .filter(|(row, _)| {
-                    row.pane_id
-                        .and_then(|pane| self.panes.get(&pane))
-                        .is_some_and(|pane| pane.session_id == session.id)
+                    row.pane_id.and_then(|pane| owners.get(&pane)) == Some(&session.id)
                 })
                 .map(|(row, status)| Some((row, (*status)?)))
                 .collect::<Option<Vec<(&ThreadRow, ThreadStatus)>>>()
@@ -1439,7 +1483,6 @@ impl SessionsActor {
             sessions.cursor = Some(SidebarItem::Session(id));
             sessions.attach = Some(id);
         }
-        self.panes.insert(pane.id, pane);
         self.sessions.insert(id, row);
         Ok(())
     }
@@ -1544,12 +1587,13 @@ impl SessionsActor {
             return Err(save_failed(&self.services.log, &report));
         }
         self.kill_panes(id, "session moved to another workspace");
-        let panes: Vec<PaneId> = self
-            .panes
-            .values()
-            .filter(|pane| pane.session_id == id)
-            .map(|pane| pane.id)
-            .collect();
+        let panes: Vec<PaneId> = {
+            let app = self.state.read();
+            session_entries(&app.layouts, &self.unread, id)
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect()
+        };
         let mut saved = Ok(());
         let mut unbound = Vec::new();
         for &pane in &panes {
@@ -1563,9 +1607,14 @@ impl SessionsActor {
             if let Err(report) = self.set_resume(pane, None) {
                 saved = Err(save_failed(&self.services.log, &report));
             }
-            if let Some(row) = self.panes.get_mut(&pane) {
-                row.cwd.clone_from(&dir);
-            }
+        }
+        for entry in self
+            .unread
+            .get_mut(&id)
+            .into_iter()
+            .flat_map(|kept| &mut kept.panes)
+        {
+            entry.cwd.clone_from(&dir);
         }
         let shown = self.sessions.get_mut(&id).map(|row| {
             row.dir.clone_from(&dir);
@@ -1573,7 +1622,8 @@ impl SessionsActor {
             show_session(row)
         });
         {
-            let mut app = self.state.write();
+            let mut guard = self.state.write();
+            let app = &mut *guard;
             app.layouts.move_session(id, &dir);
             let sessions = &mut app.sessions;
             if let (Some(shown), Some(session)) = (
@@ -1588,7 +1638,12 @@ impl SessionsActor {
             for row in self.rows.iter().filter(|row| unbound.contains(&row.id)) {
                 if let Some(thread) = thread_mut(sessions, row.id) {
                     let status = thread.status;
-                    show(thread, row, status, pane_launch(row, &self.panes));
+                    show(
+                        thread,
+                        row,
+                        status,
+                        pane_launch(row, &app.layouts, &self.unread),
+                    );
                 }
             }
         }
@@ -1734,11 +1789,12 @@ impl SessionsActor {
     fn restore_target(&self, id: SessionId) -> Option<(PathBuf, PathBuf, Vec<String>)> {
         let session = self.sessions.get(&id)?;
         let mut branches: Vec<String> = session.branch.iter().cloned().collect();
-        for row in self.rows.iter().filter(|row| {
-            row.pane_id
-                .and_then(|pane| self.panes.get(&pane))
-                .is_some_and(|pane| pane.session_id == id)
-        }) {
+        let panes = self.session_pane_ids(id);
+        for row in self
+            .rows
+            .iter()
+            .filter(|row| row.pane_id.is_some_and(|pane| panes.contains(&pane)))
+        {
             if let Some(branch) = &row.branch
                 && !branches.contains(branch)
             {
@@ -1821,7 +1877,8 @@ impl SessionsActor {
     /// Saves and shows `branch` on every thread and every session in `cwd`.
     fn show_branch(&mut self, cwd: &Path, branch: &str) -> Result<(), String> {
         let mut saved = Ok(());
-        let mut app = self.state.write();
+        let mut guard = self.state.write();
+        let app = &mut *guard;
         for row in self.rows.iter_mut().filter(|row| row.cwd == cwd) {
             row.branch = Some(branch.to_owned());
             if let Err(report) = self.store.save_thread(row) {
@@ -1829,7 +1886,12 @@ impl SessionsActor {
             }
             if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
                 let status = thread.status;
-                show(thread, row, status, pane_launch(row, &self.panes));
+                show(
+                    thread,
+                    row,
+                    status,
+                    pane_launch(row, &app.layouts, &self.unread),
+                );
             }
         }
         for row in self.sessions.values_mut().filter(|row| row.dir == cwd) {
@@ -2011,13 +2073,22 @@ impl SessionsActor {
         self.edit_session(id, |row, _| row.name = name);
     }
 
+    /// Session `id`'s panes: the ones its layout holds and the ones its
+    /// unread tabs keep.
+    fn session_pane_ids(&self, id: SessionId) -> HashSet<PaneId> {
+        let app = self.state.read();
+        session_entries(&app.layouts, &self.unread, id)
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect()
+    }
+
     /// The saved threads running in session `id`'s panes.
     fn session_rows(&self, id: SessionId) -> impl Iterator<Item = &ThreadRow> {
-        self.rows.iter().filter(move |row| {
-            row.pane_id
-                .and_then(|pane| self.panes.get(&pane))
-                .is_some_and(|pane| pane.session_id == id)
-        })
+        let panes = self.session_pane_ids(id);
+        self.rows
+            .iter()
+            .filter(move |row| row.pane_id.is_some_and(|pane| panes.contains(&pane)))
     }
 
     /// Settles session `id` unless one of its agent panes has a turn
@@ -2050,6 +2121,20 @@ impl SessionsActor {
         }
     }
 
+    /// Deletes pane `pane`'s report file (one already gone is fine; any other
+    /// failure is logged) and forgets its latest report.
+    fn forget_pane_report(&mut self, pane: PaneId) {
+        if let Err(error) = fs::remove_file(self.pane_files.file(pane))
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            self.services.log.error(
+                &format!("couldn't remove pane {}'s report file", pane.0),
+                &error,
+            );
+        }
+        self.pane_reports.remove(&pane);
+    }
+
     /// Deletes session `id`: kills every pane, deletes a Research or Learn
     /// folder that is orb's own and no other session uses, then its tabs,
     /// panes, threads (ended ones included) and row, and forgets them.
@@ -2063,12 +2148,13 @@ impl SessionsActor {
             .chain(self.rows.iter().filter(|row| row.orb_session == Some(id)))
             .map(|row| row.id)
             .collect();
-        let panes: Vec<PaneId> = self
-            .panes
-            .values()
-            .filter(|pane| pane.session_id == id)
-            .map(|pane| pane.id)
-            .collect();
+        let panes: Vec<PaneId> = {
+            let app = self.state.read();
+            session_entries(&app.layouts, &self.unread, id)
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect()
+        };
         let deleted = self.store.delete_session(id);
         {
             let what = format!(
@@ -2086,19 +2172,11 @@ impl SessionsActor {
             }
         }
         self.rows.retain(|row| !threads.contains(&row.id));
-        for pane in &panes {
-            if let Err(error) = fs::remove_file(self.pane_files.file(*pane))
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                self.services.log.error(
-                    &format!("couldn't remove pane {}'s report file", pane.0),
-                    &error,
-                );
-            }
-            self.panes.remove(pane);
-            self.pane_reports.remove(pane);
+        for pane in panes {
+            self.forget_pane_report(pane);
         }
         self.sessions.remove(&id);
+        self.unread.remove(&id);
         {
             let mut app = self.state.write();
             app.layouts.remove(id);
@@ -2124,25 +2202,24 @@ impl SessionsActor {
     /// each socket dir once, in pane order; each session with a pane to kill
     /// leaves the right side first. A dir zmx can't list kills nothing.
     fn kill_settled(&self) {
-        let mut rows: Vec<&PaneRow> = self
-            .panes
-            .values()
-            .filter(|row| {
-                self.sessions.get(&row.session_id).is_some_and(|session| {
-                    session.settled_override == Some(SettledOverride::Settled)
+        let zmx: Vec<(SessionId, ZmxSession)> = {
+            let app = self.state.read();
+            let mut entries: Vec<(SessionId, PaneEntry)> = self
+                .sessions
+                .values()
+                .filter(|session| session.settled_override == Some(SettledOverride::Settled))
+                .flat_map(|session| {
+                    session_entries(&app.layouts, &self.unread, session.id)
+                        .into_iter()
+                        .map(|entry| (session.id, entry))
                 })
-            })
-            .collect();
-        rows.sort_by_key(|row| row.id.0);
-        let zmx: Vec<(SessionId, ZmxSession)> = rows
-            .into_iter()
-            .map(|row| {
-                (
-                    row.session_id,
-                    pane_entry(&self.services, &self.orb_root, row).zmx,
-                )
-            })
-            .collect();
+                .collect();
+            entries.sort_by_key(|(_, entry)| entry.id.0);
+            entries
+                .into_iter()
+                .map(|(session, entry)| (session, entry.zmx))
+                .collect()
+        };
         let listed: HashMap<&Path, Vec<ZmxEntry>> = zmx
             .iter()
             .map(|(_, session)| session.dir.as_path())
@@ -2184,17 +2261,16 @@ impl SessionsActor {
     /// of its panes in pane order; each kill is logged with `why`. The state
     /// lock is released before the first kill.
     fn kill_panes(&self, id: SessionId, why: &str) {
-        self.state.write().attached.remove(&id);
-        let mut rows: Vec<&PaneRow> = self
-            .panes
-            .values()
-            .filter(|row| row.session_id == id)
-            .collect();
-        rows.sort_by_key(|row| row.id.0);
-        for row in rows {
-            self.services
-                .zmx
-                .kill(&pane_entry(&self.services, &self.orb_root, row).zmx, why);
+        let zmx: Vec<ZmxSession> = {
+            let mut app = self.state.write();
+            app.attached.remove(&id);
+            session_entries(&app.layouts, &self.unread, id)
+                .into_iter()
+                .map(|entry| entry.zmx)
+                .collect()
+        };
+        for session in &zmx {
+            self.services.zmx.kill(session, why);
         }
     }
 
@@ -2257,7 +2333,6 @@ impl SessionsActor {
             name: None,
         };
         let entry = pane_entry(&self.services, &self.orb_root, &row);
-        self.panes.insert(id, row);
         {
             let mut app = self.state.write();
             match placement {
@@ -2279,7 +2354,7 @@ impl SessionsActor {
     /// Saves `session`'s tabs, floats, active tab and pane names as the app
     /// state has them, after them the tabs and panes orb couldn't read at
     /// start as they were saved; panes no tab or float holds any more are
-    /// deleted from the store. A session whose layout emptied, or kept only floats, gets a
+    /// deleted from the store, each with its report file. A session whose layout emptied, or kept only floats, gets a
     /// new shell tab in its directory instead, saved in turn; nothing happens
     /// for one that is gone or being deleted.
     fn save_layout(&mut self, session: SessionId) {
@@ -2341,10 +2416,12 @@ impl SessionsActor {
                 position: read + i,
                 ..tab.clone()
             }));
-            names.extend(unread.panes.iter().map(|&id| {
-                let name = self.panes.get(&id).and_then(|row| row.name.clone());
-                (id, name)
-            }));
+            names.extend(
+                unread
+                    .panes
+                    .iter()
+                    .map(|entry| (entry.id, entry.name.clone())),
+            );
         }
         match self
             .store
@@ -2356,10 +2433,10 @@ impl SessionsActor {
                         "delete",
                         &format!("pane row {} (session {})", pane.0, session.0),
                     );
-                    self.panes.remove(&pane);
                     for row in self.rows.iter_mut().filter(|row| row.pane_id == Some(pane)) {
                         row.pane_id = None;
                     }
+                    self.forget_pane_report(pane);
                 }
             }
             Err(report) => {
@@ -2404,14 +2481,20 @@ impl SessionsActor {
         change(row, now_ms());
         let saved = self.store.save_thread(row);
         {
-            let mut app = self.state.write();
+            let mut guard = self.state.write();
+            let app = &mut *guard;
             let sessions = &mut app.sessions;
             if let Err(report) = &saved {
                 sessions.error = Some(save_failed(&self.services.log, report));
             }
             if let Some(thread) = thread_mut(sessions, id) {
                 let status = thread.status;
-                show(thread, row, status, pane_launch(row, &self.panes));
+                show(
+                    thread,
+                    row,
+                    status,
+                    pane_launch(row, &app.layouts, &self.unread),
+                );
             }
         }
         (self.wake)();
@@ -2457,14 +2540,23 @@ impl SessionsActor {
         else {
             return;
         };
-        let marked: Vec<(PaneId, String)> = {
-            let mut marked: Vec<(PaneId, String)> = self
-                .panes
-                .values()
-                .filter_map(|pane| Some((pane.id, pane.migrated_bg.clone()?)))
-                .collect();
-            marked.sort_by_key(|(pane, _)| pane.0);
-            marked
+        let marked: Vec<(PaneId, String)> = match self.store.layouts() {
+            Ok(saved) => {
+                let mut marked: Vec<(PaneId, String)> = saved
+                    .panes
+                    .into_iter()
+                    .filter_map(|pane| Some((pane.id, pane.migrated_bg?)))
+                    .collect();
+                marked.sort_by_key(|(pane, _)| pane.0);
+                marked
+            }
+            Err(report) => {
+                self.services.log.error(
+                    "couldn't read the panes of old claude --bg sessions",
+                    &report,
+                );
+                return;
+            }
         };
         if marked.is_empty() {
             return;
@@ -2495,23 +2587,14 @@ impl SessionsActor {
         }
     }
 
-    /// Forgets the `--bg` sessions `panes` named, in the store and here.
+    /// Forgets the `--bg` sessions `panes` named in the store.
     fn forget_migrated(&mut self, panes: &[PaneId]) {
         if panes.is_empty() {
             return;
         }
-        match self.store.clear_migrated_bg(panes) {
-            Ok(()) => {
-                for pane in panes {
-                    if let Some(row) = self.panes.get_mut(pane) {
-                        row.migrated_bg = None;
-                    }
-                }
-            }
-            Err(report) => {
-                self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
-                (self.wake)();
-            }
+        if let Err(report) = self.store.clear_migrated_bg(panes) {
+            self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
+            (self.wake)();
         }
     }
 
@@ -2948,21 +3031,66 @@ fn exists(sessions: &HashMap<SessionId, SessionRow>, item: SidebarItem) -> bool 
 
 /// How a saved thread looks before its first poll; one whose harness orb
 /// doesn't know is Gone.
-fn unpolled(services: &Services, row: &ThreadRow, panes: &HashMap<PaneId, PaneRow>) -> Thread {
+fn unpolled(
+    services: &Services,
+    row: &ThreadRow,
+    layouts: &Layouts,
+    unread: &HashMap<SessionId, Unread>,
+) -> Thread {
     let status = match services.harnesses.get(&row.harness) {
         Some(_) => ThreadStatus::Unknown,
         None => ThreadStatus::Gone,
     };
-    thread(row, status, pane_launch(row, panes))
+    thread(row, status, pane_launch(row, layouts, unread))
 }
 
-/// `row`'s pane and its session; `None` for a thread with no pane.
-fn pane_launch(row: &ThreadRow, panes: &HashMap<PaneId, PaneRow>) -> Option<PaneLaunch> {
-    let pane = panes.get(&row.pane_id?)?;
-    Some(PaneLaunch {
-        pane: pane.id,
-        session: pane.session_id,
+/// `row`'s pane and its session; `None` for a thread with no pane, or one
+/// whose pane no layout or unread tab holds.
+fn pane_launch(
+    row: &ThreadRow,
+    layouts: &Layouts,
+    unread: &HashMap<SessionId, Unread>,
+) -> Option<PaneLaunch> {
+    let pane = row.pane_id?;
+    pane_home(layouts, unread, pane).map(|(session, _)| PaneLaunch { pane, session })
+}
+
+/// Pane `pane`'s session and where it runs: as a layout holds it, else as
+/// a tab orb couldn't read at start keeps it.
+fn pane_home<'a>(
+    layouts: &'a Layouts,
+    unread: &'a HashMap<SessionId, Unread>,
+    pane: PaneId,
+) -> Option<(SessionId, &'a PaneEntry)> {
+    layouts.owner_of(pane).zip(layouts.entry(pane)).or_else(|| {
+        unread.iter().find_map(|(&session, kept)| {
+            Some((session, kept.panes.iter().find(|entry| entry.id == pane)?))
+        })
     })
+}
+
+/// Where each of session `id`'s panes runs, in pane order: the ones its
+/// layout holds, the ones its unread tabs keep, and the ones no saved tab
+/// held at start.
+fn session_entries(
+    layouts: &Layouts,
+    unread: &HashMap<SessionId, Unread>,
+    id: SessionId,
+) -> Vec<PaneEntry> {
+    let mut entries: Vec<PaneEntry> = layouts
+        .get(id)
+        .into_iter()
+        .flat_map(SessionLayout::panes)
+        .chain(
+            unread
+                .get(&id)
+                .into_iter()
+                .flat_map(|kept| kept.panes.iter().chain(&kept.loose)),
+        )
+        .cloned()
+        .collect();
+    entries.sort_by_key(|entry| entry.id.0);
+    entries
 }
 
 /// Where pane `row`'s program runs: its kept zmx session, on a socket dir
@@ -2990,8 +3118,6 @@ fn pane_entry(services: &Services, orb_root: &Path, row: &PaneRow) -> PaneEntry 
 
 /// What the store's saved layouts restore to.
 struct RestoredLayouts {
-    /// Every saved pane.
-    panes: HashMap<PaneId, PaneRow>,
     /// Every saved session.
     sessions: HashMap<SessionId, SessionRow>,
     /// Each session's layout.
@@ -3002,13 +3128,18 @@ struct RestoredLayouts {
     error: Option<String>,
 }
 
-/// The saved tabs of a session whose tree didn't read, and the session's
-/// panes no read tab or float holds. Each layout save of the session writes
-/// them back as they were, so they are never deleted.
+/// The saved tabs of a session whose tree didn't read, and where each of the
+/// session's panes no read tab or float holds runs, with its name and resume
+/// command. Each layout save of the session writes them back as they were,
+/// so they are never deleted.
 #[derive(Debug, Default)]
 struct Unread {
     tabs: Vec<TabRow>,
-    panes: Vec<PaneId>,
+    panes: Vec<PaneEntry>,
+    /// Panes of a session whose tabs all read that no saved tab or float
+    /// held. Their programs may still run, so settling, deleting or moving
+    /// the session kills them, but a save doesn't keep their rows.
+    loose: Vec<PaneEntry>,
 }
 
 /// The message for saved layouts that couldn't all be read, with `report`'s
@@ -3037,8 +3168,8 @@ where
 /// layout with its mark, focused on its saved pane (else its first), showing
 /// its saved tab, its floats hidden in their saved places with their mark, with where each
 /// pane runs. A tab whose tree doesn't read is left out, and so is a session
-/// left with no tab; both are kept in `unread`. Nothing comes back when the
-/// store can't be read.
+/// left with no tab; both are kept in `unread`, and so is each pane no read
+/// tab or float holds. Nothing comes back when the store can't be read.
 fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> RestoredLayouts {
     let saved = match store.layouts() {
         Ok(saved) => saved,
@@ -3047,7 +3178,6 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
                 .log
                 .error("couldn't fully read orb's saved layouts", &report);
             return RestoredLayouts {
-                panes: HashMap::new(),
                 sessions: HashMap::new(),
                 layouts: Vec::new(),
                 unread: HashMap::new(),
@@ -3108,16 +3238,22 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
                 );
                 SessionLayout::restore(tabs, session.active_tab, panes.clone(), floats)
             });
-            if let Some(kept) = unread.get_mut(&session.id) {
-                kept.panes = panes
-                    .iter()
-                    .map(|entry| entry.id)
-                    .filter(|&id| {
-                        layout
-                            .as_ref()
-                            .is_none_or(|layout| !layout.panes().any(|entry| entry.id == id))
-                    })
-                    .collect();
+            let not_held: Vec<PaneEntry> = panes
+                .iter()
+                .filter(|kept| {
+                    layout
+                        .as_ref()
+                        .is_none_or(|layout| !layout.panes().any(|entry| entry.id == kept.id))
+                })
+                .cloned()
+                .collect();
+            if !not_held.is_empty() {
+                let kept = unread.entry(session.id).or_default();
+                if kept.tabs.is_empty() {
+                    kept.loose = not_held;
+                } else {
+                    kept.panes = not_held;
+                }
             }
             Some((session.id, layout?))
         })
@@ -3128,7 +3264,6 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
             .into_iter()
             .map(|row| (row.id, row))
             .collect(),
-        panes: saved.panes.into_iter().map(|row| (row.id, row)).collect(),
         layouts,
         unread,
         error,
@@ -4012,9 +4147,33 @@ mod tests {
         Ok(())
     }
 
+    /// Adds a second pane to `seeded`'s session and saves the session as two
+    /// tabs, one per pane, the first shown. Returns the second pane.
+    fn second_tab(store: &Store, seeded: &Seeded) -> Result<PaneId, Report<StoreError>> {
+        let second = store.insert_pane(seeded.session, Path::new(PROJECT_ROOT))?;
+        let tab = |position, pane: PaneId| TabRow {
+            session_id: seeded.session,
+            position,
+            name: None,
+            layout: format!("{{\"pane\":{}}}", pane.0),
+            focus_pane: Some(pane),
+            swap_layout: SwapLayout::Vertical,
+            hand_changed: false,
+        };
+        store.save_layout(
+            seeded.session,
+            0,
+            &[tab(0, seeded.pane), tab(1, second)],
+            &SessionFloats::default(),
+            &[(seeded.pane, None), (second, None)],
+        )?;
+        Ok(second)
+    }
+
     /// Saves thread `aa`'s session with a first tab on its pane, readable
-    /// only when `first_reads`, and a second tab on a second pane whose tree
-    /// doesn't read. Returns the thread and the second pane.
+    /// only when `first_reads`, and a second tab on a second pane, named
+    /// [`UNREAD_PANE_NAME`], whose tree doesn't read. Returns the thread and
+    /// the second pane.
     fn with_unread_tab(
         store: &Store,
         first_reads: bool,
@@ -4043,13 +4202,19 @@ mod tests {
                 tab(1, UNREAD_TREE.to_owned(), second),
             ],
             &SessionFloats::default(),
-            &[(inserted.pane, None), (second, None)],
+            &[
+                (inserted.pane, None),
+                (second, Some(UNREAD_PANE_NAME.to_owned())),
+            ],
         )?;
         Ok((inserted, second))
     }
 
     /// A saved split tree orb can't read.
     const UNREAD_TREE: &str = "not a tree";
+
+    /// The name of the pane whose tab doesn't read.
+    const UNREAD_PANE_NAME: &str = "server";
 
     #[rstest::rstest]
     fn restore_with_a_tab_that_doesnt_read_is_a_partial_load() -> Result<(), Report<StoreError>> {
@@ -4148,6 +4313,38 @@ mod tests {
         Ok(())
     }
 
+    #[rstest::rstest]
+    fn layout_save_keeps_the_name_of_a_pane_whose_tab_didnt_read() -> Result<(), Report<StoreError>>
+    {
+        // Given a session whose second tab, on a pane named server, didn't
+        // read, and whose readable pane was renamed.
+        let store = Store::open_in_memory()?;
+        let (inserted, second) = with_unread_tab(&store, true)?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        state
+            .write()
+            .layouts
+            .rename_pane(inserted.pane, Some("api".to_owned()));
+
+        // When its layout is saved.
+        actor.save_layout(inserted.session);
+
+        // Then the second pane is still saved, still named server.
+        let name = actor
+            .store
+            .layouts()?
+            .panes
+            .into_iter()
+            .find(|pane| pane.id == second)
+            .map(|pane| pane.name);
+        assert_eq!(
+            name,
+            Some(Some(UNREAD_PANE_NAME.to_owned())),
+            "a pane orb couldn't read must keep its row and name"
+        );
+        Ok(())
+    }
+
     /// A seeded session and the panes of its tabs that don't read.
     type SeededSession = Result<(SessionId, Vec<PaneId>), Report<StoreError>>;
 
@@ -4174,6 +4371,13 @@ mod tests {
         actor.save_layout(s);
     })]
     #[case::partial_load(one_unread_tab, |actor: &mut SessionsActor, _: &State, s| actor.save_layout(s))]
+    #[case::partial_load_after_rename(one_unread_tab, |actor: &mut SessionsActor, state: &State, s| {
+        let readable = state.read().layouts.get(s).and_then(SessionLayout::focused);
+        if let Some(readable) = readable {
+            state.write().layouts.rename_pane(readable, Some("api".to_owned()));
+        }
+        actor.save_layout(s);
+    })]
     fn layout_save_leaves_every_pane_row_held(
         #[case] given: fn(&Store) -> SeededSession,
         #[case] change: fn(&mut SessionsActor, &State, SessionId),
@@ -4739,7 +4943,7 @@ mod tests {
         // session.
         let store = Store::open_in_memory()?;
         let inserted = insert_thread(&store, "aa")?;
-        let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let second = second_tab(&store, &inserted)?;
         insert_thread(&store, "bb")?;
         let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -4754,6 +4958,103 @@ mod tests {
             killed(&zmx),
             vec![inserted.pane.zmx_name(), second.zmx_name()],
             "settling a session kills each of its panes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn settling_kills_a_pane_no_saved_tab_holds() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, all of whose tabs read, with a second
+        // pane row that no saved tab or float holds.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let loose = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let (zmx, service) = recording_zmx();
+        actor.services.zmx = service;
+
+        // When settling the session.
+        actor.settle_session(inserted.session);
+
+        // Then the loose pane's program is killed along with the held one.
+        assert_eq!(
+            killed(&zmx),
+            vec![inserted.pane.zmx_name(), loose.zmx_name()],
+            "settling a session kills a pane no saved tab holds too"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_kills_a_pane_no_saved_tab_holds() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, all of whose tabs read, with a second
+        // pane row that no saved tab or float holds.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let loose = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let (zmx, service) = recording_zmx();
+        actor.services.zmx = service;
+
+        // When deleting the session.
+        actor.delete_session(inserted.session);
+
+        // Then the loose pane's program is killed along with the held one.
+        assert_eq!(
+            killed(&zmx),
+            vec![inserted.pane.zmx_name(), loose.zmx_name()],
+            "deleting a session kills a pane no saved tab holds too"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn layout_save_drops_the_row_of_a_pane_no_saved_tab_held() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session, all of whose tabs read, with a second
+        // pane row that no saved tab or float held at start.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let loose = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // When its layout is saved.
+        actor.save_layout(inserted.session);
+
+        // Then the loose pane's row is gone from the store.
+        let kept = actor
+            .store
+            .layouts()?
+            .panes
+            .iter()
+            .any(|pane| pane.id == loose);
+        assert!(!kept, "a save must not keep a pane row no tab holds");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::one_tab_unread(true)]
+    #[case::no_tab_read(false)]
+    #[tokio::test]
+    async fn settling_a_partly_read_session_kills_its_unread_pane(
+        #[case] first_reads: bool,
+    ) -> Result<(), Report<StoreError>> {
+        // Given thread aa's session with a second pane whose tab didn't read.
+        let store = Store::open_in_memory()?;
+        let (inserted, second) = with_unread_tab(&store, first_reads)?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let (zmx, service) = recording_zmx();
+        actor.services.zmx = service;
+
+        // When settling the session.
+        actor.settle_session(inserted.session);
+
+        // Then the unread pane is killed along with the read one.
+        assert_eq!(
+            killed(&zmx),
+            vec![inserted.pane.zmx_name(), second.zmx_name()],
+            "settling a session kills the panes of its unread tabs too"
         );
         Ok(())
     }
@@ -4855,7 +5156,7 @@ mod tests {
         // session.
         let store = Store::open_in_memory()?;
         let inserted = insert_thread(&store, "aa")?;
-        let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let second = second_tab(&store, &inserted)?;
         insert_thread(&store, "bb")?;
         let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -4870,6 +5171,32 @@ mod tests {
             killed(&zmx),
             vec![inserted.pane.zmx_name(), second.zmx_name()],
             "deleting a session kills each of its panes"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::one_tab_unread(true)]
+    #[case::no_tab_read(false)]
+    #[tokio::test]
+    async fn deleting_a_partly_read_session_kills_its_unread_pane(
+        #[case] first_reads: bool,
+    ) -> Result<(), Report<StoreError>> {
+        // Given thread aa's session with a second pane whose tab didn't read.
+        let store = Store::open_in_memory()?;
+        let (inserted, second) = with_unread_tab(&store, first_reads)?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let (zmx, service) = recording_zmx();
+        actor.services.zmx = service;
+
+        // When deleting the session.
+        actor.delete_session(inserted.session);
+
+        // Then the unread pane is killed along with the read one.
+        assert_eq!(
+            killed(&zmx),
+            vec![inserted.pane.zmx_name(), second.zmx_name()],
+            "deleting a session kills the panes of its unread tabs too"
         );
         Ok(())
     }
@@ -5094,6 +5421,24 @@ mod tests {
         assert!(
             !fx.file(fx.thread.pane).exists(),
             "a deleted session's pane files should go"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn layout_save_deletes_a_dropped_panes_report_file() -> Result<(), Report<StoreError>> {
+        // Given the shell pane has a report file.
+        let mut fx = PaneReports::new()?;
+        fx.report(fx.shell, "start", "aa", Some("startup"))?;
+
+        // When the shell pane closes and the layout is saved.
+        fx.state.write().layouts.close_pane(fx.shell);
+        fx.actor.save_layout(fx.thread.session);
+
+        // Then the shell pane's report file is gone.
+        assert!(
+            !fx.file(fx.shell).exists(),
+            "a pane's report file should go with its dropped row"
         );
         Ok(())
     }
@@ -5890,11 +6235,11 @@ mod tests {
         );
 
         // Then the sidebar has no row for it.
-        assert_eq!(
-            state.read().sessions.sidebar().len(),
-            0,
-            "a saved group should not show"
-        );
+        let rows = {
+            let app = state.read();
+            app.sessions.sidebar(&app.layouts).len()
+        };
+        assert_eq!(rows, 0, "a saved group should not show");
         Ok(())
     }
 
@@ -8186,7 +8531,7 @@ mod tests {
     fn movable() -> Result<(Store, Seeded, PaneId), Report<StoreError>> {
         let store = Store::open_in_memory()?;
         let seeded = insert_thread(&store, "aa")?;
-        let second = store.insert_pane(seeded.session, Path::new(PROJECT_ROOT))?;
+        let second = second_tab(&store, &seeded)?;
         Ok((store, seeded, second))
     }
 
@@ -9614,7 +9959,7 @@ mod tests {
             let dir = tempfile::tempdir().change_context(StoreError)?;
             let store = Store::open_in_memory()?;
             let thread = insert_thread(&store, "aa")?;
-            let shell = store.insert_pane(thread.session, Path::new(PROJECT_ROOT))?;
+            let shell = second_tab(&store, &thread)?;
             setup(&store, &thread)?;
             let host = listing(Vec::new());
             let (actor, state) = start_in(
@@ -9891,13 +10236,13 @@ mod tests {
         fx.actor.poll().await;
 
         // Then the session is still in the sidebar.
-        let listed = fx
-            .state
-            .read()
-            .sessions
-            .sidebar()
-            .iter()
-            .any(|row| row.item() == SidebarItem::Session(fx.thread.session));
+        let listed = {
+            let app = fx.state.read();
+            app.sessions
+                .sidebar(&app.layouts)
+                .iter()
+                .any(|row| row.item() == SidebarItem::Session(fx.thread.session))
+        };
         assert!(listed, "a session whose agents all ended keeps its card");
         Ok(())
     }
@@ -10880,7 +11225,7 @@ mod tests {
         // Given thread aa's session with a second pane, and a log.
         let store = Store::open_in_memory()?;
         let inserted = insert_thread(&store, "aa")?;
-        let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let second = second_tab(&store, &inserted)?;
         let host = listing(Vec::new());
         let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         let dir = tempfile::tempdir().change_context(StoreError)?;

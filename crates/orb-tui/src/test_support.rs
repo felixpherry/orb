@@ -6,10 +6,11 @@ use std::sync::{Mutex, PoisonError};
 
 use error_stack::Report;
 use orb_domain::feat::git::git_service::{Git, GitError, GitRef, WorktreeFacts};
+use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
 use orb_domain::feat::sessions::state::{
     PaneId, Project, ProjectKind, Session, SessionId, SessionKind,
 };
-use orb_domain::feat::zmx::zmx_service::{Zmx, ZmxError, ZmxOutput};
+use orb_domain::feat::zmx::zmx_service::{Zmx, ZmxError, ZmxOutput, ZmxSession};
 
 /// Session `n`, for `n < 100`: 200 + n. The same ranges as the domain's
 /// test ids (`feat::sessions::test_ids`), so a mixed-up id fails.
@@ -28,6 +29,33 @@ fn below_100(n: i64) -> i64 {
         "test ids hold 0..100 per kind, got {n}"
     );
     n
+}
+
+/// Layouts holding every pane `projects`' threads run in: one tab per pane,
+/// in its thread's session.
+pub(crate) fn layouts_for(projects: &[Project]) -> Layouts {
+    let mut layouts = Layouts::default();
+    for launch in projects
+        .iter()
+        .flat_map(|project| &project.threads)
+        .filter_map(|thread| thread.pane.as_ref())
+    {
+        let entry = PaneEntry {
+            id: launch.pane,
+            zmx: ZmxSession {
+                name: launch.pane.zmx_name(),
+                dir: "/tmp/zmx".into(),
+            },
+            cwd: "/work".into(),
+            name: None,
+            resume: None,
+        };
+        match layouts.get(launch.session) {
+            Some(_) => layouts.new_tab(launch.session, entry),
+            None => layouts.insert(launch.session, SessionLayout::of(entry)),
+        }
+    }
+    layouts
 }
 
 /// A zmx whose `list` answers as scripted and that records every command.

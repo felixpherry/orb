@@ -78,39 +78,43 @@ impl IntentHandler {
                 vec![]
             }
             Intent::SelectNext => {
-                state.sessions.select_next();
+                state.sessions.select_next(&state.layouts);
                 with_visit(state, vec![])
             }
             Intent::SelectPrev => {
-                state.sessions.select_prev();
+                state.sessions.select_prev(&state.layouts);
                 with_visit(state, vec![])
             }
             Intent::SelectFirst => {
                 let from = state.sessions.cursor;
-                state.sessions.select_first();
+                state.sessions.select_first(&state.layouts);
                 let commands = record_jump(state, from);
                 with_visit(state, commands)
             }
             Intent::SelectLast => {
                 let from = state.sessions.cursor;
-                state.sessions.select_last();
+                state.sessions.select_last(&state.layouts);
                 let commands = record_jump(state, from);
                 with_visit(state, commands)
             }
             Intent::SelectHalfPageDown => {
-                state.sessions.half_page_down(&state.sidebar.layout);
+                state
+                    .sessions
+                    .half_page_down(&state.sidebar.layout, &state.layouts);
                 with_visit(state, vec![])
             }
             Intent::SelectHalfPageUp => {
-                state.sessions.half_page_up(&state.sidebar.layout);
+                state
+                    .sessions
+                    .half_page_up(&state.sidebar.layout, &state.layouts);
                 with_visit(state, vec![])
             }
             Intent::SelectRow(item) if state.focus == Focus::Search => {
-                state.sessions.select_row(*item);
+                state.sessions.select_row(*item, &state.layouts);
                 search_key(&Intent::PickerConfirm, state)
             }
             Intent::SelectRow(item) => {
-                state.sessions.select_row(*item);
+                state.sessions.select_row(*item, &state.layouts);
                 with_visit(state, vec![])
             }
             Intent::ToggleSidebar => match (state.sidebar.hidden, state.focus) {
@@ -141,7 +145,7 @@ impl IntentHandler {
                 }
                 vec![]
             }
-            Intent::Attach => match state.sessions.selected_agent() {
+            Intent::Attach => match state.sessions.selected_agent(&state.layouts) {
                 Some((session, pane)) => {
                     state.layouts.reveal(session, pane);
                     let mut commands = attach_session(state);
@@ -277,18 +281,18 @@ impl IntentHandler {
             },
             Intent::JumpBack => match validate_jump_back(state) {
                 Ok(()) => {
-                    let target = state
-                        .jumps
-                        .back(state.jump_from(), |item| state.sessions.jumpable(item));
+                    let target = state.jumps.back(state.jump_from(), |item| {
+                        state.sessions.jumpable(item, &state.layouts)
+                    });
                     land(state, target)
                 }
                 Err(_) => vec![],
             },
             Intent::JumpForward => match validate_jump_forward(state) {
                 Ok(()) => {
-                    let target = state
-                        .jumps
-                        .forward(state.jump_from(), |item| state.sessions.jumpable(item));
+                    let target = state.jumps.forward(state.jump_from(), |item| {
+                        state.sessions.jumpable(item, &state.layouts)
+                    });
                     land(state, target)
                 }
                 Err(_) => vec![],
@@ -683,7 +687,8 @@ impl IntentHandler {
                 Some(&PickerKind::ClosePane { pane, session }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::Confirm(true))
-                            if state.sessions.selected_agent() == Some((session, pane)) =>
+                            if state.sessions.selected_agent(&state.layouts)
+                                == Some((session, pane)) =>
                         {
                             close_agent_pane(state, session, pane)
                         }
@@ -809,7 +814,7 @@ impl IntentHandler {
             }
             Intent::Rename => match (
                 validate_rename(state),
-                state.sessions.selected_agent(),
+                state.sessions.selected_agent(&state.layouts),
                 state.sessions.selected_session(),
             ) {
                 (Ok(()), Some((_, pane)), _) => {
@@ -867,7 +872,10 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
-            Intent::Delete => match (validate_delete(state), state.sessions.cursor_row()) {
+            Intent::Delete => match (
+                validate_delete(state),
+                state.sessions.cursor_row(&state.layouts),
+            ) {
                 (Ok(()), Some(SidebarItem::Agent { session, pane })) => {
                     open_picker(state, PickerState::close_pane(pane, session, state.focus));
                     vec![]
@@ -907,7 +915,7 @@ impl IntentHandler {
             && let Some(row) = state.active_row()
             && state
                 .sessions
-                .sidebar()
+                .sidebar(&state.layouts)
                 .iter()
                 .any(|listed| listed.item() == row)
         {
@@ -1027,7 +1035,7 @@ fn workspace_items(
 /// Filters the sidebar to `filter`'s project, or to all projects, and asks
 /// for the filter to be saved.
 fn filter_to(state: &mut AppState, filter: Option<ProjectId>) -> Vec<Command> {
-    state.sessions.filter_to(filter);
+    state.sessions.filter_to(filter, &state.layouts);
     with_visit(state, vec![Command::SaveUi])
 }
 
@@ -1055,7 +1063,9 @@ fn settle_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
         (Ok(()), Some(selected)) if selected.id == session && selected.settled_at.is_none() => {
             state.attached.remove(&session);
             state.sessions.leave(session);
-            state.sessions.cursor = state.sessions.card_neighbour(SidebarItem::Session(session));
+            state.sessions.cursor = state
+                .sessions
+                .card_neighbour(SidebarItem::Session(session), &state.layouts);
             with_visit(state, vec![Command::SettleSession(session)])
         }
         (Err(ToggleSettleError::InProgress), Some(selected)) if selected.id == session => {
@@ -1069,7 +1079,7 @@ fn settle_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
 /// Whether `item`, answered `Yes` in its delete or discard confirm, is still
 /// under the cursor and can still be deleted.
 fn still_deletable(state: &AppState, item: SidebarItem) -> bool {
-    state.sessions.cursor_row() == Some(item) && validate_delete(state).is_ok()
+    state.sessions.cursor_row(&state.layouts) == Some(item) && validate_delete(state).is_ok()
 }
 
 /// Closes agent pane `pane` of `session`, answered `Yes` in its confirm:
@@ -1094,7 +1104,9 @@ fn delete_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
         .selected_session()
         .map(|selected| selected.id)
         == Some(session);
-    let neighbour = state.sessions.row_neighbour(SidebarItem::Session(session));
+    let neighbour = state
+        .sessions
+        .row_neighbour(SidebarItem::Session(session), &state.layouts);
     state.sessions.deleting.insert(session);
     state.attached.remove(&session);
     state.sessions.leave(session);
@@ -1471,7 +1483,7 @@ fn leave_close_listed_agent(
 ) -> Vec<Command> {
     let yes = state.picker.as_ref().and_then(PickerState::selected)
         == Some(&PickerItem::Confirm(true))
-        && state.sessions.runs_agent(session, pane);
+        && state.sessions.runs_agent(session, pane, &state.layouts);
     back_to_list(state, yes);
     if !yes {
         return vec![];
@@ -1923,15 +1935,15 @@ fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
     match (intent, &mut sessions.search) {
         (Intent::PickerInput(ch), Some(search)) => {
             search.input.insert(*ch);
-            sessions.select_first_match();
+            sessions.select_first_match(&state.layouts);
         }
         (Intent::PickerBackspace, Some(search)) => {
             search.input.backspace();
-            sessions.select_first_match();
+            sessions.select_first_match(&state.layouts);
         }
         (Intent::PickerDeleteWord, Some(search)) => {
             search.input.delete_word();
-            sessions.select_first_match();
+            sessions.select_first_match(&state.layouts);
         }
         (Intent::PickerCursorLeft, Some(search)) => {
             search.input.cursor_left();
@@ -1945,8 +1957,8 @@ fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
             search.input.cursor_to(*index);
             return vec![];
         }
-        (Intent::PickerNext, _) => sessions.select_next_match(),
-        (Intent::PickerPrev, _) => sessions.select_prev_match(),
+        (Intent::PickerNext, _) => sessions.select_next_match(&state.layouts),
+        (Intent::PickerPrev, _) => sessions.select_prev_match(&state.layouts),
         (Intent::PickerConfirm, _) if sessions.cursor.is_some() => {
             let from = sessions.search.take().and_then(|search| search.return_to);
             if let Some(id) = sessions.selected_session().map(|session| session.id) {
@@ -1957,7 +1969,7 @@ fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
             return with_visit(state, commands);
         }
         (Intent::PickerConfirm | Intent::PickerCancel, _) => {
-            sessions.cancel_search();
+            sessions.cancel_search(&state.layouts);
             state.focus = Focus::Sidebar;
         }
         _ => return vec![],
@@ -2042,7 +2054,7 @@ mod tests {
     use crate::feat::sessions::state::{
         FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search, Session,
         SessionId, SessionKind, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
-        sessions_for,
+        layouts_for, sessions_for,
     };
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
@@ -4260,7 +4272,7 @@ mod tests {
         // Then only thread 2 is listed, while its session is removed.
         let listed: Vec<SidebarItem> = state
             .sessions
-            .sidebar()
+            .sidebar(&state.layouts)
             .iter()
             .map(SidebarRow::item)
             .collect();
@@ -6331,6 +6343,7 @@ mod tests {
             project.threads = vec![thread(id, ThreadStatus::Idle)];
         }
         state.sessions.sessions = sessions_for(&state.sessions.projects);
+        state.layouts = layouts_for(&state.sessions.projects);
         state
     }
 
@@ -6560,6 +6573,7 @@ mod tests {
             project.threads = vec![named(thread(1, ThreadStatus::Idle), "scratch")];
         }
         state.sessions.sessions = sessions_for(&state.sessions.projects);
+        state.layouts = layouts_for(&state.sessions.projects);
 
         // When opening the session picker.
         let state = open_sessions(state);
@@ -9774,6 +9788,32 @@ mod tests {
             state.layouts.owner_of(PaneId(1)),
             None,
             "Yes should close the agent's pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn closing_an_agent_pane_removes_its_row_at_once() {
+        // Given Yes highlighted in pane 1's close confirm, with no poll to
+        // follow.
+        let mut state = closing_agent();
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sidebar has no agent row for pane 1.
+        let rows: Vec<PaneId> = state
+            .sessions
+            .sidebar(&state.layouts)
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Agent { pane, .. } if *pane == PaneId(1) => Some(*pane),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            Vec::<PaneId>::new(),
+            "a closed agent pane's row should go before the next poll"
         );
     }
 

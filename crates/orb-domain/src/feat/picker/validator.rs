@@ -192,7 +192,9 @@ pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
         _ => return Err(PickSessionError::Deleted),
     }
     match pane {
-        Some(pane) if !state.sessions.runs_agent(session, pane) => Err(PickSessionError::PaneGone),
+        Some(pane) if !state.sessions.runs_agent(session, pane, &state.layouts) => {
+            Err(PickSessionError::PaneGone)
+        }
         _ => Ok(()),
     }
 }
@@ -227,7 +229,7 @@ pub fn validate_close_listed_agent(state: &AppState) -> Result<(), CloseListedAg
         return Err(CloseListedAgentError::NoAgent);
     };
     match state.sessions.session(session) {
-        Some(_) if state.sessions.runs_agent(session, pane) => Ok(()),
+        Some(_) if state.sessions.runs_agent(session, pane, &state.layouts) => Ok(()),
         _ => Err(CloseListedAgentError::Gone),
     }
 }

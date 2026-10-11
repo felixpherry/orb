@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::TextInput;
 use crate::feat::harness::HarnessId;
+use crate::feat::layout::state::Layouts;
 use crate::feat::picker::list::fuzzy_match;
 use crate::feat::sidebar::state::SidebarLayout;
 
@@ -479,19 +480,22 @@ impl Sessions {
         })
     }
 
-    /// Session `id`'s agent rows: its agents running in a pane, with the
-    /// pane.
-    pub fn agent_rows(&self, id: SessionId) -> Vec<(&Thread, PaneId)> {
+    /// Session `id`'s agent rows: its agents whose pane a tab or float of
+    /// its layout holds, with the pane.
+    pub fn agent_rows(&self, id: SessionId, layouts: &Layouts) -> Vec<(&Thread, PaneId)> {
         self.agents(id)
             .into_iter()
             .filter_map(|thread| Some((thread, thread.pane.as_ref()?.pane)))
+            .filter(|&(_, pane)| layouts.owner_of(pane) == Some(id))
             .collect()
     }
 
     /// Whether pane `pane` still runs one of session `id`'s agents (never
     /// while the session is being deleted).
-    pub fn runs_agent(&self, id: SessionId, pane: PaneId) -> bool {
-        self.agent_rows(id).iter().any(|&(_, shown)| shown == pane)
+    pub fn runs_agent(&self, id: SessionId, pane: PaneId, layouts: &Layouts) -> bool {
+        self.agent_rows(id, layouts)
+            .iter()
+            .any(|&(_, shown)| shown == pane)
     }
 
     /// Whether session `id`'s card hides its agent rows: it's folded and no
@@ -521,13 +525,13 @@ impl Sessions {
     /// the cursor's settled session. Ties go to the higher id. Sessions being
     /// deleted aren't listed. While a project filter is set, only that
     /// project's rows are. While a search has text, only the sessions whose
-    /// title, or one of whose agents' titles, matches it are,
+    /// title, or one of whose agent rows' names, matches it are,
     /// settled ones even while the shelf is closed, and the shelf header only
     /// when a settled session matches, reading as open; a folded card lists
     /// its agent rows then too.
-    pub fn sidebar(&self) -> Vec<SidebarRow<'_>> {
+    pub fn sidebar(&self, layouts: &Layouts) -> Vec<SidebarRow<'_>> {
         let (mut settled, live): (Vec<_>, Vec<_>) = self
-            .listed_sessions()
+            .listed_sessions(layouts)
             .into_iter()
             .partition(|(_, session)| session.settled_at.is_some());
         let (mut pinned, mut active): (Vec<_>, Vec<_>) = live
@@ -542,7 +546,7 @@ impl Sessions {
             if self.hides_agents(session.id) {
                 continue;
             }
-            let agents = self.agent_rows(session.id);
+            let agents = self.agent_rows(session.id, layouts);
             let count = agents.len();
             rows.extend(agents.into_iter().enumerate().map(|(at, (thread, pane))| {
                 SidebarRow::Agent {
@@ -590,18 +594,18 @@ impl Sessions {
 
     /// Move the cursor to the first row the search lists, or to
     /// nothing when none matches. Blank text leaves the cursor where it is.
-    pub fn select_first_match(&mut self) {
+    pub fn select_first_match(&mut self, layouts: &Layouts) {
         if self.searching() {
-            self.cursor = self.matches().first().copied();
+            self.cursor = self.matches(layouts).first().copied();
         }
     }
 
     /// Move the cursor to the next row the search lists, agent rows
     /// included, past the shelf header; wraps from the last one to the first. Without a
     /// cursor, or with one on a row that's gone, selects the first.
-    pub fn select_next_match(&mut self) {
-        let matches = self.matches();
-        let next = match self.position(&matches) {
+    pub fn select_next_match(&mut self, layouts: &Layouts) {
+        let matches = self.matches(layouts);
+        let next = match self.position(&matches, layouts) {
             None => matches.first(),
             Some(at) => matches.get((at + 1) % matches.len()),
         };
@@ -613,9 +617,9 @@ impl Sessions {
     /// Move the cursor to the previous row the search lists, agent
     /// rows included, past the shelf header; wraps from the first one to the last. Without
     /// a cursor, or with one on a row that's gone, selects the first.
-    pub fn select_prev_match(&mut self) {
-        let matches = self.matches();
-        let prev = match self.position(&matches) {
+    pub fn select_prev_match(&mut self, layouts: &Layouts) {
+        let matches = self.matches(layouts);
+        let prev = match self.position(&matches, layouts) {
             None => matches.first(),
             Some(at) => matches.get((at + matches.len() - 1) % matches.len()),
         };
@@ -626,13 +630,13 @@ impl Sessions {
 
     /// End the search and put the cursor back where it was before it, or on
     /// the first row when that row is no longer listed.
-    pub fn cancel_search(&mut self) {
+    pub fn cancel_search(&mut self, layouts: &Layouts) {
         let Some(search) = self.search.take() else {
             return;
         };
         self.cursor = search.return_to;
-        let items = self.items();
-        if self.position(&items).is_none() {
+        let items = self.items(layouts);
+        if self.position(&items, layouts).is_none() {
             self.cursor = items.first().copied();
         }
     }
@@ -670,16 +674,9 @@ impl Sessions {
 
     /// The agent row under the cursor, as its session and pane, while that
     /// pane still runs one of the session's agents.
-    pub fn selected_agent(&self) -> Option<(SessionId, PaneId)> {
+    pub fn selected_agent(&self, layouts: &Layouts) -> Option<(SessionId, PaneId)> {
         match self.cursor? {
-            SidebarItem::Agent { session, pane }
-                if self.agents(session).into_iter().any(|thread| {
-                    thread
-                        .pane
-                        .as_ref()
-                        .is_some_and(|launch| launch.pane == pane)
-                }) =>
-            {
+            SidebarItem::Agent { session, pane } if self.runs_agent(session, pane, layouts) => {
                 Some((session, pane))
             }
             _ => None,
@@ -688,9 +685,9 @@ impl Sessions {
 
     /// The row the cursor reads as: its own, or its session's card once the
     /// agent row it was on is gone.
-    pub fn cursor_row(&self) -> Option<SidebarItem> {
+    pub fn cursor_row(&self, layouts: &Layouts) -> Option<SidebarItem> {
         match self.cursor? {
-            SidebarItem::Agent { session, .. } if self.selected_agent().is_none() => {
+            SidebarItem::Agent { session, .. } if self.selected_agent(layouts).is_none() => {
                 Some(SidebarItem::Session(session))
             }
             item => Some(item),
@@ -720,9 +717,9 @@ impl Sessions {
     /// Move the cursor to the row below; wraps from the last row to the first.
     /// Without a cursor, or with one on a row that's gone, selects the first
     /// row.
-    pub fn select_next(&mut self) {
-        let items = self.items();
-        let next = match self.position(&items) {
+    pub fn select_next(&mut self, layouts: &Layouts) {
+        let items = self.items(layouts);
+        let next = match self.position(&items, layouts) {
             None => items.first(),
             Some(at) => items.get((at + 1) % items.len()),
         };
@@ -734,9 +731,9 @@ impl Sessions {
     /// Move the cursor to the row above; wraps from the first row to the last.
     /// Without a cursor, or with one on a row that's gone, selects the first
     /// row.
-    pub fn select_prev(&mut self) {
-        let items = self.items();
-        let prev = match self.position(&items) {
+    pub fn select_prev(&mut self, layouts: &Layouts) {
+        let items = self.items(layouts);
+        let prev = match self.position(&items, layouts) {
             None => items.first(),
             Some(at) => items.get((at + items.len() - 1) % items.len()),
         };
@@ -747,22 +744,22 @@ impl Sessions {
 
     /// Move the cursor to `item` when it's one of the sidebar's rows;
     /// otherwise leave it.
-    pub fn select_row(&mut self, item: SidebarItem) {
-        if self.items().contains(&item) {
+    pub fn select_row(&mut self, item: SidebarItem, layouts: &Layouts) {
+        if self.items(layouts).contains(&item) {
             self.cursor = Some(item);
         }
     }
 
     /// Move the cursor to the first row.
-    pub fn select_first(&mut self) {
-        if let Some(&first) = self.items().first() {
+    pub fn select_first(&mut self, layouts: &Layouts) {
+        if let Some(&first) = self.items(layouts).first() {
             self.cursor = Some(first);
         }
     }
 
     /// Move the cursor to the last row.
-    pub fn select_last(&mut self) {
-        if let Some(&last) = self.items().last() {
+    pub fn select_last(&mut self, layouts: &Layouts) {
+        if let Some(&last) = self.items(layouts).last() {
             self.cursor = Some(last);
         }
     }
@@ -770,9 +767,9 @@ impl Sessions {
     /// Move the cursor down by as many rows as fit in half the sidebar's
     /// visible height, at least one; stays put on the last row. Without a
     /// cursor, or with one on a row that's gone, selects the first row.
-    pub fn half_page_down(&mut self, layout: &SidebarLayout) {
-        let items = self.items();
-        let target = match self.position(&items) {
+    pub fn half_page_down(&mut self, layout: &SidebarLayout, layouts: &Layouts) {
+        let items = self.items(layouts);
+        let target = match self.position(&items, layouts) {
             None => items.first(),
             Some(at) => {
                 let steps = half_page(layout, at + 1..items.len());
@@ -787,9 +784,9 @@ impl Sessions {
     /// Move the cursor up by as many rows as fit in half the sidebar's
     /// visible height, at least one; stays put on the first row. Without a
     /// cursor, or with one on a row that's gone, selects the first row.
-    pub fn half_page_up(&mut self, layout: &SidebarLayout) {
-        let items = self.items();
-        let target = match self.position(&items) {
+    pub fn half_page_up(&mut self, layout: &SidebarLayout, layouts: &Layouts) {
+        let items = self.items(layouts);
+        let target = match self.position(&items, layouts) {
             None => items.first(),
             Some(at) => items.get(at.saturating_sub(half_page(layout, (0..at).rev()))),
         };
@@ -801,23 +798,23 @@ impl Sessions {
     /// Where the cursor goes when session `item` is settled: the next card
     /// below, else the nearest one above, else the shelf header the settle
     /// creates.
-    pub fn card_neighbour(&self, item: SidebarItem) -> Option<SidebarItem> {
-        self.neighbour(item, |row| matches!(row, SidebarRow::Card { .. }))
+    pub fn card_neighbour(&self, item: SidebarItem, layouts: &Layouts) -> Option<SidebarItem> {
+        self.neighbour(item, layouts, |row| matches!(row, SidebarRow::Card { .. }))
             .or(Some(SidebarItem::SettledShelf))
     }
 
     /// Where the cursor goes when `item` is deleted: the next row below,
     /// else the nearest one above, skipping shelf headers and agent rows;
     /// else the shelf header if another session is settled.
-    pub fn row_neighbour(&self, item: SidebarItem) -> Option<SidebarItem> {
-        self.neighbour(item, |row| {
+    pub fn row_neighbour(&self, item: SidebarItem, layouts: &Layouts) -> Option<SidebarItem> {
+        self.neighbour(item, layouts, |row| {
             !matches!(
                 row,
                 SidebarRow::ShelfHeader { .. } | SidebarRow::Agent { .. }
             )
         })
         .or_else(|| {
-            self.listed_sessions()
+            self.listed_sessions(layouts)
                 .into_iter()
                 .any(|(_, session)| {
                     SidebarItem::Session(session.id) != item && session.settled_at.is_some()
@@ -828,10 +825,10 @@ impl Sessions {
 
     /// Filters the sidebar to `filter`'s project, or to all projects; a
     /// cursor on a row no longer listed moves to the first row.
-    pub fn filter_to(&mut self, filter: Option<ProjectId>) {
+    pub fn filter_to(&mut self, filter: Option<ProjectId>, layouts: &Layouts) {
         self.filter = filter;
-        let items = self.items();
-        if self.position(&items).is_none() {
+        let items = self.items(layouts);
+        if self.position(&items, layouts).is_none() {
             self.cursor = items.first().copied();
         }
     }
@@ -861,7 +858,7 @@ impl Sessions {
     /// Whether a jump can land on `item`: it still exists, isn't being
     /// deleted, and the project filter lists it. Never the Settled header; an
     /// agent row only while its pane still runs an agent.
-    pub fn jumpable(&self, item: SidebarItem) -> bool {
+    pub fn jumpable(&self, item: SidebarItem, layouts: &Layouts) -> bool {
         let mut projects = self.listed_projects();
         match item {
             SidebarItem::Session(id) => {
@@ -871,7 +868,8 @@ impl Sessions {
                     })
             }
             SidebarItem::Agent { session, pane } => {
-                self.jumpable(SidebarItem::Session(session)) && self.runs_agent(session, pane)
+                self.jumpable(SidebarItem::Session(session), layouts)
+                    && self.runs_agent(session, pane, layouts)
             }
             SidebarItem::SettledShelf => false,
         }
@@ -911,8 +909,8 @@ impl Sessions {
 
     /// The sessions the sidebar may list, with their projects: in a listed
     /// project, not being deleted, and matching the search by their title or
-    /// one of their agents' titles.
-    fn listed_sessions(&self) -> Vec<(&Project, &Session)> {
+    /// the name one of their agent rows shows.
+    fn listed_sessions(&self, layouts: &Layouts) -> Vec<(&Project, &Session)> {
         self.sessions
             .iter()
             .filter(|session| !self.deleting.contains(&session.id))
@@ -925,10 +923,13 @@ impl Sessions {
             .filter(|(_, session)| {
                 !self.searching()
                     || self.title_matches(&self.title(session)).is_some()
-                    || self.agents(session.id).into_iter().any(|thread| {
-                        self.title_matches(thread.title.as_deref().unwrap_or(NEW_THREAD))
-                            .is_some()
-                    })
+                    || self
+                        .agent_rows(session.id, layouts)
+                        .into_iter()
+                        .any(|(thread, pane)| {
+                            self.title_matches(layouts.agent_name(pane, Some(thread)))
+                                .is_some()
+                        })
             })
             .collect()
     }
@@ -947,32 +948,32 @@ impl Sessions {
 
     /// The rows the search steps through, in display order: every row but
     /// the shelf header, so agent rows are stops too.
-    fn matches(&self) -> Vec<SidebarItem> {
-        self.items()
+    fn matches(&self, layouts: &Layouts) -> Vec<SidebarItem> {
+        self.items(layouts)
             .into_iter()
             .filter(|&item| item != SidebarItem::SettledShelf)
             .collect()
     }
 
     /// What each sidebar row's cursor rests on, in display order.
-    fn items(&self) -> Vec<SidebarItem> {
-        self.sidebar().iter().map(SidebarRow::item).collect()
+    fn items(&self, layouts: &Layouts) -> Vec<SidebarItem> {
+        self.sidebar(layouts).iter().map(SidebarRow::item).collect()
     }
 
     /// Where the cursor is in `items`, if it's on one of them; a cursor on
     /// a vanished agent row is on its session's card.
-    fn position(&self, items: &[SidebarItem]) -> Option<usize> {
-        let cursor = self.cursor_row()?;
+    fn position(&self, items: &[SidebarItem], layouts: &Layouts) -> Option<usize> {
+        let cursor = self.cursor_row(layouts)?;
         items.iter().position(|&item| item == cursor)
     }
 
     /// The first row after `item`'s that `fits`, else the nearest one before
     /// it.
-    fn neighbour<F>(&self, item: SidebarItem, fits: F) -> Option<SidebarItem>
+    fn neighbour<F>(&self, item: SidebarItem, layouts: &Layouts, fits: F) -> Option<SidebarItem>
     where
         F: Fn(&SidebarRow<'_>) -> bool,
     {
-        let rows = self.sidebar();
+        let rows = self.sidebar(layouts);
         let at = rows
             .iter()
             .position(|row| row.item() == item)
@@ -1045,6 +1046,26 @@ pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
     shown
 }
 
+/// Layouts holding every pane `projects`' threads run in: one tab per pane,
+/// in its thread's session.
+#[cfg(test)]
+pub(crate) fn layouts_for(projects: &[Project]) -> Layouts {
+    use crate::feat::layout::state::{SessionLayout, test_entry};
+    let mut layouts = Layouts::default();
+    for launch in projects
+        .iter()
+        .flat_map(|project| &project.threads)
+        .filter_map(|thread| thread.pane.as_ref())
+    {
+        let entry = test_entry(launch.pane.0);
+        match layouts.get(launch.session) {
+            Some(_) => layouts.new_tab(launch.session, entry),
+            None => layouts.insert(launch.session, SessionLayout::of(entry)),
+        }
+    }
+    layouts
+}
+
 #[cfg(test)]
 mod tests {
     use crate::feat::harness::HarnessId;
@@ -1054,9 +1075,10 @@ mod tests {
     use super::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search, Session, SessionId,
         SessionKind, Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus,
-        most_urgent, sessions_for,
+        layouts_for, most_urgent, sessions_for,
     };
     use crate::TextInput;
+    use crate::feat::layout::state::Layouts;
     use crate::feat::sidebar::state::SidebarLayout;
 
     /// `sessions` with the sessions its projects' threads run in.
@@ -1214,6 +1236,36 @@ mod tests {
             agents,
             [ThreadId(2), ThreadId(1)],
             "a session's agents are its panes' threads, oldest first"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::no_layout(false)]
+    #[case::pane_closed(true)]
+    fn agent_row_needs_a_layout_holding_its_pane(#[case] held_then_closed: bool) {
+        // Given thread 1 in pane 1 of session 1, and layouts that never held
+        // the pane or held it until it closed.
+        let sessions = holding(vec![agent(1, 1, 0)], vec![session(1)]);
+        let layouts = if held_then_closed {
+            let mut layouts = layouts_for(&sessions.projects);
+            layouts.close_pane(PaneId(1));
+            layouts
+        } else {
+            Layouts::default()
+        };
+
+        // When listing session 1's agent rows.
+        let panes: Vec<PaneId> = sessions
+            .agent_rows(SessionId(1), &layouts)
+            .into_iter()
+            .map(|(_, pane)| pane)
+            .collect();
+
+        // Then there are none.
+        assert_eq!(
+            panes,
+            Vec::<PaneId>::new(),
+            "an agent whose pane no layout holds has no row"
         );
     }
 
@@ -1388,7 +1440,7 @@ mod tests {
     /// The session and shelf rows, in display order; agent rows left out.
     fn items(sessions: &Sessions) -> Vec<SidebarItem> {
         sessions
-            .sidebar()
+            .sidebar(&layouts_for(&sessions.projects))
             .iter()
             .map(SidebarRow::item)
             .filter(|item| !matches!(item, SidebarItem::Agent { .. }))
@@ -1621,7 +1673,7 @@ mod tests {
         );
 
         // When selecting the next row.
-        sessions.select_next();
+        sessions.select_next(&layouts_for(&sessions.projects));
 
         // Then the shelf header is selected.
         assert_eq!(
@@ -1644,7 +1696,7 @@ mod tests {
         );
 
         // When selecting the next row.
-        sessions.select_next();
+        sessions.select_next(&layouts_for(&sessions.projects));
 
         // Then the first row is selected.
         assert_eq!(
@@ -1672,7 +1724,7 @@ mod tests {
         });
 
         // When selecting the next row.
-        sessions.select_next();
+        sessions.select_next(&layouts_for(&sessions.projects));
 
         // Then project 2's thread is selected, not project 1's older one.
         assert_eq!(
@@ -1692,7 +1744,7 @@ mod tests {
         });
 
         // When selecting the first row.
-        sessions.select_first();
+        sessions.select_first(&layouts_for(&sessions.projects));
 
         // Then the top card is selected.
         assert_eq!(
@@ -1711,7 +1763,7 @@ mod tests {
         );
 
         // When selecting the last row.
-        sessions.select_last();
+        sessions.select_last(&layouts_for(&sessions.projects));
 
         // Then the shelf's header is selected.
         assert_eq!(
@@ -1732,7 +1784,7 @@ mod tests {
         let mut sessions = seven_cards(7);
 
         // When moving half a page down on a sidebar `rows` lines tall.
-        sessions.half_page_down(&cards_in(rows));
+        sessions.half_page_down(&cards_in(rows), &layouts_for(&sessions.projects));
 
         // Then the cursor moved by as many cards as fit in half of it.
         assert_eq!(sessions.cursor, Some(on(expected)), "half of {rows} lines");
@@ -1749,7 +1801,7 @@ mod tests {
         let mut sessions = seven_cards(1);
 
         // When moving half a page up on a sidebar `rows` lines tall.
-        sessions.half_page_up(&cards_in(rows));
+        sessions.half_page_up(&cards_in(rows), &layouts_for(&sessions.projects));
 
         // Then the cursor moved by as many cards as fit in half of it.
         assert_eq!(sessions.cursor, Some(on(expected)), "half of {rows} lines");
@@ -1761,7 +1813,7 @@ mod tests {
         let mut sessions = seven_cards(1);
 
         // When moving half a page down.
-        sessions.half_page_down(&cards_in(40));
+        sessions.half_page_down(&cards_in(40), &layouts_for(&sessions.projects));
 
         // Then the cursor stays.
         assert_eq!(
@@ -1777,7 +1829,7 @@ mod tests {
         let mut sessions = seven_cards(7);
 
         // When moving half a page up.
-        sessions.half_page_up(&cards_in(40));
+        sessions.half_page_up(&cards_in(40), &layouts_for(&sessions.projects));
 
         // Then the cursor stays.
         assert_eq!(
@@ -1793,7 +1845,7 @@ mod tests {
         let mut sessions = seven_cards(7);
 
         // When moving half a page down.
-        sessions.half_page_down(&cards_in(4));
+        sessions.half_page_down(&cards_in(4), &layouts_for(&sessions.projects));
 
         // Then the cursor still moves one row.
         assert_eq!(
@@ -1809,7 +1861,7 @@ mod tests {
         let mut sessions = seven_cards(1);
 
         // When moving half a page up.
-        sessions.half_page_up(&cards_in(4));
+        sessions.half_page_up(&cards_in(4), &layouts_for(&sessions.projects));
 
         // Then the cursor still moves one row.
         assert_eq!(
@@ -1830,7 +1882,7 @@ mod tests {
         };
 
         // When moving half a page down.
-        sessions.half_page_down(&layout);
+        sessions.half_page_down(&layout, &layouts_for(&sessions.projects));
 
         // Then the cursor moves two rows, one line each.
         assert_eq!(
@@ -1849,7 +1901,7 @@ mod tests {
         };
 
         // When moving half a page down.
-        sessions.half_page_down(&cards_in(40));
+        sessions.half_page_down(&cards_in(40), &layouts_for(&sessions.projects));
 
         // Then the first row is selected.
         assert_eq!(
@@ -2092,10 +2144,13 @@ mod tests {
         let sessions = two_projects(Some(1));
 
         // When listing the sidebar.
-        let count = sessions.sidebar().iter().find_map(|row| match row {
-            SidebarRow::ShelfHeader { count, .. } => Some(*count),
-            _ => None,
-        });
+        let count = sessions
+            .sidebar(&layouts_for(&sessions.projects))
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::ShelfHeader { count, .. } => Some(*count),
+                _ => None,
+            });
 
         // Then the shelf counts one thread.
         assert_eq!(count, Some(1), "the shelf should count project 1's only");
@@ -2110,7 +2165,7 @@ mod tests {
         };
 
         // When filtering to project 2.
-        sessions.filter_to(Some(ProjectId(2)));
+        sessions.filter_to(Some(ProjectId(2)), &layouts_for(&sessions.projects));
 
         // Then the cursor is on project 2's card, the first row.
         assert_eq!(
@@ -2129,7 +2184,7 @@ mod tests {
         };
 
         // When filtering to project 2.
-        sessions.filter_to(Some(ProjectId(2)));
+        sessions.filter_to(Some(ProjectId(2)), &layouts_for(&sessions.projects));
 
         // Then the cursor stays on the card.
         assert_eq!(
@@ -2150,7 +2205,7 @@ mod tests {
         });
 
         // When filtering to project 2.
-        sessions.filter_to(Some(ProjectId(2)));
+        sessions.filter_to(Some(ProjectId(2)), &layouts_for(&sessions.projects));
 
         // Then nothing is selected.
         assert_eq!(sessions.cursor, None, "an empty sidebar has no cursor");
@@ -2170,7 +2225,7 @@ mod tests {
         );
 
         // When finding where the cursor goes after deleting card 1.
-        let next = sessions.row_neighbour(on(1));
+        let next = sessions.row_neighbour(on(1), &layouts_for(&sessions.projects));
 
         // Then nothing is left to select.
         assert_eq!(
@@ -2276,10 +2331,13 @@ mod tests {
         );
 
         // When listing the sidebar.
-        let count = sessions.sidebar().iter().find_map(|row| match row {
-            SidebarRow::ShelfHeader { count, .. } => Some(*count),
-            _ => None,
-        });
+        let count = sessions
+            .sidebar(&layouts_for(&sessions.projects))
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::ShelfHeader { count, .. } => Some(*count),
+                _ => None,
+            });
 
         // Then the header counts only the match.
         assert_eq!(count, Some(1), "the header should count the matches");
@@ -2302,10 +2360,13 @@ mod tests {
         );
 
         // When listing the sidebar.
-        let open = sessions.sidebar().iter().find_map(|row| match row {
-            SidebarRow::ShelfHeader { open, .. } => Some(*open),
-            _ => None,
-        });
+        let open = sessions
+            .sidebar(&layouts_for(&sessions.projects))
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::ShelfHeader { open, .. } => Some(*open),
+                _ => None,
+            });
 
         // Then the header is open only while the search lists the match.
         assert_eq!(open, Some(expected), "the header searching for '{text}'");
@@ -2379,7 +2440,7 @@ mod tests {
         );
 
         // When selecting the first match.
-        sessions.select_first_match();
+        sessions.select_first_match(&layouts_for(&sessions.projects));
 
         // Then nothing is selected.
         assert_eq!(sessions.cursor, None, "no match, no cursor");
@@ -2397,7 +2458,7 @@ mod tests {
         );
 
         // When selecting the first match.
-        sessions.select_first_match();
+        sessions.select_first_match(&layouts_for(&sessions.projects));
 
         // Then the cursor stays.
         assert_eq!(sessions.cursor, Some(on(1)), "blank text shouldn't move it");
@@ -2416,7 +2477,7 @@ mod tests {
         );
 
         // When selecting the next match.
-        sessions.select_next_match();
+        sessions.select_next_match(&layouts_for(&sessions.projects));
 
         // Then it lands on the settled match, past the header.
         assert_eq!(sessions.cursor, Some(on(4)), "the header is skipped");
@@ -2435,7 +2496,7 @@ mod tests {
         );
 
         // When selecting the previous match.
-        sessions.select_prev_match();
+        sessions.select_prev_match(&layouts_for(&sessions.projects));
 
         // Then it lands on card 1's agent row, past the header.
         assert_eq!(
@@ -2458,7 +2519,7 @@ mod tests {
         );
 
         // When selecting the next match.
-        sessions.select_next_match();
+        sessions.select_next_match(&layouts_for(&sessions.projects));
 
         // Then it wraps to card 3, the first match.
         assert_eq!(
@@ -2481,7 +2542,7 @@ mod tests {
         );
 
         // When selecting the previous match.
-        sessions.select_prev_match();
+        sessions.select_prev_match(&layouts_for(&sessions.projects));
 
         // Then it wraps to settled 4, the last match.
         assert_eq!(sessions.cursor, Some(on(4)), "prev wraps to the last match");
@@ -2500,7 +2561,7 @@ mod tests {
         );
 
         // When selecting the next match.
-        sessions.select_next_match();
+        sessions.select_next_match(&layouts_for(&sessions.projects));
 
         // Then the cursor stays on settled 4.
         assert_eq!(sessions.cursor, Some(on(4)), "a lone match stays put");
@@ -2521,7 +2582,7 @@ mod tests {
         };
 
         // When cancelling the search.
-        sessions.cancel_search();
+        sessions.cancel_search(&layouts_for(&sessions.projects));
 
         // Then the cursor is back on thread 2.
         assert_eq!(sessions.cursor, Some(on(2)), "Esc restores the cursor");
@@ -2539,7 +2600,7 @@ mod tests {
         );
 
         // When cancelling the search.
-        sessions.cancel_search();
+        sessions.cancel_search(&layouts_for(&sessions.projects));
 
         // Then the cursor is on the first row.
         assert_eq!(sessions.cursor, Some(on(3)), "the first row");
@@ -2552,7 +2613,7 @@ mod tests {
 
         // When listing the sidebar.
         let cards: Vec<SessionId> = sessions
-            .sidebar()
+            .sidebar(&layouts_for(&sessions.projects))
             .iter()
             .filter_map(|row| match row {
                 SidebarRow::Card { session, .. } => Some(session.id),
@@ -2641,6 +2702,31 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn sidebar_search_finds_an_agent_row_by_its_pane_name() {
+        // Given session 1 named "api", its agent titled "fix login" in a pane
+        // named "server", searched for "serv".
+        let mut sessions = sessions(vec![titled(thread(1), "fix login")], None);
+        if let Some(first) = sessions.sessions.iter_mut().find(|s| s.id == SessionId(1)) {
+            first.name = Some("api".into());
+        }
+        let sessions = searching(sessions, "serv");
+        let layouts = {
+            let mut layouts = layouts_for(&sessions.projects);
+            layouts.rename_pane(PaneId(1), Some("server".into()));
+            layouts
+        };
+
+        // When listing the sidebar.
+        let listed = sessions
+            .sidebar(&layouts)
+            .iter()
+            .any(|row| row.item() == on(1));
+
+        // Then session 1's card is listed.
+        assert!(listed, "an agent row's pane name finds its session");
+    }
+
+    #[rstest::rstest]
     fn selected_thread_is_the_sessions_oldest_agent() {
         // Given session 1 holding threads 2 (second 5) and 3 (second 1),
         // selected.
@@ -2684,7 +2770,7 @@ mod tests {
         let sessions = two_projects(Some(2));
 
         // When asking whether project 1's row is jumpable.
-        let jumpable = sessions.jumpable(item);
+        let jumpable = sessions.jumpable(item, &layouts_for(&sessions.projects));
 
         // Then it isn't.
         assert!(!jumpable, "{item:?} is hidden by the filter");
@@ -2699,7 +2785,7 @@ mod tests {
         };
 
         // When asking whether thread 1 is jumpable.
-        let jumpable = sessions.jumpable(on(1));
+        let jumpable = sessions.jumpable(on(1), &layouts_for(&sessions.projects));
 
         // Then it isn't.
         assert!(!jumpable, "a thread being deleted is gone");
@@ -2711,7 +2797,7 @@ mod tests {
         let sessions = sessions(vec![thread(1)], None);
 
         // When asking whether thread 1 is jumpable.
-        let jumpable = sessions.jumpable(on(1));
+        let jumpable = sessions.jumpable(on(1), &layouts_for(&sessions.projects));
 
         // Then it is.
         assert!(jumpable, "a listed thread is a jump target");
@@ -2737,7 +2823,11 @@ mod tests {
         let sessions = holding(vec![agent(1, 1, 0), agent(2, 1, 5)], vec![session(1)]);
 
         // When listing the sidebar's rows.
-        let items: Vec<SidebarItem> = sessions.sidebar().iter().map(SidebarRow::item).collect();
+        let items: Vec<SidebarItem> = sessions
+            .sidebar(&layouts_for(&sessions.projects))
+            .iter()
+            .map(SidebarRow::item)
+            .collect();
 
         // Then the card comes first, then one row per agent.
         assert_eq!(
@@ -2763,7 +2853,11 @@ mod tests {
         let sessions = folded_card();
 
         // When listing the sidebar's rows.
-        let items: Vec<SidebarItem> = sessions.sidebar().iter().map(SidebarRow::item).collect();
+        let items: Vec<SidebarItem> = sessions
+            .sidebar(&layouts_for(&sessions.projects))
+            .iter()
+            .map(SidebarRow::item)
+            .collect();
 
         // Then only the card is listed.
         assert_eq!(items, vec![on(1)], "a folded card hides its agent rows");
@@ -2775,7 +2869,11 @@ mod tests {
         let sessions = searching(folded_card(), "fix");
 
         // When listing the sidebar's rows.
-        let items: Vec<SidebarItem> = sessions.sidebar().iter().map(SidebarRow::item).collect();
+        let items: Vec<SidebarItem> = sessions
+            .sidebar(&layouts_for(&sessions.projects))
+            .iter()
+            .map(SidebarRow::item)
+            .collect();
 
         // Then the card lists its agent rows as if open.
         assert_eq!(
@@ -2792,7 +2890,7 @@ mod tests {
 
         // When reading which agent rows are marked last.
         let lasts: Vec<bool> = sessions
-            .sidebar()
+            .sidebar(&layouts_for(&sessions.projects))
             .iter()
             .filter_map(|row| match row {
                 SidebarRow::Agent { last, .. } => Some(*last),
@@ -2814,7 +2912,7 @@ mod tests {
         let mut sessions = two_sessions(on(1));
 
         // When selecting the next row.
-        sessions.select_next();
+        sessions.select_next(&layouts_for(&sessions.projects));
 
         // Then session 1's agent row is selected.
         assert_eq!(
@@ -2847,7 +2945,7 @@ mod tests {
         let mut sessions = two_sessions(agent_row(1, 99));
 
         // When selecting the next row.
-        sessions.select_next();
+        sessions.select_next(&layouts_for(&sessions.projects));
 
         // Then the row after session 1's card is selected.
         assert_eq!(
@@ -2864,7 +2962,7 @@ mod tests {
         let sessions = two_sessions(agent_row(1, 99));
 
         // When reading the cursor's row.
-        let row = sessions.cursor_row();
+        let row = sessions.cursor_row(&layouts_for(&sessions.projects));
 
         // Then it is session 1's card.
         assert_eq!(row, Some(on(1)), "a vanished agent row reads as its card");
@@ -2876,7 +2974,7 @@ mod tests {
         let sessions = two_sessions(on(1));
 
         // When finding where the cursor goes after deleting session 1.
-        let next = sessions.row_neighbour(on(1));
+        let next = sessions.row_neighbour(on(1), &layouts_for(&sessions.projects));
 
         // Then it is session 2's card, past session 1's agent row.
         assert_eq!(
@@ -2892,7 +2990,7 @@ mod tests {
         let mut sessions = two_sessions(on(2));
 
         // When selecting the previous row.
-        sessions.select_prev();
+        sessions.select_prev(&layouts_for(&sessions.projects));
 
         // Then session 1's agent row, the row above the card, is selected.
         assert_eq!(
@@ -2908,7 +3006,7 @@ mod tests {
         let mut sessions = two_sessions(on(1));
 
         // When selecting the last row.
-        sessions.select_last();
+        sessions.select_last(&layouts_for(&sessions.projects));
 
         // Then session 2's agent row is selected.
         assert_eq!(
@@ -2929,7 +3027,7 @@ mod tests {
         };
 
         // When moving half a page (5 lines) down.
-        sessions.half_page_down(&layout);
+        sessions.half_page_down(&layout, &layouts_for(&sessions.projects));
 
         // Then the cursor lands on session 2's agent row, three rows on.
         assert_eq!(
@@ -2945,7 +3043,7 @@ mod tests {
         let sessions = two_sessions(on(1));
 
         // When asking whether its agent row is jumpable.
-        let jumpable = sessions.jumpable(agent_row(1, 1));
+        let jumpable = sessions.jumpable(agent_row(1, 1), &layouts_for(&sessions.projects));
 
         // Then it is.
         assert!(jumpable, "a running agent's row is a jump target");
@@ -2965,7 +3063,7 @@ mod tests {
         }
 
         // When asking whether pane 1's agent row is jumpable.
-        let jumpable = sessions.jumpable(agent_row(1, 1));
+        let jumpable = sessions.jumpable(agent_row(1, 1), &layouts_for(&sessions.projects));
 
         // Then it isn't.
         assert!(!jumpable, "a closed agent is skipped");
@@ -2980,7 +3078,7 @@ mod tests {
         };
 
         // When asking whether its agent row is jumpable.
-        let jumpable = sessions.jumpable(agent_row(1, 1));
+        let jumpable = sessions.jumpable(agent_row(1, 1), &layouts_for(&sessions.projects));
 
         // Then it isn't.
         assert!(!jumpable, "an agent of a session being deleted is gone");
@@ -2999,7 +3097,7 @@ mod tests {
         );
 
         // When selecting the next match.
-        sessions.select_next_match();
+        sessions.select_next_match(&layouts_for(&sessions.projects));
 
         // Then it lands on card 3's agent row.
         assert_eq!(
@@ -3022,7 +3120,7 @@ mod tests {
         );
 
         // When asking whether pane 1 runs one of session 1's agents.
-        let runs = sessions.runs_agent(SessionId(1), PaneId(1));
+        let runs = sessions.runs_agent(SessionId(1), PaneId(1), &layouts_for(&sessions.projects));
 
         // Then it doesn't.
         assert!(!runs, "a closed pane runs no agent");

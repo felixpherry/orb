@@ -21,6 +21,7 @@
 
 use std::fmt;
 
+use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::layout::tree::{NavDirection, Split};
 use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
 use orb_domain::feat::sessions::state::{FolderKind, SessionKind, Sessions};
@@ -65,8 +66,8 @@ pub(crate) enum Selection {
 
 impl Selection {
     /// What `sessions`' cursor is on.
-    pub(crate) fn of(sessions: &Sessions) -> Self {
-        let agent = sessions.selected_agent().is_some();
+    pub(crate) fn of(sessions: &Sessions, layouts: &Layouts) -> Self {
+        let agent = sessions.selected_agent(layouts).is_some();
         match (sessions.selected_session(), agent) {
             (Some(session), true) if session.kind != SessionKind::Plain => Self::OwnFolderAgent,
             (Some(_), true) => Self::Agent,
@@ -134,7 +135,7 @@ impl Scope {
 
     /// The scope for keys in `focus` over `state`'s selection.
     pub(crate) fn of(focus: Focus, state: &AppState) -> Self {
-        Self::new(focus, Selection::of(&state.sessions))
+        Self::new(focus, Selection::of(&state.sessions, &state.layouts))
     }
 }
 
@@ -610,7 +611,7 @@ mod tests {
     use orb_domain::feat::harness::HarnessId;
     use std::time::SystemTime;
 
-    use crate::test_support::sessions_for;
+    use crate::test_support::{layouts_for, sessions_for};
     use orb_domain::feat::sessions::state::{
         FolderKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions,
         SidebarItem, Thread, ThreadId, ThreadStatus,
@@ -966,7 +967,7 @@ mod tests {
         let sessions = lone(kind, cursor);
 
         // When reading the selection.
-        let selection = Selection::of(&sessions);
+        let selection = Selection::of(&sessions, &layouts_for(&sessions.projects));
 
         // Then it follows the project's kind.
         assert_eq!(

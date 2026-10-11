@@ -137,7 +137,7 @@ pub(crate) fn render(
     };
     let [input, list] = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
     hits.record_sidebar_input(input);
-    let rows = sessions.sidebar();
+    let rows = sessions.sidebar(layouts);
     let search_cursor = render_input(sessions, &rows, input, buf, hits);
     let layout = SidebarLayout {
         rows: list.height,
@@ -280,7 +280,7 @@ fn render_list(
     hits: &mut HitMap,
 ) -> Option<u16> {
     let (placed, total) = place(rows, area.height);
-    let cursor = sessions.cursor_row();
+    let cursor = sessions.cursor_row(layouts);
     let selected = placed
         .iter()
         .find(|(row, _)| Some(row.item()) == cursor)
@@ -458,6 +458,7 @@ fn render_row(
             project,
             session,
             attached.contains(&session.id),
+            layouts,
             home,
             now,
             area,
@@ -504,6 +505,7 @@ fn render_card(
     project: &Project,
     session: &Session,
     attached: bool,
+    layouts: &Layouts,
     home: &Path,
     now: SystemTime,
     area: Rect,
@@ -540,7 +542,7 @@ fn render_card(
         line(1),
         buf,
     );
-    let rows = sessions.agent_rows(session.id);
+    let rows = sessions.agent_rows(session.id, layouts);
     let folded = sessions.hides_agents(session.id);
     let place = match look {
         Some(_) => format!("{FOLDER} {}", tilde(&session.dir, home)),
@@ -1020,6 +1022,8 @@ mod tests {
     use orb_domain::feat::harness::claude::info;
     use orb_domain::feat::harness::{HarnessId, HarnessInfo};
     use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
+    use orb_domain::feat::picker::list::PickerItem;
+    use orb_domain::feat::picker::state::{SessionFilter, session_items};
     use orb_domain::feat::zmx::zmx_service::ZmxSession;
     use std::collections::HashSet;
     use std::path::Path;
@@ -1045,7 +1049,7 @@ mod tests {
         badge_colour, monogram, render, working_label,
     };
     use crate::mouse::{Clicks, HitMap, MouseRoute};
-    use crate::test_support::sessions_for;
+    use crate::test_support::{layouts_for, sessions_for};
 
     /// The home directory the sidebar shortens folder paths against.
     const HOME: &str = "/Users/me";
@@ -1151,7 +1155,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[info()],
-            &Layouts::default(),
+            &layouts_for(&sessions.projects),
             Path::new(HOME),
             now,
             buf.area,
@@ -1186,7 +1190,7 @@ mod tests {
             None,
             &attached,
             &[info()],
-            &Layouts::default(),
+            &layouts_for(&sessions.projects),
             Path::new(HOME),
             now,
             buf.area,
@@ -1442,7 +1446,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[info()],
-            &Layouts::default(),
+            &layouts_for(&sessions.projects),
             Path::new(HOME),
             at(1000),
             buf.area,
@@ -1469,7 +1473,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[info()],
-            &Layouts::default(),
+            &layouts_for(&sessions.projects),
             Path::new(HOME),
             at(1000),
             buf.area,
@@ -1542,7 +1546,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[info()],
-            &Layouts::default(),
+            &layouts_for(&sessions.projects),
             Path::new(HOME),
             at(1000),
             buf.area,
@@ -1840,7 +1844,7 @@ mod tests {
             None,
             &HashSet::new(),
             harnesses,
-            &Layouts::default(),
+            &layouts_for(&sessions.projects),
             Path::new(HOME),
             at(1000),
             buf.area,
@@ -2583,7 +2587,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[info()],
-            &Layouts::default(),
+            &layouts_for(&sessions.projects),
             Path::new(HOME),
             at(1000),
             buf.area,
@@ -2825,10 +2829,73 @@ mod tests {
         let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
 
         // When rendering the sidebar.
-        let agent = line(&draw_with_layouts(&sessions, &Layouts::default()), 6);
+        let agent = line(
+            &draw_with_layouts(&sessions, &layouts_for(&sessions.projects)),
+            6,
+        );
 
         // Then the agent row shows the thread's title.
         assert!(agent.contains("Thread 1"), "line was '{agent}'");
+    }
+
+    #[rstest::rstest]
+    #[case::renamed(Some("server"), "server")]
+    #[case::unnamed(None, "fix login")]
+    fn agent_name_is_the_same_in_sidebar_picker_and_search(
+        #[case] pane_name: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        // Given thread 1 titled "fix login" in pane 1, named per the case.
+        let sessions = sessions(vec![Thread {
+            title: Some("fix login".into()),
+            ..thread(1, ThreadStatus::Idle)
+        }]);
+        let layouts = {
+            let mut layouts = layouts_for(&sessions.projects);
+            layouts.rename_pane(PaneId(1), pane_name.map(str::to_owned));
+            layouts
+        };
+
+        // When reading the agent's name off the sidebar row, the session
+        // picker row, and searching the sidebar for the expected name.
+        let sidebar_label = {
+            let agent = line(&draw_with_layouts(&sessions, &layouts), 6);
+            let words: Vec<&str> = agent.split_whitespace().collect();
+            words
+                .get(1..words.len().saturating_sub(1))
+                .unwrap_or_default()
+                .join(" ")
+        };
+        let picker_name = session_items(&sessions, &layouts, SessionFilter::All)
+            .into_iter()
+            .find_map(|item| match item {
+                PickerItem::Session { label, .. } => {
+                    label.rsplit_once('/').map(|(_, name)| name.to_owned())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let search_lists_the_agent_row = Sessions {
+            search: Some(Search {
+                input: TextInput::new(expected),
+                return_to: None,
+            }),
+            ..sessions.clone()
+        }
+        .sidebar(&layouts)
+        .iter()
+        .any(|row| row.item() == agent_one());
+
+        // Then all three agree on the expected name.
+        assert_eq!(
+            (
+                sidebar_label.as_str(),
+                picker_name.as_str(),
+                search_lists_the_agent_row
+            ),
+            (expected, expected, true),
+            "sidebar label, picker label and search should share the agent's name"
+        );
     }
 
     #[rstest::rstest]
@@ -2941,7 +3008,7 @@ mod tests {
             Some(active),
             &HashSet::new(),
             &[info()],
-            &Layouts::default(),
+            &layouts_for(&sessions.projects),
             Path::new(HOME),
             at(1000),
             buf.area,

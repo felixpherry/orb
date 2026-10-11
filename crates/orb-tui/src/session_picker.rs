@@ -675,7 +675,6 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use orb_domain::Focus;
-    use orb_domain::feat::layout::state::Layouts;
     use orb_domain::feat::picker::state::{PickerState, SessionFilter, session_items};
     use orb_domain::feat::sessions::state::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
@@ -691,7 +690,7 @@ mod tests {
     use crate::mouse::HitMap;
     use crate::picker::PickerScroll;
     use crate::sidebar::{BLACK, BRANCH, COMPLETED_ICON, DARK3, DARK5, IDLE_ICON, VISUAL};
-    use crate::test_support::sessions_for;
+    use crate::test_support::{layouts_for, sessions_for};
 
     /// The clock every picker is drawn at.
     fn now() -> SystemTime {
@@ -754,7 +753,11 @@ mod tests {
     /// The session picker over `sessions`, on all threads.
     fn picker(sessions: &Sessions) -> PickerState {
         PickerState::sessions(
-            session_items(sessions, &Layouts::default(), SessionFilter::All),
+            session_items(
+                sessions,
+                &layouts_for(&sessions.projects),
+                SessionFilter::All,
+            ),
             Focus::Sidebar,
         )
     }
@@ -924,7 +927,7 @@ mod tests {
         // Given the session picker filtered to `filter`.
         let sessions = two();
         let mut picker = picker(&sessions);
-        picker.set_filter(filter, &sessions, &Layouts::default());
+        picker.set_filter(filter, &sessions, &layouts_for(&sessions.projects));
 
         // When drawing the picker.
         let (buf, _) = draw(&picker, &sessions, 140, 30);
@@ -1018,7 +1021,11 @@ mod tests {
         // Given a settled thread, with settled threads shown.
         let sessions = settled(sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]));
         let mut picker = picker(&sessions);
-        picker.set_filter(SessionFilter::Settled, &sessions, &Layouts::default());
+        picker.set_filter(
+            SessionFilter::Settled,
+            &sessions,
+            &layouts_for(&sessions.projects),
+        );
 
         // When drawing the stacked picker, the list above the preview.
         let (buf, _) = draw(&picker, &sessions, 100, 30);
