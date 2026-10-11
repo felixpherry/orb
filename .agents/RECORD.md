@@ -212,7 +212,7 @@ Entries are added or amended **only with human approval**.
 - (mouse) In a picker, a click selects a row, a double-click picks it, the wheel over its list moves the selection one row without wrapping (over the session, worktree or search picker's preview it does nothing), a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.
 - (mouse) A click outside the rename box cancels it like `Esc`.
 - (mouse) Clicks on tiled pane frames do nothing.
-- (mouse) A click on a tab in the tab bar shows that tab and moves the keys into its focused pane.
+- (mouse) A click on a tab in the tab bar shows that tab and moves the keys into its focused pane; while the floats are shown, the keys stay in the top float.
 - (mouse) A click on the tab bar's `+` opens a new tab, as `<C-g> t n` does.
 - (mouse) A click on a `← +N` or `+N →` chip shows the nearest hidden tab on that side.
 - (mouse) The wheel over the tab bar shows the next tab on a scroll up and the previous one on a scroll down, without wrapping.
