@@ -49,7 +49,7 @@ User answers at checkpoint 1: **B-2** the "new reply" mark clears when the user 
 
 ## Reference patterns
 
-From jinn, herdr and zellij. _Empty until the scouts run._
+From jinn, herdr and zellij: ~90 pattern cards in `.plans/architecture-overhaul/scouts/` (jinn-actors, jinn-observability, herdr-panes, herdr-ops, zellij-threads, zellij-messaging, zellij-layout, zellij-robustness). Each accepted decision below names the cards it borrows.
 
 ## Target architecture
 
