@@ -7017,7 +7017,7 @@ mod tests {
     }
 
     /// The worktree picker open over `state`, with row `row` selected and
-    /// `<C-x>` pressed on it.
+    /// `d` pressed on it.
     fn delete_row(state: &mut AppState, row: usize) {
         IntentHandler::handle(&Intent::OpenWorktreePicker, state);
         IntentHandler::handle(&Intent::PickerSelectRow(row), state);
@@ -7041,7 +7041,7 @@ mod tests {
             ..worktree_state()
         };
 
-        // When pressing <C-x> on `USED`'s row.
+        // When pressing d on `USED`'s row.
         delete_row(&mut state, 0);
 
         // Then the mode line says why it can't be deleted.
@@ -7065,7 +7065,7 @@ mod tests {
             thread.status = ThreadStatus::Working;
         }
 
-        // When pressing <C-x> on `USED`'s row.
+        // When pressing d on `USED`'s row.
         delete_row(&mut state, 0);
 
         // Then the mode line says why it can't be deleted.
@@ -7081,7 +7081,7 @@ mod tests {
         // Given orb's worktrees, none with changes.
         let mut state = worktree_state();
 
-        // When pressing <C-x> on the orphan's row.
+        // When pressing d on the orphan's row.
         delete_row(&mut state, 1);
 
         // Then the clean delete confirm is open for it.
@@ -7091,7 +7091,7 @@ mod tests {
                 path: ORPHAN.into(),
                 dirty: false,
             }),
-            "<C-x> should ask to confirm the delete"
+            "d should ask to confirm the delete"
         );
     }
 
@@ -7109,7 +7109,7 @@ mod tests {
             }
         }
 
-        // When pressing <C-x> on the orphan's row.
+        // When pressing d on the orphan's row.
         delete_row(&mut state, 1);
 
         // Then the confirm says it's dirty.
