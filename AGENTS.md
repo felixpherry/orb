@@ -6,11 +6,13 @@ This document defines the _coding conventions_, _patterns_, and _architecture_ f
 
 ## Project Docs
 
-- `docs/roadmap.md` — product + engineering source of truth (why/what, UX spec, milestones, decisions). Don't re-open decisions in its "Decisions & rejected alternatives" table unless the user asks.
+- `docs/product.md` — product source of truth (why/what, UX spec, keys, storage, backlog).
+- `docs/decisions.md` — decisions and rejected alternatives. Don't re-open a decision there unless the user asks.
+- `docs/roadmap.md` — the architecture overhaul: debt findings, target architecture, migration steps, drift log.
 - `docs/research.md` — verified external facts (versions, CLI flags, file formats). Re-verify version-sensitive facts before relying on them.
 - `.agents/RECORD.md` — the current state of the app.
-- **At the end of every milestone, write that milestone's group from the roadmap's "Record updates" section into `.agents/RECORD.md`** (after confirming each entry is true).
-- Keybindings: bind only keys the user has defined (roadmap Keys section or the milestone's approved plan). Never bind Alt/Option (owned by the user's window manager, paneru); Cmd keys are orb's and reach it through kitty `send_key super+…` maps.
+- **At the end of every feature or overhaul step, write its new facts into `.agents/RECORD.md`** (after confirming each entry is true).
+- Keybindings: bind only keys the user has defined (product.md Keys section or the approved plan). Never bind Alt/Option (owned by the user's window manager, paneru); Cmd keys are orb's and reach it through kitty `send_key super+…` maps.
 
 ## 1. Overview
 
