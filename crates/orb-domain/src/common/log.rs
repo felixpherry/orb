@@ -8,6 +8,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use error_stack::Report;
+use error_stack::fmt::ColorMode;
+
 /// Where orb writes its log, rolled to `<path>.1` once it reaches its cap.
 /// The default writes nowhere.
 #[derive(Debug, Clone, Default)]
@@ -32,8 +35,11 @@ impl Log {
         Self::with_cap(path, CAP)
     }
 
-    /// A log at `path` that rolls once the file reaches `cap` bytes.
+    /// A log at `path` that rolls once the file reaches `cap` bytes. Error
+    /// reports print without terminal styling from then on, so the file holds
+    /// plain text.
     pub fn with_cap(path: PathBuf, cap: u64) -> Self {
+        Report::set_color_mode(ColorMode::None);
         Self {
             inner: Some(Arc::new(Inner {
                 path,
@@ -243,6 +249,27 @@ mod tests {
             .iter()
             .all(|part| content.contains(part)),
             "expected the whole chain, got {content:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn logged_error_has_no_terminal_styling() {
+        // Given a log.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orb.log");
+        let log = Log::new(path.clone());
+
+        // When logging a report.
+        log.error(
+            "couldn't index",
+            &Report::new(io::Error::other("gone")).attach("failed to read"),
+        );
+
+        // Then the file holds no escape sequences.
+        let content = read(&path);
+        assert!(
+            !content.contains('\u{1b}'),
+            "expected plain text, got {content:?}"
         );
     }
 

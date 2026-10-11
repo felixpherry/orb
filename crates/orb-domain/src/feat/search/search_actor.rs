@@ -199,13 +199,15 @@ impl SearchActor {
     /// Indexes the next queued transcript and counts it, then asks for the
     /// one after while any are left. A failure leaves that transcript's saved
     /// offset alone, so the next catch-up retries it. A thread whose harness
-    /// orb doesn't know is counted but not read.
+    /// orb doesn't know, or whose transcript file is gone, is counted but not
+    /// read.
     fn index_next(&mut self, me: &ActorRef<Self>) {
         let Some((key, harness, path)) = self.queue.pop_front() else {
             return;
         };
         if let Some(index) = &mut self.index
             && let Some(harness) = self.harnesses.get(&harness)
+            && path.exists()
             && let Err(report) =
                 index.index_transcript(key, &path, |path, offset, prompt_offset| {
                     harness.messages(path, offset, prompt_offset)
@@ -651,6 +653,32 @@ mod tests {
         assert!(
             done && found == (vec![ThreadId(1)], vec![ThreadId(2)]),
             "both transcripts should be indexed, saw {found:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn startup_skips_a_deleted_transcript_without_logging() -> io::Result<()> {
+        // Given a thread whose transcript file was deleted.
+        let dir = tempfile::tempdir()?;
+        let gone = dir.path().join("gone.jsonl");
+        let state = State::new(app(vec![thread(1, 1_000, Some(gone), 10)]));
+        let log_path = dir.path().join("orb.log");
+        let deps = SearchActorDeps {
+            log: Log::new(log_path.clone()),
+            ..deps(&state, dir.path().join("search.sqlite"))
+        };
+
+        // When the actor starts and the backfill finishes.
+        let _actor = spawn_search_actor(deps);
+        let done = backfilled(&state).await;
+
+        // Then nothing is logged for it.
+        let logged = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(
+            done && logged.is_empty(),
+            "a deleted transcript should be skipped quietly, logged {logged:?}"
         );
         Ok(())
     }
