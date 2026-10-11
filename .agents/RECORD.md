@@ -41,7 +41,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `<C-g> t b` in a pane moves the focused pane to a new tab of its own after the last one and shows it; a tab's only pane stays put.
 - (keybinds) orb has no `:` command line.
 - (pane) The terminal pane runs its child in a PTY (`portable-pty`) emulated by `alacritty_terminal` and drawn cell by cell into the ratatui buffer.
-- (pane) orb redraws when input, pane output, a pane's exit, an actor's state change, a pane's held update timing out or the message box hiding wakes the loop, and every 100 ms while an agent is working or a session is starting (the spinner's frame); there is no other tick.
+- (pane) orb redraws when input, pane output, a pane's exit, a worker's report, a pane's held update timing out or the message box hiding wakes the loop, and every 100 ms while an agent is working or a session is starting (the spinner's frame); there is no other tick.
 - (pane) While a pane has the keys, every key but orb's own (the Cmd keys, `<C-S-h>`/`<C-S-l>`, `<C-[>`/`<C-]>` and a `<C-g>` sequence), paste and focus events are encoded for its program's terminal modes and written straight to it, bypassing the `IntentHandler`.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.
@@ -272,7 +272,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) A session's title is its `r` name, else the first of its agents' titles, else its directory's name.
 - (tui) Errors and notices show in a message box like LazyVim's notifier, just under the tab bar at the right edge, titled Error in red or Messages in cyan.
 - (tui) The message box is at least 40 columns wide and at most 40% of the pane, and cuts longer lines with `…`.
-- (tui) The message box hides after 3 s for info or 5 s for errors, a newer message replaces it, and the same message sent again does not bring it back.
+- (tui) The message box hides after 3 s for info or 5 s for errors, a newer message replaces it, and the same error sent again does not bring it back until orb handles a key or click, a branch switch in a session's own directory succeeds or a project is added.
 - (projects) Adding a project from the projects screen shows `Added project <name>` in the message box, even when the project was already added or had been removed.
 - (projects) When adding a project from the projects screen fails, the message box shows the reason as an error.
 - (keybinds) `<C-g> r` in a pane enters resize mode, where `h/j/k/l` or the arrow keys push the focused pane's border on that side out 5% of the tab, `H/J/K/L` pull it in 5%, and `+`/`=`/`-` act as `Cmd +`/`Cmd -`.
@@ -329,3 +329,14 @@ Entries are added or amended **only with human approval**.
 - (store) A new session is saved through the normal layout save; its first tab keeps its swap layout.
 - (start) orb no longer stops old `claude --bg` sessions at start.
 - (store) Schema v14 dropped the pre-session leftovers: the `groups` and `drafts` tables and 12 unused columns; a test pins the exact schema.
+- (actors) Each actor (sessions, worktrees, search) takes one command enum from the frontend loop, which forwards each actor's commands with a single send.
+- (sessions) Making a worktree for a new, moved or restored session runs beside the sessions actor, so splits, new tabs and floats are handled while it runs; the result is re-checked when it arrives.
+- (sessions) A worktree made for a new session whose project was removed meanwhile, or for a move whose session was deleted, lost its project or had its first turn meanwhile, is removed with its branch, and the start shows why.
+- (worktrees) A worktree re-added for a session deleted while it was being restored stays on disk for the sweep to prune, and the restore shows `the session is gone`.
+- (sessions) The status poll asks the harnesses and zmx beside the sessions actor and hands the answers to it, so pane actions don't wait for the poll.
+- (sessions) Adding a project and switching a branch don't hold orb's shared state while git or the database runs.
+- (tui) Workers send typed reports on the frontend loop's channel (a change, a session ready to open, projects or worktrees changed, an error, a recovery, a notice, a desktop notice, search rows or preview), and one loop function applies them.
+- (tui) Workers never write the open picker; the loop fills it from their reports and drops search rows or previews that are stale.
+- (sessions) A finished restore, move, branch switch to the project's checkout or new session (Research and Learn ones too) opens if the session that was active when it was asked for is still active, even if the cursor moved; opening another session meanwhile cancels it, and a session deleted meanwhile never opens.
+- (tui) When an error and a notice arrive in the same moment, the message box shows the error.
+- (projects) The projects screen re-sorts by recency while it is open.
