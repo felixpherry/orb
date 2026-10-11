@@ -5,7 +5,8 @@
 //! dim otherwise. A zoomed tab shows only its focused pane. Each stack is a
 //! centred list naming its panes, one row each between two dim bars and a
 //! `>` outside the left bar on the shown one, above the shown pane. Floats
-//! are drawn last, over the tiled panes and stack lists.
+//! are drawn last, over the tiled panes and stack lists; a pinned float
+//! stays drawn while the floats are hidden.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -23,7 +24,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Widget};
 
 use crate::mouse::HitMap;
 use crate::session_picker::cut_right;
-use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER, ORANGE};
+use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER, ORANGE, PIN};
 
 /// The trailing chevron's text.
 const PLUS: &str = " + ";
@@ -39,7 +40,8 @@ pub(crate) fn areas(right: Rect) -> [Rect; 2] {
 
 /// Draws `layout` into `right`: the tab bar, then each placed pane that has
 /// a client in `panes` inside its frame, each stack's list, then the shown
-/// floats over them, each on a cleared area. Records each
+/// floats (or only the pinned ones while hidden) over them, each on a cleared
+/// area, a pinned one with a pin at the right of its top border. Records each
 /// pane's screen, and whether its program reads the mouse, in `hits`.
 /// Returns the focused pane's cursor while `keys_in_pane`.
 pub(crate) fn render(
@@ -102,14 +104,19 @@ fn draw_pane(
         (false, true) => (COMMENT, Style::new().fg(FG_DARK)),
         (false, false) => (GUTTER, Style::new().fg(DARK3)),
     };
-    Block::bordered()
+    let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(border))
         .title(Line::styled(
             format!(" {} ", pane_title(state, place.pane)),
             title,
-        ))
-        .render(place.area, buf);
+        ));
+    let block = if place.pinned {
+        block.title_top(Line::styled(format!(" {PIN} "), title).right_aligned())
+    } else {
+        block
+    };
+    block.render(place.area, buf);
     drawn.filter(|_| lit)
 }
 
@@ -377,6 +384,7 @@ mod tests {
 
     use super::{areas, render, visible_tabs};
     use crate::mouse::HitMap;
+    use crate::sidebar::PIN;
 
     fn entry(id: i64) -> PaneEntry {
         PaneEntry {
@@ -428,6 +436,45 @@ mod tests {
             Some(" "),
             "the float covers the tiled frames"
         );
+    }
+
+    #[rstest::rstest]
+    fn pinned_float_shows_a_pin_in_its_top_border() {
+        // Given panes 7 and 8 side by side and a pinned float over the middle.
+        let right = Rect::new(0, 0, 80, 25);
+        let layouts = {
+            let mut layouts = Layouts::default();
+            layouts.insert(SessionId(1), SessionLayout::of(entry(7)));
+            layouts.fit_to(areas(right)[1]);
+            layouts.split(SessionId(1), Split::Right, entry(8));
+            layouts.add_float(SessionId(1), entry(20));
+            layouts.toggle_pin(SessionId(1));
+            layouts
+        };
+
+        // When rendering the tab area.
+        let buf = layouts.get(SessionId(1)).map(|layout| {
+            let mut buf = Buffer::empty(right);
+            render(
+                &AppState::default(),
+                layout,
+                &HashMap::new(),
+                true,
+                right,
+                &mut buf,
+                &mut HitMap::default(),
+            );
+            buf
+        });
+
+        // Then the float's top border row holds the pin.
+        let row: String = buf.as_ref().map_or_else(String::new, |buf| {
+            (0..right.width)
+                .filter_map(|x| buf.cell((x, 7)))
+                .map(ratatui::buffer::Cell::symbol)
+                .collect()
+        });
+        assert!(row.contains(PIN), "a pinned float shows a pin: {row:?}");
     }
 
     #[rstest::rstest]

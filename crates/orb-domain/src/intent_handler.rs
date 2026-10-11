@@ -12,7 +12,8 @@ use crate::feat::jumps::validator::{validate_jump_back, validate_jump_forward};
 use crate::feat::layout::state::{FocusMove, Layouts, SessionLayout, Tab};
 use crate::feat::layout::tree::NavDirection;
 use crate::feat::layout::validator::{
-    validate_focus_pane, validate_pane_action, validate_tab_action,
+    validate_float_action, validate_focus_pane, validate_pane_action, validate_tab_action,
+    validate_tiled_action,
 };
 use crate::feat::pane::validator::validate_attach;
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
@@ -141,7 +142,7 @@ impl IntentHandler {
                 _ => vec![],
             },
             Intent::SplitPane(split) => {
-                match (validate_pane_action(state), state.shown_session()) {
+                match (validate_tiled_action(state), state.shown_session()) {
                     (Ok(()), Some(session)) => vec![Command::SplitPane {
                         session,
                         split: *split,
@@ -160,22 +161,38 @@ impl IntentHandler {
                 (Ok(()), Some(session)) => vec![Command::AddPane(session)],
                 _ => vec![],
             },
-            Intent::StackPane => match (validate_pane_action(state), state.shown_session()) {
+            Intent::StackPane => match (validate_tiled_action(state), state.shown_session()) {
                 (Ok(()), Some(session)) => vec![Command::StackPane(session)],
                 _ => vec![],
             },
             Intent::ClosePane => close_pane(state),
             Intent::ToggleFloats => toggle_floats(state),
+            Intent::ToggleFloatEmbed => save_if_changed(state, |layouts, owner| {
+                if layouts.get(owner).is_some_and(SessionLayout::float_focused) {
+                    layouts.embed_float(owner)
+                } else {
+                    layouts.float_pane(owner)
+                }
+            }),
+            Intent::TogglePinFloat => match validate_float_action(state) {
+                Ok(()) => save_if_changed(state, Layouts::toggle_pin),
+                Err(_) => vec![],
+            },
             Intent::SendCtrlG => match validate_pane_action(state) {
                 Ok(()) => vec![Command::SendCtrlG],
                 Err(_) => vec![],
             },
             Intent::ToggleZoom => {
-                in_pane(state, Layouts::toggle_zoom);
+                if validate_tiled_action(state).is_ok() {
+                    in_pane(state, Layouts::toggle_zoom);
+                }
                 vec![]
             }
-            Intent::BreakPane => in_pane(state, Layouts::break_pane)
-                .map_or_else(Vec::new, |owner| vec![Command::SaveLayout(owner)]),
+            Intent::BreakPane => match validate_tiled_action(state) {
+                Ok(()) => in_pane(state, Layouts::break_pane)
+                    .map_or_else(Vec::new, |owner| vec![Command::SaveLayout(owner)]),
+                Err(_) => vec![],
+            },
             Intent::GrowFocused => grow_or_shrink(state, true),
             Intent::ShrinkFocused => grow_or_shrink(state, false),
             Intent::EnterPaneMode(mode) => {
@@ -7275,6 +7292,83 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn toggle_float_embed_on_a_split_pane_saves_the_layout() {
+        // Given two side-by-side panes, pane 50 with the keys.
+        let mut state = split_layout();
+
+        // When turning the focused pane into a float.
+        let commands = IntentHandler::handle(&Intent::ToggleFloatEmbed, &mut state);
+
+        // Then the layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "floating a pane saves the layout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_float_embed_on_a_lone_pane_does_nothing() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Pane);
+
+        // When turning the focused pane into a float.
+        let commands = IntentHandler::handle(&Intent::ToggleFloatEmbed, &mut state);
+
+        // Then nothing is saved.
+        assert!(
+            commands.is_empty(),
+            "a tab's only pane can't become a float"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_float_embed_on_a_float_saves_the_layout() {
+        // Given a float of session 1 with the keys.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When putting the float back into the tab.
+        let commands = IntentHandler::handle(&Intent::ToggleFloatEmbed, &mut state);
+
+        // Then the layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "embedding a float saves the layout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_pin_float_without_a_float_does_nothing() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Pane);
+
+        // When pinning.
+        let commands = IntentHandler::handle(&Intent::TogglePinFloat, &mut state);
+
+        // Then nothing is saved.
+        assert!(commands.is_empty(), "only a float can be pinned");
+    }
+
+    #[rstest::rstest]
+    fn toggle_pin_float_on_a_float_saves_the_layout() {
+        // Given a float of session 1 with the keys.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When pinning it.
+        let commands = IntentHandler::handle(&Intent::TogglePinFloat, &mut state);
+
+        // Then the layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "pinning a float saves the layout"
+        );
+    }
+
+    #[rstest::rstest]
     fn toggle_floats_outside_a_pane_does_nothing() {
         // Given thread 1's layout shown while the sidebar has the keys.
         let mut state = with_layout(Focus::Sidebar);
@@ -7767,6 +7861,42 @@ mod tests {
 
         // Then the keys arrive in the pane with no mode on.
         assert_eq!(state.pane_mode(), None, "a pane is entered with no mode");
+    }
+
+    #[rstest::rstest]
+    #[case(Intent::SplitPane(Split::Right))]
+    #[case(Intent::StackPane)]
+    #[case(Intent::BreakPane)]
+    fn tiled_only_intents_do_nothing_while_a_float_has_the_keys(#[case] intent: Intent) {
+        // Given two panes side by side and a float with the keys.
+        let mut state = split_layout();
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When handling the tiled-only intent.
+        let commands = IntentHandler::handle(&intent, &mut state);
+
+        // Then nothing happens.
+        assert!(
+            commands.is_empty(),
+            "{intent:?} waits while a float has the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn zoom_does_nothing_while_a_float_has_the_keys() {
+        // Given two panes side by side and a float with the keys.
+        let mut state = split_layout();
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When zooming.
+        IntentHandler::handle(&Intent::ToggleZoom, &mut state);
+
+        // Then the tab isn't zoomed.
+        let zoomed = state
+            .shown_layout()
+            .and_then(SessionLayout::active_tab)
+            .is_some_and(Tab::zoomed);
+        assert!(!zoomed, "zoom waits while a float has the keys");
     }
 
     #[rstest::rstest]

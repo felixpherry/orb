@@ -52,6 +52,11 @@ pub enum Intent {
     /// Show or hide the shown session's floats; with none, open a shell float.
     /// Only while the keys are in a pane.
     ToggleFloats,
+    /// Turn the focused pane into a float, or the focused float back into the
+    /// shown tab. Only while the keys are in a pane.
+    ToggleFloatEmbed,
+    /// Pin or unpin the focused float. Only while a float has the keys.
+    TogglePinFloat,
     /// Grow the focused pane, or widen the sidebar while it has the keys.
     GrowFocused,
     /// Shrink the focused pane, or narrow the sidebar while it has the keys.
@@ -227,6 +232,8 @@ impl fmt::Display for Intent {
             Self::ToggleZoom => "zoom",
             Self::BreakPane => "break pane",
             Self::ToggleFloats => "floats",
+            Self::ToggleFloatEmbed => "embed/float",
+            Self::TogglePinFloat => "pin float",
             Self::GrowFocused => "grow",
             Self::ShrinkFocused => "shrink",
             Self::EnterPaneMode(PaneMode::Resize) => "resize mode",
@@ -320,6 +327,8 @@ mod tests {
     #[case(Intent::ShowStacked(PaneId(-1)), "show pane")]
     #[case(Intent::SendCtrlG, "send ctrl g")]
     #[case(Intent::ToggleFloats, "floats")]
+    #[case(Intent::ToggleFloatEmbed, "embed/float")]
+    #[case(Intent::TogglePinFloat, "pin float")]
     fn layout_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the layout intent.
         assert_eq!(intent.to_string(), expected, "which-key label");

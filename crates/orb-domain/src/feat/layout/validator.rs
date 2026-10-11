@@ -1,7 +1,8 @@
-//! Checks whether a pane or tab action can act on the shown layout.
+//! Checks whether a pane, float or tab action can act on the shown layout.
 
 use wherror::Error;
 
+use crate::feat::layout::state::SessionLayout;
 use crate::feat::sessions::state::PaneId;
 use crate::{AppState, Focus};
 
@@ -30,6 +31,64 @@ pub fn validate_pane_action(state: &AppState) -> Result<(), PaneActionError> {
         .shown_layout()
         .map(drop)
         .ok_or(PaneActionError::NoLayout)
+}
+
+/// Why a float action (pinning) can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum FloatActionError {
+    /// The keys aren't in a pane.
+    NotInPane,
+    /// No float has the keys.
+    NoFloatFocused,
+}
+
+/// Allow a float action while a float of the shown layout has the keys.
+///
+/// # Errors
+///
+/// Returns [`FloatActionError::NotInPane`] when the keys are elsewhere, and
+/// [`FloatActionError::NoFloatFocused`] when no float has them.
+pub fn validate_float_action(state: &AppState) -> Result<(), FloatActionError> {
+    if state.focus != Focus::Pane {
+        return Err(FloatActionError::NotInPane);
+    }
+    if state
+        .shown_layout()
+        .is_some_and(SessionLayout::float_focused)
+    {
+        Ok(())
+    } else {
+        Err(FloatActionError::NoFloatFocused)
+    }
+}
+
+/// Why a tiled-only action (split, stack, zoom, break out) can't proceed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(debug)]
+pub enum TiledActionError {
+    /// The keys aren't in a pane, or no layout is shown.
+    Pane(PaneActionError),
+    /// A float has the keys.
+    FloatFocused,
+}
+
+/// Allow a tiled-only action while the keys are in a tiled pane of the shown
+/// layout.
+///
+/// # Errors
+///
+/// Returns [`TiledActionError::Pane`] when a pane action can't proceed, and
+/// [`TiledActionError::FloatFocused`] when a float has the keys.
+pub fn validate_tiled_action(state: &AppState) -> Result<(), TiledActionError> {
+    validate_pane_action(state).map_err(TiledActionError::Pane)?;
+    if state
+        .shown_layout()
+        .is_some_and(SessionLayout::float_focused)
+    {
+        return Err(TiledActionError::FloatFocused);
+    }
+    Ok(())
 }
 
 /// Why a tab action can't proceed.
@@ -82,8 +141,9 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        FocusPaneError, PaneActionError, TabActionError, validate_focus_pane, validate_pane_action,
-        validate_tab_action,
+        FloatActionError, FocusPaneError, PaneActionError, TabActionError, TiledActionError,
+        validate_float_action, validate_focus_pane, validate_pane_action, validate_tab_action,
+        validate_tiled_action,
     };
     use crate::feat::harness::HarnessId;
     use crate::feat::layout::state::{SessionLayout, test_entry};
@@ -189,6 +249,52 @@ mod tests {
 
         // Then it is allowed.
         assert_eq!(result, Ok(()), "pane action in a shown pane");
+    }
+
+    #[rstest::rstest]
+    fn float_action_rejected_without_a_float_focused() {
+        // Given the keys in a tiled pane of the shown layout.
+        let state = selected(Focus::Pane, true);
+
+        // When validating a float action.
+        let result = validate_float_action(&state);
+
+        // Then it is refused.
+        assert_eq!(
+            result,
+            Err(FloatActionError::NoFloatFocused),
+            "float actions need a float with the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn float_action_is_allowed_while_a_float_has_the_keys() {
+        // Given a float of the shown layout with the keys.
+        let mut state = selected(Focus::Pane, true);
+        state.layouts.add_float(SessionId(1), test_entry(20));
+
+        // When validating a float action.
+        let result = validate_float_action(&state);
+
+        // Then it is allowed.
+        assert_eq!(result, Ok(()), "float action on a focused float");
+    }
+
+    #[rstest::rstest]
+    fn tiled_action_rejected_while_a_float_has_the_keys() {
+        // Given a float of the shown layout with the keys.
+        let mut state = selected(Focus::Pane, true);
+        state.layouts.add_float(SessionId(1), test_entry(20));
+
+        // When validating a tiled-only action.
+        let result = validate_tiled_action(&state);
+
+        // Then it is refused.
+        assert_eq!(
+            result,
+            Err(TiledActionError::FloatFocused),
+            "tiled-only actions wait while a float has the keys"
+        );
     }
 
     #[rstest::rstest]

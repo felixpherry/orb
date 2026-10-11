@@ -3,7 +3,8 @@
 //! Floats keep their places as shares of the tab body, so they grow and
 //! shrink with the window. A new float goes to the staggered spot: half the
 //! body, centred, moved two cells down and right past any float already
-//! there. The top float has the focus while the floats are shown.
+//! there. The top float has the focus while the floats are shown. A pinned
+//! float stays drawn while the floats are hidden, but never has the focus then.
 
 use ratatui::layout::Rect;
 
@@ -65,11 +66,12 @@ impl FloatRect {
     }
 }
 
-/// One float: its pane and place.
+/// One float: its pane, place, and whether it stays drawn while the floats are hidden.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Float {
-    pane: PaneId,
-    rect: FloatRect,
+    pub pane: PaneId,
+    pub rect: FloatRect,
+    pub pinned: bool,
 }
 
 /// A session's floats, bottom first (the last is on top and has the focus),
@@ -81,6 +83,19 @@ pub struct Floats {
 }
 
 impl Floats {
+    /// Saved floats, bottom first, hidden.
+    pub fn restore(panes: Vec<Float>) -> Self {
+        Self {
+            panes,
+            shown: false,
+        }
+    }
+
+    /// Every float, bottom first.
+    pub fn all(&self) -> &[Float] {
+        &self.panes
+    }
+
     /// Whether the session has no floats.
     pub fn is_empty(&self) -> bool {
         self.panes.is_empty()
@@ -104,12 +119,13 @@ impl Floats {
         self.panes.iter().map(|float| float.pane)
     }
 
-    /// Each shown float's pane and frame in `body`, bottom first; none while hidden.
-    pub fn visible(&self, body: Rect) -> impl Iterator<Item = (PaneId, Rect)> + '_ {
-        let panes: &[Float] = if self.shown { &self.panes } else { &[] };
-        panes
+    /// Each drawn float's pane, frame in `body` and pin, bottom first: every
+    /// float while shown, only the pinned ones while hidden.
+    pub fn visible(&self, body: Rect) -> impl Iterator<Item = (PaneId, Rect, bool)> + '_ {
+        self.panes
             .iter()
-            .map(move |float| (float.pane, float.rect.to_cells(body)))
+            .filter(|float| self.shown || float.pinned)
+            .map(move |float| (float.pane, float.rect.to_cells(body), float.pinned))
     }
 
     /// Puts `pane` on top in the staggered spot for `body` and shows the floats.
@@ -125,6 +141,7 @@ impl Floats {
         self.panes.push(Float {
             pane,
             rect: FloatRect::from_cells(spot, body),
+            pinned: false,
         });
         self.shown = true;
     }
@@ -148,6 +165,26 @@ impl Floats {
             self.shown = false;
         }
         true
+    }
+
+    /// Takes the top float out and hides the floats; none while hidden.
+    pub fn take_focused(&mut self) -> Option<PaneId> {
+        let pane = self.focused()?;
+        self.panes.pop();
+        self.shown = false;
+        Some(pane)
+    }
+
+    /// Pins or unpins the top float; nothing while hidden. Whether it changed.
+    pub fn toggle_pin(&mut self) -> bool {
+        let shown = self.shown;
+        match self.panes.last_mut().filter(|_| shown) {
+            Some(float) => {
+                float.pinned = !float.pinned;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Moves `pane` to the top.
@@ -255,7 +292,7 @@ mod tests {
         floats.add(PaneId(1), BODY);
 
         // Then its frame is the centred half of the body.
-        let frames: Vec<Rect> = floats.visible(BODY).map(|(_, r)| r).collect();
+        let frames: Vec<Rect> = floats.visible(BODY).map(|(_, r, _)| r).collect();
         assert_eq!(
             frames,
             vec![Rect::new(20, 6, 40, 12)],
@@ -273,7 +310,7 @@ mod tests {
         floats.add(PaneId(2), BODY);
 
         // Then the new top frame is two cells down and right.
-        let top = floats.visible(BODY).last().map(|(_, r)| r);
+        let top = floats.visible(BODY).last().map(|(_, r, _)| r);
         assert_eq!(
             top,
             Some(Rect::new(22, 8, 40, 12)),
@@ -291,7 +328,7 @@ mod tests {
         let frame = floats
             .visible(Rect::new(0, 0, 160, 48))
             .next()
-            .map(|(_, r)| r);
+            .map(|(_, r, _)| r);
 
         // Then its frame doubles.
         assert_eq!(
@@ -311,7 +348,7 @@ mod tests {
         floats.add(PaneId(1), body);
 
         // Then its frame is the whole body.
-        let frame = floats.visible(body).next().map(|(_, r)| r);
+        let frame = floats.visible(body).next().map(|(_, r, _)| r);
         assert_eq!(
             frame,
             Some(body),

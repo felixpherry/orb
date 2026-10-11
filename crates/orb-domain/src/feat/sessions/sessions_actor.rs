@@ -93,7 +93,8 @@ use super::state::{
     ThreadStatus,
 };
 use super::store::{
-    NewPaneThread, PaneRow, SessionRow, SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
+    FloatRow, NewPaneThread, PaneRow, SessionRow, SettledOverride, Store, StoreError, TabRow,
+    ThreadRow, Ui,
 };
 use super::template;
 use super::validator::folder_exists;
@@ -108,6 +109,7 @@ use crate::feat::harness::{
 use crate::feat::integration::pane_file::{AgentEvent, AgentReport, PaneFiles};
 use crate::feat::integration::{NUDGE, panes_dir};
 use crate::feat::jumps::state::JumpList;
+use crate::feat::layout::floats::{Float, Floats};
 use crate::feat::layout::state::{PaneEntry, SessionLayout, Tab};
 use crate::feat::layout::tree::{Split, TileLayout};
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
@@ -2142,44 +2144,63 @@ impl SessionsActor {
         (self.wake)();
     }
 
-    /// Saves `session`'s tabs, active tab and pane names as the app state
-    /// has them; panes no tab holds any more are deleted from the store. A
-    /// session whose layout emptied gets a new shell tab in its directory
-    /// instead, saved in turn; nothing happens for one that is gone or
-    /// being deleted.
+    /// Saves `session`'s tabs, floats, active tab and pane names as the app
+    /// state has them; panes no tab or float holds any more are deleted from
+    /// the store. A session whose layout emptied, or kept only floats, gets a
+    /// new shell tab in its directory instead, saved in turn; nothing happens
+    /// for one that is gone or being deleted.
     fn save_layout(&mut self, session: SessionId) {
         let saved = {
             let app = self.state.read();
-            app.layouts.get(session).map(|layout| {
-                let tabs: Vec<TabRow> = layout
-                    .tabs()
-                    .iter()
-                    .enumerate()
-                    .map(|(position, tab)| TabRow {
-                        session_id: session,
-                        position,
-                        name: tab.name().map(str::to_owned),
-                        layout: tab.layout_json(),
-                        focus_pane: Some(tab.focused()),
-                        swap_layout: tab.swap_layout(),
-                        hand_changed: tab.hand_changed(),
-                    })
-                    .collect();
-                let names: Vec<(PaneId, Option<String>)> = layout
-                    .panes()
-                    .map(|entry| (entry.id, entry.name.clone()))
-                    .collect();
-                (tabs, layout.active(), names)
-            })
+            app.layouts
+                .get(session)
+                .filter(|layout| !layout.tabs().is_empty())
+                .map(|layout| {
+                    let tabs: Vec<TabRow> = layout
+                        .tabs()
+                        .iter()
+                        .enumerate()
+                        .map(|(position, tab)| TabRow {
+                            session_id: session,
+                            position,
+                            name: tab.name().map(str::to_owned),
+                            layout: tab.layout_json(),
+                            focus_pane: Some(tab.focused()),
+                            swap_layout: tab.swap_layout(),
+                            hand_changed: tab.hand_changed(),
+                        })
+                        .collect();
+                    let names: Vec<(PaneId, Option<String>)> = layout
+                        .panes()
+                        .map(|entry| (entry.id, entry.name.clone()))
+                        .collect();
+                    let floats: Vec<FloatRow> = layout
+                        .floats()
+                        .all()
+                        .iter()
+                        .enumerate()
+                        .map(|(position, float)| FloatRow {
+                            session_id: session,
+                            position,
+                            pane_id: float.pane,
+                            rect: float.rect,
+                            pinned: float.pinned,
+                        })
+                        .collect();
+                    (tabs, floats, layout.active(), names)
+                })
         };
-        let Some((tabs, active, names)) = saved else {
+        let Some((tabs, floats, active, names)) = saved else {
             let deleting = self.state.read().sessions.deleting.contains(&session);
             if self.sessions.contains_key(&session) && !deleting {
                 self.add_pane(session, Placement::Tab);
             }
             return;
         };
-        match self.store.save_layout(session, active, &tabs, &names) {
+        match self
+            .store
+            .save_layout(session, active, &tabs, &floats, &names)
+        {
             Ok(dropped) => {
                 for pane in dropped {
                     self.panes.remove(&pane);
@@ -2775,9 +2796,9 @@ struct RestoredLayouts {
 
 /// Every saved session's layout: its tabs by position, each in its saved swap
 /// layout with its mark, focused on its saved pane (else its first), showing
-/// its saved tab, with where each pane runs. A tab whose tree doesn't read is
-/// left out, and so is a session left with no tab. Nothing comes back when the
-/// store can't be read.
+/// its saved tab, its floats hidden in their saved places, with where each
+/// pane runs. A tab whose tree doesn't read is left out, and so is a session
+/// left with no tab. Nothing comes back when the store can't be read.
 fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> RestoredLayouts {
     let Ok(saved) = store.layouts() else {
         return RestoredLayouts {
@@ -2815,6 +2836,18 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
             if tabs.is_empty() {
                 return None;
             }
+            let floats = Floats::restore(
+                saved
+                    .floats
+                    .iter()
+                    .filter(|row| row.session_id == session.id)
+                    .map(|row| Float {
+                        pane: row.pane_id,
+                        rect: row.rect,
+                        pinned: row.pinned,
+                    })
+                    .collect(),
+            );
             let panes = saved
                 .panes
                 .iter()
@@ -2823,7 +2856,7 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
                 .collect();
             Some((
                 session.id,
-                SessionLayout::restore(tabs, session.active_tab, panes),
+                SessionLayout::restore(tabs, session.active_tab, panes, floats),
             ))
         })
         .collect();
@@ -2975,6 +3008,7 @@ mod tests {
     use crate::feat::harness::fake::FakeHarness;
     use crate::feat::harness::{Harness, Harnesses, RunningAgent};
     use crate::feat::jumps::state::JumpList;
+    use crate::feat::layout::floats::FloatRect;
     use crate::feat::layout::state::{SessionLayout, test_entry};
     use crate::feat::layout::tree::{Split, SwapLayout};
     use crate::feat::sessions::state::{
@@ -2982,7 +3016,8 @@ mod tests {
         Session, SessionId, SessionKind, SidebarItem, Thread, ThreadId, ThreadStatus,
     };
     use crate::feat::sessions::store::{
-        NewPaneThread, SessionRow, SettledOverride, Store, StoreError, TabRow, ThreadRow, Ui,
+        FloatRow, NewPaneThread, SessionRow, SettledOverride, Store, StoreError, TabRow, ThreadRow,
+        Ui,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::feat::zmx::zmx_service::fake::FakeZmx;
@@ -3685,6 +3720,7 @@ mod tests {
             inserted.session,
             1,
             &[tab(0, inserted.pane), tab(1, second)],
+            &[],
             &[(inserted.pane, None), (second, None)],
         )?;
         let host = listing(Vec::new());
@@ -3720,7 +3756,7 @@ mod tests {
             swap_layout: SwapLayout::Horizontal,
             hand_changed: true,
         };
-        store.save_layout(inserted.session, 0, &[tab], &[(inserted.pane, None)])?;
+        store.save_layout(inserted.session, 0, &[tab], &[], &[(inserted.pane, None)])?;
         let host = listing(Vec::new());
 
         // When restoring.
@@ -3737,6 +3773,63 @@ mod tests {
             restored,
             Some((SwapLayout::Horizontal, true)),
             "the tab's swap layout and mark should come back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_brings_floats_back_hidden() -> Result<(), Report<StoreError>> {
+        // Given a thread's session saved with a second pane as a float.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let float = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let tab = TabRow {
+            session_id: inserted.session,
+            position: 0,
+            name: None,
+            layout: format!("{{\"pane\":{}}}", inserted.pane.0),
+            focus_pane: Some(inserted.pane),
+            swap_layout: SwapLayout::Vertical,
+            hand_changed: false,
+        };
+        let row = FloatRow {
+            session_id: inserted.session,
+            position: 0,
+            pane_id: float,
+            rect: FloatRect {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+            },
+            pinned: false,
+        };
+        store.save_layout(
+            inserted.session,
+            0,
+            &[tab],
+            &[row],
+            &[(inserted.pane, None), (float, None)],
+        )?;
+        let host = listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then the float's pane is back in the session, with the floats hidden.
+        let restored = {
+            let app = state.read();
+            (
+                app.layouts.session_panes(inserted.session).contains(&float),
+                app.layouts
+                    .get(inserted.session)
+                    .is_some_and(SessionLayout::float_focused),
+            )
+        };
+        assert_eq!(
+            restored,
+            (true, false),
+            "a saved float should come back hidden"
         );
         Ok(())
     }
@@ -4567,6 +4660,67 @@ mod tests {
             shown,
             Some((true, true)),
             "the new float should be shown with the keys"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saving_a_layout_with_a_float_keeps_its_pane_row() -> Result<(), Report<StoreError>> {
+        // Given a thread's session with a pane added as a float.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.add_pane(inserted.session, Placement::Float);
+        let float = state
+            .read()
+            .layouts
+            .get(inserted.session)
+            .and_then(SessionLayout::focused);
+
+        // When saving the layout.
+        actor.save_layout(inserted.session);
+
+        // Then the float's pane row is kept.
+        let panes: Vec<PaneId> = actor
+            .store
+            .layouts()?
+            .panes
+            .into_iter()
+            .map(|pane| pane.id)
+            .collect();
+        assert!(
+            float.is_some_and(|float| panes.contains(&float)),
+            "a float's pane should keep its row"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn closing_the_last_tiled_pane_with_floats_adds_a_shell_tab() -> Result<(), Report<StoreError>>
+    {
+        // Given a thread's session with a float whose only tiled pane closed.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.add_pane(inserted.session, Placement::Float);
+        state.write().layouts.close_pane(inserted.pane);
+
+        // When saving the layout.
+        actor.save_layout(inserted.session);
+
+        // Then the layout has one new tab, without the closed pane.
+        let tabs = state.read().layouts.get(inserted.session).map(|layout| {
+            (
+                layout.tabs().len(),
+                layout.tabs().iter().any(|tab| tab.holds(inserted.pane)),
+            )
+        });
+        assert_eq!(
+            tabs,
+            Some((1, false)),
+            "a session left with only floats should get a new shell tab"
         );
         Ok(())
     }

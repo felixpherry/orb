@@ -253,24 +253,30 @@ impl SessionLayout {
         }
     }
 
-    /// Saved tabs showing tab `active` (the last when past it), with where
-    /// their panes run. Entries for panes no tab holds are left out.
-    pub fn restore(tabs: Vec<Tab>, active: usize, panes: Vec<PaneEntry>) -> Self {
+    /// Saved tabs showing tab `active` (the last when past it) and saved
+    /// floats, hidden, with where their panes run. Entries for panes no tab
+    /// or float holds are left out.
+    pub fn restore(tabs: Vec<Tab>, active: usize, panes: Vec<PaneEntry>, floats: Floats) -> Self {
         let panes = panes
             .into_iter()
-            .filter(|entry| tabs.iter().any(|tab| tab.holds(entry.id)))
+            .filter(|entry| tabs.iter().any(|tab| tab.holds(entry.id)) || floats.holds(entry.id))
             .map(|entry| (entry.id, entry))
             .collect();
         Self {
             active: active.min(tabs.len().saturating_sub(1)),
             tabs,
             panes,
-            floats: Floats::default(),
+            floats,
         }
     }
 
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
+    }
+
+    /// The session's floats.
+    pub fn floats(&self) -> &Floats {
+        &self.floats
     }
 
     /// Where each of the session's panes runs, in no order.
@@ -324,9 +330,9 @@ impl SessionLayout {
     /// pane below it at the stack's full width. `list_width` gives a stack's
     /// list width, bars included, from its panes; the list is centred,
     /// leaving at least two columns on each side for the shown row's `>` (at
-    /// least 3 wide, at most the stack's width). Shown floats come last,
-    /// bottom first, also with no tab; while one has the keys, no tiled pane
-    /// is placed as focused.
+    /// least 3 wide, at most the stack's width). Shown floats, or only the
+    /// pinned ones while hidden, come last, bottom first, also with no tab;
+    /// while one has the keys, no tiled pane is placed as focused.
     pub fn placed<F>(&self, body: Rect, list_width: F) -> Placement
     where
         F: Fn(&[PaneId]) -> u16,
@@ -341,14 +347,17 @@ impl SessionLayout {
             }
         }
         let top = self.floats.focused();
-        placement
-            .panes
-            .extend(self.floats.visible(body).map(|(pane, area)| Placed {
-                pane,
-                area,
-                focused: Some(pane) == top,
-                floating: true,
-            }));
+        placement.panes.extend(
+            self.floats
+                .visible(body)
+                .map(|(pane, area, pinned)| Placed {
+                    pane,
+                    area,
+                    focused: Some(pane) == top,
+                    floating: true,
+                    pinned,
+                }),
+        );
         placement
     }
 
@@ -397,6 +406,7 @@ where
                 area: body,
                 focused: true,
                 floating: false,
+                pinned: false,
             }],
             stacks: vec![],
         };
@@ -412,6 +422,7 @@ where
             area: info.rect,
             focused: info.is_focused,
             floating: false,
+            pinned: false,
         })
         .collect();
     let stacks = stacks
@@ -441,6 +452,7 @@ where
                 ),
                 focused: tab.tree.focused() == stack.expanded,
                 floating: false,
+                pinned: false,
             });
             let start = if stack.panes.len() > fits {
                 stack
@@ -488,6 +500,8 @@ pub struct Placed {
     pub focused: bool,
     /// Drawn over the tiled panes.
     pub floating: bool,
+    /// A float that stays drawn while the floats are hidden.
+    pub pinned: bool,
 }
 
 impl Placed {
@@ -572,8 +586,9 @@ pub enum FocusMove {
 /// them at start, adding a pane on add, split, new tab or a new session,
 /// adding a float, pointing a moved session's panes at its new directory,
 /// dropping a deleted session), the intent handler (focus, resize, zoom, tab
-/// moves, renames, closes, showing and hiding floats) and the frontend (closing panes whose program ended, the
-/// tab body's size).
+/// moves, renames, closes, showing, hiding and pinning floats, moving panes
+/// between a tab and the floats) and the frontend (closing panes whose program
+/// ended, the tab body's size).
 #[derive(Debug, Default)]
 pub struct Layouts {
     sessions: HashMap<SessionId, SessionLayout>,
@@ -701,11 +716,66 @@ impl Layouts {
         }
     }
 
+    /// Turns the shown tab's focused pane into the top float in the staggered
+    /// spot and shows the floats; the tab is re-tiled in its swap layout
+    /// unless it was changed by hand. A tab's only pane, or a float having
+    /// the keys, changes nothing. Whether it changed.
+    pub fn float_pane(&mut self, owner: SessionId) -> bool {
+        let body = self.body;
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return false;
+        };
+        if layout.float_focused() {
+            return false;
+        }
+        let Some(tab) = layout.tab_mut() else {
+            return false;
+        };
+        let pane = tab.tree.focused();
+        if tab.pane_count() < 2 || !tab.tree.close_pane(pane) {
+            return false;
+        }
+        if tab.hand_changed {
+            tab.zoomed = false;
+        } else {
+            tab.relayout(None);
+        }
+        layout.floats.add(pane, body);
+        true
+    }
+
+    /// Puts the top float back into the shown tab, focused, as a new pane is
+    /// added there, and hides the floats. Nothing unless a float has the keys
+    /// and a tab is shown. Whether it changed.
+    pub fn embed_float(&mut self, owner: SessionId) -> bool {
+        let body = self.body;
+        let Some(layout) = self.sessions.get_mut(&owner) else {
+            return false;
+        };
+        if layout.active_tab().is_none() {
+            return false;
+        }
+        let Some(pane) = layout.floats.take_focused() else {
+            return false;
+        };
+        if let Some(tab) = layout.tab_mut() {
+            tab.add_tiled(pane, body);
+        }
+        true
+    }
+
     /// Shows or hides `owner`'s floats; nothing with none. Whether it changed.
     pub fn toggle_floats(&mut self, owner: SessionId) -> bool {
         self.sessions
             .get_mut(&owner)
             .is_some_and(|layout| layout.floats.toggle())
+    }
+
+    /// Pins or unpins `owner`'s top float while the floats are shown. Whether it changed.
+    pub fn toggle_pin(&mut self, owner: SessionId) -> bool {
+        self.sessions
+            .get_mut(&owner)
+            .is_some_and(|layout| layout.floats.toggle_pin())
     }
 
     /// Moves the shown tab's focused pane to a new tab after the last one and
@@ -1024,6 +1094,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{FocusMove, Layouts, Placed, Placement, SessionLayout, Tab, test_entry as entry};
+    use crate::feat::layout::floats::{Float, FloatRect, Floats};
     use crate::feat::layout::tree::{NavDirection, Split, SwapLayout, TileLayout};
     use crate::feat::sessions::state::{PaneId, SessionId};
 
@@ -1192,6 +1263,44 @@ mod tests {
             (tab.name(), tab.layout_json(), tab.focused()),
             (Some("logs"), tree.to_json(), PaneId(7)),
             "a restored tab is the saved one"
+        );
+    }
+
+    #[rstest::rstest]
+    fn restore_keeps_float_entries() {
+        // Given a saved tab of pane 7 and a saved float of pane 20.
+        let floats = Floats::restore(vec![Float {
+            pane: PaneId(20),
+            rect: FloatRect {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+            },
+            pinned: false,
+        }]);
+
+        // When restoring the session.
+        let mut layouts = Layouts::default();
+        layouts.insert(
+            OWNER,
+            SessionLayout::restore(
+                vec![Tab::restore(
+                    None,
+                    TileLayout::new(PaneId(7)),
+                    SwapLayout::Vertical,
+                    false,
+                )],
+                0,
+                vec![entry(7), entry(20)],
+                floats,
+            ),
+        );
+
+        // Then the float's pane still has its entry.
+        assert!(
+            layouts.entry(PaneId(20)).is_some(),
+            "a restored float keeps where its pane runs"
         );
     }
 
@@ -1824,6 +1933,7 @@ mod tests {
                     area: BODY,
                     focused: true,
                     floating: false,
+                    pinned: false,
                 }],
                 stacks: vec![],
             },
@@ -1885,6 +1995,7 @@ mod tests {
             area: Rect::new(0, 0, 40, 24),
             focused: false,
             floating: false,
+            pinned: false,
         };
 
         // When asking where its screen goes.
@@ -3275,5 +3386,180 @@ mod tests {
 
         // Then it is session 1.
         assert_eq!(owner, Some(OWNER), "a float belongs to its session");
+    }
+
+    #[rstest::rstest]
+    fn float_pane_moves_the_pane_to_the_top_float() {
+        // Given panes 7 and 8 side by side, 8 focused.
+        let mut layouts = split_right();
+
+        // When turning the focused pane into a float.
+        layouts.float_pane(OWNER);
+
+        // Then pane 8 is the focused float and the tab keeps only pane 7.
+        let shape = layouts.get(OWNER).map(|layout| {
+            (
+                layout.focused(),
+                layout.float_focused(),
+                layout.active_tab().map(Tab::pane_count),
+            )
+        });
+        assert_eq!(
+            shape,
+            Some((Some(PaneId(8)), true, Some(1))),
+            "the focused pane becomes the top float"
+        );
+    }
+
+    #[rstest::rstest]
+    fn float_pane_on_a_tabs_only_pane_changes_nothing() {
+        // Given the lone pane 7.
+        let mut layouts = opened();
+        let before = layouts.get(OWNER).cloned();
+
+        // When turning the focused pane into a float.
+        let changed = layouts.float_pane(OWNER);
+
+        // Then nothing changes.
+        assert_eq!(
+            (changed, layouts.get(OWNER).cloned()),
+            (false, before),
+            "a tab's only pane stays in the tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn embed_float_puts_the_float_back_in_the_tab_focused() {
+        // Given float 20 over the lone pane 7.
+        let mut layouts = with_float();
+
+        // When putting the float back into the tab.
+        layouts.embed_float(OWNER);
+
+        // Then pane 20 is focused in the tab of two panes.
+        let shape = layouts.get(OWNER).map(|layout| {
+            (
+                layout.focused(),
+                layout.active_tab().map(Tab::pane_count),
+                layout.float_focused(),
+            )
+        });
+        assert_eq!(
+            shape,
+            Some((Some(PaneId(20)), Some(2), false)),
+            "the float goes back into the tab with the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn embed_float_hides_the_other_floats() {
+        // Given floats 20 and 21 over two tiled panes.
+        let mut layouts = split_with_two_floats();
+
+        // When putting the top float back into the tab.
+        layouts.embed_float(OWNER);
+
+        // Then no float is drawn.
+        assert!(
+            !placed(&layouts).iter().any(|place| place.floating),
+            "embedding a float hides the others"
+        );
+    }
+
+    #[rstest::rstest]
+    fn restored_floats_place_only_the_pinned_one() {
+        // Given a saved tab of pane 7, float 20 unpinned and float 21 pinned.
+        let float = |pane, pinned| Float {
+            pane: PaneId(pane),
+            rect: FloatRect {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+            },
+            pinned,
+        };
+        let floats = Floats::restore(vec![float(20, false), float(21, true)]);
+
+        // When restoring the session.
+        let mut layouts = Layouts::default();
+        layouts.insert(
+            OWNER,
+            SessionLayout::restore(
+                vec![Tab::restore(
+                    None,
+                    TileLayout::new(PaneId(7)),
+                    SwapLayout::Vertical,
+                    false,
+                )],
+                0,
+                vec![entry(7), entry(20), entry(21)],
+                floats,
+            ),
+        );
+        layouts.fit_to(BODY);
+
+        // Then only the pinned float is placed.
+        let floating: Vec<PaneId> = placed(&layouts)
+            .iter()
+            .filter(|place| place.floating)
+            .map(|place| place.pane)
+            .collect();
+        assert_eq!(
+            floating,
+            vec![PaneId(21)],
+            "hidden floats draw only the pinned one"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hidden_pinned_float_leaves_the_keys_in_the_tab() {
+        // Given float 20 pinned over pane 7.
+        let mut layouts = with_float();
+        layouts.toggle_pin(OWNER);
+
+        // When hiding the floats.
+        layouts.toggle_floats(OWNER);
+
+        // Then the tiled pane has the keys.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(7)),
+            "a hidden pinned float never has the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hidden_pinned_float_is_placed_unfocused() {
+        // Given float 20 pinned over pane 7.
+        let mut layouts = with_float();
+        layouts.toggle_pin(OWNER);
+
+        // When hiding the floats.
+        layouts.toggle_floats(OWNER);
+
+        // Then the float is still drawn, pinned and without the focus.
+        let float = placed(&layouts)
+            .into_iter()
+            .find(|place| place.floating)
+            .map(|place| (place.pinned, place.focused));
+        assert_eq!(
+            float,
+            Some((true, false)),
+            "a hidden pinned float is drawn unfocused"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_pin_while_hidden_changes_nothing() {
+        // Given float 20 hidden.
+        let mut layouts = with_float();
+        layouts.toggle_floats(OWNER);
+
+        // When pinning.
+        let changed = layouts.toggle_pin(OWNER);
+
+        // Then nothing changes.
+        assert!(!changed, "a hidden float can't be pinned");
     }
 }

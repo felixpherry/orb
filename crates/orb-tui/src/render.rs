@@ -240,6 +240,7 @@ mod tests {
     use crate::test_support::sessions_for;
     use jiff::tz::TimeZone;
     use orb_domain::Intent;
+    use orb_domain::feat::layout::floats::Floats;
     use orb_domain::feat::layout::state::{PaneEntry, SessionLayout, Tab};
     use orb_domain::feat::layout::tree::{Node, Split, SwapLayout, TileLayout};
     use orb_domain::feat::picker::list::PickerItem;
@@ -1600,6 +1601,7 @@ mod tests {
                     vec![Tab::restore(None, tree, SwapLayout::Vertical, false)],
                     0,
                     vec![entry(1), api, entry(3), entry(4)],
+                    Floats::default(),
                 ),
             );
         })
@@ -1830,6 +1832,7 @@ mod tests {
                     vec![Tab::restore(None, tree, SwapLayout::Vertical, false)],
                     0,
                     vec![entry(1), api, entry(3), web],
+                    Floats::default(),
                 ),
             );
         })

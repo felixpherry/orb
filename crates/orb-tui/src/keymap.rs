@@ -348,6 +348,24 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind(
+                "<leader>pw",
+                Intent::ToggleFloats,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>pe",
+                Intent::ToggleFloatEmbed,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>pi",
+                Intent::TogglePinFloat,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
                 "<leader>pc",
                 Intent::RenamePane,
                 KeyCategory::Navigation,
@@ -1498,6 +1516,9 @@ mod tests {
     #[case(Scope::Pane, "pr", Intent::SplitPane(Split::Right))]
     #[case(Scope::Pane, "pf", Intent::ToggleZoom)]
     #[case(Scope::Pane, "px", Intent::ClosePane)]
+    #[case(Scope::Pane, "pw", Intent::ToggleFloats)]
+    #[case(Scope::Pane, "pe", Intent::ToggleFloatEmbed)]
+    #[case(Scope::PaneIncognito, "pi", Intent::TogglePinFloat)]
     #[case(Scope::Pane, "pc", Intent::RenamePane)]
     #[case(Scope::Pane, "ps", Intent::StackPane)]
     #[case(Scope::Pane, "tb", Intent::BreakPane)]
@@ -1568,7 +1589,7 @@ mod tests {
         let found = leader_popup(Scope::Pane, &[key(KeyCode::Char('p'))]).join(" ");
 
         // Then they are the pane keys.
-        assert_eq!(found, "c d f r s x", "<C-g> p keys in a pane");
+        assert_eq!(found, "c d e f i r s w x", "<C-g> p keys in a pane");
     }
 
     #[rstest::rstest]
