@@ -101,12 +101,6 @@ Entries are added or amended **only with human approval**.
 - (drafts) On a Claude draft, the model picker lists `Default`, then T3 Code's current Claude models by name, then its legacy models under a `Legacy models` heading; orb passes the picked model's full ID to `--model`.
 - (keybinds) On a draft, `⏎` in the sidebar or on the dashboard's Start item starts it, and `␣h`/`␣w`/`␣b`/`␣m`/`␣a` in either pick its harness, workspace, base branch, model, and permission.
 - (keybinds) Keys that do nothing for the selected row are not bound, so which-key doesn't list them: `␣h`/`␣m`/`␣a` and the dashboard's `h`/`m`/`a` only on a draft, a group's draft or a group's card, with `␣a` and `a` there only while the selection's harness has permission modes, which pi doesn't; `␣w` and the dashboard's `w` only on a lone thread or a project's draft, outside the Incognito project; `␣b` and the dashboard's `b` only there and on a started Feature group's card; `␣t`/`␣gg`/`␣v` and the dashboard's `t`/`g`/`v` only with a thread, draft or group selected; the dashboard's `o` only on a thread or draft; `p`/`s` in the sidebar only on a lone thread or a group's card; `r` only on a thread; and `n` only on a group's card or a thread in it.
-- (keybinds) `␣t` opens a shell, `␣gg` lazygit, and `␣v` `nvim .` in the selected thread's, draft's or group's directory, in the sidebar or dashboard.
-- (zellij) Tool handoff opens each tool as a full-screen floating zellij pane named `orb:<directory>:<tool>`, which closes when the tool exits.
-- (zellij) Tool handoff focuses an existing pane of the same name, switching to its tab, instead of opening a second one.
-- (zellij) A draft's tools open in its worktree, or in the project root for a local or new-worktree draft.
-- (zellij) Tool panes run with orb's own `NO_COLOR`, not the zellij server's.
-- (zellij) A zellij call that runs longer than 2 s is killed; when it was opening a tool, the message box then shows `zellij timed out (session renamed? restart orb)`.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
 - (keybinds) In the sidebar, the dashboard or the attached pane, `<C-Right>` widens the focused side and `<C-Left>` narrows it, 4 columns a step, with the sidebar kept between 24 and 80 columns.
@@ -217,7 +211,7 @@ Entries are added or amended **only with human approval**.
 - (mouse) A click on a dashboard menu item moves the menu cursor to it without running it.
 - (mouse) In a picker, a click selects a row, a double-click picks it, the wheel over its list moves the selection one row without wrapping (over the session, worktree or search picker's preview it does nothing), a click outside it cancels it like `Esc`, and a click on a heading or a disabled row does nothing.
 - (mouse) A click outside the rename box cancels it like `Esc`.
-- (mouse) Clicks on pane frames do nothing.
+- (mouse) Clicks on tiled pane frames do nothing.
 - (mouse) A click on a tab in the tab bar shows that tab and moves the keys into its focused pane.
 - (mouse) A click on the tab bar's `+` opens a new tab, as `<C-g> t n` does.
 - (mouse) A click on a `← +N` or `+N →` chip shows the nearest hidden tab on that side.
@@ -301,8 +295,8 @@ Entries are added or amended **only with human approval**.
 - (layout) `Cmd n` in a tab changed by hand adds the pane to the focused pane's stack, else halves the focused pane top/bottom when it's tall and left/right when it's wide, leaving other panes their size, else stacks the two.
 - (layout) The tab bar ends, right-aligned, with `Cmd <[]>` and the shown tab's swap layout name in caps, lit while the tab is untouched and dim once it's changed by hand; it's hidden on a 1-pane tab and dropped when the tabs leave no room.
 - (sessions) Each tab's swap layout and changed-by-hand mark persist to orb's database; tabs saved before then load as vertical and unmarked.
-- (layout) When a thread's last pane closes, by a close key or by its program exiting, orb opens a shell pane in the thread's directory in its place.
-- (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab with the keys in its pane.
+- (layout) When a thread's last tiled pane closes, by a close key or by its program exiting, orb opens a shell pane in the thread's directory in its place, whatever floats it has.
+- (sidebar) The cursor stops on each agent line under a session card, and `⏎` there shows that agent's tab, or the session's floats when the agent is in one, with the keys in its pane.
 - (sidebar) On an agent row, `r` renames the agent's pane and `d` closes it after a confirm.
 - (tui) After orb copies a mouse selection in a pane, the message box shows `Text copied to system clipboard`.
 - (keybinds) `<C-g> n` asks for a name in a `New session` box right after the project pick, before any workspace or base pick; `Esc` there cancels the new session.
@@ -319,3 +313,16 @@ Entries are added or amended **only with human approval**.
 - (keybinds) Resize and move mode last until `Esc` or `⏎`, until the keys leave the pane, or until a mouse action orb handles itself (a click on another pane, the sidebar or the tab bar, or a tab-bar scroll); clicks, scrolling and selecting inside the focused pane leave it on. While either is on, no key reaches the pane's program, and `Cmd` keys still work.
 - (tui) The mode line reads `RESIZE` or `MOVE` while that mode is on, and a which-key style box lists the mode's keys.
 - (layout) Moving a pane swaps two panes without changing the tab's shape, so it doesn't mark the tab changed by hand.
+- (float) Each session has one layer of floating panes drawn over all of its tabs, so switching tabs keeps it shown and focused.
+- (keybinds) `Cmd f` shows or hides the session's floats, opening a shell float when it has none.
+- (keybinds) While a float has the keys, `Cmd n` opens a float, `Cmd x` closes the focused float, and `Cmd h/j/k/l` move between floats without switching tabs.
+- (float) Closing the last float hides the layer and gives the keys back to the shown tab's focused pane.
+- (keybinds) `<C-g> p w` shows or hides the floats, `<C-g> p e` turns the focused pane into a float or a float back into the shown tab, and `<C-g> p i` pins or unpins the focused float.
+- (float) A pinned float stays drawn over the tiled panes while the floats are hidden, and gets the keys only when clicked.
+- (float) Resize mode, move mode, `Cmd +` and `Cmd -` change the focused float in steps of 5% of the tab body, and a float never leaves the body.
+- (float) The floats follow one of zellij's float layouts: staggered (half-size, centred, each new float 2 cells down and right of any taken spot), enlarged (90%, each a row lower, up to 10), or spread (side by side, up to 4).
+- (keybinds) While a float has the keys, `Cmd [` and `Cmd ]` move the floats to the previous or next layout that fits their count, wrapping.
+- (float) Moving or resizing a float marks the floats changed by hand, so adding or closing one doesn't re-lay them until the next `Cmd [` or `Cmd ]`.
+- (layout) While a float has the keys, the tab bar's layout name shows the float layout instead of the tab's.
+- (mouse) Clicking a float focuses it and brings it to the top, dragging its frame moves it, and clicking a tiled pane hides the floats.
+- (sessions) Each session's floats, their positions as shares of the tab body, their pins and the float layout persist to orb's database, and the floats come back hidden except pinned ones.
