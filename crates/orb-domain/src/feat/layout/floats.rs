@@ -316,6 +316,45 @@ impl Floats {
         }
     }
 
+    /// Whether `pane` is a float that is drawn: any float while shown, a pinned one while hidden.
+    pub fn draws(&self, pane: PaneId) -> bool {
+        self.panes
+            .iter()
+            .any(|float| float.pane == pane && (self.shown || float.pinned))
+    }
+
+    /// Puts `pane` on top and shows the floats. Whether `pane` is a float.
+    pub fn focus(&mut self, pane: PaneId) -> bool {
+        if !self.holds(pane) {
+            return false;
+        }
+        self.raise(pane);
+        self.shown = true;
+        true
+    }
+
+    /// Hides the floats; pinned ones stay drawn.
+    pub fn hide(&mut self) {
+        self.shown = false;
+    }
+
+    /// A mouse drag: the top float's top-left corner to `x`, `y` (screen
+    /// cells), kept inside `body`, while `pane` is the shown top float. A move
+    /// marks the floats changed by hand. Whether it moved.
+    pub fn move_top_to(&mut self, pane: PaneId, x: u16, y: u16, body: Rect) -> bool {
+        if self.focused() != Some(pane) {
+            return false;
+        }
+        self.edit_top(body, |frame| Rect {
+            x: x.clamp(body.x, body.right().saturating_sub(frame.width).max(body.x)),
+            y: y.clamp(
+                body.y,
+                body.bottom().saturating_sub(frame.height).max(body.y),
+            ),
+            ..frame
+        })
+    }
+
     /// Puts what `edit` makes of the top float's frame in `body` back as its
     /// place, while shown; a change marks the floats changed by hand. Whether it changed.
     fn edit_top<F>(&mut self, body: Rect, edit: F) -> bool
@@ -797,5 +836,60 @@ mod tests {
             !floats.hand_changed(),
             "cycling should clear the changed-by-hand mark"
         );
+    }
+
+    #[rstest::rstest]
+    fn move_top_to_stops_at_the_body_edge() {
+        // Given one staggered float on an 80×24 body.
+        let mut floats = Floats::default();
+        floats.add(PaneId(1), BODY);
+
+        // When dragging it to (200, 200).
+        floats.move_top_to(PaneId(1), 200, 200, BODY);
+
+        // Then its frame ends at the body's right and bottom.
+        let corner = frames(&floats)
+            .first()
+            .map(|frame| (frame.right(), frame.bottom()));
+        assert_eq!(
+            corner,
+            Some((BODY.right(), BODY.bottom())),
+            "a dragged float stays inside the body"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_top_to_marks_the_floats_changed_by_hand() {
+        // Given one staggered float.
+        let mut floats = Floats::default();
+        floats.add(PaneId(1), BODY);
+
+        // When dragging it to (0, 0).
+        floats.move_top_to(PaneId(1), 0, 0, BODY);
+
+        // Then the floats are marked changed by hand.
+        assert!(
+            floats.hand_changed(),
+            "a drag that moves a float marks it changed by hand"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(true, true)]
+    #[case(false, false)]
+    fn draws_a_pinned_float_while_hidden(#[case] pinned: bool, #[case] expected: bool) {
+        // Given one float, pinned or not, hidden.
+        let mut floats = Floats::default();
+        floats.add(PaneId(1), BODY);
+        if pinned {
+            floats.toggle_pin();
+        }
+        floats.toggle();
+
+        // When asking whether it is drawn.
+        let drawn = floats.draws(PaneId(1));
+
+        // Then only a pinned float is drawn.
+        assert_eq!(drawn, expected, "hidden floats draw only when pinned");
     }
 }

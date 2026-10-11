@@ -44,8 +44,9 @@ pub(crate) fn areas(right: Rect) -> [Rect; 2] {
 /// a client in `panes` inside its frame, each stack's list, then the shown
 /// floats (or only the pinned ones while hidden) over them, each on a cleared
 /// area, a pinned one with a pin at the right of its top border. Records each
-/// pane's screen, and whether its program reads the mouse, in `hits`.
-/// Returns the focused pane's cursor while `keys_in_pane`.
+/// pane's screen, and whether its program reads the mouse, and each drawn
+/// float's frame in `hits`. Returns the focused pane's cursor while
+/// `keys_in_pane`.
 pub(crate) fn render(
     state: &AppState,
     layout: &SessionLayout,
@@ -78,6 +79,7 @@ pub(crate) fn render(
     }
     for place in placement.panes.iter().filter(|place| place.floating) {
         Clear.render(place.area, buf);
+        hits.record_float(place.area, place.pane);
         cursor = draw_pane(state, place, panes, keys_in_pane, buf, hits).or(cursor);
     }
     cursor
@@ -208,7 +210,8 @@ pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
 /// While a float has the keys (`keys_in_pane`), the name is the floats'
 /// layout instead, lit or dim the same way, whatever the tab's pane count.
 /// Records the bar, each tab and chip with the tab it shows, and the `+` in
-/// `hits`.
+/// `hits`; while the floats are shown, a tab's click keeps the keys in the
+/// top float.
 fn tab_bar(
     state: &AppState,
     layout: &SessionLayout,
@@ -244,7 +247,11 @@ fn tab_bar(
     };
     let mut target = |area: Rect, index: usize| {
         if let Some(tab) = layout.tabs().get(index).filter(|_| !area.is_empty()) {
-            hits.record_tab(area, index, tab.focused());
+            hits.record_tab(
+                area,
+                index,
+                layout.floats().focused().unwrap_or_else(|| tab.focused()),
+            );
         }
     };
     let mut spans = vec![session];

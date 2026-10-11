@@ -6,10 +6,14 @@
 //! shows the next tab on a scroll up and the previous on a scroll down. A
 //! click on a row of a stack's list focuses its pane, and the wheel over the
 //! list shows the next stacked pane on a scroll down and the previous on a
-//! scroll up, leaving the keys where they are. The pane frames and the start
-//! screen take no clicks. The wheel over the sidebar scrolls its view and
-//! never moves the selection, wherever the keys are. In a
-//! picker a click selects a row, a double-click picks it and the wheel over
+//! scroll up, leaving the keys where they are. The tiled pane frames and the
+//! start screen take no clicks. A press on a float's border brings it to the
+//! top with the keys and the drag moves it inside the tab body; the release
+//! saves. A click on a float focuses it and brings it to the top; a click on
+//! a tiled pane hides the floats. Where floats overlap panes, the topmost
+//! one takes the click and the wheel. The wheel over the sidebar scrolls its
+//! view and never moves the selection, wherever the keys are. In a picker a
+//! click selects a row, a double-click picks it and the wheel over
 //! its list moves the selection; a click outside a picker or the rename box
 //! closes it like `Esc`. A click in the text of the sidebar search, a
 //! picker's input or the rename box moves its cursor there.
@@ -75,6 +79,8 @@ pub(crate) struct HitMap {
     new_tab: Option<Rect>,
     /// Each stack's list, its stacked panes in order and the shown one.
     stacks: Vec<(Rect, Vec<PaneId>, PaneId)>,
+    /// Each drawn float's frame (border included) and pane, bottom first.
+    floats: Vec<(Rect, PaneId)>,
 }
 
 /// The text line of the input that has the keys, and what `visible` drew
@@ -120,10 +126,34 @@ impl HitMap {
         self.panes.push((area, id, reads_mouse));
     }
 
-    /// The pane drawn at `at`, if any.
+    /// Records where float `pane` was drawn, its frame included, above
+    /// everything recorded before it.
+    pub(crate) fn record_float(&mut self, frame: Rect, pane: PaneId) {
+        self.floats.push((frame, pane));
+    }
+
+    /// The topmost float whose frame is at `at`: its frame and pane.
+    fn float_at(&self, at: Position) -> Option<(Rect, PaneId)> {
+        self.floats
+            .iter()
+            .rev()
+            .find(|(frame, _)| frame.contains(at))
+            .copied()
+    }
+
+    /// The pane drawn on top at `at`, if any: inside a float's frame only
+    /// that float's content counts, so its border is no pane.
     pub(crate) fn pane_at(&self, at: Position) -> Option<PaneId> {
+        if let Some((_, float)) = self.float_at(at) {
+            return self
+                .panes
+                .iter()
+                .any(|&(area, id, _)| id == float && area.contains(at))
+                .then_some(float);
+        }
         self.panes
             .iter()
+            .rev()
             .find(|(area, ..)| area.contains(at))
             .map(|&(_, id, _)| id)
     }
@@ -132,6 +162,7 @@ impl HitMap {
     pub(crate) fn pane_area(&self, id: PaneId) -> Option<Rect> {
         self.panes
             .iter()
+            .rev()
             .find(|(_, pane, _)| *pane == id)
             .map(|&(area, ..)| area)
     }
@@ -276,6 +307,9 @@ enum Gesture {
     /// The press acted on orb (focus, a sidebar row, a picker); its drag and
     /// release do nothing.
     Orb,
+    /// orb is moving this float; its frame was grabbed `dx`, `dy` cells from
+    /// its top-left corner.
+    Drag { pane: PaneId, dx: u16, dy: u16 },
 }
 
 impl Clicks {
@@ -341,12 +375,15 @@ pub(crate) fn route(
     now: Instant,
 ) -> MouseRoute {
     let at = Position::new(event.column, event.row);
-    if let Some(routed) = follow_gesture(event.kind, clicks) {
+    if let Some(routed) = follow_gesture(event.kind, at, clicks) {
         return routed;
     }
-    let on_focused = focused
-        .and_then(|id| hits.pane_area(id))
-        .is_some_and(|area| area.contains(at));
+    if let MouseEventKind::Down(MouseButton::Left) = event.kind
+        && let Some(routed) = press_frame(at, hits, focus, clicks, now)
+    {
+        return routed;
+    }
+    let on_focused = focused.is_some() && hits.pane_at(at) == focused;
     let in_pane = focus == Focus::Pane && on_focused;
     match (event.kind, focused) {
         (MouseEventKind::Down(MouseButton::Left), Some(id)) if in_pane => {
@@ -355,7 +392,9 @@ pub(crate) fn route(
         (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown, _)
             if !matches!(focus, Focus::Picker | Focus::Rename) =>
         {
-            if let Some(routed) = route_stack(at, hits, event.kind) {
+            if hits.float_at(at).is_none()
+                && let Some(routed) = route_stack(at, hits, event.kind)
+            {
                 return routed;
             }
             if let Some(id) = hits.pane_at(at) {
@@ -469,8 +508,9 @@ fn route_tab_bar(
 /// forgets the gesture on release; `None` when the gesture doesn't decide.
 /// A left press starts a new gesture (owned by orb until a pane takes it),
 /// dropping one whose release never came. While orb selects, nothing else
-/// acts.
-fn follow_gesture(kind: MouseEventKind, clicks: &mut Clicks) -> Option<MouseRoute> {
+/// acts. While orb drags a float, the drag moves it by where its frame was
+/// grabbed and the release saves it.
+fn follow_gesture(kind: MouseEventKind, at: Position, clicks: &mut Clicks) -> Option<MouseRoute> {
     let gesture = clicks.gesture;
     match (kind, gesture) {
         (MouseEventKind::Down(MouseButton::Left), _) => {
@@ -481,6 +521,7 @@ fn follow_gesture(kind: MouseEventKind, clicks: &mut Clicks) -> Option<MouseRout
             clicks.gesture = None;
             match gesture {
                 Some(Gesture::Select(id)) => Some(MouseRoute::Copy(id)),
+                Some(Gesture::Drag { .. }) => Some(MouseRoute::Intents(vec![Intent::DropFloat])),
                 Some(Gesture::Orb) => Some(MouseRoute::Nothing),
                 Some(Gesture::Program) | None => None,
             }
@@ -488,10 +529,44 @@ fn follow_gesture(kind: MouseEventKind, clicks: &mut Clicks) -> Option<MouseRout
         (MouseEventKind::Drag(MouseButton::Left), Some(Gesture::Select(id))) => {
             Some(MouseRoute::Extend(id))
         }
+        (MouseEventKind::Drag(MouseButton::Left), Some(Gesture::Drag { pane, dx, dy })) => {
+            Some(MouseRoute::Intents(vec![Intent::DragFloat {
+                pane,
+                x: at.x.saturating_sub(dx),
+                y: at.y.saturating_sub(dy),
+            }]))
+        }
         (MouseEventKind::Drag(MouseButton::Left), Some(Gesture::Orb))
         | (_, Some(Gesture::Select(_))) => Some(MouseRoute::Nothing),
         _ => None,
     }
+}
+
+/// A left press on a drawn float's border, outside a picker or the rename
+/// box: brings the float to the top with the keys (confirming a search
+/// first) and starts dragging it. `None` anywhere else.
+fn press_frame(
+    at: Position,
+    hits: &HitMap,
+    focus: Focus,
+    clicks: &mut Clicks,
+    now: Instant,
+) -> Option<MouseRoute> {
+    if matches!(focus, Focus::Picker | Focus::Rename) || hits.pane_at(at).is_some() {
+        return None;
+    }
+    let (frame, pane) = hits.float_at(at)?;
+    clicks.click(None, now);
+    clicks.gesture = Some(Gesture::Drag {
+        pane,
+        dx: at.x - frame.x,
+        dy: at.y - frame.y,
+    });
+    let lead = match focus {
+        Focus::Search => Some(Intent::PickerConfirm),
+        _ => None,
+    };
+    Some(intents([lead, Some(Intent::FocusPane(pane))]))
 }
 
 /// A left press on the focused pane while it has the keys: its program's
@@ -1718,6 +1793,158 @@ mod tests {
             routed,
             MouseRoute::Select(vec![], PaneId(1)),
             "a new press should start over"
+        );
+    }
+
+    /// `hits()` with float 9 drawn over both panes: its frame in columns 45
+    /// to 64 on lines 4 to 11, its content inside the border.
+    fn float_hits() -> HitMap {
+        let mut hits = hits();
+        hits.record_pane(Rect::new(46, 5, 18, 6), PaneId(9), true);
+        hits.record_float(Rect::new(45, 4, 20, 8), PaneId(9));
+        hits
+    }
+
+    #[rstest::rstest]
+    fn pane_at_returns_the_float_over_a_tiled_pane() {
+        // Given float 9 drawn over thread 1's pane.
+        let hits = float_hits();
+
+        // When asking which pane is at a cell of both.
+        let pane = hits.pane_at(ratatui::layout::Position::new(50, 7));
+
+        // Then it is the float.
+        assert_eq!(pane, Some(PaneId(9)), "the topmost pane wins");
+    }
+
+    #[rstest::rstest]
+    fn pane_at_on_a_float_border_is_no_pane() {
+        // Given float 9's border drawn over thread 1's pane.
+        let hits = float_hits();
+
+        // When asking which pane is on the border.
+        let pane = hits.pane_at(ratatui::layout::Position::new(45, 7));
+
+        // Then there is none.
+        assert_eq!(pane, None, "a float's border hides the pane beneath it");
+    }
+
+    #[rstest::rstest]
+    fn press_on_a_float_border_focuses_the_float() {
+        // Given float 9 drawn over thread 1's focused pane.
+        let (hits, mut clicks) = (float_hits(), Clicks::default());
+
+        // When pressing on the float's border.
+        let routed = route_with(left_click(45, 7), &hits, Focus::Pane, &mut clicks);
+
+        // Then the float gets the keys.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::FocusPane(PaneId(9))]),
+            "a press on a float's border brings it to the top"
+        );
+    }
+
+    #[rstest::rstest]
+    fn drag_after_a_float_border_press_moves_it_by_the_grab() {
+        // Given float 9's top border pressed two cells from its corner.
+        let (hits, mut clicks) = (float_hits(), Clicks::default());
+        route_with(left_click(47, 4), &hits, Focus::Pane, &mut clicks);
+
+        // When dragging to (50, 10).
+        let routed = route_with(left_drag(50, 10), &hits, Focus::Pane, &mut clicks);
+
+        // Then the float's corner follows, two cells to the left of the mouse.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::DragFloat {
+                pane: PaneId(9),
+                x: 48,
+                y: 10,
+            }]),
+            "the float moves with the grabbed point"
+        );
+    }
+
+    #[rstest::rstest]
+    fn release_after_a_float_drag_saves() {
+        // Given float 9's border pressed and dragged.
+        let (hits, mut clicks) = (float_hits(), Clicks::default());
+        route_with(left_click(45, 7), &hits, Focus::Pane, &mut clicks);
+        route_with(left_drag(50, 10), &hits, Focus::Pane, &mut clicks);
+
+        // When releasing.
+        let routed = route_with(left_release(50, 10), &hits, Focus::Pane, &mut clicks);
+
+        // Then the dragged float is saved.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::DropFloat]),
+            "the release saves the drag"
+        );
+    }
+
+    #[rstest::rstest]
+    fn press_on_a_float_over_the_focused_pane_focuses_the_float() {
+        // Given float 9 drawn over thread 1's focused pane, which has the keys.
+        let (hits, mut clicks) = (float_hits(), Clicks::default());
+
+        // When pressing on the float's content.
+        let routed = route_with(left_click(50, 7), &hits, Focus::Pane, &mut clicks);
+
+        // Then the float gets the keys instead of the pane beneath it.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::FocusPane(PaneId(9))]),
+            "a press on a float isn't forwarded to the pane under it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_tiled_pane_beside_a_focused_float_focuses_it() {
+        // Given float 9 with the keys.
+        let hits = float_hits();
+
+        // When clicking thread 1's pane outside the float.
+        let routed = route(
+            left_click(40, 15),
+            &hits,
+            Focus::Pane,
+            Some(PaneId(9)),
+            &mut Clicks::default(),
+            Instant::now(),
+        );
+
+        // Then thread 1's pane gets the keys.
+        assert_eq!(
+            routed,
+            MouseRoute::Intents(vec![Intent::FocusPane(PaneId(1))]),
+            "a click on a tiled pane focuses it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn wheel_over_a_float_above_a_stack_list_goes_to_the_float() {
+        // Given float 9 drawn over a stack's list.
+        let mut hits = stack_hits(4);
+        hits.record_pane(Rect::new(36, 2, 28, 4), PaneId(9), true);
+        hits.record_float(Rect::new(35, 1, 30, 6), PaneId(9));
+
+        // When wheeling over the list under the float.
+        let routed = route(
+            mouse(MouseEventKind::ScrollDown, 40, 2),
+            &hits,
+            Focus::Pane,
+            Some(PaneId(9)),
+            &mut Clicks::default(),
+            Instant::now(),
+        );
+
+        // Then the float's program gets the wheel.
+        assert_eq!(
+            routed,
+            MouseRoute::Wheel(PaneId(9)),
+            "the wheel over a float skips the list beneath it"
         );
     }
 }

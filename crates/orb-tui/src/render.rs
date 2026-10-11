@@ -2060,4 +2060,87 @@ mod tests {
             "a mode away from the pane should draw no box"
         );
     }
+
+    /// Where `state`'s shown float frame was drawn in `buffer`.
+    fn drawn_float(state: &AppState, buffer: &Buffer) -> Option<Rect> {
+        let [_, body] = crate::tabs::areas(right_of(buffer));
+        let layout = state.shown_layout()?;
+        crate::tabs::placement(state, layout, body)
+            .panes
+            .into_iter()
+            .find(|place| place.floating)
+            .map(|place| place.area)
+    }
+
+    #[rstest::rstest]
+    fn press_on_a_drawn_float_border_starts_a_drag() {
+        // Given float 2 drawn over thread 1's pane with the keys.
+        let state = laid_out(|state| {
+            state.focus = Focus::Pane;
+            state.layouts.add_float(SessionId(1), entry(2));
+        });
+        let (buffer, hits) = draw_hits(&state);
+        let frame = drawn_float(&state, &buffer);
+
+        // When pressing its top-left corner, then dragging three cells right.
+        let route = frame.map(|frame| {
+            let mut clicks = Clicks::default();
+            let event = |kind, column| MouseEvent {
+                kind,
+                column,
+                row: frame.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            let mut send = |event| {
+                mouse::route(
+                    event,
+                    &hits,
+                    Focus::Pane,
+                    Some(PaneId(2)),
+                    &mut clicks,
+                    Instant::now(),
+                )
+            };
+            send(event(MouseEventKind::Down(MouseButton::Left), frame.x));
+            (
+                frame,
+                send(event(MouseEventKind::Drag(MouseButton::Left), frame.x + 3)),
+            )
+        });
+
+        // Then the drag moves the float three cells right.
+        assert!(
+            route.is_some_and(|(frame, route)| route
+                == MouseRoute::Intents(vec![Intent::DragFloat {
+                    pane: PaneId(2),
+                    x: frame.x + 3,
+                    y: frame.y,
+                }])),
+            "a drag of a drawn float's border moves it"
+        );
+    }
+
+    #[rstest::rstest]
+    fn click_on_a_tab_with_floats_shown_keeps_the_keys_in_the_float() {
+        // Given two tabs, the first shown, and float 3 shown over them.
+        let state = laid_out(|state| {
+            state.layouts.new_tab(SessionId(1), entry(2));
+            state.layouts.add_float(SessionId(1), entry(3));
+            state.layouts.go_to_tab(SessionId(1), 1);
+        });
+        let (buffer, hits) = draw_hits(&state);
+
+        // When clicking where tab 2's label is drawn.
+        let route = find_in_bar(&buffer, " 2 ").map(|at| click_from_sidebar(&hits, at));
+
+        // Then tab 2 is shown with the keys still in the float.
+        assert_eq!(
+            route,
+            Some(MouseRoute::Intents(vec![
+                Intent::GoToTab(2),
+                Intent::FocusPane(PaneId(3))
+            ])),
+            "a tab click keeps the floats shown"
+        );
+    }
 }

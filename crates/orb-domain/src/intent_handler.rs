@@ -229,7 +229,7 @@ impl IntentHandler {
             Intent::FocusPane(pane) => {
                 match (validate_focus_pane(state, *pane), state.shown_session()) {
                     (Ok(()), Some(owner)) => {
-                        state.layouts.focus_pane(owner, *pane);
+                        state.layouts.reveal(owner, *pane);
                         let mut commands = attach_session(state);
                         commands.push(Command::SaveLayout(owner));
                         commands
@@ -246,6 +246,17 @@ impl IntentHandler {
                     _ => vec![],
                 }
             }
+            Intent::DragFloat { pane, x, y } => {
+                if let (Ok(()), Some(owner)) = (validate_float_action(state), state.shown_session())
+                {
+                    state.layouts.move_float_to(owner, *pane, *x, *y);
+                }
+                vec![]
+            }
+            Intent::DropFloat => match (validate_float_action(state), state.shown_session()) {
+                (Ok(()), Some(owner)) => vec![Command::SaveLayout(owner)],
+                _ => vec![],
+            },
             Intent::JumpBack => match validate_jump_back(state) {
                 Ok(()) => {
                     let target = state
@@ -8805,5 +8816,160 @@ mod tests {
 
         // Then the session keeps one tab.
         assert_eq!(tab_count(&state), 1, "breaking a pane needs the keys in it");
+    }
+
+    #[rstest::rstest]
+    fn focus_pane_on_a_tiled_pane_with_floats_shown_hides_them() {
+        // Given a shown float over thread 1's pane.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When clicking thread 1's pane.
+        IntentHandler::handle(&Intent::FocusPane(PaneId(1)), &mut state);
+
+        // Then the floats are hidden.
+        assert_eq!(
+            state.shown_layout().map(SessionLayout::float_focused),
+            Some(false),
+            "a click on a tiled pane hides the floats"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_pane_on_a_float_brings_it_to_the_top() {
+        // Given floats 70 and 71, 71 on top.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+        state.layouts.add_float(SessionId(1), test_entry(71));
+
+        // When clicking float 70.
+        IntentHandler::handle(&Intent::FocusPane(PaneId(70)), &mut state);
+
+        // Then float 70 is on top with the keys.
+        assert_eq!(
+            shown_focus(&state),
+            Some(PaneId(70)),
+            "a click on a float brings it to the top"
+        );
+    }
+
+    #[rstest::rstest]
+    fn focus_pane_on_a_pinned_float_shows_the_floats() {
+        // Given a pinned float, hidden.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+        IntentHandler::handle(&Intent::TogglePinFloat, &mut state);
+        state.layouts.toggle_floats(SessionId(1));
+
+        // When clicking the pinned float.
+        IntentHandler::handle(&Intent::FocusPane(PaneId(70)), &mut state);
+
+        // Then the floats are shown.
+        assert_eq!(
+            state.shown_layout().map(SessionLayout::float_focused),
+            Some(true),
+            "a click on a pinned float shows the floats"
+        );
+    }
+
+    #[rstest::rstest]
+    fn attach_on_an_agent_row_of_a_float_shows_it_on_top() {
+        // Given thread 1's pane turned into a hidden float beside shell pane
+        // 50, the cursor on its agent row in the sidebar.
+        let mut state = split_layout();
+        state.layouts.focus_pane(SessionId(1), PaneId(1));
+        state.layouts.float_pane(SessionId(1));
+        state.layouts.toggle_floats(SessionId(1));
+        state.focus = Focus::Sidebar;
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        });
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the floats are shown with thread 1's float on top.
+        assert_eq!(
+            shown_focus(&state),
+            Some(PaneId(1)),
+            "Enter on a float's agent row shows the floats with it on top"
+        );
+    }
+
+    #[rstest::rstest]
+    fn drag_float_moves_the_focused_float() {
+        // Given a float of session 1 with the keys.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When dragging it to (3, 4).
+        IntentHandler::handle(
+            &Intent::DragFloat {
+                pane: PaneId(70),
+                x: 3,
+                y: 4,
+            },
+            &mut state,
+        );
+
+        // Then its frame's top-left corner is at (3, 4).
+        let corner = state.shown_layout().and_then(|layout| {
+            layout
+                .floats()
+                .visible(Rect::new(0, 0, 80, 24))
+                .last()
+                .map(|(_, frame, _)| (frame.x, frame.y))
+        });
+        assert_eq!(corner, Some((3, 4)), "the dragged float follows the mouse");
+    }
+
+    #[rstest::rstest]
+    fn drag_float_returns_no_commands() {
+        // Given a float of session 1 with the keys.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When dragging it.
+        let commands = IntentHandler::handle(
+            &Intent::DragFloat {
+                pane: PaneId(70),
+                x: 3,
+                y: 4,
+            },
+            &mut state,
+        );
+
+        // Then nothing is saved yet.
+        assert!(commands.is_empty(), "only the release saves a drag");
+    }
+
+    #[rstest::rstest]
+    fn drop_float_saves_the_layout() {
+        // Given a float of session 1 with the keys.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When releasing a drag.
+        let commands = IntentHandler::handle(&Intent::DropFloat, &mut state);
+
+        // Then the layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "the release saves the dragged float"
+        );
+    }
+
+    #[rstest::rstest]
+    fn drop_float_without_a_float_does_nothing() {
+        // Given thread 1's lone pane with the keys.
+        let mut state = with_layout(Focus::Pane);
+
+        // When releasing a drag.
+        let commands = IntentHandler::handle(&Intent::DropFloat, &mut state);
+
+        // Then nothing is saved.
+        assert!(commands.is_empty(), "no float, nothing to save");
     }
 }

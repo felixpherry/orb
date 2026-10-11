@@ -117,19 +117,19 @@ pub fn validate_tab_action(state: &AppState) -> Result<(), TabActionError> {
 pub enum FocusPaneError {
     /// The selected thread has no layout.
     NoLayout,
-    /// The pane isn't in the shown tab.
+    /// The pane isn't in the shown tab or a drawn float.
     NotShown,
 }
 
-/// Allow focusing `pane` when it is in the shown tab.
+/// Allow focusing `pane` when it is in the shown tab or is one of its drawn floats.
 ///
 /// # Errors
 ///
 /// Returns [`FocusPaneError::NoLayout`] when no layout is shown, and
-/// [`FocusPaneError::NotShown`] when `pane` isn't in its shown tab.
+/// [`FocusPaneError::NotShown`] when `pane` isn't in its shown tab or a drawn float.
 pub fn validate_focus_pane(state: &AppState, pane: PaneId) -> Result<(), FocusPaneError> {
     let layout = state.shown_layout().ok_or(FocusPaneError::NoLayout)?;
-    if layout.active_tab().is_some_and(|tab| tab.holds(pane)) {
+    if layout.active_tab().is_some_and(|tab| tab.holds(pane)) || layout.floats().draws(pane) {
         Ok(())
     } else {
         Err(FocusPaneError::NotShown)
@@ -355,5 +355,36 @@ mod tests {
 
         // Then it is allowed.
         assert_eq!(result, Ok(()), "a shown pane takes clicks");
+    }
+
+    #[rstest::rstest]
+    fn focus_pane_is_allowed_for_a_shown_float() {
+        // Given a shown float over the shown layout.
+        let mut state = selected(Focus::Sidebar, true);
+        state.layouts.add_float(SessionId(1), test_entry(20));
+
+        // When validating a click on the float.
+        let result = validate_focus_pane(&state, PaneId(20));
+
+        // Then it is allowed.
+        assert_eq!(result, Ok(()), "a shown float takes clicks");
+    }
+
+    #[rstest::rstest]
+    fn focus_pane_is_refused_for_a_hidden_unpinned_float() {
+        // Given a hidden, unpinned float.
+        let mut state = selected(Focus::Sidebar, true);
+        state.layouts.add_float(SessionId(1), test_entry(20));
+        state.layouts.toggle_floats(SessionId(1));
+
+        // When validating a click on the float.
+        let result = validate_focus_pane(&state, PaneId(20));
+
+        // Then it is refused.
+        assert_eq!(
+            result,
+            Err(FocusPaneError::NotShown),
+            "a hidden float isn't drawn and takes no clicks"
+        );
     }
 }

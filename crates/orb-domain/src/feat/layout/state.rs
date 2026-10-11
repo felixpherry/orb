@@ -905,14 +905,20 @@ impl Layouts {
         }
     }
 
-    /// Shows the tab of `owner`'s layout holding `pane` and focuses `pane` in
-    /// it, expanding it when it's stacked; nothing when no tab holds it. A
-    /// zoomed tab stays zoomed.
+    /// Gives `pane` of `owner`'s layout the keys: a float goes on top and the
+    /// floats are shown; a tiled pane hides the floats (pinned ones stay
+    /// drawn), its tab is shown and it is focused, expanding it when it's
+    /// stacked. Nothing when the layout doesn't hold it. A zoomed tab stays
+    /// zoomed.
     pub fn reveal(&mut self, owner: SessionId, pane: PaneId) {
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
         };
+        if layout.floats.focus(pane) {
+            return;
+        }
         if let Some(index) = layout.tabs.iter().position(|tab| tab.holds(pane)) {
+            layout.floats.hide();
             layout.active = index;
             self.focus_pane(owner, pane);
         }
@@ -1021,6 +1027,14 @@ impl Layouts {
         let body = self.body;
         self.focused_floats(owner)
             .is_some_and(|floats| floats.cycle(back, body))
+    }
+
+    /// A mouse drag of float `pane` to top-left `x`, `y` while it has the
+    /// keys; see [`Floats::move_top_to`]. Whether it moved.
+    pub fn move_float_to(&mut self, owner: SessionId, pane: PaneId, x: u16, y: u16) -> bool {
+        let body = self.body;
+        self.focused_floats(owner)
+            .is_some_and(|floats| floats.move_top_to(pane, x, y, body))
     }
 
     /// Swaps the shown tab with the one before it; the first stays put.
@@ -3960,6 +3974,59 @@ mod tests {
             float_frames(&layouts),
             vec![Rect::new(40, 12, 40, 12)],
             "the float left takes the one-float place"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reveal_on_a_hidden_float_shows_it_on_top() {
+        // Given floats 20 and 21 over two panes, 21 on top, hidden.
+        let mut layouts = split_with_two_floats();
+        layouts.toggle_floats(OWNER);
+
+        // When revealing float 20.
+        layouts.reveal(OWNER, PaneId(20));
+
+        // Then float 20 is shown on top with the keys.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(20)),
+            "revealing a float shows the floats with it on top"
+        );
+    }
+
+    #[rstest::rstest]
+    fn reveal_on_a_tiled_pane_hides_the_floats() {
+        // Given floats 20 and 21 shown over panes 7 and 8.
+        let mut layouts = split_with_two_floats();
+
+        // When revealing pane 7.
+        layouts.reveal(OWNER, PaneId(7));
+
+        // Then the floats are hidden and pane 7 has the keys.
+        assert_eq!(
+            (
+                layouts.get(OWNER).map(SessionLayout::float_focused),
+                focused(&layouts)
+            ),
+            (Some(false), Some(PaneId(7))),
+            "revealing a tiled pane hides the floats"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_float_to_after_a_move_the_next_add_does_not_relay() {
+        // Given float 20 dragged to (5, 5).
+        let mut layouts = floats_in(FloatLayout::Staggered, &[20]);
+        layouts.move_float_to(OWNER, PaneId(20), 5, 5);
+
+        // When adding float 21.
+        layouts.add_float(OWNER, entry(21));
+
+        // Then float 20 stays where it was dragged.
+        assert_eq!(
+            float_frames(&layouts).first(),
+            Some(&Rect::new(5, 5, 40, 12)),
+            "a dragged float is changed by hand and not laid out again"
         );
     }
 }

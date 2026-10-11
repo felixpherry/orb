@@ -98,6 +98,11 @@ pub enum Intent {
     /// Show this stacked pane of the shown tab below the stack's list,
     /// leaving the keys where they are (the wheel over the list).
     ShowStacked(PaneId),
+    /// Move float `pane`, which has the keys, so its top-left corner is at
+    /// screen cell `x`, `y`, inside the tab body (a drag of its frame).
+    DragFloat { pane: PaneId, x: u16, y: u16 },
+    /// Save the layout after a float's frame was dragged (the release).
+    DropFloat,
     /// Attach to the selected session (un-settling a settled one), or open or
     /// close the Settled shelf on its header.
     Attach,
@@ -255,6 +260,8 @@ impl fmt::Display for Intent {
             Self::MoveTabRight => "move tab right",
             Self::FocusPane(_) => "focus pane",
             Self::ShowStacked(_) => "show pane",
+            Self::DragFloat { .. } => "drag float",
+            Self::DropFloat => "drop float",
             Self::SendCtrlG => "send ctrl g",
             Self::Attach => "attach",
             Self::JumpBack => "jump back",
@@ -325,6 +332,8 @@ mod tests {
     #[case(Intent::MoveTabRight, "move tab right")]
     #[case(Intent::FocusPane(PaneId(-1)), "focus pane")]
     #[case(Intent::ShowStacked(PaneId(-1)), "show pane")]
+    #[case(Intent::DragFloat { pane: PaneId(-1), x: 0, y: 0 }, "drag float")]
+    #[case(Intent::DropFloat, "drop float")]
     #[case(Intent::SendCtrlG, "send ctrl g")]
     #[case(Intent::ToggleFloats, "floats")]
     #[case(Intent::ToggleFloatEmbed, "embed/float")]
