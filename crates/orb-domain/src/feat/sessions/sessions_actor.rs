@@ -6698,6 +6698,88 @@ mod tests {
         Ok(())
     }
 
+    /// The directory of Claude's transcripts, holding session `aa` with
+    /// `lines`.
+    fn claude_dir_with(lines: &str) -> Result<tempfile::TempDir, Report<StoreError>> {
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(&path, lines).change_context(StoreError)?;
+        Ok(claude_dir)
+    }
+
+    const SOCRATIC_PLAN: &str = "{\"type\":\"user\",\"message\":{\"content\":\"<command-message>socratic-plan</command-message>\\n<command-name>/socratic-plan</command-name>\\n<command-args>fix the sidebar</command-args>\"}}\n";
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn poll_titles_a_thread_with_its_slash_commands_text() -> Result<(), Report<StoreError>> {
+        // Given a thread whose transcript starts with `/socratic-plan fix the sidebar`.
+        let claude_dir = claude_dir_with(SOCRATIC_PLAN)?;
+        let (store, id) = store_with_thread("aa")?;
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, claude_dir.path());
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the thread is titled with the text typed after the command.
+        assert_eq!(
+            shown(&state, id).and_then(|thread| thread.title).as_deref(),
+            Some("fix the sidebar"),
+            "the command's text should title the thread"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn custom_title_beats_a_slash_commands_text() -> Result<(), Report<StoreError>> {
+        // Given a thread whose transcript has a slash command with text, then a `/rename`.
+        let claude_dir = claude_dir_with(&format!(
+            "{SOCRATIC_PLAN}{{\"type\":\"custom-title\",\"customTitle\":\"orb-m1\"}}\n"
+        ))?;
+        let (store, id) = store_with_thread("aa")?;
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, claude_dir.path());
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the thread shows the `/rename`.
+        assert_eq!(
+            shown(&state, id).and_then(|thread| thread.title).as_deref(),
+            Some("orb-m1"),
+            "`/rename` should beat the command's text"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn orb_name_beats_a_slash_commands_text() -> Result<(), Report<StoreError>> {
+        // Given a thread renamed with `r` whose transcript starts with a slash command with text.
+        let claude_dir = claude_dir_with(SOCRATIC_PLAN)?;
+        let (store, id) = store_with_thread("aa")?;
+        resave(&store, "aa", |row| ThreadRow {
+            renamed_title: Some("Sidebar search".to_owned()),
+            ..row
+        })?;
+        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+        let (mut actor, state) = start(store, &host, claude_dir.path());
+
+        // When polling.
+        actor.poll().await;
+
+        // Then the thread keeps the orb name.
+        assert_eq!(
+            shown(&state, id).and_then(|thread| thread.title).as_deref(),
+            Some("Sidebar search"),
+            "the `r` name should beat the command's text"
+        );
+        Ok(())
+    }
+
     #[rstest::rstest]
     #[tokio::test]
     async fn poll_titles_a_thread_with_its_custom_title() -> Result<(), Report<StoreError>> {
