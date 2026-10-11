@@ -6844,7 +6844,7 @@ mod tests {
         assert_eq!(
             removed_of(&state, id),
             Some(false),
-            "<C-g> a on a removed project's directory should restore it"
+            "adding a removed project's directory should restore it"
         );
         Ok(())
     }

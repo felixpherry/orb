@@ -46,18 +46,21 @@ impl IntentHandler {
     /// changes nothing. After every intent, a cursor left on an agent row of
     /// a folded card unfolds it, unless a search lists the row anyway.
     /// Every intent but `PickerG` also ends a `gg` in progress.
+    /// `ProjectsChanged`, which only re-lists, leaves both alone.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per intent keeps every input decision in one match"
     )]
     pub fn handle(intent: &Intent, state: &mut AppState) -> Vec<Command> {
-        state.sessions.error = None;
-        state.sessions.notice = None;
-        state.worktrees.notice = None;
-        if *intent != Intent::PickerG
-            && let Some(picker) = state.picker.as_mut()
-        {
-            picker.forget_g();
+        if *intent != Intent::ProjectsChanged {
+            state.sessions.error = None;
+            state.sessions.notice = None;
+            state.worktrees.notice = None;
+            if *intent != Intent::PickerG
+                && let Some(picker) = state.picker.as_mut()
+            {
+                picker.forget_g();
+            }
         }
         let commands = match intent {
             Intent::Quit => {
@@ -255,6 +258,28 @@ impl IntentHandler {
                 open_picker(state, PickerState::projects(items, state.focus));
                 vec![]
             }
+            Intent::OpenProjects => {
+                let items = state
+                    .sessions
+                    .projects_by_recency()
+                    .into_iter()
+                    .map(project_item)
+                    .collect();
+                open_picker(state, PickerState::manage_projects(items, state.focus));
+                vec![]
+            }
+            Intent::ProjectsChanged => {
+                let items = state
+                    .sessions
+                    .projects_by_recency()
+                    .into_iter()
+                    .map(project_item)
+                    .collect();
+                if let Some(picker) = &mut state.picker {
+                    picker.show_projects(items);
+                }
+                vec![]
+            }
             Intent::NewIncognito => match (
                 validate_new_incognito(state),
                 validate_new_session(state),
@@ -312,8 +337,14 @@ impl IntentHandler {
             }
             Intent::AddProject => {
                 let (picker, dir) = PickerState::directories(state.home.clone(), state.focus);
-                state.picker = Some(picker);
-                state.focus = Focus::Picker;
+                let projects = state
+                    .picker
+                    .take_if(|open| *open.kind() == PickerKind::ManageProjects);
+                let picker = match projects {
+                    Some(list) => picker.over(list),
+                    None => picker,
+                };
+                open_picker(state, picker);
                 vec![Command::ListDirectories(dir)]
             }
             Intent::ChangeWorkspace => match (
@@ -570,9 +601,13 @@ impl IntentHandler {
                     }
                 }
                 Some(&PickerKind::RemoveProject { project }) => {
-                    match close_picker(state).as_ref().and_then(PickerState::selected) {
-                        Some(PickerItem::Confirm(true)) => remove_project(state, project),
-                        _ => vec![],
+                    let yes = state.picker.as_ref().and_then(PickerState::selected)
+                        == Some(&PickerItem::Confirm(true));
+                    back_to_list(state, yes);
+                    if yes {
+                        remove_project(state, project)
+                    } else {
+                        vec![]
                     }
                 }
                 Some(&PickerKind::SettleSession { session }) => {
@@ -629,11 +664,14 @@ impl IntentHandler {
                             _ => vec![],
                         }
                     }
-                    (_, Ok(())) => close_picker(state)
-                        .and_then(|picker| picker.directory_to_add())
-                        .map(Command::AddProject)
-                        .into_iter()
-                        .collect(),
+                    (_, Ok(())) => {
+                        let dir = state
+                            .picker
+                            .as_ref()
+                            .and_then(PickerState::directory_to_add);
+                        back_to_list(state, false);
+                        dir.map(Command::AddProject).into_iter().collect()
+                    }
                     _ => vec![],
                 },
             },
@@ -643,16 +681,10 @@ impl IntentHandler {
                 }
                 vec![]
             }
-            Intent::PickerCancel => match state.picker.as_ref().map(PickerState::kind) {
-                Some(PickerKind::DeleteWorktree { .. }) => {
-                    back_to_worktrees(state, false);
-                    vec![]
-                }
-                _ => {
-                    close_picker(state);
-                    vec![]
-                }
-            },
+            Intent::PickerCancel => {
+                back_to_list(state, false);
+                vec![]
+            }
             Intent::PickerRemove => match state.picker.as_ref().map(PickerState::kind) {
                 Some(PickerKind::Worktrees) => ask_delete_worktree(state),
                 _ => match (
@@ -660,11 +692,11 @@ impl IntentHandler {
                     state.picker.as_ref().and_then(PickerState::selected),
                 ) {
                     (Ok(()), Some(&PickerItem::Project { id, .. })) => {
-                        let return_to = state
-                            .picker
-                            .as_ref()
-                            .map_or(Focus::Sidebar, PickerState::return_to);
-                        state.picker = Some(PickerState::remove_project(id, return_to));
+                        if let Some(list) = state.picker.take() {
+                            let return_to = list.return_to();
+                            state.picker =
+                                Some(PickerState::remove_project(id, return_to).over(list));
+                        }
                         vec![]
                     }
                     _ => vec![],
@@ -1268,24 +1300,25 @@ fn leave_delete_worktree(state: &mut AppState) -> Vec<Command> {
         }
         _ => None,
     };
-    back_to_worktrees(state, delete.is_some());
+    back_to_list(state, delete.is_some());
     delete
         .map(|path| Command::DeleteWorktree { path })
         .into_iter()
         .collect()
 }
 
-/// Swaps the delete-worktree confirm for the list under it, dropping the
-/// selected row when `deleted`. The keys stay in the picker.
-fn back_to_worktrees(state: &mut AppState, deleted: bool) {
+/// Swaps the open picker for the list it was opened over, dropping the
+/// selected row when `drop_row`; the keys stay in the picker. With no list
+/// under it, closes it and gives the keys back.
+fn back_to_list(state: &mut AppState, drop_row: bool) {
     let Some(confirm) = state.picker.take() else {
         return;
     };
     let return_to = confirm.return_to();
     match confirm.back() {
         Some(mut list) => {
-            if deleted {
-                list.remove_worktree_row();
+            if drop_row {
+                list.remove_selected_row();
             }
             state.picker = Some(list);
         }
@@ -4229,9 +4262,8 @@ mod tests {
     }
 
     /// Projects alpha (1) and beta (2), holding idle threads 11 and 21 (21
-    /// listed first), the sidebar filtered to `filter` with the cursor on
-    /// `cursor`, and the project filter opened from the sidebar.
-    fn filtering(filter: Option<i64>, cursor: SidebarItem) -> AppState {
+    /// listed first), the sidebar filtered to `filter`, cursor on `cursor`.
+    fn two_projects(filter: Option<i64>, cursor: SidebarItem) -> AppState {
         let mut state = with_projects(&["alpha", "beta"]);
         for (project, id) in state.sessions.projects.iter_mut().zip([11, 21]) {
             project.threads = vec![thread(id, ThreadStatus::Idle)];
@@ -4239,7 +4271,20 @@ mod tests {
         state.sessions.sessions = sessions_for(&state.sessions.projects);
         state.sessions.filter = filter.map(ProjectId);
         state.sessions.cursor = Some(cursor);
+        state
+    }
+
+    /// [`two_projects`] with the project filter opened from the sidebar.
+    fn filtering(filter: Option<i64>, cursor: SidebarItem) -> AppState {
+        let mut state = two_projects(filter, cursor);
         IntentHandler::handle(&Intent::FilterProjects, &mut state);
+        state
+    }
+
+    /// [`two_projects`] with the projects screen opened from the sidebar.
+    fn managing(filter: Option<i64>, cursor: SidebarItem) -> AppState {
+        let mut state = two_projects(filter, cursor);
+        IntentHandler::handle(&Intent::OpenProjects, &mut state);
         state
     }
 
@@ -4256,9 +4301,9 @@ mod tests {
         highlight(state, &PickerItem::Confirm(true));
     }
 
-    /// [`filtering`], then `<C-x>` on alpha.
+    /// [`managing`], then `d` on alpha.
     fn removing_alpha(filter: Option<i64>, cursor: SidebarItem) -> AppState {
-        let mut state = filtering(filter, cursor);
+        let mut state = managing(filter, cursor);
         highlight(&mut state, &project_row(1, "alpha"));
         IntentHandler::handle(&Intent::PickerRemove, &mut state);
         state
@@ -4518,7 +4563,7 @@ mod tests {
 
     #[rstest::rstest]
     fn picker_remove_on_a_project_opens_the_remove_confirm() {
-        // Given the project filter with alpha highlighted.
+        // Given the projects screen with alpha highlighted.
         // When handling PickerRemove.
         let state = removing_alpha(None, on_thread(21));
 
@@ -4528,14 +4573,33 @@ mod tests {
             Some(&PickerKind::RemoveProject {
                 project: ProjectId(1)
             }),
-            "<C-x> on a project should ask to confirm its removal"
+            "d on a project should ask to confirm its removal"
         );
     }
 
     #[rstest::rstest]
-    fn picker_remove_on_all_projects_does_nothing() {
-        // Given the project filter with All projects highlighted.
+    fn picker_remove_on_a_project_draws_the_confirm_over_the_list() {
+        // Given the projects screen with alpha highlighted.
+        // When handling PickerRemove.
+        let state = removing_alpha(None, on_thread(21));
+
+        // Then the confirm is drawn over the projects screen.
+        assert_eq!(
+            state
+                .picker
+                .as_ref()
+                .and_then(PickerState::under)
+                .map(PickerState::kind),
+            Some(&PickerKind::ManageProjects),
+            "the remove confirm should sit over the projects screen"
+        );
+    }
+
+    #[rstest::rstest]
+    fn picker_remove_in_the_project_filter_does_nothing() {
+        // Given the project filter with alpha highlighted.
         let mut state = filtering(None, on_thread(21));
+        highlight(&mut state, &project_row(1, "alpha"));
 
         // When handling PickerRemove.
         IntentHandler::handle(&Intent::PickerRemove, &mut state);
@@ -4544,7 +4608,7 @@ mod tests {
         assert_eq!(
             state.picker.as_ref().map(PickerState::kind),
             Some(&PickerKind::ProjectFilter),
-            "All projects can't be removed"
+            "the project filter only filters"
         );
     }
 
@@ -4566,6 +4630,29 @@ mod tests {
                 Command::Visit(SessionId(21)),
             ],
             "Yes should remove the project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_yes_drops_the_project_row() {
+        // Given the remove confirm for alpha with Yes highlighted.
+        let mut state = removing_alpha(None, on_thread(21));
+        highlight(&mut state, &PickerItem::Confirm(true));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the projects screen is back, without alpha.
+        let picker = state.picker.as_ref();
+        assert_eq!(
+            (
+                picker.map(PickerState::kind),
+                picker.is_some_and(|picker| picker
+                    .shown()
+                    .any(|(item, _)| *item == project_row(1, "alpha"))),
+            ),
+            (Some(&PickerKind::ManageProjects), false),
+            "Yes should go back to the projects screen without alpha"
         );
     }
 
@@ -4599,18 +4686,295 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn cancelling_the_remove_confirm_returns_to_the_sidebar() {
-        // Given the remove confirm opened from the sidebar's project filter.
+    fn confirming_no_returns_to_the_projects_screen() {
+        // Given the remove confirm for alpha with No highlighted.
+        let mut state = removing_alpha(None, on_thread(21));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the projects screen is back, still listing alpha.
+        let picker = state.picker.as_ref();
+        assert_eq!(
+            (
+                picker.map(PickerState::kind),
+                picker.is_some_and(|picker| picker
+                    .shown()
+                    .any(|(item, _)| *item == project_row(1, "alpha"))),
+            ),
+            (Some(&PickerKind::ManageProjects), true),
+            "No should go back to the projects screen with alpha still listed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cancelling_the_remove_confirm_returns_to_the_projects_screen() {
+        // Given the remove confirm opened from the projects screen.
         let mut state = removing_alpha(None, on_thread(21));
 
         // When handling PickerCancel.
         IntentHandler::handle(&Intent::PickerCancel, &mut state);
 
-        // Then the picker is closed and the keys are back in the sidebar.
+        // Then the projects screen is back with the keys.
         assert_eq!(
-            (state.picker.is_none(), state.focus),
-            (true, Focus::Sidebar),
-            "Esc should close the confirm back to the sidebar"
+            (state.picker.as_ref().map(PickerState::kind), state.focus),
+            (Some(&PickerKind::ManageProjects), Focus::Picker),
+            "Esc should go back to the projects screen"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_projects_opens_the_projects_screen() {
+        // Given two projects and the keys in the sidebar.
+        let mut state = two_projects(None, on_thread(21));
+
+        // When handling OpenProjects.
+        IntentHandler::handle(&Intent::OpenProjects, &mut state);
+
+        // Then the projects screen takes the keys.
+        assert_eq!(
+            (state.focus, state.picker.as_ref().map(PickerState::kind)),
+            (Focus::Picker, Some(&PickerKind::ManageProjects)),
+            "<C-g> P should open the projects screen"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_projects_lists_projects_in_new_session_order() {
+        // Given two projects, and the rows the new-session picker lists.
+        let mut state = two_projects(None, on_thread(21));
+        let rows = |state: &AppState| -> Vec<PickerItem> {
+            state
+                .picker
+                .iter()
+                .flat_map(PickerState::shown)
+                .map(|(item, _)| item.clone())
+                .collect()
+        };
+        let new_session_rows = {
+            let mut picking = two_projects(None, on_thread(21));
+            IntentHandler::handle(&Intent::NewSession, &mut picking);
+            rows(&picking)
+        };
+
+        // When handling OpenProjects.
+        IntentHandler::handle(&Intent::OpenProjects, &mut state);
+
+        // Then it lists the same projects in the same order.
+        assert_eq!(
+            rows(&state),
+            new_session_rows,
+            "the projects screen should list projects as <C-g> n does"
+        );
+    }
+
+    /// [`managing`] at home `~/`, then `a`, with the directory picker listing
+    /// `dev`.
+    fn adding_from_projects() -> AppState {
+        let mut state = AppState {
+            home: HOME.into(),
+            ..managing(None, on_thread(21))
+        };
+        IntentHandler::handle(&Intent::AddProject, &mut state);
+        if let Some(picker) = &mut state.picker {
+            picker.show_directories(Path::new(HOME), vec!["dev".to_owned()]);
+        }
+        state
+    }
+
+    /// Adds project gamma (3, `/gamma`), with no threads, to `state`.
+    fn add_gamma(state: &mut AppState) {
+        if let Some(mut gamma) = state.sessions.projects.first().cloned() {
+            gamma.id = ProjectId(3);
+            gamma.title = "gamma".to_owned();
+            gamma.root = "/gamma".into();
+            gamma.threads = vec![];
+            state.sessions.projects.push(gamma);
+        }
+    }
+
+    /// Whether the projects screen, open or under the open picker, lists
+    /// `row`.
+    fn projects_screen_lists(state: &AppState, row: &PickerItem) -> bool {
+        state
+            .picker
+            .iter()
+            .flat_map(|picker| [Some(picker), picker.under()])
+            .flatten()
+            .filter(|picker| *picker.kind() == PickerKind::ManageProjects)
+            .any(|picker| picker.shown().any(|(item, _)| item == row))
+    }
+
+    #[rstest::rstest]
+    fn projects_changed_lists_a_new_project() {
+        // Given the projects screen, then project gamma added.
+        let mut state = managing(None, on_thread(21));
+        add_gamma(&mut state);
+
+        // When handling ProjectsChanged.
+        IntentHandler::handle(&Intent::ProjectsChanged, &mut state);
+
+        // Then gamma shows as a row.
+        assert!(
+            projects_screen_lists(&state, &project_row(3, "gamma")),
+            "a re-list should show the new project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn projects_changed_keeps_the_selected_project() {
+        // Given the projects screen with beta highlighted, then project gamma
+        // added.
+        let mut state = managing(None, on_thread(21));
+        highlight(&mut state, &project_row(2, "beta"));
+        add_gamma(&mut state);
+
+        // When handling ProjectsChanged.
+        IntentHandler::handle(&Intent::ProjectsChanged, &mut state);
+
+        // Then beta is still highlighted.
+        assert_eq!(
+            state.picker.as_ref().and_then(PickerState::selected),
+            Some(&project_row(2, "beta")),
+            "a re-list should keep the highlighted project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn projects_changed_relists_the_projects_screen_under_a_confirm() {
+        // Given the remove confirm over the projects screen, then project
+        // gamma added.
+        let mut state = removing_alpha(None, on_thread(21));
+        add_gamma(&mut state);
+
+        // When handling ProjectsChanged.
+        IntentHandler::handle(&Intent::ProjectsChanged, &mut state);
+
+        // Then the confirm stays on top and the list under it shows gamma.
+        assert_eq!(
+            (
+                matches!(
+                    state.picker.as_ref().map(PickerState::kind),
+                    Some(PickerKind::RemoveProject { .. })
+                ),
+                projects_screen_lists(&state, &project_row(3, "gamma")),
+            ),
+            (true, true),
+            "a re-list should reach the projects screen under the confirm"
+        );
+    }
+
+    #[rstest::rstest]
+    fn projects_changed_keeps_the_notice() {
+        // Given the projects screen and a notice on the mode line.
+        let mut state = managing(None, on_thread(21));
+        state.sessions.notice = Some("Added project gamma".to_owned());
+
+        // When handling ProjectsChanged.
+        IntentHandler::handle(&Intent::ProjectsChanged, &mut state);
+
+        // Then the notice is still shown.
+        assert!(
+            state.sessions.notice.is_some(),
+            "a re-list should not clear the notice"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_project_in_the_projects_screen_opens_the_directory_picker_over_it() {
+        // Given the projects screen.
+        let mut state = managing(None, on_thread(21));
+
+        // When handling AddProject.
+        IntentHandler::handle(&Intent::AddProject, &mut state);
+
+        // Then the directory picker is drawn over the projects screen.
+        let picker = state.picker.as_ref();
+        assert!(
+            matches!(
+                (
+                    picker.map(PickerState::kind),
+                    picker.and_then(PickerState::under).map(PickerState::kind),
+                ),
+                (
+                    Some(PickerKind::Directories { .. }),
+                    Some(PickerKind::ManageProjects)
+                )
+            ),
+            "a should open the directory picker over the projects screen"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_directory_over_the_projects_screen_returns_add_project() {
+        // Given the directory picker over the projects screen, `dev`
+        // highlighted.
+        let mut state = adding_from_projects();
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the sessions actor is asked to add `~/dev`.
+        assert_eq!(
+            commands,
+            vec![Command::AddProject(Path::new(HOME).join("dev"))],
+            "confirming a directory should add it as a project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_directory_over_the_projects_screen_returns_to_the_list() {
+        // Given the directory picker over the projects screen, `dev`
+        // highlighted.
+        let mut state = adding_from_projects();
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the projects screen is back with the keys.
+        assert_eq!(
+            (state.picker.as_ref().map(PickerState::kind), state.focus),
+            (Some(&PickerKind::ManageProjects), Focus::Picker),
+            "adding a directory should go back to the projects screen"
+        );
+    }
+
+    #[rstest::rstest]
+    fn confirming_a_project_in_the_projects_screen_opens_the_new_session_box() {
+        // Given the projects screen with alpha highlighted.
+        let mut state = managing(None, on_thread(21));
+        highlight(&mut state, &project_row(1, "alpha"));
+
+        // When handling PickerConfirm.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the New session box for alpha takes the keys.
+        assert!(
+            state.focus == Focus::Rename
+                && matches!(
+                    state.rename.as_ref().map(|rename| &rename.target),
+                    Some(RenameTarget::NewSession {
+                        project: ProjectId(1),
+                        ..
+                    })
+                ),
+            "⏎ in the projects screen should ask for a new session's name"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cancelling_the_directory_picker_over_the_projects_screen_returns_to_the_list() {
+        // Given the directory picker over the projects screen.
+        let mut state = adding_from_projects();
+
+        // When handling PickerCancel.
+        IntentHandler::handle(&Intent::PickerCancel, &mut state);
+
+        // Then the projects screen is back with the keys.
+        assert_eq!(
+            (state.picker.as_ref().map(PickerState::kind), state.focus),
+            (Some(&PickerKind::ManageProjects), Focus::Picker),
+            "Esc should go back to the projects screen"
         );
     }
 

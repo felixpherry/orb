@@ -83,7 +83,7 @@ use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::layout::state::{Layouts, SessionLayout};
 use orb_domain::feat::notify::notifier::NotifierService;
-use orb_domain::feat::picker::state::{PickerKind, PickerState};
+use orb_domain::feat::picker::state::PickerKind;
 use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
@@ -790,14 +790,18 @@ impl App {
     {
         match event {
             LoopEvent::Input(Event::Key(key)) if key.kind != KeyEventKind::Release => {
-                let (focus, mode, listing) = {
+                let (focus, mode, list_intent) = {
                     let state = self.state.read();
-                    let listing = state.picker.as_ref().is_some_and(PickerState::listing);
-                    (state.focus, state.pane_mode(), listing)
+                    let list_intent = state
+                        .picker
+                        .as_ref()
+                        .filter(|picker| picker.listing())
+                        .map(|picker| keymap::picker_list_route(picker.kind(), key));
+                    (state.focus, state.pane_mode(), list_intent)
                 };
                 let intent = match (focus, mode) {
                     // A list-mode picker takes letters as commands until `/`.
-                    (Focus::Picker, _) if listing => keymap::picker_list_route(key),
+                    (Focus::Picker, _) if list_intent.is_some() => list_intent.flatten(),
                     // The rename box and the search take the picker's keys.
                     (Focus::Picker | Focus::Rename | Focus::Search, _) => keymap::picker_route(key),
                     (Focus::Pane, Some(mode)) => {
@@ -858,7 +862,8 @@ impl App {
             // Resize and the rest: the next iteration lays out and redraws;
             // `reconcile` sweeps exited thread panes.
             LoopEvent::Pane(id, PaneEvent::Output) => self.type_resume(id),
-            LoopEvent::Input(_) | LoopEvent::StateChanged => {}
+            LoopEvent::Input(_) => {}
+            LoopEvent::StateChanged => self.relist_projects(),
             LoopEvent::Pane(id, PaneEvent::Exited) => self.exited.push(id),
             LoopEvent::InputFailed(error) => return Err(error),
             LoopEvent::Pane(_, PaneEvent::Clipboard(text)) => {
@@ -1288,6 +1293,27 @@ impl App {
             && let Some(pane) = self.panes.get(&id)
         {
             pane.type_line(&line);
+        }
+    }
+
+    /// After an actor changed the state, re-lists the projects screen when
+    /// it is open or under a picker, so an added or removed project shows.
+    fn relist_projects(&mut self) {
+        let commands = {
+            let mut state = self.state.write();
+            let open = state.picker.as_ref().is_some_and(|picker| {
+                [Some(picker), picker.under()]
+                    .into_iter()
+                    .flatten()
+                    .any(|shown| *shown.kind() == PickerKind::ManageProjects)
+            });
+            if !open {
+                return;
+            }
+            IntentHandler::handle(&Intent::ProjectsChanged, &mut state)
+        };
+        for command in &commands {
+            self.execute(command);
         }
     }
 

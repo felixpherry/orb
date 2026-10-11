@@ -15,13 +15,14 @@
 //! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
 //! row) go through the same keymap. In a pane every other key goes to its
 //! program. An open picker, the rename box and
-//! the sidebar search take typed characters and have their own fixed keys,
-//! `<C-x>` among them for removing a project from the project filter and
-//! `<C-s>` for showing or hiding settled sessions in the session picker.
+//! the sidebar search take typed characters and have their own fixed keys.
+//! The projects screen and the session and worktree pickers open in list
+//! mode, where letters are keys, until `/`.
 
 use std::fmt;
 
 use orb_domain::feat::layout::tree::{NavDirection, Split};
+use orb_domain::feat::picker::state::PickerKind;
 use orb_domain::feat::sessions::state::{FolderKind, SessionKind, Sessions};
 use orb_domain::{AppState, Focus, Intent, PaneMode};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -234,8 +235,8 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind(
-                "<leader>a",
-                Intent::AddProject,
+                "<leader>P",
+                Intent::OpenProjects,
                 KeyCategory::Sessions,
                 scope,
             )
@@ -546,10 +547,11 @@ pub(crate) fn picker_route(key: KeyEvent) -> Option<Intent> {
     }
 }
 
-/// What `key` does in a list-mode picker (the session and worktree pickers
-/// until `/`); `None` when it does nothing. Letters are commands here, not
-/// filter text.
-pub(crate) fn picker_list_route(key: KeyEvent) -> Option<Intent> {
+/// What `key` does in a list-mode picker of `kind` (the projects screen and
+/// the session and worktree pickers until `/`); `None` when it does nothing.
+/// Letters are commands here, not filter text; `a` adds a project in the
+/// projects screen.
+pub(crate) fn picker_list_route(kind: &PickerKind, key: KeyEvent) -> Option<Intent> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE)
         | (KeyCode::Char('j'), KeyModifiers::CONTROL) => Some(Intent::PickerNext),
@@ -565,6 +567,9 @@ pub(crate) fn picker_list_route(key: KeyEvent) -> Option<Intent> {
         (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Intent::PickerRemove),
         (KeyCode::Enter, KeyModifiers::NONE) => Some(Intent::PickerConfirm),
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Intent::PickerCancel),
+        (KeyCode::Char('a'), KeyModifiers::NONE) if *kind == PickerKind::ManageProjects => {
+            Some(Intent::AddProject)
+        }
         _ => None,
     }
 }
@@ -588,6 +593,7 @@ mod tests {
         picker_route, press, route,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
+    use orb_domain::feat::picker::state::PickerKind;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -661,7 +667,7 @@ mod tests {
     #[case(key(KeyCode::Esc), Intent::PickerCancel)]
     fn list_picker_keys_map_to_their_intents(#[case] pressed: KeyEvent, #[case] expected: Intent) {
         // Given / When routing the key in a list-mode picker.
-        let intent = picker_list_route(pressed);
+        let intent = picker_list_route(&PickerKind::Worktrees, pressed);
 
         // Then it yields its intent.
         assert_eq!(
@@ -677,13 +683,35 @@ mod tests {
     #[case('z')]
     fn letters_do_nothing_in_a_list_picker(#[case] letter: char) {
         // Given / When routing a letter in a list-mode picker.
-        let intent = picker_list_route(key(KeyCode::Char(letter)));
+        let intent = picker_list_route(&PickerKind::Worktrees, key(KeyCode::Char(letter)));
 
         // Then it neither filters nor acts.
         assert_eq!(
             intent, None,
             "{letter} should do nothing in a list-mode picker"
         );
+    }
+
+    #[rstest::rstest]
+    fn a_adds_a_project_in_the_projects_screen() {
+        // Given / When routing `a` in the projects screen's list.
+        let intent = picker_list_route(&PickerKind::ManageProjects, key(KeyCode::Char('a')));
+
+        // Then it opens the directory picker to add a project.
+        assert_eq!(
+            intent,
+            Some(Intent::AddProject),
+            "a in the projects screen should add a project"
+        );
+    }
+
+    #[rstest::rstest]
+    fn a_does_nothing_in_the_worktree_list() {
+        // Given / When routing `a` in the worktree picker's list.
+        let intent = picker_list_route(&PickerKind::Worktrees, key(KeyCode::Char('a')));
+
+        // Then it does nothing.
+        assert_eq!(intent, None, "a should do nothing in the worktree list");
     }
 
     #[rstest::rstest]
@@ -1368,6 +1396,23 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn leader_a_is_unbound(#[values(Scope::Sidebar, Scope::Pane)] scope: Scope) {
+        // Given `<C-g>` pressed in `scope`.
+        let mut keys = Keys::new(keymap(), scope);
+        press(&mut keys, LEADER);
+
+        // When pressing `a`.
+        let intent = press(&mut keys, key(KeyCode::Char('a')));
+
+        // Then nothing happens and no sequence is left waiting.
+        assert_eq!(
+            (intent, keys.is_pending()),
+            (None, false),
+            "<C-g> a should do nothing in {scope:?}"
+        );
+    }
+
+    #[rstest::rstest]
     fn leader_r_is_unbound_in_the_sidebar() {
         // Given `<C-g>` pressed in the sidebar.
         let mut keys = Keys::new(keymap(), Scope::Sidebar);
@@ -1557,8 +1602,8 @@ mod tests {
     #[case(Scope::SidebarEmpty, " ", Intent::OpenSessionPicker)]
     #[case(Scope::Sidebar, "n", Intent::NewSession)]
     #[case(Scope::Pane, "n", Intent::NewSession)]
-    #[case(Scope::SidebarEmpty, "a", Intent::AddProject)]
-    #[case(Scope::Pane, "a", Intent::AddProject)]
+    #[case(Scope::SidebarEmpty, "P", Intent::OpenProjects)]
+    #[case(Scope::Pane, "P", Intent::OpenProjects)]
     #[case(Scope::Sidebar, "f", Intent::FilterProjects)]
     #[case(Scope::SidebarEmpty, "f", Intent::FilterProjects)]
     #[case(Scope::PaneIncognito, "i", Intent::NewIncognito)]
@@ -1622,13 +1667,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, "/ Space W a b e f g i n q t w")]
-    #[case(Scope::SidebarEmpty, "/ Space W a e f g i n q")]
-    #[case(Scope::SidebarIncognito, "/ Space W a e f g i n q t")]
-    #[case(Scope::Pane, "/ <C-g> Space W a b e g i m n p q r t w")]
-    #[case(Scope::PaneIncognito, "/ <C-g> Space W a e g i m n p q r t")]
-    #[case(Scope::SidebarAgent, "/ Space W a b e f g i n q t w")]
-    #[case(Scope::SidebarAgentIncognito, "/ Space W a e f g i n q t")]
+    #[case(Scope::Sidebar, "/ P Space W b e f g i n q t w")]
+    #[case(Scope::SidebarEmpty, "/ P Space W e f g i n q")]
+    #[case(Scope::SidebarIncognito, "/ P Space W e f g i n q t")]
+    #[case(Scope::Pane, "/ <C-g> P Space W b e g i m n p q r t w")]
+    #[case(Scope::PaneIncognito, "/ <C-g> P Space W e g i m n p q r t")]
+    #[case(Scope::SidebarAgent, "/ P Space W b e f g i n q t w")]
+    #[case(Scope::SidebarAgentIncognito, "/ P Space W e f g i n q t")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 

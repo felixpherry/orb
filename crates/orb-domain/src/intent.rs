@@ -114,6 +114,12 @@ pub enum Intent {
     /// Open the worktree picker over every directory under
     /// `~/.orb/worktrees/<repo>/`, most recently used first.
     OpenWorktreePicker,
+    /// Open the projects screen, listing projects in `<C-g> n` order, to
+    /// start a session in one, add one or remove one.
+    OpenProjects,
+    /// The projects changed while the projects screen is open: re-list it.
+    /// Sent by the frontend's loop, not a key.
+    ProjectsChanged,
     /// Open the search picker, which finds typed text in the prompts and
     /// replies of every thread's transcripts, newest message first.
     OpenSearch,
@@ -140,7 +146,8 @@ pub enum Intent {
     Fold,
     /// Name a new session in orb's own `kind` folder.
     NewFolder(FolderKind),
-    /// Open the directory picker to add a project.
+    /// Open the directory picker, over the projects screen, to add a project
+    /// (`a`).
     AddProject,
     /// Open the workspace picker for the selected thread before its first
     /// prompt.
@@ -198,7 +205,8 @@ pub enum Intent {
     PickerLast,
     /// `g` in list mode: pressed twice, select the first item.
     PickerG,
-    /// Ask to remove the project highlighted in the project filter.
+    /// Ask to remove the project highlighted in the projects screen, or to
+    /// delete the worktree highlighted in the worktree picker (`d`).
     PickerRemove,
     /// Show or hide settled threads in the session picker, keeping the typed
     /// text.
@@ -257,6 +265,7 @@ impl fmt::Display for Intent {
             Self::NewIncognito => "incognito",
             Self::OpenSessionPicker => "sessions",
             Self::OpenWorktreePicker => "worktrees",
+            Self::OpenProjects | Self::ProjectsChanged => "projects",
             Self::OpenSearch => "grep",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",
@@ -341,6 +350,16 @@ mod tests {
         assert_eq!(
             Intent::OpenWorktreePicker.to_string(),
             "worktrees",
+            "which-key label"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_projects_displays_as_projects() {
+        // Given / When / Then: which-key labels OpenProjects "projects".
+        assert_eq!(
+            Intent::OpenProjects.to_string(),
+            "projects",
             "which-key label"
         );
     }

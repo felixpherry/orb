@@ -92,12 +92,13 @@ pub(crate) fn render(
         format!(" {} ", title(picker.kind(), sessions, layouts)),
         BLUE,
     ));
+    let footer = hints(picker.kind());
     let popup = {
         let lines = |count: usize| u16::try_from(count).unwrap_or(u16::MAX);
-        let title = u16::try_from(title.width()).unwrap_or(u16::MAX);
+        let label = u16::try_from(title.width().max(footer.width())).unwrap_or(u16::MAX);
         popup_rect(
             area,
-            title,
+            label,
             lines(picker.shown().count()),
             lines(picker.total()),
         )
@@ -110,7 +111,7 @@ pub(crate) fn render(
         .border_style(Style::new().fg(BORDER).bg(BG_DARK))
         .style(Style::new().bg(BG_DARK))
         .title(title.centered())
-        .title_bottom(hints(picker.kind()));
+        .title_bottom(footer);
     let inner = block.inner(popup);
     block.render(popup, buf);
     let [input, rule, rows] = Layout::vertical([
@@ -126,14 +127,14 @@ pub(crate) fn render(
 }
 
 /// The popup: half the width, kept to 44–72 columns but wide enough for its
-/// `title` cells between the corners, never wider than `area`; and as tall
+/// `label` cells (the wider of its title and hints) between the corners, never wider than `area`; and as tall
 /// as `shown` rows plus its border, input and rule, at most 60% of the
 /// height. It's centred across, and its top stays where the popup for all
 /// `total` rows would be centred, so filtering doesn't move the input.
-fn popup_rect(area: Rect, title: u16, shown: u16, total: u16) -> Rect {
+fn popup_rect(area: Rect, label: u16, shown: u16, total: u16) -> Rect {
     let width = (area.width / 2)
         .clamp(44, 72)
-        .max(title.saturating_add(2))
+        .max(label.saturating_add(2))
         .min(area.width);
     let tallest = (area.height.saturating_mul(3) / 5).max(8).min(area.height);
     let full = total.max(1).saturating_add(4).min(tallest);
@@ -175,7 +176,7 @@ fn title(kind: &PickerKind, sessions: &Sessions, layouts: &Layouts) -> Cow<'stat
                 .unwrap_or_else(|| NEW_THREAD.to_owned());
             return Cow::Owned(format!("Close {label}?"));
         }
-        PickerKind::Projects => "Projects",
+        PickerKind::Projects | PickerKind::ManageProjects => "Projects",
         PickerKind::Sessions { .. } => "Sessions",
         PickerKind::Worktrees => "Worktrees",
         PickerKind::Search { .. } => "Search",
@@ -199,7 +200,14 @@ fn title(kind: &PickerKind, sessions: &Sessions, layouts: &Layouts) -> Cow<'stat
 fn hints(kind: &PickerKind) -> Line<'static> {
     let keys: &[(&str, &str)] = match kind {
         PickerKind::Directories { .. } => &[("⏎", "add"), ("Tab", "open"), ("Esc", "close")],
-        PickerKind::ProjectFilter => &[("⏎", "filter"), ("<C-x>", "remove"), ("Esc", "close")],
+        PickerKind::ManageProjects => &[
+            ("⏎", "new session"),
+            ("a", "add"),
+            ("d", "remove"),
+            ("/", "search"),
+            ("Esc", "close"),
+        ],
+        PickerKind::ProjectFilter => &[("⏎", "filter"), ("Esc", "close")],
         PickerKind::RemoveProject { .. }
         | PickerKind::SettleSession { .. }
         | PickerKind::DeleteSession { .. }
@@ -955,6 +963,7 @@ mod tests {
     )]
     #[case::clean_worktree(delete_worktree(false), "Delete worktree?")]
     #[case::dirty_worktree(delete_worktree(true), "Delete worktree and its uncommitted changes?")]
+    #[case::manage_projects(PickerState::manage_projects(vec![], Focus::Sidebar), "Projects")]
     fn picker_is_titled_by_its_kind(#[case] picker: PickerState, #[case] title: &str) {
         // Given a picker of some kind.
 
@@ -1115,7 +1124,7 @@ mod tests {
     )]
     #[case(
         PickerState::project_filter(vec![PickerItem::AllProjects], None, Focus::Sidebar),
-        "⏎ filter · <C-x> remove · Esc close"
+        "⏎ filter · Esc close"
     )]
     #[case(
         PickerState::remove_project(ProjectId(1), Focus::Sidebar),
@@ -1135,6 +1144,10 @@ mod tests {
     )]
     #[case::delete_worktree(delete_worktree(false), "⏎ confirm · Esc cancel")]
     #[case(workspace(), "⏎ select · Esc close")]
+    #[case::manage_projects(
+        PickerState::manage_projects(vec![], Focus::Sidebar),
+        "⏎ new session · a add · d remove · / search · Esc close"
+    )]
     fn hints(#[case] picker: PickerState, #[case] expected: &str) {
         // Given a picker of some kind.
 

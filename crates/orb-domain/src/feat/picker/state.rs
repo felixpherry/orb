@@ -36,7 +36,10 @@ pub enum PickTarget {
 pub enum PickerKind {
     /// `<C-g> n`: pick the project of a new session.
     Projects,
-    /// `<C-g> a`: pick a directory to add as a project. `listed` is the directory
+    /// `<C-g> P`: the projects screen, to start a session in, add or remove
+    /// projects.
+    ManageProjects,
+    /// `a` in the projects screen: pick a directory to add as a project. `listed` is the directory
     /// text (e.g. `~/dev/`) the items were read from; `None` while the input
     /// isn't a path.
     Directories { listed: Option<String> },
@@ -57,7 +60,7 @@ pub enum PickerKind {
     InitGit { project: ProjectId },
     /// `<C-g> f`: pick the project the sidebar is filtered to, or all of them.
     ProjectFilter,
-    /// `<C-x>` in the project filter: confirm removing `project`.
+    /// `d` in the projects screen: confirm removing `project`.
     RemoveProject { project: ProjectId },
     /// `s` on a session: confirm settling it.
     SettleSession { session: SessionId },
@@ -71,7 +74,7 @@ pub enum PickerKind {
     Sessions { settled: bool },
     /// `<C-g> W`: orb's worktrees, to look over and delete.
     Worktrees,
-    /// `<C-x>` in the worktree picker: confirm force-removing the worktree at
+    /// `d` in the worktree picker: confirm force-removing the worktree at
     /// `path`. `dirty` is whether it has uncommitted changes.
     DeleteWorktree { path: PathBuf, dirty: bool },
     /// `<C-g> /`: messages across every thread's transcripts that match the typed
@@ -126,8 +129,8 @@ pub struct PickerState {
     preview: Option<SessionPreview>,
     /// The search picker's preview, as last loaded.
     search_preview: Option<SearchPreview>,
-    /// The worktree list a delete confirm was opened over; the confirm
-    /// returns to it.
+    /// The list this picker was opened over (a confirm, or the directory
+    /// picker over the projects screen); it returns to it.
     under: Option<Box<PickerState>>,
     /// Whether letters filter or act as list keys.
     mode: PickerMode,
@@ -172,6 +175,16 @@ impl PickerState {
     pub fn worktrees(items: Vec<PickerItem>, return_to: Focus) -> Self {
         Self {
             kind: PickerKind::Worktrees,
+            mode: PickerMode::List { pending_g: false },
+            ..Self::projects(items, return_to)
+        }
+    }
+
+    /// The projects screen over `items`, in the order given, opening in list
+    /// mode.
+    pub fn manage_projects(items: Vec<PickerItem>, return_to: Focus) -> Self {
+        Self {
+            kind: PickerKind::ManageProjects,
             mode: PickerMode::List { pending_g: false },
             ..Self::projects(items, return_to)
         }
@@ -243,13 +256,21 @@ impl PickerState {
     /// selected, over `list`, which it returns to.
     pub fn delete_worktree(list: PickerState, path: PathBuf, dirty: bool) -> Self {
         let return_to = list.return_to;
+        Self::confirm(PickerKind::DeleteWorktree { path, dirty }, return_to).over(list)
+    }
+
+    /// This picker drawn over `list`, which it returns to; the keys go back
+    /// to where `list` was opened from when they close.
+    #[must_use]
+    pub fn over(self, list: PickerState) -> Self {
         Self {
+            return_to: list.return_to,
             under: Some(Box::new(list)),
-            ..Self::confirm(PickerKind::DeleteWorktree { path, dirty }, return_to)
+            ..self
         }
     }
 
-    /// The picker this confirm was opened over, if any.
+    /// The picker this one was opened over, if any.
     pub fn back(self) -> Option<PickerState> {
         self.under.map(|list| *list)
     }
@@ -443,6 +464,32 @@ impl PickerState {
         }
     }
 
+    /// Shows `items`, fresh project rows, in the projects screen (this picker
+    /// or the one under it), filtered by the typed text, keeping the selected
+    /// project selected while it's still shown. Other pickers ignore it.
+    pub fn show_projects(&mut self, items: Vec<PickerItem>) {
+        if self.kind != PickerKind::ManageProjects {
+            if let Some(list) = &mut self.under {
+                list.show_projects(items);
+            }
+            return;
+        }
+        let id_of = |item: &PickerItem| match item {
+            PickerItem::Project { id, .. } => Some(*id),
+            _ => None,
+        };
+        let selected = self.list.selected().and_then(id_of);
+        let wanted = items
+            .iter()
+            .find(|item| selected.is_some() && id_of(item) == selected)
+            .cloned();
+        let pattern = self.list.input().to_owned();
+        self.list.set_items(items, &pattern);
+        if let Some(wanted) = wanted {
+            self.list.select(&wanted);
+        }
+    }
+
     /// Shows `refs`, listed in `cwd`, filtered by the typed text. Ignored
     /// unless this is `cwd`'s branch or base picker. A branch picker selects
     /// the wanted branch when nothing is typed and, once the thread has had a
@@ -540,9 +587,9 @@ impl PickerState {
         }
     }
 
-    /// Drops the selected worktree row, keeping the typed text, and selects
-    /// the next row, else the previous one.
-    pub fn remove_worktree_row(&mut self) {
+    /// Drops the selected row, keeping the typed text, and selects the next
+    /// row, else the previous one.
+    pub fn remove_selected_row(&mut self) {
         self.list.remove_selected();
     }
 
@@ -1440,6 +1487,27 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    fn show_projects_leaves_another_picker_alone() {
+        // Given a project picker showing nothing.
+        let mut picker = PickerState::projects(Vec::new(), Focus::Sidebar);
+
+        // When the projects are re-listed.
+        picker.show_projects(vec![PickerItem::Project {
+            id: ProjectId(1),
+            title: "alpha".to_owned(),
+            root: PathBuf::from("/alpha"),
+            kind: ProjectKind::Normal,
+        }]);
+
+        // Then it still shows nothing.
+        assert_eq!(
+            picker.shown().count(),
+            0,
+            "only the projects screen should re-list projects"
+        );
+    }
+
     /// Local branch `name`, the default branch when `default`.
     fn local(name: &str, default: bool) -> GitRef {
         GitRef {
@@ -1890,6 +1958,7 @@ mod tests {
     #[rstest::rstest]
     #[case::worktrees(PickerState::worktrees(vec![], Focus::Sidebar))]
     #[case::sessions(PickerState::sessions(vec![], Focus::Sidebar))]
+    #[case::manage_projects(PickerState::manage_projects(vec![], Focus::Sidebar))]
     fn list_mode_pickers_open_listing(#[case] picker: PickerState) {
         // Given / When opening a list-mode picker.
 

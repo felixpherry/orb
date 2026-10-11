@@ -1,7 +1,7 @@
 //! Checks whether the open picker's keys can proceed: `⏎` picking a project
-//! or adding a directory, `Tab` opening one, `<C-x>` removing a project,
-//! `⏎` picking a session in the session or search picker, and `<C-x>`
-//! deleting a worktree.
+//! or adding a directory, `Tab` opening one, `d` removing a project in the
+//! projects screen, `⏎` picking a session in the session or search picker,
+//! and `d` deleting a worktree.
 
 use std::time::SystemTime;
 
@@ -27,14 +27,22 @@ pub enum PickProjectError {
 ///
 /// # Errors
 ///
-/// Returns [`PickProjectError::NoPicker`] unless the project picker is open,
-/// and [`PickProjectError::NoProject`] when nothing is highlighted.
+/// Returns [`PickProjectError::NoPicker`] unless the project picker or the
+/// projects screen is open, and [`PickProjectError::NoProject`] when nothing
+/// is highlighted.
 pub fn validate_pick_project(state: &AppState) -> Result<(), PickProjectError> {
     match &state.picker {
-        Some(picker) if *picker.kind() == PickerKind::Projects => match picker.selected() {
-            None => Err(PickProjectError::NoProject),
-            Some(_) => Ok(()),
-        },
+        Some(picker)
+            if matches!(
+                picker.kind(),
+                PickerKind::Projects | PickerKind::ManageProjects
+            ) =>
+        {
+            match picker.selected() {
+                None => Err(PickProjectError::NoProject),
+                Some(_) => Ok(()),
+            }
+        }
         _ => Err(PickProjectError::NoPicker),
     }
 }
@@ -100,22 +108,21 @@ pub fn validate_add_directory(state: &AppState) -> Result<(), AddDirectoryError>
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum RemoveProjectError {
-    /// No project filter picker is open.
+    /// No projects screen is open.
     NoPicker,
     /// The highlighted row isn't a project.
     NotAProject,
 }
 
-/// Allow asking to remove the project highlighted in the project filter.
+/// Allow asking to remove the project highlighted in the projects screen.
 ///
 /// # Errors
 ///
-/// Returns [`RemoveProjectError::NoPicker`] unless the project filter picker
-/// is open, and [`RemoveProjectError::NotAProject`] when `All projects`, or
-/// nothing, is highlighted.
+/// Returns [`RemoveProjectError::NoPicker`] unless the projects screen is
+/// open, and [`RemoveProjectError::NotAProject`] when nothing is highlighted.
 pub fn validate_remove_project(state: &AppState) -> Result<(), RemoveProjectError> {
     match &state.picker {
-        Some(picker) if *picker.kind() == PickerKind::ProjectFilter => match picker.selected() {
+        Some(picker) if *picker.kind() == PickerKind::ManageProjects => match picker.selected() {
             Some(PickerItem::Project { .. }) => Ok(()),
             _ => Err(RemoveProjectError::NotAProject),
         },
@@ -299,6 +306,21 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn pick_project_is_allowed_in_the_projects_screen() {
+        // Given the projects screen with alpha highlighted.
+        let state = AppState {
+            picker: Some(PickerState::manage_projects(vec![alpha()], Focus::Sidebar)),
+            ..AppState::default()
+        };
+
+        // When validating a pick.
+        let result = validate_pick_project(&state);
+
+        // Then it is allowed.
+        assert_eq!(result, Ok(()), "the projects screen should pick a project");
+    }
+
+    #[rstest::rstest]
     fn pick_project_is_allowed_while_starting() {
         // Given alpha highlighted while a session start is in flight.
         let state = AppState {
@@ -365,14 +387,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn remove_project_is_refused_on_all_projects() {
-        // Given the project filter with All projects highlighted.
+    fn remove_project_is_refused_with_no_project_highlighted() {
+        // Given the projects screen with no rows.
         let state = AppState {
-            picker: Some(PickerState::project_filter(
-                vec![PickerItem::AllProjects, alpha()],
-                None,
-                Focus::Sidebar,
-            )),
+            picker: Some(PickerState::manage_projects(vec![], Focus::Sidebar)),
             ..AppState::default()
         };
 
@@ -383,15 +401,19 @@ mod tests {
         assert_eq!(
             result,
             Err(RemoveProjectError::NotAProject),
-            "All projects can't be removed"
+            "with nothing highlighted there is nothing to remove"
         );
     }
 
     #[rstest::rstest]
-    fn remove_project_is_refused_outside_the_project_filter() {
-        // Given the `<C-g> n` project picker with alpha highlighted.
+    fn remove_project_is_refused_in_the_project_filter() {
+        // Given the project filter with alpha highlighted.
         let state = AppState {
-            picker: Some(PickerState::projects(vec![alpha()], Focus::Sidebar)),
+            picker: Some(PickerState::project_filter(
+                vec![PickerItem::AllProjects, alpha()],
+                Some(ProjectId(1)),
+                Focus::Sidebar,
+            )),
             ..AppState::default()
         };
 
@@ -402,19 +424,15 @@ mod tests {
         assert_eq!(
             result,
             Err(RemoveProjectError::NoPicker),
-            "only the project filter removes projects"
+            "only the projects screen removes projects"
         );
     }
 
     #[rstest::rstest]
     fn remove_project_is_allowed_on_a_project_row() {
-        // Given the project filter with alpha highlighted.
+        // Given the projects screen with alpha highlighted.
         let state = AppState {
-            picker: Some(PickerState::project_filter(
-                vec![PickerItem::AllProjects, alpha()],
-                Some(ProjectId(1)),
-                Focus::Sidebar,
-            )),
+            picker: Some(PickerState::manage_projects(vec![alpha()], Focus::Sidebar)),
             ..AppState::default()
         };
 

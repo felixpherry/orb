@@ -199,7 +199,7 @@ fn key_name(key: &KeyEvent) -> String {
 fn look(intent: &Intent) -> (&'static str, Color) {
     match intent {
         Intent::NewSession => ("\u{f067}", GREEN),
-        Intent::AddProject => (FOLDER_OPEN, BLUE),
+        Intent::OpenProjects => (FOLDER_OPEN, BLUE),
         Intent::FilterProjects => ("\u{f0b0}", CYAN),
         Intent::ChangeWorkspace => ("\u{f1bb}", GREEN),
         Intent::SwitchBranch => ("\u{e725}", ORANGE),
