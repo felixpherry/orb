@@ -14,9 +14,8 @@ use tokio::time::MissedTickBehavior;
 
 use super::state::{Verdict, Worktree, users, verdict};
 use crate::command::WorktreesCommand;
-use crate::common::{State, Wake};
+use crate::common::{Outcome, Reporter, State};
 use crate::feat::git::git_service::{GitService, git_reason};
-use crate::feat::picker::state::worktree_items;
 
 /// How often the sweep runs after the first, at start.
 pub const SWEEP_EVERY: Duration = Duration::from_hours(1);
@@ -27,20 +26,20 @@ pub struct WorktreesActorDeps {
     pub state: State,
     /// `~/.orb/worktrees`: its `*/*` directories are the worktrees.
     pub worktrees_root: PathBuf,
-    /// Tells the frontend to redraw.
-    pub wake: Wake,
+    /// Tells the frontend loop what changed.
+    pub report: Reporter,
     /// The time between sweeps.
     pub sweep_every: Duration,
 }
 
 /// Owns [`Worktrees`](super::state::Worktrees): the list of orb's worktrees
-/// with their facts and sizes, and the notice. The intent handler also clears
-/// the notice.
+/// with their facts and sizes. Its notices go to the frontend loop as
+/// reports.
 pub struct WorktreesActor {
     git: GitService,
     state: State,
     worktrees_root: PathBuf,
-    wake: Wake,
+    report: Reporter,
     sweep_every: Duration,
 }
 
@@ -108,7 +107,7 @@ impl WorktreesActor {
             git: deps.git,
             state: deps.state,
             worktrees_root: deps.worktrees_root,
-            wake: deps.wake,
+            report: deps.report,
             sweep_every: deps.sweep_every,
         }
     }
@@ -121,8 +120,8 @@ impl WorktreesActor {
         let n = self.prune();
         if n > 0 {
             let s = if n == 1 { "" } else { "s" };
-            self.state.write().worktrees.notice = Some(format!("pruned {n} worktree{s}"));
-            (self.wake)();
+            self.report
+                .report(Outcome::Notice(format!("pruned {n} worktree{s}")));
         }
         self.scan();
         self.read_sizes();
@@ -183,7 +182,7 @@ impl WorktreesActor {
 
     /// Force-removes the worktree at `path` through its main repository,
     /// keeping its branch, then rescans and re-reads facts. A failure, or a
-    /// path with no known repository, goes to the notice.
+    /// path with no known repository, is reported as a notice.
     fn delete(&self, path: &Path) {
         let repo = self
             .state
@@ -201,16 +200,16 @@ impl WorktreesActor {
                 .err()
                 .map(|report| git_reason(&report)),
         };
-        if failure.is_some() {
-            self.state.write().worktrees.notice = failure;
+        if let Some(failure) = failure {
+            self.report.report(Outcome::Notice(failure));
         }
         self.scan();
         self.read_facts();
     }
 
     /// Lists the `*/*` directories under the root, keeping what's already
-    /// known about paths still there, and lists them again in the worktree
-    /// picker if it's open. Only a directory whose `.git` is a file
+    /// known about paths still there, and reports the new list, so an open
+    /// worktree picker re-lists. Only a directory whose `.git` is a file
     /// (a linked worktree) gets a repo, so git never answers for an enclosing
     /// repository.
     fn scan(&self) {
@@ -239,17 +238,8 @@ impl WorktreesActor {
                 },
             })
             .collect();
-        {
-            let mut app = self.state.write();
-            app.worktrees.list = list;
-            if app.picker.is_some() {
-                let items = worktree_items(&app);
-                if let Some(picker) = &mut app.picker {
-                    picker.show_worktrees(items);
-                }
-            }
-        }
-        (self.wake)();
+        self.state.write().worktrees.list = list;
+        self.report.report(Outcome::WorktreesChanged);
     }
 
     /// Reads git's facts for every worktree with a known repo, writing each
@@ -284,7 +274,7 @@ impl WorktreesActor {
             .collect()
     }
 
-    /// Edits the listed worktree at `path`, if still listed, then wakes.
+    /// Edits the listed worktree at `path`, if still listed, then reports the change.
     fn update<F>(&self, path: &Path, edit: F)
     where
         F: FnOnce(&mut Worktree),
@@ -299,7 +289,7 @@ impl WorktreesActor {
         {
             edit(w);
         }
-        (self.wake)();
+        self.report.changed();
     }
 }
 
@@ -333,12 +323,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{SWEEP_EVERY, WorktreesActor, WorktreesActorDeps, spawn_worktrees_actor};
-    use crate::common::{Log, State};
+    use crate::AppState;
+    use crate::common::{Log, Outcome, Reporter, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
-    use crate::feat::picker::state::PickerState;
     use crate::feat::sessions::state::{Project, ProjectId, ProjectKind, Sessions};
     use crate::feat::worktrees::state::Worktree;
-    use crate::{AppState, Focus};
 
     /// The main repository the fake git names for every linked worktree.
     const REPO: &str = "/repo";
@@ -583,6 +572,19 @@ mod tests {
         }
     }
 
+    /// The notices `actor` reported, oldest first.
+    fn notices(actor: &WorktreesActor) -> Vec<String> {
+        actor
+            .report
+            .outcomes()
+            .into_iter()
+            .filter_map(|outcome| match outcome {
+                Outcome::Notice(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn deps(
         git: &Arc<FakeGit>,
         root: &TempDir,
@@ -593,7 +595,7 @@ mod tests {
             git: GitService::new(git.clone(), Log::default()),
             state: state.clone(),
             worktrees_root: root.path().to_owned(),
-            wake: Arc::new(|| {}),
+            report: Reporter::new(|_| {}),
             sweep_every: every,
         }
     }
@@ -687,28 +689,28 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn sweep_sets_notice_with_the_count() -> io::Result<()> {
+    fn sweep_reports_how_many_were_pruned() -> io::Result<()> {
         // Given two clean orphans.
         let root = tempfile::tempdir()?;
         worktree(&root, "orb-a1")?;
         worktree(&root, "orb-b2")?;
         let git = Arc::new(FakeGit::default());
-        let (actor, state) = start(&git, &root, one_project());
+        let (actor, _state) = start(&git, &root, one_project());
 
         // When sweeping.
         actor.sweep();
 
-        // Then the notice counts both.
+        // Then the reported notice counts both.
         assert_eq!(
-            state.read().worktrees.notice.as_deref(),
-            Some("pruned 2 worktrees"),
+            notices(&actor),
+            ["pruned 2 worktrees"],
             "the notice should say how many were pruned"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn sweep_with_nothing_removed_sets_no_notice() -> io::Result<()> {
+    fn sweep_that_removes_nothing_reports_no_notice() -> io::Result<()> {
         // Given an orphan with uncommitted changes.
         let root = tempfile::tempdir()?;
         let path = worktree(&root, "orb-a1")?;
@@ -716,15 +718,15 @@ mod tests {
             facts: HashMap::from([(path, dirty())]),
             ..FakeGit::default()
         });
-        let (actor, state) = start(&git, &root, one_project());
+        let (actor, _state) = start(&git, &root, one_project());
 
         // When sweeping.
         actor.sweep();
 
-        // Then there is no notice.
+        // Then no notice is reported.
         assert_eq!(
-            state.read().worktrees.notice,
-            None,
+            notices(&actor),
+            Vec::<String>::new(),
             "a sweep that removes nothing should say nothing"
         );
         Ok(())
@@ -906,7 +908,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn delete_failure_puts_the_reason_in_notice() -> io::Result<()> {
+    fn failed_delete_reports_gits_reason() -> io::Result<()> {
         // Given a scanned worktree git refuses to remove.
         let root = tempfile::tempdir()?;
         let path = worktree(&root, "orb-a1")?;
@@ -914,42 +916,36 @@ mod tests {
             refused: HashMap::from([(path.clone(), "fatal: locked".to_owned())]),
             ..FakeGit::default()
         });
-        let (actor, state) = start(&git, &root, one_project());
+        let (actor, _state) = start(&git, &root, one_project());
         actor.scan();
 
         // When deleting it.
         actor.delete(&path);
 
-        // Then git's reason is the notice.
+        // Then git's reason is reported as a notice.
         assert_eq!(
-            state.read().worktrees.notice.as_deref(),
-            Some("fatal: locked"),
+            notices(&actor),
+            ["fatal: locked"],
             "the notice should carry git's reason"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn scan_lists_a_new_worktree_in_the_open_worktree_picker() -> io::Result<()> {
-        // Given an open worktree picker showing nothing and a new worktree on disk.
+    fn scan_reports_the_new_worktree_list() -> io::Result<()> {
+        // Given a new worktree on disk.
         let root = tempfile::tempdir()?;
-        let path = worktree(&root, "orb-a1")?;
+        worktree(&root, "orb-a1")?;
         let git = Arc::new(FakeGit::default());
-        let (actor, state) = start(&git, &root, one_project());
-        state.write().picker = Some(PickerState::worktrees(Vec::new(), Focus::Sidebar));
+        let (actor, _state) = start(&git, &root, one_project());
 
         // When scanning.
         actor.scan();
 
-        // Then the picker shows the new worktree.
-        assert_eq!(
-            state
-                .read()
-                .picker
-                .as_ref()
-                .and_then(PickerState::selected_worktree),
-            Some(path.as_path()),
-            "a rescan should list a new worktree in the open picker"
+        // Then the loop is told the list changed, so an open picker re-lists.
+        assert!(
+            actor.report.outcomes().contains(&Outcome::WorktreesChanged),
+            "a rescan should report the new list"
         );
         Ok(())
     }

@@ -16,7 +16,7 @@
 //! It makes new sessions: a session row with one tab running a shell, in a
 //! project's checkout, a worktree it already has, a new worktree made from a
 //! base branch, or orb's Incognito folder (made first when missing). The new
-//! session is selected and the frontend asked to attach it. A failure shows
+//! session is selected and reported ready to open. A failure shows
 //! the reason and removes the worktree and branch orb made for it. A new
 //! worktree (for a new session, a move, or a restore) is made beside the
 //! actor's queue, so the actor keeps handling other requests meanwhile; its
@@ -30,7 +30,8 @@
 //! workspace: the project's checkout, a worktree that already exists, or a
 //! new one made from a base branch. Every pane is killed, the threads in
 //! them unbound, and the session and its panes point at the new directory;
-//! the frontend then attaches it again, starting a fresh shell in each pane.
+//! it is reported ready to open again, and opening it starts a fresh shell
+//! in each pane.
 //! A worktree orb made for a move that failed is removed again, and an orb
 //! worktree no session uses after a move is removed unless it has changes.
 //! When a turn
@@ -43,8 +44,8 @@
 //! branch the worktree was on: the session's, else one of its threads', else
 //! orb's `orb/<hex>` for the directory.
 //! When that branch is gone it makes it again from the project's default
-//! branch, fetched first from origin. Then it asks the frontend to attach, or
-//! shows git's reason.
+//! branch, fetched first from origin. Then it reports the session ready to
+//! open, or shows git's reason.
 //!
 //! It checks branches out in a session's directory, unless a turn is
 //! underway there. Before the first agent turn, picking the default branch
@@ -79,7 +80,7 @@
 //! saves them when asked. It does the same for the jump list, dropping saved
 //! rows that no longer exist.
 //!
-//! It queues a notice for the frontend to announce when a thread it has
+//! It reports a notice for the frontend to announce when a thread it has
 //! polled since orb started finishes a turn, or starts needing an approval or
 //! an answer, in any project, unless the thread is being deleted.
 
@@ -108,7 +109,7 @@ use super::store::{
 use super::template;
 use super::validator::folder_exists;
 use crate::command::{SessionsCommand, Workspace};
-use crate::common::{Log, Services, State, Wake};
+use crate::common::{Log, Outcome, Reporter, Services, State};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
 use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{hex, hex_branch, is_orb_worktree, new_worktree_path, slug};
@@ -153,8 +154,9 @@ pub struct SessionsActorDeps {
     /// orb's Incognito project's root (`/tmp/orb-incognito`), made at start
     /// and before each Incognito start.
     pub incognito_root: PathBuf,
-    /// Tells the frontend to redraw.
-    pub wake: Wake,
+    /// Tells the frontend loop what changed, what failed and which session
+    /// is ready to open.
+    pub report: Reporter,
     /// Neither orb's Claude hook nor its pi extension is installed; the mode
     /// line says how to install them.
     pub integration_missing: bool,
@@ -163,10 +165,10 @@ pub struct SessionsActorDeps {
 /// Owns [`Sessions`](super::state::Sessions) and the harnesses the frontend
 /// shows (`AppState::harnesses`): the projects, the
 /// sessions with their names, pins and settles, the threads' statuses and
-/// titles, the latest error, the origin ref a start is fetching, and the
-/// new, moved or restored session the frontend should attach to. It adds orb's Incognito project at
-/// start. It also restores the sidebar's width and project filter, and
-/// selects a new session. It loads every session's
+/// titles, and the origin ref a start is fetching; it reports errors,
+/// notices and the session a start made ready to the frontend loop. It adds
+/// orb's Incognito project at start. It also restores the sidebar's width
+/// and project filter, and selects a new session. It loads every session's
 /// layout at start, adds the panes splits and new tabs make (it saves their
 /// store rows, so it gives them their ids), lays out a new session, drops a
 /// deleted
@@ -183,7 +185,7 @@ pub struct SessionsActor {
     store: Store,
     worktrees_root: PathBuf,
     orb_root: PathBuf,
-    wake: Wake,
+    report: Reporter,
     /// Cuts the ticker's wait short so it polls now.
     poke: Arc<Notify>,
     /// The saved threads, as last written to the store.
@@ -247,21 +249,32 @@ struct MadeWorktree {
 const WORKTREE_UNMADE: &str = "couldn't make the worktree";
 
 /// Which start a worktree job belongs to, with what applying its result
-/// needs.
+/// needs. `if_active` is the session that was active when the user asked; a
+/// restore's is the restored session itself.
 #[derive(Debug)]
 enum Start {
     New {
         project: ProjectId,
         kind: ProjectKind,
         name: Option<String>,
+        if_active: Option<SessionId>,
     },
     Move {
         session: SessionId,
         moving: Moving,
+        if_active: Option<SessionId>,
     },
     Restore {
         session: SessionId,
     },
+}
+
+/// The session a finished start made ready to open, and the session that
+/// was active when the user asked for the start.
+#[derive(Debug, Clone, Copy)]
+struct Opens {
+    session: SessionId,
+    if_active: Option<SessionId>,
 }
 
 /// Where a session being moved is, from before its new worktree was made.
@@ -292,7 +305,7 @@ struct WorktreeJob {
 struct Work {
     services: Services,
     state: State,
-    wake: Wake,
+    report: Reporter,
     worktrees_root: PathBuf,
     repo: PathBuf,
     make: Make,
@@ -367,14 +380,19 @@ impl Message<SessionsCommand> for SessionsActor {
                 project,
                 workspace,
                 name,
+                if_active,
             } => {
-                if let Some(job) = self.new_session(project, workspace, name) {
+                if let Some(job) = self.new_session(project, workspace, name, if_active) {
                     job.spawn(ctx.actor_ref().clone());
                 }
             }
             SessionsCommand::InitGit(id) => self.init_git(id),
-            SessionsCommand::ChangeWorkspace { session, to } => {
-                if let Some(job) = self.change_workspace(session, to) {
+            SessionsCommand::ChangeWorkspace {
+                session,
+                to,
+                if_active,
+            } => {
+                if let Some(job) = self.change_workspace(session, to, if_active) {
                     job.spawn(ctx.actor_ref().clone());
                 }
             }
@@ -382,7 +400,8 @@ impl Message<SessionsCommand> for SessionsActor {
                 session,
                 git_ref,
                 to_root,
-            } => self.switch_branch(session, &git_ref, to_root),
+                if_active,
+            } => self.switch_branch(session, &git_ref, to_root, if_active),
             SessionsCommand::AddProject(root) => self.add_project(root),
             SessionsCommand::RefreshSessions => self.poke.notify_one(),
             SessionsCommand::PinSession(id) => self.pin_session(id),
@@ -395,8 +414,12 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::SaveUi => self.save_ui(),
             SessionsCommand::SaveJumps => self.save_jumps(),
             SessionsCommand::RemoveProject(id) => self.remove_project(id),
-            SessionsCommand::NewFolderSession { kind, name } => {
-                self.new_folder_session(kind, &name);
+            SessionsCommand::NewFolderSession {
+                kind,
+                name,
+                if_active,
+            } => {
+                self.new_folder_session(kind, &name, if_active);
             }
             SessionsCommand::RestoreWorktree(id) => {
                 if let Some(job) = self.restore_worktree(id) {
@@ -549,7 +572,7 @@ impl SessionsActor {
             worktrees_root,
             orb_root,
             incognito_root,
-            wake,
+            report,
             integration_missing,
         } = deps;
         if let Err(error) = fs::create_dir_all(&incognito_root) {
@@ -657,9 +680,11 @@ impl SessionsActor {
             sessions.cursor = None;
             sessions.partial_load = partial_load;
             sessions.filter_to(filter, &app.layouts);
-            sessions.error = error.or_else(|| integration_missing.then(|| NUDGE.to_owned()));
         }
-        wake();
+        if let Some(error) = error.or_else(|| integration_missing.then(|| NUDGE.to_owned())) {
+            report.report(Outcome::Failed(error));
+        }
+        report.changed();
         Self {
             services,
             state,
@@ -667,7 +692,7 @@ impl SessionsActor {
             worktrees_root,
             pane_files: PaneFiles::new(panes_dir(&orb_root)),
             orb_root,
-            wake,
+            report,
             poke: Arc::default(),
             rows,
             sessions: session_rows,
@@ -745,8 +770,7 @@ impl SessionsActor {
             self.services
                 .log
                 .error_on_change("poll: pane report", SAVE_FAILED, &error);
-            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
-            (self.wake)();
+            self.report.report(Outcome::Failed(SAVE_FAILED.to_owned()));
         }
     }
 
@@ -919,7 +943,7 @@ impl SessionsActor {
         {
             project.threads.insert(0, thread);
         }
-        (self.wake)();
+        self.report.changed();
         Ok(())
     }
 
@@ -1050,15 +1074,12 @@ impl SessionsActor {
             }
         }
         let changed_sessions = self.follow_sessions(&statuses, &owners, now, &mut error);
+        let mut notices = Vec::new();
         let changed = {
             let mut guard = self.state.write();
             let app = &mut *guard;
             let sessions = &mut app.sessions;
             let mut changed = false;
-            if let Some(error) = error {
-                changed = sessions.error.as_ref() != Some(&error);
-                sessions.error = Some(error);
-            }
             for (row, status) in self
                 .rows
                 .iter()
@@ -1066,8 +1087,7 @@ impl SessionsActor {
                 .filter_map(|(row, status)| Some((row, status?)))
             {
                 if let Some(notice) = notice(sessions, row, status) {
-                    sessions.notices.push(notice);
-                    changed = true;
+                    notices.push(notice);
                 }
                 if let Some(thread) = thread_mut(sessions, row.id) {
                     changed |= show(
@@ -1089,8 +1109,14 @@ impl SessionsActor {
             }
             changed
         };
+        if let Some(error) = error {
+            self.report.report(Outcome::Failed(error));
+        }
+        for notice in notices {
+            self.report.report(Outcome::Announce(notice));
+        }
         if changed {
-            (self.wake)();
+            self.report.changed();
         }
     }
 
@@ -1167,68 +1193,69 @@ impl SessionsActor {
         let Some(root) = self.project_root(id) else {
             return;
         };
-        let inited = self.services.git.init(&root);
-        {
-            let mut app = self.state.write();
-            let sessions = &mut app.sessions;
-            match inited {
-                Ok(()) => {
-                    if let Some(project) = sessions.projects.iter_mut().find(|p| p.id == id) {
-                        project.repo = true;
-                    }
+        match self.services.git.init(&root) {
+            Ok(()) => {
+                if let Some(project) = self
+                    .state
+                    .write()
+                    .sessions
+                    .projects
+                    .iter_mut()
+                    .find(|p| p.id == id)
+                {
+                    project.repo = true;
                 }
-                Err(report) => {
-                    sessions.error = Some(format!(
-                        "Git initialization failed: {}",
-                        git_failed(&self.services.log, "git init failed", &report)
-                    ));
-                }
+                self.report.changed();
             }
+            Err(report) => self.report.report(Outcome::Failed(format!(
+                "Git initialization failed: {}",
+                git_failed(&self.services.log, "git init failed", &report)
+            ))),
         }
-        (self.wake)();
     }
 
-    /// Ends a session start: stops showing it as starting, and shows
-    /// `result`'s error, or polls the new session now. A success leaves the
-    /// message box alone, so an error the start ran into on the way (a
-    /// layout that didn't save) still shows.
-    fn end_start(&self, result: Result<(), String>) {
+    /// Ends a session start: stops showing it as starting, reports
+    /// `result`'s error, then `opens`, the session it made ready, if any,
+    /// and on success polls now. A success reports no recovery, so an error
+    /// the start ran into on the way (a layout that didn't save) still shows.
+    fn end_start(&self, result: Result<(), String>, opens: Option<Opens>) {
+        self.state.write().sessions.starting = false;
         let succeeded = result.is_ok();
-        {
-            let mut app = self.state.write();
-            let sessions = &mut app.sessions;
-            sessions.starting = false;
-            if let Err(error) = result {
-                sessions.error = Some(error);
-            }
+        if let Err(error) = result {
+            self.report.report(Outcome::Failed(error));
         }
-        (self.wake)();
+        if let Some(Opens { session, if_active }) = opens {
+            self.report.report(Outcome::Ready { session, if_active });
+        }
+        self.report.changed();
         if succeeded {
             self.poke.notify_one();
         }
     }
 
     /// Makes a session of project `id` in `workspace`, named `name`, with one
-    /// tab running a shell, selects it and asks the frontend to attach it. The checkout or
-    /// an existing worktree must still be a folder; a new worktree is made
-    /// by the returned job (see [`Work`]), and the session once its result
-    /// arrives (see [`Self::worktree_ready`]); the Incognito project's folder
-    /// is made first. On failure the reason shows.
+    /// tab running a shell, selects it and reports it ready to open while
+    /// `if_active`, the session active when the user asked, still is. The
+    /// checkout or an existing worktree must still be a folder; a new
+    /// worktree is made by the returned job (see [`Work`]), and the session
+    /// once its result arrives (see [`Self::worktree_ready`]); the Incognito
+    /// project's folder is made first. On failure the reason shows.
     #[must_use]
     fn new_session(
         &mut self,
         id: ProjectId,
         workspace: Workspace,
         name: Option<String>,
+        if_active: Option<SessionId>,
     ) -> Option<WorktreeJob> {
         let Some((root, kind)) = self.project_of(id) else {
-            self.end_start(Err("the project is gone".to_owned()));
+            self.end_start(Err("the project is gone".to_owned()), None);
             return None;
         };
         if kind == ProjectKind::Incognito
             && let Err(error) = fs::create_dir_all(&root)
         {
-            self.end_start(Err(failed(&self.services.log, FOLDER_UNMADE, &error)));
+            self.end_start(Err(failed(&self.services.log, FOLDER_UNMADE, &error)), None);
             return None;
         }
         match workspace {
@@ -1241,15 +1268,20 @@ impl SessionsActor {
                     project: id,
                     kind,
                     name,
+                    if_active,
                 };
                 Some(self.job(root, make, start))
             }
             to => {
-                let result = reach(&root, to).and_then(|dir| {
+                let saved = reach(&root, to).and_then(|dir| {
                     let branch = current_branch(&self.services.git, &dir);
                     self.save_session(id, session_kind(kind), &dir, branch, name)
                 });
-                self.end_start(result);
+                let opens = saved
+                    .as_ref()
+                    .ok()
+                    .map(|&session| Opens { session, if_active });
+                self.end_start(saved.map(drop), opens);
                 None
             }
         }
@@ -1263,7 +1295,7 @@ impl SessionsActor {
             work: Work {
                 services: self.services.clone(),
                 state: self.state.clone(),
-                wake: self.wake.clone(),
+                report: self.report.clone(),
                 worktrees_root: self.worktrees_root.clone(),
                 repo,
                 make,
@@ -1285,8 +1317,9 @@ impl SessionsActor {
                 project,
                 kind,
                 name,
+                if_active,
             } => {
-                let result = made.and_then(|made| {
+                let saved = made.and_then(|made| {
                     let live = self
                         .state
                         .read()
@@ -1298,16 +1331,24 @@ impl SessionsActor {
                         return Err("the project is gone".to_owned());
                     }
                     let branch = Some(made.branch.clone());
-                    let result =
+                    let saved =
                         self.save_session(project, session_kind(kind), &made.path, branch, name);
-                    if result.is_err() {
+                    if saved.is_err() {
                         self.remove_made(&made, "new session couldn't be saved");
                     }
-                    result
+                    saved
                 });
-                self.end_start(result);
+                let opens = saved
+                    .as_ref()
+                    .ok()
+                    .map(|&session| Opens { session, if_active });
+                self.end_start(saved.map(drop), opens);
             }
-            Start::Move { session, moving } => {
+            Start::Move {
+                session,
+                moving,
+                if_active,
+            } => {
                 let result = made.and_then(|made| {
                     let still = if self.state.read().sessions.deleting.contains(&session) {
                         Err("the session is gone".to_owned())
@@ -1320,8 +1361,7 @@ impl SessionsActor {
                     still?;
                     self.move_to(session, &moving, &made.path, Some(&made))
                 });
-                self.state.write().sessions.attach = Some(session);
-                self.end_start(result);
+                self.end_start(result, Some(Opens { session, if_active }));
             }
             Start::Restore { session } => {
                 let result = made.and_then(|made| {
@@ -1330,19 +1370,21 @@ impl SessionsActor {
                     {
                         return Err("the session is gone".to_owned());
                     }
-                    self.show_branch(&made.path, &made.branch)?;
-                    self.state.write().sessions.attach = Some(session);
-                    Ok(())
+                    self.show_branch(&made.path, &made.branch)
                 });
-                self.end_start(result);
+                let opens = result.is_ok().then_some(Opens {
+                    session,
+                    if_active: Some(session),
+                });
+                self.end_start(result, opens);
             }
         }
     }
 
     /// Saves a new `kind` session of project `project` named `name` in `dir`
     /// on `branch` with one tab of one shell pane, saved through the layout
-    /// save, shows it, selects it and asks the frontend to attach it. The
-    /// error is the message box text.
+    /// save, shows it and selects it. Returns its id; the error is the
+    /// message box text.
     fn save_session(
         &mut self,
         project: ProjectId,
@@ -1350,7 +1392,7 @@ impl SessionsActor {
         dir: &Path,
         branch: Option<String>,
         name: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<SessionId, String> {
         let now = now_ms();
         let (id, pane) = self
             .store
@@ -1389,11 +1431,10 @@ impl SessionsActor {
             let sessions = &mut app.sessions;
             sessions.sessions.push(show_session(&row));
             sessions.cursor = Some(SidebarItem::Session(id));
-            sessions.attach = Some(id);
         }
         self.sessions.insert(id, row);
         self.save_layout(id);
-        Ok(())
+        Ok(id)
     }
 
     /// Project `id`'s root and kind, if it still exists.
@@ -1412,12 +1453,18 @@ impl SessionsActor {
     /// pane, unbinds the threads in them and clears their resume commands,
     /// and points the layout at the new directory. The worktree it left is
     /// removed with its branch when orb made it and no other session uses it
-    /// (git refuses one with changes). However it ends, the frontend is
-    /// asked to attach the session again, which starts a fresh shell in each
-    /// pane; a session that has had a turn, or a target that can't be
+    /// (git refuses one with changes). However it ends, the session is
+    /// reported ready to open again while `if_active`, the session active
+    /// when the user asked, still is; opening it starts a fresh shell in each
+    /// pane. A session that has had a turn, or a target that can't be
     /// reached, stays where it was with the reason shown.
     #[must_use]
-    fn change_workspace(&mut self, id: SessionId, to: Workspace) -> Option<WorktreeJob> {
+    fn change_workspace(
+        &mut self,
+        id: SessionId,
+        to: Workspace,
+        if_active: Option<SessionId>,
+    ) -> Option<WorktreeJob> {
         match (self.moving(id), to) {
             (Ok(moving), Workspace::NewWorktree { base }) => {
                 let make = Make::New {
@@ -1431,26 +1478,39 @@ impl SessionsActor {
                     Start::Move {
                         session: id,
                         moving,
+                        if_active,
                     },
                 ))
             }
             (moving, to) => {
-                self.move_here(id, moving, to);
+                self.move_here(id, moving, to, if_active);
                 None
             }
         }
     }
 
     /// Moves session `id` to `to`, the checkout or an existing worktree,
-    /// when `moving` says it can move, then asks the frontend to attach it
-    /// again and ends the start.
-    fn move_here(&mut self, id: SessionId, moving: Result<Moving, String>, to: Workspace) {
+    /// when `moving` says it can move, then ends the start, reporting the
+    /// session ready to open again while `if_active` still is the active
+    /// session.
+    fn move_here(
+        &mut self,
+        id: SessionId,
+        moving: Result<Moving, String>,
+        to: Workspace,
+        if_active: Option<SessionId>,
+    ) {
         let result = moving.and_then(|moving| {
             let dir = reach(&moving.root, to)?;
             self.move_to(id, &moving, &dir, None)
         });
-        self.state.write().sessions.attach = Some(id);
-        self.end_start(result);
+        self.end_start(
+            result,
+            Some(Opens {
+                session: id,
+                if_active,
+            }),
+        );
     }
 
     /// Where session `id` is, if it can still move: it exists, its project
@@ -1485,7 +1545,7 @@ impl SessionsActor {
     }
 
     /// The work of a move of session `id` from where `moving` says to `dir`,
-    /// where orb `made` a worktree if it did, up to asking for the attach.
+    /// where orb `made` a worktree if it did, up to reporting it ready.
     fn move_to(
         &mut self,
         id: SessionId,
@@ -1600,23 +1660,28 @@ impl SessionsActor {
     }
 
     /// Recreates session `id`'s worktree at its path through the returned
-    /// job (see [`Work`]) and asks the frontend to attach to the session once
-    /// its result arrives (see [`Self::worktree_ready`]), ending the start
-    /// the frontend marked. A directory that is back already needs nothing.
-    /// On failure, git's reason shows and nothing attaches.
+    /// job (see [`Work`]) and reports the session ready to open once its
+    /// result arrives (see [`Self::worktree_ready`]), ending the start the
+    /// frontend marked. Entering the session asked for the restore, so it
+    /// opens while it is still the active one. A directory that is back
+    /// already needs nothing. On failure, git's reason shows and nothing
+    /// opens.
     #[must_use]
     fn restore_worktree(&mut self, id: SessionId) -> Option<WorktreeJob> {
         let Some((root, cwd, branches)) = self.restore_target(id) else {
-            self.end_start(Err("the session is gone".to_owned()));
+            self.end_start(Err("the session is gone".to_owned()), None);
             return None;
         };
         if cwd.is_dir() {
-            self.state.write().sessions.attach = Some(id);
-            self.end_start(Ok(()));
+            let opens = Opens {
+                session: id,
+                if_active: Some(id),
+            };
+            self.end_start(Ok(()), Some(opens));
             return None;
         }
         if branches.is_empty() {
-            self.end_start(Err("couldn't tell the worktree's branch".to_owned()));
+            self.end_start(Err("couldn't tell the worktree's branch".to_owned()), None);
             return None;
         }
         let make = Make::Again { cwd, branches };
@@ -1666,16 +1731,23 @@ impl SessionsActor {
             Ok(local) => (Some(local), None),
             Err(error) => (None, Some(error)),
         };
-        self.state.write().sessions.error = error;
-        (self.wake)();
+        self.report.error(error);
+        self.report.changed();
         checked_out
     }
 
     /// Checks `git_ref` out for session `id`: in its directory, or with
-    /// `to_root` in its project's checkout, moving the session there.
-    fn switch_branch(&mut self, id: SessionId, git_ref: &GitRef, to_root: bool) {
+    /// `to_root` in its project's checkout, moving the session there; the
+    /// moved session opens while `if_active` is still the active session.
+    fn switch_branch(
+        &mut self,
+        id: SessionId,
+        git_ref: &GitRef,
+        to_root: bool,
+        if_active: Option<SessionId>,
+    ) {
         match self.sessions.get(&id).map(|row| row.dir.clone()) {
-            _ if to_root => self.switch_to_root(id, git_ref),
+            _ if to_root => self.switch_to_root(id, git_ref, if_active),
             Some(dir) => {
                 let _ = self.check_out_in(&dir, git_ref);
             }
@@ -1685,33 +1757,36 @@ impl SessionsActor {
 
     /// Checks `git_ref` out in the project's checkout and moves session
     /// `id`, which has had no agent turn, there from its worktree. Refused
-    /// while a turn is underway in the checkout.
-    fn switch_to_root(&mut self, id: SessionId, git_ref: &GitRef) {
+    /// while a turn is underway in the checkout. However it ends, the
+    /// session opens again while `if_active` is still the active session.
+    fn switch_to_root(&mut self, id: SessionId, git_ref: &GitRef, if_active: Option<SessionId>) {
         let root = self
             .sessions
             .get(&id)
             .and_then(|row| self.project_root(row.project_id));
         let Some(root) = root else {
-            return self.end_start(Err("the session is gone".to_owned()));
+            return self.end_start(Err("the session is gone".to_owned()), None);
         };
         if self.state.read().sessions.turned(id) {
             let moving = self.moving(id);
-            return self.move_here(id, moving, Workspace::Checkout);
+            return self.move_here(id, moving, Workspace::Checkout, if_active);
         }
+        let opens = Opens {
+            session: id,
+            if_active,
+        };
         if self.busy_in(&root) {
-            self.state.write().sessions.attach = Some(id);
-            return self.end_start(Err(BUSY_DIRECTORY.to_owned()));
+            return self.end_start(Err(BUSY_DIRECTORY.to_owned()), Some(opens));
         }
         match self.services.git.checkout(&root, git_ref) {
             Ok(local) => {
                 let _ = self.show_branch(&root, &local);
                 let moving = self.moving(id);
-                self.move_here(id, moving, Workspace::Checkout);
+                self.move_here(id, moving, Workspace::Checkout, if_active);
             }
             Err(report) => {
-                self.state.write().sessions.attach = Some(id);
                 let shown = git_failed(&self.services.log, "checkout failed", &report);
-                self.end_start(Err(shown));
+                self.end_start(Err(shown), Some(opens));
             }
         }
     }
@@ -1775,33 +1850,36 @@ impl SessionsActor {
             Err(format!("not a directory: {}", root.display()))
         };
         let repo = added.is_ok() && self.services.git.project_path(&root).is_some();
-        {
-            let mut app = self.state.write();
-            let sessions = &mut app.sessions;
-            match added {
-                Ok(id) => {
-                    sessions.error = None;
-                    sessions.notice = Some(format!("Added project {title}"));
-                    show_project(sessions, id, title, root, ProjectKind::Normal, repo, now);
-                }
-                Err(error) => {
-                    sessions.error = Some(error);
-                    sessions.notice = None;
-                }
+        match added {
+            Ok(id) => {
+                let notice = format!("Added project {title}");
+                show_project(
+                    &mut self.state.write().sessions,
+                    id,
+                    title,
+                    root,
+                    ProjectKind::Normal,
+                    repo,
+                    now,
+                );
+                self.report.report(Outcome::Recovered);
+                self.report.report(Outcome::Notice(notice));
+                self.report.report(Outcome::ProjectsChanged);
             }
+            Err(error) => self.report.report(Outcome::Failed(error)),
         }
-        (self.wake)();
     }
 
     /// Makes a `kind` session named `name` in orb's own folder for the kind:
     /// adds or restores its project, copies `<orb_root>/templates/<kind>`
     /// (seeded when missing) to `<orb_root>/<kind>/<name>`, refused when that
     /// folder exists, and saves a session of that kind there with one shell,
-    /// selected and attached. A made session outside the project filter
-    /// clears it. The name box closes once the session is made and otherwise
-    /// stays open with the reason on the mode line; a folder this call made
-    /// is removed again.
-    fn new_folder_session(&mut self, kind: FolderKind, name: &str) {
+    /// selected and reported ready to open while `if_active`, the session
+    /// active when the user asked, still is. A made session outside the
+    /// project filter clears it. The name box closes once the session is made
+    /// and otherwise stays open with the reason on the mode line; a folder
+    /// this call made is removed again.
+    fn new_folder_session(&mut self, kind: FolderKind, name: &str, if_active: Option<SessionId>) {
         let now = now_ms();
         let (project_kind, kind_dir, title) = own_folder(kind);
         let root = self.orb_root.join(kind_dir);
@@ -1830,7 +1908,7 @@ impl SessionsActor {
             if saved.is_err() {
                 remove_unstarted(&self.services.log, &dir);
             }
-            saved.map(|()| id)
+            saved.map(|session| (id, session))
         });
         let unfiltered = {
             let mut app = self.state.write();
@@ -1839,7 +1917,7 @@ impl SessionsActor {
             let sessions = &mut app.sessions;
             let outside = made
                 .as_ref()
-                .is_ok_and(|&id| sessions.filter.is_some_and(|filter| filter != id));
+                .is_ok_and(|&(id, _)| sessions.filter.is_some_and(|filter| filter != id));
             if outside {
                 sessions.filter = None;
             }
@@ -1848,7 +1926,11 @@ impl SessionsActor {
         if unfiltered {
             self.save_ui();
         }
-        self.end_start(made.map(|_| ()));
+        let opens = made
+            .as_ref()
+            .ok()
+            .map(|&(_, session)| Opens { session, if_active });
+        self.end_start(made.map(drop), opens);
     }
 
     /// Copies `kind`'s template (`<orb_root>/templates/<kind_dir>`, seeded
@@ -1885,19 +1967,21 @@ impl SessionsActor {
     /// Removes project `id` from `<C-g> n` and the project filter once the store
     /// has; its sessions stay.
     fn remove_project(&mut self, id: ProjectId) {
-        let removed = self.store.remove_project(id, now_ms());
-        {
-            let mut app = self.state.write();
-            let sessions = &mut app.sessions;
-            match (removed, sessions.projects.iter_mut().find(|p| p.id == id)) {
-                (Ok(()), Some(project)) => project.removed = true,
-                (Ok(()), None) => {}
-                (Err(report), _) => {
-                    sessions.error = Some(save_failed(&self.services.log, &report));
-                }
-            }
+        if let Err(report) = self.store.remove_project(id, now_ms()) {
+            let error = save_failed(&self.services.log, &report);
+            return self.report.report(Outcome::Failed(error));
         }
-        (self.wake)();
+        if let Some(project) = self
+            .state
+            .write()
+            .sessions
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+        {
+            project.removed = true;
+        }
+        self.report.report(Outcome::ProjectsChanged);
     }
 
     /// Pins session `id`; pinning a settled session un-settles it.
@@ -2036,13 +2120,15 @@ impl SessionsActor {
                     .retain(|thread| !threads.contains(&thread.id));
             }
             sessions.deleting.remove(&id);
-            match (deleted, cleared) {
-                (Err(report), _) => sessions.error = Some(save_failed(&self.services.log, &report)),
-                (Ok(()), Err(error)) => sessions.error = Some(error),
-                (Ok(()), Ok(())) => {}
-            }
         }
-        (self.wake)();
+        match (deleted, cleared) {
+            (Err(report), _) => {
+                let error = save_failed(&self.services.log, &report);
+                self.report.report(Outcome::Failed(error));
+            }
+            (Ok(()), Err(error)) => self.report.report(Outcome::Failed(error)),
+            (Ok(()), Ok(())) => self.report.changed(),
+        }
     }
 
     /// Kills the panes zmx still lists for every settled session, listing
@@ -2151,7 +2237,7 @@ impl SessionsActor {
     /// the shown tab re-tiled by pane count unless it was changed by hand,
     /// splitting the focused pane, in a new tab, or as a float. A session with no layout
     /// (its last pane closed) gets a first tab of that shell from
-    /// [`Placement::Tab`] and is attached once it's saved; the other
+    /// [`Placement::Tab`] and is reported ready to open once it's saved; the other
     /// placements do nothing there. Then saves the layout. A pane that can't
     /// be saved shows why.
     fn add_pane(&mut self, session: SessionId, placement: Placement) {
@@ -2165,8 +2251,8 @@ impl SessionsActor {
         let id = match self.store.insert_pane(session, &dir) {
             Ok(id) => id,
             Err(report) => {
-                self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
-                return (self.wake)();
+                let error = save_failed(&self.services.log, &report);
+                return self.report.report(Outcome::Failed(error));
             }
         };
         let row = PaneRow {
@@ -2185,16 +2271,20 @@ impl SessionsActor {
                 Placement::Tile => app.layouts.add_tiled(session, entry),
                 Placement::Split(split) => app.layouts.split(session, split, entry),
                 Placement::Stack => app.layouts.stack(session, entry),
-                Placement::Tab if first => {
-                    app.layouts.insert(session, SessionLayout::of(entry));
-                    app.sessions.attach = Some(session);
-                }
+                Placement::Tab if first => app.layouts.insert(session, SessionLayout::of(entry)),
                 Placement::Tab => app.layouts.new_tab(session, entry),
                 Placement::Float => app.layouts.add_float(session, entry),
             }
         }
         self.save_layout(session);
-        (self.wake)();
+        self.report.changed();
+        if first {
+            // Entering the session asked for this tab, so it is the active one.
+            self.report.report(Outcome::Ready {
+                session,
+                if_active: Some(session),
+            });
+        }
     }
 
     /// Saves `session`'s tabs, floats, active tab and pane names as the app
@@ -2286,8 +2376,8 @@ impl SessionsActor {
                 }
             }
             Err(report) => {
-                self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
-                (self.wake)();
+                let error = save_failed(&self.services.log, &report);
+                self.report.report(Outcome::Failed(error));
             }
         }
     }
@@ -2301,8 +2391,8 @@ impl SessionsActor {
             }
         };
         if let Err(report) = self.store.save_ui(&ui) {
-            self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
-            (self.wake)();
+            let error = save_failed(&self.services.log, &report);
+            self.report.report(Outcome::Failed(error));
         }
     }
 
@@ -2310,8 +2400,8 @@ impl SessionsActor {
     fn save_jumps(&self) {
         let jumps = self.state.read().jumps.entries().to_vec();
         if let Err(report) = self.store.save_jumps(&jumps) {
-            self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
-            (self.wake)();
+            let error = save_failed(&self.services.log, &report);
+            self.report.report(Outcome::Failed(error));
         }
     }
 
@@ -2330,9 +2420,6 @@ impl SessionsActor {
             let mut guard = self.state.write();
             let app = &mut *guard;
             let sessions = &mut app.sessions;
-            if let Err(report) = &saved {
-                sessions.error = Some(save_failed(&self.services.log, report));
-            }
             if let Some(thread) = thread_mut(sessions, id) {
                 let status = thread.status;
                 show(
@@ -2343,7 +2430,7 @@ impl SessionsActor {
                 );
             }
         }
-        (self.wake)();
+        self.report_saved(saved);
     }
 
     /// Changes session `id`'s saved row with `change` (given the time now),
@@ -2360,14 +2447,23 @@ impl SessionsActor {
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
-            if let Err(report) = &saved {
-                sessions.error = Some(save_failed(&self.services.log, report));
-            }
             if let Some(shown) = sessions.sessions.iter_mut().find(|shown| shown.id == id) {
                 *shown = show_session(row);
             }
         }
-        (self.wake)();
+        self.report_saved(saved);
+    }
+
+    /// Reports that a row was shown after `saved`: why the save failed, else
+    /// that the state changed.
+    fn report_saved(&self, saved: Result<(), Report<StoreError>>) {
+        match saved {
+            Ok(()) => self.report.changed(),
+            Err(report) => {
+                let error = save_failed(&self.services.log, &report);
+                self.report.report(Outcome::Failed(error));
+            }
+        }
     }
 
     /// Shows a harness failure in the mode line.
@@ -2375,8 +2471,7 @@ impl SessionsActor {
         self.services
             .log
             .error_on_change("poll: harness", "harness poll failed", report);
-        self.state.write().sessions.error = Some(reason(report));
-        (self.wake)();
+        self.report.report(Outcome::Failed(reason(report)));
     }
 
     /// The directory project `id`'s sessions start in.
@@ -3178,10 +3273,10 @@ impl Work {
     /// while it runs.
     fn fetch(&self, branch: &str) -> Result<bool, Report<GitError>> {
         self.state.write().sessions.fetching = Some(format!("origin/{branch}"));
-        (self.wake)();
+        self.report.changed();
         let fetched = self.services.git.fetch(&self.repo, branch);
         self.state.write().sessions.fetching = None;
-        (self.wake)();
+        self.report.changed();
         fetched
     }
 }
@@ -3307,7 +3402,7 @@ mod tests {
     use crate::Focus;
     use crate::TextInput;
     use crate::command::{SessionsCommand, Workspace};
-    use crate::common::{Log, Services, State};
+    use crate::common::{Log, Outcome, Reporter, Services, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
     use crate::feat::harness::claude::ClaudeCode;
     use crate::feat::harness::claude::fake::FakeClaude;
@@ -3926,7 +4021,7 @@ mod tests {
             worktrees_root: PathBuf::from(WORKTREES_ROOT),
             orb_root: orb_root.to_owned(),
             incognito_root: incognito_root.to_owned(),
-            wake: Arc::new(|| {}),
+            report: Reporter::new(|_| {}),
             integration_missing: false,
         });
         (actor, state)
@@ -3963,7 +4058,7 @@ mod tests {
             worktrees_root: PathBuf::from(WORKTREES_ROOT),
             orb_root: PathBuf::from(ORB_ROOT),
             incognito_root: PathBuf::from(INCOGNITO_ROOT),
-            wake: Arc::new(|| {}),
+            report: Reporter::new(|_| {}),
             integration_missing: false,
         }
     }
@@ -4257,11 +4352,11 @@ mod tests {
         with_unread_tab(&store, true)?;
 
         // When restoring.
-        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let (actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // Then the mode line says the layouts couldn't all be read, and why.
         assert_eq!(
-            state.read().sessions.error.as_deref(),
+            error_of(&actor).as_deref(),
             Some(
                 "couldn't fully read orb's saved layouts (failed to read a saved layout tree: \
                  expected ident at line 1 column 2); orb keeps what it couldn't read"
@@ -4603,14 +4698,14 @@ mod tests {
     #[rstest::rstest]
     fn emptied_layout_asks_to_attach_its_session() -> Result<(), Report<StoreError>> {
         // Given a session whose last pane closed.
-        let (mut actor, state, inserted) = emptied_session()?;
+        let (mut actor, _state, inserted) = emptied_session()?;
 
         // When saving its layout.
         actor.save_layout(inserted.session);
 
         // Then the frontend is asked to attach it.
         assert_eq!(
-            state.read().sessions.attach,
+            ready_of(&actor),
             Some(inserted.session),
             "the new shell should be attached"
         );
@@ -5347,14 +5442,14 @@ mod tests {
         let orb = tempfile::tempdir().change_context(StoreError)?;
         let dir = orb.path().join("research").join("tokio-cancel");
         let (store, inserted) = research_sessions(orb.path(), &dir, false)?;
-        let (mut actor, state) = start_at(store, orb.path());
+        let (mut actor, _state) = start_at(store, orb.path());
 
         // When deleting it.
         actor.delete_session(inserted.session);
 
         // Then no error shows.
         assert_eq!(
-            error_of(&state),
+            error_of(&actor),
             None,
             "an already-removed folder counts as removed"
         );
@@ -5777,14 +5872,14 @@ mod tests {
     #[rstest::rstest]
     fn new_tab_on_a_session_without_a_layout_asks_to_attach_it() -> Result<(), Report<StoreError>> {
         // Given a session whose last pane closed.
-        let (mut actor, state, inserted) = emptied_session()?;
+        let (mut actor, _state, inserted) = emptied_session()?;
 
         // When opening a tab.
         actor.add_pane(inserted.session, Placement::Tab);
 
         // Then the frontend is asked to attach it.
         assert_eq!(
-            state.read().sessions.attach,
+            ready_of(&actor),
             Some(inserted.session),
             "the new shell should be attached"
         );
@@ -6034,19 +6129,46 @@ mod tests {
         };
 
         // When restoring.
-        let _actor = SessionsActor::restore(deps);
+        let actor = SessionsActor::restore(deps);
 
         // Then the mode line says how to install them.
         assert_eq!(
-            state.read().sessions.error.as_deref(),
+            error_of(&actor).as_deref(),
             Some(crate::feat::integration::NUDGE),
             "a missing integration should show the install nudge"
         );
         Ok(())
     }
 
-    fn error_of(state: &State) -> Option<String> {
-        state.read().sessions.error.clone()
+    /// The error the message box shows after what `actor` reported.
+    fn error_of(actor: &SessionsActor) -> Option<String> {
+        actor.report.shown_error()
+    }
+
+    /// The last session `actor` reported ready to open.
+    fn ready_of(actor: &SessionsActor) -> Option<SessionId> {
+        actor
+            .report
+            .outcomes()
+            .into_iter()
+            .filter_map(|outcome| match outcome {
+                Outcome::Ready { session, .. } => Some(session),
+                _ => None,
+            })
+            .next_back()
+    }
+
+    /// The notices for the message box `actor` reported, oldest first.
+    fn message_notices(actor: &SessionsActor) -> Vec<String> {
+        actor
+            .report
+            .outcomes()
+            .into_iter()
+            .filter_map(|outcome| match outcome {
+                Outcome::Notice(text) => Some(text),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The thread `id` as the sidebar shows it.
@@ -6229,15 +6351,17 @@ mod tests {
         // Given a failure on the mode line.
         let (store, _) = store_with_thread("aa")?;
         let host = listing(vec![record("aa", ThreadStatus::Working)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
-        state.write().sessions.error = Some("A session is working in this directory".to_owned());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.report.report(Outcome::Failed(
+            "A session is working in this directory".to_owned(),
+        ));
 
         // When a poll succeeds.
         actor.poll().await;
 
         // Then the failure still shows.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some("A session is working in this directory"),
             "a poll shouldn't hide an error the user hasn't seen"
         );
@@ -6378,14 +6502,14 @@ mod tests {
         let (store, _) = store_with_thread("aa")?;
         let host = listing(Vec::new());
         host.set_running(Err("claude: command not found".to_owned()));
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling.
         actor.poll().await;
 
         // Then the reason is the error.
         assert_eq!(
-            state.read().sessions.error.as_deref(),
+            error_of(&actor).as_deref(),
             Some("claude: command not found"),
             "the mode line should show why the poll failed"
         );
@@ -6449,9 +6573,32 @@ mod tests {
         let (store, id) = store_with_project()?;
         let (mut actor, state) =
             start_with(store, &listing(Vec::new()), git, Path::new(NO_CLAUDE_DIR));
-        let job = actor.new_session(id, workspace, name.map(str::to_owned));
+        let job = actor.new_session(id, workspace, name.map(str::to_owned), None);
         finish(&mut actor, job);
         Ok((actor, state))
+    }
+
+    #[rstest::rstest]
+    fn new_session_reports_the_session_active_when_asked() -> Result<(), Report<StoreError>> {
+        // Given the orb project, with session 7 active when the user asked.
+        let (store, project) = store_with_project()?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let asked = Some(SessionId(7));
+
+        // When making a session of it in its checkout.
+        let job = actor.new_session(project, Workspace::Checkout, None, asked);
+        finish(&mut actor, job);
+
+        // Then the new session is ready to open while session 7 is active.
+        let session = only_session(&state)?.id;
+        assert!(
+            actor.report.outcomes().contains(&Outcome::Ready {
+                session,
+                if_active: asked,
+            }),
+            "the new session should open only while the asking session is active"
+        );
+        Ok(())
     }
 
     #[rstest::rstest]
@@ -6591,7 +6738,7 @@ mod tests {
                 )
             })
             .change_context(StoreError)?;
-        let (mut actor, state) = start_with(
+        let (mut actor, _state) = start_with(
             store,
             &listing(Vec::new()),
             &FakeGit::local(),
@@ -6599,12 +6746,12 @@ mod tests {
         );
 
         // When making a session of it in its checkout.
-        let job = actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None, None);
         finish(&mut actor, job);
 
         // Then the message box says orb couldn't save its state.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some(SAVE_FAILED),
             "a new session whose first tab wasn't saved should say so"
         );
@@ -6667,15 +6814,11 @@ mod tests {
     #[rstest::rstest]
     fn new_session_asks_the_frontend_to_attach() -> Result<(), Report<StoreError>> {
         // Given / When making a session of the orb project.
-        let (_actor, state) = made_session(&FakeGit::local(), Workspace::Checkout)?;
+        let (actor, state) = made_session(&FakeGit::local(), Workspace::Checkout)?;
 
         // Then the frontend is asked to attach it.
         let id = only_session(&state)?.id;
-        assert_eq!(
-            state.read().sessions.attach,
-            Some(id),
-            "a new session is attached"
-        );
+        assert_eq!(ready_of(&actor), Some(id), "a new session is attached");
         Ok(())
     }
 
@@ -6687,7 +6830,7 @@ mod tests {
         state.write().sessions.starting = true;
 
         // When making a session.
-        let job = actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None, None);
         finish(&mut actor, job);
 
         // Then nothing is starting any more.
@@ -6827,7 +6970,7 @@ mod tests {
     fn new_worktree_whose_fetch_fails_shows_the_reason() -> Result<(), Report<StoreError>> {
         // Given / When making a session in a new worktree whose fetch fails.
         let git = FakeGit::with_origin(Err("fatal: unable to access origin"));
-        let (_actor, state) = made_session(
+        let (actor, _state) = made_session(
             &git,
             Workspace::NewWorktree {
                 base: "main".to_owned(),
@@ -6836,7 +6979,7 @@ mod tests {
 
         // Then git's reason shows.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some("fatal: unable to access origin"),
             "a failed fetch shows why"
         );
@@ -6871,6 +7014,7 @@ mod tests {
                 base: "main".to_owned(),
             },
             None,
+            None,
         );
         finish(&mut actor, job);
 
@@ -6900,15 +7044,15 @@ mod tests {
             ProjectKind::Normal,
             0,
         )?;
-        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // When making a session in its checkout.
-        let job = actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None, None);
         finish(&mut actor, job);
 
         // Then the mode line names the missing folder.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some("project folder no longer exists: /nonexistent/gone"),
             "a missing checkout shows its path"
         );
@@ -6937,7 +7081,7 @@ mod tests {
             .ok_or_else(|| Report::new(StoreError).attach("no Incognito project"))?;
 
         // When making an Incognito session.
-        let job = actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None, None);
         finish(&mut actor, job);
 
         // Then its folder is back and the session runs there.
@@ -6967,14 +7111,14 @@ mod tests {
     #[rstest::rstest]
     fn new_session_in_a_missing_worktree_fails_with_its_path() -> Result<(), Report<StoreError>> {
         // Given / When making a session in a worktree that is gone.
-        let (_actor, state) = made_session(
+        let (actor, _state) = made_session(
             &FakeGit::local(),
             Workspace::Existing(PathBuf::from("/nonexistent/worktree")),
         )?;
 
         // Then the mode line names the missing worktree.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some("worktree no longer exists: /nonexistent/worktree"),
             "a missing worktree shows its path"
         );
@@ -7039,6 +7183,7 @@ mod tests {
                 base: "main".to_owned(),
             },
             None,
+            None,
         );
         finish(&mut actor, job);
 
@@ -7098,6 +7243,7 @@ mod tests {
             ProjectId(99),
             Workspace::Existing(worktree.path().to_owned()),
             None,
+            None,
         );
         finish(&mut actor, job);
 
@@ -7136,12 +7282,12 @@ mod tests {
             .ok_or_else(|| Report::new(StoreError).attach("no Incognito project"))?;
 
         // When making an Incognito session.
-        let job = actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None, None);
         finish(&mut actor, job);
 
         // Then the mode line says the folder couldn't be made.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some("couldn't make the folder"),
             "an Incognito session needs its folder"
         );
@@ -7195,7 +7341,7 @@ mod tests {
         state.write().sessions.starting = true;
 
         // When asking for a session in a new worktree, its job not yet run.
-        let _job = actor.new_session(id, new_worktree(), None);
+        let _job = actor.new_session(id, new_worktree(), None, None);
 
         // Then it still shows as starting.
         assert!(
@@ -7212,7 +7358,7 @@ mod tests {
         let (store, id) = store_with_project()?;
         let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
         state.write().sessions.starting = true;
-        let job = actor.new_session(id, new_worktree(), None);
+        let job = actor.new_session(id, new_worktree(), None, None);
 
         // When its worktree is made and the result applied.
         finish(&mut actor, job);
@@ -7234,7 +7380,7 @@ mod tests {
         let git = FakeGit::local();
         let (mut actor, _state) =
             start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
-        let job = actor.new_session(id, new_worktree(), None);
+        let job = actor.new_session(id, new_worktree(), None, None);
         actor.remove_project(id);
 
         // When the worktree result is applied.
@@ -7255,8 +7401,8 @@ mod tests {
         // Given a start of the orb project in a new worktree, and the
         // project removed while the worktree is made.
         let (store, id) = store_with_project()?;
-        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
-        let job = actor.new_session(id, new_worktree(), None);
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let job = actor.new_session(id, new_worktree(), None, None);
         actor.remove_project(id);
 
         // When the worktree result is applied.
@@ -7264,7 +7410,7 @@ mod tests {
 
         // Then the start says the project is gone.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some("the project is gone"),
             "a start whose project was removed says so"
         );
@@ -7349,7 +7495,7 @@ mod tests {
     fn failed_git_init_shows_why() -> Result<(), Report<StoreError>> {
         // Given a non-git project where git init fails.
         let (store, id) = store_with_project()?;
-        let (mut actor, state) = start_with(
+        let (mut actor, _state) = start_with(
             store,
             &listing(Vec::new()),
             &FakeGit::plain(Err("fatal: cannot mkdir .git: Permission denied")),
@@ -7361,7 +7507,7 @@ mod tests {
 
         // Then the mode line says why.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some("Git initialization failed: fatal: cannot mkdir .git: Permission denied"),
             "a failed git init should show git's reason"
         );
@@ -7449,7 +7595,7 @@ mod tests {
     #[rstest::rstest]
     fn adding_a_missing_directory_shows_an_error() -> Result<(), Report<StoreError>> {
         // Given no projects.
-        let (mut actor, state) = start(
+        let (mut actor, _state) = start(
             Store::open_in_memory()?,
             &listing(Vec::new()),
             Path::new(NO_CLAUDE_DIR),
@@ -7460,7 +7606,7 @@ mod tests {
 
         // Then the error names it.
         assert_eq!(
-            state.read().sessions.error.as_deref(),
+            error_of(&actor).as_deref(),
             Some("not a directory: /nonexistent/project"),
             "the mode line should say the path isn't a directory"
         );
@@ -7496,7 +7642,7 @@ mod tests {
     fn adding_a_directory_shows_added_notice() -> Result<(), Report<StoreError>> {
         // Given no projects and an existing directory.
         let dir = tempfile::tempdir().change_context(StoreError)?;
-        let (mut actor, state) = start(
+        let (mut actor, _state) = start(
             Store::open_in_memory()?,
             &listing(Vec::new()),
             Path::new(NO_CLAUDE_DIR),
@@ -7508,9 +7654,47 @@ mod tests {
         // Then the notice names the project.
         let expected = format!("Added project {}", project_title(dir.path()));
         assert_eq!(
-            state.read().sessions.notice.as_deref(),
-            Some(expected.as_str()),
+            message_notices(&actor),
+            [expected],
             "adding a project should say it was added"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn add_project_reports_projects_changed() -> Result<(), Report<StoreError>> {
+        // Given no projects and an existing directory.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let (mut actor, _state) = start(
+            Store::open_in_memory()?,
+            &listing(Vec::new()),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When adding it as a project.
+        actor.add_project(dir.path().to_owned());
+
+        // Then the frontend is told the projects changed.
+        assert!(
+            actor.report.outcomes().contains(&Outcome::ProjectsChanged),
+            "an open projects screen should re-list the new project"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn remove_project_reports_projects_changed() -> Result<(), Report<StoreError>> {
+        // Given a saved project.
+        let (store, id) = store_with_project()?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // When removing it.
+        actor.remove_project(id);
+
+        // Then the frontend is told the projects changed.
+        assert!(
+            actor.report.outcomes().contains(&Outcome::ProjectsChanged),
+            "an open projects screen should drop the removed project"
         );
         Ok(())
     }
@@ -7521,7 +7705,7 @@ mod tests {
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
         store.add_project(dir.path(), "web", ProjectKind::Normal, 0)?;
-        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // When adding it again.
         actor.add_project(dir.path().to_owned());
@@ -7529,8 +7713,8 @@ mod tests {
         // Then the notice says it was added.
         let expected = format!("Added project {}", project_title(dir.path()));
         assert_eq!(
-            state.read().sessions.notice.as_deref(),
-            Some(expected.as_str()),
+            message_notices(&actor),
+            [expected],
             "re-adding a project should still say it was added"
         );
         Ok(())
@@ -7538,21 +7722,20 @@ mod tests {
 
     #[rstest::rstest]
     fn adding_a_missing_directory_leaves_no_notice() -> Result<(), Report<StoreError>> {
-        // Given a notice already showing.
-        let (mut actor, state) = start(
+        // Given no projects.
+        let (mut actor, _state) = start(
             Store::open_in_memory()?,
             &listing(Vec::new()),
             Path::new(NO_CLAUDE_DIR),
         );
-        state.write().sessions.notice = Some("Added project web".to_owned());
 
         // When adding a path that doesn't exist.
         actor.add_project(PathBuf::from("/nonexistent/project"));
 
         // Then there's no notice.
         assert!(
-            state.read().sessions.notice.is_none(),
-            "a failed add shouldn't leave an Added notice"
+            message_notices(&actor).is_empty(),
+            "a failed add shouldn't say Added"
         );
         Ok(())
     }
@@ -7820,13 +8003,13 @@ mod tests {
             ..row
         })?;
         let host = listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polls see its turn run and then end.
         end_turn(&mut actor, &host).await;
 
         // Then the notice names the thread by its orb name.
-        let titles: Vec<_> = notices_of(&state)
+        let titles: Vec<_> = notices_of(&actor)
             .into_iter()
             .map(|notice| notice.title)
             .collect();
@@ -8539,7 +8722,7 @@ mod tests {
             start_with(store, &listing(Vec::new()), git, Path::new(NO_CLAUDE_DIR));
         let (zmx, service) = recording_zmx();
         actor.services.zmx = service;
-        let job = actor.change_workspace(seeded.session, to);
+        let job = actor.change_workspace(seeded.session, to, None);
         finish(&mut actor, job);
         Ok((actor, state, seeded, second, zmx))
     }
@@ -8638,12 +8821,12 @@ mod tests {
         let to = tempfile::tempdir().change_context(StoreError)?;
 
         // When moving it.
-        let (_actor, state, seeded, _, _) =
+        let (actor, _state, seeded, _, _) =
             moved_to(Workspace::Existing(to.path().to_owned()), &FakeGit::local())?;
 
         // Then the frontend is asked to attach it again.
         assert_eq!(
-            state.read().sessions.attach,
+            ready_of(&actor),
             Some(seeded.session),
             "fresh shells start when the frontend attaches"
         );
@@ -8662,12 +8845,16 @@ mod tests {
         let to = tempfile::tempdir().change_context(StoreError)?;
 
         // When moving it.
-        let job = actor.change_workspace(seeded.session, Workspace::Existing(to.path().to_owned()));
+        let job = actor.change_workspace(
+            seeded.session,
+            Workspace::Existing(to.path().to_owned()),
+            None,
+        );
         finish(&mut actor, job);
 
         // Then it stays, locked.
         assert_eq!(
-            (dir_of(&state, seeded.session), error_of(&state)),
+            (dir_of(&state, seeded.session), error_of(&actor)),
             (
                 Some(PathBuf::from(PROJECT_ROOT)),
                 Some("Workspace locked · Local checkout".to_owned())
@@ -8686,7 +8873,7 @@ mod tests {
         let git = FakeGit::local();
         let (mut actor, _state) =
             start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
-        let job = actor.change_workspace(seeded.session, new_worktree());
+        let job = actor.change_workspace(seeded.session, new_worktree(), None);
         actor.delete_session(seeded.session);
 
         // When the worktree result is applied.
@@ -8715,7 +8902,7 @@ mod tests {
         // turn while the worktree is made.
         let (store, seeded, _) = movable()?;
         let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
-        let job = actor.change_workspace(seeded.session, new_worktree());
+        let job = actor.change_workspace(seeded.session, new_worktree(), None);
         title_in_state(&state, seeded.thread);
 
         // When the worktree result is applied.
@@ -8723,7 +8910,7 @@ mod tests {
 
         // Then it stays, locked.
         assert_eq!(
-            (dir_of(&state, seeded.session), error_of(&state)),
+            (dir_of(&state, seeded.session), error_of(&actor)),
             (
                 Some(PathBuf::from(PROJECT_ROOT)),
                 Some("Workspace locked · Local checkout".to_owned())
@@ -8742,7 +8929,7 @@ mod tests {
         let git = FakeGit::local();
         let (mut actor, state) =
             start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
-        let job = actor.change_workspace(seeded.session, new_worktree());
+        let job = actor.change_workspace(seeded.session, new_worktree(), None);
         title_in_state(&state, seeded.thread);
 
         // When the worktree result is applied.
@@ -8790,7 +8977,7 @@ mod tests {
             start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
 
         // When moving it to the checkout.
-        let job = actor.change_workspace(seeded.session, Workspace::Checkout);
+        let job = actor.change_workspace(seeded.session, Workspace::Checkout, None);
         finish(&mut actor, job);
 
         // Then the old worktree and its branch are removed, without force.
@@ -8822,7 +9009,7 @@ mod tests {
             start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
 
         // When moving one of them to the checkout.
-        let job = actor.change_workspace(seeded.session, Workspace::Checkout);
+        let job = actor.change_workspace(seeded.session, Workspace::Checkout, None);
         finish(&mut actor, job);
 
         // Then git removes nothing.
@@ -8858,6 +9045,7 @@ mod tests {
             Workspace::NewWorktree {
                 base: "main".to_owned(),
             },
+            None,
         );
         finish(&mut actor, job);
 
@@ -8903,6 +9091,7 @@ mod tests {
         let job = actor.change_workspace(
             seeded.session,
             Workspace::Existing(worktree.path().to_owned()),
+            None,
         );
         finish(&mut actor, job);
 
@@ -8925,7 +9114,7 @@ mod tests {
         let git = FakeGit::with_origin(Err("fatal: unable to access origin"));
 
         // When moving it to a new worktree from main.
-        let (_actor, state, seeded, _, _) = moved_to(
+        let (actor, state, seeded, _, _) = moved_to(
             Workspace::NewWorktree {
                 base: "main".to_owned(),
             },
@@ -8934,7 +9123,7 @@ mod tests {
 
         // Then it stays in the checkout, with git's reason shown.
         assert_eq!(
-            (dir_of(&state, seeded.session), error_of(&state)),
+            (dir_of(&state, seeded.session), error_of(&actor)),
             (
                 Some(PathBuf::from(PROJECT_ROOT)),
                 Some("fatal: unable to access origin".to_owned())
@@ -8969,7 +9158,7 @@ mod tests {
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When switching it to `feat`.
-        actor.switch_branch(seeded.session, &git_ref("feat", false), false);
+        actor.switch_branch(seeded.session, &git_ref("feat", false), false, None);
 
         // Then the sidebar shows it on feat.
         assert_eq!(
@@ -8988,15 +9177,15 @@ mod tests {
         let store = Store::open_in_memory()?;
         let seeded = insert_thread(&store, "aa")?;
         let host = listing(vec![record("aa", ThreadStatus::Working)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
 
         // When switching it to `feat`.
-        actor.switch_branch(seeded.session, &git_ref("feat", false), false);
+        actor.switch_branch(seeded.session, &git_ref("feat", false), false, None);
 
         // Then the mode line says an agent is working there.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some("A session is working in this directory"),
             "a checkout under a running turn should be refused"
         );
@@ -9012,7 +9201,7 @@ mod tests {
         let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When switching it to `origin/feat`.
-        actor.switch_branch(seeded.session, &git_ref("origin/feat", true), false);
+        actor.switch_branch(seeded.session, &git_ref("origin/feat", true), false, None);
 
         // Then the sidebar shows the tracking branch feat.
         assert_eq!(
@@ -9041,7 +9230,7 @@ mod tests {
         let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // When picking the default branch, checked out nowhere.
-        actor.switch_branch(seeded.session, &git_ref("main", false), true);
+        actor.switch_branch(seeded.session, &git_ref("main", false), true, None);
 
         // Then the session runs in the checkout.
         assert_eq!(
@@ -9211,8 +9400,17 @@ mod tests {
         Ok(())
     }
 
-    fn notices_of(state: &State) -> Vec<Notice> {
-        state.read().sessions.notices.clone()
+    /// The status changes `actor` reported for announcing, oldest first.
+    fn notices_of(actor: &SessionsActor) -> Vec<Notice> {
+        actor
+            .report
+            .outcomes()
+            .into_iter()
+            .filter_map(|outcome| match outcome {
+                Outcome::Announce(notice) => Some(notice),
+                _ => None,
+            })
+            .collect()
     }
 
     #[rstest::rstest]
@@ -9257,14 +9455,14 @@ mod tests {
         // Given a saved thread that was already waiting for an approval at launch.
         let (store, _) = store_with_thread("aa")?;
         let host = listing(vec![record("aa", ThreadStatus::NeedsApproval)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polling for the first time.
         actor.poll().await;
 
         // Then no notice is queued.
         assert_eq!(
-            notices_of(&state),
+            notices_of(&actor),
             [],
             "a state that existed at launch shouldn't notify"
         );
@@ -9282,14 +9480,14 @@ mod tests {
             ..row
         })?;
         let host = listing(Vec::new());
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
         // When polls see its turn run and then end.
         end_turn(&mut actor, &host).await;
 
         // Then one Finished notice names the project and the thread.
         assert_eq!(
-            notices_of(&state),
+            notices_of(&actor),
             [Notice {
                 thread: id,
                 kind: NoticeKind::Finished,
@@ -9303,11 +9501,46 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn poll_reports_each_notice_as_an_announcement() -> Result<(), Report<StoreError>> {
+        // Given two threads whose turns are running.
+        let (store, aa) = store_with_thread("aa")?;
+        let bb = add_thread(&store, "bb", now_ms() - HOUR_MS)?;
+        let host = listing(vec![
+            record("aa", ThreadStatus::Working),
+            record("bb", ThreadStatus::Working),
+        ]);
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.poll().await;
+
+        // When one poll sees both turns end.
+        host.set_running(Ok(vec![
+            record("aa", ThreadStatus::Idle),
+            record("bb", ThreadStatus::Idle),
+        ]));
+        actor.poll().await;
+
+        // Then each ended turn is reported for announcing on its own.
+        let mut announced: Vec<ThreadId> = actor
+            .report
+            .outcomes()
+            .into_iter()
+            .filter_map(|outcome| match outcome {
+                Outcome::Announce(notice) => Some(notice.thread),
+                _ => None,
+            })
+            .collect();
+        announced.sort_by_key(|thread| thread.0);
+        assert_eq!(announced, [aa, bb], "one announcement per ended turn");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn a_wait_seen_by_two_polls_queues_one_notice() -> Result<(), Report<StoreError>> {
         // Given a thread whose turn is running.
         let (store, _) = store_with_thread("aa")?;
         let host = listing(vec![in_session(ThreadStatus::Working)]);
-        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
         actor.poll().await;
 
         // When two polls in a row see it waiting for an approval.
@@ -9316,7 +9549,7 @@ mod tests {
         actor.poll().await;
 
         // Then one NeedsApproval notice is queued.
-        let kinds: Vec<NoticeKind> = notices_of(&state)
+        let kinds: Vec<NoticeKind> = notices_of(&actor)
             .into_iter()
             .map(|notice| notice.kind)
             .collect();
@@ -9345,7 +9578,7 @@ mod tests {
 
         // Then no notice is queued.
         assert_eq!(
-            notices_of(&state),
+            notices_of(&actor),
             [],
             "a thread being deleted shouldn't notify"
         );
@@ -9367,7 +9600,7 @@ mod tests {
         end_turn(&mut actor, &host).await;
 
         // Then its notice is queued anyway.
-        let notified: Vec<ThreadId> = notices_of(&state)
+        let notified: Vec<ThreadId> = notices_of(&actor)
             .into_iter()
             .map(|notice| notice.thread)
             .collect();
@@ -9400,7 +9633,7 @@ mod tests {
         let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
 
         // When making Research session `tokio-cancel`.
-        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
         // Then the template is written.
         assert!(
@@ -9420,7 +9653,7 @@ mod tests {
         let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
 
         // When making Research session `tokio-cancel`.
-        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
         // Then its folder has AGENTS.md and a CLAUDE.md link to it.
         let dir = orb_root.path().join("research/tokio-cancel");
@@ -9439,7 +9672,7 @@ mod tests {
         let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
 
         // When making Research session `tokio-cancel`.
-        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
         // Then its folder has the kit's investigator subagent.
         assert!(
@@ -9458,7 +9691,7 @@ mod tests {
         let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
         // When making Research session `tokio-cancel`.
-        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
         // Then orb's Research project shows, rooted in orb's research folder.
         let research: Vec<(String, PathBuf)> = state
@@ -9483,7 +9716,7 @@ mod tests {
         let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
 
         // When making Learn session `rust-async`.
-        actor.new_folder_session(FolderKind::Learn, "rust-async");
+        actor.new_folder_session(FolderKind::Learn, "rust-async", None);
 
         // Then its folder is under orb's learn folder.
         assert!(
@@ -9499,7 +9732,7 @@ mod tests {
         let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
         // When making Research session `tokio-cancel`.
-        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
         // Then a Research session runs in its folder.
         let session = only_session(&state)?;
@@ -9520,7 +9753,7 @@ mod tests {
         let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
 
         // When making Learn session `rust-async`.
-        actor.new_folder_session(FolderKind::Learn, "rust-async");
+        actor.new_folder_session(FolderKind::Learn, "rust-async", None);
 
         // Then its layout holds one tab of one pane in its folder.
         let id = only_session(&state)?.id;
@@ -9551,7 +9784,7 @@ mod tests {
         fs::write(template.join("AGENTS.md"), "mine").change_context(StoreError)?;
 
         // When making Research session `tokio-cancel`.
-        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
         // Then the folder gets the user's AGENTS.md.
         let text = fs::read_to_string(orb_root.path().join("research/tokio-cancel/AGENTS.md"))
@@ -9563,15 +9796,15 @@ mod tests {
     #[rstest::rstest]
     fn new_folder_session_refused_when_its_folder_exists() -> Result<(), Report<StoreError>> {
         // Given a folder `x` already under orb's research folder.
-        let (orb_root, _, mut actor, state) = creating(&FakeGit::local())?;
+        let (orb_root, _, mut actor, _state) = creating(&FakeGit::local())?;
         fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
 
         // When making Research session `x`.
-        actor.new_folder_session(FolderKind::Research, "x");
+        actor.new_folder_session(FolderKind::Research, "x", None);
 
         // Then the mode line says the folder exists.
         assert_eq!(
-            error_of(&state).as_deref(),
+            error_of(&actor).as_deref(),
             Some("~/.orb/research/x already exists"),
             "an existing folder should be refused"
         );
@@ -9585,7 +9818,7 @@ mod tests {
         fs::create_dir_all(orb_root.path().join("research/x")).change_context(StoreError)?;
 
         // When making Research session `x`.
-        actor.new_folder_session(FolderKind::Research, "x");
+        actor.new_folder_session(FolderKind::Research, "x", None);
 
         // Then no session shows.
         assert!(
@@ -9624,7 +9857,7 @@ mod tests {
         waiting_name_box(&state, FolderKind::Research, "tokio cancel");
 
         // When making it.
-        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
         // Then the box is closed and the sidebar has the keys.
         assert_eq!(
@@ -9644,7 +9877,7 @@ mod tests {
         waiting_name_box(&state, FolderKind::Research, "x");
 
         // When making it.
-        actor.new_folder_session(FolderKind::Research, "x");
+        actor.new_folder_session(FolderKind::Research, "x", None);
 
         // Then the box stays open with the name, no longer waiting.
         assert_eq!(
@@ -9662,7 +9895,7 @@ mod tests {
         state.write().sessions.filter = Some(orb);
 
         // When making Research session `tokio-cancel`, outside orb.
-        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
         // Then the filter goes back to all projects.
         assert_eq!(
@@ -9682,7 +9915,7 @@ mod tests {
         actor.save_ui();
 
         // When making Research session `tokio-cancel`, outside orb.
-        actor.new_folder_session(FolderKind::Research, "tokio-cancel");
+        actor.new_folder_session(FolderKind::Research, "tokio-cancel", None);
 
         // Then the store holds no filter.
         assert_eq!(
@@ -9701,7 +9934,7 @@ mod tests {
         state.write().sessions.filter = Some(orb);
 
         // When making Research session `x`.
-        actor.new_folder_session(FolderKind::Research, "x");
+        actor.new_folder_session(FolderKind::Research, "x", None);
 
         // Then the filter stays on orb.
         assert_eq!(
@@ -9925,10 +10158,10 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn restore_success_sets_attach() -> Result<(), Report<StoreError>> {
+    async fn restore_reports_ready_for_the_restored_session() -> Result<(), Report<StoreError>> {
         // Given thread aa's pruned worktree.
         let (store, id) = pruned_thread(Some("fix-parser"))?;
-        let (mut actor, state) = start_with(
+        let (mut actor, _state) = start_with(
             store,
             &listing(vec![]),
             &FakeGit::local(),
@@ -9939,11 +10172,13 @@ mod tests {
         let job = actor.restore_worktree(id);
         finish(&mut actor, job);
 
-        // Then the frontend is asked to attach to the session.
-        assert_eq!(
-            state.read().sessions.attach,
-            Some(id),
-            "a restored session should be attached"
+        // Then the session is ready to open while it is still the active one.
+        assert!(
+            actor.report.outcomes().contains(&Outcome::Ready {
+                session: id,
+                if_active: Some(id),
+            }),
+            "a restored session should open while it is still active"
         );
         Ok(())
     }
@@ -9953,7 +10188,7 @@ mod tests {
     async fn restore_failure_sets_the_error_and_no_attach() -> Result<(), Report<StoreError>> {
         // Given thread aa's pruned worktree, in a project git can't read.
         let (store, id) = pruned_thread(Some("fix-parser"))?;
-        let (mut actor, state) = start_with(
+        let (mut actor, _state) = start_with(
             store,
             &listing(vec![]),
             &FakeGit::plain(Ok(())),
@@ -9964,10 +10199,9 @@ mod tests {
         let job = actor.restore_worktree(id);
         finish(&mut actor, job);
 
-        // Then git's reason shows and nothing attaches.
-        let sessions = &state.read().sessions;
+        // Then git's reason shows and nothing opens.
         assert_eq!(
-            (sessions.error.as_deref(), sessions.attach),
+            (error_of(&actor).as_deref(), ready_of(&actor)),
             (Some(NOT_A_REPO), None),
             "a failed restore should show why and not attach"
         );
@@ -10628,7 +10862,7 @@ mod tests {
                 worktrees_root: PathBuf::from(WORKTREES_ROOT),
                 orb_root: dir.path().to_owned(),
                 incognito_root: PathBuf::from(INCOGNITO_ROOT),
-                wake: Arc::new(|| {}),
+                report: Reporter::new(|_| {}),
                 integration_missing: false,
             });
             Ok(Self {
@@ -11017,7 +11251,20 @@ mod tests {
         git: Arc<FakeGit>,
         zmx: ZmxService,
     ) -> Result<(ActorRef<SessionsActor>, State), Report<StoreError>> {
+        let (actor, state, _) = spawned_reporting(store, claude, git, zmx).await?;
+        Ok((actor, state))
+    }
+
+    /// [`spawned_with`], also returning a clone of the actor's reporter,
+    /// which sees everything the actor reports.
+    async fn spawned_reporting(
+        store: Store,
+        claude: &Arc<FakeClaude>,
+        git: Arc<FakeGit>,
+        zmx: ZmxService,
+    ) -> Result<(ActorRef<SessionsActor>, State, Reporter), Report<StoreError>> {
         let state = State::default();
+        let report = Reporter::new(|_| {});
         let actor = spawn_sessions_actor(SessionsActorDeps {
             services: Services {
                 harnesses: Harnesses::new(vec![Arc::new(ClaudeCode::new(
@@ -11033,14 +11280,14 @@ mod tests {
             worktrees_root: PathBuf::from(WORKTREES_ROOT),
             orb_root: PathBuf::from(ORB_ROOT),
             incognito_root: PathBuf::from(INCOGNITO_ROOT),
-            wake: Arc::new(|| {}),
+            report: report.clone(),
             integration_missing: false,
         });
         tokio::time::timeout(LIMIT, actor.wait_for_startup())
             .await
             .change_context(StoreError)
             .attach("the actor didn't start in time")?;
-        Ok((actor, state))
+        Ok((actor, state, report))
     }
 
     /// Asks `actor` to save session `session`'s layout and waits, at most
@@ -11232,6 +11479,7 @@ mod tests {
                     base: "main".to_owned(),
                 },
                 name: None,
+                if_active: None,
             })
             .await
             .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))?;
@@ -11297,18 +11545,27 @@ mod tests {
         // its mailbox.
         let (store, id) = pruned_thread(Some("fix-parser"))?;
         let zmx = zmx_running(&store);
-        let (actor, state) =
-            spawned_with(store, &listing(Vec::new()), FakeGit::local(), zmx).await?;
+        let (actor, _state, report) =
+            spawned_reporting(store, &listing(Vec::new()), FakeGit::local(), zmx).await?;
 
         // When asking it to restore the worktree, and its job finishing.
         ask_within(&actor, SessionsCommand::RestoreWorktree(id)).await?;
-        wait_until(|| state.read().sessions.attach.is_some()).await;
+        let ready = || {
+            report
+                .outcomes()
+                .into_iter()
+                .find_map(|outcome| match outcome {
+                    Outcome::Ready { session, .. } => Some(session),
+                    _ => None,
+                })
+        };
+        wait_until(|| ready().is_some()).await;
 
-        // Then the frontend is asked to attach the session.
+        // Then the session is reported ready to open.
         assert_eq!(
-            state.read().sessions.attach,
+            ready(),
             Some(id),
-            "a restored session is attached once its worktree is back"
+            "a restored session opens once its worktree is back"
         );
         Ok(())
     }
@@ -11321,8 +11578,8 @@ mod tests {
         let store = Store::open_in_memory()?;
         let project = orb_project(&store)?;
         let zmx = zmx_running(&store);
-        let (actor, state) =
-            spawned_with(store, &listing(Vec::new()), FakeGit::panicking(), zmx).await?;
+        let (actor, state, report) =
+            spawned_reporting(store, &listing(Vec::new()), FakeGit::panicking(), zmx).await?;
         state.write().sessions.starting = true;
 
         // When asking for a session in a new worktree, and its job dying.
@@ -11332,16 +11589,16 @@ mod tests {
                 project,
                 workspace: new_worktree(),
                 name: None,
+                if_active: None,
             },
         )
         .await?;
         wait_until(|| !state.read().sessions.starting).await;
 
         // Then the start ends with the failure shown.
-        let sessions = &state.read().sessions;
         assert_eq!(
-            (sessions.starting, sessions.error.as_deref()),
-            (false, Some("couldn't make the worktree")),
+            (state.read().sessions.starting, report.shown_error()),
+            (false, Some("couldn't make the worktree".to_owned())),
             "a job that dies still ends its start"
         );
         Ok(())
@@ -11412,6 +11669,7 @@ mod tests {
             SessionsCommand::ChangeWorkspace {
                 session,
                 to: Workspace::Existing(to.path().to_owned()),
+                if_active: None,
             },
         )
         .await?;

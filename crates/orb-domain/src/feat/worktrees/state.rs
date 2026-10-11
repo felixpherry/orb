@@ -19,9 +19,6 @@ pub const PRUNE_AFTER: Duration = Duration::from_hours(3 * 24);
 pub struct Worktrees {
     /// Sorted by path.
     pub list: Vec<Worktree>,
-    /// `pruned N worktrees`, or why a delete failed. Besides the worktrees
-    /// actor, the intent handler writes it: it clears it on the next intent.
-    pub notice: Option<String>,
 }
 
 /// One directory under `~/.orb/worktrees/<repo>/`.
@@ -473,7 +470,6 @@ mod tests {
                     worktree("/w/orb/orb-b", None),
                     worktree("/w/orb/orb-c", None),
                 ],
-                notice: None,
             },
             ..app(vec![project(vec![
                 chatted(thread(1, "/w/orb/orb-b"), 10),
@@ -509,7 +505,6 @@ mod tests {
         let app = AppState {
             worktrees: Worktrees {
                 list: vec![worktree("/w/orb/orb-a"), worktree("/w/orb/orb-b")],
-                notice: None,
             },
             ..settle(
                 app(vec![project(vec![

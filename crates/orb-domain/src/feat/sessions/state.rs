@@ -339,13 +339,13 @@ pub struct Search {
 
 /// orb's projects, sessions and threads, and where the sidebar's cursor is.
 ///
-/// Written by the sessions actor (projects, `sessions`, `error`, `notice`, `starting`
-/// when a start ends, `fetching`, `attach`, the cursor and `filter`
-/// after a restore, the cursor on a new session, removing a session from
-/// `deleting`, pushing `notices`) and by the intent handler (the cursor on
-/// navigation, settle and delete, `active`, `shelf_open`, `folded`, `starting` when a
-/// start begins, adding a session to `deleting`, `filter`). The frontend loop takes
-/// `attach` and `notices`.
+/// Written by the sessions actor (projects, `sessions`, `starting` when a
+/// start ends, `fetching`, the cursor and `filter` after a restore, the
+/// cursor on a new session, removing a session from `deleting`) and by the
+/// intent handler (the cursor on navigation, settle and delete, `active`,
+/// `shelf_open`, `folded`, `starting` when a start begins, adding a session
+/// to `deleting`, `filter`, `error`). The frontend loop moves `error` into
+/// the message box.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     /// In the order orb first used them.
@@ -372,22 +372,16 @@ pub struct Sessions {
     /// The origin ref a start is fetching, like `origin/main`; none when no
     /// fetch is running. Written only by the sessions actor.
     pub fetching: Option<String>,
-    /// The latest failure; shown until the next intent or a later success.
+    /// Why the intent just handled was refused, for the message box.
+    /// Written only by the intent handler (it clears it first on every
+    /// intent) and the frontend loop, which moves it into the message box
+    /// after each turn. Workers report their errors instead.
     pub error: Option<String>,
-    /// A notice for the message box, like a project just added; shown until
-    /// the next intent. Written only by the sessions actor.
-    pub notice: Option<String>,
-    /// A new session, or a session whose worktree was recreated, for the
-    /// frontend to attach to.
-    pub attach: Option<SessionId>,
     /// Sessions hidden while they are removed. The intent handler inserts,
     /// the sessions actor removes.
     pub deleting: HashSet<SessionId>,
     /// The project the sidebar is filtered to; `None` = all projects.
     pub filter: Option<ProjectId>,
-    /// Status changes for the frontend to announce; the sessions actor
-    /// pushes, the frontend takes.
-    pub notices: Vec<Notice>,
     /// The sidebar search while the user types one. Written only by the
     /// intent handler; the frontend clears it when it gives the keys to a
     /// pane.

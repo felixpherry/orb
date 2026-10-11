@@ -1,6 +1,6 @@
 //! Plumbing shared by every feature: the lock-protected [`State`] the
-//! frontend and actors hold, the [`Wake`] that tells the frontend loop to
-//! redraw, the [`Services`] actors use, [`tilde`] for showing a path,
+//! frontend and actors hold, the [`Reporter`] that tells the frontend loop
+//! what workers did, the [`Services`] actors use, [`tilde`] for showing a path,
 //! [`run_within`] for a child process that mustn't hang orb, [`ancestry`]
 //! for walking a process's parents, and the [`TextInput`] behind every line
 //! the user types into, the [`Log`] that records failures, kills and
@@ -24,5 +24,5 @@ pub use paths::tilde;
 pub use process::{ancestry, parse_parents};
 pub use services::Services;
 pub use shutdown::stop_gracefully;
-pub use state::{State, Wake};
+pub use state::{Outcome, Reporter, State};
 pub use text_input::TextInput;

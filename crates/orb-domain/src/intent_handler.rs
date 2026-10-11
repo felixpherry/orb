@@ -43,10 +43,10 @@ pub struct IntentHandler;
 
 impl IntentHandler {
     /// Apply `intent` to `state` and return the commands that must follow.
-    /// Every intent first clears the error and the notices in the message box,
-    /// which the user has now seen; otherwise an intent that fails validation
-    /// changes nothing. After every intent, a cursor left on an agent row of
-    /// a folded card unfolds it, unless a search lists the row anyway.
+    /// Every intent first clears the error, which the user has now seen;
+    /// otherwise an intent that fails validation changes nothing. After every
+    /// intent, a cursor left on an agent row of a folded card unfolds it,
+    /// unless a search lists the row anyway.
     /// A focus key, tab switch, pane click or float toggle that moves the
     /// keys from one pane to another records the agent left and the agent
     /// entered, each only if its pane runs an agent.
@@ -54,21 +54,16 @@ impl IntentHandler {
     /// When an intent moves the keys from a pane to the sidebar, the cursor
     /// starts on the active row while it's listed; a row click or a jump
     /// keeps its own cursor.
-    /// `ProjectsChanged`, which only re-lists, leaves both alone.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per intent keeps every input decision in one match"
     )]
     pub fn handle(intent: &Intent, state: &mut AppState) -> Vec<Command> {
-        if *intent != Intent::ProjectsChanged {
-            state.sessions.error = None;
-            state.sessions.notice = None;
-            state.worktrees.notice = None;
-            if *intent != Intent::PickerG
-                && let Some(picker) = state.picker.as_mut()
-            {
-                picker.forget_g();
-            }
+        state.sessions.error = None;
+        if *intent != Intent::PickerG
+            && let Some(picker) = state.picker.as_mut()
+        {
+            picker.forget_g();
         }
         let was_pane = state.focus == Focus::Pane;
         let left = was_pane.then(|| state.focused_agent());
@@ -326,18 +321,6 @@ impl IntentHandler {
                     .map(project_item)
                     .collect();
                 open_picker(state, PickerState::manage_projects(items, state.focus));
-                vec![]
-            }
-            Intent::ProjectsChanged => {
-                let items = state
-                    .sessions
-                    .projects_by_recency()
-                    .into_iter()
-                    .map(project_item)
-                    .collect();
-                if let Some(picker) = &mut state.picker {
-                    picker.show_projects(items);
-                }
                 vec![]
             }
             Intent::NewIncognito => match (
@@ -943,6 +926,33 @@ impl IntentHandler {
         }
         commands
     }
+
+    /// Re-lists the projects screen, open or under a picker, after the
+    /// projects changed, keeping the selected project selected.
+    pub fn relist_projects(state: &mut AppState) {
+        let items = state
+            .sessions
+            .projects_by_recency()
+            .into_iter()
+            .map(project_item)
+            .collect();
+        if let Some(picker) = &mut state.picker {
+            picker.show_projects(items);
+        }
+    }
+
+    /// Opens session `id`, which a worker just made ready, as `⏎` on its
+    /// row would, wherever the cursor is: it becomes active and attached,
+    /// and the cursor moves to its row. Nothing happens for a session that
+    /// is gone or being deleted.
+    pub fn open_ready(state: &mut AppState, id: SessionId) -> Vec<Command> {
+        if state.sessions.session(id).is_none() || state.sessions.deleting.contains(&id) {
+            return vec![];
+        }
+        let commands = enter_session(state, id);
+        state.sessions.cursor = state.active_row();
+        commands
+    }
 }
 
 /// Records leaving agent row `left` for the focused agent, each only if it
@@ -1020,6 +1030,7 @@ fn pick_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command> {
                 session,
                 git_ref: git_ref.clone(),
                 to_root,
+                if_active: state.sessions.active(),
             });
             if to_root {
                 detach_moving(state, session, command)
@@ -1252,11 +1263,13 @@ fn new_session(
     }
     state.sessions.starting = true;
     state.jumps.jump(state.sessions.cursor, None);
+    let if_active = state.sessions.active();
     vec![
         Command::Sessions(SessionsCommand::NewSession {
             project,
             workspace,
             name,
+            if_active,
         }),
         Command::Sessions(SessionsCommand::SaveJumps),
     ]
@@ -1297,7 +1310,11 @@ fn change_workspace(state: &mut AppState, session: SessionId, to: Workspace) -> 
     detach_moving(
         state,
         session,
-        Command::Sessions(SessionsCommand::ChangeWorkspace { session, to }),
+        Command::Sessions(SessionsCommand::ChangeWorkspace {
+            session,
+            to,
+            if_active: state.sessions.active(),
+        }),
     )
 }
 
@@ -1983,6 +2000,7 @@ fn new_folder_session(state: &mut AppState) -> Vec<Command> {
     let command = Command::Sessions(SessionsCommand::NewFolderSession {
         kind: *kind,
         name: folder_slug(input.text()),
+        if_active: state.sessions.active(),
     });
     state.sessions.starting = true;
     state.jumps.jump(state.sessions.cursor, None);
@@ -3244,6 +3262,7 @@ mod tests {
                     project: ProjectId(2),
                     workspace: Workspace::Checkout,
                     name: Some("api".to_owned()),
+                    if_active: None,
                 }),
                 Command::Sessions(SessionsCommand::SaveJumps),
             ],
@@ -3267,6 +3286,7 @@ mod tests {
                     project: ProjectId(2),
                     workspace: Workspace::Checkout,
                     name: None,
+                    if_active: None,
                 }),
                 Command::Sessions(SessionsCommand::SaveJumps),
             ],
@@ -3329,6 +3349,7 @@ mod tests {
                     base: "main".to_owned()
                 },
                 name: Some("api".to_owned()),
+                if_active: None,
             })),
             "the name rides the workspace and base pickers, got {commands:?}"
         );
@@ -3348,6 +3369,7 @@ mod tests {
                 project: ProjectId(1),
                 workspace: Workspace::Checkout,
                 name: None,
+                if_active: None,
             })),
             "the current checkout should make a session there, got {commands:?}"
         );
@@ -3370,6 +3392,7 @@ mod tests {
                 project: ProjectId(1),
                 workspace: Workspace::Existing("/wt/alpha-1".into()),
                 name: None,
+                if_active: None,
             })),
             "the previous worktree should make a session there, got {commands:?}"
         );
@@ -3429,6 +3452,7 @@ mod tests {
                     base: "main".to_owned()
                 },
                 name: None,
+                if_active: None,
             })),
             "a picked base should make a session in a new worktree, got {commands:?}"
         );
@@ -3727,6 +3751,7 @@ mod tests {
             [Command::Sessions(SessionsCommand::ChangeWorkspace {
                 session: SessionId(1),
                 to: Workspace::Existing("/work/2".into()),
+                if_active: Some(SessionId(1)),
             })],
             "the previous worktree should be the session's new workspace"
         );
@@ -3787,6 +3812,7 @@ mod tests {
                 to: Workspace::NewWorktree {
                     base: "main".into()
                 },
+                if_active: None,
             })],
             "the base should start the session's new worktree"
         );
@@ -3884,38 +3910,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn next_intent_clears_the_notice() {
-        // Given a worktree notice in the message box.
-        let mut state = state_with(vec![in_root(1)], 1);
-        state.worktrees.notice = Some("pruned 2 worktrees".to_owned());
-
-        // When handling the next intent.
-        IntentHandler::handle(&Intent::SelectNext, &mut state);
-
-        // Then the notice is gone.
-        assert_eq!(
-            state.worktrees.notice, None,
-            "the user has seen the notice once they press a key"
-        );
-    }
-
-    #[rstest::rstest]
-    fn any_intent_clears_the_sessions_notice() {
-        // Given an Added project notice in the message box.
-        let mut state = state_with(vec![in_root(1)], 1);
-        state.sessions.notice = Some("Added project web".to_owned());
-
-        // When handling the next intent.
-        IntentHandler::handle(&Intent::SelectNext, &mut state);
-
-        // Then the notice is gone.
-        assert_eq!(
-            state.sessions.notice, None,
-            "the user has seen the notice once they press a key"
-        );
-    }
-
-    #[rstest::rstest]
     fn busy_directory_shows_the_error() {
         // Given a working sibling in the selected thread's directory.
         let mut state = state_with(
@@ -3962,6 +3956,7 @@ mod tests {
                 session: SessionId(1),
                 git_ref: branch("feat", false, None),
                 to_root: false,
+                if_active: None,
             })],
             "a free branch should be checked out"
         );
@@ -3989,8 +3984,122 @@ mod tests {
             [Command::Sessions(SessionsCommand::ChangeWorkspace {
                 session: SessionId(1),
                 to: Workspace::Existing("/wt/feat".into()),
+                if_active: None,
             })],
             "a session with no turn follows the branch into its worktree"
+        );
+    }
+
+    /// The session active when each start in `commands` was asked for.
+    fn if_active_of(commands: &[Command]) -> Vec<Option<SessionId>> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Sessions(
+                    SessionsCommand::NewSession { if_active, .. }
+                    | SessionsCommand::ChangeWorkspace { if_active, .. }
+                    | SessionsCommand::SwitchBranch { if_active, .. }
+                    | SessionsCommand::NewFolderSession { if_active, .. },
+                ) => Some(*if_active),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn new_session_carries_the_session_active_when_asked() {
+        // Given alpha's workspace picker on the current checkout, with
+        // session 5 active.
+        let mut state = choosing_new_workspace(&WorkspaceChoice::Current { worktree: false });
+        state.sessions.enter(SessionId(5));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the new session opens only while session 5 is still active.
+        assert_eq!(
+            if_active_of(&commands),
+            [Some(SessionId(5))],
+            "a new session should carry the active session, got {commands:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn change_workspace_carries_the_session_active_when_asked() {
+        // Given session 1's workspace picker on the previous worktree, with
+        // session 2 active.
+        let mut state = choosing_previous_worktree();
+        state.sessions.enter(SessionId(2));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the move opens only while session 2 is still active.
+        assert_eq!(
+            if_active_of(&commands),
+            [Some(SessionId(2))],
+            "a move should carry the active session, got {commands:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn switch_branch_to_the_root_carries_the_session_active_when_asked() {
+        // Given the branch picker of session 1, with no turn and outside the
+        // checkout, on the default branch checked out nowhere, and session 2
+        // active.
+        let mut state = AppState {
+            focus: Focus::Sidebar,
+            ..state_with(
+                vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+                1,
+            )
+        };
+        IntentHandler::handle(&Intent::SwitchBranch, &mut state);
+        if let Some(picker) = &mut state.picker {
+            let main = GitRef {
+                default: true,
+                ..branch("main", false, None)
+            };
+            picker.show_branches(Path::new("/work/1"), vec![main]);
+        }
+        state.sessions.enter(SessionId(2));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the switch to the root opens only while session 2 is still
+        // active.
+        assert_eq!(
+            if_active_of(&commands),
+            [Some(SessionId(2))],
+            "a switch to the root should carry the active session, got {commands:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn folder_session_carries_the_session_active_when_asked() {
+        // Given the name box for a new Research session holding `notes`,
+        // with session 1 active.
+        let mut state = AppState {
+            focus: Focus::Rename,
+            rename: Some(Rename {
+                target: RenameTarget::NewFolder(FolderKind::Research),
+                input: TextInput::new("notes"),
+                creating: false,
+            }),
+            ..state_with(vec![in_root(1)], 1)
+        };
+        state.sessions.enter(SessionId(1));
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the folder session opens only while session 1 is still
+        // active.
+        assert_eq!(
+            if_active_of(&commands),
+            [Some(SessionId(1))],
+            "a folder session should carry the active session, got {commands:?}"
         );
     }
 
@@ -4742,6 +4851,7 @@ mod tests {
                 project: ProjectId(2),
                 workspace: Workspace::Checkout,
                 name: None,
+                if_active: None,
             })),
             "NewIncognito should ask for a session in the Incognito folder, got {commands:?}"
         );
@@ -5178,13 +5288,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn projects_changed_lists_a_new_project() {
+    fn relist_projects_lists_a_new_project() {
         // Given the projects screen, then project gamma added.
         let mut state = managing(None, on_thread(21));
         add_gamma(&mut state);
 
-        // When handling ProjectsChanged.
-        IntentHandler::handle(&Intent::ProjectsChanged, &mut state);
+        // When re-listing the projects.
+        IntentHandler::relist_projects(&mut state);
 
         // Then gamma shows as a row.
         assert!(
@@ -5194,15 +5304,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn projects_changed_keeps_the_selected_project() {
+    fn relist_projects_keeps_the_selected_project() {
         // Given the projects screen with beta highlighted, then project gamma
         // added.
         let mut state = managing(None, on_thread(21));
         highlight(&mut state, &project_row(2, "beta"));
         add_gamma(&mut state);
 
-        // When handling ProjectsChanged.
-        IntentHandler::handle(&Intent::ProjectsChanged, &mut state);
+        // When re-listing the projects.
+        IntentHandler::relist_projects(&mut state);
 
         // Then beta is still highlighted.
         assert_eq!(
@@ -5213,14 +5323,14 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn projects_changed_relists_the_projects_screen_under_a_confirm() {
+    fn relist_projects_relists_the_projects_screen_under_a_confirm() {
         // Given the remove confirm over the projects screen, then project
         // gamma added.
         let mut state = removing_alpha(None, on_thread(21));
         add_gamma(&mut state);
 
-        // When handling ProjectsChanged.
-        IntentHandler::handle(&Intent::ProjectsChanged, &mut state);
+        // When re-listing the projects.
+        IntentHandler::relist_projects(&mut state);
 
         // Then the confirm stays on top and the list under it shows gamma.
         assert_eq!(
@@ -5233,22 +5343,6 @@ mod tests {
             ),
             (true, true),
             "a re-list should reach the projects screen under the confirm"
-        );
-    }
-
-    #[rstest::rstest]
-    fn projects_changed_keeps_the_notice() {
-        // Given the projects screen and a notice on the mode line.
-        let mut state = managing(None, on_thread(21));
-        state.sessions.notice = Some("Added project gamma".to_owned());
-
-        // When handling ProjectsChanged.
-        IntentHandler::handle(&Intent::ProjectsChanged, &mut state);
-
-        // Then the notice is still shown.
-        assert!(
-            state.sessions.notice.is_some(),
-            "a re-list should not clear the notice"
         );
     }
 
@@ -5836,6 +5930,7 @@ mod tests {
             commands.contains(&Command::Sessions(SessionsCommand::NewFolderSession {
                 kind: FolderKind::Research,
                 name: "GT-514-login".into(),
+                if_active: None,
             })),
             "a valid name should ask for the session, got {commands:?}"
         );
@@ -7681,7 +7776,6 @@ mod tests {
         AppState {
             worktrees: Worktrees {
                 list: vec![worktree(ORPHAN), worktree(USED)],
-                notice: None,
             },
             ..state_at(
                 vec![Thread {
@@ -10585,6 +10679,54 @@ mod tests {
             ),
             (false, Some(SessionId(1))),
             "moving the hover should not change what's on the right"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_ready_attaches_the_session_though_the_cursor_moved() {
+        // Given session 1 active and the cursor moved to session 2 while a
+        // restore of session 1 ran.
+        let mut state = left_pane_showing_1(&[1, 2], 2);
+
+        // When the restored session 1 opens.
+        let commands = IntentHandler::open_ready(&mut state, SessionId(1));
+
+        // Then session 1 is attached, not the hovered session 2.
+        assert!(
+            commands.contains(&Command::Attach(SessionId(1))),
+            "a ready session should open wherever the cursor is, got {commands:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_ready_moves_the_cursor_to_the_opened_session() {
+        // Given session 1 active and the cursor on session 2.
+        let mut state = left_pane_showing_1(&[1, 2], 2);
+
+        // When the ready session 1 opens.
+        IntentHandler::open_ready(&mut state, SessionId(1));
+
+        // Then the cursor is on session 1's entered row.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(state.entry_row(SessionId(1))),
+            "opening should put the cursor on the opened session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn open_ready_does_nothing_for_a_deleted_session() {
+        // Given session 1 being deleted and the cursor on session 2.
+        let mut state = left_pane_showing_1(&[1, 2], 2);
+        state.sessions.deleting.insert(SessionId(1));
+
+        // When the ready session 1 opens.
+        let commands = IntentHandler::open_ready(&mut state, SessionId(1));
+
+        // Then nothing is asked for.
+        assert!(
+            commands.is_empty(),
+            "a session being deleted shouldn't open, got {commands:?}"
         );
     }
 

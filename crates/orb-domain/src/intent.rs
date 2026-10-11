@@ -132,9 +132,6 @@ pub enum Intent {
     /// Open the projects screen, listing projects in `<C-g> n` order, to
     /// start a session in one, add one or remove one.
     OpenProjects,
-    /// The projects changed while the projects screen is open: re-list it.
-    /// Sent by the frontend's loop, not a key.
-    ProjectsChanged,
     /// Open the search picker, which finds typed text in the prompts and
     /// replies of every thread's transcripts, newest message first.
     OpenSearch,
@@ -286,7 +283,7 @@ impl fmt::Display for Intent {
             Self::NewIncognito => "incognito",
             Self::OpenSessionPicker => "sessions",
             Self::OpenWorktreePicker => "worktrees",
-            Self::OpenProjects | Self::ProjectsChanged => "projects",
+            Self::OpenProjects => "projects",
             Self::OpenSearch => "grep",
             Self::FilterProjects => "filter projects",
             Self::PickerHalfPageDown | Self::SelectHalfPageDown => "half page down",

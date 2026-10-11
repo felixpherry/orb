@@ -72,7 +72,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -85,16 +84,16 @@ use orb_domain::feat::git::worktree::is_orb_worktree;
 use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::layout::state::{Layouts, SessionLayout};
 use orb_domain::feat::notify::notifier::NotifierService;
-use orb_domain::feat::picker::state::PickerKind;
+use orb_domain::feat::picker::state::{PickerKind, worktree_items};
 use orb_domain::feat::search::search_actor::SearchActor;
 use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::SessionsActor;
-use orb_domain::feat::sessions::state::{PaneId, SessionId, ThreadId};
+use orb_domain::feat::sessions::state::{Notice, PaneId, SessionId, ThreadId};
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::worktrees::worktrees_actor::WorktreesActor;
 use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
 use orb_domain::{
-    AppState, Command, Focus, Intent, IntentHandler, Log, SessionsCommand, State, Wake,
+    AppState, Command, Focus, Intent, IntentHandler, Log, Outcome, Reporter, SessionsCommand, State,
 };
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
@@ -129,7 +128,7 @@ const EXITED_AT_START: &str = "session exited at start";
 #[error(debug)]
 pub struct TuiRunError;
 
-/// orb's TUI. Created before the actors so they can wake its loop.
+/// orb's TUI. Created before the actors so they can report to its loop.
 pub struct Frontend {
     tx: Sender<LoopEvent>,
     rx: Receiver<LoopEvent>,
@@ -144,21 +143,21 @@ impl Frontend {
         Self { tx, rx, tz }
     }
 
-    /// Wakes the loop to redraw after an actor changed the state.
-    pub fn waker(&self) -> Wake {
+    /// Sends an actor's outcomes to the loop, which applies each one.
+    pub fn reporter(&self) -> Reporter {
         let tx = self.tx.clone();
-        Arc::new(move || {
-            let _ = tx.send(LoopEvent::StateChanged);
+        Reporter::new(move |outcome| {
+            let _ = tx.send(LoopEvent::Reported(outcome));
         })
     }
 
     /// Quits orb the way `<C-g> q` does, from outside the loop. A quit sent
     /// before the loop starts is handled on its first turn.
-    pub fn quitter(&self) -> Wake {
+    pub fn quitter(&self) -> impl Fn() + Send + Sync + 'static {
         let tx = self.tx.clone();
-        Arc::new(move || {
+        move || {
             let _ = tx.send(LoopEvent::Quit);
-        })
+        }
     }
 
     /// Runs orb's TUI until the user quits or [`Frontend::quitter`] is called.
@@ -224,16 +223,26 @@ enum LoopEvent {
     InputFailed(io::Error),
     /// Pane `PaneId` reported `PaneEvent`.
     Pane(PaneId, PaneEvent),
-    /// An actor changed the state.
-    StateChanged,
+    /// A worker reported an outcome.
+    Reported(Outcome),
     /// orb was asked to quit from outside (a signal).
     Quit,
 }
 
-/// What the loop does with a new session's request to attach to it.
+/// A session a worker made ready to open, waiting in the loop until it can.
+#[derive(Debug, Clone, Copy)]
+struct Ready {
+    session: SessionId,
+    /// The session that was active when the user asked.
+    if_active: Option<SessionId>,
+    /// It waited for the keys to come back to the sidebar.
+    waited: bool,
+}
+
+/// What the loop does with a session a worker made ready to open.
 #[derive(Debug, PartialEq, Eq)]
 enum StartedAttach {
-    /// There's no request, or its session is no longer selected: drop it.
+    /// The user opened another session meanwhile: drop it.
     Drop,
     /// The user is typing (a picker, the rename box, the search) or in a
     /// pane: keep the request until the keys are back.
@@ -243,16 +252,18 @@ enum StartedAttach {
     Attach { keep_keys: bool },
 }
 
-/// What to do with `started`, a new session's request, given the selected
-/// session, where the keys are, and whether the request has `waited` already.
+/// What to do with a ready session, asked for while `if_active` was the
+/// active session, given the `active` session now, where the keys are, and
+/// whether it has `waited` already. Moving the cursor around doesn't cancel
+/// it; opening another session does.
 fn started_attach(
-    started: Option<SessionId>,
-    selected: Option<SessionId>,
+    if_active: Option<SessionId>,
+    active: Option<SessionId>,
     focus: Focus,
     waited: bool,
 ) -> StartedAttach {
     match focus {
-        _ if started.is_none() || started != selected => StartedAttach::Drop,
+        _ if if_active != active => StartedAttach::Drop,
         Focus::Picker | Focus::Rename | Focus::Search | Focus::Pane => StartedAttach::Wait,
         Focus::Sidebar => StartedAttach::Attach { keep_keys: waited },
     }
@@ -503,6 +514,60 @@ where
     }
 }
 
+/// Whether the projects screen is open, or under the open picker.
+fn projects_open(state: &AppState) -> bool {
+    state.picker.as_ref().is_some_and(|picker| {
+        [Some(picker), picker.under()]
+            .into_iter()
+            .flatten()
+            .any(|shown| *shown.kind() == PickerKind::ManageProjects)
+    })
+}
+
+/// Shows a worker's `outcome` in `state` and the message box at `now`: an
+/// error or notice pops, a success hides the error, changed worktrees
+/// re-list an open worktree picker, and search rows and previews fill the
+/// search picker unless they're stale (see [`PickerState::show_hits`] and
+/// [`PickerState::show_search_preview`]). Then an open projects screen
+/// re-lists, so it keeps its recency order as sessions get busier.
+///
+/// [`PickerState::show_hits`]: orb_domain::feat::picker::state::PickerState::show_hits
+/// [`PickerState::show_search_preview`]: orb_domain::feat::picker::state::PickerState::show_search_preview
+fn show(outcome: Outcome, state: &mut AppState, toasts: &mut Toasts, now: Instant) {
+    match outcome {
+        Outcome::Changed
+        | Outcome::Ready { .. }
+        | Outcome::Announce(_)
+        | Outcome::ProjectsChanged => {}
+        Outcome::Failed(error) => toasts.error(error, now),
+        Outcome::Recovered => toasts.recovered(),
+        Outcome::Notice(text) => toasts.notice(text, now),
+        Outcome::WorktreesChanged => {
+            let items = worktree_items(state);
+            if let Some(picker) = &mut state.picker {
+                picker.show_worktrees(items);
+            }
+        }
+        Outcome::Hits {
+            query,
+            items,
+            overflow,
+        } => {
+            if let Some(picker) = &mut state.picker {
+                picker.show_hits(&query, items, overflow);
+            }
+        }
+        Outcome::HitPreview { hit, messages } => {
+            if let Some(picker) = &mut state.picker {
+                picker.show_search_preview(hit, messages);
+            }
+        }
+    }
+    if projects_open(state) {
+        IntentHandler::relist_projects(state);
+    }
+}
+
 /// Handles a mouse event's intents in order after ending any pane mode;
 /// `execute` runs each intent's commands before the next intent is handled.
 fn handle_mouse_intents<F>(state: &State, intents: &[Intent], mut execute: F)
@@ -576,16 +641,15 @@ struct App {
     pane_error: Option<String>,
     /// The message box: the latest error or notice, until it times out.
     toasts: Toasts,
-    /// A new session's attach request is waiting for the keys to come back
-    /// to the sidebar.
-    attach_waited: bool,
+    /// The session a worker last made ready, until it opens or is dropped.
+    ready: Option<Ready>,
     /// The environment panes run with.
     env: Vec<(OsString, OsString)>,
     /// Lists the zmx sessions panes attach to.
     zmx: ZmxService,
     /// The command a pane's client runs to attach to its zmx session.
     attach: fn(&ZmxSession) -> Vec<OsString>,
-    /// Announces the sessions actor's notices.
+    /// Announces the sessions actor's status changes.
     notifier: NotifierService,
     /// orb's log file.
     log: Log,
@@ -647,7 +711,7 @@ impl App {
             typing: HashMap::new(),
             pane_error: None,
             toasts: Toasts::default(),
-            attach_waited: false,
+            ready: None,
             env,
             zmx,
             attach,
@@ -722,13 +786,14 @@ impl App {
                     Err(_) => return Ok(()),
                 },
             };
+            self.toasts.begin_turn();
             for event in first.into_iter().chain(rx.try_iter()) {
                 self.handle(event, terminal.backend_mut())?;
             }
             self.refresh_preview();
-            self.announce();
             self.reconcile();
-            self.open_started();
+            self.open_ready();
+            self.take_error();
             self.sync_focus();
             let now = Instant::now();
             for pane in self.panes.values() {
@@ -875,6 +940,7 @@ impl App {
         self.keys.dismiss();
         let state = self.state.clone();
         handle_mouse_intents(&state, intents, |command| self.execute(command));
+        self.toasts.dismiss();
     }
 
     fn handle<W>(&mut self, event: LoopEvent, out: &mut W) -> io::Result<()>
@@ -929,6 +995,7 @@ impl App {
                 };
                 if let Some(intent) = intent {
                     let commands = IntentHandler::handle(&intent, &mut self.state.write());
+                    self.toasts.dismiss();
                     for command in &commands {
                         self.execute(command);
                     }
@@ -957,7 +1024,7 @@ impl App {
             LoopEvent::Pane(id, PaneEvent::Output) => self.type_resume(id),
             LoopEvent::Input(_) => {}
             LoopEvent::Pane(id, PaneEvent::Broken) => self.drop_broken(id),
-            LoopEvent::StateChanged => self.relist_projects(),
+            LoopEvent::Reported(outcome) => self.apply(outcome),
             LoopEvent::Quit => {
                 IntentHandler::handle(&Intent::Quit, &mut self.state.write());
             }
@@ -1297,57 +1364,58 @@ impl App {
         }
     }
 
-    /// After an actor changed the state, re-lists the projects screen when
-    /// it is open or under a picker, so an added or removed project shows.
-    fn relist_projects(&mut self) {
-        let commands = {
-            let mut state = self.state.write();
-            let open = state.picker.as_ref().is_some_and(|picker| {
-                [Some(picker), picker.under()]
-                    .into_iter()
-                    .flatten()
-                    .any(|shown| *shown.kind() == PickerKind::ManageProjects)
-            });
-            if !open {
-                return;
+    /// Applies a worker's `outcome`: a ready session waits to open (see
+    /// [`Self::open_ready`]), a status change is announced, and every
+    /// outcome shows on the screen (see [`show`]).
+    fn apply(&mut self, outcome: Outcome) {
+        match &outcome {
+            Outcome::Ready { session, if_active } => {
+                self.ready = Some(Ready {
+                    session: *session,
+                    if_active: *if_active,
+                    waited: false,
+                });
             }
-            IntentHandler::handle(&Intent::ProjectsChanged, &mut state)
-        };
-        for command in &commands {
-            self.execute(command);
+            Outcome::Announce(notice) => self.announce(notice.clone()),
+            _ => {}
         }
+        show(
+            outcome,
+            &mut self.state.write(),
+            &mut self.toasts,
+            Instant::now(),
+        );
     }
 
-    /// Attaches to a new session's request while it's still selected, as
-    /// [`started_attach`] decides: at once, or, if the user was typing or in
-    /// a pane when it came up, once the keys are back in the sidebar, leaving
-    /// them there with the pane drawn (as a click on the sidebar does). A
-    /// request whose session is no longer selected is dropped for good. A
-    /// failure the start still reported (saving the store) stays on the mode
-    /// line.
-    fn open_started(&mut self) {
+    /// Opens the ready session as [`started_attach`] decides: at once, or,
+    /// if the user was typing or in a pane when it came up, once the keys
+    /// are back in the sidebar, leaving them there with the pane drawn (as a
+    /// click on the sidebar does). One the user moved on from is dropped.
+    fn open_ready(&mut self) {
+        let Some(ready) = self.ready.take() else {
+            return;
+        };
         let (commands, keep_keys) = {
             let mut state = self.state.write();
             let decision = started_attach(
-                state.sessions.attach,
-                state.sessions.selected_session().map(|session| session.id),
+                ready.if_active,
+                state.sessions.active(),
                 state.focus,
-                self.attach_waited,
+                ready.waited,
             );
-            self.attach_waited = decision == StartedAttach::Wait;
             let keep_keys = match decision {
-                StartedAttach::Wait => return,
-                StartedAttach::Drop => {
-                    state.sessions.attach = None;
+                StartedAttach::Drop => return,
+                StartedAttach::Wait => {
+                    self.ready = Some(Ready {
+                        waited: true,
+                        ..ready
+                    });
                     return;
                 }
                 StartedAttach::Attach { keep_keys } => keep_keys,
             };
-            state.sessions.attach = None;
             let focus = state.focus;
-            let error = state.sessions.error.take();
-            let commands = IntentHandler::handle(&Intent::Attach, &mut state);
-            state.sessions.error = error;
+            let commands = IntentHandler::open_ready(&mut state, ready.session);
             if keep_keys {
                 state.focus = focus;
             }
@@ -1359,6 +1427,17 @@ impl App {
         if keep_keys {
             // The pane loses the keys, as on a click on the sidebar.
             self.execute(&Command::Detach);
+        }
+    }
+
+    /// Moves the refusal the last intents or the loop's own work left in
+    /// the state into the message box.
+    fn take_error(&mut self) {
+        if self.state.read().sessions.error.is_none() {
+            return;
+        }
+        if let Some(error) = self.state.write().sessions.error.take() {
+            self.toasts.error(error, Instant::now());
         }
     }
 
@@ -1397,23 +1476,19 @@ impl App {
         }
     }
 
-    /// Takes the sessions actor's notices and, while orb's terminal isn't
-    /// focused, sends them on a thread of their own (the desktop's
-    /// notification server can be slow to answer); while it is, the sidebar
-    /// already shows them and they're dropped. A notice that can't be sent
-    /// is dropped.
-    fn announce(&self) {
-        let notices = mem::take(&mut self.state.write().sessions.notices);
-        if notices.is_empty() || self.focused {
+    /// While orb's terminal isn't focused, sends `notice` on a thread of
+    /// its own (the desktop's notification server can be slow to answer);
+    /// while it is, the sidebar already shows it and it's dropped. A notice
+    /// that can't be sent is dropped.
+    fn announce(&self, notice: Notice) {
+        if self.focused {
             return;
         }
         let notifier = self.notifier.clone();
         let _ = thread::Builder::new()
             .name("orb-notice".into())
             .spawn(move || {
-                for notice in &notices {
-                    let _ = notifier.announce(notice);
-                }
+                let _ = notifier.announce(&notice);
             });
     }
 
@@ -1543,15 +1618,6 @@ impl App {
         let mut drawn = (None, None, None);
         self.sidebar_scroll
             .follow_keys(self.state.read().focus == Focus::Sidebar);
-        {
-            let state = self.state.read();
-            self.toasts.observe(
-                state.sessions.error.as_deref(),
-                state.worktrees.notice.as_deref(),
-                state.sessions.notice.as_deref(),
-                Instant::now(),
-            );
-        }
         ratatui::crossterm::queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
         terminal.draw(|frame| {
             let state = self.state.read();
@@ -1671,13 +1737,15 @@ mod tests {
     use std::fs;
     use std::io;
     use std::os::unix::fs::symlink;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::UNIX_EPOCH;
 
     use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
     use orb_domain::feat::layout::tree::Split;
     use orb_domain::feat::picker::list::PickerItem;
-    use orb_domain::feat::picker::state::{PickerState, SessionFilter, session_items};
+    use orb_domain::feat::picker::state::{
+        PickerState, SessionFilter, session_items, worktree_items,
+    };
     use orb_domain::feat::sessions::state::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Session, SessionId, SessionKind,
         Sessions, Thread, ThreadId, ThreadStatus,
@@ -1696,9 +1764,13 @@ mod tests {
     use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
     use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
     use orb_domain::feat::sessions::store::Store;
+    use orb_domain::feat::sessions::transcript::Role;
+    use orb_domain::feat::worktrees::state::Worktree;
     use orb_domain::feat::worktrees::worktrees_actor::{WorktreesActorDeps, spawn_worktrees_actor};
     use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession};
-    use orb_domain::{AppState, Focus, Intent, Log, PaneMode, Services, State, Wake};
+    use orb_domain::{
+        AppState, Focus, Intent, IntentHandler, Log, Outcome, PaneMode, Reporter, Services, State,
+    };
     use orb_term::PaneEvent;
     use ratatui::crossterm::cursor::SetCursorStyle;
     use ratatui::layout::Rect;
@@ -1710,11 +1782,12 @@ mod tests {
     };
 
     use super::{
-        App, AttachPlan, ExitOutcome, LoopEvent, PREVIEW_EVERY, PaneExit, StartedAttach,
+        App, AttachPlan, ExitOutcome, LoopEvent, PREVIEW_EVERY, PaneExit, StartedAttach, Toasts,
         after_pane, attach_at_start, attach_or_restore, broken_pane_message, classify_exit,
         clear_detached, closed_in_layouts, cursor_style, exit_outcome, handle_mouse_intents,
         list_directories, pane_error_after, present_at_start, preview_due, reattachable,
-        resume_plan, stale_preview, stale_sessions, started_attach, to_drop, to_kill, to_spawn,
+        resume_plan, show, stale_preview, stale_sessions, started_attach, to_drop, to_kill,
+        to_spawn,
     };
 
     /// Pane `id`, a shell in `orb-p<id>`.
@@ -2052,34 +2125,55 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn started_session_still_selected_is_attached() {
-        // Given new session 1 still selected.
-        let started = Some(SessionId(1));
+    fn ready_session_opens_while_the_same_session_is_active() {
+        // Given session 1 restored while it was active, the cursor having
+        // moved to another row meanwhile, and it still active.
+        let active = Some(SessionId(1));
 
         // When deciding what to do in the sidebar.
-        let decision = started_attach(started, started, Focus::Sidebar, false);
+        let decision = started_attach(active, active, Focus::Sidebar, false);
 
-        // Then orb attaches, taking the keys into the pane.
+        // Then orb opens it, taking the keys into the pane.
         assert_eq!(
             decision,
             StartedAttach::Attach { keep_keys: false },
-            "a still-selected started thread should attach"
+            "glancing around the sidebar shouldn't cancel the open"
         );
     }
 
     #[rstest::rstest]
-    fn started_session_is_dropped_after_the_selection_moved() {
-        // Given new session 1 while session 2 is selected.
-        let started = Some(SessionId(1));
+    fn ready_session_is_dropped_after_another_session_opened() {
+        // Given a session asked for while session 1 was active, and session 2
+        // opened since.
 
         // When deciding what to do.
-        let decision = started_attach(started, Some(SessionId(2)), Focus::Sidebar, false);
+        let decision = started_attach(
+            Some(SessionId(1)),
+            Some(SessionId(2)),
+            Focus::Sidebar,
+            false,
+        );
 
-        // Then the request is dropped.
+        // Then it is dropped.
         assert_eq!(
             decision,
             StartedAttach::Drop,
-            "a moved selection shouldn't attach"
+            "opening another session meanwhile cancels the open"
+        );
+    }
+
+    #[rstest::rstest]
+    fn new_session_opens_when_nothing_was_active_and_still_isnt() {
+        // Given a new session asked for with nothing active, and still nothing.
+
+        // When deciding what to do.
+        let decision = started_attach(None, None, Focus::Sidebar, false);
+
+        // Then it opens.
+        assert_eq!(
+            decision,
+            StartedAttach::Attach { keep_keys: false },
+            "a new session opens when the user opened nothing else"
         );
     }
 
@@ -2088,51 +2182,333 @@ mod tests {
     #[case(Focus::Rename)]
     #[case(Focus::Search)]
     #[case(Focus::Pane)]
-    fn started_session_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
-        // Given new session 1 still selected. e.g. while
-        // a picker has the keys.
-        let started = Some(SessionId(1));
+    fn ready_session_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
+        // Given session 1 ready while it is still active, e.g. while a picker
+        // has the keys.
+        let active = Some(SessionId(1));
 
         // When deciding what to do in `focus`.
-        let decision = started_attach(started, started, focus, false);
+        let decision = started_attach(active, active, focus, false);
 
-        // Then the request waits instead of being dropped.
+        // Then it waits instead of being dropped.
         assert_eq!(
             decision,
             StartedAttach::Wait,
-            "the attach should wait in {focus:?}"
+            "the open should wait in {focus:?}"
         );
     }
 
     #[rstest::rstest]
-    fn waited_started_thread_attaches_once_the_keys_are_back() {
-        // Given thread 1's attach request waited while the user was in a
-        // picker, and the thread is still selected.
-        let started = Some(SessionId(1));
+    fn waited_ready_session_opens_once_the_keys_are_back() {
+        // Given session 1 waited while the user was in a picker, and it is
+        // still active.
+        let active = Some(SessionId(1));
 
         // When deciding what to do once the keys are back in the sidebar.
-        let decision = started_attach(started, started, Focus::Sidebar, true);
+        let decision = started_attach(active, active, Focus::Sidebar, true);
 
-        // Then orb attaches and leaves the keys there.
+        // Then orb opens it and leaves the keys there.
         assert_eq!(
             decision,
             StartedAttach::Attach { keep_keys: true },
-            "a waited attach should keep the keys where they came back to"
+            "a waited open should keep the keys where they came back to"
+        );
+    }
+
+    /// Shows `outcome` in `state` with an empty message box, now.
+    fn shown(outcome: Outcome, state: &mut AppState) {
+        show(outcome, state, &mut Toasts::default(), Instant::now());
+    }
+
+    /// The search picker with "ab" typed, listing nothing yet.
+    fn search_typed_ab() -> AppState {
+        let mut picker = PickerState::search(Focus::Sidebar);
+        let _ = picker.insert('a');
+        let _ = picker.insert('b');
+        AppState {
+            picker: Some(picker),
+            ..AppState::default()
+        }
+    }
+
+    /// A hit row in thread 1.
+    fn hit(id: i64) -> PickerItem {
+        PickerItem::Hit {
+            id,
+            thread: ThreadId(1),
+            label: "orb/fix".to_owned(),
+            split: 4,
+            snippet: "the parser".to_owned(),
+            lit: vec![],
+            text_lit: vec![],
+            path: PathBuf::from("/t/1.jsonl"),
+            prompt_offset: 0,
+        }
+    }
+
+    /// How many rows the open picker lists.
+    fn listed(state: &AppState) -> Option<usize> {
+        state.picker.as_ref().map(|picker| picker.shown().count())
+    }
+
+    #[rstest::rstest]
+    fn stale_search_rows_are_dropped() {
+        // Given the search picker with "ab" typed.
+        let mut state = search_typed_ab();
+
+        // When rows for the older query "a" arrive.
+        shown(
+            Outcome::Hits {
+                query: "a".to_owned(),
+                items: vec![hit(1)],
+                overflow: false,
+            },
+            &mut state,
+        );
+
+        // Then the picker lists nothing.
+        assert_eq!(
+            listed(&state),
+            Some(0),
+            "rows for a query no longer typed shouldn't show"
         );
     }
 
     #[rstest::rstest]
-    fn nothing_started_attaches_nothing() {
-        // Given no started thread and nothing selected.
+    fn current_search_rows_are_shown() {
+        // Given the search picker with "ab" typed.
+        let mut state = search_typed_ab();
 
-        // When deciding what to do.
-        let decision = started_attach(None, None, Focus::Sidebar, false);
+        // When rows for "ab" arrive.
+        shown(
+            Outcome::Hits {
+                query: "ab".to_owned(),
+                items: vec![hit(1)],
+                overflow: false,
+            },
+            &mut state,
+        );
 
-        // Then there's nothing to attach.
+        // Then the picker lists them.
         assert_eq!(
-            decision,
-            StartedAttach::Drop,
-            "no started thread, no attach"
+            listed(&state),
+            Some(1),
+            "rows for the typed query should show"
+        );
+    }
+
+    /// The search picker listing hits 1 and 2, with hit 1 selected.
+    fn search_listing_two_hits() -> AppState {
+        let mut picker = PickerState::search(Focus::Sidebar);
+        picker.show_hits("", vec![hit(1), hit(2)], false);
+        AppState {
+            picker: Some(picker),
+            ..AppState::default()
+        }
+    }
+
+    /// A one-message exchange.
+    fn exchange() -> Vec<(i64, Role, String)> {
+        vec![(1, Role::User, "fix the parser".to_owned())]
+    }
+
+    /// The hit the open picker previews.
+    fn previewed(state: &AppState) -> Option<i64> {
+        state
+            .picker
+            .as_ref()
+            .and_then(PickerState::search_preview)
+            .map(|preview| preview.hit)
+    }
+
+    #[rstest::rstest]
+    fn stale_search_preview_is_dropped() {
+        // Given the search picker with hit 1 selected.
+        let mut state = search_listing_two_hits();
+
+        // When the preview of hit 2, selected earlier, arrives.
+        shown(
+            Outcome::HitPreview {
+                hit: 2,
+                messages: exchange(),
+            },
+            &mut state,
+        );
+
+        // Then nothing is previewed.
+        assert_eq!(
+            previewed(&state),
+            None,
+            "a preview for a row no longer selected shouldn't show"
+        );
+    }
+
+    #[rstest::rstest]
+    fn current_search_preview_is_shown() {
+        // Given the search picker with hit 1 selected.
+        let mut state = search_listing_two_hits();
+
+        // When the preview of hit 1 arrives.
+        shown(
+            Outcome::HitPreview {
+                hit: 1,
+                messages: exchange(),
+            },
+            &mut state,
+        );
+
+        // Then hit 1 is previewed.
+        assert_eq!(
+            previewed(&state),
+            Some(1),
+            "the selected row's preview should show"
+        );
+    }
+
+    /// An unused, not yet read worktree at `path`.
+    fn worktree_at(path: &str) -> Worktree {
+        Worktree {
+            path: PathBuf::from(path),
+            repo: None,
+            facts: None,
+            size_kb: None,
+        }
+    }
+
+    #[rstest::rstest]
+    fn worktrees_changed_relists_the_open_worktree_picker() {
+        // Given the worktree picker over two worktrees, "orb" typed and the
+        // second row selected, then a third worktree listed.
+        let mut state = AppState::default();
+        state.worktrees.list = vec![worktree_at("/w/orb/a1"), worktree_at("/w/orb/b2")];
+        state.picker = Some({
+            let mut picker = PickerState::worktrees(worktree_items(&state), Focus::Sidebar);
+            for ch in ['o', 'r', 'b'] {
+                let _ = picker.insert(ch);
+            }
+            picker.next();
+            picker
+        });
+        state.worktrees.list.push(worktree_at("/w/orb/c3"));
+
+        // When the worktrees actor reports the new list.
+        shown(Outcome::WorktreesChanged, &mut state);
+
+        // Then the picker lists all three, keeping the typed text and the
+        // selected worktree.
+        let picker = state.picker.as_ref();
+        assert_eq!(
+            (
+                picker.map(|picker| picker.shown().count()),
+                picker.map(PickerState::input),
+                picker.and_then(PickerState::selected_worktree),
+            ),
+            (Some(3), Some("orb"), Some(Path::new("/w/orb/b2"))),
+            "a rescan should re-list the open worktree picker as the user left it"
+        );
+    }
+
+    /// Project `id` titled `title`, with one thread last active `secs`
+    /// seconds after the epoch.
+    fn project_active_at(id: i64, title: &str, secs: u64) -> Project {
+        Project {
+            id: ProjectId(id),
+            title: title.to_owned(),
+            root: PathBuf::from(format!("/{title}")),
+            created_at: UNIX_EPOCH,
+            threads: vec![Thread {
+                last_session: None,
+                harness: HarnessId::new("claude"),
+                id: ThreadId(id),
+                title: None,
+                cwd: PathBuf::from(format!("/{title}")),
+                transcript: None,
+                status: ThreadStatus::Idle,
+                turn_started_at: None,
+                pane: None,
+                branch: None,
+                created_at: UNIX_EPOCH,
+                last_activity_at: UNIX_EPOCH + Duration::from_secs(secs),
+                unseen: false,
+                model: None,
+            }],
+            repo: true,
+            removed: false,
+            kind: ProjectKind::Normal,
+        }
+    }
+
+    /// Alpha (active at 20 s) and beta (at 10 s), with `opened` handled.
+    fn alpha_and_beta_after(opened: &Intent) -> AppState {
+        let mut state = AppState {
+            sessions: Sessions {
+                projects: vec![
+                    project_active_at(1, "alpha", 20),
+                    project_active_at(2, "beta", 10),
+                ],
+                ..Sessions::default()
+            },
+            ..AppState::default()
+        };
+        IntentHandler::handle(opened, &mut state);
+        state
+    }
+
+    /// Beta's thread gets busier than alpha's.
+    fn make_beta_busier(state: &mut AppState) {
+        if let Some(beta) = state.sessions.projects.get_mut(1) {
+            for thread in &mut beta.threads {
+                thread.last_activity_at = UNIX_EPOCH + Duration::from_secs(30);
+            }
+        }
+    }
+
+    /// The project titles the open picker lists, in order.
+    fn titles(state: &AppState) -> Vec<String> {
+        state
+            .picker
+            .iter()
+            .flat_map(PickerState::shown)
+            .filter_map(|(item, _)| match item {
+                PickerItem::Project { title, .. } => Some(title.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[rstest::rstest]
+    fn any_report_resorts_the_open_projects_screen() {
+        // Given the projects screen listing alpha then beta, and beta now
+        // the busier.
+        let mut state = alpha_and_beta_after(&Intent::OpenProjects);
+        make_beta_busier(&mut state);
+
+        // When a plain change is reported.
+        shown(Outcome::Changed, &mut state);
+
+        // Then beta is listed first.
+        assert_eq!(
+            titles(&state),
+            vec!["beta".to_owned(), "alpha".to_owned()],
+            "the projects screen should keep its recency order live"
+        );
+    }
+
+    #[rstest::rstest]
+    fn report_leaves_projects_alone_when_the_screen_is_closed() {
+        // Given the new-session project picker (not the projects screen)
+        // listing alpha then beta, and beta now the busier.
+        let mut state = alpha_and_beta_after(&Intent::NewSession);
+        make_beta_busier(&mut state);
+
+        // When a plain change is reported.
+        shown(Outcome::Changed, &mut state);
+
+        // Then the picker still lists alpha first.
+        assert_eq!(
+            titles(&state),
+            vec!["alpha".to_owned(), "beta".to_owned()],
+            "a report shouldn't re-list projects while the projects screen is closed"
         );
     }
 
@@ -2659,7 +3035,7 @@ mod tests {
         let git = GitService::new(Arc::new(NoGit), Log::default());
         let (sessions, worktrees, search) = {
             let _context = runtime.enter();
-            let wake: Wake = Arc::new(|| {});
+            let report = Reporter::new(|_| {});
             let sessions = spawn_sessions_actor(SessionsActorDeps {
                 services: Services {
                     harnesses: Harnesses::new(vec![]),
@@ -2676,21 +3052,21 @@ mod tests {
                 worktrees_root: dir.path().join("worktrees"),
                 orb_root: dir.path().join("orb"),
                 incognito_root: dir.path().join("incognito"),
-                wake: wake.clone(),
+                report: report.clone(),
                 integration_missing: false,
             });
             let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
                 git: git.clone(),
                 state: State::default(),
                 worktrees_root: dir.path().join("worktrees"),
-                wake: wake.clone(),
+                report: report.clone(),
                 sweep_every: Duration::from_secs(3600),
             });
             let search = spawn_search_actor(SearchActorDeps {
                 state: State::default(),
                 harnesses: Harnesses::new(vec![]),
                 index_path: dir.path().join("search.sqlite"),
-                wake,
+                report,
                 log: Log::default(),
             });
             (sessions, worktrees, search)

@@ -19,7 +19,7 @@ use super::index::{Hit, SearchIndex, SearchIndexError, ThreadKey, snippet};
 use super::state::SearchProgress;
 use crate::AppState;
 use crate::command::SearchCommand;
-use crate::common::{Log, State, Wake};
+use crate::common::{Log, Outcome, Reporter, State};
 use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::picker::list::PickerItem;
 use crate::feat::picker::state::{PickerState, hit_label};
@@ -33,20 +33,20 @@ pub struct SearchActorDeps {
     pub harnesses: Harnesses,
     /// `~/.orb/userdata/search.sqlite`.
     pub index_path: PathBuf,
-    /// Tells the frontend to redraw.
-    pub wake: Wake,
+    /// Tells the frontend loop what changed and what the picker should show.
+    pub report: Reporter,
     /// orb's log file.
     pub log: Log,
 }
 
-/// Owns [`SearchProgress`] and the search index. Writes the search picker's
-/// rows and preview through their guarded setters.
+/// Owns [`SearchProgress`] and the search index. Reports the search picker's
+/// rows and preview; the frontend loop shows them unless they're stale.
 pub struct SearchActor {
     state: State,
     harnesses: Harnesses,
     /// `None` when the index couldn't be opened; then every message is a no-op.
     index: Option<SearchIndex>,
-    wake: Wake,
+    report: Reporter,
     log: Log,
     /// Transcripts the startup indexing hasn't read yet, newest chat first,
     /// with the harness each thread runs in.
@@ -121,20 +121,20 @@ impl SearchActor {
             state,
             harnesses,
             index_path,
-            wake,
+            report,
             log,
         } = deps;
         let mut index = match SearchIndex::open(&index_path) {
             Ok(index) => index,
-            Err(report) => {
-                log.error_on_change("search: open", "couldn't open the search index", &report);
-                state.write().search.error = Some(reason(&report));
-                wake();
+            Err(failure) => {
+                log.error_on_change("search: open", "couldn't open the search index", &failure);
+                state.write().search.error = Some(reason(&failure));
+                report.changed();
                 return Self {
                     state,
                     harnesses,
                     index: None,
-                    wake,
+                    report,
                     log,
                     queue: VecDeque::new(),
                 };
@@ -170,12 +170,12 @@ impl SearchActor {
             total: queue.len(),
             error: None,
         };
-        wake();
+        report.changed();
         Self {
             state,
             harnesses,
             index: Some(index),
-            wake,
+            report,
             log,
             queue,
         }
@@ -205,17 +205,17 @@ impl SearchActor {
             );
         }
         self.state.write().search.indexed += 1;
-        (self.wake)();
+        self.report.changed();
         if !self.queue.is_empty() {
             let _ = me.tell(IndexNext).try_send();
         }
     }
 
-    /// Brings the index up to date and lists what `query` finds in the open
+    /// Brings the index up to date and reports what `query` finds for the
     /// search picker. Skipped when `query` is no longer the picker's typed
     /// text, which also collapses keystrokes queued behind a slow query. A
-    /// failed query writes no rows. Then shows the first row's preview, since
-    /// no keystroke selects it.
+    /// failed query reports no rows. Then reports the first row's preview,
+    /// since the rows arrive with it selected and no keystroke selects it.
     fn search(&mut self, query: &str) {
         let Some(index) = &mut self.index else {
             return;
@@ -240,24 +240,28 @@ impl SearchActor {
             }
         };
         let items = rows(&self.state.read(), found.hits);
-        let first = {
-            let mut app = self.state.write();
-            let Some(picker) = &mut app.picker else {
-                return;
-            };
-            picker.show_hits(query, items, found.overflow);
-            picker
-                .selected_hit()
-                .map(|(hit, path, prompt_offset)| (hit, path.to_owned(), prompt_offset))
+        let first = match items.first() {
+            Some(PickerItem::Hit {
+                id,
+                path,
+                prompt_offset,
+                ..
+            }) => Some((*id, path.clone(), *prompt_offset)),
+            _ => None,
         };
+        self.report.report(Outcome::Hits {
+            query: query.to_owned(),
+            items,
+            overflow: found.overflow,
+        });
         if let Some((hit, path, prompt_offset)) = first {
             self.preview(hit, &path, prompt_offset);
         }
-        (self.wake)();
     }
 
-    /// Shows the exchange of hit `hit` in the search picker's preview,
-    /// unless another row is selected by now. A failed read writes nothing.
+    /// Reports the exchange of hit `hit` for the search picker's preview; the
+    /// loop drops it if another row is selected by now. A failed read reports
+    /// nothing.
     fn preview(&self, hit: i64, path: &Path, prompt_offset: u64) {
         let Some(index) = &self.index else {
             return;
@@ -273,10 +277,7 @@ impl SearchActor {
                 return;
             }
         };
-        if let Some(picker) = &mut self.state.write().picker {
-            picker.show_search_preview(hit, messages);
-        }
-        (self.wake)();
+        self.report.report(Outcome::HitPreview { hit, messages });
     }
 }
 
@@ -405,7 +406,7 @@ mod tests {
 
     use super::{SearchActor, SearchActorDeps, spawn_search_actor};
     use crate::command::SearchCommand;
-    use crate::common::{Log, State};
+    use crate::common::{Log, Outcome, Reporter, State};
     use crate::feat::harness::Harnesses;
     use crate::feat::harness::claude::ClaudeCode;
     use crate::feat::harness::claude::supervisor::ClaudeSupervisor;
@@ -493,9 +494,30 @@ mod tests {
             state: state.clone(),
             harnesses: Harnesses::new(vec![Arc::new(claude)]),
             index_path,
-            wake: Arc::new(|| {}),
+            report: showing(state),
             log: Log::default(),
         }
+    }
+
+    /// A reporter that shows reported rows and previews in `state`'s picker
+    /// through the same guarded setters the frontend loop uses.
+    fn showing(state: &State) -> Reporter {
+        let state = state.clone();
+        Reporter::new(move |outcome| {
+            let mut app = state.write();
+            let Some(picker) = &mut app.picker else {
+                return;
+            };
+            match outcome {
+                Outcome::Hits {
+                    query,
+                    items,
+                    overflow,
+                } => picker.show_hits(&query, items, overflow),
+                Outcome::HitPreview { hit, messages } => picker.show_search_preview(hit, messages),
+                _ => {}
+            }
+        })
     }
 
     /// The threads whose messages a second connection to the index at `path`
@@ -971,8 +993,8 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
     async fn backfill_counts_up_one_transcript_at_a_time() -> io::Result<()> {
-        // Given two threads with transcripts, and a wake that records the
-        // indexing progress each time the actor wakes the frontend.
+        // Given two threads with transcripts, and a reporter that records
+        // the indexing progress each time the actor reports to the frontend.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("alpha words")])?;
         let b = transcript(dir.path(), "b.jsonl", &[prompt("bravo words")])?;
@@ -981,10 +1003,10 @@ mod tests {
             thread(2, 2_000, Some(b), 10),
         ]));
         let seen: Arc<Mutex<Vec<(usize, usize)>>> = Arc::default();
-        let wake = {
+        let report = {
             let state = state.clone();
             let seen = Arc::clone(&seen);
-            Arc::new(move || {
+            Reporter::new(move |_| {
                 let progress = {
                     let search = &state.read().search;
                     (search.indexed, search.total)
@@ -997,7 +1019,7 @@ mod tests {
 
         // When the actor starts and the backfill finishes.
         let _actor = spawn_search_actor(SearchActorDeps {
-            wake,
+            report,
             ..deps(&state, dir.path().join("search.sqlite"))
         });
         let done = backfilled(&state).await;

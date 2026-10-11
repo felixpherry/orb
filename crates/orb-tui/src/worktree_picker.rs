@@ -569,10 +569,7 @@ mod tests {
                 projects,
                 ..Sessions::default()
             },
-            worktrees: Worktrees {
-                list: worktrees,
-                notice: None,
-            },
+            worktrees: Worktrees { list: worktrees },
             ..AppState::default()
         }
     }

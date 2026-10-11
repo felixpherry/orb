@@ -200,7 +200,6 @@ mod tests {
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, SidebarItem,
         Thread, ThreadId, ThreadStatus,
     };
-    use orb_domain::feat::worktrees::state::Worktrees;
     use orb_domain::{AppState, Focus, PaneMode};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
@@ -621,28 +620,6 @@ mod tests {
         // Then the error is not on it.
         let text = text(&buffer);
         assert!(!text.contains("Workspace locked"), "mode line was '{text}'");
-    }
-
-    #[rstest::rstest]
-    fn worktree_notice_is_not_on_the_mode_line() {
-        // Given a sweep that pruned two worktrees.
-        let state = AppState {
-            worktrees: Worktrees {
-                notice: Some("pruned 2 worktrees".to_owned()),
-                ..Worktrees::default()
-            },
-            ..AppState::default()
-        };
-
-        // When drawing the mode line.
-        let buffer = draw(&state);
-
-        // Then the notice is not on it.
-        let text = text(&buffer);
-        assert!(
-            !text.contains("pruned 2 worktrees"),
-            "mode line was '{text}'"
-        );
     }
 
     #[rstest::rstest]

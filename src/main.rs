@@ -32,7 +32,7 @@ use orb_domain::feat::worktrees::worktrees_actor::{
 use orb_domain::feat::zmx::zmx_cli::ZmxCli;
 use orb_domain::feat::zmx::zmx_service::ZmxService;
 use orb_domain::{
-    AppState, Finished, Log, Services, State, Wake, ancestry, ends_orb, panic_text, parse_parents,
+    AppState, Finished, Log, Services, State, ancestry, ends_orb, panic_text, parse_parents,
     run_within, stop_gracefully,
 };
 use orb_tui::{Frontend, PANE_READER_THREAD};
@@ -162,7 +162,7 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
         worktrees_root: worktrees_root.clone(),
         orb_root,
         incognito_root: PathBuf::from("/tmp/orb-incognito"),
-        wake: frontend.waker(),
+        report: frontend.reporter(),
         integration_missing: !integrations.any_installed(),
     });
     runtime.block_on(sessions.wait_for_startup());
@@ -170,14 +170,14 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
         git: git.clone(),
         state: state.clone(),
         worktrees_root: worktrees_root.clone(),
-        wake: frontend.waker(),
+        report: frontend.reporter(),
         sweep_every: SWEEP_EVERY,
     });
     let search = spawn_search_actor(SearchActorDeps {
         state: state.clone(),
         harnesses: harnesses.clone(),
         index_path: search_index,
-        wake: frontend.waker(),
+        report: frontend.reporter(),
         log: log.clone(),
     });
     let workers = (sessions.clone(), worktrees.clone(), search.clone());
@@ -215,7 +215,10 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
 
 /// Quits orb, as `<C-g> q` does, on SIGTERM, SIGINT or SIGHUP. A signal orb
 /// can't listen for is logged and keeps its default.
-fn quit_on_signals(quit: Wake, log: &Log) {
+fn quit_on_signals<F>(quit: F, log: &Log)
+where
+    F: Fn() + Send + Sync + 'static,
+{
     let mut streams: Vec<Signal> = [
         (SignalKind::terminate(), "SIGTERM"),
         (SignalKind::interrupt(), "SIGINT"),

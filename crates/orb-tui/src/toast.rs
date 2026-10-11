@@ -53,53 +53,79 @@ impl Toast {
     }
 }
 
-/// The one message the box shows, if any. A message pops when its text is
-/// new, shows for 3 s (info) or 5 s (an error), and is replaced by a newer
-/// one. When orb clears an error or notice, its message goes too.
+/// The one message the box shows, if any. Each error or notice orb reports
+/// pops, shows for 3 s (info) or 5 s (an error), and is replaced by a newer
+/// one, with two exceptions: the same error again doesn't pop until a key or
+/// a success, and a notice doesn't replace an error that popped in the same
+/// turn. The next key hides an error or notice; a success hides an error;
+/// the copy notice stays until it times out.
 #[derive(Debug, Default)]
 pub(crate) struct Toasts {
     shown: Option<Toast>,
-    seen_error: Option<String>,
-    seen_worktree_notice: Option<String>,
-    seen_project_notice: Option<String>,
+    /// The shown message is the copy notice, which a key doesn't hide.
+    copy: bool,
+    /// The last error that popped; the same error again doesn't pop until a
+    /// key or a success.
+    last_error: Option<String>,
+    /// An error popped in this turn; a notice in the same turn doesn't
+    /// replace it.
+    error_this_turn: bool,
 }
 
 impl Toasts {
-    /// Takes in the current error, worktree notice and project notice; pops
-    /// any one whose text changed, the error over a notice when both did.
-    pub(crate) fn observe(
-        &mut self,
-        error: Option<&str>,
-        worktree_notice: Option<&str>,
-        project_notice: Option<&str>,
-        now: Instant,
-    ) {
-        Self::track(
-            &mut self.shown,
-            &mut self.seen_worktree_notice,
-            worktree_notice,
-            ToastKind::Info,
-            now + INFO_FOR,
+    /// Pops `text` as an error, unless it is the error that last popped.
+    pub(crate) fn error(&mut self, text: String, now: Instant) {
+        if self.last_error.as_ref() == Some(&text) {
+            return;
+        }
+        self.show(
+            Toast::new(ToastKind::Error, text.clone(), now + ERROR_FOR),
+            false,
         );
-        Self::track(
-            &mut self.shown,
-            &mut self.seen_project_notice,
-            project_notice,
-            ToastKind::Info,
-            now + INFO_FOR,
-        );
-        Self::track(
-            &mut self.shown,
-            &mut self.seen_error,
-            error,
-            ToastKind::Error,
-            now + ERROR_FOR,
-        );
+        self.last_error = Some(text);
+        self.error_this_turn = true;
     }
 
-    /// Pops the copy notice.
+    /// Pops `text` as a notice, unless an error popped in this turn.
+    pub(crate) fn notice(&mut self, text: String, now: Instant) {
+        if !self.error_this_turn {
+            self.show(Toast::new(ToastKind::Info, text, now + INFO_FOR), false);
+        }
+    }
+
+    /// Pops the copy notice, unless an error popped in this turn.
     pub(crate) fn copied(&mut self, now: Instant) {
-        self.shown = Some(Toast::new(ToastKind::Info, COPIED, now + INFO_FOR));
+        if !self.error_this_turn {
+            self.show(Toast::new(ToastKind::Info, COPIED, now + INFO_FOR), true);
+        }
+    }
+
+    /// A key was handled: the user has seen the error or notice, so it hides
+    /// and the same error may pop again.
+    pub(crate) fn dismiss(&mut self) {
+        if !self.copy {
+            self.shown = None;
+        }
+        self.last_error = None;
+        self.error_this_turn = false;
+    }
+
+    /// What failed works again: a showing error hides, a notice stays.
+    pub(crate) fn recovered(&mut self) {
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|toast| toast.kind == ToastKind::Error)
+        {
+            self.shown = None;
+        }
+        self.last_error = None;
+        self.error_this_turn = false;
+    }
+
+    /// A new batch of events starts.
+    pub(crate) fn begin_turn(&mut self) {
+        self.error_this_turn = false;
     }
 
     /// The message showing at `now`.
@@ -112,28 +138,9 @@ impl Toasts {
         self.shown(now).map(|toast| toast.until)
     }
 
-    fn track(
-        shown: &mut Option<Toast>,
-        seen: &mut Option<String>,
-        text: Option<&str>,
-        kind: ToastKind,
-        until: Instant,
-    ) {
-        if seen.as_deref() == text {
-            return;
-        }
-        match text {
-            Some(text) => *shown = Some(Toast::new(kind, text, until)),
-            None => {
-                if shown
-                    .as_ref()
-                    .is_some_and(|toast| toast.kind == kind && Some(&toast.text) == seen.as_ref())
-                {
-                    *shown = None;
-                }
-            }
-        }
-        *seen = text.map(str::to_owned);
+    fn show(&mut self, toast: Toast, copy: bool) {
+        self.shown = Some(toast);
+        self.copy = copy;
     }
 }
 
@@ -323,16 +330,16 @@ mod tests {
         );
     }
 
-    /// A tracker that has just seen `error` at `at`.
+    /// A box that has just popped `error` at `at`.
     fn error_seen(error: &str, at: Instant) -> Toasts {
         let mut toasts = Toasts::default();
-        toasts.observe(Some(error), None, None, at);
+        toasts.error(error.to_owned(), at);
         toasts
     }
 
     #[rstest::rstest]
     fn new_error_still_shows_just_before_five_seconds() {
-        // Given a new error observed.
+        // Given a new error.
         let at = Instant::now();
         let toasts = error_seen("boom", at);
 
@@ -353,7 +360,7 @@ mod tests {
 
     #[rstest::rstest]
     fn new_error_hides_after_five_seconds() {
-        // Given a new error observed.
+        // Given a new error.
         let at = Instant::now();
         let toasts = error_seen("boom", at);
 
@@ -366,10 +373,10 @@ mod tests {
 
     #[rstest::rstest]
     fn new_notice_hides_after_three_seconds() {
-        // Given a new notice observed.
+        // Given a new notice.
         let at = Instant::now();
         let mut toasts = Toasts::default();
-        toasts.observe(None, Some("pruned 2 worktrees"), None, at);
+        toasts.notice("pruned 2 worktrees".to_owned(), at);
 
         // When 3 s have passed.
         let shown = toasts.shown(at + Duration::from_secs(3));
@@ -379,19 +386,53 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn same_error_again_does_not_pop() {
+    fn same_error_again_without_a_key_does_not_pop() {
         // Given an error that already timed out.
         let at = Instant::now();
         let mut toasts = error_seen("boom", at);
         let later = at + Duration::from_secs(6);
 
-        // When the same error is observed again.
-        toasts.observe(Some("boom"), None, None, later);
+        // When the same error is reported again, with no key between.
+        toasts.error("boom".to_owned(), later);
 
         // Then nothing shows.
         assert!(
             toasts.shown(later).is_none(),
-            "the same error sent again should not bring the box back"
+            "the same error reported again should not bring the box back"
+        );
+    }
+
+    #[rstest::rstest]
+    fn same_error_after_a_key_pops_again() {
+        // Given an error that a key then hid.
+        let at = Instant::now();
+        let mut toasts = error_seen("boom", at);
+        toasts.dismiss();
+
+        // When the same error is reported again.
+        toasts.error("boom".to_owned(), at);
+
+        // Then it shows again.
+        assert!(
+            toasts.shown(at).is_some(),
+            "the same error after a key should pop again"
+        );
+    }
+
+    #[rstest::rstest]
+    fn same_error_after_a_recovery_pops_again() {
+        // Given an error, then a success.
+        let at = Instant::now();
+        let mut toasts = error_seen("boom", at);
+        toasts.recovered();
+
+        // When the same error is reported again.
+        toasts.error("boom".to_owned(), at);
+
+        // Then it shows again.
+        assert!(
+            toasts.shown(at).is_some(),
+            "the same error after a success should pop again"
         );
     }
 
@@ -402,8 +443,8 @@ mod tests {
         let mut toasts = Toasts::default();
         toasts.copied(at);
 
-        // When an error is observed.
-        toasts.observe(Some("boom"), None, None, at);
+        // When an error is reported.
+        toasts.error("boom".to_owned(), at);
 
         // Then the error shows.
         assert_eq!(
@@ -414,18 +455,79 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn cleared_error_hides_its_box() {
+    fn key_hides_the_error() {
         // Given an error showing.
         let at = Instant::now();
         let mut toasts = error_seen("boom", at);
 
-        // When the error is observed cleared, as an orb key does.
-        toasts.observe(None, None, None, at);
+        // When a key is handled.
+        toasts.dismiss();
+
+        // Then nothing shows.
+        assert!(toasts.shown(at).is_none(), "a key should hide the error");
+    }
+
+    #[rstest::rstest]
+    fn key_hides_a_notice() {
+        // Given a notice showing.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.notice("Added project orb".to_owned(), at);
+
+        // When a key is handled.
+        toasts.dismiss();
+
+        // Then nothing shows.
+        assert!(toasts.shown(at).is_none(), "a key should hide the notice");
+    }
+
+    #[rstest::rstest]
+    fn key_keeps_the_copy_notice() {
+        // Given the copy notice showing.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.copied(at);
+
+        // When a key is handled.
+        toasts.dismiss();
+
+        // Then the copy notice still shows.
+        assert!(
+            toasts.shown(at).is_some(),
+            "a key shouldn't hide the copy notice"
+        );
+    }
+
+    #[rstest::rstest]
+    fn recovery_hides_the_error() {
+        // Given an error showing.
+        let at = Instant::now();
+        let mut toasts = error_seen("boom", at);
+
+        // When what failed works again.
+        toasts.recovered();
 
         // Then nothing shows.
         assert!(
             toasts.shown(at).is_none(),
-            "clearing the error should hide its box"
+            "a later success should hide the error"
+        );
+    }
+
+    #[rstest::rstest]
+    fn recovery_keeps_a_notice() {
+        // Given a notice showing.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.notice("Added project orb".to_owned(), at);
+
+        // When what failed works again.
+        toasts.recovered();
+
+        // Then the notice still shows.
+        assert!(
+            toasts.shown(at).is_some(),
+            "a success shouldn't hide a notice"
         );
     }
 
@@ -457,8 +559,8 @@ mod tests {
         let at = Instant::now();
         let mut toasts = Toasts::default();
 
-        // When a project notice is observed.
-        toasts.observe(None, None, Some("Added project orb"), at);
+        // When a project notice is reported.
+        toasts.notice("Added project orb".to_owned(), at);
 
         // Then it shows as info for 3 s.
         assert_eq!(
@@ -473,38 +575,40 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn error_wins_over_project_notice_in_same_frame() {
-        // Given no message showing.
+    fn notice_in_the_same_turn_does_not_hide_the_error() {
+        // Given an error reported in this turn.
         let at = Instant::now();
         let mut toasts = Toasts::default();
+        toasts.begin_turn();
+        toasts.error("boom".to_owned(), at);
 
-        // When an error and a project notice change in the same frame.
-        toasts.observe(Some("boom"), None, Some("Added project orb"), at);
+        // When a notice is reported in the same turn.
+        toasts.notice("Added project orb".to_owned(), at);
+
+        // Then the error still shows.
+        assert_eq!(
+            toasts.shown(at).map(|toast| toast.kind),
+            Some(ToastKind::Error),
+            "a notice in the same turn should not hide the error"
+        );
+    }
+
+    #[rstest::rstest]
+    fn error_in_the_same_turn_replaces_the_notice() {
+        // Given a notice reported in this turn.
+        let at = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.begin_turn();
+        toasts.notice("Added project orb".to_owned(), at);
+
+        // When an error is reported in the same turn.
+        toasts.error("boom".to_owned(), at);
 
         // Then the error shows.
         assert_eq!(
             toasts.shown(at).map(|toast| toast.kind),
             Some(ToastKind::Error),
-            "the error should win over the notice"
-        );
-    }
-
-    #[rstest::rstest]
-    fn same_project_notice_after_clear_pops_again() {
-        // Given a project notice seen, timed out, then cleared by a key.
-        let at = Instant::now();
-        let mut toasts = Toasts::default();
-        toasts.observe(None, None, Some("Added project orb"), at);
-        let later = at + Duration::from_secs(4);
-        toasts.observe(None, None, None, later);
-
-        // When the same notice is observed again.
-        toasts.observe(None, None, Some("Added project orb"), later);
-
-        // Then it shows again.
-        assert!(
-            toasts.shown(later).is_some(),
-            "adding the same project again should pop the notice again"
+            "an error in the same turn should replace the notice"
         );
     }
 }

@@ -66,18 +66,30 @@ pub enum SessionsCommand {
         project: ProjectId,
         workspace: Workspace,
         name: Option<String>,
+        /// The session active when the user asked; what this start opens
+        /// opens only while it still is.
+        if_active: Option<SessionId>,
     },
     /// Make the project's root a git repository (`git init`).
     InitGit(ProjectId),
     /// Move `session`, before its first agent turn, to `to`, restarting its
     /// panes there.
-    ChangeWorkspace { session: SessionId, to: Workspace },
+    ChangeWorkspace {
+        session: SessionId,
+        to: Workspace,
+        /// The session active when the user asked; what this start opens
+        /// opens only while it still is.
+        if_active: Option<SessionId>,
+    },
     /// Check `git_ref` out in `session`'s directory; with `to_root`, check it
     /// out in the project's checkout and move the session there.
     SwitchBranch {
         session: SessionId,
         git_ref: GitRef,
         to_root: bool,
+        /// The session active when the user asked; what this start opens
+        /// opens only while it still is.
+        if_active: Option<SessionId>,
     },
     /// Add the directory as a project.
     AddProject(PathBuf),
@@ -112,9 +124,16 @@ pub enum SessionsCommand {
     RemoveProject(ProjectId),
     /// Make a `kind` session in orb's own folder `name` (a slug), with one
     /// shell.
-    NewFolderSession { kind: FolderKind, name: String },
+    NewFolderSession {
+        kind: FolderKind,
+        name: String,
+        /// The session active when the user asked; what this start opens
+        /// opens only while it still is.
+        if_active: Option<SessionId>,
+    },
     /// Make the session's orb worktree again, gone from disk, then attach to
     /// it. The frontend loop sends this when `Attach` finds the worktree gone.
+    /// It opens while the session is still active.
     RestoreWorktree(SessionId),
 }
 
