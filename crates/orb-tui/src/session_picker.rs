@@ -10,6 +10,8 @@
 //! are drawn live. Settled rows are dimmed behind a check. Nothing matched
 //! leaves the list empty.
 //!
+//! The popup's bottom row, under both boxes, holds the picker's keys, dim.
+//!
 //! The preview box is titled with the selected row's label and shows its
 //! most recently active agent's status, branch and model, then its latest
 //! exchanges from the transcript: up to two earlier ones in brief while
@@ -32,7 +34,9 @@ use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::mouse::HitMap;
-use crate::picker::{PickerScroll, cut_left, highlight, span, visible};
+use crate::picker::{
+    PROMPT_WIDTH, PickerScroll, cut_left, highlight, hints, input_spans, span, visible,
+};
 use crate::sidebar::{
     BG_DARK, BLACK, BLUE, BORDER, BRANCH, COMMENT, COMPLETED_ICON, CYAN, DARK3, DARK5, FG, FG_DARK,
     GREEN1, GUTTER, ORANGE, VISUAL, ago_label, mark, render_split, session_status, status,
@@ -65,11 +69,21 @@ pub(crate) fn render(
     Clear.render(popup, buf);
     buf.set_style(popup, Style::new().bg(BG_DARK));
     hits.record_overlay(popup);
-    let [list_box, preview_box] = boxes(popup, area.width >= 120);
+    let frame = with_hints(picker, popup, buf);
+    let [list_box, preview_box] = boxes(frame, area.width >= 120);
     hits.record_selector(list_box);
     let drawn = render_list(picker, sessions, attached, now, list_box, buf, scroll, hits);
     render_preview(picker, sessions, attached, harnesses, now, preview_box, buf);
     drawn
+}
+
+/// Draws `picker`'s keys along `popup`'s bottom row, under both boxes.
+/// Returns the rest of `popup`.
+pub(crate) fn with_hints(picker: &PickerState, popup: Rect, buf: &mut Buffer) -> Rect {
+    let [frame, footer] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(popup);
+    hints(picker).render(footer, buf);
+    frame
 }
 
 /// The list box and the preview box: side by side (45/55, one column
@@ -181,7 +195,7 @@ fn render_list(
     (page, cursor)
 }
 
-/// The ` > ` prompt and the typed text (its end while too long, as in the
+/// The prompt and the typed text (its end while too long, as in the
 /// select picker), with `count` dim against the right edge. Returns the
 /// cursor's position. Records its line in `hits`.
 pub(crate) fn render_input(
@@ -191,15 +205,13 @@ pub(crate) fn render_input(
     buf: &mut Buffer,
     hits: &mut HitMap,
 ) -> Position {
-    let prompt = span(" > ", CYAN);
-    let prompt_width = prompt.width();
     let count = span(count.to_owned(), DARK3);
     // The count, the cell before it, the right margin and the cursor's cell.
-    let room = usize::from(area.width).saturating_sub(prompt_width + count.width() + 3);
+    let room = usize::from(area.width).saturating_sub(PROMPT_WIDTH + count.width() + 3);
     let (shown, before) = visible(picker.input(), picker.cursor(), room);
-    hits.record_text(area, prompt_width, picker.input(), picker.cursor(), room);
+    hits.record_text(area, PROMPT_WIDTH, picker.input(), picker.cursor(), room);
     render_split(
-        Line::from(vec![prompt, span(shown, FG)]),
+        Line::from(input_spans(picker, shown)),
         Line::from(count),
         Rect {
             width: area.width.saturating_sub(1),
@@ -207,7 +219,7 @@ pub(crate) fn render_input(
         },
         buf,
     );
-    let x = u16::try_from(prompt_width + before)
+    let x = u16::try_from(PROMPT_WIDTH + before)
         .unwrap_or(u16::MAX)
         .min(area.width.saturating_sub(1));
     Position::new(area.x + x, area.y)
@@ -963,7 +975,7 @@ mod tests {
         let (buf, _) = draw(&picker, &sessions, 140, 30);
 
         // Then the input row ends in the count, one cell from the border.
-        let input = line_of(&buf, " > ");
+        let input = line_of(&buf, " / ");
         assert!(input.contains("1/2 │"), "input row was {input}");
     }
 
@@ -1281,6 +1293,37 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn hints_sit_on_the_popups_bottom_row() {
+        // Given two threads on a 140×30 screen.
+        let sessions = two();
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
+
+        // Then the keys start one cell in on the popup's bottom row.
+        let popup = super::big(buf.area);
+        let at = find(&buf, "↑↓/j/k rows");
+        assert_eq!(
+            at,
+            Some((popup.x + 1, popup.bottom() - 1)),
+            "where the hints start"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hints_name_the_session_keys() {
+        // Given two threads.
+        let sessions = two();
+
+        // When drawing the picker.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
+
+        // Then the hints name the filters, delete and open.
+        let expected = "↑↓/j/k rows · / search · a/b/w/i/s filter · d delete · ⏎ open · Esc close";
+        assert!(find(&buf, expected).is_some(), "the hints {expected:?}");
+    }
+
+    #[rstest::rstest]
     fn page_is_the_list_boxs_row_count() {
         // Given two threads on a 140×30 screen.
         let sessions = two();
@@ -1288,8 +1331,9 @@ mod tests {
         // When drawing the picker.
         let (_, page) = draw(&picker(&sessions), &sessions, 140, 30);
 
-        // Then the page is the 24-row float less its borders, input and rule.
-        assert_eq!(page, 20, "page size");
+        // Then the page is the 24-row float less its hint row, borders, input
+        // and rule.
+        assert_eq!(page, 19, "page size");
     }
 
     #[rstest::rstest]

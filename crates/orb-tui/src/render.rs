@@ -538,7 +538,7 @@ mod tests {
         };
 
         // When drawing a frame.
-        let buffer = draw(&state);
+        let buffer = draw_tall(&state, None);
 
         // Then the input row shows the session picker's `0/0` count.
         let screen = text(&buffer, buffer.area);
@@ -555,7 +555,7 @@ mod tests {
         };
 
         // When drawing a frame.
-        let buffer = draw(&state);
+        let buffer = draw_tall(&state, None);
 
         // Then the list box is titled ` Worktrees ` over a `0/0` count.
         let screen = text(&buffer, buffer.area);

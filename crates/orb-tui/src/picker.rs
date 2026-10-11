@@ -1,7 +1,9 @@
 //! The picker popup, drawn like LazyVim's `vim.ui.select` in tokyonight-moon:
 //! a small rounded float with the picker's name centred in its top border, a
 //! `>` prompt over an orange rule, numbered one-line rows with the selected
-//! one filled, and the picker's keys dim in its bottom border. The float is
+//! one filled, and the picker's keys dim in its bottom border. A list
+//! picker's prompt is a `/`, dim with a dim placeholder until `/` starts a
+//! search, then bright. The float is
 //! only as tall as its rows need, at least as wide as its name, and its top
 //! stays put while the filter narrows them. The session picker has its own
 //! snacks layout in `session_picker`.
@@ -92,7 +94,7 @@ pub(crate) fn render(
         format!(" {} ", title(picker.kind(), sessions, layouts)),
         BLUE,
     ));
-    let footer = hints(picker.kind());
+    let footer = hints(picker).right_aligned();
     let popup = {
         let lines = |count: usize| u16::try_from(count).unwrap_or(u16::MAX);
         let label = u16::try_from(title.width().max(footer.width())).unwrap_or(u16::MAX);
@@ -195,49 +197,103 @@ fn title(kind: &PickerKind, sessions: &Sessions, layouts: &Layouts) -> Cow<'stat
     Cow::Borrowed(name)
 }
 
-/// The picker's keys, dim and right-aligned in its bottom border: each key,
-/// then what it does.
-fn hints(kind: &PickerKind) -> Line<'static> {
-    let keys: &[(&str, &str)] = match kind {
-        PickerKind::Directories { .. } => &[("⏎", "add"), ("Tab", "open"), ("Esc", "close")],
-        PickerKind::ManageProjects => &[
-            ("⏎", "new session"),
-            ("a", "add"),
-            ("d", "remove"),
-            ("/", "search"),
-            ("Esc", "close"),
-        ],
-        PickerKind::ProjectFilter => &[("⏎", "filter"), ("Esc", "close")],
-        PickerKind::RemoveProject { .. }
-        | PickerKind::SettleSession { .. }
-        | PickerKind::DeleteSession { .. }
-        | PickerKind::ClosePane { .. }
-        | PickerKind::DeleteWorktree { .. }
-        | PickerKind::InitGit { .. } => &[("⏎", "confirm"), ("Esc", "cancel")],
-        _ => &[("⏎", "select"), ("Esc", "close")],
+/// The picker's keys, dim: each key, then what it does. A list picker
+/// names its list keys while listing and only `⏎` and `Esc` while
+/// searching.
+pub(crate) fn hints(picker: &PickerState) -> Line<'static> {
+    let kind = picker.kind();
+    let confirm = confirm_verb(kind).map(|verb| ("⏎", verb));
+    let keys: Vec<(&str, &str)> = match (picker.listing(), picker.searching(), kind) {
+        (_, true, _) => confirm.into_iter().chain([("Esc", "back")]).collect(),
+        (true, _, _) => {
+            let own: &[(&str, &str)] = match kind {
+                PickerKind::ManageProjects => &[("a", "add"), ("d", "remove")],
+                PickerKind::Sessions { .. } => &[("a/b/w/i/s", "filter"), ("d", "delete")],
+                _ => &[("d", "delete")],
+            };
+            [("↑↓/j/k", "rows"), ("/", "search")]
+                .into_iter()
+                .chain(own.iter().copied())
+                .chain(confirm)
+                .chain([("Esc", "close")])
+                .collect()
+        }
+        (_, _, PickerKind::Directories { .. }) => {
+            vec![("⏎", "add"), ("Tab", "open"), ("Esc", "close")]
+        }
+        (
+            _,
+            _,
+            PickerKind::RemoveProject { .. }
+            | PickerKind::SettleSession { .. }
+            | PickerKind::DeleteSession { .. }
+            | PickerKind::ClosePane { .. }
+            | PickerKind::DeleteWorktree { .. }
+            | PickerKind::InitGit { .. },
+        ) => vec![("⏎", "confirm"), ("Esc", "cancel")],
+        _ => confirm.into_iter().chain([("Esc", "close")]).collect(),
     };
     let mut spans = vec![Span::raw(" ")];
-    for (index, (key, label)) in keys.iter().enumerate() {
+    for (index, (key, label)) in keys.into_iter().enumerate() {
         if index > 0 {
             spans.push(span(" · ", DARK3));
         }
-        spans.push(span(*key, FG_DARK));
+        spans.push(span(key, FG_DARK));
         spans.push(span(format!(" {label}"), COMMENT));
     }
     spans.push(Span::raw(" "));
-    Line::from(spans).right_aligned()
+    Line::from(spans)
 }
 
-/// The ` > ` prompt and the typed text, its end while it is too long to fit.
+/// What `⏎` does in a list picker or a picker that closes with `Esc close`;
+/// `None` in the worktree picker, where it does nothing.
+fn confirm_verb(kind: &PickerKind) -> Option<&'static str> {
+    match kind {
+        PickerKind::Worktrees => None,
+        PickerKind::ManageProjects => Some("new session"),
+        PickerKind::Sessions { .. } => Some("open"),
+        PickerKind::ProjectFilter => Some("filter"),
+        _ => Some("select"),
+    }
+}
+
+/// The width of the input's prompt, ` > ` or ` / `.
+pub(crate) const PROMPT_WIDTH: usize = 3;
+
+/// The input row's prompt and text. A list picker shows ` / `: while
+/// listing it and the kept text are dim, or a dim placeholder stands in for
+/// no text; while searching both are bright. Other pickers show a cyan
+/// ` > ` and bright text. `shown` is the part of the text that fits.
+pub(crate) fn input_spans(picker: &PickerState, shown: String) -> Vec<Span<'static>> {
+    match (picker.listing(), picker.searching()) {
+        (true, _) if shown.is_empty() => vec![
+            span(" / ", COMMENT),
+            span(placeholder(picker.kind()), COMMENT),
+        ],
+        (true, _) => vec![span(" / ", COMMENT), span(shown, COMMENT)],
+        (_, true) => vec![span(" / ", FG), span(shown, FG)],
+        _ => vec![span(" > ", CYAN), span(shown, FG)],
+    }
+}
+
+/// What an empty list picker's input row says while listing.
+fn placeholder(kind: &PickerKind) -> &'static str {
+    match kind {
+        PickerKind::ManageProjects => "search projects",
+        PickerKind::Worktrees => "search worktrees",
+        PickerKind::Sessions { .. } => "search sessions",
+        _ => "search",
+    }
+}
+
+/// The prompt and the typed text, its end while it is too long to fit.
 /// Returns the cursor's position. Records its line in `hits`.
 fn render_input(picker: &PickerState, area: Rect, buf: &mut Buffer, hits: &mut HitMap) -> Position {
-    let prompt = span(" > ", CYAN);
-    let prompt_width = prompt.width();
-    let room = usize::from(area.width).saturating_sub(prompt_width + 1);
+    let room = usize::from(area.width).saturating_sub(PROMPT_WIDTH + 1);
     let (shown, before) = visible(picker.input(), picker.cursor(), room);
-    hits.record_text(area, prompt_width, picker.input(), picker.cursor(), room);
-    Line::from(vec![prompt, span(shown, FG)]).render(area, buf);
-    let x = u16::try_from(prompt_width + before)
+    hits.record_text(area, PROMPT_WIDTH, picker.input(), picker.cursor(), room);
+    Line::from(input_spans(picker, shown)).render(area, buf);
+    let x = u16::try_from(PROMPT_WIDTH + before)
         .unwrap_or(u16::MAX)
         .min(area.width.saturating_sub(1));
     Position::new(area.x + x, area.y)
@@ -583,7 +639,7 @@ mod tests {
 
     use super::{FOLDER, GIT, HISTORY, PickerScroll, grapheme_at, render};
     use crate::mouse::HitMap;
-    use crate::sidebar::{BLUE1, DARK3, DARK5, FG, ORANGE, VISUAL, badge};
+    use crate::sidebar::{BLUE1, COMMENT, DARK3, DARK5, FG, ORANGE, VISUAL, badge};
 
     /// The home directory the pickers are drawn with.
     const HOME: &str = "/Users/me";
@@ -990,8 +1046,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn input_starts_with_a_prompt() {
-        // Given a project picker.
+    fn filter_picker_input_starts_with_a_chevron() {
+        // Given a project picker, which filters as you type.
         let picker = orb();
 
         // When drawing it.
@@ -1144,10 +1200,6 @@ mod tests {
     )]
     #[case::delete_worktree(delete_worktree(false), "⏎ confirm · Esc cancel")]
     #[case(workspace(), "⏎ select · Esc close")]
-    #[case::manage_projects(
-        PickerState::manage_projects(vec![], Focus::Sidebar),
-        "⏎ new session · a add · d remove · / search · Esc close"
-    )]
     fn hints(#[case] picker: PickerState, #[case] expected: &str) {
         // Given a picker of some kind.
 
@@ -1158,6 +1210,130 @@ mod tests {
         let bottom = border_rows(&buf).map(|(_, bottom)| bottom);
         let at = find(&buf, expected).map(|(_, y)| y);
         assert_eq!(at, bottom, "the row of the hints {expected:?}");
+    }
+
+    /// The projects screen over two projects, listing.
+    fn projects_screen() -> PickerState {
+        PickerState::manage_projects(
+            vec![
+                project(1, "orb", "/Users/me/dev/orb"),
+                project(2, "jinn", "/Users/me/dev/jinn"),
+            ],
+            Focus::Sidebar,
+        )
+    }
+
+    /// The projects screen in search mode with `text` typed.
+    fn searching_projects(text: &[char]) -> PickerState {
+        let mut picker = projects_screen();
+        picker.start_search();
+        for ch in text {
+            picker.insert(*ch);
+        }
+        picker
+    }
+
+    /// The foreground of the cell where `text` first starts.
+    fn fg_of(buf: &Buffer, text: &str) -> Option<ratatui::style::Color> {
+        find(buf, text)
+            .and_then(|at| buf.cell(at))
+            .map(|cell| cell.fg)
+    }
+
+    #[rstest::rstest]
+    fn projects_screen_lists_its_keys_while_listing() {
+        // Given the projects screen, listing.
+        let picker = projects_screen();
+
+        // When drawing it.
+        let buf = draw(&picker, 120, 20);
+
+        // Then its bottom border holds the list keys.
+        let expected = "↑↓/j/k rows · / search · a add · d remove · ⏎ new session · Esc close";
+        let bottom = border_rows(&buf).map(|(_, bottom)| bottom);
+        let at = find(&buf, expected).map(|(_, y)| y);
+        assert_eq!(at, bottom, "the row of the hints {expected:?}");
+    }
+
+    #[rstest::rstest]
+    fn searching_list_picker_hints_only_confirm_and_back() {
+        // Given the projects screen in search mode.
+        let picker = searching_projects(&[]);
+
+        // When drawing it.
+        let buf = draw(&picker, 120, 20);
+
+        // Then its bottom border names only ⏎ and Esc.
+        let bottom = border_rows(&buf).map(|(_, bottom)| bottom);
+        let at = find(&buf, " ⏎ new session · Esc back ").map(|(_, y)| y);
+        assert_eq!(at, bottom, "the row of the searching hints");
+    }
+
+    #[rstest::rstest]
+    fn listing_input_shows_a_dim_placeholder() {
+        // Given the projects screen, listing, with nothing typed.
+        let picker = projects_screen();
+
+        // When drawing it.
+        let buf = draw(&picker, 120, 20);
+
+        // Then the input row shows a dim `/` and a dim placeholder.
+        let fgs = (
+            fg_of(&buf, " / search projects"),
+            fg_of(&buf, "search projects"),
+        );
+        assert_eq!(
+            fgs,
+            (Some(COMMENT), Some(COMMENT)),
+            "the prompt's and placeholder's colours"
+        );
+    }
+
+    #[rstest::rstest]
+    fn listing_input_dims_the_kept_text() {
+        // Given the projects screen back to listing after searching `jin`.
+        let picker = {
+            let mut picker = searching_projects(&['j', 'i', 'n']);
+            picker.leave_search();
+            picker
+        };
+
+        // When drawing it.
+        let buf = draw(&picker, 120, 20);
+
+        // Then the kept text shows dim after a dim `/`, with no placeholder.
+        let shown = (
+            fg_of(&buf, " / jin"),
+            fg_of(&buf, "jin"),
+            find(&buf, "search projects"),
+        );
+        assert_eq!(
+            shown,
+            (Some(COMMENT), Some(COMMENT), None),
+            "the prompt's and kept text's colours, and the placeholder"
+        );
+    }
+
+    #[rstest::rstest]
+    fn searching_input_lights_the_slash() {
+        // Given the projects screen in search mode with nothing typed.
+        let picker = searching_projects(&[]);
+
+        // When drawing it.
+        let buf = draw(&picker, 120, 20);
+
+        // Then the `/` is bright and the placeholder is gone.
+        let shown = (
+            find(&buf, " / ")
+                .and_then(|(x, y)| buf.cell((x + 1, y)))
+                .map(|cell| cell.fg),
+            find(&buf, "search projects"),
+        );
+        assert_eq!(
+            shown,
+            (Some(FG), None),
+            "the slash's colour and the placeholder"
+        );
     }
 
     #[rstest::rstest]

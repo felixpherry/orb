@@ -13,7 +13,8 @@
 //! worktree's state, branch and size, then its path, branch, size, changes,
 //! last commit, last use and what the next sweep does with it, then one line
 //! per session using it. Facts git hasn't reported yet show as
-//! `…`. There are no key hints.
+//! `…`. The popup's bottom row, under both boxes, holds the picker's keys,
+//! dim.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -34,7 +35,7 @@ use ratatui::widgets::{Clear, Widget};
 
 use crate::mouse::HitMap;
 use crate::picker::{PickerScroll, WORKTREE, cut_left, highlight, span};
-use crate::session_picker::{big, boxed, boxes, cut_right, render_input};
+use crate::session_picker::{big, boxed, boxes, cut_right, render_input, with_hints};
 use crate::sidebar::{
     BG_DARK, BLUE, BRANCH, COMMENT, COMPLETED_ICON, DARK3, DARK5, FG, FG_DARK, GREEN, GUTTER,
     ORANGE, RED, VISUAL, YELLOW, ago_label, render_split, session_status,
@@ -58,7 +59,8 @@ pub(crate) fn render(
     Clear.render(popup, buf);
     buf.set_style(popup, Style::new().bg(BG_DARK));
     hits.record_overlay(popup);
-    let [list_box, preview_box] = boxes(popup, area.width >= 120);
+    let frame = with_hints(picker, popup, buf);
+    let [list_box, preview_box] = boxes(frame, area.width >= 120);
     hits.record_selector(list_box);
     let drawn = render_list(picker, state, now, list_box, buf, scroll, hits);
     render_preview(picker, state, now, preview_box, buf);
@@ -688,6 +690,19 @@ mod tests {
     fn stacked() -> Buffer {
         let app = fixture();
         draw(&picker(&app, 0), &app, 100, 40)
+    }
+
+    #[rstest::rstest]
+    fn hints_name_the_worktree_keys() {
+        // Given the fixture's worktrees.
+        let app = fixture();
+
+        // When drawing the picker.
+        let buf = draw(&picker(&app, 0), &app, 140, 30);
+
+        // Then the hints name delete and, as ⏎ does nothing, leave it out.
+        let expected = " ↑↓/j/k rows · / search · d delete · Esc close ";
+        assert!(find(&buf, expected).is_some(), "the hints {expected:?}");
     }
 
     #[rstest::rstest]
