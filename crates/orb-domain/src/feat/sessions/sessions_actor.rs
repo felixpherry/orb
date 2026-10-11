@@ -99,7 +99,7 @@ use super::store::{
 };
 use super::template;
 use super::validator::folder_exists;
-use crate::command::Workspace;
+use crate::command::{SessionsCommand, Workspace};
 use crate::common::{Log, Services, State, Wake};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
 use crate::feat::git::validator::BUSY_DIRECTORY;
@@ -196,39 +196,6 @@ pub struct SessionsActor {
 #[derive(Debug)]
 pub struct Poll;
 
-/// Split `session`'s focused pane `split` with a new shell pane, and save
-/// the layout.
-#[derive(Debug)]
-pub struct SplitPane {
-    pub session: SessionId,
-    pub split: Split,
-}
-
-/// Add a shell pane to `session`'s shown tab, re-tile the tab unless it was
-/// changed by hand, and save the layout.
-#[derive(Debug)]
-pub struct AddPane(pub SessionId);
-
-/// Open a shell float on top of `session`'s floats, show them, and save the
-/// layout.
-#[derive(Debug)]
-pub struct AddFloat(pub SessionId);
-
-/// Stack a new shell pane with `session`'s focused pane, show it, and save
-/// the layout.
-#[derive(Debug)]
-pub struct StackPane(pub SessionId);
-
-/// Open a tab of one new shell pane in a session, its first when it has no
-/// layout, and save the layout.
-#[derive(Debug)]
-pub struct NewTab(pub SessionId);
-
-/// Save a session's tabs, splits, focus and pane names as the app state has
-/// them.
-#[derive(Debug)]
-pub struct SaveLayout(pub SessionId);
-
 /// Kill the panes zmx still runs for sessions that are already settled.
 #[derive(Debug)]
 pub struct KillSettled;
@@ -236,100 +203,6 @@ pub struct KillSettled;
 /// How long to wait before the next [`Poll`].
 #[derive(Debug, Reply)]
 pub struct NextPoll(pub Duration);
-
-/// Make a session of `project` in `workspace`, with one shell pane, named
-/// `name`.
-#[derive(Debug)]
-pub struct NewSession {
-    pub project: ProjectId,
-    pub workspace: Workspace,
-    pub name: Option<String>,
-}
-
-/// Make a project's root a git repository.
-#[derive(Debug)]
-pub struct InitGit(pub ProjectId);
-
-/// Move a session, before its first agent turn, to another workspace.
-#[derive(Debug)]
-pub struct ChangeWorkspace {
-    pub session: SessionId,
-    pub to: Workspace,
-}
-
-/// Check a branch out for a session: in its directory, or with `to_root` in
-/// its project's checkout, moving the session there.
-#[derive(Debug)]
-pub struct SwitchBranch {
-    pub session: SessionId,
-    pub git_ref: GitRef,
-    pub to_root: bool,
-}
-
-/// Add a directory as a project.
-#[derive(Debug)]
-pub struct AddProject(pub PathBuf);
-
-/// Poll now instead of waiting for the next tick.
-#[derive(Debug)]
-pub struct RefreshSessions;
-
-/// Pin a session to the top of the sidebar, un-settling it if needed.
-#[derive(Debug)]
-pub struct PinSession(pub SessionId);
-
-/// Unpin a session.
-#[derive(Debug)]
-pub struct UnpinSession(pub SessionId);
-
-/// Give a session a name, or with `None` go back to its agents' or
-/// directory's.
-#[derive(Debug)]
-pub struct RenameSession {
-    pub session: SessionId,
-    pub name: Option<String>,
-}
-
-/// Settle a session onto the Settled shelf.
-#[derive(Debug)]
-pub struct SettleSession(pub SessionId);
-
-/// Take a session off the Settled shelf and keep it active until its next
-/// turn.
-#[derive(Debug)]
-pub struct UnsettleSession(pub SessionId);
-
-/// Delete a session: its panes, tabs and threads.
-#[derive(Debug)]
-pub struct DeleteSession(pub SessionId);
-
-/// The user selected a session, so its agents' latest turns are seen.
-#[derive(Debug)]
-pub struct Visit(pub SessionId);
-
-/// Save the sidebar's width and project filter as they now are in the app
-/// state.
-#[derive(Debug)]
-pub struct SaveUi;
-
-/// Save the jump list as it now is in the app state.
-#[derive(Debug)]
-pub struct SaveJumps;
-
-/// Remove a project from `<C-g> n` and the project filter.
-#[derive(Debug)]
-pub struct RemoveProject(pub ProjectId);
-
-/// Make a `kind` session with one shell in orb's own folder `name` (a slug).
-#[derive(Debug)]
-pub struct NewFolderSession {
-    pub kind: FolderKind,
-    pub name: String,
-}
-
-/// Recreate session `.0`'s orb worktree, gone from disk, then attach to it.
-#[derive(Debug)]
-pub struct RestoreWorktree(pub SessionId);
 
 /// A worktree orb made, on its new branch.
 struct MadeWorktree {
@@ -372,67 +245,53 @@ impl Actor for SessionsActor {
     }
 }
 
-impl Message<SplitPane> for SessionsActor {
+impl Message<SessionsCommand> for SessionsActor {
     type Reply = ();
 
-    async fn handle(
+    fn handle(
         &mut self,
-        msg: SplitPane,
+        msg: SessionsCommand,
         _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.add_pane(msg.session, Placement::Split(msg.split));
-    }
-}
-
-impl Message<AddPane> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(&mut self, msg: AddPane, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.add_pane(msg.0, Placement::Tile);
-    }
-}
-
-impl Message<AddFloat> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        msg: AddFloat,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.add_pane(msg.0, Placement::Float);
-    }
-}
-
-impl Message<StackPane> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        msg: StackPane,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.add_pane(msg.0, Placement::Stack);
-    }
-}
-
-impl Message<NewTab> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(&mut self, msg: NewTab, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.add_pane(msg.0, Placement::Tab);
-    }
-}
-
-impl Message<SaveLayout> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        msg: SaveLayout,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.save_layout(msg.0);
+    ) -> impl Future<Output = Self::Reply> + Send {
+        match msg {
+            SessionsCommand::SplitPane { session, split } => {
+                self.add_pane(session, Placement::Split(split));
+            }
+            SessionsCommand::AddPane(session) => self.add_pane(session, Placement::Tile),
+            SessionsCommand::AddFloat(session) => self.add_pane(session, Placement::Float),
+            SessionsCommand::StackPane(session) => self.add_pane(session, Placement::Stack),
+            SessionsCommand::NewTab(session) => self.add_pane(session, Placement::Tab),
+            SessionsCommand::SaveLayout(session) => self.save_layout(session),
+            SessionsCommand::NewSession {
+                project,
+                workspace,
+                name,
+            } => self.new_session(project, workspace, name),
+            SessionsCommand::InitGit(id) => self.init_git(id),
+            SessionsCommand::ChangeWorkspace { session, to } => self.change_workspace(session, to),
+            SessionsCommand::SwitchBranch {
+                session,
+                git_ref,
+                to_root,
+            } => self.switch_branch(session, &git_ref, to_root),
+            SessionsCommand::AddProject(root) => self.add_project(root),
+            SessionsCommand::RefreshSessions => self.poke.notify_one(),
+            SessionsCommand::PinSession(id) => self.pin_session(id),
+            SessionsCommand::UnpinSession(id) => self.unpin_session(id),
+            SessionsCommand::RenameSession { session, name } => self.rename_session(session, name),
+            SessionsCommand::SettleSession(id) => self.settle_session(id),
+            SessionsCommand::UnsettleSession(id) => self.unsettle_session(id),
+            SessionsCommand::DeleteSession(id) => self.delete_session(id),
+            SessionsCommand::Visit(id) => self.visit(id),
+            SessionsCommand::SaveUi => self.save_ui(),
+            SessionsCommand::SaveJumps => self.save_jumps(),
+            SessionsCommand::RemoveProject(id) => self.remove_project(id),
+            SessionsCommand::NewFolderSession { kind, name } => {
+                self.new_folder_session(kind, &name);
+            }
+            SessionsCommand::RestoreWorktree(id) => self.restore_worktree(id),
+        }
+        std::future::ready(())
     }
 }
 
@@ -453,226 +312,6 @@ impl Message<Poll> for SessionsActor {
 
     async fn handle(&mut self, _msg: Poll, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         NextPoll(self.poll().await)
-    }
-}
-
-impl Message<InitGit> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        InitGit(id): InitGit,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.init_git(id);
-    }
-}
-
-impl Message<NewSession> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        NewSession {
-            project,
-            workspace,
-            name,
-        }: NewSession,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.new_session(project, workspace, name);
-    }
-}
-
-impl Message<ChangeWorkspace> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        ChangeWorkspace { session, to }: ChangeWorkspace,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.change_workspace(session, to);
-    }
-}
-
-impl Message<SwitchBranch> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        SwitchBranch {
-            session,
-            git_ref,
-            to_root,
-        }: SwitchBranch,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.switch_branch(session, &git_ref, to_root);
-    }
-}
-
-impl Message<AddProject> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        AddProject(root): AddProject,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.add_project(root);
-    }
-}
-
-impl Message<RefreshSessions> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        _msg: RefreshSessions,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.poke.notify_one();
-    }
-}
-
-impl Message<PinSession> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        PinSession(id): PinSession,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.pin_session(id);
-    }
-}
-
-impl Message<UnpinSession> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        UnpinSession(id): UnpinSession,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.unpin_session(id);
-    }
-}
-
-impl Message<RenameSession> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        RenameSession { session, name }: RenameSession,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.rename_session(session, name);
-    }
-}
-
-impl Message<SettleSession> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        SettleSession(id): SettleSession,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.settle_session(id);
-    }
-}
-
-impl Message<UnsettleSession> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        UnsettleSession(id): UnsettleSession,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.unsettle_session(id);
-    }
-}
-
-impl Message<DeleteSession> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        DeleteSession(id): DeleteSession,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.delete_session(id);
-    }
-}
-
-impl Message<Visit> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        Visit(id): Visit,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.visit(id);
-    }
-}
-
-impl Message<SaveUi> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(&mut self, _msg: SaveUi, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.save_ui();
-    }
-}
-
-impl Message<SaveJumps> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        _msg: SaveJumps,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.save_jumps();
-    }
-}
-
-impl Message<RemoveProject> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        RemoveProject(id): RemoveProject,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.remove_project(id);
-    }
-}
-
-impl Message<NewFolderSession> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        NewFolderSession { kind, name }: NewFolderSession,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.new_folder_session(kind, &name);
-    }
-}
-
-impl Message<RestoreWorktree> for SessionsActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        RestoreWorktree(id): RestoreWorktree,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.restore_worktree(id);
     }
 }
 
@@ -3303,13 +2942,12 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        ChangeWorkspace, DeleteSession, FAST_POLL, Placement, SAVE_FAILED, SLOW_POLL, SaveLayout,
-        SessionsActor, SessionsActorDeps, SettleSession, notice_kind, now_ms, project_title,
-        settle_session_row, spawn_sessions_actor,
+        FAST_POLL, Placement, SAVE_FAILED, SLOW_POLL, SessionsActor, SessionsActorDeps,
+        notice_kind, now_ms, project_title, settle_session_row, spawn_sessions_actor,
     };
     use crate::Focus;
     use crate::TextInput;
-    use crate::command::Workspace;
+    use crate::command::{SessionsCommand, Workspace};
     use crate::common::{Log, Services, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
     use crate::feat::harness::claude::ClaudeCode;
@@ -10747,7 +10385,7 @@ mod tests {
         actor: &ActorRef<SessionsActor>,
         session: SessionId,
     ) -> Result<(), Report<StoreError>> {
-        tokio::time::timeout(LIMIT, actor.ask(SaveLayout(session)))
+        tokio::time::timeout(LIMIT, actor.ask(SessionsCommand::SaveLayout(session)))
             .await
             .change_context(StoreError)
             .attach("the actor didn't answer in time")?
@@ -10826,7 +10464,7 @@ mod tests {
         // When sending a save for aa's layout without waiting, then shutting
         // the actor down.
         actor
-            .tell(SaveLayout(inserted.session))
+            .tell(SessionsCommand::SaveLayout(inserted.session))
             .await
             .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))?;
         tokio::time::timeout(LIMIT, crate::stop_gracefully(&actor))
@@ -10920,7 +10558,7 @@ mod tests {
         let (actor, session, zmx) = shown_movable_through_mailbox().await?;
 
         // When settling it through the mailbox.
-        ask_within(&actor, SettleSession(session)).await?;
+        ask_within(&actor, SessionsCommand::SettleSession(session)).await?;
 
         // Then it was off the right side at each of its two kills.
         assert_eq!(
@@ -10939,7 +10577,7 @@ mod tests {
         let (actor, session, zmx) = shown_movable_through_mailbox().await?;
 
         // When deleting it through the mailbox.
-        ask_within(&actor, DeleteSession(session)).await?;
+        ask_within(&actor, SessionsCommand::DeleteSession(session)).await?;
 
         // Then it was off the right side at each of its two kills.
         assert_eq!(
@@ -10961,7 +10599,7 @@ mod tests {
         // When moving it to another existing directory through the mailbox.
         ask_within(
             &actor,
-            ChangeWorkspace {
+            SessionsCommand::ChangeWorkspace {
                 session,
                 to: Workspace::Existing(to.path().to_owned()),
             },

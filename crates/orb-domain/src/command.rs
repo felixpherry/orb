@@ -1,14 +1,11 @@
 //! Commands: work the [`IntentHandler`](crate::IntentHandler) asks for after it
-//! has updated [`AppState`](crate::AppState). Pane commands (`Attach`,
-//! `Detach`, `SendCtrlG`),
-//! `ListDirectories`, `ListBranches` and `LoadPreview` are carried
-//! out by the frontend loop; session commands (new sessions, add or remove a
-//! project, move a session to another workspace, switch a session's branch,
-//! refresh, pin, rename, settle, delete and visit a session, save the
-//! sidebar's width and filter, save the jump list, split a pane, add a float,
-//! open a tab, save a layout) go to the sessions actor; worktree commands (refresh,
-//! delete) go to the worktrees actor; search commands (query, preview) go to
-//! the search actor.
+//! has updated [`AppState`](crate::AppState). The frontend loop carries out
+//! the pane commands (`Attach`, `Detach`, `SendCtrlG`) and the quick reads
+//! (`ListDirectories`, `ListBranches`, `LoadPreview`) itself. Each actor's
+//! commands are grouped in its own list, which the loop forwards whole:
+//! [`SessionsCommand`] (sessions, projects, panes, layouts, the sidebar's
+//! saved state), [`WorktreesCommand`] (rescan, delete) and [`SearchCommand`]
+//! (query, preview).
 
 use std::path::PathBuf;
 
@@ -27,6 +24,26 @@ pub enum Command {
     Detach,
     /// Write Ctrl g to the focused pane.
     SendCtrlG,
+    /// List the refs of the directory's repository into the open branch picker.
+    ListBranches(PathBuf),
+    /// List the directory's subdirectories into the open directory picker.
+    ListDirectories(PathBuf),
+    /// Read the thread's transcript into the open session picker's preview.
+    LoadPreview {
+        thread: ThreadId,
+        transcript: PathBuf,
+    },
+    /// Work for the sessions actor.
+    Sessions(SessionsCommand),
+    /// Work for the worktrees actor.
+    Worktrees(WorktreesCommand),
+    /// Work for the search actor.
+    Search(SearchCommand),
+}
+
+/// Work the frontend loop forwards to the sessions actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionsCommand {
     /// Split `session`'s focused pane `split`; the sessions actor makes the pane.
     SplitPane { session: SessionId, split: Split },
     /// Add a shell to `session`'s shown tab and re-tile it unless it was
@@ -62,17 +79,8 @@ pub enum Command {
         git_ref: GitRef,
         to_root: bool,
     },
-    /// List the refs of the directory's repository into the open branch picker.
-    ListBranches(PathBuf),
     /// Add the directory as a project.
     AddProject(PathBuf),
-    /// List the directory's subdirectories into the open directory picker.
-    ListDirectories(PathBuf),
-    /// Read the thread's transcript into the open session picker's preview.
-    LoadPreview {
-        thread: ThreadId,
-        transcript: PathBuf,
-    },
     /// Poll the sessions' statuses now instead of waiting for the next tick.
     RefreshSessions,
     /// Pin the session to the top of the sidebar; a settled session
@@ -105,10 +113,23 @@ pub enum Command {
     /// Make a `kind` session in orb's own folder `name` (a slug), with one
     /// shell.
     NewFolderSession { kind: FolderKind, name: String },
+    /// Make the session's orb worktree again, gone from disk, then attach to
+    /// it. The frontend loop sends this when `Attach` finds the worktree gone.
+    RestoreWorktree(SessionId),
+}
+
+/// Work the frontend loop forwards to the worktrees actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreesCommand {
     /// Rescan orb's worktrees and re-read their facts, then their sizes.
     RefreshWorktrees,
     /// Force-remove the worktree at `path`, keeping its branch.
     DeleteWorktree { path: PathBuf },
+}
+
+/// Work the frontend loop forwards to the search actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchCommand {
     /// Bring the search index up to date and run `query` in it, listing the
     /// rows in the open search picker while `query` is still its typed text.
     SearchTranscripts { query: String },

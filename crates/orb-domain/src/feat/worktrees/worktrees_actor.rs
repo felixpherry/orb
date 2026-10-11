@@ -13,6 +13,7 @@ use kameo::prelude::{Actor, ActorRef, Context, Message, Spawn};
 use tokio::time::MissedTickBehavior;
 
 use super::state::{Verdict, Worktree, users, verdict};
+use crate::command::WorktreesCommand;
 use crate::common::{State, Wake};
 use crate::feat::git::git_service::{GitService, git_reason};
 use crate::feat::picker::state::worktree_items;
@@ -43,17 +44,9 @@ pub struct WorktreesActor {
     sweep_every: Duration,
 }
 
-/// Rescan, then read facts, then sizes.
-#[derive(Debug)]
-pub struct RefreshWorktrees;
-
 /// Rescan, read facts, prune, then read sizes.
 #[derive(Debug)]
 pub struct Sweep;
-
-/// Force-remove the worktree at this path, keeping its branch.
-#[derive(Debug)]
-pub struct DeleteWorktree(pub PathBuf);
 
 /// Spawns the worktrees actor with a mailbox that never refuses a message.
 /// Must be called inside a tokio runtime.
@@ -85,15 +78,19 @@ impl Actor for WorktreesActor {
     }
 }
 
-impl Message<RefreshWorktrees> for WorktreesActor {
+impl Message<WorktreesCommand> for WorktreesActor {
     type Reply = ();
 
-    async fn handle(
+    fn handle(
         &mut self,
-        _msg: RefreshWorktrees,
+        msg: WorktreesCommand,
         _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.refresh();
+    ) -> impl Future<Output = Self::Reply> + Send {
+        match msg {
+            WorktreesCommand::RefreshWorktrees => self.refresh(),
+            WorktreesCommand::DeleteWorktree { path } => self.delete(&path),
+        }
+        std::future::ready(())
     }
 }
 
@@ -102,18 +99,6 @@ impl Message<Sweep> for WorktreesActor {
 
     async fn handle(&mut self, _msg: Sweep, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.sweep();
-    }
-}
-
-impl Message<DeleteWorktree> for WorktreesActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        DeleteWorktree(path): DeleteWorktree,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.delete(&path);
     }
 }
 

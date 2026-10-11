@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::command::Workspace;
+use crate::command::{SearchCommand, SessionsCommand, Workspace, WorktreesCommand};
 use crate::feat::git::validator::{
     BUSY_DIRECTORY, ChangeWorkspaceError, SwitchBranchError, validate_change_workspace,
     validate_switch_branch,
@@ -149,7 +149,7 @@ impl IntentHandler {
                 Some((session, pane)) => {
                     state.layouts.reveal(session, pane);
                     let mut commands = attach_session(state);
-                    commands.push(Command::SaveLayout(session));
+                    commands.push(Command::Sessions(SessionsCommand::SaveLayout(session)));
                     commands
                 }
                 None => attach_session(state),
@@ -165,10 +165,12 @@ impl IntentHandler {
             },
             Intent::SplitPane(split) => {
                 match (validate_tiled_action(state), state.shown_session()) {
-                    (Ok(()), Some(session)) => vec![Command::SplitPane {
-                        session,
-                        split: *split,
-                    }],
+                    (Ok(()), Some(session)) => {
+                        vec![Command::Sessions(SessionsCommand::SplitPane {
+                            session,
+                            split: *split,
+                        })]
+                    }
                     _ => vec![],
                 }
             }
@@ -178,13 +180,17 @@ impl IntentHandler {
                         .shown_layout()
                         .is_some_and(SessionLayout::float_focused) =>
                 {
-                    vec![Command::AddFloat(session)]
+                    vec![Command::Sessions(SessionsCommand::AddFloat(session))]
                 }
-                (Ok(()), Some(session)) => vec![Command::AddPane(session)],
+                (Ok(()), Some(session)) => {
+                    vec![Command::Sessions(SessionsCommand::AddPane(session))]
+                }
                 _ => vec![],
             },
             Intent::StackPane => match (validate_tiled_action(state), state.shown_session()) {
-                (Ok(()), Some(session)) => vec![Command::StackPane(session)],
+                (Ok(()), Some(session)) => {
+                    vec![Command::Sessions(SessionsCommand::StackPane(session))]
+                }
                 _ => vec![],
             },
             Intent::ClosePane => close_pane(state),
@@ -211,8 +217,9 @@ impl IntentHandler {
                 vec![]
             }
             Intent::BreakPane => match validate_tiled_action(state) {
-                Ok(()) => in_pane(state, Layouts::break_pane)
-                    .map_or_else(Vec::new, |owner| vec![Command::SaveLayout(owner)]),
+                Ok(()) => in_pane(state, Layouts::break_pane).map_or_else(Vec::new, |owner| {
+                    vec![Command::Sessions(SessionsCommand::SaveLayout(owner))]
+                }),
                 Err(_) => vec![],
             },
             Intent::GrowFocused => grow_or_shrink(state, true),
@@ -237,7 +244,9 @@ impl IntentHandler {
                 layouts.move_pane_in_order(owner, *forward)
             }),
             Intent::NewTab => match (validate_tab_action(state), state.shown_session()) {
-                (Ok(()), Some(session)) => vec![Command::NewTab(session)],
+                (Ok(()), Some(session)) => {
+                    vec![Command::Sessions(SessionsCommand::NewTab(session))]
+                }
                 _ => vec![],
             },
             Intent::CloseTab => close_tab(state),
@@ -253,7 +262,7 @@ impl IntentHandler {
                     (Ok(()), Some(owner)) => {
                         state.layouts.reveal(owner, *pane);
                         let mut commands = enter_session(state, owner);
-                        commands.push(Command::SaveLayout(owner));
+                        commands.push(Command::Sessions(SessionsCommand::SaveLayout(owner)));
                         commands
                     }
                     _ => vec![],
@@ -263,7 +272,7 @@ impl IntentHandler {
                 match (validate_focus_pane(state, *pane), state.shown_session()) {
                     (Ok(()), Some(owner)) => {
                         state.layouts.focus_pane(owner, *pane);
-                        vec![Command::SaveLayout(owner)]
+                        vec![Command::Sessions(SessionsCommand::SaveLayout(owner))]
                     }
                     _ => vec![],
                 }
@@ -276,7 +285,9 @@ impl IntentHandler {
                 vec![]
             }
             Intent::DropFloat => match (validate_float_action(state), state.shown_session()) {
-                (Ok(()), Some(owner)) => vec![Command::SaveLayout(owner)],
+                (Ok(()), Some(owner)) => {
+                    vec![Command::Sessions(SessionsCommand::SaveLayout(owner))]
+                }
                 _ => vec![],
             },
             Intent::JumpBack => match validate_jump_back(state) {
@@ -352,13 +363,13 @@ impl IntentHandler {
             Intent::OpenWorktreePicker => {
                 let items = worktree_items(state);
                 open_picker(state, PickerState::worktrees(items, state.focus));
-                vec![Command::RefreshWorktrees]
+                vec![Command::Worktrees(WorktreesCommand::RefreshWorktrees)]
             }
             Intent::OpenSearch => {
                 open_picker(state, PickerState::search(state.focus));
-                vec![Command::SearchTranscripts {
+                vec![Command::Search(SearchCommand::SearchTranscripts {
                     query: String::new(),
-                }]
+                })]
             }
             Intent::FilterProjects => {
                 let items = std::iter::once(PickerItem::AllProjects)
@@ -649,7 +660,9 @@ impl IntentHandler {
                 },
                 Some(&PickerKind::InitGit { project }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
-                        Some(PickerItem::InitGit) => vec![Command::InitGit(project)],
+                        Some(PickerItem::InitGit) => {
+                            vec![Command::Sessions(SessionsCommand::InitGit(project))]
+                        }
                         _ => vec![],
                     }
                 }
@@ -737,7 +750,10 @@ impl IntentHandler {
                             .as_ref()
                             .and_then(PickerState::directory_to_add);
                         back_to_list(state, false);
-                        dir.map(Command::AddProject).into_iter().collect()
+                        dir.map(SessionsCommand::AddProject)
+                            .map(Command::Sessions)
+                            .into_iter()
+                            .collect()
                     }
                     _ => vec![],
                 },
@@ -806,8 +822,10 @@ impl IntentHandler {
                     state.sessions.selected_session(),
                 ) {
                     (Ok(()), Some(session)) => match session.pinned_at {
-                        Some(_) => vec![Command::UnpinSession(session.id)],
-                        None => vec![Command::PinSession(session.id)],
+                        Some(_) => {
+                            vec![Command::Sessions(SessionsCommand::UnpinSession(session.id))]
+                        }
+                        None => vec![Command::Sessions(SessionsCommand::PinSession(session.id))],
                     },
                     _ => vec![],
                 }
@@ -858,7 +876,9 @@ impl IntentHandler {
                     state.sessions.selected_session(),
                 ) {
                     (Ok(()), Some(session)) if session.settled_at.is_some() => {
-                        vec![Command::UnsettleSession(session.id)]
+                        vec![Command::Sessions(SessionsCommand::UnsettleSession(
+                            session.id,
+                        ))]
                     }
                     (Ok(()), Some(session)) => {
                         let picker = PickerState::settle_session(session.id, state.focus);
@@ -935,8 +955,8 @@ fn record_focus_move(
     let entered = state.focused_agent();
     if left != entered && (left.is_some() || entered.is_some()) {
         state.jumps.jump(left, entered);
-        if !commands.contains(&Command::SaveJumps) {
-            commands.push(Command::SaveJumps);
+        if !commands.contains(&Command::Sessions(SessionsCommand::SaveJumps)) {
+            commands.push(Command::Sessions(SessionsCommand::SaveJumps));
         }
     }
     commands
@@ -996,11 +1016,11 @@ fn pick_branch(state: &mut AppState, picker: &PickerState) -> Vec<Command> {
                 && !git_ref.remote
                 && git_ref.worktree.is_none()
                 && outside_root;
-            let command = Command::SwitchBranch {
+            let command = Command::Sessions(SessionsCommand::SwitchBranch {
                 session,
                 git_ref: git_ref.clone(),
                 to_root,
-            };
+            });
             if to_root {
                 detach_moving(state, session, command)
             } else {
@@ -1036,7 +1056,7 @@ fn workspace_items(
 /// for the filter to be saved.
 fn filter_to(state: &mut AppState, filter: Option<ProjectId>) -> Vec<Command> {
     state.sessions.filter_to(filter, &state.layouts);
-    with_visit(state, vec![Command::SaveUi])
+    with_visit(state, vec![Command::Sessions(SessionsCommand::SaveUi)])
 }
 
 /// Asks for `project` to be removed. A filter to it goes back to all
@@ -1047,7 +1067,10 @@ fn remove_project(state: &mut AppState, project: ProjectId) -> Vec<Command> {
     }
     with_visit(
         state,
-        vec![Command::RemoveProject(project), Command::SaveUi],
+        vec![
+            Command::Sessions(SessionsCommand::RemoveProject(project)),
+            Command::Sessions(SessionsCommand::SaveUi),
+        ],
     )
 }
 
@@ -1066,7 +1089,10 @@ fn settle_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
             state.sessions.cursor = state
                 .sessions
                 .card_neighbour(SidebarItem::Session(session), &state.layouts);
-            with_visit(state, vec![Command::SettleSession(session)])
+            with_visit(
+                state,
+                vec![Command::Sessions(SessionsCommand::SettleSession(session))],
+            )
         }
         (Err(ToggleSettleError::InProgress), Some(selected)) if selected.id == session => {
             state.sessions.error = Some(SETTLE_IN_PROGRESS.to_owned());
@@ -1092,7 +1118,7 @@ fn close_agent_pane(state: &mut AppState, session: SessionId, pane: PaneId) -> V
     if state.sessions.cursor == Some(SidebarItem::Agent { session, pane }) {
         state.sessions.cursor = Some(SidebarItem::Session(session));
     }
-    vec![Command::SaveLayout(session)]
+    vec![Command::Sessions(SessionsCommand::SaveLayout(session))]
 }
 
 /// Hides `session` at once, detaches it, drops it from the jump list, moves
@@ -1116,7 +1142,10 @@ fn delete_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
     }
     with_visit(
         state,
-        vec![Command::DeleteSession(session), Command::SaveJumps],
+        vec![
+            Command::Sessions(SessionsCommand::DeleteSession(session)),
+            Command::Sessions(SessionsCommand::SaveJumps),
+        ],
     )
 }
 
@@ -1173,7 +1202,10 @@ fn unfilter(state: &mut AppState, project: ProjectId) -> Vec<Command> {
     if outside {
         state.sessions.filter = None;
     }
-    outside.then_some(Command::SaveUi).into_iter().collect()
+    outside
+        .then_some(Command::Sessions(SessionsCommand::SaveUi))
+        .into_iter()
+        .collect()
 }
 
 /// What picking `choice` in `project`'s new-session workspace picker asks
@@ -1221,12 +1253,12 @@ fn new_session(
     state.sessions.starting = true;
     state.jumps.jump(state.sessions.cursor, None);
     vec![
-        Command::NewSession {
+        Command::Sessions(SessionsCommand::NewSession {
             project,
             workspace,
             name,
-        },
-        Command::SaveJumps,
+        }),
+        Command::Sessions(SessionsCommand::SaveJumps),
     ]
 }
 
@@ -1262,7 +1294,11 @@ fn pick_move_workspace(
 /// Asks for `session` to move to `to`, one start at a time (see
 /// [`detach_moving`]).
 fn change_workspace(state: &mut AppState, session: SessionId, to: Workspace) -> Vec<Command> {
-    detach_moving(state, session, Command::ChangeWorkspace { session, to })
+    detach_moving(
+        state,
+        session,
+        Command::Sessions(SessionsCommand::ChangeWorkspace { session, to }),
+    )
 }
 
 /// Asks for `command`, which moves `session` to another directory, one start
@@ -1297,7 +1333,7 @@ fn pick_agent(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Com
     state.layouts.reveal(session, pane);
     let agent = SidebarItem::Agent { session, pane };
     let mut commands = pick(state, from, agent, agent);
-    commands.push(Command::SaveLayout(session));
+    commands.push(Command::Sessions(SessionsCommand::SaveLayout(session)));
     commands
 }
 
@@ -1315,7 +1351,7 @@ fn pick(
         vec![]
     } else {
         state.jumps.jump(from, Some(jump_to));
-        vec![Command::SaveJumps]
+        vec![Command::Sessions(SessionsCommand::SaveJumps)]
     };
     commands.extend(show_pane(state));
     with_visit(state, commands)
@@ -1358,8 +1394,10 @@ fn with_search(state: &AppState, commands: Vec<Command>) -> Vec<Command> {
     let query = state.picker.as_ref().and_then(PickerState::search_query);
     commands
         .into_iter()
-        .chain(query.map(|query| Command::SearchTranscripts {
-            query: query.to_owned(),
+        .chain(query.map(|query| {
+            Command::Search(SearchCommand::SearchTranscripts {
+                query: query.to_owned(),
+            })
         }))
         .collect()
 }
@@ -1373,11 +1411,11 @@ fn preview_command(state: &mut AppState) -> Vec<Command> {
         return vec![];
     };
     if let Some((hit, path, prompt_offset)) = picker.selected_hit() {
-        return vec![Command::LoadSearchPreview {
+        return vec![Command::Search(SearchCommand::LoadSearchPreview {
             hit,
             path: path.to_owned(),
             prompt_offset,
-        }];
+        })];
     }
     let load = picker.selected_thread().and_then(|id| {
         let thread = state.sessions.threads().find(|thread| thread.id == id)?;
@@ -1507,7 +1545,7 @@ fn leave_delete_worktree(state: &mut AppState) -> Vec<Command> {
     };
     back_to_list(state, delete.is_some());
     delete
-        .map(|path| Command::DeleteWorktree { path })
+        .map(|path| Command::Worktrees(WorktreesCommand::DeleteWorktree { path }))
         .into_iter()
         .collect()
 }
@@ -1554,7 +1592,7 @@ fn attach_session(state: &mut AppState) -> Vec<Command> {
 fn enter_session(state: &mut AppState, id: SessionId) -> Vec<Command> {
     let mut commands = show_session(state, id);
     if state.jumps.enter(state.entry_row(id)) {
-        commands.push(Command::SaveJumps);
+        commands.push(Command::Sessions(SessionsCommand::SaveJumps));
     }
     commands
 }
@@ -1583,7 +1621,7 @@ fn show_session(state: &mut AppState, id: SessionId) -> Vec<Command> {
         .session(id)
         .is_some_and(|session| session.settled_at.is_some());
     state.sessions.enter(id);
-    let unsettle = settled.then_some(Command::UnsettleSession(id));
+    let unsettle = settled.then_some(Command::Sessions(SessionsCommand::UnsettleSession(id)));
     match state.layouts.get(id) {
         Some(_) => {
             state.focus = Focus::Pane;
@@ -1591,10 +1629,16 @@ fn show_session(state: &mut AppState, id: SessionId) -> Vec<Command> {
             state.attached.insert(id);
             unsettle
                 .into_iter()
-                .chain([Command::Attach(id), Command::RefreshSessions])
+                .chain([
+                    Command::Attach(id),
+                    Command::Sessions(SessionsCommand::RefreshSessions),
+                ])
                 .collect()
         }
-        None => unsettle.into_iter().chain([Command::NewTab(id)]).collect(),
+        None => unsettle
+            .into_iter()
+            .chain([Command::Sessions(SessionsCommand::NewTab(id))])
+            .collect(),
     }
 }
 
@@ -1622,7 +1666,10 @@ fn leave_pane(state: &mut AppState) -> Vec<Command> {
         Focus::Pane => {
             state.sidebar.hidden = false;
             state.focus = Focus::Sidebar;
-            vec![Command::Detach, Command::RefreshSessions]
+            vec![
+                Command::Detach,
+                Command::Sessions(SessionsCommand::RefreshSessions),
+            ]
         }
         _ => vec![],
     }
@@ -1651,7 +1698,7 @@ where
         return vec![];
     };
     edit(&mut state.layouts, owner);
-    vec![Command::SaveLayout(owner)]
+    vec![Command::Sessions(SessionsCommand::SaveLayout(owner))]
 }
 
 /// `Cmd ]` (or `Cmd [` when `back`): cycles the floats' layout while a float
@@ -1673,7 +1720,7 @@ fn move_focus(state: &mut AppState, nav: NavDirection) -> Vec<Command> {
         return vec![];
     };
     match state.layouts.move_focus(owner, nav) {
-        FocusMove::Moved => vec![Command::SaveLayout(owner)],
+        FocusMove::Moved => vec![Command::Sessions(SessionsCommand::SaveLayout(owner))],
         FocusMove::Stuck => vec![],
     }
 }
@@ -1685,9 +1732,9 @@ fn toggle_floats(state: &mut AppState) -> Vec<Command> {
         return vec![];
     };
     if state.layouts.toggle_floats(owner) {
-        vec![Command::SaveLayout(owner)]
+        vec![Command::Sessions(SessionsCommand::SaveLayout(owner))]
     } else {
-        vec![Command::AddFloat(owner)]
+        vec![Command::Sessions(SessionsCommand::AddFloat(owner))]
     }
 }
 
@@ -1700,7 +1747,7 @@ fn close_pane(state: &mut AppState) -> Vec<Command> {
         return vec![];
     };
     state.layouts.close_pane(focused);
-    vec![Command::SaveLayout(owner)]
+    vec![Command::Sessions(SessionsCommand::SaveLayout(owner))]
 }
 
 /// Closes the shown tab and saves the layout.
@@ -1709,7 +1756,7 @@ fn close_tab(state: &mut AppState) -> Vec<Command> {
         return vec![];
     };
     state.layouts.close_tab(owner);
-    vec![Command::SaveLayout(owner)]
+    vec![Command::Sessions(SessionsCommand::SaveLayout(owner))]
 }
 
 /// Runs `edit` on the shown layout while the keys are in one of its panes,
@@ -1722,7 +1769,8 @@ where
     let owner = in_pane(state, |layouts, owner| changed = edit(layouts, owner));
     owner
         .filter(|_| changed)
-        .map(Command::SaveLayout)
+        .map(SessionsCommand::SaveLayout)
+        .map(Command::Sessions)
         .into_iter()
         .collect()
 }
@@ -1740,7 +1788,10 @@ fn grow_or_shrink(state: &mut AppState, grow: bool) -> Vec<Command> {
             } else {
                 state.sidebar.narrow()
             };
-            changed.then_some(Command::SaveUi).into_iter().collect()
+            changed
+                .then_some(Command::Sessions(SessionsCommand::SaveUi))
+                .into_iter()
+                .collect()
         }
         Focus::Pane => {
             let mut changed = false;
@@ -1749,7 +1800,8 @@ fn grow_or_shrink(state: &mut AppState, grow: bool) -> Vec<Command> {
             });
             owner
                 .filter(|_| changed)
-                .map(Command::SaveLayout)
+                .map(SessionsCommand::SaveLayout)
+                .map(Command::Sessions)
                 .into_iter()
                 .collect()
         }
@@ -1843,19 +1895,30 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
             let name = rename.input.text().trim();
             let name = (!name.is_empty()).then(|| name.to_owned());
             return match rename.target {
-                RenameTarget::Session(session) => vec![Command::RenameSession { session, name }],
+                RenameTarget::Session(session) => {
+                    vec![Command::Sessions(SessionsCommand::RenameSession {
+                        session,
+                        name,
+                    })]
+                }
                 RenameTarget::NewFolder(_) | RenameTarget::NewSession { .. } => vec![],
                 // The keys go back to the panes.
                 RenameTarget::Tab { owner, tab } => {
                     state.layouts.rename_tab(owner, tab, name);
                     let mut commands = show_pane(state);
-                    commands.push(Command::SaveLayout(owner));
+                    commands.push(Command::Sessions(SessionsCommand::SaveLayout(owner)));
                     commands
                 }
                 RenameTarget::Pane(pane) => {
                     state.layouts.rename_pane(pane, name);
                     let mut commands = show_pane(state);
-                    commands.extend(state.layouts.owner_of(pane).map(Command::SaveLayout));
+                    commands.extend(
+                        state
+                            .layouts
+                            .owner_of(pane)
+                            .map(SessionsCommand::SaveLayout)
+                            .map(Command::Sessions),
+                    );
                     commands
                 }
                 // The keys stay in the sidebar.
@@ -1864,7 +1927,8 @@ fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
                     state
                         .layouts
                         .owner_of(pane)
-                        .map(Command::SaveLayout)
+                        .map(SessionsCommand::SaveLayout)
+                        .map(Command::Sessions)
                         .into_iter()
                         .collect()
                 }
@@ -1916,13 +1980,13 @@ fn new_folder_session(state: &mut AppState) -> Vec<Command> {
         return vec![];
     };
     *creating = true;
-    let command = Command::NewFolderSession {
+    let command = Command::Sessions(SessionsCommand::NewFolderSession {
         kind: *kind,
         name: folder_slug(input.text()),
-    };
+    });
     state.sessions.starting = true;
     state.jumps.jump(state.sessions.cursor, None);
-    vec![command, Command::SaveJumps]
+    vec![command, Command::Sessions(SessionsCommand::SaveJumps)]
 }
 
 /// What a picker key does in the sidebar search: edit the text, putting the
@@ -1985,7 +2049,7 @@ fn record_jump(state: &mut AppState, from: Option<SidebarItem>) -> Vec<Command> 
         return vec![];
     }
     state.jumps.jump(from, to);
-    vec![Command::SaveJumps]
+    vec![Command::Sessions(SessionsCommand::SaveJumps)]
 }
 
 /// Lands a jump back or forward on `target`: the cursor moves there and its
@@ -2008,17 +2072,20 @@ fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
             state.layouts.reveal(session, pane);
             let mut commands = show_pane(state);
             if !commands.is_empty() {
-                commands.push(Command::SaveLayout(session));
+                commands.push(Command::Sessions(SessionsCommand::SaveLayout(session)));
             }
             commands
         }
         _ => vec![],
     };
-    let mut commands = vec![Command::SaveJumps];
+    let mut commands = vec![Command::Sessions(SessionsCommand::SaveJumps)];
     match (from_pane, pane.is_empty()) {
         (true, true) => {
             state.focus = Focus::Sidebar;
-            commands.extend([Command::Detach, Command::RefreshSessions]);
+            commands.extend([
+                Command::Detach,
+                Command::Sessions(SessionsCommand::RefreshSessions),
+            ]);
         }
         _ => commands.extend(pane),
     }
@@ -2031,7 +2098,7 @@ fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
         state
             .sessions
             .selected_session()
-            .map(|session| Command::Visit(session.id)),
+            .map(|session| Command::Sessions(SessionsCommand::Visit(session.id))),
     );
     commands
 }
@@ -2043,7 +2110,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
-    use crate::command::Workspace;
+    use crate::command::{SearchCommand, SessionsCommand, Workspace, WorktreesCommand};
     use crate::feat::git::git_service::{GitRef, WorktreeFacts};
     use crate::feat::jumps::state::JumpList;
     use crate::feat::layout::floats::FloatLayout;
@@ -2432,7 +2499,7 @@ mod tests {
         // Then the new width is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveUi],
+            vec![Command::Sessions(SessionsCommand::SaveUi)],
             "a resize should save the width"
         );
     }
@@ -2508,8 +2575,8 @@ mod tests {
             commands,
             vec![
                 Command::Attach(SessionId(1)),
-                Command::RefreshSessions,
-                Command::SaveJumps,
+                Command::Sessions(SessionsCommand::RefreshSessions),
+                Command::Sessions(SessionsCommand::SaveJumps),
             ],
             "Attach should target the selected thread, then refresh"
         );
@@ -2573,7 +2640,9 @@ mod tests {
 
         // Then the session's layout is saved.
         assert!(
-            commands.contains(&Command::SaveLayout(SessionId(1))),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                1
+            )))),
             "Enter on an agent row should save the revealed layout"
         );
     }
@@ -2591,7 +2660,7 @@ mod tests {
             commands.get(..2),
             Some(
                 &[
-                    Command::UnsettleSession(SessionId(1)),
+                    Command::Sessions(SessionsCommand::UnsettleSession(SessionId(1))),
                     Command::Attach(SessionId(1))
                 ][..]
             ),
@@ -2621,8 +2690,8 @@ mod tests {
             commands.get(..2),
             Some(
                 &[
-                    Command::UnsettleSession(SessionId(1)),
-                    Command::NewTab(SessionId(1))
+                    Command::Sessions(SessionsCommand::UnsettleSession(SessionId(1))),
+                    Command::Sessions(SessionsCommand::NewTab(SessionId(1)))
                 ][..]
             ),
             "⏎ on an emptied session should open a shell in it"
@@ -2758,7 +2827,10 @@ mod tests {
         // refreshed.
         assert_eq!(
             commands,
-            vec![Command::Detach, Command::RefreshSessions],
+            vec![
+                Command::Detach,
+                Command::Sessions(SessionsCommand::RefreshSessions)
+            ],
             "LeavePane should detach, then refresh"
         );
     }
@@ -2830,8 +2902,8 @@ mod tests {
             commands,
             vec![
                 Command::Attach(SessionId(2)),
-                Command::RefreshSessions,
-                Command::SaveJumps,
+                Command::Sessions(SessionsCommand::RefreshSessions),
+                Command::Sessions(SessionsCommand::SaveJumps),
             ],
             "<C-S-l> should attach to the selected session, then refresh"
         );
@@ -3168,12 +3240,12 @@ mod tests {
         assert_eq!(
             commands,
             vec![
-                Command::NewSession {
+                Command::Sessions(SessionsCommand::NewSession {
                     project: ProjectId(2),
                     workspace: Workspace::Checkout,
                     name: Some("api".to_owned()),
-                },
-                Command::SaveJumps,
+                }),
+                Command::Sessions(SessionsCommand::SaveJumps),
             ],
             "a project outside git gets its named session in its checkout"
         );
@@ -3191,12 +3263,12 @@ mod tests {
         assert_eq!(
             commands,
             vec![
-                Command::NewSession {
+                Command::Sessions(SessionsCommand::NewSession {
                     project: ProjectId(2),
                     workspace: Workspace::Checkout,
                     name: None,
-                },
-                Command::SaveJumps,
+                }),
+                Command::Sessions(SessionsCommand::SaveJumps),
             ],
             "a blank name leaves the session unnamed"
         );
@@ -3251,13 +3323,13 @@ mod tests {
         // Then a session named `api` in a new worktree from `main` is asked
         // for.
         assert!(
-            commands.contains(&Command::NewSession {
+            commands.contains(&Command::Sessions(SessionsCommand::NewSession {
                 project: ProjectId(1),
                 workspace: Workspace::NewWorktree {
                     base: "main".to_owned()
                 },
                 name: Some("api".to_owned()),
-            }),
+            })),
             "the name rides the workspace and base pickers, got {commands:?}"
         );
     }
@@ -3272,11 +3344,11 @@ mod tests {
 
         // Then a session in alpha's checkout is asked for.
         assert!(
-            commands.contains(&Command::NewSession {
+            commands.contains(&Command::Sessions(SessionsCommand::NewSession {
                 project: ProjectId(1),
                 workspace: Workspace::Checkout,
                 name: None,
-            }),
+            })),
             "the current checkout should make a session there, got {commands:?}"
         );
     }
@@ -3294,11 +3366,11 @@ mod tests {
 
         // Then a session in that worktree is asked for.
         assert!(
-            commands.contains(&Command::NewSession {
+            commands.contains(&Command::Sessions(SessionsCommand::NewSession {
                 project: ProjectId(1),
                 workspace: Workspace::Existing("/wt/alpha-1".into()),
                 name: None,
-            }),
+            })),
             "the previous worktree should make a session there, got {commands:?}"
         );
     }
@@ -3351,13 +3423,13 @@ mod tests {
 
         // Then a session in a new worktree from `main` is asked for.
         assert!(
-            commands.contains(&Command::NewSession {
+            commands.contains(&Command::Sessions(SessionsCommand::NewSession {
                 project: ProjectId(1),
                 workspace: Workspace::NewWorktree {
                     base: "main".to_owned()
                 },
                 name: None,
-            }),
+            })),
             "a picked base should make a session in a new worktree, got {commands:?}"
         );
     }
@@ -3419,7 +3491,9 @@ mod tests {
         // Then the sessions actor is asked to add `~/dev`.
         assert_eq!(
             commands,
-            vec![Command::AddProject(Path::new(HOME).join("dev"))],
+            vec![Command::Sessions(SessionsCommand::AddProject(
+                Path::new(HOME).join("dev")
+            ))],
             "PickerConfirm should add the highlighted directory"
         );
     }
@@ -3650,10 +3724,10 @@ mod tests {
         // Then session 1 moves into that worktree.
         assert_eq!(
             commands,
-            [Command::ChangeWorkspace {
+            [Command::Sessions(SessionsCommand::ChangeWorkspace {
                 session: SessionId(1),
                 to: Workspace::Existing("/work/2".into()),
-            }],
+            })],
             "the previous worktree should be the session's new workspace"
         );
     }
@@ -3708,12 +3782,12 @@ mod tests {
         // Then session 1 moves into a new worktree from main.
         assert_eq!(
             commands,
-            [Command::ChangeWorkspace {
+            [Command::Sessions(SessionsCommand::ChangeWorkspace {
                 session: SessionId(1),
                 to: Workspace::NewWorktree {
                     base: "main".into()
                 },
-            }],
+            })],
             "the base should start the session's new worktree"
         );
     }
@@ -3884,11 +3958,11 @@ mod tests {
         // Then feat is checked out in the session's directory.
         assert_eq!(
             commands,
-            [Command::SwitchBranch {
+            [Command::Sessions(SessionsCommand::SwitchBranch {
                 session: SessionId(1),
                 git_ref: branch("feat", false, None),
                 to_root: false,
-            }],
+            })],
             "a free branch should be checked out"
         );
     }
@@ -3912,10 +3986,10 @@ mod tests {
         // Then the session moves into that worktree.
         assert_eq!(
             commands,
-            [Command::ChangeWorkspace {
+            [Command::Sessions(SessionsCommand::ChangeWorkspace {
                 session: SessionId(1),
                 to: Workspace::Existing("/wt/feat".into()),
-            }],
+            })],
             "a session with no turn follows the branch into its worktree"
         );
     }
@@ -4048,7 +4122,9 @@ mod tests {
 
         // Then the sessions actor is asked to settle thread 2.
         assert!(
-            commands.contains(&Command::SettleSession(SessionId(2))),
+            commands.contains(&Command::Sessions(SessionsCommand::SettleSession(
+                SessionId(2)
+            ))),
             "Yes on the settle confirm should return Settle"
         );
     }
@@ -4127,7 +4203,9 @@ mod tests {
         // Then the sessions actor is asked to un-settle it.
         assert_eq!(
             commands,
-            vec![Command::UnsettleSession(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::UnsettleSession(
+                SessionId(1)
+            ))],
             "ToggleSettle on a settled thread should return Unsettle"
         );
     }
@@ -4159,7 +4237,7 @@ mod tests {
         // Then the sessions actor is asked to pin it.
         assert_eq!(
             commands,
-            vec![Command::PinSession(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::PinSession(SessionId(1)))],
             "p on an unpinned session pins it"
         );
     }
@@ -4178,7 +4256,9 @@ mod tests {
         // Then the sessions actor is asked to unpin it.
         assert_eq!(
             commands,
-            vec![Command::UnpinSession(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::UnpinSession(SessionId(
+                1
+            )))],
             "TogglePin on a pinned thread should return Unpin"
         );
     }
@@ -4194,7 +4274,9 @@ mod tests {
 
         // Then the sessions actor is asked to delete it.
         assert!(
-            commands.contains(&Command::DeleteSession(SessionId(1))),
+            commands.contains(&Command::Sessions(SessionsCommand::DeleteSession(
+                SessionId(1)
+            ))),
             "Yes on the delete confirm should return Delete"
         );
     }
@@ -4252,7 +4334,9 @@ mod tests {
 
         // Then the thread it lands on is visited.
         assert!(
-            commands.contains(&Command::Visit(SessionId(expected))),
+            commands.contains(&Command::Sessions(SessionsCommand::Visit(SessionId(
+                expected
+            )))),
             "{intent:?} should visit thread {expected}"
         );
     }
@@ -4307,7 +4391,7 @@ mod tests {
 
         // Then the newly selected thread is visited.
         assert!(
-            commands.contains(&Command::Visit(SessionId(1))),
+            commands.contains(&Command::Sessions(SessionsCommand::Visit(SessionId(1)))),
             "SelectNext should visit the thread it lands on"
         );
     }
@@ -4327,7 +4411,7 @@ mod tests {
         // Then the sessions actor is asked to run git init.
         assert_eq!(
             commands,
-            vec![Command::InitGit(ProjectId(1))],
+            vec![Command::Sessions(SessionsCommand::InitGit(ProjectId(1)))],
             "⏎ on Initialize Git should init the project"
         );
     }
@@ -4654,11 +4738,11 @@ mod tests {
 
         // Then a session in the Incognito folder is asked for.
         assert!(
-            commands.contains(&Command::NewSession {
+            commands.contains(&Command::Sessions(SessionsCommand::NewSession {
                 project: ProjectId(2),
                 workspace: Workspace::Checkout,
                 name: None,
-            }),
+            })),
             "NewIncognito should ask for a session in the Incognito folder, got {commands:?}"
         );
     }
@@ -4825,7 +4909,10 @@ mod tests {
         // Then the filter is saved and thread 21 visited.
         assert_eq!(
             commands,
-            vec![Command::SaveUi, Command::Visit(SessionId(21))],
+            vec![
+                Command::Sessions(SessionsCommand::SaveUi),
+                Command::Sessions(SessionsCommand::Visit(SessionId(21)))
+            ],
             "filtering should save the filter"
         );
     }
@@ -4910,9 +4997,9 @@ mod tests {
         assert_eq!(
             commands,
             vec![
-                Command::RemoveProject(ProjectId(1)),
-                Command::SaveUi,
-                Command::Visit(SessionId(21)),
+                Command::Sessions(SessionsCommand::RemoveProject(ProjectId(1))),
+                Command::Sessions(SessionsCommand::SaveUi),
+                Command::Sessions(SessionsCommand::Visit(SessionId(21))),
             ],
             "Yes should remove the project"
         );
@@ -5202,7 +5289,9 @@ mod tests {
         // Then the sessions actor is asked to add `~/dev`.
         assert_eq!(
             commands,
-            vec![Command::AddProject(Path::new(HOME).join("dev"))],
+            vec![Command::Sessions(SessionsCommand::AddProject(
+                Path::new(HOME).join("dev")
+            ))],
             "confirming a directory should add it as a project"
         );
     }
@@ -5293,7 +5382,7 @@ mod tests {
         // Then the cleared filter is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveUi],
+            vec![Command::Sessions(SessionsCommand::SaveUi)],
             "clearing the filter should save it"
         );
     }
@@ -5416,10 +5505,10 @@ mod tests {
         // Then the thread is renamed to the trimmed text.
         assert_eq!(
             commands,
-            vec![Command::RenameSession {
+            vec![Command::Sessions(SessionsCommand::RenameSession {
                 session: SessionId(1),
                 name: Some("Sidebar search".to_owned()),
-            }],
+            })],
             "⏎ should rename the thread"
         );
     }
@@ -5437,10 +5526,10 @@ mod tests {
         // Then orb's name is cleared.
         assert_eq!(
             commands,
-            vec![Command::RenameSession {
+            vec![Command::Sessions(SessionsCommand::RenameSession {
                 session: SessionId(1),
                 name: None,
-            }],
+            })],
             "a blank ⏎ should go back to Claude's title"
         );
     }
@@ -5565,7 +5654,7 @@ mod tests {
         // Then the match is visited.
         assert_eq!(
             commands,
-            vec![Command::Visit(SessionId(3))],
+            vec![Command::Sessions(SessionsCommand::Visit(SessionId(3)))],
             "typing should visit the first match"
         );
     }
@@ -5744,10 +5833,10 @@ mod tests {
 
         // Then a Research session is asked for under the case-kept slug.
         assert!(
-            commands.contains(&Command::NewFolderSession {
+            commands.contains(&Command::Sessions(SessionsCommand::NewFolderSession {
                 kind: FolderKind::Research,
                 name: "GT-514-login".into(),
-            }),
+            })),
             "a valid name should ask for the session, got {commands:?}"
         );
     }
@@ -5882,7 +5971,7 @@ mod tests {
 
         // Then the jump list is saved.
         assert!(
-            commands.contains(&Command::SaveJumps),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveJumps)),
             "entering a pane should save the jump list"
         );
     }
@@ -5926,7 +6015,7 @@ mod tests {
 
         // Then the jump list is saved.
         assert!(
-            commands.contains(&Command::SaveJumps),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveJumps)),
             "G should save the jump list"
         );
     }
@@ -6032,7 +6121,7 @@ mod tests {
 
         // Then the jump list is saved.
         assert!(
-            commands.contains(&Command::SaveJumps),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveJumps)),
             "<C-[> should save the jump list"
         );
     }
@@ -6132,7 +6221,7 @@ mod tests {
 
         // Then the list isn't saved: nothing was recorded.
         assert!(
-            !commands.contains(&Command::SaveJumps),
+            !commands.contains(&Command::Sessions(SessionsCommand::SaveJumps)),
             "re-entering the landed pane records nothing to save"
         );
     }
@@ -6164,7 +6253,10 @@ mod tests {
         // Then it only saves the list and visits thread 1.
         assert_eq!(
             commands,
-            vec![Command::SaveJumps, Command::Visit(SessionId(1))],
+            vec![
+                Command::Sessions(SessionsCommand::SaveJumps),
+                Command::Sessions(SessionsCommand::Visit(SessionId(1)))
+            ],
             "<C-[> must never attach"
         );
     }
@@ -6776,7 +6868,9 @@ mod tests {
 
         // Then session 1's layout, without the pane, is saved.
         assert!(
-            commands.contains(&Command::SaveLayout(SessionId(1))),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                1
+            )))),
             "Yes over the list should save the layout it closed a pane of"
         );
     }
@@ -6956,7 +7050,9 @@ mod tests {
 
         // Then session 1's layout, showing the pane, is saved.
         assert!(
-            commands.contains(&Command::SaveLayout(SessionId(1))),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                1
+            )))),
             "picking should save the layout it revealed the pane in"
         );
     }
@@ -7637,7 +7733,7 @@ mod tests {
         // Then the worktrees are re-read.
         assert_eq!(
             commands,
-            [Command::RefreshWorktrees],
+            [Command::Worktrees(WorktreesCommand::RefreshWorktrees)],
             "opening should refresh the worktrees"
         );
     }
@@ -7809,7 +7905,9 @@ mod tests {
         // Then the worktree is deleted.
         assert_eq!(
             commands,
-            [Command::DeleteWorktree { path: USED.into() }],
+            [Command::Worktrees(WorktreesCommand::DeleteWorktree {
+                path: USED.into()
+            })],
             "Yes should delete the worktree"
         );
     }
@@ -8152,11 +8250,11 @@ mod tests {
         // Then hit 2's exchange is asked for.
         assert_eq!(
             commands,
-            [Command::LoadSearchPreview {
+            [Command::Search(SearchCommand::LoadSearchPreview {
                 hit: 2,
                 path: format!("/t/{thread}.jsonl").into(),
                 prompt_offset: 0,
-            }],
+            })],
             "moving onto a hit should load its search preview"
         );
     }
@@ -8188,9 +8286,9 @@ mod tests {
         // Then an empty query is sent, which only catches the index up.
         assert_eq!(
             commands,
-            [Command::SearchTranscripts {
+            [Command::Search(SearchCommand::SearchTranscripts {
                 query: String::new()
-            }],
+            })],
             "opening should search for nothing"
         );
     }
@@ -8214,9 +8312,9 @@ mod tests {
         // Then the new text is searched for.
         assert_eq!(
             commands,
-            [Command::SearchTranscripts {
+            [Command::Search(SearchCommand::SearchTranscripts {
                 query: query.to_owned()
-            }],
+            })],
             "{intent:?} should search for the edited text"
         );
     }
@@ -8231,9 +8329,10 @@ mod tests {
 
         // Then no search is asked for.
         assert!(
-            !commands
-                .iter()
-                .any(|command| matches!(command, Command::SearchTranscripts { .. })),
+            !commands.iter().any(|command| matches!(
+                command,
+                Command::Search(SearchCommand::SearchTranscripts { .. })
+            )),
             "only the search picker searches transcripts"
         );
     }
@@ -8409,10 +8508,10 @@ mod tests {
         // Then the sessions actor is asked to split session 1.
         assert_eq!(
             commands,
-            vec![Command::SplitPane {
+            vec![Command::Sessions(SessionsCommand::SplitPane {
                 session: SessionId(1),
                 split: Split::Right
-            }],
+            })],
             "a split goes through the sessions actor, which makes the pane"
         );
     }
@@ -8440,7 +8539,7 @@ mod tests {
         // Then the sessions actor is asked to add one to session 1.
         assert_eq!(
             commands,
-            vec![Command::AddPane(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::AddPane(SessionId(1)))],
             "adding goes through the sessions actor, which makes the pane"
         );
     }
@@ -8457,7 +8556,7 @@ mod tests {
         // Then the sessions actor is asked for another float.
         assert_eq!(
             commands,
-            vec![Command::AddFloat(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::AddFloat(SessionId(1)))],
             "a new pane opens as a float while a float has the keys"
         );
     }
@@ -8473,7 +8572,7 @@ mod tests {
         // Then the sessions actor is asked for a shell float.
         assert_eq!(
             commands,
-            vec![Command::AddFloat(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::AddFloat(SessionId(1)))],
             "with no floats, showing them opens one"
         );
     }
@@ -8489,7 +8588,9 @@ mod tests {
 
         // Then the layout is saved.
         assert!(
-            commands.contains(&Command::SaveLayout(SessionId(1))),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                1
+            )))),
             "hiding the floats moves the keys, so the layout is saved"
         );
     }
@@ -8505,7 +8606,7 @@ mod tests {
         // Then the layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "floating a pane saves the layout"
         );
     }
@@ -8537,7 +8638,7 @@ mod tests {
         // Then the layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "embedding a float saves the layout"
         );
     }
@@ -8566,7 +8667,7 @@ mod tests {
         // Then the layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "pinning a float saves the layout"
         );
     }
@@ -8612,7 +8713,7 @@ mod tests {
         // Then the sessions actor is asked to stack one in session 1.
         assert_eq!(
             commands,
-            vec![Command::StackPane(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::StackPane(SessionId(1)))],
             "stacking goes through the sessions actor, which makes the pane"
         );
     }
@@ -8642,7 +8743,9 @@ mod tests {
 
         // Then session 1's layout is saved.
         assert!(
-            commands.contains(&Command::SaveLayout(SessionId(1))),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                1
+            )))),
             "a focus move should be saved"
         );
     }
@@ -8717,7 +8820,9 @@ mod tests {
 
         // Then session 1's layout, showing agent 1's pane, is saved.
         assert!(
-            commands.contains(&Command::SaveLayout(SessionId(1))),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                1
+            )))),
             "revealing the agent's pane should save the layout"
         );
     }
@@ -8866,7 +8971,7 @@ mod tests {
 
         // Then the jump list is saved.
         assert!(
-            commands.contains(&Command::SaveJumps),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveJumps)),
             "a focus move between agents should save the jump list"
         );
     }
@@ -8930,7 +9035,7 @@ mod tests {
         // Then session 1's layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "a closed pane should be saved"
         );
     }
@@ -8974,7 +9079,10 @@ mod tests {
         // Then its layout is gone and saved as such.
         assert_eq!(
             (state.layouts.get(SessionId(1)).is_some(), commands),
-            (false, vec![Command::SaveLayout(SessionId(1))]),
+            (
+                false,
+                vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))]
+            ),
             "an agent's pane closes like any other"
         );
     }
@@ -9109,7 +9217,7 @@ mod tests {
         // Then the stacked layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "a Cmd + that stacks the split saves the layout"
         );
     }
@@ -9182,7 +9290,7 @@ mod tests {
         // Then the layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "a resize-mode step that changes the tree saves the layout"
         );
     }
@@ -9220,7 +9328,7 @@ mod tests {
         // Then the layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "a move that swaps panes saves the layout"
         );
     }
@@ -9400,7 +9508,7 @@ mod tests {
         // Then the sessions actor is asked for a tab in session 1.
         assert_eq!(
             commands,
-            vec![Command::NewTab(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::NewTab(SessionId(1)))],
             "a new tab goes through the sessions actor, which makes the pane"
         );
     }
@@ -9432,7 +9540,10 @@ mod tests {
         // Then its layout is gone and saved as such.
         assert_eq!(
             (state.layouts.get(SessionId(1)).is_some(), commands),
-            (false, vec![Command::SaveLayout(SessionId(1))]),
+            (
+                false,
+                vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))]
+            ),
             "a tab holding an agent's pane closes like any other"
         );
     }
@@ -9605,7 +9716,9 @@ mod tests {
 
         // Then session 1's layout is saved.
         assert!(
-            commands.contains(&Command::SaveLayout(SessionId(1))),
+            commands.contains(&Command::Sessions(SessionsCommand::SaveLayout(SessionId(
+                1
+            )))),
             "a pane's new name should be saved, got {commands:?}"
         );
     }
@@ -9728,7 +9841,7 @@ mod tests {
         // Then session 1's layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "an agent's new name should be saved"
         );
     }
@@ -9828,7 +9941,7 @@ mod tests {
         // Then session 1's layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "a closed agent pane should be saved"
         );
     }
@@ -9961,7 +10074,7 @@ mod tests {
         // Then session 1's layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "a float layout step should be saved"
         );
     }
@@ -9994,7 +10107,7 @@ mod tests {
         // Then session 1's layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "a swap layout step should be saved"
         );
     }
@@ -10276,7 +10389,7 @@ mod tests {
         // Then session 1's layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "the new tab is saved"
         );
     }
@@ -10432,7 +10545,7 @@ mod tests {
         // Then the layout is saved.
         assert_eq!(
             commands,
-            vec![Command::SaveLayout(SessionId(1))],
+            vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
             "the release saves the dragged float"
         );
     }

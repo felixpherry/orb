@@ -9,7 +9,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use error_stack::Report;
 use kameo::mailbox;
@@ -18,6 +18,7 @@ use kameo::prelude::{Actor, ActorRef, Context, Message, Spawn};
 use super::index::{Hit, SearchIndex, SearchIndexError, ThreadKey, snippet};
 use super::state::SearchProgress;
 use crate::AppState;
+use crate::command::SearchCommand;
 use crate::common::{Log, State, Wake};
 use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::picker::list::PickerItem;
@@ -56,18 +57,6 @@ pub struct SearchActor {
 #[derive(Debug)]
 pub struct IndexNext;
 
-/// Catch up, then run the query text in the index.
-#[derive(Debug)]
-pub struct SearchTranscripts(pub String);
-
-/// Load the exchange of hit `hit` into the search picker's preview.
-#[derive(Debug)]
-pub struct LoadSearchPreview {
-    pub hit: i64,
-    pub path: PathBuf,
-    pub prompt_offset: u64,
-}
-
 /// Spawns the search actor with a mailbox that never refuses a message.
 /// Must be called inside a tokio runtime, once `AppState` holds the threads.
 pub fn spawn_search_actor(deps: SearchActorDeps) -> ActorRef<SearchActor> {
@@ -102,27 +91,23 @@ impl Message<IndexNext> for SearchActor {
     }
 }
 
-impl Message<SearchTranscripts> for SearchActor {
+impl Message<SearchCommand> for SearchActor {
     type Reply = ();
 
-    async fn handle(
+    fn handle(
         &mut self,
-        SearchTranscripts(query): SearchTranscripts,
+        msg: SearchCommand,
         _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.search(&query);
-    }
-}
-
-impl Message<LoadSearchPreview> for SearchActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        msg: LoadSearchPreview,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.preview(msg);
+    ) -> impl Future<Output = Self::Reply> + Send {
+        match msg {
+            SearchCommand::SearchTranscripts { query } => self.search(&query),
+            SearchCommand::LoadSearchPreview {
+                hit,
+                path,
+                prompt_offset,
+            } => self.preview(hit, &path, prompt_offset),
+        }
+        std::future::ready(())
     }
 }
 
@@ -263,30 +248,21 @@ impl SearchActor {
             picker.show_hits(query, items, found.overflow);
             picker
                 .selected_hit()
-                .map(|(hit, path, prompt_offset)| LoadSearchPreview {
-                    hit,
-                    path: path.to_owned(),
-                    prompt_offset,
-                })
+                .map(|(hit, path, prompt_offset)| (hit, path.to_owned(), prompt_offset))
         };
-        if let Some(request) = first {
-            self.preview(request);
+        if let Some((hit, path, prompt_offset)) = first {
+            self.preview(hit, &path, prompt_offset);
         }
         (self.wake)();
     }
 
     /// Shows the exchange of hit `hit` in the search picker's preview,
     /// unless another row is selected by now. A failed read writes nothing.
-    fn preview(&self, request: LoadSearchPreview) {
-        let LoadSearchPreview {
-            hit,
-            path,
-            prompt_offset,
-        } = request;
+    fn preview(&self, hit: i64, path: &Path, prompt_offset: u64) {
         let Some(index) = &self.index else {
             return;
         };
-        let messages = match index.exchange(&path, prompt_offset) {
+        let messages = match index.exchange(path, prompt_offset) {
             Ok(messages) => messages,
             Err(report) => {
                 self.log.error_on_change(
@@ -427,9 +403,8 @@ mod tests {
 
     use kameo::prelude::ActorRef;
 
-    use super::{
-        LoadSearchPreview, SearchActor, SearchActorDeps, SearchTranscripts, spawn_search_actor,
-    };
+    use super::{SearchActor, SearchActorDeps, spawn_search_actor};
+    use crate::command::SearchCommand;
     use crate::common::{Log, State};
     use crate::feat::harness::Harnesses;
     use crate::feat::harness::claude::ClaudeCode;
@@ -559,16 +534,18 @@ mod tests {
     /// Asks the actor to run `query`, waiting until it has.
     async fn search(actor: &ActorRef<SearchActor>, query: &str) -> io::Result<()> {
         actor
-            .ask(SearchTranscripts(query.to_owned()))
+            .ask(SearchCommand::SearchTranscripts {
+                query: query.to_owned(),
+            })
             .await
             .map_err(|err| io::Error::other(format!("{err:?}")))
     }
 
     /// The preview request for the search picker's selected hit.
-    fn selected_preview(state: &State) -> Option<LoadSearchPreview> {
+    fn selected_preview(state: &State) -> Option<SearchCommand> {
         let app = state.read();
         let (hit, path, prompt_offset) = app.picker.as_ref()?.selected_hit()?;
-        Some(LoadSearchPreview {
+        Some(SearchCommand::LoadSearchPreview {
             hit,
             path: path.to_path_buf(),
             prompt_offset,
@@ -578,7 +555,7 @@ mod tests {
     /// Asks the actor to load `request`, waiting until it has.
     async fn load_preview(
         actor: &ActorRef<SearchActor>,
-        request: Option<LoadSearchPreview>,
+        request: Option<SearchCommand>,
     ) -> io::Result<()> {
         let request = request.ok_or_else(|| io::Error::other("no hit selected"))?;
         actor

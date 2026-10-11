@@ -14,7 +14,7 @@ mod intent;
 mod intent_handler;
 
 pub use app_state::{AppState, Focus, PaneMode};
-pub use command::Command;
+pub use command::{Command, SearchCommand, SessionsCommand, WorktreesCommand};
 pub use common::{
     Finished, Log, Services, State, TextInput, Wake, ancestry, ends_orb, panic_text, parse_parents,
     run_within, stop_gracefully, tilde,

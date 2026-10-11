@@ -86,14 +86,16 @@ use orb_domain::feat::harness::Harnesses;
 use orb_domain::feat::layout::state::{Layouts, SessionLayout};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::PickerKind;
-use orb_domain::feat::search::search_actor::{self, SearchActor};
+use orb_domain::feat::search::search_actor::SearchActor;
 use orb_domain::feat::sessions::child_env::pane_env;
-use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
+use orb_domain::feat::sessions::sessions_actor::SessionsActor;
 use orb_domain::feat::sessions::state::{PaneId, SessionId, ThreadId};
 use orb_domain::feat::sidebar::state::SidebarLayout;
-use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
+use orb_domain::feat::worktrees::worktrees_actor::WorktreesActor;
 use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
-use orb_domain::{AppState, Command, Focus, Intent, IntentHandler, Log, State, Wake};
+use orb_domain::{
+    AppState, Command, Focus, Intent, IntentHandler, Log, SessionsCommand, State, Wake,
+};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
@@ -968,7 +970,6 @@ impl App {
         Ok(())
     }
 
-    #[expect(clippy::too_many_lines, reason = "one arm per command")]
     fn execute(&mut self, command: &Command) {
         match command {
             Command::Attach(session) => {
@@ -991,7 +992,7 @@ impl App {
                 {
                     let _ = self
                         .sessions
-                        .tell(sessions_actor::RestoreWorktree(*session))
+                        .tell(SessionsCommand::RestoreWorktree(*session))
                         .try_send();
                     let mut app = self.state.write();
                     app.focus = Focus::Sidebar;
@@ -1003,93 +1004,11 @@ impl App {
                 self.reconcile();
                 self.sync_focus();
             }
-            Command::SplitPane { session, split } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::SplitPane {
-                        session: *session,
-                        split: *split,
-                    })
-                    .try_send();
-            }
-            Command::AddPane(session) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::AddPane(*session))
-                    .try_send();
-            }
-            Command::AddFloat(session) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::AddFloat(*session))
-                    .try_send();
-            }
-            Command::StackPane(session) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::StackPane(*session))
-                    .try_send();
-            }
-            Command::NewTab(session) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::NewTab(*session))
-                    .try_send();
-            }
-            Command::SaveLayout(session) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::SaveLayout(*session))
-                    .try_send();
-            }
             Command::Detach => self.sync_focus(),
             Command::SendCtrlG => {
                 if let Some(pane) = self.attached_pane() {
                     pane.key(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
                 }
-            }
-            Command::NewSession {
-                project,
-                workspace,
-                name,
-            } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::NewSession {
-                        project: *project,
-                        workspace: workspace.clone(),
-                        name: name.clone(),
-                    })
-                    .try_send();
-            }
-            Command::InitGit(project) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::InitGit(*project))
-                    .try_send();
-            }
-            Command::ChangeWorkspace { session, to } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::ChangeWorkspace {
-                        session: *session,
-                        to: to.clone(),
-                    })
-                    .try_send();
-            }
-            Command::SwitchBranch {
-                session,
-                git_ref,
-                to_root,
-            } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::SwitchBranch {
-                        session: *session,
-                        git_ref: git_ref.clone(),
-                        to_root: *to_root,
-                    })
-                    .try_send();
             }
             Command::ListBranches(cwd) => {
                 let refs = self.git.refs(cwd);
@@ -1108,12 +1027,6 @@ impl App {
                     }
                 }
             }
-            Command::AddProject(root) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::AddProject(root.clone()))
-                    .try_send();
-            }
             Command::ListDirectories(dir) => {
                 let names = list_directories(dir);
                 if let Some(picker) = &mut self.state.write().picker {
@@ -1123,106 +1036,14 @@ impl App {
             Command::LoadPreview { thread, transcript } => {
                 self.load_preview(*thread, transcript);
             }
-            Command::RefreshWorktrees => {
-                let _ = self
-                    .worktrees
-                    .tell(worktrees_actor::RefreshWorktrees)
-                    .try_send();
+            Command::Sessions(command) => {
+                let _ = self.sessions.tell(command.clone()).try_send();
             }
-            Command::DeleteWorktree { path } => {
-                let _ = self
-                    .worktrees
-                    .tell(worktrees_actor::DeleteWorktree(path.clone()))
-                    .try_send();
+            Command::Worktrees(command) => {
+                let _ = self.worktrees.tell(command.clone()).try_send();
             }
-            Command::SearchTranscripts { query } => {
-                let _ = self
-                    .search
-                    .tell(search_actor::SearchTranscripts(query.clone()))
-                    .try_send();
-            }
-            Command::LoadSearchPreview {
-                hit,
-                path,
-                prompt_offset,
-            } => {
-                let _ = self
-                    .search
-                    .tell(search_actor::LoadSearchPreview {
-                        hit: *hit,
-                        path: path.clone(),
-                        prompt_offset: *prompt_offset,
-                    })
-                    .try_send();
-            }
-            Command::RefreshSessions => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::RefreshSessions)
-                    .try_send();
-            }
-            Command::PinSession(id) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::PinSession(*id))
-                    .try_send();
-            }
-            Command::UnpinSession(id) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::UnpinSession(*id))
-                    .try_send();
-            }
-            Command::RenameSession { session, name } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::RenameSession {
-                        session: *session,
-                        name: name.clone(),
-                    })
-                    .try_send();
-            }
-            Command::SettleSession(id) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::SettleSession(*id))
-                    .try_send();
-            }
-            Command::UnsettleSession(id) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::UnsettleSession(*id))
-                    .try_send();
-            }
-            Command::DeleteSession(id) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::DeleteSession(*id))
-                    .try_send();
-            }
-            Command::Visit(id) => {
-                let _ = self.sessions.tell(sessions_actor::Visit(*id)).try_send();
-            }
-            Command::SaveUi => {
-                let _ = self.sessions.tell(sessions_actor::SaveUi).try_send();
-            }
-            Command::SaveJumps => {
-                let _ = self.sessions.tell(sessions_actor::SaveJumps).try_send();
-            }
-            Command::RemoveProject(id) => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::RemoveProject(*id))
-                    .try_send();
-            }
-            Command::NewFolderSession { kind, name } => {
-                let _ = self
-                    .sessions
-                    .tell(sessions_actor::NewFolderSession {
-                        kind: *kind,
-                        name: name.clone(),
-                    })
-                    .try_send();
+            Command::Search(command) => {
+                let _ = self.search.tell(command.clone()).try_send();
             }
         }
     }
@@ -1355,10 +1176,7 @@ impl App {
             (keep, app.layouts.pane_ids(), edited, titles)
         };
         for owner in edited {
-            let _ = self
-                .sessions
-                .tell(sessions_actor::SaveLayout(owner))
-                .try_send();
+            self.execute(&Command::Sessions(SessionsCommand::SaveLayout(owner)));
         }
         let gone = to_drop(self.panes.keys().map(|id| (*id, ended.contains(id))), &keep);
         let early_exit = pane_error_after(
