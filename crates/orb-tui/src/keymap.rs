@@ -349,6 +349,24 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 scope,
             )
             .bind(
+                "<leader>pw",
+                Intent::ToggleFloats,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>pe",
+                Intent::ToggleFloatEmbed,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
+                "<leader>pi",
+                Intent::TogglePinFloat,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
                 "<leader>pc",
                 Intent::RenamePane,
                 KeyCategory::Navigation,
@@ -464,6 +482,7 @@ fn cmd_route(key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('l') | KeyCode::Right => Some(Intent::MoveFocus(NavDirection::Right)),
         KeyCode::Char('n') => Some(Intent::AddPane),
         KeyCode::Char('x') => Some(Intent::ClosePane),
+        KeyCode::Char('f') => Some(Intent::ToggleFloats),
         KeyCode::Char('+' | '=') => Some(Intent::GrowFocused),
         KeyCode::Char('-') => Some(Intent::ShrinkFocused),
         KeyCode::Char(digit @ '1'..='9') => digit.to_digit(10).map(|n| Intent::GoToTab(n as usize)),
@@ -1135,6 +1154,7 @@ mod tests {
     #[case(KeyCode::Right, Intent::MoveFocus(NavDirection::Right))]
     #[case(KeyCode::Char('n'), Intent::AddPane)]
     #[case(KeyCode::Char('x'), Intent::ClosePane)]
+    #[case(KeyCode::Char('f'), Intent::ToggleFloats)]
     #[case(KeyCode::Char('+'), Intent::GrowFocused)]
     #[case(KeyCode::Char('='), Intent::GrowFocused)]
     #[case(KeyCode::Char('-'), Intent::ShrinkFocused)]
@@ -1248,24 +1268,6 @@ mod tests {
 
         // Then nothing happens.
         assert_eq!(intent, None, "<C-g> q quits, not q");
-    }
-
-    #[rstest::rstest]
-    #[case(false, Route::Keymap)]
-    #[case(true, Route::Forward)]
-    fn cmd_f_is_unbound(#[case] in_pane: bool, #[case] expected: Route) {
-        // Given Cmd f, reserved for floating panes.
-        let pressed = cmd(KeyCode::Char('f'));
-
-        // When routing it in the sidebar or a pane.
-        let routed = route(pressed, in_pane, false);
-
-        // Then orb asks for nothing: a pane gets it, the sidebar's keymap
-        // has no binding for it.
-        assert_eq!(
-            routed, expected,
-            "Cmd f stays unbound (in a pane: {in_pane})"
-        );
     }
 
     #[rstest::rstest]
@@ -1687,6 +1689,9 @@ mod tests {
     #[case(Scope::Pane, "pr", Intent::SplitPane(Split::Right))]
     #[case(Scope::Pane, "pf", Intent::ToggleZoom)]
     #[case(Scope::Pane, "px", Intent::ClosePane)]
+    #[case(Scope::Pane, "pw", Intent::ToggleFloats)]
+    #[case(Scope::Pane, "pe", Intent::ToggleFloatEmbed)]
+    #[case(Scope::PaneIncognito, "pi", Intent::TogglePinFloat)]
     #[case(Scope::Pane, "pc", Intent::RenamePane)]
     #[case(Scope::Pane, "ps", Intent::StackPane)]
     #[case(Scope::Pane, "tb", Intent::BreakPane)]
@@ -1757,7 +1762,7 @@ mod tests {
         let found = leader_popup(Scope::Pane, &[key(KeyCode::Char('p'))]).join(" ");
 
         // Then they are the pane keys.
-        assert_eq!(found, "c d f r s x", "<C-g> p keys in a pane");
+        assert_eq!(found, "c d e f i r s w x", "<C-g> p keys in a pane");
     }
 
     #[rstest::rstest]

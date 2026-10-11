@@ -979,7 +979,7 @@ pub(crate) const SPINNER_FRAME: Duration = Duration::from_millis(100);
 /// The spinner's frames, here and in the mode line's activity.
 pub(crate) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// A pinned thread (`nf-fa-thumb_tack`).
-const PIN: &str = "\u{f08d}";
+pub(crate) const PIN: &str = "\u{f08d}";
 /// Before a branch, here and in the picker (`nf-pl-branch`).
 pub(crate) const BRANCH: &str = "\u{e0a0}";
 /// A project, the closed Settled shelf, and the picker's folders

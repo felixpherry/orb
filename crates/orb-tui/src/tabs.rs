@@ -4,13 +4,17 @@
 //! has the keys, grey while it has the focus and the keys are elsewhere,
 //! dim otherwise. A zoomed tab shows only its focused pane. Each stack is a
 //! centred list naming its panes, one row each between two dim bars and a
-//! `>` outside the left bar on the shown one, above the shown pane.
+//! `>` outside the left bar on the shown one, above the shown pane. Floats
+//! are drawn last, over the tiled panes and stack lists; a pinned float
+//! stays drawn while the floats are hidden. While a float has the keys, the
+//! tab bar names the floats' layout instead of the tab's.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
 use orb_domain::AppState;
-use orb_domain::feat::layout::state::{Placement, SessionLayout, StackList};
+use orb_domain::feat::layout::floats::FloatLayout;
+use orb_domain::feat::layout::state::{Placed, Placement, SessionLayout, StackList};
 use orb_domain::feat::layout::tree::SwapLayout;
 use orb_domain::feat::sessions::state::PaneId;
 use orb_term::Pane;
@@ -18,11 +22,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Widget};
+use ratatui::widgets::{Block, BorderType, Clear, Widget};
 
 use crate::mouse::HitMap;
 use crate::session_picker::cut_right;
-use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER, ORANGE};
+use crate::sidebar::{BLACK, BLUE, COMMENT, DARK3, FG, FG_DARK, GUTTER, ORANGE, PIN};
 
 /// The trailing chevron's text.
 const PLUS: &str = " + ";
@@ -37,9 +41,12 @@ pub(crate) fn areas(right: Rect) -> [Rect; 2] {
 }
 
 /// Draws `layout` into `right`: the tab bar, then each placed pane that has
-/// a client in `panes` inside its frame, and each stack's list. Records each
-/// pane's screen, and whether its program reads the mouse, in `hits`.
-/// Returns the focused pane's cursor while `keys_in_pane`.
+/// a client in `panes` inside its frame, each stack's list, then the shown
+/// floats (or only the pinned ones while hidden) over them, each on a cleared
+/// area, a pinned one with a pin at the right of its top border. Records each
+/// pane's screen, and whether its program reads the mouse, and each drawn
+/// float's frame in `hits`. Returns the focused pane's cursor while
+/// `keys_in_pane`.
 pub(crate) fn render(
     state: &AppState,
     layout: &SessionLayout,
@@ -50,34 +57,11 @@ pub(crate) fn render(
     hits: &mut HitMap,
 ) -> Option<Position> {
     let [bar, body] = areas(right);
-    tab_bar(state, layout, bar, buf, hits);
+    tab_bar(state, layout, keys_in_pane, bar, buf, hits);
     let placement = placement(state, layout, body);
     let mut cursor = None;
-    for place in &placement.panes {
-        let lit = place.focused && keys_in_pane;
-        let content = place.content();
-        let reads_mouse = panes.get(&place.pane).is_some_and(Pane::reads_mouse);
-        hits.record_pane(content, place.pane, reads_mouse);
-        let drawn = panes
-            .get(&place.pane)
-            .filter(|_| !content.is_empty())
-            .and_then(|pane| pane.render(content, buf));
-        if lit {
-            cursor = drawn;
-        }
-        let (border, title) = match (lit, place.focused) {
-            (true, _) => (BLUE, Style::new().fg(BLUE).add_modifier(Modifier::BOLD)),
-            (false, true) => (COMMENT, Style::new().fg(FG_DARK)),
-            (false, false) => (GUTTER, Style::new().fg(DARK3)),
-        };
-        Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(border))
-            .title(Line::styled(
-                format!(" {} ", pane_title(state, place.pane)),
-                title,
-            ))
-            .render(place.area, buf);
+    for place in placement.panes.iter().filter(|place| !place.floating) {
+        cursor = draw_pane(state, place, panes, keys_in_pane, buf, hits).or(cursor);
     }
     for stack in &placement.stacks {
         let lit = keys_in_pane
@@ -93,7 +77,51 @@ pub(crate) fn render(
         stack_list(state, stack, left, lit, buf, hits);
         hits.record_stack(stack.area, stack.panes.clone(), stack.shown);
     }
+    for place in placement.panes.iter().filter(|place| place.floating) {
+        Clear.render(place.area, buf);
+        hits.record_float(place.area, place.pane);
+        cursor = draw_pane(state, place, panes, keys_in_pane, buf, hits).or(cursor);
+    }
     cursor
+}
+
+/// Draws one placed pane's client (when `panes` has one) inside its frame and
+/// records its screen in `hits`. Returns its cursor while it has the keys.
+fn draw_pane(
+    state: &AppState,
+    place: &Placed,
+    panes: &HashMap<PaneId, Pane>,
+    keys_in_pane: bool,
+    buf: &mut Buffer,
+    hits: &mut HitMap,
+) -> Option<Position> {
+    let lit = place.focused && keys_in_pane;
+    let content = place.content();
+    let reads_mouse = panes.get(&place.pane).is_some_and(Pane::reads_mouse);
+    hits.record_pane(content, place.pane, reads_mouse);
+    let drawn = panes
+        .get(&place.pane)
+        .filter(|_| !content.is_empty())
+        .and_then(|pane| pane.render(content, buf));
+    let (border, title) = match (lit, place.focused) {
+        (true, _) => (BLUE, Style::new().fg(BLUE).add_modifier(Modifier::BOLD)),
+        (false, true) => (COMMENT, Style::new().fg(FG_DARK)),
+        (false, false) => (GUTTER, Style::new().fg(DARK3)),
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(border))
+        .title(Line::styled(
+            format!(" {} ", pane_title(state, place.pane)),
+            title,
+        ));
+    let block = if place.pinned {
+        block.title_top(Line::styled(format!(" {PIN} "), title).right_aligned())
+    } else {
+        block
+    };
+    block.render(place.area, buf);
+    drawn.filter(|_| lit)
 }
 
 /// Where `layout`'s shown tab draws its panes in `body`, each stack's list as
@@ -179,11 +207,15 @@ pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
 /// Then, right-aligned, the `Cmd <[]>` hint and the shown tab's swap layout
 /// name, lit while the tab is untouched and dim once it's changed by hand; a
 /// 1-pane tab has none, and it's dropped when the tabs leave no room for it.
+/// While a float has the keys (`keys_in_pane`), the name is the floats'
+/// layout instead, lit or dim the same way, whatever the tab's pane count.
 /// Records the bar, each tab and chip with the tab it shows, and the `+` in
-/// `hits`.
+/// `hits`; while the floats are shown, a tab's click keeps the keys in the
+/// top float.
 fn tab_bar(
     state: &AppState,
     layout: &SessionLayout,
+    keys_in_pane: bool,
     bar: Rect,
     buf: &mut Buffer,
     hits: &mut HitMap,
@@ -215,7 +247,11 @@ fn tab_bar(
     };
     let mut target = |area: Rect, index: usize| {
         if let Some(tab) = layout.tabs().get(index).filter(|_| !area.is_empty()) {
-            hits.record_tab(area, index, tab.focused());
+            hits.record_tab(
+                area,
+                index,
+                layout.floats().focused().unwrap_or_else(|| tab.focused()),
+            );
         }
     };
     let mut spans = vec![session];
@@ -243,7 +279,16 @@ fn tab_bar(
         hits.record_new_tab(plus);
     }
     chevron(&mut spans, PLUS.to_owned(), rest);
-    if let Some(tab) = layout.active_tab().filter(|tab| tab.pane_count() > 1) {
+    let indicator = if keys_in_pane && layout.float_focused() {
+        let floats = layout.floats();
+        Some((float_layout_name(floats.layout()), floats.hand_changed()))
+    } else {
+        layout
+            .active_tab()
+            .filter(|tab| tab.pane_count() > 1)
+            .map(|tab| (swap_layout_name(tab.swap_layout()), tab.hand_changed()))
+    };
+    if let Some((name, hand_changed)) = indicator {
         let hint = Span::styled(
             SWAP_KEYS,
             Style::new()
@@ -251,13 +296,13 @@ fn tab_bar(
                 .bg(BLACK)
                 .add_modifier(Modifier::BOLD),
         );
-        let name = format!(" {} ", swap_layout_name(tab.swap_layout()));
+        let name = format!(" {name} ");
         let width = span_width(&hint).saturating_add(chevron_width(&name));
         let left = bar.right().saturating_sub(x);
         if left >= width {
             spans.push(Span::raw(" ".repeat(usize::from(left - width))));
             spans.push(hint);
-            let style = if tab.hand_changed() { rest } else { shown };
+            let style = if hand_changed { rest } else { shown };
             chevron(&mut spans, name, style);
         }
     }
@@ -311,6 +356,15 @@ fn swap_layout_name(layout: SwapLayout) -> &'static str {
     }
 }
 
+/// What the tab bar calls the floats' `layout`, in caps.
+fn float_layout_name(layout: FloatLayout) -> &'static str {
+    match layout {
+        FloatLayout::Staggered => "STAGGERED",
+        FloatLayout::Enlarged => "ENLARGED",
+        FloatLayout::Spread => "SPREAD",
+    }
+}
+
 /// Which tabs fit in `room` columns, given each tab chevron's `widths`,
 /// starting from the shown tab `active` and add neighbours,
 /// alternating sides from the left, while they and the chips counting the
@@ -348,7 +402,110 @@ fn visible_tabs(widths: &[u16], active: usize, room: u16) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::visible_tabs;
+    use std::collections::HashMap;
+
+    use orb_domain::AppState;
+    use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
+    use orb_domain::feat::layout::tree::Split;
+    use orb_domain::feat::sessions::state::{PaneId, SessionId};
+    use orb_domain::feat::zmx::zmx_service::ZmxSession;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    use super::{areas, render, visible_tabs};
+    use crate::mouse::HitMap;
+    use crate::sidebar::PIN;
+
+    fn entry(id: i64) -> PaneEntry {
+        PaneEntry {
+            id: PaneId(id),
+            zmx: ZmxSession {
+                name: format!("orb-p{id}"),
+                dir: "/tmp/zmx".into(),
+            },
+            cwd: "/tmp".into(),
+            name: None,
+            resume: None,
+        }
+    }
+
+    #[rstest::rstest]
+    fn float_hides_the_tiled_frames_beneath_it() {
+        // Given panes 7 and 8 side by side (frames meeting at column 40) and
+        // a float over the middle of the body.
+        let right = Rect::new(0, 0, 80, 25);
+        let layouts = {
+            let mut layouts = Layouts::default();
+            layouts.insert(SessionId(1), SessionLayout::of(entry(7)));
+            layouts.fit_to(areas(right)[1]);
+            layouts.split(SessionId(1), Split::Right, entry(8));
+            layouts.add_float(SessionId(1), entry(20));
+            layouts
+        };
+
+        // When rendering the tab area.
+        let buf = layouts.get(SessionId(1)).map(|layout| {
+            let mut buf = Buffer::empty(right);
+            render(
+                &AppState::default(),
+                layout,
+                &HashMap::new(),
+                true,
+                right,
+                &mut buf,
+                &mut HitMap::default(),
+            );
+            buf
+        });
+
+        // Then the tiled border column is blank inside the float.
+        assert_eq!(
+            buf.as_ref()
+                .and_then(|buf| buf.cell((40, 12)))
+                .map(ratatui::buffer::Cell::symbol),
+            Some(" "),
+            "the float covers the tiled frames"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pinned_float_shows_a_pin_in_its_top_border() {
+        // Given panes 7 and 8 side by side and a pinned float over the middle.
+        let right = Rect::new(0, 0, 80, 25);
+        let layouts = {
+            let mut layouts = Layouts::default();
+            layouts.insert(SessionId(1), SessionLayout::of(entry(7)));
+            layouts.fit_to(areas(right)[1]);
+            layouts.split(SessionId(1), Split::Right, entry(8));
+            layouts.add_float(SessionId(1), entry(20));
+            layouts.toggle_pin(SessionId(1));
+            layouts
+        };
+
+        // When rendering the tab area.
+        let buf = layouts.get(SessionId(1)).map(|layout| {
+            let mut buf = Buffer::empty(right);
+            render(
+                &AppState::default(),
+                layout,
+                &HashMap::new(),
+                true,
+                right,
+                &mut buf,
+                &mut HitMap::default(),
+            );
+            buf
+        });
+
+        // Then the float's top border row holds the pin.
+        let row: String = buf.as_ref().map_or_else(String::new, |buf| {
+            (0..right.width)
+                .filter_map(|x| buf.cell((x, 7)))
+                .map(ratatui::buffer::Cell::symbol)
+                .collect()
+        });
+        assert!(row.contains(PIN), "a pinned float shows a pin: {row:?}");
+    }
 
     #[rstest::rstest]
     fn all_tabs_that_fit_are_visible() {

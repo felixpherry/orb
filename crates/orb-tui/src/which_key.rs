@@ -513,6 +513,34 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn pane_popup_lists_the_float_rows() {
+        // Given `<C-g>` and `p` pressed in a pane.
+        let keys = {
+            let mut keys = leader(Keys::new(keymap(), Scope::Pane));
+            press(
+                &mut keys,
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            );
+            keys
+        };
+
+        // When drawing the popup.
+        let buffer = draw(&keys, SCREEN);
+
+        // Then it has the floats, embed/float and pin float rows.
+        let lines = lines(&buffer);
+        let listed = |key: &str, label: &str| {
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("{key} ➜")) && line.contains(label))
+        };
+        assert!(
+            listed("w", "floats") && listed("e", "embed/float") && listed("i", "pin float"),
+            "the screen was {lines:#?}"
+        );
+    }
+
+    #[rstest::rstest]
     #[case('r', "\u{f0c3}", BLUE2)]
     #[case('l', "\u{f02d}", PURPLE)]
     fn new_folder_rows_show_their_kind_icon(

@@ -58,7 +58,7 @@ pub enum NavDirection {
 
 impl NavDirection {
     /// The direction facing the other way.
-    fn opposite(self) -> Self {
+    pub(super) fn opposite(self) -> Self {
         match self {
             Self::Left => Self::Right,
             Self::Right => Self::Left,
@@ -137,19 +137,37 @@ impl SwapLayout {
     /// one after it when `step`), going backwards when `back`, wrapping;
     /// `None` when none fits after a full turn.
     pub fn fitting(self, n: usize, step: bool, back: bool) -> Option<Self> {
-        let len = Self::ALL.len();
-        let at = self as usize;
-        (usize::from(step)..usize::from(step) + len)
-            .map(|offset| {
-                if back {
-                    (at + 2 * len - offset) % len
-                } else {
-                    (at + offset) % len
-                }
-            })
-            .filter_map(|index| Self::ALL.get(index).copied())
-            .find(|layout| layout.fits(n))
+        first_fitting(&Self::ALL, self as usize, step, back, |layout| {
+            layout.fits(n)
+        })
     }
+}
+
+/// The first of `all` that `fits`, starting at index `at` (at the one after
+/// it when `step`), going backwards when `back`, wrapping; `None` when none
+/// fits after a full turn.
+pub(super) fn first_fitting<T, F>(
+    all: &[T],
+    at: usize,
+    step: bool,
+    back: bool,
+    fits: F,
+) -> Option<T>
+where
+    T: Copy,
+    F: Fn(T) -> bool,
+{
+    let len = all.len();
+    (usize::from(step)..usize::from(step) + len)
+        .map(|offset| {
+            if back {
+                (at + 2 * len - offset) % len
+            } else {
+                (at + offset) % len
+            }
+        })
+        .filter_map(|index| all.get(index).copied())
+        .find(|layout| fits(*layout))
 }
 
 /// A node of the tree: one pane, a split holding two subtrees, or a stack

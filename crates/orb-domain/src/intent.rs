@@ -41,7 +41,8 @@ pub enum Intent {
     /// taking the focus; outside the tab's stack, add it to that stack.
     StackPane,
     /// Add a shell to the shown tab and re-tile it by pane count unless it
-    /// was changed by hand, the new shell taking the focus.
+    /// was changed by hand, the new shell taking the focus; while a float has
+    /// the keys, open a float instead.
     AddPane,
     /// Close the focused pane; on the thread's own pane, detach the thread.
     ClosePane,
@@ -49,6 +50,14 @@ pub enum Intent {
     ToggleZoom,
     /// Move the focused pane to a new tab of its own and show it.
     BreakPane,
+    /// Show or hide the shown session's floats; with none, open a shell float.
+    /// Only while the keys are in a pane.
+    ToggleFloats,
+    /// Turn the focused pane into a float, or the focused float back into the
+    /// shown tab. Only while the keys are in a pane.
+    ToggleFloatEmbed,
+    /// Pin or unpin the focused float. Only while a float has the keys.
+    TogglePinFloat,
     /// Grow the focused pane, or widen the sidebar while it has the keys.
     GrowFocused,
     /// Shrink the focused pane, or narrow the sidebar while it has the keys.
@@ -90,6 +99,11 @@ pub enum Intent {
     /// Show this stacked pane of the shown tab below the stack's list,
     /// leaving the keys where they are (the wheel over the list).
     ShowStacked(PaneId),
+    /// Move float `pane`, which has the keys, so its top-left corner is at
+    /// screen cell `x`, `y`, inside the tab body (a drag of its frame).
+    DragFloat { pane: PaneId, x: u16, y: u16 },
+    /// Save the layout after a float's frame was dragged (the release).
+    DropFloat,
     /// Attach to the selected session (un-settling a settled one), or open or
     /// close the Settled shelf on its header.
     Attach,
@@ -238,6 +252,9 @@ impl fmt::Display for Intent {
             Self::ClosePane => "close pane",
             Self::ToggleZoom => "zoom",
             Self::BreakPane => "break pane",
+            Self::ToggleFloats => "floats",
+            Self::ToggleFloatEmbed => "embed/float",
+            Self::TogglePinFloat => "pin float",
             Self::GrowFocused => "grow",
             Self::ShrinkFocused => "shrink",
             Self::EnterPaneMode(PaneMode::Resize) => "resize mode",
@@ -259,6 +276,8 @@ impl fmt::Display for Intent {
             Self::MoveTabRight => "move tab right",
             Self::FocusPane(_) => "focus pane",
             Self::ShowStacked(_) => "show pane",
+            Self::DragFloat { .. } => "drag float",
+            Self::DropFloat => "drop float",
             Self::SendCtrlG => "send ctrl g",
             Self::Attach => "attach",
             Self::JumpBack => "jump back",
@@ -333,7 +352,12 @@ mod tests {
     #[case(Intent::MoveTabRight, "move tab right")]
     #[case(Intent::FocusPane(PaneId(-1)), "focus pane")]
     #[case(Intent::ShowStacked(PaneId(-1)), "show pane")]
+    #[case(Intent::DragFloat { pane: PaneId(-1), x: 0, y: 0 }, "drag float")]
+    #[case(Intent::DropFloat, "drop float")]
     #[case(Intent::SendCtrlG, "send ctrl g")]
+    #[case(Intent::ToggleFloats, "floats")]
+    #[case(Intent::ToggleFloatEmbed, "embed/float")]
+    #[case(Intent::TogglePinFloat, "pin float")]
     fn layout_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the layout intent.
         assert_eq!(intent.to_string(), expected, "which-key label");
