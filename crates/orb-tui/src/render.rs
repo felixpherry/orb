@@ -65,8 +65,8 @@ pub(crate) fn layout(area: Rect, sidebar: &SidebarView) -> [Rect; 3] {
 /// side shows the start screen, with `pane_error` saying why the session
 /// couldn't start. While the sidebar has the keys, the cursor sits on the
 /// first cell of its selected row. `toast` shows in the message box, and the
-/// mode line's clock shows `now` in `tz`. Returns the sidebar's layout unless it's hidden, and how
-/// many rows the picker fits when it's open.
+/// mode line's clock shows `now` in `tz`. Returns the sidebar's layout unless it's hidden, how
+/// many rows the picker fits when it's open, and where the cursor shows, if anywhere.
 #[expect(
     clippy::too_many_arguments,
     reason = "the frame's inputs, the two frontend view states it updates, and the hit map it fills"
@@ -83,7 +83,8 @@ pub(crate) fn render(
     scroll: &mut SidebarScroll,
     picker_scroll: &mut PickerScroll,
     hits: &mut HitMap,
-) -> (Option<SidebarLayout>, Option<usize>) {
+) -> (Option<SidebarLayout>, Option<usize>, Option<Position>) {
+    let mut cursor = None;
     let [sidebar_area, right, mode_area] = layout(frame.area(), &state.sidebar);
     *hits = HitMap::new(sidebar_area, right);
     let (selected_y, sidebar_layout, search_cursor) = if state.sidebar.hidden {
@@ -106,7 +107,7 @@ pub(crate) fn render(
     match state.shown_layout() {
         Some(layout) => {
             let keys_in_pane = state.focus == Focus::Pane;
-            if let Some(cursor) = tabs::render(
+            if let Some(pane_cursor) = tabs::render(
                 state,
                 layout,
                 panes,
@@ -115,7 +116,7 @@ pub(crate) fn render(
                 frame.buffer_mut(),
                 hits,
             ) {
-                frame.set_cursor_position(cursor);
+                cursor = Some(pane_cursor);
             }
         }
         None => dashboard::render(state, pane_error, right, frame.buffer_mut()),
@@ -126,19 +127,26 @@ pub(crate) fn render(
         .as_ref()
         .filter(|_| state.focus == Focus::Rename);
     let picker_page = match (&state.picker, renaming) {
-        (Some(picker), _) => Some(render_open_picker(
-            frame,
-            picker,
-            state,
-            now,
-            sidebar_area.union(right),
-            picker_scroll,
-            hits,
-        )),
+        (Some(picker), _) => {
+            let (rows, picker_cursor) = render_open_picker(
+                frame,
+                picker,
+                state,
+                now,
+                sidebar_area.union(right),
+                picker_scroll,
+                hits,
+            );
+            cursor = picker_cursor.or(cursor);
+            Some(rows)
+        }
         (None, Some(rename)) => {
-            let cursor =
-                rename::render(rename, sidebar_area.union(right), frame.buffer_mut(), hits);
-            frame.set_cursor_position(cursor);
+            cursor = Some(rename::render(
+                rename,
+                sidebar_area.union(right),
+                frame.buffer_mut(),
+                hits,
+            ));
             None
         }
         (None, None) => {
@@ -151,9 +159,12 @@ pub(crate) fn render(
         }
     };
     match (state.focus, selected_y, search_cursor) {
-        (Focus::Sidebar, Some(y), _) => frame.set_cursor_position((sidebar_area.x, y)),
-        (Focus::Search, _, Some(cursor)) => frame.set_cursor_position(cursor),
+        (Focus::Sidebar, Some(y), _) => cursor = Some(Position::new(sidebar_area.x, y)),
+        (Focus::Search, _, Some(search)) => cursor = Some(search),
         _ => {}
+    }
+    if let Some(cursor) = cursor {
+        frame.set_cursor_position(cursor);
     }
     if let Some(toast) = toast {
         toast::render(toast, right, frame.buffer_mut());
@@ -163,12 +174,12 @@ pub(crate) fn render(
             cell.bg = BACKGROUND;
         }
     }
-    (sidebar_layout, picker_page)
+    (sidebar_layout, picker_page, cursor)
 }
 
 /// Draws the open `picker` into `area`, over the picker it was opened over
-/// if any, and shows the text cursor unless the picker is in list mode.
-/// Returns how many rows a page of its list holds.
+/// if any. Returns how many rows a page of its list holds, and its text
+/// cursor unless the picker is in list mode.
 fn render_open_picker(
     frame: &mut Frame,
     picker: &PickerState,
@@ -177,7 +188,7 @@ fn render_open_picker(
     area: Rect,
     picker_scroll: &mut PickerScroll,
     hits: &mut HitMap,
-) -> usize {
+) -> (usize, Option<Position>) {
     let buf = frame.buffer_mut();
     let (rows, cursor) = match picker.under() {
         Some(list) => {
@@ -202,10 +213,7 @@ fn render_open_picker(
         }
         None => render_picker(picker, state, now, area, buf, picker_scroll, hits),
     };
-    if !picker.listing() {
-        frame.set_cursor_position(cursor);
-    }
-    rows
+    (rows, (!picker.listing()).then_some(cursor))
 }
 
 /// Draws `picker` over `area` with its own look, the session and worktree
@@ -2066,7 +2074,7 @@ mod tests {
         let Ok(mut terminal) = Terminal::new(TestBackend::new(80, 8));
         let mut sidebar_layout = None;
         let Ok(_) = terminal.draw(|frame| {
-            (sidebar_layout, _) = render(
+            (sidebar_layout, _, _) = render(
                 frame,
                 &state,
                 &HashMap::new(),

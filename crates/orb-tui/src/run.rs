@@ -88,6 +88,7 @@ use orb_domain::feat::search::search_actor::{self, SearchActor};
 use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::{self, SessionsActor};
 use orb_domain::feat::sessions::state::{PaneId, SessionId, ThreadId};
+use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
 use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
 use orb_domain::{AppState, Command, Focus, Intent, IntentHandler, State, Wake};
@@ -560,6 +561,7 @@ impl App {
         spawn_input_thread(self.tx.clone())?;
         self.measure(terminal.size()?.into());
         self.reattach_live();
+        let mut last_cursor = None;
         loop {
             self.measure(terminal.size()?.into());
             let placed = {
@@ -574,41 +576,8 @@ impl App {
                     pane.resize(PaneSize::from(place.content()));
                 }
             }
-            let now = SystemTime::now();
-            let mut drawn = (None, None);
-            self.sidebar_scroll
-                .follow_keys(self.state.read().focus == Focus::Sidebar);
-            {
-                let state = self.state.read();
-                self.toasts.observe(
-                    state.sessions.error.as_deref(),
-                    state.worktrees.notice.as_deref(),
-                    state.sessions.notice.as_deref(),
-                    Instant::now(),
-                );
-            }
-            // The terminal shows only the finished frame, so the cursor never
-            // visibly crosses the screen while cells are written.
-            ratatui::crossterm::queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
-            terminal.draw(|frame| {
-                let state = self.state.read();
-                drawn = render::render(
-                    frame,
-                    &state,
-                    &self.panes,
-                    self.pane_error.as_deref(),
-                    self.toasts.shown(Instant::now()),
-                    &self.keys,
-                    now,
-                    &self.tz,
-                    &mut self.sidebar_scroll,
-                    &mut self.picker_scroll,
-                    &mut self.hits,
-                );
-            })?;
-            ratatui::crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
+            let (sidebar_layout, picker_page) = self.draw(terminal, &mut last_cursor)?;
             // Navigation scrolls by what was just drawn.
-            let (sidebar_layout, picker_page) = drawn;
             if let Some(layout) = sidebar_layout
                 && self.state.read().sidebar.layout != layout
             {
@@ -1524,6 +1493,54 @@ impl App {
             let _ = tx.send(LoopEvent::Pane(id, event));
         })
         .ok()
+    }
+
+    /// Draws one frame. The terminal shows only the finished frame, and a
+    /// hidden cursor goes back to `last_cursor`, where it last showed, so it
+    /// never visibly moves. Returns the sidebar's layout and the picker's page.
+    fn draw(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        last_cursor: &mut Option<Position>,
+    ) -> io::Result<(Option<SidebarLayout>, Option<usize>)> {
+        let now = SystemTime::now();
+        let mut drawn = (None, None, None);
+        self.sidebar_scroll
+            .follow_keys(self.state.read().focus == Focus::Sidebar);
+        {
+            let state = self.state.read();
+            self.toasts.observe(
+                state.sessions.error.as_deref(),
+                state.worktrees.notice.as_deref(),
+                state.sessions.notice.as_deref(),
+                Instant::now(),
+            );
+        }
+        ratatui::crossterm::queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+        terminal.draw(|frame| {
+            let state = self.state.read();
+            drawn = render::render(
+                frame,
+                &state,
+                &self.panes,
+                self.pane_error.as_deref(),
+                self.toasts.shown(Instant::now()),
+                &self.keys,
+                now,
+                &self.tz,
+                &mut self.sidebar_scroll,
+                &mut self.picker_scroll,
+                &mut self.hits,
+            );
+        })?;
+        let (sidebar_layout, picker_page, cursor) = drawn;
+        match (cursor, *last_cursor) {
+            (Some(_), _) => *last_cursor = cursor,
+            (None, Some(parked)) => terminal.set_cursor_position(parked)?,
+            (None, None) => {}
+        }
+        ratatui::crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
+        Ok((sidebar_layout, picker_page))
     }
 
     /// Shows the cursor shape for where the keys are in the outer terminal.
