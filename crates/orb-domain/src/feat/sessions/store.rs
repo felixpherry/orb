@@ -13,8 +13,11 @@
 //! focused pane, swap layout and whether it was changed by hand, and each
 //! pane its directory, zmx session, name and the command that brings its
 //! agent back; a thread keeps the pane it runs in.
-//! The schema grows through an ordered list of migrations, and a database
-//! from before sessions is copied aside before it is migrated. Times are
+//! The schema grows through an ordered list of migrations. Before any
+//! upgrade the database is copied aside to `<file>.bak-v<old version>`, and
+//! only the three newest copies are kept. A database from a newer orb is
+//! refused with the name of the copy to put back, and a test build (one not
+//! run from cargo's bin directory) refuses to upgrade unless asked. Times are
 //! milliseconds since the Unix epoch.
 //!
 //! One orb at a time owns a store: it holds a lock beside the database for as
@@ -30,6 +33,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use wherror::Error;
 
 use super::state::{PaneId, ProjectId, ProjectKind, SessionId, SessionKind, SidebarItem, ThreadId};
+use crate::common::Log;
 use crate::feat::harness::HarnessId;
 use crate::feat::layout::floats::{FloatLayout, FloatRect};
 use crate::feat::layout::tree::{Node, SwapLayout, TileLayout};
@@ -379,15 +383,57 @@ pub fn lock(path: &Path) -> Result<File, Report<StoreError>> {
     }
 }
 
+/// Whether opening the store may upgrade an older database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upgrade {
+    Allowed,
+    /// A test build: refuse to upgrade, so the installed orb can still open it.
+    AskFirst,
+}
+
+/// The installed orb (run from `cargo_bin`) may upgrade; any other orb asks
+/// first unless started with `--upgrade-data` (`upgrade_flag`). An exe whose
+/// folder can't be resolved counts as a test build.
+#[must_use]
+pub fn upgrade_policy(exe: Option<&Path>, cargo_bin: &Path, upgrade_flag: bool) -> Upgrade {
+    if upgrade_flag {
+        return Upgrade::Allowed;
+    }
+    let installed = exe
+        .and_then(Path::parent)
+        .and_then(|dir| dir.canonicalize().ok())
+        .zip(cargo_bin.canonicalize().ok())
+        .is_some_and(|(dir, bin)| dir == bin);
+    if installed {
+        Upgrade::Allowed
+    } else {
+        Upgrade::AskFirst
+    }
+}
+
 impl Store {
-    /// Opens the database at `path`, creating it and its directories if needed,
-    /// and brings its schema up to date.
+    /// Opens the database at `path` like `open_live` for the installed orb,
+    /// logging nowhere.
     ///
     /// # Errors
     ///
-    /// Returns an error if the directories or the database can't be created,
-    /// or a migration fails.
+    /// As `open_live` with `Upgrade::Allowed`.
     pub fn open(path: &Path) -> Result<Self, Report<StoreError>> {
+        Self::open_live(path, Upgrade::Allowed, &Log::default())
+    }
+
+    /// Opens the database at `path`, creating it and its directories if
+    /// needed, and brings its schema up to date. Before upgrading it copies
+    /// the database aside and keeps the three newest copies, writing each copy
+    /// and removal to `log`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directories or the database can't be created;
+    /// if the database is from a newer orb (naming the copy to put back); if
+    /// it needs an upgrade and `upgrade` is `AskFirst`; or if the copy or a
+    /// migration fails.
+    pub fn open_live(path: &Path, upgrade: Upgrade, log: &Log) -> Result<Self, Report<StoreError>> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .change_context(StoreError)
@@ -396,7 +442,21 @@ impl Store {
         let conn = Connection::open(path)
             .change_context(StoreError)
             .attach_with(|| format!("failed to open {}", path.display()))?;
-        back_up_before_sessions(&conn, path)?;
+        let version = schema_version(&conn)?;
+        if version > MIGRATIONS.len() {
+            return Err(newer_database(path, version));
+        }
+        if version > 0 && version < MIGRATIONS.len() {
+            if upgrade == Upgrade::AskFirst {
+                return Err(Report::new(StoreError).attach(format!(
+                    "this test build won't upgrade orb's saved data from version {version} \
+                     to {}; start it with --upgrade-data to allow it (a copy is kept first)",
+                    MIGRATIONS.len()
+                )));
+            }
+            back_up_before_upgrade(&conn, path, version, log)?;
+            prune_copies(path, version, log);
+        }
         Self::from_connection(conn)
     }
 
@@ -1127,29 +1187,57 @@ fn migrate(conn: &mut Connection) -> Result<(), Report<StoreError>> {
         .attach("failed to commit the migration")
 }
 
-/// The schema version that turned threads and groups into sessions.
-const SESSIONS_VERSION: usize = 11;
-
-/// Copies a database that predates sessions to `<file>.bak-v<version>` beside
-/// it, once: an existing backup is kept. The copy is written to a `.tmp` file
-/// with `VACUUM INTO` (a consistent snapshot, `user_version` included) and
-/// renamed into place, so a half-written copy never counts as the backup. A
-/// fresh database (version 0) or one already past the sessions migration
-/// needs none.
-fn back_up_before_sessions(conn: &Connection, path: &Path) -> Result<(), Report<StoreError>> {
-    let version: usize = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
+fn schema_version(conn: &Connection) -> Result<usize, Report<StoreError>> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
         .change_context(StoreError)
-        .attach("failed to read the schema version")?;
-    if version == 0 || version >= SESSIONS_VERSION {
-        return Ok(());
-    }
-    let backup = {
-        let mut name = path.as_os_str().to_owned();
-        name.push(format!(".bak-v{version}"));
-        PathBuf::from(name)
+        .attach("failed to read the schema version")
+}
+
+/// `<file>.bak-v<version>` beside `path`.
+fn copy_path(path: &Path, version: usize) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".bak-v{version}"));
+    PathBuf::from(name)
+}
+
+/// The refusal for a database at `version`, past what this orb knows,
+/// naming the newest copy this orb can open.
+fn newer_database(path: &Path, version: usize) -> Report<StoreError> {
+    let latest = MIGRATIONS.len();
+    let hint = match copies(path).into_iter().find(|(n, _)| *n <= latest) {
+        Some((_, copy)) => format!(
+            "Quit, then put back {} as {} to use this orb.",
+            copy.display(),
+            path.display()
+        ),
+        None => "No copy from before that upgrade was found.".to_owned(),
     };
+    Report::new(StoreError).attach(format!(
+        "orb's saved data is from a newer orb (version {version}; this orb knows {latest}). {hint}"
+    ))
+}
+
+/// Copies the database (at `version`) to `<file>.bak-v<version>` beside it
+/// before an upgrade, once: an existing copy is kept. The copy is written to
+/// a `.tmp` file with `VACUUM INTO` (a consistent snapshot, `user_version`
+/// included) and renamed into place, so a half-written copy never counts.
+fn back_up_before_upgrade(
+    conn: &Connection,
+    path: &Path,
+    version: usize,
+    log: &Log,
+) -> Result<(), Report<StoreError>> {
+    let backup = copy_path(path, version);
+    let upgrading = format!(
+        "upgrading {} from version {version} to {}",
+        path.display(),
+        MIGRATIONS.len()
+    );
     if backup.exists() {
+        log.line(
+            "upgrade",
+            &format!("{upgrading}; kept the existing copy {}", backup.display()),
+        );
         return Ok(());
     }
     let partial = {
@@ -1167,7 +1255,59 @@ fn back_up_before_sessions(conn: &Connection, path: &Path) -> Result<(), Report<
         .attach_with(|| format!("failed to back the database up to {}", partial.display()))?;
     std::fs::rename(&partial, &backup)
         .change_context(StoreError)
-        .attach_with(|| format!("failed to move the backup to {}", backup.display()))
+        .attach_with(|| format!("failed to move the backup to {}", backup.display()))?;
+    log.line(
+        "upgrade",
+        &format!("{upgrading}; copied it to {}", backup.display()),
+    );
+    Ok(())
+}
+
+/// Every `<file>.bak-v<N>` beside `path`, newest version first. Other names
+/// (`.tmp` files included) are never listed; an unreadable folder lists none.
+fn copies(path: &Path) -> Vec<(usize, PathBuf)> {
+    let (Some(dir), Some(file)) = (path.parent(), path.file_name()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}.bak-v", file.to_string_lossy());
+    let listed = if dir.as_os_str().is_empty() {
+        std::fs::read_dir(".")
+    } else {
+        std::fs::read_dir(dir)
+    };
+    let mut found: Vec<(usize, PathBuf)> = listed
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let digits = name.to_str()?.strip_prefix(&prefix)?;
+            let all_digits = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+            let version = all_digits.then(|| digits.parse().ok()).flatten()?;
+            Some((version, dir.join(&name)))
+        })
+        .collect();
+    found.sort_by_key(|(version, _)| std::cmp::Reverse(*version));
+    found
+}
+
+/// Removes all but the three newest copies, never the one for `kept` (the
+/// version being upgraded from), logging each removal. A failed removal is
+/// logged and never stops the upgrade.
+fn prune_copies(path: &Path, kept: usize, log: &Log) {
+    for (_, old) in copies(path)
+        .into_iter()
+        .skip(3)
+        .filter(|(version, _)| *version != kept)
+    {
+        match std::fs::remove_file(&old) {
+            Ok(()) => log.line("delete", &format!("old copy {}: ok", old.display())),
+            Err(error) => log.error(
+                &format!("delete old copy {}: failed", old.display()),
+                &Report::new(error).change_context(StoreError),
+            ),
+        }
+    }
 }
 
 /// Turns every group into a session with a tab for each of its threads,
@@ -1647,8 +1787,9 @@ mod tests {
     use super::{
         FloatRow, MIGRATIONS, NewPaneThread, PaneId, ProjectId, ProjectKind, SavedLayouts,
         SessionFloats, SessionId, SessionKind, SessionRow, SettledOverride, SidebarItem, Store,
-        StoreError, TabRow, ThreadRow, Ui, lock,
+        StoreError, TabRow, ThreadRow, Ui, Upgrade, lock, upgrade_policy,
     };
+    use crate::common::Log;
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
         Connection::open(path)
@@ -2992,6 +3133,388 @@ mod tests {
             path,
             &format!("SELECT pane_id FROM threads WHERE id = {thread}"),
         )
+    }
+
+    /// A database at `path` with the first `version` migrations applied.
+    fn database_at(path: &Path, version: usize) -> Result<(), Report<StoreError>> {
+        let conn = Connection::open(path).change_context(StoreError)?;
+        for migration in MIGRATIONS
+            .get(..version)
+            .ok_or_else(|| Report::new(StoreError).attach("no such version"))?
+        {
+            migration.apply(&conn).change_context(StoreError)?;
+        }
+        conn.pragma_update(None, "user_version", version)
+            .change_context(StoreError)
+    }
+
+    /// The sorted names in `dir` that contain `.bak-v`.
+    fn copy_names(dir: &Path) -> Result<Vec<String>, Report<StoreError>> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .change_context(StoreError)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".bak-v"))
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
+    /// The log file's text, empty if it was never written.
+    fn log_text(path: &Path) -> String {
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    #[case(3)]
+    #[case(4)]
+    #[case(5)]
+    #[case(6)]
+    #[case(7)]
+    #[case(8)]
+    #[case(9)]
+    #[case(10)]
+    #[case(11)]
+    #[case(12)]
+    fn upgrading_a_past_version_leaves_its_copy(
+        #[case] version: usize,
+    ) -> Result<(), Report<StoreError>> {
+        // Given a database at a past schema version.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        database_at(&path, version)?;
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then a copy at that version sits beside it.
+        let copy = dir.path().join(format!("state.sqlite.bak-v{version}"));
+        assert_eq!(
+            user_version(&copy)?,
+            version,
+            "the copy should be the database as it was before the upgrade"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn opening_a_current_database_writes_no_copy() -> Result<(), Report<StoreError>> {
+        // Given a database already brought up to date, with no copies beside it.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        drop(Store::open(&path)?);
+        for name in copy_names(dir.path())? {
+            std::fs::remove_file(dir.path().join(name)).change_context(StoreError)?;
+        }
+
+        // When opening the store again.
+        drop(Store::open(&path)?);
+
+        // Then no copy is written.
+        let names = copy_names(dir.path())?;
+        assert!(
+            names.is_empty(),
+            "a current database needs no copy: {names:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn upgrade_keeps_only_the_three_newest_copies() -> Result<(), Report<StoreError>> {
+        // Given a v12 database with copies v7 to v10, a partial copy and an
+        // unrelated file beside it.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        database_at(&path, 12)?;
+        for name in [
+            "state.sqlite.bak-v7",
+            "state.sqlite.bak-v8",
+            "state.sqlite.bak-v9",
+            "state.sqlite.bak-v10",
+            "state.sqlite.bak-v9.tmp",
+            "other.txt",
+        ] {
+            std::fs::write(dir.path().join(name), b"").change_context(StoreError)?;
+        }
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then only the three newest copies are left, and nothing else is touched.
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .change_context(StoreError)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "other.txt",
+                "state.sqlite",
+                "state.sqlite.bak-v10",
+                "state.sqlite.bak-v12",
+                "state.sqlite.bak-v9",
+                "state.sqlite.bak-v9.tmp",
+            ],
+            "only the three newest copies should be kept"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn upgrade_never_prunes_the_copy_it_is_upgrading_from() -> Result<(), Report<StoreError>> {
+        // Given a v10 database with newer copies v11 to v13 beside it.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        database_at(&path, 10)?;
+        for version in 11..=13 {
+            std::fs::write(dir.path().join(format!("state.sqlite.bak-v{version}")), b"")
+                .change_context(StoreError)?;
+        }
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then the v10 copy is still there.
+        assert!(
+            dir.path().join("state.sqlite.bak-v10").exists(),
+            "the copy of the version being upgraded should never be pruned"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn upgrade_logs_its_copy() -> Result<(), Report<StoreError>> {
+        // Given a v12 database and a log.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        database_at(&path, 12)?;
+        let log_path = dir.path().join("orb.log");
+        let log = Log::new(log_path.clone());
+
+        // When opening the store.
+        drop(Store::open_live(&path, Upgrade::Allowed, &log)?);
+
+        // Then the log has an upgrade line naming the copy.
+        let text = log_text(&log_path);
+        assert!(
+            text.lines()
+                .any(|line| line.contains(" upgrade ") && line.contains("state.sqlite.bak-v12")),
+            "the upgrade should be logged with its copy: {text}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn upgrade_logs_each_pruned_copy() -> Result<(), Report<StoreError>> {
+        // Given a v12 database with copies v7 to v10 beside it, and a log.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        database_at(&path, 12)?;
+        for version in 7..=10 {
+            std::fs::write(dir.path().join(format!("state.sqlite.bak-v{version}")), b"")
+                .change_context(StoreError)?;
+        }
+        let log_path = dir.path().join("orb.log");
+        let log = Log::new(log_path.clone());
+
+        // When opening the store.
+        drop(Store::open_live(&path, Upgrade::Allowed, &log)?);
+
+        // Then each pruned copy has its own delete line.
+        let text = log_text(&log_path);
+        assert!(
+            ["bak-v7", "bak-v8"].iter().all(|copy| text
+                .lines()
+                .any(|line| line.contains("delete old copy")
+                    && line.contains(&format!("{copy}: ok")))),
+            "each pruned copy should be logged: {text}"
+        );
+        Ok(())
+    }
+
+    /// A current database at `path` marked as one version past this orb.
+    fn newer_database_at(path: &Path) -> Result<(), Report<StoreError>> {
+        database_at(path, MIGRATIONS.len())?;
+        Connection::open(path)
+            .and_then(|conn| conn.pragma_update(None, "user_version", MIGRATIONS.len() + 1))
+            .change_context(StoreError)
+    }
+
+    #[rstest::rstest]
+    fn newer_database_refusal_names_the_copy_to_restore() -> Result<(), Report<StoreError>> {
+        // Given a database from a newer orb with a copy this orb can open.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        newer_database_at(&path)?;
+        let copy = dir
+            .path()
+            .join(format!("state.sqlite.bak-v{}", MIGRATIONS.len()));
+        std::fs::write(&copy, b"").change_context(StoreError)?;
+
+        // When opening the store.
+        let opened = Store::open(&path);
+
+        // Then it is refused, naming the copy.
+        let text = opened.err().map(|report| format!("{report:?}"));
+        assert!(
+            text.as_deref()
+                .is_some_and(|text| text.contains(&copy.display().to_string())),
+            "the refusal should name the copy to put back: {text:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn newer_database_refusal_without_a_copy_says_so() -> Result<(), Report<StoreError>> {
+        // Given a database from a newer orb with no copy beside it.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        newer_database_at(&path)?;
+
+        // When opening the store.
+        let opened = Store::open(&path);
+
+        // Then it is refused, saying no copy was found.
+        let text = opened.err().map(|report| format!("{report:?}"));
+        assert!(
+            text.as_deref()
+                .is_some_and(|text| text.contains("No copy from before that upgrade was found")),
+            "the refusal should say there is no copy: {text:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn newer_database_writes_no_copy() -> Result<(), Report<StoreError>> {
+        // Given a database from a newer orb with no copy beside it.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        newer_database_at(&path)?;
+
+        // When opening the store.
+        let _refused = Store::open(&path);
+
+        // Then no copy is written.
+        let names = copy_names(dir.path())?;
+        assert!(
+            names.is_empty(),
+            "a newer database should be refused before any copy: {names:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[expect(
+        clippy::redundant_test_prefix,
+        reason = "a test build is the orb being tested, not a name prefix"
+    )]
+    fn test_build_refuses_to_upgrade() -> Result<(), Report<StoreError>> {
+        // Given a database one version behind.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        database_at(&path, MIGRATIONS.len() - 1)?;
+
+        // When a test build opens the store.
+        let opened = Store::open_live(&path, Upgrade::AskFirst, &Log::default());
+
+        // Then it is refused, pointing at --upgrade-data, with the database untouched and no copy.
+        let outcome = (
+            opened.is_err(),
+            user_version(&path)?,
+            copy_names(dir.path())?.is_empty(),
+            opened
+                .err()
+                .is_some_and(|report| format!("{report:?}").contains("--upgrade-data")),
+        );
+        assert_eq!(
+            outcome,
+            (true, MIGRATIONS.len() - 1, true, true),
+            "a test build should refuse to upgrade and leave the data as it was"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[expect(
+        clippy::redundant_test_prefix,
+        reason = "a test build is the orb being tested, not a name prefix"
+    )]
+    fn test_build_opens_a_current_database() -> Result<(), Report<StoreError>> {
+        // Given a current database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        database_at(&path, MIGRATIONS.len())?;
+
+        // When a test build opens the store.
+        let opened = Store::open_live(&path, Upgrade::AskFirst, &Log::default());
+
+        // Then it opens.
+        assert!(
+            opened.is_ok(),
+            "a test build should open a current database"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[expect(
+        clippy::redundant_test_prefix,
+        reason = "a test build is the orb being tested, not a name prefix"
+    )]
+    fn test_build_creates_a_fresh_database() -> Result<(), Report<StoreError>> {
+        // Given no database yet.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+
+        // When a test build opens the store.
+        let opened = Store::open_live(&path, Upgrade::AskFirst, &Log::default());
+
+        // Then a current database is created.
+        let created = (opened.is_ok(), user_version(&path)?);
+        assert_eq!(
+            created,
+            (true, MIGRATIONS.len()),
+            "a test build should create a fresh, current database"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(Some("cargo/bin/orb"), false, Upgrade::Allowed)]
+    #[case(Some("repo/target/debug/orb"), false, Upgrade::AskFirst)]
+    #[case(Some("repo/target/debug/orb"), true, Upgrade::Allowed)]
+    #[case(None, false, Upgrade::AskFirst)]
+    #[case(Some("nowhere/orb"), false, Upgrade::AskFirst)]
+    fn upgrade_policy_from_where_orb_runs(
+        #[case] exe: Option<&str>,
+        #[case] flag: bool,
+        #[case] expected: Upgrade,
+    ) -> Result<(), Report<StoreError>> {
+        // Given an installed orb in cargo's bin folder and a test build in target/.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        for built in ["cargo/bin/orb", "repo/target/debug/orb"] {
+            let file = dir.path().join(built);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).change_context(StoreError)?;
+            }
+            std::fs::write(file, b"").change_context(StoreError)?;
+        }
+
+        // When deciding the upgrade policy for the running orb.
+        let exe = exe.map(|exe| dir.path().join(exe));
+        let policy = upgrade_policy(exe.as_deref(), &dir.path().join("cargo/bin"), flag);
+
+        // Then it matches where orb runs from.
+        assert_eq!(
+            policy, expected,
+            "upgrade policy for {exe:?} with flag {flag}"
+        );
+        Ok(())
     }
 
     fn backup_path(path: &Path) -> PathBuf {

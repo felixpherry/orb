@@ -26,7 +26,7 @@ use orb_domain::feat::sessions::child_env::child_env;
 use orb_domain::feat::sessions::sessions_actor::{
     SessionsActorDeps, StopMigrated, spawn_sessions_actor,
 };
-use orb_domain::feat::sessions::store::{self, Store};
+use orb_domain::feat::sessions::store::{self, Store, Upgrade};
 use orb_domain::feat::worktrees::worktrees_actor::{
     SWEEP_EVERY, WorktreesActorDeps, spawn_worktrees_actor,
 };
@@ -87,6 +87,21 @@ fn install_crash_hook(log: Log) {
     }));
 }
 
+/// Whether this orb may upgrade the saved data: the installed orb (run from
+/// `$CARGO_HOME/bin`, default `~/.cargo/bin`) may; a test build may only when
+/// started with `--upgrade-data`.
+fn upgrade_policy(home: &Path, args: &[OsString]) -> Upgrade {
+    let cargo_bin = std::env::var_os("CARGO_HOME")
+        .map_or_else(|| home.join(".cargo"), PathBuf::from)
+        .join("bin");
+    let exe = std::env::current_exe().ok();
+    store::upgrade_policy(
+        exe.as_deref(),
+        &cargo_bin,
+        args.iter().any(|arg| arg == "--upgrade-data"),
+    )
+}
+
 /// Everything after the log opens: integrations, store, actors, frontend.
 fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbError>> {
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
@@ -103,7 +118,8 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
     let notifier = desktop_notifier();
     let store_path = orb_root.join("userdata/state.sqlite");
     let _store_lock = store::lock(&store_path).change_context(OrbError)?;
-    let store = Store::open(&store_path).change_context(OrbError)?;
+    let store = Store::open_live(&store_path, upgrade_policy(&home, &args), log)
+        .change_context(OrbError)?;
     let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
