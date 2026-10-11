@@ -131,6 +131,7 @@ Entries are added or amended **only with human approval**.
 - (dashboard) When a pane's client can't start, the reason shows in red under the start screen's footer; other errors show in the message box.
 - (pane) orb keeps a `zmx attach` client for every pane of each attached session, and showing another session leaves them running.
 - (pane) A session is attached from when it is entered, or from orb's start while it's unsettled, until it is settled, deleted or moved to another workspace, or a pane's client can't be reattached.
+- (tui) At start orb draws its first frame before it reconnects the panes of its unsettled sessions, so the sidebar shows while they reconnect.
 - (sidebar) An idle agent of an attached session shows a filled `FG` (`#c8d3f5`) circle in place of the hollow idle circle; with unseen output it still shows the green done check.
 - (sidebar) While the list overflows the sidebar, the Settled header stays on its bottom row until scrolling brings it into view.
 - (sidebar) While a search lists settled matches, the Settled header shows the open folder.

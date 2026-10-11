@@ -155,7 +155,8 @@ impl Frontend {
     /// it recreated before attaching; the branch picker's refs come from
     /// `git`; panes run with `env` and attach through `zmx`; notices are
     /// announced through `notifier` while orb's terminal isn't focused;
-    /// problems are written to `log`. The terminal is restored on exit and
+    /// problems are written to `log`. The first frame is drawn before the
+    /// panes of open sessions reconnect. The terminal is restored on exit and
     /// on panic.
     ///
     /// # Errors
@@ -643,8 +644,10 @@ impl App {
     fn run(mut self, terminal: &mut DefaultTerminal, rx: &Receiver<LoopEvent>) -> io::Result<()> {
         spawn_input_thread(self.tx.clone())?;
         self.measure(terminal.size()?.into());
-        self.reattach_live();
         let mut last_cursor = None;
+        // The loop's own draw stores the layout this first frame returns.
+        self.draw(terminal, &mut last_cursor)?;
+        self.reattach_live();
         loop {
             self.measure(terminal.size()?.into());
             let placed = {
@@ -1565,7 +1568,8 @@ impl App {
     /// left running when orb quit show again and panes whose zmx session died
     /// while orb was down come back with their agents resumed (see
     /// [`resume_plan`]). Each socket dir the panes use is listed once; a dir
-    /// zmx can't list brings no running program back.
+    /// zmx can't list brings no running program back. orb calls this after
+    /// its first frame, so the screen shows while panes reconnect.
     fn reattach_live(&mut self) {
         let owned: HashSet<String> = {
             let state = self.state.read();
