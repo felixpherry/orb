@@ -52,11 +52,11 @@
 //! until it is removed.
 //!
 //! It follows each session's settle lifecycle on its store row: a turn ending
-//! in any of its agent panes is its latest activity, a turn underway
-//! un-settles it, and a session idle for three days settles itself unless it
-//! is pinned, was just un-settled, or is the one the sidebar's cursor is on.
-//! Settling a session kills every pane's program and keeps its layout and
-//! resume commands.
+//! in any of its agent panes is its latest activity, and a turn underway
+//! un-settles it. Sessions settle only when the user settles them. Settling a
+//! session kills every pane's program and keeps its layout and resume
+//! commands. Whenever it kills a session's panes, the session leaves the
+//! right side first.
 //!
 //! It makes Research and Learn sessions: each in a new folder under orb's
 //! own project for its kind, added when first needed, copied from the user's
@@ -121,8 +121,6 @@ use crate::{AppState, Focus};
 const FAST_POLL: Duration = Duration::from_secs(1);
 /// How long to wait between polls otherwise.
 const SLOW_POLL: Duration = Duration::from_secs(5);
-/// How long an unpinned session stays idle before it settles itself, in ms.
-const AUTO_SETTLE_AFTER: i64 = 3 * 24 * 60 * 60 * 1000;
 /// The error shown when orb's store can't be written.
 const SAVE_FAILED: &str = "couldn't save orb's state";
 /// The error shown when a session's folder or the Incognito folder can't be
@@ -1224,7 +1222,7 @@ impl SessionsActor {
                 error = Some(failed);
             }
         }
-        let changed_sessions = self.follow_sessions(&statuses, selected, now, &mut error);
+        let changed_sessions = self.follow_sessions(&statuses, now, &mut error);
         let changed = {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
@@ -1266,18 +1264,15 @@ impl SessionsActor {
     /// Follows each session's settle lifecycle (see [`follow_session`]) from
     /// its agent threads' polled rows and `statuses` (index-aligned with the
     /// rows; `None` where a thread wasn't polled, which leaves its session as
-    /// it was), saving the ones that changed. `selected` never auto-settles.
-    /// A session that auto-settles is detached and its panes killed. Sets
-    /// `error` when a save fails. Returns the sessions that changed.
+    /// it was), saving the ones that changed. Sets `error` when a save fails.
+    /// Returns the sessions that changed.
     fn follow_sessions(
         &mut self,
         statuses: &[Option<ThreadStatus>],
-        selected: Option<SessionId>,
         now: i64,
         error: &mut Option<String>,
     ) -> Vec<SessionId> {
         let mut changed = Vec::new();
-        let mut auto_settled = Vec::new();
         for session in self.sessions.values_mut() {
             let Some(children) = self
                 .rows
@@ -1299,14 +1294,12 @@ impl SessionsActor {
                 .fold(session.last_activity_at, i64::max);
             let in_progress = children.iter().any(|(_, status)| status.in_progress());
             let before = session.clone();
-            let settled = follow_session(
+            follow_session(
                 session,
                 Activity {
                     latest,
                     in_progress,
-                    agents: !children.is_empty(),
                 },
-                selected == Some(session.id),
                 now,
             );
             if *session != before {
@@ -1317,20 +1310,6 @@ impl SessionsActor {
                     *error = Some(SAVE_FAILED.to_owned());
                 }
                 changed.push(session.id);
-            }
-            if settled {
-                auto_settled.push(session.id);
-            }
-        }
-        if !auto_settled.is_empty() {
-            {
-                let mut app = self.state.write();
-                for id in &auto_settled {
-                    app.attached.remove(id);
-                }
-            }
-            for &id in &auto_settled {
-                self.kill_panes(id, "session settled itself after 3 idle days");
             }
         }
         changed
@@ -2142,7 +2121,8 @@ impl SessionsActor {
     }
 
     /// Kills the panes zmx still lists for every settled session, listing
-    /// each socket dir once, in pane order. Failures are ignored.
+    /// each socket dir once, in pane order; each session with a pane to kill
+    /// leaves the right side first. A dir zmx can't list kills nothing.
     fn kill_settled(&self) {
         let mut rows: Vec<&PaneRow> = self
             .panes
@@ -2154,13 +2134,18 @@ impl SessionsActor {
             })
             .collect();
         rows.sort_by_key(|row| row.id.0);
-        let zmx: Vec<ZmxSession> = rows
+        let zmx: Vec<(SessionId, ZmxSession)> = rows
             .into_iter()
-            .map(|row| pane_entry(&self.services, &self.orb_root, row).zmx)
+            .map(|row| {
+                (
+                    row.session_id,
+                    pane_entry(&self.services, &self.orb_root, row).zmx,
+                )
+            })
             .collect();
         let listed: HashMap<&Path, Vec<ZmxEntry>> = zmx
             .iter()
-            .map(|session| session.dir.as_path())
+            .map(|(_, session)| session.dir.as_path())
             .collect::<HashSet<&Path>>()
             .into_iter()
             .map(|dir| {
@@ -2178,19 +2163,28 @@ impl SessionsActor {
                 (dir, listed)
             })
             .collect();
-        for session in &zmx {
-            let running = listed
-                .get(session.dir.as_path())
-                .is_some_and(|entries| entries.iter().any(|entry| entry.name == session.name));
-            if running {
-                self.services.zmx.kill(session, "session settled");
-            }
+        let running: Vec<&(SessionId, ZmxSession)> = zmx
+            .iter()
+            .filter(|(_, session)| {
+                listed
+                    .get(session.dir.as_path())
+                    .is_some_and(|entries| entries.iter().any(|entry| entry.name == session.name))
+            })
+            .collect();
+        self.state
+            .write()
+            .attached
+            .retain(|shown| !running.iter().any(|(owner, _)| owner == shown));
+        for (_, session) in running {
+            self.services.zmx.kill(session, "session settled");
         }
     }
 
-    /// Runs `zmx kill` on each of session `id`'s panes in pane order; each
-    /// kill is logged with `why`.
+    /// Takes session `id` off the right side, then runs `zmx kill` on each
+    /// of its panes in pane order; each kill is logged with `why`. The state
+    /// lock is released before the first kill.
     fn kill_panes(&self, id: SessionId, why: &str) {
+        self.state.write().attached.remove(&id);
         let mut rows: Vec<&PaneRow> = self
             .panes
             .values()
@@ -2614,20 +2608,12 @@ struct Activity {
     latest: i64,
     /// Whether any agent pane has a turn underway.
     in_progress: bool,
-    /// Whether it has an agent pane at all.
-    agents: bool,
 }
 
-/// Follows a session's settle lifecycle from `activity`:
-/// - the latest activity becomes the session's;
-/// - a turn underway un-settles it and ends its kept-active mark;
-/// - an unpinned session with an agent pane, idle for
-///   [`AUTO_SETTLE_AFTER`], settles as of that activity, unless it is kept
-///   active, in progress or `selected`. A session with no agent pane never
-///   settles by itself, since settling kills its shells and editors.
-///
-/// Returns whether it settled the session just now.
-fn follow_session(row: &mut SessionRow, activity: Activity, selected: bool, now: i64) -> bool {
+/// Follows a session's settle lifecycle from `activity`: the latest activity
+/// becomes the session's, and a turn underway un-settles it and ends its
+/// kept-active mark.
+fn follow_session(row: &mut SessionRow, activity: Activity, now: i64) {
     row.last_activity_at = activity.latest;
     if activity.in_progress
         && let Some(settled_override) = row.settled_override
@@ -2638,17 +2624,6 @@ fn follow_session(row: &mut SessionRow, activity: Activity, selected: bool, now:
         row.settled_override = None;
         row.settled_at = None;
     }
-    if row.settled_override.is_none()
-        && row.pinned_at.is_none()
-        && activity.agents
-        && !activity.in_progress
-        && !selected
-        && now.saturating_sub(activity.latest) >= AUTO_SETTLE_AFTER
-    {
-        settle_session_row(row, activity.latest);
-        return true;
-    }
-    false
 }
 
 /// Settles session `row` onto the shelf as of `at`, unpinning it.
@@ -3283,8 +3258,9 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        FAST_POLL, Placement, SLOW_POLL, SaveLayout, SessionsActor, SessionsActorDeps, notice_kind,
-        now_ms, project_title, settle_session_row, spawn_sessions_actor,
+        ChangeWorkspace, DeleteSession, FAST_POLL, Placement, SLOW_POLL, SaveLayout, SessionsActor,
+        SessionsActorDeps, SettleSession, notice_kind, now_ms, project_title, settle_session_row,
+        spawn_sessions_actor,
     };
     use crate::Focus;
     use crate::TextInput;
@@ -3310,8 +3286,9 @@ mod tests {
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::feat::zmx::zmx_service::fake::FakeZmx;
-    use crate::feat::zmx::zmx_service::{ZmxOutput, ZmxService, ZmxSession};
-    use kameo::prelude::ActorRef;
+    use crate::feat::zmx::zmx_service::{Zmx, ZmxError, ZmxOutput, ZmxService, ZmxSession};
+    use kameo::prelude::{ActorRef, Message};
+    use std::ffi::OsString;
 
     /// The orb project's root, a folder that exists so its sessions can start.
     const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -4510,6 +4487,70 @@ mod tests {
         )
     }
 
+    /// A zmx that answers every command with one output and, on each kill,
+    /// notes whether one session was still on the right side of the watched
+    /// state.
+    struct WatchingZmx {
+        output: ZmxOutput,
+        session: SessionId,
+        watched: OnceLock<State>,
+        shown_at_kill: Mutex<Vec<bool>>,
+    }
+
+    impl WatchingZmx {
+        /// A zmx watching session `session`, whose commands all succeed
+        /// printing `stdout`.
+        fn new(session: SessionId, stdout: String) -> Arc<Self> {
+            Arc::new(Self {
+                output: ZmxOutput {
+                    success: true,
+                    stdout,
+                    stderr: String::new(),
+                },
+                session,
+                watched: OnceLock::new(),
+                shown_at_kill: Mutex::default(),
+            })
+        }
+
+        /// Watches `state` from now on.
+        fn watch(&self, state: &State) {
+            let _ = self.watched.set(state.clone());
+        }
+
+        /// For each kill so far, in order, whether the session was shown.
+        fn shown_at_kill(&self) -> Vec<bool> {
+            self.shown_at_kill
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        /// A service over this zmx on the pane socket dir /zmx.
+        fn service(self: &Arc<Self>) -> ZmxService {
+            ZmxService::new(self.clone(), PathBuf::from("/zmx"), Log::default())
+        }
+    }
+
+    impl Zmx for WatchingZmx {
+        fn name(&self) -> &'static str {
+            "watching"
+        }
+
+        fn run(&self, argv: &[OsString]) -> Result<ZmxOutput, Report<ZmxError>> {
+            if argv.iter().any(|word| word == "kill")
+                && let Some(state) = self.watched.get()
+            {
+                let shown = state.read().attached.contains(&self.session);
+                self.shown_at_kill
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(shown);
+            }
+            Ok(self.output.clone())
+        }
+    }
+
     /// The zmx session names `zmx` was asked to kill, in order.
     fn killed(zmx: &FakeZmx) -> Vec<String> {
         zmx.calls()
@@ -5115,32 +5156,6 @@ mod tests {
             state.read().jumps.entries(),
             [SidebarItem::Session(inserted.session)],
             "a saved session jump should come back"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn session_without_agents_never_auto_settles() -> Result<(), Report<StoreError>> {
-        // Given a session idle for four days whose agent has ended.
-        let (store, _) = store_with_thread("aa")?;
-        let session = saved_session(&store, "aa")?.id;
-        session_idle_for_four_days(&store, "aa")?;
-        resave(&store, "aa", |row| ThreadRow {
-            pane_id: None,
-            ..row
-        })?;
-        let host = listing(Vec::new());
-        let (mut actor, _state) = start_unselected(store, &host);
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the session stays active.
-        assert_eq!(
-            saved_session_row(&actor.store, session).and_then(|row| row.settled_override),
-            None,
-            "a session of shells only never settles by itself"
         );
         Ok(())
     }
@@ -10381,115 +10396,45 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn session_idle_for_three_days_auto_settles() -> Result<(), Report<StoreError>> {
+    async fn session_idle_for_four_days_stays_unsettled_after_a_poll()
+    -> Result<(), Report<StoreError>> {
         // Given thread aa's session idle for four days.
         let (store, _) = store_with_thread("aa")?;
-        let since = session_idle_for_four_days(&store, "aa")?;
+        session_idle_for_four_days(&store, "aa")?;
         let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start_unselected(store, &host);
 
         // When polling.
         actor.poll().await;
 
-        // Then the session is settled as of its latest activity.
+        // Then the session is still unsettled.
         let row = saved_session(&actor.store, "aa")?;
         assert_eq!(
             (row.settled_override, row.settled_at),
-            (Some(SettledOverride::Settled), Some(since)),
-            "a long-idle session should settle as of its latest activity"
+            (None, None),
+            "a long-idle session should stay unsettled"
         );
         Ok(())
     }
 
     #[rstest::rstest]
     #[tokio::test]
-    async fn selected_session_never_auto_settles() -> Result<(), Report<StoreError>> {
-        // Given thread aa's session idle for four days, with aa selected.
-        let (store, id) = store_with_thread("aa")?;
-        session_idle_for_four_days(&store, "aa")?;
-        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start_unselected(store, &host);
-        state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(id.0)));
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the session stays active.
-        assert_eq!(
-            saved_session(&actor.store, "aa")?.settled_override,
-            None,
-            "the selected session should never auto-settle"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn pinned_session_never_auto_settles() -> Result<(), Report<StoreError>> {
-        // Given thread aa's pinned session idle for four days.
+    async fn poll_kills_no_pane_of_an_idle_session() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session idle for four days.
         let (store, _) = store_with_thread("aa")?;
         session_idle_for_four_days(&store, "aa")?;
-        resave_sessions(&store, |row| SessionRow {
-            pinned_at: Some(now_ms() - HOUR_MS),
-            ..row
-        })?;
         let host = listing(vec![record("aa", ThreadStatus::Idle)]);
         let (mut actor, _state) = start_unselected(store, &host);
+        let (zmx, service) = recording_zmx();
+        actor.services.zmx = service;
 
         // When polling.
         actor.poll().await;
 
-        // Then the session stays active.
-        assert_eq!(
-            saved_session(&actor.store, "aa")?.settled_override,
-            None,
-            "a pin keeps the session in view"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn kept_active_session_never_auto_settles() -> Result<(), Report<StoreError>> {
-        // Given thread aa's kept-active session idle for four days.
-        let (store, _) = store_with_thread("aa")?;
-        session_idle_for_four_days(&store, "aa")?;
-        resave_sessions(&store, |row| SessionRow {
-            settled_override: Some(SettledOverride::Active),
-            ..row
-        })?;
-        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start_unselected(store, &host);
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the session stays kept active.
-        assert_eq!(
-            saved_session(&actor.store, "aa")?.settled_override,
-            Some(SettledOverride::Active),
-            "an un-settled session stays active until its next turn"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn session_with_a_turn_underway_never_auto_settles() -> Result<(), Report<StoreError>> {
-        // Given thread aa's session idle for four days, and aa now working.
-        let (store, _) = store_with_thread("aa")?;
-        session_idle_for_four_days(&store, "aa")?;
-        let host = listing(vec![record("aa", ThreadStatus::Working)]);
-        let (mut actor, _state) = start_unselected(store, &host);
-
-        // When polling.
-        actor.poll().await;
-
-        // Then the session stays active.
-        assert_eq!(
-            saved_session(&actor.store, "aa")?.settled_override,
-            None,
-            "a session with a turn underway should never auto-settle"
+        // Then no pane is killed.
+        assert!(
+            killed(&zmx).is_empty(),
+            "a poll should kill no pane of an idle session"
         );
         Ok(())
     }
@@ -10539,7 +10484,7 @@ mod tests {
         assert_eq!(
             saved_session(&actor.store, "aa")?.settled_override,
             None,
-            "turn activity should let auto-settle apply again"
+            "turn activity should end the kept-active mark"
         );
         Ok(())
     }
@@ -10562,54 +10507,6 @@ mod tests {
             saved_session(&actor.store, "aa")?.last_activity_at,
             saved(&actor.store, "aa")?.last_activity_at,
             "the session's activity should follow its thread's turn end"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn auto_settle_kills_the_sessions_panes() -> Result<(), Report<StoreError>> {
-        // Given thread aa's session idle for four days.
-        let (store, _) = store_with_thread("aa")?;
-        session_idle_for_four_days(&store, "aa")?;
-        let pane = saved(&store, "aa")?
-            .pane_id
-            .ok_or_else(|| Report::new(StoreError).attach("aa has no pane"))?;
-        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start_unselected(store, &host);
-        let (zmx, service) = recording_zmx();
-        actor.services.zmx = service;
-
-        // When polling, which auto-settles the session.
-        actor.poll().await;
-
-        // Then its pane is killed.
-        assert_eq!(
-            killed(&zmx),
-            vec![pane.zmx_name()],
-            "an auto-settle should kill the session's panes"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn auto_settle_detaches_the_session() -> Result<(), Report<StoreError>> {
-        // Given thread aa's attached session idle for four days.
-        let (store, _) = store_with_thread("aa")?;
-        session_idle_for_four_days(&store, "aa")?;
-        let session = saved_session(&store, "aa")?.id;
-        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, state) = start_unselected(store, &host);
-        state.write().attached.insert(session);
-
-        // When polling, which auto-settles the session.
-        actor.poll().await;
-
-        // Then it is no longer attached.
-        assert!(
-            !state.read().attached.contains(&session),
-            "an auto-settled session should be detached"
         );
         Ok(())
     }
@@ -10717,6 +10614,22 @@ mod tests {
         session: SessionId,
     ) -> Result<(), Report<StoreError>> {
         tokio::time::timeout(LIMIT, actor.ask(SaveLayout(session)))
+            .await
+            .change_context(StoreError)
+            .attach("the actor didn't answer in time")?
+            .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))
+    }
+
+    /// Asks `actor` `msg` and waits, at most [`LIMIT`], for it to be handled.
+    async fn ask_within<M>(
+        actor: &ActorRef<SessionsActor>,
+        msg: M,
+    ) -> Result<(), Report<StoreError>>
+    where
+        SessionsActor: Message<M, Reply = ()>,
+        M: std::fmt::Debug + Send + 'static,
+    {
+        tokio::time::timeout(LIMIT, actor.ask(msg))
             .await
             .change_context(StoreError)
             .attach("the actor didn't answer in time")?
@@ -10852,22 +10765,111 @@ mod tests {
         Ok(())
     }
 
+    /// What a kill-order test starts from: the actor started through its
+    /// mailbox with session aa (two panes) on the right side, and the zmx
+    /// watching aa.
+    async fn shown_movable_through_mailbox()
+    -> Result<(ActorRef<SessionsActor>, SessionId, Arc<WatchingZmx>), Report<StoreError>> {
+        let (store, seeded, _) = movable()?;
+        let zmx = WatchingZmx::new(seeded.session, String::new());
+        let (actor, state) = spawned(store, &listing(Vec::new()), zmx.service()).await?;
+        zmx.watch(&state);
+        state.write().attached.insert(seeded.session);
+        Ok((actor, seeded.session, zmx))
+    }
+
     #[rstest::rstest]
     #[tokio::test]
-    async fn session_auto_settle_stops_nothing() -> Result<(), Report<StoreError>> {
-        // Given thread aa's session idle for four days.
-        let (store, _) = store_with_thread("aa")?;
-        session_idle_for_four_days(&store, "aa")?;
-        let host = listing(vec![record("aa", ThreadStatus::Idle)]);
-        let (mut actor, _state) = start_unselected(store, &host);
+    async fn settling_takes_the_session_off_the_right_side_before_killing_its_panes()
+    -> Result<(), Report<StoreError>> {
+        // Given session aa with two panes on the right side.
+        let (actor, session, zmx) = shown_movable_through_mailbox().await?;
 
-        // When polling, which auto-settles the session.
-        actor.poll().await;
+        // When settling it through the mailbox.
+        ask_within(&actor, SettleSession(session)).await?;
 
-        // Then nothing is stopped.
-        assert!(
-            host.stopped().is_empty(),
-            "an auto-settle should leave the session's agents running"
+        // Then it was off the right side at each of its two kills.
+        assert_eq!(
+            zmx.shown_at_kill(),
+            vec![false, false],
+            "a settled session should leave the right side before its panes are killed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_takes_the_session_off_the_right_side_before_killing_its_panes()
+    -> Result<(), Report<StoreError>> {
+        // Given session aa with two panes on the right side.
+        let (actor, session, zmx) = shown_movable_through_mailbox().await?;
+
+        // When deleting it through the mailbox.
+        ask_within(&actor, DeleteSession(session)).await?;
+
+        // Then it was off the right side at each of its two kills.
+        assert_eq!(
+            zmx.shown_at_kill(),
+            vec![false, false],
+            "a deleted session should leave the right side before its panes are killed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn moving_takes_the_session_off_the_right_side_before_killing_its_panes()
+    -> Result<(), Report<StoreError>> {
+        // Given session aa with two panes on the right side, before any turn.
+        let (actor, session, zmx) = shown_movable_through_mailbox().await?;
+        let to = tempfile::tempdir().change_context(StoreError)?;
+
+        // When moving it to another existing directory through the mailbox.
+        ask_within(
+            &actor,
+            ChangeWorkspace {
+                session,
+                to: Workspace::Existing(to.path().to_owned()),
+            },
+        )
+        .await?;
+
+        // Then it was off the right side at each of its two kills.
+        assert_eq!(
+            zmx.shown_at_kill(),
+            vec![false, false],
+            "a moved session should leave the right side before its panes are killed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn start_kill_takes_settled_sessions_off_the_right_side_before_killing_their_panes()
+    -> Result<(), Report<StoreError>> {
+        // Given settled session aa on the right side, zmx listing its pane.
+        let store = Store::open_in_memory()?;
+        let settled = insert_thread(&store, "aa")?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        actor.edit_session(settled.session, settle_session_row);
+        let zmx = WatchingZmx::new(
+            settled.session,
+            format!(
+                "  name={}\tpid=100\tclients=0\tcreated=1\n",
+                settled.pane.zmx_name()
+            ),
+        );
+        actor.services.zmx = zmx.service();
+        zmx.watch(&state);
+        state.write().attached.insert(settled.session);
+
+        // When killing the settled sessions' panes, as at start.
+        actor.kill_settled();
+
+        // Then aa was off the right side at its one kill.
+        assert_eq!(
+            zmx.shown_at_kill(),
+            vec![false],
+            "a settled session should leave the right side before its panes are killed at start"
         );
         Ok(())
     }

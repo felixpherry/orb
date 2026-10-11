@@ -22,9 +22,10 @@
 //! directory is gone only if a pane still runs). A pane whose zmx session is
 //! gone gets a fresh shell, and orb types its resume command
 //! (`claude --resume <id>`, `pi --session-id <id>`) once the client first
-//! prints. A client
-//! that dies while zmx still lists its session is attached again once; a
-//! second death closes the pane with an error in the message box. While a pane
+//! prints. A client that dies while its session is still shown and zmx still
+//! lists it is attached again once; a second death closes the pane with an
+//! error in the message box. One whose session isn't shown any more is
+//! dropped, keeping its program. While a pane
 //! has the keys, input goes straight to its program except orb's Cmd keys,
 //! `<C-[>`/`<C-]>` and a `<C-g>` sequence (see [`keymap::route`]). The loop
 //! itself reads the directory picker's listings, the branch picker's refs
@@ -439,17 +440,23 @@ enum PaneExit {
     /// The client died again after one respawn: its session detaches, keeping
     /// the pane, and orb says so.
     Failed,
+    /// Its session isn't shown: only the client is dropped, keeping the pane
+    /// and its program for the session's next attach.
+    Drop,
 }
 
 /// How to treat a pane whose client exited, given whether zmx still `listed`
-/// its session (`None` when zmx couldn't be asked) and whether it was
-/// `respawned` once already. Only a session zmx positively no longer lists
-/// has ended.
-fn classify_exit(listed: Option<bool>, respawned: bool) -> PaneExit {
-    match (listed, respawned) {
-        (Some(false), _) => PaneExit::Ended,
-        (Some(true) | None, false) => PaneExit::Respawn,
-        (Some(true) | None, true) => PaneExit::Failed,
+/// its session (`None` when zmx couldn't be asked), whether it was
+/// `respawned` once already, and whether its session is `shown` (on the
+/// right side). A pane whose session isn't shown is only dropped, whatever
+/// zmx says. Otherwise only a session zmx positively no longer lists has
+/// ended.
+fn classify_exit(listed: Option<bool>, respawned: bool, shown: bool) -> PaneExit {
+    match (shown, listed, respawned) {
+        (false, _, _) => PaneExit::Drop,
+        (true, Some(false), _) => PaneExit::Ended,
+        (true, Some(true) | None, false) => PaneExit::Respawn,
+        (true, Some(true) | None, true) => PaneExit::Failed,
     }
 }
 
@@ -463,6 +470,9 @@ enum ExitOutcome {
     /// No client could attach: its session detaches, keeping the pane, and
     /// the mode line says so.
     Detached,
+    /// Its session isn't shown: the client is dropped, and the pane and its
+    /// program stay for the session's next attach.
+    Dropped,
 }
 
 /// The outcome of `exit` once a new client did (`reattached`) or didn't start.
@@ -471,6 +481,7 @@ fn exit_outcome(exit: PaneExit, reattached: bool) -> ExitOutcome {
         (_, true) => ExitOutcome::Reattached,
         (PaneExit::Ended, false) => ExitOutcome::Closed,
         (PaneExit::Respawn | PaneExit::Failed, false) => ExitOutcome::Detached,
+        (PaneExit::Drop, false) => ExitOutcome::Dropped,
     }
 }
 
@@ -1240,8 +1251,10 @@ impl App {
     /// Classifies each pane whose client exit arrived (see [`classify_exit`]):
     /// attaches a dead client again once, and on a second death detaches its
     /// session, keeping the pane and its program, and puts `couldn't reattach
-    /// to zmx session <name>` on the mode line. Returns the panes to close. An exit from a pane already replaced or dropped is
-    /// ignored.
+    /// to zmx session <name>` on the mode line. A pane whose session isn't
+    /// shown any more isn't listed or attached again; reconcile drops its
+    /// client and keeps the pane and its program. Returns the panes to close.
+    /// An exit from a pane already replaced or dropped is ignored.
     fn classify_exits(&mut self) -> HashSet<PaneId> {
         let mut ended = HashSet::new();
         for id in mem::take(&mut self.exited) {
@@ -1252,21 +1265,30 @@ impl App {
                 ended.insert(id);
                 continue;
             };
-            let listed = self
-                .zmx
-                .list(&session.dir)
-                .inspect_err(|report| {
-                    self.log.error(
-                        &format!("couldn't list zmx sessions on {}", session.dir.display()),
-                        report,
-                    );
-                })
-                .ok()
-                .map(|entries| entries.iter().any(|entry| entry.name == session.name));
-            let exit = classify_exit(listed, self.respawned.contains(&id));
+            let shown = {
+                let app = self.state.read();
+                app.layouts
+                    .owner_of(id)
+                    .is_some_and(|owner| app.attached.contains(&owner))
+            };
+            let listed = if shown {
+                self.zmx
+                    .list(&session.dir)
+                    .inspect_err(|report| {
+                        self.log.error(
+                            &format!("couldn't list zmx sessions on {}", session.dir.display()),
+                            report,
+                        );
+                    })
+                    .ok()
+                    .map(|entries| entries.iter().any(|entry| entry.name == session.name))
+            } else {
+                None
+            };
+            let exit = classify_exit(listed, self.respawned.contains(&id), shown);
             let respawned = match exit {
                 PaneExit::Respawn => self.spawn_pane(id, &session, &cwd),
-                PaneExit::Ended | PaneExit::Failed => None,
+                PaneExit::Ended | PaneExit::Failed | PaneExit::Drop => None,
             };
             match (exit_outcome(exit, respawned.is_some()), respawned) {
                 (ExitOutcome::Reattached, Some(pane)) => {
@@ -1280,6 +1302,7 @@ impl App {
                 (ExitOutcome::Closed, _) => {
                     ended.insert(id);
                 }
+                (ExitOutcome::Dropped, _) => {}
                 (ExitOutcome::Detached | ExitOutcome::Reattached, _) => {
                     let mut app = self.state.write();
                     if let Some(owner) = app.layouts.owner_of(id) {
@@ -1843,6 +1866,7 @@ mod tests {
     };
     use std::ffi::OsString;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver};
     use std::time::{Duration, Instant};
 
@@ -1950,6 +1974,7 @@ mod tests {
     #[case::respawn_failed_to_attach(PaneExit::Respawn, false, ExitOutcome::Detached)]
     #[case::failed(PaneExit::Failed, false, ExitOutcome::Detached)]
     #[case::ended(PaneExit::Ended, false, ExitOutcome::Closed)]
+    #[case::dropped(PaneExit::Drop, false, ExitOutcome::Dropped)]
     fn exit_outcome_after_a_classified_exit(
         #[case] exit: PaneExit,
         #[case] reattached: bool,
@@ -2647,12 +2672,37 @@ mod tests {
         #[case] respawned: bool,
         #[case] expected: PaneExit,
     ) {
-        // Given / When a pane's client exits, zmx `listed` its session or
-        // not, and the pane was `respawned` once or not.
-        let exit = classify_exit(listed, respawned);
+        // Given / When a pane of a shown session's client exits, zmx
+        // `listed` its session or not, and the pane was `respawned` once or
+        // not.
+        let exit = classify_exit(listed, respawned, true);
 
         // Then the exit is `expected`.
         assert_eq!(exit, expected, "listed {listed:?}, respawned {respawned}");
+    }
+
+    #[rstest::rstest]
+    #[case::ended(Some(false), false)]
+    #[case::ended_after_a_respawn(Some(false), true)]
+    #[case::client_died(Some(true), false)]
+    #[case::client_died_again(Some(true), true)]
+    #[case::zmx_unknown(None, false)]
+    #[case::zmx_unknown_again(None, true)]
+    fn pane_exit_of_a_session_not_shown_is_dropped(
+        #[case] listed: Option<bool>,
+        #[case] respawned: bool,
+    ) {
+        // Given / When a pane of a session that isn't shown has its client
+        // exit, zmx `listed` its session or not, and the pane was
+        // `respawned` once or not.
+        let exit = classify_exit(listed, respawned, false);
+
+        // Then only its client is dropped.
+        assert_eq!(
+            exit,
+            PaneExit::Drop,
+            "listed {listed:?}, respawned {respawned}"
+        );
     }
 
     #[rstest::rstest]
@@ -2868,6 +2918,15 @@ mod tests {
             .to_vec()
     }
 
+    /// How many clients [`counted_exit_at_once`] started.
+    static COUNTED_ATTACHES: AtomicUsize = AtomicUsize::new(0);
+
+    /// A client that exits at once, counted in [`COUNTED_ATTACHES`].
+    fn counted_exit_at_once(session: &ZmxSession) -> Vec<OsString> {
+        COUNTED_ATTACHES.fetch_add(1, Ordering::SeqCst);
+        exits_at_once(session)
+    }
+
     impl LoopTest {
         /// Pane `id` in the test's dir, attaching to its own zmx session.
         fn entry(&self, id: PaneId) -> PaneEntry {
@@ -2942,6 +3001,30 @@ mod tests {
         assert!(
             test.state.read().layouts.pane_ids().contains(&pane(1)),
             "an exit zmx can't explain keeps the pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn dead_pane_of_a_session_not_shown_is_not_attached_again() -> io::Result<()> {
+        // Given zmx that can't list, pane 1 whose client exits at once, and
+        // its session taken off the right side.
+        let mut test = loop_app(FakeZmx::failing("boom"), counted_exit_at_once)?;
+        test.attach(&[pane(1)]);
+        test.state.write().attached.remove(&session_id(1));
+
+        // When its exit arrives and the loop goes round.
+        let event = test
+            .exit_of(pane(1))
+            .ok_or_else(|| io::Error::other("pane 1's client didn't exit within 5 s"))?;
+        test.app.handle(event, &mut io::sink())?;
+        test.app.reconcile();
+
+        // Then no second client was started.
+        assert_eq!(
+            COUNTED_ATTACHES.load(Ordering::SeqCst),
+            1,
+            "a dead client of a session not shown is not attached again"
         );
         Ok(())
     }

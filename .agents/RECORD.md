@@ -63,7 +63,8 @@ Entries are added or amended **only with human approval**.
 - (sidebar) Pinned sessions come first, then active ones, then a collapsible Settled shelf at the bottom of the sidebar.
 - (sidebar) An agent shows a green check and "done" when its latest turn ended after the user last selected its session.
 - (settle) A turn underway in any of a session's agent panes, including one waiting for approval or input, un-settles the session.
-- (settle) An unpinned session with an agent pane auto-settles after 3 days without turn activity in any of its agent panes, unless the user un-settled it since that activity or the sidebar's cursor is on it; auto-settling detaches it and kills its panes.
+- (settle) Sessions never settle by themselves; only `s` settles a session. Worktree auto-prune still waits until a worktree's sessions are settled or deleted.
+- (sessions) Whenever orb kills a session's panes (settle, delete, workspace move, the start-up kill of settled sessions), the session leaves the right side first.
 - (settle) Settling a session kills every pane's program (`zmx kill`), keeping its tabs, layout and each pane's resume command; entering it again starts a shell in each pane and types `claude --resume <id>` or `pi --session-id <id>` into panes that last ran an agent.
 - (sessions) Deleting a session kills every pane and deletes its tabs, panes, threads and, for a Research or Learn session, its own folder; Claude transcripts, pi session files and worktrees stay.
 - (keybinds) In the sidebar, `p` pins or unpins and `s` settles or un-settles the selected session, and `d` deletes a session or, on an agent row, closes its pane; settling, deleting and closing ask a `No`/`Yes` confirm first.
@@ -302,7 +303,8 @@ Entries are added or amended **only with human approval**.
 - (layout) A saved tab whose split tree orb couldn't read at start, and the session's panes no read tab or float holds, are written back unchanged by every layout save of that session.
 - (pane) After orb couldn't fully read its saved layouts at start, the start-up kill of `orb-p*` zmx sessions no pane names is skipped for that run.
 - (worktrees) After orb couldn't fully read its saved layouts at start, no worktree is pruned for the rest of that run.
-- (pane) A pane closes when its `zmx attach` client exits only if `zmx list` positively no longer lists its zmx session; a list that errors or times out counts as still running, so the client is attached again.
+- (pane) A pane closes when its `zmx attach` client exits only if `zmx list` positively no longer lists its zmx session; a list that errors or times out counts as still running, so the client is attached again while its session is shown.
+- (panes) A pane whose connection dies is attached again only if its session is still shown; otherwise its connection is dropped and its program and saved pane are kept.
 - (pane) When a pane's `zmx attach` client dies again after one reattach, its session is detached with `couldn't reattach to zmx session <name>` in the message box, and the pane and its program are kept.
 - (worktrees) When orb renames a worktree's `orb/<hex>` branch to `orb/<slug>`, the sessions in that worktree take the new branch too, so the tab bar shows it.
 - (worktrees) Restoring a pruned worktree adds it back on the first of its session's recorded branch and its threads' branches that still exists, and makes the session's branch anew from the default branch only when none exists; the session then shows the branch it came back on.

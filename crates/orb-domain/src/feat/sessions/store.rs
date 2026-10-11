@@ -98,12 +98,12 @@ pub struct ThreadRow {
     pub orb_session: Option<SessionId>,
 }
 
-/// A thread's settle state as set by the user, auto-settle, or activity.
+/// A thread's settle state as set by the user or by activity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettledOverride {
     /// Settled onto the shelf.
     Settled,
-    /// Un-settled by the user; auto-settle waits for the next turn activity.
+    /// Un-settled by the user, until the next turn activity.
     Active,
 }
 

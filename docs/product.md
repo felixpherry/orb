@@ -163,8 +163,7 @@ The user starts `claude` or `pi` in the shell, and sets the model and permission
 - Manual settle / un-settle / pin (`s`, `p`). `s` asks `Settle <name>?` and `d` asks `Delete <name>?` (`Delete <name> and its folder?` for a Research or Learn session), with `No` selected; `Esc` or `No` does nothing. Un-settling needs no confirm.
 - A manual settle is refused with `Can't settle while a session is working` while any agent pane has a turn underway, and removes the pin. Pinning a settled session un-settles it.
 - Activity in an agent pane (a turn running, approval/input requested) **un-settles** its session.
-- An unpinned session **auto-settles after 3 days** without turn activity in any of its agent panes, unless the user un-settled it since that activity or it is the selected session. A session with no agent pane never auto-settles.
-- A **manual un-settle** blocks auto-settle until the next real activity (T3's `settled_override = 'active'`).
+- A **manual un-settle** moves the session back to Active, sorted by when it was un-settled; sessions never settle by themselves.
 - **Settling kills every pane** of the session (`zmx kill`), keeping its tabs, splits and each pane's resume command. `⏎` on a settled session restores the layout with a shell in each pane and types `claude --resume <id>` or `pi --session-id <id>` into panes whose last program was an agent.
 - **Delete** (`d`) kills every pane, deletes the session's tabs, panes and threads, and removes the row; a Research or Learn session's folder goes too. Claude transcripts and pi session files stay, and so does a worktree, which the sweep prunes later.
 - **Selection**: after a settle or a delete, the selection moves to the next session below, else the one above. Un-settle and pin keep the selection.

@@ -60,7 +60,7 @@ TEST_MODULE = re.compile(r"^#\[cfg\(test\)\]", re.M)
 ZMX_LIST = re.compile(r"zmx\s*\.list\(")
 ZMX_LIST_SITES = {
     "crates/orb-tui/src/run.rs": 4,
-    # classify_exits: error -> None -> the pane respawns, never ends
+    # classify_exits (shown sessions only): error -> None -> the pane respawns, never ends
     #   (exited_client_with_unlistable_zmx_keeps_its_pane, classify_exit's zmx_unknown case)
     # plan_resumes: error -> None -> nothing typed (resume_plan_types_nothing_where_zmx_couldnt_list)
     # reattach_live sweep: error -> empty -> nothing killed (stale_sessions_kills_nothing_when_zmx_lists_nothing)
