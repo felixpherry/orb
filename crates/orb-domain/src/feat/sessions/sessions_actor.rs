@@ -81,7 +81,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use error_stack::Report;
+use error_stack::{AttachmentKind, FrameKind, Report};
 use kameo::mailbox;
 use kameo::prelude::{Actor, ActorRef, Context, Message, Reply, Spawn};
 use tokio::sync::Notify;
@@ -186,6 +186,9 @@ pub struct SessionsActor {
     /// Each saved session: its directory, where its new panes start, and
     /// its settle lifecycle.
     sessions: HashMap<SessionId, SessionRow>,
+    /// What couldn't be read of each session's saved layout at start, kept
+    /// through every save.
+    unread: HashMap<SessionId, Unread>,
     /// The agents' reports of what runs in each pane.
     pane_files: PaneFiles,
     /// Each pane's latest agent report.
@@ -745,8 +748,10 @@ impl SessionsActor {
             panes,
             sessions: session_rows,
             layouts,
+            unread,
             error: layouts_error,
         } = restore_layouts(&store, &services, &orb_root);
+        let partial_load = layouts_error.is_some();
         let (projects, rows, error) = match store.load() {
             Ok((projects, rows)) => (
                 projects,
@@ -759,7 +764,7 @@ impl SessionsActor {
                 Some("couldn't load orb's saved sessions".to_owned()),
             ),
         };
-        let error = error.or_else(|| layouts_error.map(str::to_owned));
+        let error = error.or(layouts_error);
         let projects: Vec<Project> = projects
             .into_iter()
             .map(|project| Project {
@@ -811,6 +816,7 @@ impl SessionsActor {
                 shown
             };
             sessions.cursor = None;
+            sessions.partial_load = partial_load;
             sessions.filter_to(filter);
             sessions.error = error.or_else(|| integration_missing.then(|| NUDGE.to_owned()));
         }
@@ -827,6 +833,7 @@ impl SessionsActor {
             rows,
             panes,
             sessions: session_rows,
+            unread,
             pane_reports: HashMap::new(),
         }
     }
@@ -1125,6 +1132,7 @@ impl SessionsActor {
         };
         let mut statuses = Vec::with_capacity(self.rows.len());
         let mut error = None;
+        let mut renamed = Vec::new();
         for row in &mut self.rows {
             let harness = self.services.harnesses.get(&row.harness);
             if harness.is_some() && !listed.contains_key(&row.harness) {
@@ -1143,7 +1151,10 @@ impl SessionsActor {
                 if asks_git && let Some(branch) = current_branch(&self.services.git, &row.cwd) {
                     row.branch = Some(branch);
                 }
-                rename_hex_branch(&self.services.git, &self.worktrees_root, row);
+                if let Some(new) = rename_hex_branch(&self.services.git, &self.worktrees_root, row)
+                {
+                    renamed.push((row.cwd.clone(), new));
+                }
             }
             let in_selected = selected.is_some()
                 && row
@@ -1156,6 +1167,11 @@ impl SessionsActor {
                 error = Some(SAVE_FAILED.to_owned());
             }
             statuses.push(Some(status));
+        }
+        for (cwd, branch) in renamed {
+            if let Err(failed) = self.show_branch(&cwd, &branch) {
+                error = Some(failed);
+            }
         }
         let changed_sessions = self.follow_sessions(&statuses, selected, now, &mut error);
         let changed = {
@@ -1623,61 +1639,76 @@ impl SessionsActor {
     /// attach to the session, ending the start the frontend marked. On
     /// failure, git's reason shows and nothing attaches.
     fn restore_worktree(&mut self, id: SessionId) {
-        let result = self.recreate_worktree(id).map(|()| {
+        let result = self.recreate_worktree(id).and_then(|added| {
+            if let Some((cwd, branch)) = added {
+                self.show_branch(&cwd, &branch)?;
+            }
             self.state.write().sessions.attach = Some(id);
+            Ok(())
         });
         self.end_start(result);
     }
 
     /// Prunes git's record of session `id`'s missing worktree, then adds it
-    /// back on its branch, or on that branch made anew from the default branch
-    /// (as origin has it) when it's gone. A directory that is back already
-    /// needs nothing.
-    fn recreate_worktree(&self, id: SessionId) -> Result<(), String> {
-        let (root, cwd, branch) = self
+    /// back on the first of its branches that still exists (see
+    /// [`Self::restore_target`]), or on the likeliest one made anew from the
+    /// default branch (as origin has it) when all are gone. A directory that
+    /// is back already needs nothing. Returns the directory and the branch
+    /// it was added on, if it was.
+    fn recreate_worktree(&self, id: SessionId) -> Result<Option<(PathBuf, String)>, String> {
+        let (root, cwd, branches) = self
             .restore_target(id)
             .ok_or_else(|| "the session is gone".to_owned())?;
         if cwd.is_dir() {
-            return Ok(());
+            return Ok(None);
         }
-        let branch = branch.ok_or_else(|| "couldn't tell the worktree's branch".to_owned())?;
+        let branch = branches
+            .first()
+            .ok_or_else(|| "couldn't tell the worktree's branch".to_owned())?;
         let git = &self.services.git;
         git.prune_worktrees(&root)
             .and_then(|()| {
-                if git.branch_exists(&root, &branch) {
-                    return git.add_worktree_on(&root, &cwd, &branch);
+                if let Some(existing) = branches
+                    .iter()
+                    .find(|branch| git.branch_exists(&root, branch))
+                {
+                    return git
+                        .add_worktree_on(&root, &cwd, existing)
+                        .map(|()| existing.clone());
                 }
                 let base = git.default_branch(&root)?;
                 let base = start_point(git, &root, &base, |b| self.fetch(&root, b))?;
-                git.add_worktree(&root, &cwd, &branch, &base)
+                git.add_worktree(&root, &cwd, branch, &base)
+                    .map(|()| branch.clone())
             })
+            .map(|branch| Some((cwd, branch)))
             .map_err(|report| git_reason(&report))
     }
 
-    /// Session `id`'s project root, its directory, and the branch its
-    /// worktree was on: the session's recorded branch, else one of its
-    /// threads', else orb's
-    /// `orb/<hex>` for the directory.
-    fn restore_target(&self, id: SessionId) -> Option<(PathBuf, PathBuf, Option<String>)> {
+    /// Session `id`'s project root, its directory, and the branches its
+    /// worktree may have been on, likeliest first: the session's recorded
+    /// branch, then its threads', else orb's `orb/<hex>` for the directory.
+    fn restore_target(&self, id: SessionId) -> Option<(PathBuf, PathBuf, Vec<String>)> {
         let session = self.sessions.get(&id)?;
-        let thread_branch = self
-            .rows
-            .iter()
-            .filter(|row| {
-                row.pane_id
-                    .and_then(|pane| self.panes.get(&pane))
-                    .is_some_and(|pane| pane.session_id == id)
-            })
-            .find_map(|row| row.branch.clone());
-        let branch = session
-            .branch
-            .clone()
-            .or(thread_branch)
-            .or_else(|| hex_branch(&self.worktrees_root, &session.dir));
+        let mut branches: Vec<String> = session.branch.iter().cloned().collect();
+        for row in self.rows.iter().filter(|row| {
+            row.pane_id
+                .and_then(|pane| self.panes.get(&pane))
+                .is_some_and(|pane| pane.session_id == id)
+        }) {
+            if let Some(branch) = &row.branch
+                && !branches.contains(branch)
+            {
+                branches.push(branch.clone());
+            }
+        }
+        if branches.is_empty() {
+            branches.extend(hex_branch(&self.worktrees_root, &session.dir));
+        }
         Some((
             self.project_root(session.project_id)?,
             session.dir.clone(),
-            branch,
+            branches,
         ))
     }
 
@@ -2147,8 +2178,9 @@ impl SessionsActor {
     }
 
     /// Saves `session`'s tabs, floats, active tab and pane names as the app
-    /// state has them; panes no tab or float holds any more are deleted from
-    /// the store. A session whose layout emptied, or kept only floats, gets a
+    /// state has them, after them the tabs and panes orb couldn't read at
+    /// start as they were saved; panes no tab or float holds any more are
+    /// deleted from the store. A session whose layout emptied, or kept only floats, gets a
     /// new shell tab in its directory instead, saved in turn; nothing happens
     /// for one that is gone or being deleted.
     fn save_layout(&mut self, session: SessionId) {
@@ -2197,13 +2229,24 @@ impl SessionsActor {
                     (tabs, floats, layout.active(), names)
                 })
         };
-        let Some((tabs, floats, active, names)) = saved else {
+        let Some((mut tabs, floats, active, mut names)) = saved else {
             let deleting = self.state.read().sessions.deleting.contains(&session);
             if self.sessions.contains_key(&session) && !deleting {
                 self.add_pane(session, Placement::Tab);
             }
             return;
         };
+        if let Some(unread) = self.unread.get(&session) {
+            let read = tabs.len();
+            tabs.extend(unread.tabs.iter().enumerate().map(|(i, tab)| TabRow {
+                position: read + i,
+                ..tab.clone()
+            }));
+            names.extend(unread.panes.iter().map(|&id| {
+                let name = self.panes.get(&id).and_then(|row| row.name.clone());
+                (id, name)
+            }));
+        }
         match self
             .store
             .save_layout(session, active, &tabs, &floats, &names)
@@ -2599,8 +2642,13 @@ fn take_transcript(row: &mut ThreadRow, transcript: Option<&PathBuf>) {
 
 /// Renames the `orb/<hex>` branch of the orb worktree `row` is in to
 /// `orb/<slug>` of its title, once the harness or the user titled it. The old name
-/// stays when that branch already exists or git refuses.
-fn rename_hex_branch(git: &GitService, worktrees_root: &Path, row: &mut ThreadRow) {
+/// stays when that branch already exists or git refuses. Returns the new name
+/// when it renamed.
+fn rename_hex_branch(
+    git: &GitService,
+    worktrees_root: &Path,
+    row: &mut ThreadRow,
+) -> Option<String> {
     if let Some(old) = hex_branch(worktrees_root, &row.cwd)
         && row.branch.as_deref() == Some(old.as_str())
         && (row.renamed_title.is_some() || row.custom_title.is_some() || row.ai_titled)
@@ -2611,8 +2659,10 @@ fn rename_hex_branch(git: &GitService, worktrees_root: &Path, row: &mut ThreadRo
         && !git.branch_exists(&row.cwd, &new)
         && git.rename_branch(&row.cwd, &old, &new).is_ok()
     {
-        row.branch = Some(new);
+        row.branch = Some(new.clone());
+        return Some(new);
     }
+    None
 }
 
 /// Shows a saved thread and `status` on `thread`, its pane run as `pane`.
@@ -2797,25 +2847,64 @@ struct RestoredLayouts {
     sessions: HashMap<SessionId, SessionRow>,
     /// Each session's layout.
     layouts: Vec<(SessionId, SessionLayout)>,
+    /// What couldn't be read of each session's layout, kept as saved.
+    unread: HashMap<SessionId, Unread>,
     /// Why some or all of them couldn't be read.
-    error: Option<&'static str>,
+    error: Option<String>,
+}
+
+/// The saved tabs of a session whose tree didn't read, and the session's
+/// panes no read tab or float holds. Each layout save of the session writes
+/// them back as they were, so they are never deleted.
+#[derive(Debug, Default)]
+struct Unread {
+    tabs: Vec<TabRow>,
+    panes: Vec<PaneId>,
+}
+
+/// The message for saved layouts that couldn't all be read, with `report`'s
+/// reason: its attachments and the errors under its own, outermost first.
+fn unread_message<C>(report: &Report<C>) -> String
+where
+    C: Send + Sync + 'static,
+{
+    let reason: Vec<String> = report
+        .frames()
+        .filter_map(|frame| match frame.kind() {
+            FrameKind::Attachment(AttachmentKind::Printable(printable)) => {
+                Some(printable.to_string())
+            }
+            FrameKind::Context(context) if !frame.is::<C>() => Some(context.to_string()),
+            _ => None,
+        })
+        .collect();
+    format!(
+        "couldn't fully read orb's saved layouts ({}); orb keeps what it couldn't read",
+        reason.join(": ")
+    )
 }
 
 /// Every saved session's layout: its tabs by position, each in its saved swap
 /// layout with its mark, focused on its saved pane (else its first), showing
 /// its saved tab, its floats hidden in their saved places with their mark, with where each
 /// pane runs. A tab whose tree doesn't read is left out, and so is a session
-/// left with no tab. Nothing comes back when the store can't be read.
+/// left with no tab; both are kept in `unread`. Nothing comes back when the
+/// store can't be read.
 fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> RestoredLayouts {
-    let Ok(saved) = store.layouts() else {
-        return RestoredLayouts {
-            panes: HashMap::new(),
-            sessions: HashMap::new(),
-            layouts: Vec::new(),
-            error: Some("couldn't load orb's saved layouts"),
-        };
+    let saved = match store.layouts() {
+        Ok(saved) => saved,
+        Err(report) => {
+            return RestoredLayouts {
+                panes: HashMap::new(),
+                sessions: HashMap::new(),
+                layouts: Vec::new(),
+                unread: HashMap::new(),
+                error: Some(unread_message(&report)),
+            };
+        }
     };
-    let mut unread = false;
+    let mut error = None;
+    let mut unread: HashMap<SessionId, Unread> = HashMap::new();
     let layouts = saved
         .sessions
         .iter()
@@ -2833,40 +2922,49 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
                             tab.swap_layout,
                             tab.hand_changed,
                         )),
-                        Err(_) => {
-                            unread = true;
+                        Err(report) => {
+                            error.get_or_insert_with(|| unread_message(&report));
+                            unread.entry(session.id).or_default().tabs.push(tab.clone());
                             None
                         }
                     }
                 })
                 .collect();
-            if tabs.is_empty() {
-                return None;
-            }
-            let floats = Floats::restore(
-                saved
-                    .floats
-                    .iter()
-                    .filter(|row| row.session_id == session.id)
-                    .map(|row| Float {
-                        pane: row.pane_id,
-                        rect: row.rect,
-                        pinned: row.pinned,
-                    })
-                    .collect(),
-                session.float_layout,
-                session.floats_hand_changed,
-            );
-            let panes = saved
+            let panes: Vec<PaneEntry> = saved
                 .panes
                 .iter()
                 .filter(|pane| pane.session_id == session.id)
                 .map(|pane| pane_entry(services, orb_root, pane))
                 .collect();
-            Some((
-                session.id,
-                SessionLayout::restore(tabs, session.active_tab, panes, floats),
-            ))
+            let layout = (!tabs.is_empty()).then(|| {
+                let floats = Floats::restore(
+                    saved
+                        .floats
+                        .iter()
+                        .filter(|row| row.session_id == session.id)
+                        .map(|row| Float {
+                            pane: row.pane_id,
+                            rect: row.rect,
+                            pinned: row.pinned,
+                        })
+                        .collect(),
+                    session.float_layout,
+                    session.floats_hand_changed,
+                );
+                SessionLayout::restore(tabs, session.active_tab, panes.clone(), floats)
+            });
+            if let Some(kept) = unread.get_mut(&session.id) {
+                kept.panes = panes
+                    .iter()
+                    .map(|entry| entry.id)
+                    .filter(|&id| {
+                        layout
+                            .as_ref()
+                            .is_none_or(|layout| !layout.panes().any(|entry| entry.id == id))
+                    })
+                    .collect();
+            }
+            Some((session.id, layout?))
         })
         .collect();
     RestoredLayouts {
@@ -2877,7 +2975,8 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
             .collect(),
         panes: saved.panes.into_iter().map(|row| (row.id, row)).collect(),
         layouts,
-        error: unread.then_some("couldn't read a saved tab"),
+        unread,
+        error,
     }
 }
 
@@ -3748,6 +3847,192 @@ mod tests {
             restored,
             Some((2, 1, Some(second))),
             "the saved tabs should come back"
+        );
+        Ok(())
+    }
+
+    /// Saves thread `aa`'s session with a first tab on its pane, readable
+    /// only when `first_reads`, and a second tab on a second pane whose tree
+    /// doesn't read. Returns the thread and the second pane.
+    fn with_unread_tab(
+        store: &Store,
+        first_reads: bool,
+    ) -> Result<(Seeded, PaneId), Report<StoreError>> {
+        let inserted = insert_thread(store, "aa")?;
+        let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let tab = |position, layout: String, pane| TabRow {
+            session_id: inserted.session,
+            position,
+            name: None,
+            layout,
+            focus_pane: Some(pane),
+            swap_layout: SwapLayout::Vertical,
+            hand_changed: false,
+        };
+        let first = if first_reads {
+            format!("{{\"pane\":{}}}", inserted.pane.0)
+        } else {
+            UNREAD_TREE.to_owned()
+        };
+        store.save_layout(
+            inserted.session,
+            0,
+            &[
+                tab(0, first, inserted.pane),
+                tab(1, UNREAD_TREE.to_owned(), second),
+            ],
+            &SessionFloats::default(),
+            &[(inserted.pane, None), (second, None)],
+        )?;
+        Ok((inserted, second))
+    }
+
+    /// A saved split tree orb can't read.
+    const UNREAD_TREE: &str = "not a tree";
+
+    #[rstest::rstest]
+    fn restore_with_a_tab_that_doesnt_read_is_a_partial_load() -> Result<(), Report<StoreError>> {
+        // Given a session saved with a tab whose tree doesn't read.
+        let store = Store::open_in_memory()?;
+        with_unread_tab(&store, true)?;
+
+        // When restoring.
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // Then the load counts as partial.
+        assert!(
+            state.read().sessions.partial_load,
+            "a tab orb couldn't read makes the load partial"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_with_every_tab_read_is_not_a_partial_load() -> Result<(), Report<StoreError>> {
+        // Given a session saved with one readable tab.
+        let store = Store::open_in_memory()?;
+        insert_thread(&store, "aa")?;
+
+        // When restoring.
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // Then the load is whole.
+        assert!(
+            !state.read().sessions.partial_load,
+            "a load that read everything isn't partial"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_with_unreadable_layouts_is_a_partial_load() -> Result<(), Report<StoreError>> {
+        // Given a store whose floats table is gone, so its layouts can't be
+        // read.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        insert_thread(&store, "aa")?;
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| conn.execute("DROP TABLE floats", []))
+            .change_context(StoreError)?;
+
+        // When restoring.
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // Then the load counts as partial.
+        assert!(
+            state.read().sessions.partial_load,
+            "layouts orb couldn't read make the load partial"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_with_a_tab_that_doesnt_read_says_why() -> Result<(), Report<StoreError>> {
+        // Given a session saved with a tab whose tree doesn't read.
+        let store = Store::open_in_memory()?;
+        with_unread_tab(&store, true)?;
+
+        // When restoring.
+        let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // Then the mode line says the layouts couldn't all be read, and why.
+        assert_eq!(
+            state.read().sessions.error.as_deref(),
+            Some(
+                "couldn't fully read orb's saved layouts (failed to read a saved layout tree: \
+                 expected ident at line 1 column 2); orb keeps what it couldn't read"
+            ),
+            "the message should give the reason"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn layout_save_keeps_the_pane_of_a_tab_that_didnt_read() -> Result<(), Report<StoreError>> {
+        // Given a session whose second tab, on a second pane, didn't read.
+        let store = Store::open_in_memory()?;
+        let (inserted, second) = with_unread_tab(&store, true)?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // When its layout is saved.
+        actor.save_layout(inserted.session);
+
+        // Then the second pane is still saved.
+        let panes = actor.store.layouts()?.panes;
+        assert!(
+            panes.iter().any(|pane| pane.id == second),
+            "a pane orb couldn't read must not be deleted"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn layout_save_keeps_a_tab_that_didnt_read() -> Result<(), Report<StoreError>> {
+        // Given a session whose second tab didn't read.
+        let store = Store::open_in_memory()?;
+        let (inserted, _second) = with_unread_tab(&store, true)?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // When its layout is saved.
+        actor.save_layout(inserted.session);
+
+        // Then the tab is saved after the read one as it was.
+        let tabs: Vec<(usize, String)> = actor
+            .store
+            .layouts()?
+            .tabs
+            .into_iter()
+            .map(|tab| (tab.position, tab.layout))
+            .collect();
+        assert_eq!(
+            tabs,
+            vec![
+                (0, format!("{{\"pane\":{}}}", inserted.pane.0)),
+                (1, UNREAD_TREE.to_owned()),
+            ],
+            "a tab orb couldn't read must be kept as saved"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn new_tab_of_a_session_with_no_tab_read_keeps_its_panes() -> Result<(), Report<StoreError>> {
+        // Given a session none of whose tabs read.
+        let store = Store::open_in_memory()?;
+        let (inserted, second) = with_unread_tab(&store, false)?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // When its empty layout is saved, which gives it a new shell tab.
+        actor.save_layout(inserted.session);
+
+        // Then both of its old panes are still saved.
+        let panes = actor.store.layouts()?.panes;
+        assert!(
+            [inserted.pane, second]
+                .iter()
+                .all(|id| panes.iter().any(|pane| pane.id == *id)),
+            "panes orb couldn't read must not be deleted"
         );
         Ok(())
     }
@@ -8125,6 +8410,38 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test]
+    async fn turn_end_rename_moves_the_session_to_the_new_branch() -> Result<(), Report<StoreError>>
+    {
+        // Given a Claude-titled thread in its own session in an orb worktree,
+        // both on the hex branch.
+        let claude_dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = transcript_path(claude_dir.path(), Path::new(HEX_WORKTREE), "aa");
+        fs::create_dir_all(path.parent().unwrap_or(claude_dir.path()))
+            .change_context(StoreError)?;
+        fs::write(&path, format!("{PROMPT_LINE}{AI_TITLE_LINE}")).change_context(StoreError)?;
+        let store = Store::open_in_memory()?;
+        let session = insert_in(&store, "aa", Path::new(HEX_WORKTREE), Some(HEX_BRANCH))?.session;
+        resave_sessions(&store, |row| SessionRow {
+            branch: Some(HEX_BRANCH.to_owned()),
+            ..row
+        })?;
+        let host = listing(Vec::new());
+        let (mut actor, state) = start_with(store, &host, &FakeGit::local(), claude_dir.path());
+
+        // When a poll sees its turn end.
+        end_turn(&mut actor, &host).await;
+
+        // Then the session shows the renamed branch.
+        assert_eq!(
+            branch_of(&state, session).as_deref(),
+            Some("orb/parser-fix"),
+            "the session's branch should follow the rename"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
     async fn no_rename_when_the_branch_is_not_the_hex_branch() -> Result<(), Report<StoreError>> {
         // Given a Claude-titled thread in an orb worktree on another branch.
         let (claude_dir, store, _) =
@@ -8782,6 +9099,63 @@ mod tests {
                 base: "main".to_owned(),
             }),
             "a gone branch should be made again from main"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_with_a_gone_session_branch_uses_the_threads_existing_branch()
+    -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree, the session recorded on a hex
+        // branch that is gone, the thread on fix-parser, which exists.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        resave_sessions(&store, |row| SessionRow {
+            branch: Some(HEX_BRANCH.to_owned()),
+            ..row
+        })?;
+        let git = FakeGit::having("fix-parser");
+
+        // When restoring its worktree.
+        let calls = restore_calls(store, &git, id);
+
+        // Then the worktree comes back on the thread's branch.
+        assert!(
+            calls.contains(&GitCall::AddWorktreeOn {
+                path: PathBuf::from(HEX_WORKTREE),
+                branch: "fix-parser".to_owned(),
+            }),
+            "the work lives on the thread's branch, so the worktree goes there"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_on_the_threads_branch_shows_it_on_the_session()
+    -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree, the session recorded on a hex
+        // branch that is gone, the thread on fix-parser, which exists.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        resave_sessions(&store, |row| SessionRow {
+            branch: Some(HEX_BRANCH.to_owned()),
+            ..row
+        })?;
+        let (mut actor, state) = start_with(
+            store,
+            &listing(vec![]),
+            &FakeGit::having("fix-parser"),
+            Path::new(NO_CLAUDE_DIR),
+        );
+
+        // When restoring its worktree.
+        actor.restore_worktree(id);
+
+        // Then the session shows fix-parser.
+        assert_eq!(
+            branch_of(&state, id).as_deref(),
+            Some("fix-parser"),
+            "the session should show the branch it came back on"
         );
         Ok(())
     }

@@ -366,8 +366,12 @@ fn attach_at_start(
 }
 
 /// The sessions on orb's pane dir to kill at start: every `orb-p*` name no
-/// pane names (`owned`). Other names are left alone.
-fn stale_sessions(listed: Vec<String>, owned: &HashSet<String>) -> Vec<String> {
+/// pane names (`owned`). Other names are left alone, and so is every name
+/// after a `partial_load`, since a pane orb couldn't read may own it.
+fn stale_sessions(listed: Vec<String>, owned: &HashSet<String>, partial_load: bool) -> Vec<String> {
+    if partial_load {
+        return Vec::new();
+    }
     listed
         .into_iter()
         .filter(|name| name.starts_with("orb-p") && !owned.contains(name))
@@ -379,19 +383,23 @@ fn stale_sessions(listed: Vec<String>, owned: &HashSet<String>) -> Vec<String> {
 enum PaneExit {
     /// zmx no longer lists the session: its program ended, so the pane closes.
     Ended,
-    /// zmx still lists it, so only the client died: attach again.
+    /// zmx still lists it, or couldn't say, so only the client died: attach
+    /// again.
     Respawn,
-    /// The client died again after one respawn: close the pane and say so.
+    /// The client died again after one respawn: its session detaches, keeping
+    /// the pane, and orb says so.
     Failed,
 }
 
 /// How to treat a pane whose client exited, given whether zmx still `listed`
-/// its session and whether it was `respawned` once already.
-fn classify_exit(listed: bool, respawned: bool) -> PaneExit {
+/// its session (`None` when zmx couldn't be asked) and whether it was
+/// `respawned` once already. Only a session zmx positively no longer lists
+/// has ended.
+fn classify_exit(listed: Option<bool>, respawned: bool) -> PaneExit {
     match (listed, respawned) {
-        (false, _) => PaneExit::Ended,
-        (true, false) => PaneExit::Respawn,
-        (true, true) => PaneExit::Failed,
+        (Some(false), _) => PaneExit::Ended,
+        (Some(true) | None, false) => PaneExit::Respawn,
+        (Some(true) | None, true) => PaneExit::Failed,
     }
 }
 
@@ -1107,9 +1115,9 @@ impl App {
     }
 
     /// Classifies each pane whose client exit arrived (see [`classify_exit`]):
-    /// attaches a dead client again once, and on a second death puts
-    /// `couldn't reattach to zmx session <name>` on the mode line. Returns the
-    /// panes to close. An exit from a pane already replaced or dropped is
+    /// attaches a dead client again once, and on a second death detaches its
+    /// session, keeping the pane and its program, and puts `couldn't reattach
+    /// to zmx session <name>` on the mode line. Returns the panes to close. An exit from a pane already replaced or dropped is
     /// ignored.
     fn classify_exits(&mut self) -> HashSet<PaneId> {
         let mut ended = HashSet::new();
@@ -1124,7 +1132,8 @@ impl App {
             let listed = self
                 .zmx
                 .list(&session.dir)
-                .is_ok_and(|entries| entries.iter().any(|entry| entry.name == session.name));
+                .ok()
+                .map(|entries| entries.iter().any(|entry| entry.name == session.name));
             let exit = classify_exit(listed, self.respawned.contains(&id));
             let respawned = match exit {
                 PaneExit::Respawn => self.spawn_pane(id, &session, &cwd),
@@ -1143,8 +1152,11 @@ impl App {
                     ended.insert(id);
                 }
                 (PaneExit::Respawn | PaneExit::Failed, None) => {
-                    ended.insert(id);
-                    self.state.write().sessions.error =
+                    let mut app = self.state.write();
+                    if let Some(owner) = app.layouts.owner_of(id) {
+                        app.attached.remove(&owner);
+                    }
+                    app.sessions.error =
                         Some(format!("couldn't reattach to zmx session {}", session.name));
                 }
             }
@@ -1417,7 +1429,8 @@ impl App {
             .into_iter()
             .map(|entry| entry.name)
             .collect();
-        for name in stale_sessions(listed, &owned) {
+        let partial_load = self.state.read().sessions.partial_load;
+        for name in stale_sessions(listed, &owned, partial_load) {
             let _ = self.zmx.kill(&self.zmx.session(name));
         }
         let panes = reattachable(&self.state.read());
@@ -2203,7 +2216,7 @@ mod tests {
         let listed = vec!["orb-p3".to_owned(), "orb-p-1".to_owned()];
 
         // When choosing what to kill.
-        let stale = stale_sessions(listed, &HashSet::new());
+        let stale = stale_sessions(listed, &HashSet::new(), false);
 
         // Then both are killed.
         assert_eq!(
@@ -2219,10 +2232,23 @@ mod tests {
         let listed = vec!["orb-p12".to_owned()];
 
         // When choosing what to kill.
-        let stale = stale_sessions(listed, &HashSet::from(["orb-p12".to_owned()]));
+        let stale = stale_sessions(listed, &HashSet::from(["orb-p12".to_owned()]), false);
 
         // Then nothing is killed.
         assert!(stale.is_empty(), "a pane's own session stays");
+    }
+
+    #[rstest::rstest]
+    fn stale_sessions_kills_nothing_after_a_partial_load() {
+        // Given zmx listing an orb-p* name no loaded pane owns, after saved
+        // layouts orb couldn't all read.
+        let listed = vec!["orb-p7".to_owned()];
+
+        // When choosing what to kill.
+        let stale = stale_sessions(listed, &HashSet::new(), true);
+
+        // Then nothing is killed.
+        assert!(stale.is_empty(), "a pane orb couldn't read may own it");
     }
 
     #[rstest::rstest]
@@ -2231,19 +2257,21 @@ mod tests {
         let listed = vec!["work".to_owned()];
 
         // When choosing what to kill.
-        let stale = stale_sessions(listed, &HashSet::new());
+        let stale = stale_sessions(listed, &HashSet::new(), false);
 
         // Then it is left alone.
         assert!(stale.is_empty(), "only orb-p* sessions are orb's");
     }
 
     #[rstest::rstest]
-    #[case::ended(false, false, PaneExit::Ended)]
-    #[case::ended_after_a_respawn(false, true, PaneExit::Ended)]
-    #[case::client_died(true, false, PaneExit::Respawn)]
-    #[case::client_died_again(true, true, PaneExit::Failed)]
+    #[case::ended(Some(false), false, PaneExit::Ended)]
+    #[case::ended_after_a_respawn(Some(false), true, PaneExit::Ended)]
+    #[case::client_died(Some(true), false, PaneExit::Respawn)]
+    #[case::client_died_again(Some(true), true, PaneExit::Failed)]
+    #[case::zmx_unknown(None, false, PaneExit::Respawn)]
+    #[case::zmx_unknown_again(None, true, PaneExit::Failed)]
     fn pane_exit_is_classified_by_zmx_listing_and_an_earlier_respawn(
-        #[case] listed: bool,
+        #[case] listed: Option<bool>,
         #[case] respawned: bool,
         #[case] expected: PaneExit,
     ) {
@@ -2252,7 +2280,7 @@ mod tests {
         let exit = classify_exit(listed, respawned);
 
         // Then the exit is `expected`.
-        assert_eq!(exit, expected, "listed {listed}, respawned {respawned}");
+        assert_eq!(exit, expected, "listed {listed:?}, respawned {respawned}");
     }
 
     #[rstest::rstest]

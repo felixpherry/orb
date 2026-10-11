@@ -364,6 +364,10 @@ pub struct Sessions {
     pub shelf_open: bool,
     /// A new session is being created, or a session's worktree recreated.
     pub starting: bool,
+    /// Some saved layouts couldn't be read at start. For the rest of the run
+    /// orb kills no pane program, deletes no pane and prunes no worktree it
+    /// can't account for. Written only by the sessions actor, at start.
+    pub partial_load: bool,
     /// The origin ref a start is fetching, like `origin/main`; none when no
     /// fetch is running. Written only by the sessions actor.
     pub fetching: Option<String>,

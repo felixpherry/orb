@@ -146,13 +146,17 @@ impl WorktreesActor {
     /// Removes, without forcing, every worktree whose verdict is to prune
     /// now, keeping its branch. The verdict is worked out from the state read
     /// right before each removal, so a thread attached meanwhile saves it.
-    /// Prunes nothing while no projects are loaded, since then every
-    /// worktree would read as unused, nor while a session is starting, since
+    /// Prunes nothing while no projects are loaded, or after some saved
+    /// layouts couldn't be read at start, since then a worktree in use could
+    /// read as unused, nor while a session is starting, since
     /// a worktree made for it has no thread until the start ends. Returns how
     /// many were removed.
     fn prune(&self) -> usize {
-        if self.state.read().sessions.projects.is_empty() {
-            return 0;
+        {
+            let app = self.state.read();
+            if app.sessions.projects.is_empty() || app.sessions.partial_load {
+                return 0;
+            }
         }
         let candidates: Vec<(PathBuf, PathBuf)> = self
             .state
@@ -755,6 +759,29 @@ mod tests {
                 .iter()
                 .any(|call| matches!(call, Call::Remove { .. })),
             "with no projects loaded every worktree looks unused, so none is pruned"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn sweep_prunes_nothing_after_a_partial_load() -> io::Result<()> {
+        // Given a clean worktree nothing uses, and saved layouts orb couldn't
+        // all read at start.
+        let root = tempfile::tempdir()?;
+        worktree(&root, "orb-a1")?;
+        let git = Arc::new(FakeGit::default());
+        let (actor, state) = start(&git, &root, one_project());
+        state.write().sessions.partial_load = true;
+
+        // When sweeping.
+        actor.sweep();
+
+        // Then nothing is removed.
+        assert!(
+            !git.calls()
+                .iter()
+                .any(|call| matches!(call, Call::Remove { .. })),
+            "a session orb couldn't read may use the worktree, so none is pruned"
         );
         Ok(())
     }

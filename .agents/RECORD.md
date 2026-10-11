@@ -339,3 +339,11 @@ Entries are added or amended **only with human approval**.
 - (sidebar) The hovered row has a filled background, and the active row has a blue bar at its left edge and a bold first line.
 - (sidebar) When the keys come back to the sidebar from a pane, the hover starts on the active row, unless a click on a row or a jump put it elsewhere or the project filter hides the active row.
 - (sidebar) Deleting or settling the active session leaves no active session.
+- (layout) When orb can't read its saved layouts at start, or any saved tab's split tree, the message box says `couldn't fully read orb's saved layouts (<reason>); orb keeps what it couldn't read`.
+- (layout) A saved tab whose split tree orb couldn't read at start, and the session's panes no read tab or float holds, are written back unchanged by every layout save of that session.
+- (pane) After orb couldn't fully read its saved layouts at start, the start-up kill of `orb-p*` zmx sessions no pane names is skipped for that run.
+- (worktrees) After orb couldn't fully read its saved layouts at start, no worktree is pruned for the rest of that run.
+- (pane) A pane closes when its `zmx attach` client exits only if `zmx list` positively no longer lists its zmx session; a list that errors or times out counts as still running, so the client is attached again.
+- (pane) When a pane's `zmx attach` client dies again after one reattach, its session is detached with `couldn't reattach to zmx session <name>` in the message box, and the pane and its program are kept.
+- (worktrees) When orb renames a worktree's `orb/<hex>` branch to `orb/<slug>`, the sessions in that worktree take the new branch too, so the tab bar shows it.
+- (worktrees) Restoring a pruned worktree adds it back on the first of its session's recorded branch and its threads' branches that still exists, and makes the session's branch anew from the default branch only when none exists; the session then shows the branch it came back on.
