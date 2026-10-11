@@ -1160,6 +1160,7 @@ mod tests {
     use crate::feat::layout::floats::{Float, FloatLayout, FloatRect, Floats};
     use crate::feat::layout::tree::{NavDirection, Split, SwapLayout, TileLayout};
     use crate::feat::sessions::state::{PaneId, SessionId, Thread, ThreadId, ThreadStatus};
+    use crate::feat::sessions::test_ids::{pane, session};
     use std::time::UNIX_EPOCH;
 
     const OWNER: SessionId = SessionId(1);
@@ -4081,5 +4082,109 @@ mod tests {
 
         // Then it is `expected`.
         assert_eq!(name, expected, "pane {pane_name:?}, title {title:?}");
+    }
+
+    /// Fails the test if a pane of `before` is in neither `after` nor `closed`.
+    fn assert_no_pane_lost(before: &HashSet<PaneId>, after: &Layouts, closed: &[PaneId]) {
+        let lost: Vec<PaneId> = {
+            let kept = after.pane_ids();
+            let mut lost: Vec<PaneId> = before
+                .iter()
+                .filter(|pane| !kept.contains(pane) && !closed.contains(pane))
+                .copied()
+                .collect();
+            lost.sort_unstable_by_key(|pane| pane.0);
+            lost
+        };
+        assert!(lost.is_empty(), "lost panes {lost:?}");
+    }
+
+    /// Session 1's layout with tiles and a float: tab 1 holds pane 1 split
+    /// right with pane 2, and pane 3 stacked on pane 2; tab 2 holds pane 4;
+    /// float pane 5 is hidden, so tab 1 is shown with the keys.
+    fn seams() -> Layouts {
+        let mut layouts = Layouts::default();
+        layouts.insert(session(1), SessionLayout::of(entry(pane(1).0)));
+        layouts.fit_to(BODY);
+        layouts.split(session(1), Split::Right, entry(pane(2).0));
+        layouts.stack(session(1), entry(pane(3).0));
+        layouts.new_tab(session(1), entry(pane(4).0));
+        layouts.go_to_tab(session(1), 1);
+        layouts.add_float(session(1), entry(pane(5).0));
+        layouts.toggle_floats(session(1));
+        layouts
+    }
+
+    /// [`seams`] with the floats shown, float pane 5 having the keys.
+    fn seams_on_float() -> Layouts {
+        let mut layouts = seams();
+        layouts.toggle_floats(session(1));
+        layouts
+    }
+
+    /// [`seams`] with tab 2 shown.
+    fn seams_on_tab_2() -> Layouts {
+        let mut layouts = seams();
+        layouts.go_to_tab(session(1), 2);
+        layouts
+    }
+
+    #[rstest::rstest]
+    #[case::split(seams, |l: &mut Layouts| l.split(session(1), Split::Right, entry(pane(9).0)))]
+    #[case::stack(seams, |l: &mut Layouts| l.stack(session(1), entry(pane(9).0)))]
+    #[case::add_tiled(seams, |l: &mut Layouts| l.add_tiled(session(1), entry(pane(9).0)))]
+    #[case::new_tab(seams, |l: &mut Layouts| l.new_tab(session(1), entry(pane(9).0)))]
+    #[case::add_float(seams, |l: &mut Layouts| l.add_float(session(1), entry(pane(9).0)))]
+    #[case::float_pane(seams, |l: &mut Layouts| { l.float_pane(session(1)); })]
+    #[case::embed_float(seams_on_float, |l: &mut Layouts| { l.embed_float(session(1)); })]
+    #[case::toggle_floats(seams, |l: &mut Layouts| { l.toggle_floats(session(1)); })]
+    #[case::toggle_pin(seams_on_float, |l: &mut Layouts| { l.toggle_pin(session(1)); })]
+    #[case::break_pane(seams, |l: &mut Layouts| l.break_pane(session(1)))]
+    #[case::move_focus(seams, |l: &mut Layouts| { l.move_focus(session(1), NavDirection::Left); })]
+    #[case::focus_pane(seams, |l: &mut Layouts| l.focus_pane(session(1), pane(1)))]
+    #[case::reveal(seams, |l: &mut Layouts| l.reveal(session(1), pane(4)))]
+    #[case::toggle_zoom(seams, |l: &mut Layouts| l.toggle_zoom(session(1)))]
+    #[case::resize_focused(seams, |l: &mut Layouts| { l.resize_focused(session(1), true); })]
+    #[case::resize_side(seams, |l: &mut Layouts| { l.resize_side(session(1), NavDirection::Right, true); })]
+    #[case::move_pane(seams, |l: &mut Layouts| { l.move_pane(session(1), NavDirection::Left); })]
+    #[case::move_pane_in_order(seams, |l: &mut Layouts| { l.move_pane_in_order(session(1), true); })]
+    #[case::go_to_tab(seams, |l: &mut Layouts| l.go_to_tab(session(1), 2))]
+    #[case::next_swap_layout(seams, |l: &mut Layouts| l.next_swap_layout(session(1)))]
+    #[case::previous_swap_layout(seams, |l: &mut Layouts| l.previous_swap_layout(session(1)))]
+    #[case::cycle_float_layout(seams_on_float, |l: &mut Layouts| { l.cycle_float_layout(session(1), false); })]
+    #[case::move_float_to(seams_on_float, |l: &mut Layouts| { l.move_float_to(session(1), pane(5), 2, 2); })]
+    #[case::move_tab_left(seams_on_tab_2, |l: &mut Layouts| l.move_tab_left(session(1)))]
+    #[case::move_tab_right(seams, |l: &mut Layouts| l.move_tab_right(session(1)))]
+    #[case::rename_pane(seams, |l: &mut Layouts| l.rename_pane(pane(1), Some("api".into())))]
+    #[case::rename_tab(seams, |l: &mut Layouts| l.rename_tab(session(1), 0, Some("agent".into())))]
+    #[case::fit_to(seams, |l: &mut Layouts| l.fit_to(Rect::new(0, 0, 40, 12)))]
+    #[case::remember_resume(seams, |l: &mut Layouts| l.remember_resume(pane(1), Some("claude --resume x".into())))]
+    #[case::move_session(seams, |l: &mut Layouts| l.move_session(session(1), std::path::Path::new("/wt")))]
+    fn tree_operation_loses_no_pane(#[case] given: fn() -> Layouts, #[case] op: fn(&mut Layouts)) {
+        // Given a layout of tiles, stacks, tabs and a float.
+        let mut layouts = given();
+        let before = layouts.pane_ids();
+
+        // When running the operation.
+        op(&mut layouts);
+
+        // Then every pane it held is still held.
+        assert_no_pane_lost(&before, &layouts, &[]);
+    }
+
+    #[rstest::rstest]
+    #[case::close_pane(|l: &mut Layouts| l.close_pane(pane(2)), &[2])]
+    #[case::close_tab(|l: &mut Layouts| l.close_tab(session(1)), &[1, 2, 3])]
+    fn closing_loses_only_the_closed_panes(#[case] op: fn(&mut Layouts), #[case] closed: &[i64]) {
+        // Given a layout of tiles, stacks, tabs and a float, tab 1 shown.
+        let mut layouts = seams();
+        let before = layouts.pane_ids();
+        let closed: Vec<PaneId> = closed.iter().map(|&n| pane(n)).collect();
+
+        // When closing.
+        op(&mut layouts);
+
+        // Then only the closed panes are gone.
+        assert_no_pane_lost(&before, &layouts, &closed);
     }
 }

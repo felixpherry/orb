@@ -3271,8 +3271,8 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        FAST_POLL, Placement, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms,
-        project_title, settle_session_row,
+        FAST_POLL, Placement, SLOW_POLL, SaveLayout, SessionsActor, SessionsActorDeps, notice_kind,
+        now_ms, project_title, settle_session_row, spawn_sessions_actor,
     };
     use crate::Focus;
     use crate::TextInput;
@@ -3294,11 +3294,12 @@ mod tests {
     };
     use crate::feat::sessions::store::{
         FloatRow, NewPaneThread, SessionFloats, SessionRow, SettledOverride, Store, StoreError,
-        TabRow, ThreadRow, Ui,
+        TabRow, ThreadRow, Ui, assert_every_pane_row_held,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
     use crate::feat::zmx::zmx_service::fake::FakeZmx;
     use crate::feat::zmx::zmx_service::{ZmxOutput, ZmxService, ZmxSession};
+    use kameo::prelude::ActorRef;
 
     /// The orb project's root, a folder that exists so its sessions can start.
     const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -4155,6 +4156,49 @@ mod tests {
             panes.iter().any(|pane| pane.id == second),
             "a pane orb couldn't read must not be deleted"
         );
+        Ok(())
+    }
+
+    /// A seeded session and the panes of its tabs that don't read.
+    type SeededSession = Result<(SessionId, Vec<PaneId>), Report<StoreError>>;
+
+    /// Seeds thread `aa` in a session of its own; no tab is unread.
+    fn one_thread(store: &Store) -> SeededSession {
+        insert_thread(store, "aa").map(|seeded| (seeded.session, Vec::new()))
+    }
+
+    /// Seeds thread `aa` with a second tab whose tree doesn't read.
+    fn one_unread_tab(store: &Store) -> SeededSession {
+        with_unread_tab(store, true).map(|(seeded, second)| (seeded.session, vec![second]))
+    }
+
+    #[rstest::rstest]
+    #[case::split(one_thread, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Split(Split::Right)))]
+    #[case::stack(one_thread, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Stack))]
+    #[case::float(one_thread, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Float))]
+    #[case::close(one_thread, |actor: &mut SessionsActor, state: &State, s| {
+        actor.add_pane(s, Placement::Split(Split::Right));
+        let added = state.read().layouts.get(s).and_then(SessionLayout::focused);
+        if let Some(added) = added {
+            state.write().layouts.close_pane(added);
+        }
+        actor.save_layout(s);
+    })]
+    #[case::partial_load(one_unread_tab, |actor: &mut SessionsActor, _: &State, s| actor.save_layout(s))]
+    fn layout_save_leaves_every_pane_row_held(
+        #[case] given: fn(&Store) -> SeededSession,
+        #[case] change: fn(&mut SessionsActor, &State, SessionId),
+    ) -> Result<(), Report<StoreError>> {
+        // Given a saved session.
+        let store = Store::open_in_memory()?;
+        let (session, unread) = given(&store)?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+
+        // When its layout changes and is saved.
+        change(&mut actor, &state, session);
+
+        // Then every saved pane is held by a tab, a float or an unread tab.
+        assert_every_pane_row_held(&actor.store, &unread);
         Ok(())
     }
 
@@ -10561,6 +10605,167 @@ mod tests {
             killed(&zmx),
             vec![settled.pane.zmx_name()],
             "only a settled session's listed pane should be killed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn kill_settled_kills_nothing_when_zmx_cant_list() -> Result<(), Report<StoreError>> {
+        // Given settled session aa, and a zmx that can't list its sessions.
+        let store = Store::open_in_memory()?;
+        let settled = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        actor.edit_session(settled.session, settle_session_row);
+        let zmx = Arc::new(FakeZmx::new(ZmxOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: "boom".into(),
+        }));
+        actor.services.zmx = ZmxService::new(zmx.clone(), PathBuf::from("/zmx"), Log::default());
+
+        // When killing the settled sessions' panes.
+        actor.kill_settled();
+
+        // Then nothing is killed.
+        assert!(
+            killed(&zmx).is_empty(),
+            "nothing should be killed when zmx can't list what runs"
+        );
+        Ok(())
+    }
+
+    /// How long a mailbox test waits for any one answer.
+    const LIMIT: Duration = Duration::from_secs(5);
+
+    /// Starts the actor through its real mailbox, as main does, over `store`,
+    /// `claude`, a local fake git and `zmx`; `on_start` sends `KillSettled`
+    /// and starts the poll loop. Returns the actor and its state.
+    async fn spawned(
+        store: Store,
+        claude: &Arc<FakeClaude>,
+        zmx: ZmxService,
+    ) -> Result<(ActorRef<SessionsActor>, State), Report<StoreError>> {
+        let state = State::default();
+        let actor = spawn_sessions_actor(SessionsActorDeps {
+            services: Services {
+                harnesses: Harnesses::new(vec![Arc::new(ClaudeCode::new(
+                    claude.clone(),
+                    PathBuf::from(NO_CLAUDE_DIR),
+                ))]),
+                git: GitService::new(FakeGit::local(), Log::default()),
+                zmx,
+                log: Log::default(),
+            },
+            state: state.clone(),
+            store,
+            worktrees_root: PathBuf::from(WORKTREES_ROOT),
+            orb_root: PathBuf::from(ORB_ROOT),
+            incognito_root: PathBuf::from(INCOGNITO_ROOT),
+            wake: Arc::new(|| {}),
+            integration_missing: false,
+        });
+        tokio::time::timeout(LIMIT, actor.wait_for_startup())
+            .await
+            .change_context(StoreError)
+            .attach("the actor didn't start in time")?;
+        Ok((actor, state))
+    }
+
+    /// Asks `actor` to save session `session`'s layout and waits, at most
+    /// [`LIMIT`], for it to be done.
+    async fn save_through_mailbox(
+        actor: &ActorRef<SessionsActor>,
+        session: SessionId,
+    ) -> Result<(), Report<StoreError>> {
+        tokio::time::timeout(LIMIT, actor.ask(SaveLayout(session)))
+            .await
+            .change_context(StoreError)
+            .attach("the actor didn't answer in time")?
+            .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn layout_saved_through_the_mailbox_is_stored() -> Result<(), Report<StoreError>> {
+        // Given a store file with thread aa, the actor started through its
+        // mailbox, and aa's tab renamed in the app state.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path)?;
+        let inserted = insert_thread(&store, "aa")?;
+        let zmx = zmx_running(&store);
+        let host = listing(Vec::new());
+        let (actor, state) = spawned(store, &host, zmx).await?;
+        state
+            .write()
+            .layouts
+            .rename_tab(inserted.session, 0, Some("agent".into()));
+
+        // When asking the actor to save aa's layout.
+        save_through_mailbox(&actor, inserted.session).await?;
+
+        // Then the store file has the tab's name.
+        let names: Vec<Option<String>> = Store::open(&path)?
+            .layouts()?
+            .tabs
+            .into_iter()
+            .map(|tab| tab.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![Some("agent".to_owned())],
+            "a layout saved through the mailbox should reach the store"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn kill_settled_at_start_kills_only_settled_panes() -> Result<(), Report<StoreError>> {
+        // Given session aa settled before start and session bb not, zmx
+        // listing both their panes.
+        let store = Store::open_in_memory()?;
+        let settled = insert_thread(&store, "aa")?;
+        let active = insert_thread(&store, "bb")?;
+        let mut row = store
+            .layouts()?
+            .sessions
+            .into_iter()
+            .find(|row| row.id == settled.session)
+            .ok_or_else(|| Report::new(StoreError).attach("aa's session isn't saved"))?;
+        settle_session_row(&mut row, now_ms());
+        store.save_session(&row)?;
+        let zmx = Arc::new(FakeZmx::new(ZmxOutput {
+            success: true,
+            stdout: format!(
+                "  name={}\tpid=100\tclients=0\tcreated=1\n  name={}\tpid=101\tclients=0\tcreated=1\n",
+                settled.pane.zmx_name(),
+                active.pane.zmx_name()
+            ),
+            stderr: String::new(),
+        }));
+        let host = listing(Vec::new());
+
+        // When the actor starts through its mailbox and has handled what
+        // `on_start` sent it.
+        let (actor, _state) = spawned(
+            store,
+            &host,
+            ZmxService::new(zmx.clone(), PathBuf::from("/zmx"), Log::default()),
+        )
+        .await?;
+        let waited = tokio::time::Instant::now();
+        while killed(&zmx).is_empty() && waited.elapsed() < LIMIT {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        save_through_mailbox(&actor, active.session).await?;
+
+        // Then only aa's pane is killed.
+        assert_eq!(
+            killed(&zmx),
+            vec![settled.pane.zmx_name()],
+            "only a settled session's listed pane should be killed at start"
         );
         Ok(())
     }

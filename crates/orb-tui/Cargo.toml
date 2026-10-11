@@ -19,6 +19,7 @@ unicode-segmentation = { workspace = true }
 [dev-dependencies]
 rstest = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

@@ -6,9 +6,12 @@
 - Architecture deny-list: AGENTS.md section 3 must not describe a bus.
 - Dropped results: production Rust code must not `let _ =` a kill or removal,
   nor drop an error report with a `|_report|` closure.
+- zmx list sites: each file's production `zmx … .list(` count must match the
+  reviewed ZMX_LIST_SITES, so a new site fails until someone checks that a
+  failed list there keeps panes rather than closing or killing them.
 
-`--self-test` plants a bad name, a bad phrase, a dropped kill and a dropped
-report, and exits 0 only if all are reported.
+`--self-test` plants a bad name, a bad phrase, a dropped kill, a dropped
+report and an unreviewed zmx list site, and exits 0 only if all are reported.
 """
 
 import re
@@ -48,6 +51,21 @@ LET_DROP = re.compile(
 )
 DROPPED_REPORT = re.compile(r"\|_report\|")
 TEST_MODULE = re.compile(r"^#\[cfg\(test\)\]", re.M)
+
+# Production `zmx list` call sites per file, each reviewed to mean "keep" on error.
+ZMX_LIST = re.compile(r"zmx\s*\.list\(")
+ZMX_LIST_SITES = {
+    "crates/orb-tui/src/run.rs": 4,
+    # classify_exits: error -> None -> the pane respawns, never ends
+    #   (exited_client_with_unlistable_zmx_keeps_its_pane, classify_exit's zmx_unknown case)
+    # plan_resumes: error -> None -> nothing typed (resume_plan_types_nothing_where_zmx_couldnt_list)
+    # reattach_live sweep: error -> empty -> nothing killed (stale_sessions_kills_nothing_when_zmx_lists_nothing)
+    # reattach_live running: error -> empty -> panes come back as fresh shells, no kill
+    #   (start_attaches_a_session_whose_panes_all_died)
+    "crates/orb-domain/src/feat/sessions/sessions_actor.rs": 2,
+    # poll: error -> that dir's panes left as they were (poll_leaves_a_pane_thread_as_it_was_when_zmx_cant_list)
+    # kill_settled: error -> empty -> nothing killed (kill_settled_kills_nothing_when_zmx_cant_list)
+}
 
 SPAN = re.compile(r"`([^`\n]+)`")
 IDENT = re.compile(r"^[A-Za-z_]\w*(::\w+)*$")
@@ -131,6 +149,18 @@ def check_drops(label, text):
     return reports
 
 
+def check_zmx_lists(label, text):
+    """Report a file whose production `zmx … .list(` count differs from the reviewed list."""
+    found = len(ZMX_LIST.findall(production(text)))
+    want = ZMX_LIST_SITES.get(label, 0)
+    if found == want:
+        return []
+    return [
+        f"{label}: {found} zmx list call sites, reviewed {want}; "
+        "check that a failed list there keeps, then update ZMX_LIST_SITES"
+    ]
+
+
 def rust_files():
     for code_dir in CODE_DIRS:
         for path in sorted((ROOT / code_dir).rglob("*.rs")):
@@ -145,9 +175,10 @@ def self_test():
     )
     kill = check_drops("self-test", "fn f() {\n    let _ = zmx\n        .kill(&s);\n}\n")
     report = check_drops("self-test", "fn f() {\n    x.map_err(|_report| X);\n}\n")
-    for line in names + deny + kill + report:
+    zmx = check_zmx_lists("self-test", "fn f() {\n    self.zmx\n        .list(dir);\n}\n")
+    for line in names + deny + kill + report + zmx:
         print(line)
-    if not names or not deny or not kill or not report:
+    if not names or not deny or not kill or not report or not zmx:
         print("self-test: a check did not fail on its planted text")
         return 1
     print("self-test: every check reported its planted text")
@@ -162,7 +193,10 @@ def main():
         reports += check_names(doc, (ROOT / doc).read_text())
     reports += check_section3("AGENTS.md", (ROOT / "AGENTS.md").read_text())
     for path in rust_files():
-        reports += check_drops(str(path.relative_to(ROOT)), path.read_text())
+        rel = str(path.relative_to(ROOT))
+        text = path.read_text()
+        reports += check_drops(rel, text)
+        reports += check_zmx_lists(rel, text)
     for report in reports:
         print(report)
     if reports:

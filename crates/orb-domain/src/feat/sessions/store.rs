@@ -1769,6 +1769,37 @@ fn jump_item(kind: &str, id: i64, session: Option<i64>) -> Option<SidebarItem> {
     }
 }
 
+/// Fails the test unless every pane row in `store` is held by a saved tab's
+/// tree, a float row, or `unread` (panes of tabs whose tree doesn't read).
+#[cfg(test)]
+pub(crate) fn assert_every_pane_row_held(store: &Store, unread: &[PaneId]) {
+    let saved = store.layouts();
+    assert!(saved.is_ok(), "the saved layouts should read: {saved:?}");
+    let Ok(saved) = saved else {
+        return;
+    };
+    let held: std::collections::HashSet<PaneId> = saved
+        .tabs
+        .iter()
+        .filter_map(|tab| {
+            TileLayout::from_json(&tab.layout, tab.focus_pane.unwrap_or(PaneId(0))).ok()
+        })
+        .flat_map(|tree| tree.pane_ids())
+        .chain(saved.floats.iter().map(|float| float.pane_id))
+        .chain(unread.iter().copied())
+        .collect();
+    let orphans: Vec<PaneId> = saved
+        .panes
+        .iter()
+        .map(|pane| pane.id)
+        .filter(|id| !held.contains(id))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "pane rows no tab, float or unread tab holds: {orphans:?}"
+    );
+}
+
 #[cfg(test)]
 #[expect(
     clippy::panic_in_result_fn,

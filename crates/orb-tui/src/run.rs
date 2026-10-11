@@ -187,6 +187,7 @@ impl Frontend {
                 harnesses,
                 env,
                 zmx,
+                attach_argv,
                 notifier,
                 log,
                 tx,
@@ -384,6 +385,20 @@ fn attach_at_start(
         .collect()
 }
 
+/// The owners in `panes` whose session's directory is there.
+fn present_at_start(state: &AppState, panes: &[(SessionId, ZmxSession)]) -> HashSet<SessionId> {
+    panes
+        .iter()
+        .map(|(owner, _)| *owner)
+        .filter(|owner| {
+            state
+                .sessions
+                .session(*owner)
+                .is_some_and(|session| session.dir.is_dir())
+        })
+        .collect()
+}
+
 /// The sessions on orb's pane dir to kill at start: every `orb-p*` name no
 /// pane names (`owned`). Other names are left alone, and so is every name
 /// after a `partial_load`, since a pane orb couldn't read may own it.
@@ -419,6 +434,27 @@ fn classify_exit(listed: Option<bool>, respawned: bool) -> PaneExit {
         (Some(false), _) => PaneExit::Ended,
         (Some(true) | None, false) => PaneExit::Respawn,
         (Some(true) | None, true) => PaneExit::Failed,
+    }
+}
+
+/// What happens to a pane after its client's exit is classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitOutcome {
+    /// A new client attached: the pane stays, marked respawned.
+    Reattached,
+    /// Its program ended: the pane closes.
+    Closed,
+    /// No client could attach: its session detaches, keeping the pane, and
+    /// the mode line says so.
+    Detached,
+}
+
+/// The outcome of `exit` once a new client did (`reattached`) or didn't start.
+fn exit_outcome(exit: PaneExit, reattached: bool) -> ExitOutcome {
+    match (exit, reattached) {
+        (_, true) => ExitOutcome::Reattached,
+        (PaneExit::Ended, false) => ExitOutcome::Closed,
+        (PaneExit::Respawn | PaneExit::Failed, false) => ExitOutcome::Detached,
     }
 }
 
@@ -493,7 +529,7 @@ struct App {
     /// threads are selected.
     panes: HashMap<PaneId, Pane>,
     /// The zmx session each held pane's client attached to, for killing it
-    /// once its layout no longer says.
+    /// once its layout no longer says, also for a broken pane.
     pane_sessions: HashMap<PaneId, ZmxSession>,
     /// The pane that last got a focus-in, so it gets a focus-out when the
     /// keys move on (see [`App::sync_focus`]).
@@ -518,6 +554,8 @@ struct App {
     env: Vec<(OsString, OsString)>,
     /// Lists the zmx sessions panes attach to.
     zmx: ZmxService,
+    /// The command a pane's client runs to attach to its zmx session.
+    attach: fn(&ZmxSession) -> Vec<OsString>,
     /// Announces the sessions actor's notices.
     notifier: NotifierService,
     /// orb's log file.
@@ -550,6 +588,7 @@ impl App {
         harnesses: Harnesses,
         env: Vec<(OsString, OsString)>,
         zmx: ZmxService,
+        attach: fn(&ZmxSession) -> Vec<OsString>,
         notifier: NotifierService,
         log: Log,
         tx: Sender<LoopEvent>,
@@ -580,6 +619,7 @@ impl App {
             attach_waited: false,
             env,
             zmx,
+            attach,
             notifier,
             log,
             tz,
@@ -1146,12 +1186,12 @@ impl App {
 
     /// Drops broken pane `id`'s client (its program keeps running in zmx),
     /// keeps it from getting another while its session stays attached, and
-    /// says so in the message box and the log.
+    /// says so in the message box and the log. It keeps its zmx session so
+    /// closing it in its layout still ends its program.
     fn drop_broken(&mut self, id: PaneId) {
         if self.panes.remove(&id).is_none() {
             return;
         }
-        self.pane_sessions.remove(&id);
         self.respawned.remove(&id);
         self.typing.remove(&id);
         self.broken.insert(id);
@@ -1196,8 +1236,8 @@ impl App {
                 PaneExit::Respawn => self.spawn_pane(id, &session, &cwd),
                 PaneExit::Ended | PaneExit::Failed => None,
             };
-            match (exit, respawned) {
-                (_, Some(pane)) => {
+            match (exit_outcome(exit, respawned.is_some()), respawned) {
+                (ExitOutcome::Reattached, Some(pane)) => {
                     if self.focused_pane == Some(id) {
                         pane.focus(true);
                     }
@@ -1205,10 +1245,10 @@ impl App {
                     self.pane_sessions.insert(id, session.clone());
                     self.respawned.insert(id);
                 }
-                (PaneExit::Ended, None) => {
+                (ExitOutcome::Closed, _) => {
                     ended.insert(id);
                 }
-                (PaneExit::Respawn | PaneExit::Failed, None) => {
+                (ExitOutcome::Detached | ExitOutcome::Reattached, _) => {
                     let mut app = self.state.write();
                     if let Some(owner) = app.layouts.owner_of(id) {
                         app.attached.remove(&owner);
@@ -1226,7 +1266,8 @@ impl App {
     /// attached, which ends their `zmx attach` client. A pane of an attached
     /// session that ended closes in its layout, which is saved; a session
     /// whose layout emptied leaves `attached`. A dropped pane no layout holds
-    /// any more that didn't end is killed with `zmx kill`. A pane that ended
+    /// any more that didn't end is killed with `zmx kill`; a broken pane no
+    /// layout holds any more is killed too. A pane that ended
     /// within [`EARLY_EXIT`] of starting leaves `session <title> exited at
     /// start` on the start screen, and that line in the log. Every pane of an attached session gets a client;
     /// when one can't start, its session leaves `attached` and `couldn't
@@ -1287,6 +1328,20 @@ impl App {
             self.pane_sessions.remove(id);
             self.respawned.remove(id);
             self.typing.remove(id);
+        }
+        let unbroken: Vec<PaneId> = self
+            .broken
+            .iter()
+            .copied()
+            .filter(|id| !keep.contains(id))
+            .collect();
+        for id in to_kill(&unbroken, &HashSet::new(), &all) {
+            if let Some(session) = self.pane_sessions.get(&id) {
+                self.zmx.kill(session, "closed in its layout");
+            }
+        }
+        for id in &unbroken {
+            self.pane_sessions.remove(id);
         }
         clear_detached(&mut self.broken, &keep);
         let spawning = to_spawn(&keep, &self.panes, &self.broken);
@@ -1543,19 +1598,7 @@ impl App {
                 })
                 .collect()
         };
-        let present: HashSet<SessionId> = {
-            let state = self.state.read();
-            panes
-                .iter()
-                .map(|(owner, _)| *owner)
-                .filter(|owner| {
-                    state
-                        .sessions
-                        .session(*owner)
-                        .is_some_and(|session| session.dir.is_dir())
-                })
-                .collect()
-        };
+        let present = present_at_start(&self.state.read(), &panes);
         let owners = attach_at_start(&panes, &running, &present);
         self.state.write().attached.extend(owners);
         self.reconcile();
@@ -1569,7 +1612,7 @@ impl App {
         Some((entry.zmx.clone(), entry.cwd.clone()))
     }
 
-    /// Runs `zmx attach` on `session` for pane `id`, in `cwd`, which starts
+    /// Runs the attach command on `session` for pane `id`, in `cwd`, which starts
     /// the user's shell when zmx makes the session,
     /// sized to the inside of its frame in the shown layout (else to the
     /// inside of a frame over the whole pane area),
@@ -1578,7 +1621,7 @@ impl App {
     fn spawn_pane(&self, id: PaneId, session: &ZmxSession, cwd: &Path) -> Option<Pane> {
         let tx = self.tx.clone();
         let command = PaneCommand {
-            argv: attach_argv(session),
+            argv: (self.attach)(session),
             cwd: cwd.to_owned(),
             env: pane_env(&self.env, id),
         };
@@ -1750,15 +1793,36 @@ mod tests {
         PaneId, Project, ProjectId, ProjectKind, Session, SessionId, SessionKind, Sessions, Thread,
         ThreadId, ThreadStatus,
     };
-    use orb_domain::feat::zmx::zmx_service::ZmxSession;
-    use orb_domain::{AppState, Focus, Intent, PaneMode, State};
+    use std::ffi::OsString;
+    use std::sync::Arc;
+    use std::sync::mpsc::{self, Receiver};
+    use std::time::{Duration, Instant};
+
+    use jiff::tz::TimeZone;
+    use orb_domain::feat::git::git_service::GitService;
+    use orb_domain::feat::harness::Harnesses;
+    use orb_domain::feat::notify::none::NoneNotifier;
+    use orb_domain::feat::notify::notifier::NotifierService;
+    use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
+    use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
+    use orb_domain::feat::sessions::store::Store;
+    use orb_domain::feat::worktrees::worktrees_actor::{WorktreesActorDeps, spawn_worktrees_actor};
+    use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession};
+    use orb_domain::{AppState, Focus, Intent, Log, PaneMode, Services, State, Wake};
+    use orb_term::PaneEvent;
     use ratatui::crossterm::cursor::SetCursorStyle;
+    use ratatui::layout::Rect;
+    use tempfile::TempDir;
+    use tokio::runtime::Runtime;
+
+    use crate::test_support::{FakeZmx, NoGit, pane, session as session_id};
 
     use super::{
-        AttachPlan, PaneExit, StartedAttach, after_pane, attach_at_start, attach_or_restore,
-        broken_pane_message, classify_exit, clear_detached, closed_in_layouts, cursor_style,
-        handle_mouse_intents, list_directories, pane_error_after, reattachable, resume_plan,
-        stale_preview, stale_sessions, started_attach, to_drop, to_kill, to_spawn,
+        App, AttachPlan, ExitOutcome, LoopEvent, PaneExit, StartedAttach, after_pane,
+        attach_at_start, attach_or_restore, broken_pane_message, classify_exit, clear_detached,
+        closed_in_layouts, cursor_style, exit_outcome, handle_mouse_intents, list_directories,
+        pane_error_after, present_at_start, reattachable, resume_plan, stale_preview,
+        stale_sessions, started_attach, to_drop, to_kill, to_spawn,
     };
 
     /// Pane `id`, a shell in `orb-p<id>`.
@@ -1831,6 +1895,68 @@ mod tests {
             active_since: UNIX_EPOCH,
             last_activity_at: UNIX_EPOCH,
         }
+    }
+
+    #[rstest::rstest]
+    #[case::reattached(PaneExit::Respawn, true, ExitOutcome::Reattached)]
+    #[case::respawn_failed_to_attach(PaneExit::Respawn, false, ExitOutcome::Detached)]
+    #[case::failed(PaneExit::Failed, false, ExitOutcome::Detached)]
+    #[case::ended(PaneExit::Ended, false, ExitOutcome::Closed)]
+    fn exit_outcome_after_a_classified_exit(
+        #[case] exit: PaneExit,
+        #[case] reattached: bool,
+        #[case] expected: ExitOutcome,
+    ) {
+        assert_eq!(
+            exit_outcome(exit, reattached),
+            expected,
+            "{exit:?} with a new client {reattached}"
+        );
+    }
+
+    /// Unsettled session 1 in `dir`, owning pane 1, as start-up sees them.
+    fn session_in(dir: PathBuf) -> (AppState, Vec<(SessionId, ZmxSession)>) {
+        let mut state = AppState::default();
+        state.sessions.sessions = vec![Session {
+            dir,
+            ..session(1, false)
+        }];
+        (state, vec![(SessionId(1), entry(1).zmx)])
+    }
+
+    #[rstest::rstest]
+    fn start_counts_a_session_whose_directory_is_there() -> io::Result<()> {
+        // Given session 1 whose directory is on disk.
+        let dir = tempfile::tempdir()?;
+        let (state, panes) = session_in(dir.path().to_owned());
+
+        // When start-up checks which directories are there.
+        let present = present_at_start(&state, &panes);
+
+        // Then session 1 counts.
+        assert_eq!(
+            present,
+            HashSet::from([SessionId(1)]),
+            "a session whose directory is there counts as present"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn start_leaves_out_a_session_whose_directory_is_gone() -> io::Result<()> {
+        // Given session 1 whose directory is gone.
+        let dir = tempfile::tempdir()?;
+        let (state, panes) = session_in(dir.path().join("gone"));
+
+        // When start-up checks which directories are there.
+        let present = present_at_start(&state, &panes);
+
+        // Then session 1 is left out.
+        assert!(
+            present.is_empty(),
+            "a session whose directory is gone isn't present"
+        );
+        Ok(())
     }
 
     #[rstest::rstest]
@@ -2391,6 +2517,18 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn stale_sessions_kills_nothing_when_zmx_lists_nothing() {
+        // Given zmx listing nothing, as when its list fails at start.
+        let listed = Vec::new();
+
+        // When choosing what to kill.
+        let stale = stale_sessions(listed, &HashSet::new(), false);
+
+        // Then nothing is killed.
+        assert!(stale.is_empty(), "a failed list kills nothing");
+    }
+
+    #[rstest::rstest]
     fn stale_sessions_spares_names_without_the_orb_p_prefix() {
         // Given zmx listing a session orb didn't name.
         let listed = vec!["work".to_owned()];
@@ -2532,5 +2670,225 @@ mod tests {
 
         // Then no mode is on.
         assert_eq!(state.read().pane_mode(), None, "a click ends the mode");
+    }
+
+    /// An `App` over fakes, for loop tests: its actors run on their own
+    /// runtime over an in-memory store and a state of their own; panes
+    /// attach with the given command in a temp dir; zmx is `zmx`.
+    struct LoopTest {
+        app: App,
+        state: State,
+        zmx: Arc<FakeZmx>,
+        rx: Receiver<LoopEvent>,
+        /// The panes' cwd, the sessions' dir and the actors' roots.
+        dir: TempDir,
+        /// Dropped after the app.
+        _runtime: Runtime,
+    }
+
+    fn loop_app(zmx: FakeZmx, attach: fn(&ZmxSession) -> Vec<OsString>) -> io::Result<LoopTest> {
+        let dir = tempfile::tempdir()?;
+        let runtime = Runtime::new()?;
+        let store =
+            Store::open_in_memory().map_err(|report| io::Error::other(report.to_string()))?;
+        let git = GitService::new(Arc::new(NoGit), Log::default());
+        let (sessions, worktrees, search) = {
+            let _context = runtime.enter();
+            let wake: Wake = Arc::new(|| {});
+            let sessions = spawn_sessions_actor(SessionsActorDeps {
+                services: Services {
+                    harnesses: Harnesses::new(vec![]),
+                    git: git.clone(),
+                    zmx: ZmxService::new(
+                        Arc::new(FakeZmx::listing("")),
+                        dir.path().join("zmx"),
+                        Log::default(),
+                    ),
+                    log: Log::default(),
+                },
+                state: State::default(),
+                store,
+                worktrees_root: dir.path().join("worktrees"),
+                orb_root: dir.path().join("orb"),
+                incognito_root: dir.path().join("incognito"),
+                wake: wake.clone(),
+                integration_missing: false,
+            });
+            let worktrees = spawn_worktrees_actor(WorktreesActorDeps {
+                git: git.clone(),
+                state: State::default(),
+                worktrees_root: dir.path().join("worktrees"),
+                wake: wake.clone(),
+                sweep_every: Duration::from_secs(3600),
+            });
+            let search = spawn_search_actor(SearchActorDeps {
+                state: State::default(),
+                harnesses: Harnesses::new(vec![]),
+                index_path: dir.path().join("search.sqlite"),
+                wake,
+                log: Log::default(),
+            });
+            (sessions, worktrees, search)
+        };
+        runtime.block_on(sessions.wait_for_startup());
+        let zmx = Arc::new(zmx);
+        let state = State::default();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(
+            state.clone(),
+            sessions,
+            worktrees,
+            dir.path().join("worktrees"),
+            search,
+            git,
+            Harnesses::new(vec![]),
+            Vec::new(),
+            ZmxService::new(zmx.clone(), dir.path().join("zmx"), Log::default()),
+            attach,
+            NotifierService::new(Arc::new(NoneNotifier)),
+            Log::default(),
+            tx,
+            TimeZone::UTC,
+        );
+        app.measure(Rect::new(0, 0, 120, 40));
+        Ok(LoopTest {
+            app,
+            state,
+            zmx,
+            rx,
+            dir,
+            _runtime: runtime,
+        })
+    }
+
+    /// A client that exits at once.
+    fn exits_at_once(_: &ZmxSession) -> Vec<OsString> {
+        ["/bin/sh", "-c", "exit 0"].map(OsString::from).to_vec()
+    }
+
+    /// A client that keeps running.
+    fn keeps_running(_: &ZmxSession) -> Vec<OsString> {
+        ["/bin/sh", "-c", "/bin/sleep 30"]
+            .map(OsString::from)
+            .to_vec()
+    }
+
+    impl LoopTest {
+        /// Pane `id` in the test's dir, attaching to its own zmx session.
+        fn entry(&self, id: PaneId) -> PaneEntry {
+            PaneEntry {
+                id,
+                zmx: ZmxSession {
+                    name: id.zmx_name(),
+                    dir: "/zmx".into(),
+                },
+                cwd: self.dir.path().to_owned(),
+                name: None,
+                resume: None,
+            }
+        }
+
+        /// Attached session 1 in the test's dir, holding `panes` side by
+        /// side; each gets its client.
+        fn attach(&mut self, panes: &[PaneId]) {
+            {
+                let mut state = self.state.write();
+                state.sessions.sessions = vec![Session {
+                    id: session_id(1),
+                    dir: self.dir.path().to_owned(),
+                    ..session(1, false)
+                }];
+                for (at, id) in panes.iter().enumerate() {
+                    let entry = self.entry(*id);
+                    match at {
+                        0 => state
+                            .layouts
+                            .insert(session_id(1), SessionLayout::of(entry)),
+                        _ => state.layouts.split(session_id(1), Split::Right, entry),
+                    }
+                }
+                state.attached.insert(session_id(1));
+            }
+            self.app.reconcile();
+        }
+
+        /// Waits up to five seconds for pane `id`'s client to exit.
+        fn exit_of(&self, id: PaneId) -> Option<LoopEvent> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match self
+                    .rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                {
+                    Ok(LoopEvent::Pane(pane, PaneEvent::Exited)) if pane == id => {
+                        return Some(LoopEvent::Pane(pane, PaneEvent::Exited));
+                    }
+                    Ok(_) => {}
+                    Err(_) => return None,
+                }
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    fn exited_client_with_unlistable_zmx_keeps_its_pane() -> io::Result<()> {
+        // Given zmx that can't list, and pane 1 whose client exits at once.
+        let mut test = loop_app(FakeZmx::failing("boom"), exits_at_once)?;
+        test.attach(&[pane(1)]);
+
+        // When its exit arrives and the loop goes round.
+        let event = test
+            .exit_of(pane(1))
+            .ok_or_else(|| io::Error::other("pane 1's client didn't exit within 5 s"))?;
+        test.app.handle(event, &mut io::sink())?;
+        test.app.reconcile();
+
+        // Then the pane is still in its layout.
+        assert!(
+            test.state.read().layouts.pane_ids().contains(&pane(1)),
+            "an exit zmx can't explain keeps the pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn pane_closed_in_its_layout_is_killed_once() -> io::Result<()> {
+        // Given zmx listing nothing, and running panes 1 and 2.
+        let mut test = loop_app(FakeZmx::listing(""), keeps_running)?;
+        test.attach(&[pane(1), pane(2)]);
+
+        // When pane 2 closes in its layout and the loop goes round twice.
+        test.state.write().layouts.close_pane(pane(2));
+        test.app.reconcile();
+        test.app.reconcile();
+
+        // Then its zmx session is killed once.
+        assert_eq!(
+            test.zmx.killed(),
+            [pane(2).zmx_name()],
+            "a closed pane's session is killed once"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn closed_broken_pane_is_killed() -> io::Result<()> {
+        // Given running panes 1 and 2, and pane 2 stopped showing after an error.
+        let mut test = loop_app(FakeZmx::listing(""), keeps_running)?;
+        test.attach(&[pane(1), pane(2)]);
+        test.app
+            .handle(LoopEvent::Pane(pane(2), PaneEvent::Broken), &mut io::sink())?;
+
+        // When pane 2 closes in its layout and the loop goes round.
+        test.state.write().layouts.close_pane(pane(2));
+        test.app.reconcile();
+
+        // Then its zmx session is killed.
+        assert_eq!(
+            test.zmx.killed(),
+            [pane(2).zmx_name()],
+            "a closed broken pane's session is killed"
+        );
+        Ok(())
     }
 }

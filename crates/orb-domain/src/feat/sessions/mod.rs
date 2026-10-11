@@ -17,5 +17,7 @@ pub mod sessions_actor;
 pub mod state;
 pub mod store;
 pub mod template;
+#[cfg(test)]
+pub(crate) mod test_ids;
 pub mod transcript;
 pub mod validator;

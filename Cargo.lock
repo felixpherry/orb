@@ -1450,6 +1450,7 @@ dependencies = [
  "ratatui-which-key",
  "rstest",
  "tempfile",
+ "tokio",
  "unicode-segmentation",
  "wherror",
 ]
