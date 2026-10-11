@@ -58,7 +58,7 @@ pub enum NavDirection {
 
 impl NavDirection {
     /// The direction facing the other way.
-    fn opposite(self) -> Self {
+    pub(super) fn opposite(self) -> Self {
         match self {
             Self::Left => Self::Right,
             Self::Right => Self::Left,

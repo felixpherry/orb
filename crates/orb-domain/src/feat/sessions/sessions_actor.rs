@@ -1361,6 +1361,7 @@ impl SessionsActor {
             created_at: now,
             dir: dir.to_owned(),
             active_tab: 0,
+            floats_hand_changed: false,
             pinned_at: None,
             settled_override: None,
             settled_at: None,
@@ -2187,10 +2188,11 @@ impl SessionsActor {
                             pinned: float.pinned,
                         })
                         .collect();
-                    (tabs, floats, layout.active(), names)
+                    let hand_changed = layout.floats().hand_changed();
+                    (tabs, floats, hand_changed, layout.active(), names)
                 })
         };
-        let Some((tabs, floats, active, names)) = saved else {
+        let Some((tabs, floats, hand_changed, active, names)) = saved else {
             let deleting = self.state.read().sessions.deleting.contains(&session);
             if self.sessions.contains_key(&session) && !deleting {
                 self.add_pane(session, Placement::Tab);
@@ -2199,7 +2201,7 @@ impl SessionsActor {
         };
         match self
             .store
-            .save_layout(session, active, &tabs, &floats, &names)
+            .save_layout(session, active, &tabs, &floats, hand_changed, &names)
         {
             Ok(dropped) => {
                 for pane in dropped {
@@ -2796,7 +2798,7 @@ struct RestoredLayouts {
 
 /// Every saved session's layout: its tabs by position, each in its saved swap
 /// layout with its mark, focused on its saved pane (else its first), showing
-/// its saved tab, its floats hidden in their saved places, with where each
+/// its saved tab, its floats hidden in their saved places with their mark, with where each
 /// pane runs. A tab whose tree doesn't read is left out, and so is a session
 /// left with no tab. Nothing comes back when the store can't be read.
 fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> RestoredLayouts {
@@ -2847,6 +2849,7 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
                         pinned: row.pinned,
                     })
                     .collect(),
+                session.floats_hand_changed,
             );
             let panes = saved
                 .panes
@@ -2992,6 +2995,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use error_stack::{Report, ResultExt};
+    use ratatui::layout::Rect;
 
     use super::{
         FAST_POLL, Placement, SLOW_POLL, SessionsActor, SessionsActorDeps, notice_kind, now_ms,
@@ -3010,7 +3014,7 @@ mod tests {
     use crate::feat::jumps::state::JumpList;
     use crate::feat::layout::floats::FloatRect;
     use crate::feat::layout::state::{SessionLayout, test_entry};
-    use crate::feat::layout::tree::{Split, SwapLayout};
+    use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
     use crate::feat::sessions::state::{
         FolderKind, Notice, NoticeKind, PaneId, PaneLaunch, Project, ProjectId, ProjectKind,
         Session, SessionId, SessionKind, SidebarItem, Thread, ThreadId, ThreadStatus,
@@ -3721,6 +3725,7 @@ mod tests {
             1,
             &[tab(0, inserted.pane), tab(1, second)],
             &[],
+            false,
             &[(inserted.pane, None), (second, None)],
         )?;
         let host = listing(Vec::new());
@@ -3756,7 +3761,14 @@ mod tests {
             swap_layout: SwapLayout::Horizontal,
             hand_changed: true,
         };
-        store.save_layout(inserted.session, 0, &[tab], &[], &[(inserted.pane, None)])?;
+        store.save_layout(
+            inserted.session,
+            0,
+            &[tab],
+            &[],
+            false,
+            &[(inserted.pane, None)],
+        )?;
         let host = listing(Vec::new());
 
         // When restoring.
@@ -3809,6 +3821,7 @@ mod tests {
             0,
             &[tab],
             &[row],
+            false,
             &[(inserted.pane, None), (float, None)],
         )?;
         let host = listing(Vec::new());
@@ -4722,6 +4735,84 @@ mod tests {
             Some((1, false)),
             "a session left with only floats should get a new shell tab"
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn save_layout_writes_the_floats_mark() -> Result<(), Report<StoreError>> {
+        // Given a thread's session with a float moved by hand.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().layouts.fit_to(Rect::new(0, 0, 80, 24));
+        actor.add_pane(inserted.session, Placement::Float);
+        state
+            .write()
+            .layouts
+            .move_pane(inserted.session, NavDirection::Right);
+
+        // When saving the layout.
+        actor.save_layout(inserted.session);
+
+        // Then the session row is marked.
+        let marked = actor
+            .store
+            .layouts()?
+            .sessions
+            .iter()
+            .any(|row| row.id == inserted.session && row.floats_hand_changed);
+        assert!(marked, "saving should write the floats' mark");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn restore_brings_back_the_floats_mark() -> Result<(), Report<StoreError>> {
+        // Given a thread's session saved with a float and the floats marked.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let float = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let tab = TabRow {
+            session_id: inserted.session,
+            position: 0,
+            name: None,
+            layout: format!("{{\"pane\":{}}}", inserted.pane.0),
+            focus_pane: Some(inserted.pane),
+            swap_layout: SwapLayout::Vertical,
+            hand_changed: false,
+        };
+        let row = FloatRow {
+            session_id: inserted.session,
+            position: 0,
+            pane_id: float,
+            rect: FloatRect {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+            },
+            pinned: false,
+        };
+        store.save_layout(
+            inserted.session,
+            0,
+            &[tab],
+            &[row],
+            true,
+            &[(inserted.pane, None), (float, None)],
+        )?;
+        let host = listing(Vec::new());
+
+        // When restoring.
+        let (_actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // Then the floats come back marked.
+        let marked = state
+            .read()
+            .layouts
+            .get(inserted.session)
+            .is_some_and(|layout| layout.floats().hand_changed());
+        assert!(marked, "restored floats should keep their mark");
         Ok(())
     }
 

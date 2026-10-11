@@ -925,9 +925,14 @@ impl Layouts {
     /// `Cmd +` (`grow`) or `Cmd -` on the shown tab's focused pane: see
     /// [`Tab::grow`] and [`Tab::shrink`]. Each undoes the other first. Whether
     /// the tree changed, which marks the tab changed by hand; a zoom or
-    /// unzoom alone isn't a change.
+    /// unzoom alone isn't a change. While a float has the keys, every side of
+    /// the focused float moves one step of 5% of the body instead, marking
+    /// the floats changed by hand.
     pub fn resize_focused(&mut self, owner: SessionId, grow: bool) -> bool {
         let body = self.body;
+        if let Some(floats) = self.focused_floats(owner) {
+            return floats.resize(body, grow);
+        }
         self.tab_mut(owner).is_some_and(|tab| {
             let changed = if grow {
                 tab.grow(body)
@@ -942,9 +947,13 @@ impl Layouts {
     /// Resize mode's step on `owner`'s shown tab: see
     /// [`TileLayout::resize_side`]. A zoomed tab, or one with no body yet,
     /// doesn't change. Whether the tree changed, which marks the tab changed
-    /// by hand.
+    /// by hand. While a float has the keys, the focused float's edge moves
+    /// one step of 5% of the body instead, marking the floats changed by hand.
     pub fn resize_side(&mut self, owner: SessionId, dir: NavDirection, grow: bool) -> bool {
         let body = self.body;
+        if let Some(floats) = self.focused_floats(owner) {
+            return floats.resize_side(body, dir, grow);
+        }
         self.tab_mut(owner).is_some_and(|tab| {
             let changed = !tab.zoomed && !body.is_empty() && tab.tree.resize_side(body, dir, grow);
             tab.hand_changed |= changed;
@@ -955,16 +964,25 @@ impl Layouts {
     /// Move mode's step on `owner`'s shown tab: see
     /// [`TileLayout::swap_toward`]. Never changes tab. A zoomed tab, or one
     /// with no body yet, doesn't change. Whether a pane moved; the tab's
-    /// shape is unchanged, so it isn't marked changed by hand.
+    /// shape is unchanged, so it isn't marked changed by hand. While a float
+    /// has the keys, it moves the focused float one step of 5% of the body
+    /// instead, marking the floats changed by hand.
     pub fn move_pane(&mut self, owner: SessionId, dir: NavDirection) -> bool {
         let body = self.body;
+        if let Some(floats) = self.focused_floats(owner) {
+            return floats.shift(body, dir);
+        }
         self.tab_mut(owner)
             .is_some_and(|tab| !tab.zoomed && !body.is_empty() && tab.tree.swap_toward(body, dir))
     }
 
     /// Move mode's next/previous step: see [`TileLayout::swap_in_order`]. A
     /// zoomed tab doesn't change. Whether a pane moved; not changed by hand.
+    /// While a float has the keys, it rotates which float is on top instead.
     pub fn move_pane_in_order(&mut self, owner: SessionId, forward: bool) -> bool {
+        if let Some(floats) = self.focused_floats(owner) {
+            return floats.rotate(forward);
+        }
         self.tab_mut(owner)
             .is_some_and(|tab| !tab.zoomed && tab.tree.swap_in_order(forward))
     }
@@ -1058,6 +1076,14 @@ impl Layouts {
 
     fn tab_mut(&mut self, owner: SessionId) -> Option<&mut Tab> {
         self.sessions.get_mut(&owner)?.tab_mut()
+    }
+
+    /// `owner`'s floats while one of them has the keys.
+    fn focused_floats(&mut self, owner: SessionId) -> Option<&mut Floats> {
+        self.sessions
+            .get_mut(&owner)
+            .filter(|layout| layout.float_focused())
+            .map(|layout| &mut layout.floats)
     }
 
     /// Drops `owner`'s layout when it has no tabs and no floats left.
@@ -1269,16 +1295,19 @@ mod tests {
     #[rstest::rstest]
     fn restore_keeps_float_entries() {
         // Given a saved tab of pane 7 and a saved float of pane 20.
-        let floats = Floats::restore(vec![Float {
-            pane: PaneId(20),
-            rect: FloatRect {
-                x: 0.25,
-                y: 0.25,
-                width: 0.5,
-                height: 0.5,
-            },
-            pinned: false,
-        }]);
+        let floats = Floats::restore(
+            vec![Float {
+                pane: PaneId(20),
+                rect: FloatRect {
+                    x: 0.25,
+                    y: 0.25,
+                    width: 0.5,
+                    height: 0.5,
+                },
+                pinned: false,
+            }],
+            false,
+        );
 
         // When restoring the session.
         let mut layouts = Layouts::default();
@@ -3479,7 +3508,7 @@ mod tests {
             },
             pinned,
         };
-        let floats = Floats::restore(vec![float(20, false), float(21, true)]);
+        let floats = Floats::restore(vec![float(20, false), float(21, true)], false);
 
         // When restoring the session.
         let mut layouts = Layouts::default();
@@ -3561,5 +3590,242 @@ mod tests {
 
         // Then nothing changes.
         assert!(!changed, "a hidden float can't be pinned");
+    }
+
+    /// The top float's frame in the tests' body.
+    fn top_frame(layouts: &Layouts) -> Option<Rect> {
+        layouts
+            .get(OWNER)?
+            .floats()
+            .visible(BODY)
+            .last()
+            .map(|(_, frame, _)| frame)
+    }
+
+    /// Whether session 1's floats are marked changed by hand.
+    fn floats_marked(layouts: &Layouts) -> bool {
+        layouts
+            .get(OWNER)
+            .is_some_and(|layout| layout.floats().hand_changed())
+    }
+
+    /// `with_float` with the float moved by each direction and step count in turn.
+    fn with_float_moved(moves: &[(NavDirection, usize)]) -> Layouts {
+        let mut layouts = with_float();
+        for &(dir, times) in moves {
+            for _ in 0..times {
+                layouts.move_pane(OWNER, dir);
+            }
+        }
+        layouts
+    }
+
+    #[rstest::rstest]
+    fn resize_mode_grow_pushes_a_float_edge_out_one_step() {
+        // Given a float at (20, 6), 40×12, on an 80×24 body.
+        let mut layouts = with_float();
+
+        // When growing its right edge.
+        layouts.resize_side(OWNER, NavDirection::Right, true);
+
+        // Then the right edge moves out 4 columns.
+        assert_eq!(
+            top_frame(&layouts),
+            Some(Rect::new(20, 6, 44, 12)),
+            "the right edge should move out one step"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_mode_grow_at_the_body_edge_pulls_the_other_edge_in() {
+        // Given a float against the body's right edge, at (40, 6), 40×12.
+        let mut layouts = with_float_moved(&[(NavDirection::Right, 5)]);
+
+        // When growing its right edge.
+        layouts.resize_side(OWNER, NavDirection::Right, true);
+
+        // Then the left edge is pulled in 4 columns instead.
+        assert_eq!(
+            top_frame(&layouts),
+            Some(Rect::new(44, 6, 36, 12)),
+            "the left edge should be pulled in one step"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_mode_shrink_stops_at_the_smallest_float() {
+        // Given a float shrunk to the smallest size, 10×4.
+        let mut layouts = with_float();
+        for _ in 0..4 {
+            layouts.resize_focused(OWNER, false);
+        }
+
+        // When shrinking its left edge.
+        let changed = layouts.resize_side(OWNER, NavDirection::Left, false);
+
+        // Then nothing changes.
+        assert!(!changed, "the smallest float should not shrink further");
+    }
+
+    #[rstest::rstest]
+    fn move_mode_shifts_a_float_one_step() {
+        // Given a float at (20, 6), 40×12.
+        let mut layouts = with_float();
+
+        // When moving it right.
+        layouts.move_pane(OWNER, NavDirection::Right);
+
+        // Then it moves 4 columns right.
+        assert_eq!(
+            top_frame(&layouts),
+            Some(Rect::new(24, 6, 40, 12)),
+            "the float should move one step right"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_mode_at_the_left_edge_leaves_the_float() {
+        // Given a float against the body's left edge.
+        let mut layouts = with_float_moved(&[(NavDirection::Left, 5)]);
+
+        // When moving it left.
+        let changed = layouts.move_pane(OWNER, NavDirection::Left);
+
+        // Then nothing changes.
+        assert!(!changed, "a float at the left edge should not move left");
+    }
+
+    #[rstest::rstest]
+    fn grow_focused_moves_each_side_of_a_float_out() {
+        // Given a float at (20, 6), 40×12.
+        let mut layouts = with_float();
+
+        // When growing it.
+        layouts.resize_focused(OWNER, true);
+
+        // Then each side moves out one step.
+        assert_eq!(
+            top_frame(&layouts),
+            Some(Rect::new(16, 5, 48, 14)),
+            "every side should move out one step"
+        );
+    }
+
+    #[rstest::rstest]
+    fn grow_focused_keeps_a_float_inside_the_body() {
+        // Given a float in the body's top-left corner.
+        let mut layouts = with_float_moved(&[(NavDirection::Left, 5), (NavDirection::Up, 6)]);
+
+        // When growing it.
+        layouts.resize_focused(OWNER, true);
+
+        // Then only the right and bottom edges move.
+        assert_eq!(
+            top_frame(&layouts),
+            Some(Rect::new(0, 0, 44, 13)),
+            "the float should stay inside the body"
+        );
+    }
+
+    #[rstest::rstest]
+    fn shrink_focused_moves_each_side_of_a_float_in() {
+        // Given a float at (20, 6), 40×12.
+        let mut layouts = with_float();
+
+        // When shrinking it.
+        layouts.resize_focused(OWNER, false);
+
+        // Then each side moves in one step.
+        assert_eq!(
+            top_frame(&layouts),
+            Some(Rect::new(24, 7, 32, 10)),
+            "every side should move in one step"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_mode_next_puts_the_bottom_float_on_top() {
+        // Given floats 20 and 21, 21 on top.
+        let mut layouts = split_with_two_floats();
+
+        // When stepping to the next float in move mode.
+        layouts.move_pane_in_order(OWNER, true);
+
+        // Then float 20 is on top with the keys.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(20)),
+            "the bottom float should come to the top"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_mode_next_does_not_mark_the_floats() {
+        // Given floats 20 and 21, 21 on top.
+        let mut layouts = split_with_two_floats();
+
+        // When stepping to the next float in move mode.
+        layouts.move_pane_in_order(OWNER, true);
+
+        // Then the floats are not marked changed by hand.
+        assert!(
+            !floats_marked(&layouts),
+            "rotating the floats is not a change by hand"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::move_mode(|l: &mut Layouts| { l.move_pane(OWNER, NavDirection::Right); })]
+    #[case::resize_mode(|l: &mut Layouts| { l.resize_side(OWNER, NavDirection::Right, true); })]
+    #[case::grow(|l: &mut Layouts| { l.resize_focused(OWNER, true); })]
+    fn changing_a_float_marks_the_floats(#[case] change: fn(&mut Layouts)) {
+        // Given a shown float.
+        let mut layouts = with_float();
+
+        // When moving or resizing it.
+        change(&mut layouts);
+
+        // Then the floats are marked changed by hand.
+        assert!(
+            floats_marked(&layouts),
+            "moving or resizing a float marks the floats"
+        );
+    }
+
+    #[rstest::rstest]
+    fn resize_mode_on_a_float_leaves_the_tab_alone() {
+        // Given two side-by-side panes under two shown floats.
+        let mut layouts = split_with_two_floats();
+        let before = layouts
+            .get(OWNER)
+            .and_then(SessionLayout::active_tab)
+            .map(Tab::layout_json);
+
+        // When growing the right edge in resize mode.
+        layouts.resize_side(OWNER, NavDirection::Right, true);
+
+        // Then the tab's tree is unchanged.
+        let after = layouts
+            .get(OWNER)
+            .and_then(SessionLayout::active_tab)
+            .map(Tab::layout_json);
+        assert_eq!(after, before, "resizing a float leaves the tab alone");
+    }
+
+    #[rstest::rstest]
+    fn resize_mode_with_floats_hidden_resizes_the_tab() {
+        // Given two side-by-side panes under two hidden floats.
+        let mut layouts = split_with_two_floats();
+        layouts.toggle_floats(OWNER);
+
+        // When growing the left edge in resize mode.
+        let changed = layouts.resize_side(OWNER, NavDirection::Left, true);
+
+        // Then the tab resizes and the floats stay unmarked.
+        assert_eq!(
+            (changed, floats_marked(&layouts)),
+            (true, false),
+            "hidden floats leave resize mode to the tab"
+        );
     }
 }

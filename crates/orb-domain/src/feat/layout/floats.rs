@@ -5,6 +5,7 @@
 //! body, centred, moved two cells down and right past any float already
 //! there. The top float has the focus while the floats are shown. A pinned
 //! float stays drawn while the floats are hidden, but never has the focus then.
+//! Moving or resizing a float marks the floats changed by hand.
 
 use ratatui::layout::Rect;
 
@@ -80,15 +81,23 @@ pub struct Float {
 pub struct Floats {
     panes: Vec<Float>,
     shown: bool,
+    /// Moved or resized by hand since the floats were last laid out.
+    hand_changed: bool,
 }
 
 impl Floats {
-    /// Saved floats, bottom first, hidden.
-    pub fn restore(panes: Vec<Float>) -> Self {
+    /// Saved floats, bottom first, hidden, and whether they were changed by hand.
+    pub fn restore(panes: Vec<Float>, hand_changed: bool) -> Self {
         Self {
             panes,
             shown: false,
+            hand_changed,
         }
+    }
+
+    /// Whether a float was moved or resized by hand since the floats were last laid out.
+    pub fn hand_changed(&self) -> bool {
+        self.hand_changed
     }
 
     /// Every float, bottom first.
@@ -195,6 +204,73 @@ impl Floats {
         }
     }
 
+    /// Puts what `edit` makes of the top float's frame in `body` back as its
+    /// place, while shown; a change marks the floats changed by hand. Whether it changed.
+    fn edit_top<F>(&mut self, body: Rect, edit: F) -> bool
+    where
+        F: FnOnce(Rect) -> Rect,
+    {
+        if !self.shown || body.is_empty() {
+            return false;
+        }
+        let Some(top) = self.panes.last_mut() else {
+            return false;
+        };
+        let before = top.rect.to_cells(body);
+        let after = edit(before);
+        if after == before {
+            return false;
+        }
+        top.rect = FloatRect::from_cells(after, body);
+        self.hand_changed = true;
+        true
+    }
+
+    /// `Cmd +` (`grow`) or `Cmd -`: every side of the top float one step out
+    /// or in, stopping at the body and the smallest float size. Whether it changed.
+    pub fn resize(&mut self, body: Rect, grow: bool) -> bool {
+        use NavDirection::{Down, Left, Right, Up};
+        self.edit_top(body, |frame| {
+            [Left, Right, Up, Down]
+                .into_iter()
+                .fold(frame, |frame, dir| push_edge(frame, body, dir, grow))
+        })
+    }
+
+    /// Resize mode: the top float's `dir` edge one step out (`grow`) or in. A
+    /// grow at the body's edge pulls the opposite edge in instead; a shrink at
+    /// the smallest float size changes nothing. Whether it changed.
+    pub fn resize_side(&mut self, body: Rect, dir: NavDirection, grow: bool) -> bool {
+        self.edit_top(body, |frame| {
+            let pushed = push_edge(frame, body, dir, grow);
+            if grow && pushed == frame {
+                push_edge(frame, body, dir.opposite(), false)
+            } else {
+                pushed
+            }
+        })
+    }
+
+    /// Move mode: the top float one step `dir`, stopping at the body's edge. Whether it moved.
+    pub fn shift(&mut self, body: Rect, dir: NavDirection) -> bool {
+        self.edit_top(body, |frame| shift_frame(frame, body, dir))
+    }
+
+    /// Move mode's next (`forward`: the bottom float goes on top) or previous
+    /// (the top float goes to the bottom), while shown with two or more
+    /// floats. Not a change by hand. Whether the order changed.
+    pub fn rotate(&mut self, forward: bool) -> bool {
+        if !self.shown || self.panes.len() < 2 {
+            return false;
+        }
+        if forward {
+            self.panes.rotate_left(1);
+        } else {
+            self.panes.rotate_right(1);
+        }
+        true
+    }
+
     /// The float `nav` of the top one in `body`: among floats whose top-left
     /// corner lies that way and whose rows (left/right) or columns (up/down)
     /// overlap the top float's, the nearest one.
@@ -275,6 +351,58 @@ fn staggered_spot(body: Rect, taken: &[Rect]) -> Rect {
                 .find(|spot| !taken.contains(spot))
         })
         .unwrap_or(body)
+}
+
+/// One move or resize step, as a share of the body.
+const STEP: f32 = 0.05;
+
+/// One step across and down `body`, in whole cells, at least one each.
+fn steps(body: Rect) -> (u16, u16) {
+    let step = |len: u16| ((f32::from(len) * STEP).round() as u16).max(1);
+    (step(body.width), step(body.height))
+}
+
+/// `frame` with its `dir` edge one step out (`out`, stopping at the body's
+/// edge) or in (stopping at the smallest float size).
+fn push_edge(frame: Rect, body: Rect, dir: NavDirection, out: bool) -> Rect {
+    let (sx, sy) = steps(body);
+    let (min_w, min_h) = (MIN_WIDTH.min(body.width), MIN_HEIGHT.min(body.height));
+    let (mut left, mut top, mut right, mut bottom) =
+        (frame.x, frame.y, frame.right(), frame.bottom());
+    match (dir, out) {
+        (NavDirection::Left, true) => left = left.saturating_sub(sx).max(body.x),
+        (NavDirection::Left, false) => left = (left + sx).min(right - min_w),
+        (NavDirection::Right, true) => right = (right + sx).min(body.right()),
+        (NavDirection::Right, false) => right = right.saturating_sub(sx).max(left + min_w),
+        (NavDirection::Up, true) => top = top.saturating_sub(sy).max(body.y),
+        (NavDirection::Up, false) => top = (top + sy).min(bottom - min_h),
+        (NavDirection::Down, true) => bottom = (bottom + sy).min(body.bottom()),
+        (NavDirection::Down, false) => bottom = bottom.saturating_sub(sy).max(top + min_h),
+    }
+    Rect::new(left, top, right - left, bottom - top)
+}
+
+/// `frame` moved one step `dir`, stopping at the body's edge.
+fn shift_frame(frame: Rect, body: Rect, dir: NavDirection) -> Rect {
+    let (sx, sy) = steps(body);
+    match dir {
+        NavDirection::Left => Rect {
+            x: frame.x.saturating_sub(sx).max(body.x),
+            ..frame
+        },
+        NavDirection::Right => Rect {
+            x: (frame.x + sx).min(body.right() - frame.width),
+            ..frame
+        },
+        NavDirection::Up => Rect {
+            y: frame.y.saturating_sub(sy).max(body.y),
+            ..frame
+        },
+        NavDirection::Down => Rect {
+            y: (frame.y + sy).min(body.bottom() - frame.height),
+            ..frame
+        },
+    }
 }
 
 #[cfg(test)]
