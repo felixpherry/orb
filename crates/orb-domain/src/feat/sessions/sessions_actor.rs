@@ -55,7 +55,8 @@
 //! in any of its agent panes is its latest activity, a turn underway
 //! un-settles it, and a session idle for three days settles itself unless it
 //! is pinned, was just un-settled, or is the one the sidebar's cursor is on.
-//! Settling a session stops nothing.
+//! Settling a session kills every pane's program and keeps its layout and
+//! resume commands.
 //!
 //! It makes Research and Learn sessions: each in a new folder under orb's
 //! own project for its kind, added when first needed, copied from the user's
@@ -99,7 +100,7 @@ use super::store::{
 use super::template;
 use super::validator::folder_exists;
 use crate::command::Workspace;
-use crate::common::{Services, State, Wake};
+use crate::common::{Log, Services, State, Wake};
 use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
 use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{hex, hex_branch, is_orb_worktree, new_worktree_path, slug};
@@ -737,7 +738,15 @@ impl SessionsActor {
             wake,
             integration_missing,
         } = deps;
-        let _ = fs::create_dir_all(&incognito_root);
+        if let Err(error) = fs::create_dir_all(&incognito_root) {
+            services.log.error(
+                &format!(
+                    "couldn't make the incognito folder {}",
+                    incognito_root.display()
+                ),
+                &error,
+            );
+        }
         let added = store.add_project(
             &incognito_root,
             "Incognito",
@@ -756,12 +765,18 @@ impl SessionsActor {
             Ok((projects, rows)) => (
                 projects,
                 rows,
-                added.err().map(|_report| SAVE_FAILED.to_owned()),
+                added
+                    .err()
+                    .map(|report| save_failed(&services.log, &report)),
             ),
-            Err(_) => (
+            Err(report) => (
                 Vec::new(),
                 Vec::new(),
-                Some("couldn't load orb's saved sessions".to_owned()),
+                Some(failed(
+                    &services.log,
+                    "couldn't load orb's saved sessions",
+                    &report,
+                )),
             ),
         };
         let error = error.or(layouts_error);
@@ -857,7 +872,7 @@ impl SessionsActor {
     /// Applies the agents' reports written since the last poll, oldest first.
     /// A failed save shows on the mode line.
     fn follow_pane_files(&mut self) {
-        let mut failed = false;
+        let mut first_error = None;
         for (pane, report) in self.pane_files.changed() {
             self.pane_reports.insert(
                 pane,
@@ -866,9 +881,14 @@ impl SessionsActor {
                     at: report.at,
                 },
             );
-            failed |= self.follow_report(pane, &report).is_err();
+            if let Err(error) = self.follow_report(pane, &report) {
+                first_error.get_or_insert(error);
+            }
         }
-        if failed {
+        if let Some(error) = first_error {
+            self.services
+                .log
+                .error_on_change("poll: pane report", SAVE_FAILED, &error);
             self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
             (self.wake)();
         }
@@ -1096,7 +1116,21 @@ impl SessionsActor {
             .map(|(_, zmx)| zmx.dir.as_path())
             .collect::<HashSet<&Path>>()
             .into_iter()
-            .map(|dir| (dir, self.services.zmx.list(dir).ok()))
+            .map(|dir| {
+                let listed = self
+                    .services
+                    .zmx
+                    .list(dir)
+                    .inspect_err(|report| {
+                        self.services.log.error_on_change(
+                            &format!("poll: zmx list {}", dir.display()),
+                            "couldn't list zmx sessions",
+                            report,
+                        );
+                    })
+                    .ok();
+                (dir, listed)
+            })
             .collect();
         let sessions: HashMap<PaneId, Option<ZmxEntry>> = bound
             .iter()
@@ -1163,7 +1197,12 @@ impl SessionsActor {
                     .map(|pane| pane.session_id)
                     == selected;
             follow_activity(row, status, was_in_progress, in_selected, now);
-            if *row != before && self.store.save_thread(row).is_err() {
+            if *row != before
+                && let Err(report) = self.store.save_thread(row)
+            {
+                self.services
+                    .log
+                    .error_on_change("poll: thread save", SAVE_FAILED, &report);
                 error = Some(SAVE_FAILED.to_owned());
             }
             statuses.push(Some(status));
@@ -1259,7 +1298,10 @@ impl SessionsActor {
                 now,
             );
             if *session != before {
-                if self.store.save_session(session).is_err() {
+                if let Err(report) = self.store.save_session(session) {
+                    self.services
+                        .log
+                        .error_on_change("poll: session save", SAVE_FAILED, &report);
                     *error = Some(SAVE_FAILED.to_owned());
                 }
                 changed.push(session.id);
@@ -1276,7 +1318,7 @@ impl SessionsActor {
                 }
             }
             for &id in &auto_settled {
-                self.kill_panes(id);
+                self.kill_panes(id, "session settled itself after 3 idle days");
             }
         }
         changed
@@ -1301,7 +1343,7 @@ impl SessionsActor {
                 Err(report) => {
                     sessions.error = Some(format!(
                         "Git initialization failed: {}",
-                        git_reason(&report)
+                        git_failed(&self.services.log, "git init failed", &report)
                     ));
                 }
             }
@@ -1335,8 +1377,10 @@ impl SessionsActor {
         let Some((root, kind)) = self.project_of(id) else {
             return self.end_start(Err("the project is gone".to_owned()));
         };
-        if kind == ProjectKind::Incognito && fs::create_dir_all(&root).is_err() {
-            return self.end_start(Err(FOLDER_UNMADE.to_owned()));
+        if kind == ProjectKind::Incognito
+            && let Err(error) = fs::create_dir_all(&root)
+        {
+            return self.end_start(Err(failed(&self.services.log, FOLDER_UNMADE, &error)));
         }
         let (dir, made) = match self.reach(&root, workspace, name.as_deref()) {
             Ok(reached) => reached,
@@ -1347,7 +1391,7 @@ impl SessionsActor {
         if result.is_err()
             && let Some(made) = &made
         {
-            self.remove_made(made);
+            self.remove_made(made, "new session couldn't be saved");
         }
         self.end_start(result);
     }
@@ -1367,7 +1411,7 @@ impl SessionsActor {
         let (id, pane) = self
             .store
             .insert_session(project, kind, dir, branch.as_deref(), name.as_deref(), now)
-            .map_err(|_report| NEW_SESSION_UNSAVED.to_owned())?;
+            .map_err(|report| failed(&self.services.log, NEW_SESSION_UNSAVED, &report))?;
         let row = SessionRow {
             id,
             project_id: project,
@@ -1447,7 +1491,9 @@ impl SessionsActor {
                     .filter(|branch| !self.services.git.branch_exists(root, branch));
                 self.add_worktree(root, Some(&base), branch.as_deref())
                     .map(|made| (made.path.clone(), Some(made)))
-                    .map_err(|report| git_reason(&report))
+                    .map_err(|report| {
+                        git_failed(&self.services.log, "couldn't make the worktree", &report)
+                    })
             }
         }
     }
@@ -1500,17 +1546,13 @@ impl SessionsActor {
         }
         let (dir, made) = self.reach(&root, to, name.as_deref())?;
         let branch = self.branch_of(&dir, made.as_ref());
-        if self
-            .store
-            .move_session(id, &dir, branch.as_deref())
-            .is_err()
-        {
+        if let Err(report) = self.store.move_session(id, &dir, branch.as_deref()) {
             if let Some(made) = &made {
-                self.remove_made(made);
+                self.remove_made(made, "workspace change couldn't be saved");
             }
-            return Err(SAVE_FAILED.to_owned());
+            return Err(save_failed(&self.services.log, &report));
         }
-        self.kill_panes(id);
+        self.kill_panes(id, "session moved to another workspace");
         let panes: Vec<PaneId> = self
             .panes
             .values()
@@ -1523,12 +1565,12 @@ impl SessionsActor {
             for row in self.rows.iter_mut().filter(|row| row.pane_id == Some(pane)) {
                 row.pane_id = None;
                 unbound.push(row.id);
-                if self.store.save_thread(row).is_err() {
-                    saved = Err(SAVE_FAILED.to_owned());
+                if let Err(report) = self.store.save_thread(row) {
+                    saved = Err(save_failed(&self.services.log, &report));
                 }
             }
-            if self.set_resume(pane, None).is_err() {
-                saved = Err(SAVE_FAILED.to_owned());
+            if let Err(report) = self.set_resume(pane, None) {
+                saved = Err(save_failed(&self.services.log, &report));
             }
             if let Some(row) = self.panes.get_mut(&pane) {
                 row.cwd.clone_from(&dir);
@@ -1574,10 +1616,11 @@ impl SessionsActor {
             return;
         }
         let git = &self.services.git;
-        if git.remove_worktree(root, old_dir, false).is_ok()
+        let why = "left behind by a workspace change";
+        if git.remove_worktree(root, old_dir, false, why).is_ok()
             && let Some(branch) = old_branch.or_else(|| hex_branch(&self.worktrees_root, old_dir))
         {
-            let _ = git.delete_branch(root, &branch, false);
+            git.delete_branch(root, &branch, false, why);
         }
     }
 
@@ -1628,10 +1671,13 @@ impl SessionsActor {
 
     /// Removes a worktree orb just made, and its branch, discarding anything
     /// in them.
-    fn remove_made(&self, made: &MadeWorktree) {
+    fn remove_made(&self, made: &MadeWorktree, why: &str) {
         let git = &self.services.git;
-        if git.remove_worktree(&made.repo, &made.path, true).is_ok() {
-            let _ = git.delete_branch(&made.repo, &made.branch, true);
+        if git
+            .remove_worktree(&made.repo, &made.path, true, why)
+            .is_ok()
+        {
+            git.delete_branch(&made.repo, &made.branch, true, why);
         }
     }
 
@@ -1682,7 +1728,13 @@ impl SessionsActor {
                     .map(|()| branch.clone())
             })
             .map(|branch| Some((cwd, branch)))
-            .map_err(|report| git_reason(&report))
+            .map_err(|report| {
+                git_failed(
+                    &self.services.log,
+                    "couldn't recreate the worktree",
+                    &report,
+                )
+            })
     }
 
     /// Session `id`'s project root, its directory, and the branches its
@@ -1720,7 +1772,7 @@ impl SessionsActor {
         } else {
             match self.services.git.checkout(cwd, git_ref) {
                 Ok(local) => self.show_branch(cwd, &local).map(|()| local),
-                Err(report) => Err(git_reason(&report)),
+                Err(report) => Err(git_failed(&self.services.log, "checkout failed", &report)),
             }
         };
         let (checked_out, error) = match result {
@@ -1769,7 +1821,8 @@ impl SessionsActor {
             }
             Err(report) => {
                 self.state.write().sessions.attach = Some(id);
-                self.end_start(Err(git_reason(&report)));
+                let shown = git_failed(&self.services.log, "checkout failed", &report);
+                self.end_start(Err(shown));
             }
         }
     }
@@ -1780,8 +1833,8 @@ impl SessionsActor {
         let mut app = self.state.write();
         for row in self.rows.iter_mut().filter(|row| row.cwd == cwd) {
             row.branch = Some(branch.to_owned());
-            if self.store.save_thread(row).is_err() {
-                saved = Err(SAVE_FAILED.to_owned());
+            if let Err(report) = self.store.save_thread(row) {
+                saved = Err(save_failed(&self.services.log, &report));
             }
             if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
                 let status = thread.status;
@@ -1790,8 +1843,8 @@ impl SessionsActor {
         }
         for row in self.sessions.values_mut().filter(|row| row.dir == cwd) {
             row.branch = Some(branch.to_owned());
-            if self.store.save_session(row).is_err() {
-                saved = Err(SAVE_FAILED.to_owned());
+            if let Err(report) = self.store.save_session(row) {
+                saved = Err(save_failed(&self.services.log, &report));
             }
             if let Some(shown) = app.sessions.sessions.iter_mut().find(|s| s.id == row.id) {
                 *shown = show_session(row);
@@ -1817,7 +1870,7 @@ impl SessionsActor {
         let added = if root.is_dir() {
             self.store
                 .add_project(&root, &title, ProjectKind::Normal, now)
-                .map_err(|_report| SAVE_FAILED.to_owned())
+                .map_err(|report| save_failed(&self.services.log, &report))
         } else {
             Err(format!("not a directory: {}", root.display()))
         };
@@ -1853,11 +1906,11 @@ impl SessionsActor {
         let (project_kind, kind_dir, title) = own_folder(kind);
         let root = self.orb_root.join(kind_dir);
         let project = fs::create_dir_all(&root)
-            .map_err(|_error| FOLDER_UNMADE.to_owned())
+            .map_err(|error| failed(&self.services.log, FOLDER_UNMADE, &error))
             .and_then(|()| {
                 self.store
                     .add_project(&root, title, project_kind, now)
-                    .map_err(|_report| SAVE_FAILED.to_owned())
+                    .map_err(|report| save_failed(&self.services.log, &report))
             });
         if let Ok(id) = project {
             let mut app = self.state.write();
@@ -1875,7 +1928,7 @@ impl SessionsActor {
             let dir = self.make_folder(kind, kind_dir, &root, name)?;
             let saved = self.save_session(id, session_kind(project_kind), &dir, None, None);
             if saved.is_err() {
-                let _ = fs::remove_dir_all(&dir);
+                remove_unstarted(&self.services.log, &dir);
             }
             saved.map(|()| id)
         });
@@ -1921,9 +1974,10 @@ impl SessionsActor {
         };
         match seeded.and_then(|()| template::copy(&template, &dir)) {
             Ok(()) => Ok(dir),
-            Err(_) => {
-                let _ = fs::remove_dir_all(&dir);
-                Err(FOLDER_UNMADE.to_owned())
+            Err(report) => {
+                let shown = failed(&self.services.log, FOLDER_UNMADE, &report);
+                remove_unstarted(&self.services.log, &dir);
+                Err(shown)
             }
         }
     }
@@ -1938,7 +1992,9 @@ impl SessionsActor {
             match (removed, sessions.projects.iter_mut().find(|p| p.id == id)) {
                 (Ok(()), Some(project)) => project.removed = true,
                 (Ok(()), None) => {}
-                (Err(_), _) => sessions.error = Some(SAVE_FAILED.to_owned()),
+                (Err(report), _) => {
+                    sessions.error = Some(save_failed(&self.services.log, &report));
+                }
             }
         }
         (self.wake)();
@@ -1984,7 +2040,7 @@ impl SessionsActor {
             return;
         }
         self.edit_session(id, settle_session_row);
-        self.kill_panes(id);
+        self.kill_panes(id, "session settled");
     }
 
     fn unsettle_session(&mut self, id: SessionId) {
@@ -2009,7 +2065,7 @@ impl SessionsActor {
     /// Claude transcripts, pi session files and worktrees stay. However it
     /// ends, the session is no longer hidden as being deleted.
     fn delete_session(&mut self, id: SessionId) {
-        self.kill_panes(id);
+        self.kill_panes(id, "session deleted");
         let cleared = self.clear_folder(id);
         let threads: Vec<ThreadId> = self
             .session_rows(id)
@@ -2023,9 +2079,31 @@ impl SessionsActor {
             .map(|pane| pane.id)
             .collect();
         let deleted = self.store.delete_session(id);
+        {
+            let what = format!(
+                "session {} with threads {:?} and panes {:?}",
+                id.0,
+                sorted_ids(threads.iter().map(|thread| thread.0)),
+                sorted_ids(panes.iter().map(|pane| pane.0))
+            );
+            match &deleted {
+                Ok(()) => self.services.log.line("delete", &format!("{what}: ok")),
+                Err(report) => self
+                    .services
+                    .log
+                    .error(&format!("delete {what}: failed"), report),
+            }
+        }
         self.rows.retain(|row| !threads.contains(&row.id));
         for pane in &panes {
-            let _ = fs::remove_file(self.pane_files.file(*pane));
+            if let Err(error) = fs::remove_file(self.pane_files.file(*pane))
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                self.services.log.error(
+                    &format!("couldn't remove pane {}'s report file", pane.0),
+                    &error,
+                );
+            }
             self.panes.remove(pane);
             self.pane_reports.remove(pane);
         }
@@ -2043,7 +2121,7 @@ impl SessionsActor {
             }
             sessions.deleting.remove(&id);
             match (deleted, cleared) {
-                (Err(_), _) => sessions.error = Some(SAVE_FAILED.to_owned()),
+                (Err(report), _) => sessions.error = Some(save_failed(&self.services.log, &report)),
                 (Ok(()), Err(error)) => sessions.error = Some(error),
                 (Ok(()), Ok(())) => {}
             }
@@ -2073,21 +2151,34 @@ impl SessionsActor {
             .map(|session| session.dir.as_path())
             .collect::<HashSet<&Path>>()
             .into_iter()
-            .map(|dir| (dir, self.services.zmx.list(dir).unwrap_or_default()))
+            .map(|dir| {
+                let listed = self
+                    .services
+                    .zmx
+                    .list(dir)
+                    .inspect_err(|report| {
+                        self.services.log.error(
+                            &format!("couldn't list zmx sessions on {}", dir.display()),
+                            report,
+                        );
+                    })
+                    .unwrap_or_default();
+                (dir, listed)
+            })
             .collect();
         for session in &zmx {
             let running = listed
                 .get(session.dir.as_path())
                 .is_some_and(|entries| entries.iter().any(|entry| entry.name == session.name));
             if running {
-                let _ = self.services.zmx.kill(session);
+                self.services.zmx.kill(session, "session settled");
             }
         }
     }
 
-    /// Runs `zmx kill` on each of session `id`'s panes in pane order,
-    /// ignoring failures.
-    fn kill_panes(&self, id: SessionId) {
+    /// Runs `zmx kill` on each of session `id`'s panes in pane order; each
+    /// kill is logged with `why`.
+    fn kill_panes(&self, id: SessionId, why: &str) {
         let mut rows: Vec<&PaneRow> = self
             .panes
             .values()
@@ -2095,10 +2186,9 @@ impl SessionsActor {
             .collect();
         rows.sort_by_key(|row| row.id.0);
         for row in rows {
-            let _ = self
-                .services
+            self.services
                 .zmx
-                .kill(&pane_entry(&self.services, &self.orb_root, row).zmx);
+                .kill(&pane_entry(&self.services, &self.orb_root, row).zmx, why);
         }
     }
 
@@ -2124,7 +2214,7 @@ impl SessionsActor {
         match fs::remove_dir_all(&row.dir) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(FOLDER_UNREMOVED.to_owned()),
+            Err(error) => Err(failed(&self.services.log, FOLDER_UNREMOVED, &error)),
         }
     }
 
@@ -2143,9 +2233,12 @@ impl SessionsActor {
         if first && !matches!(placement, Placement::Tab) {
             return;
         }
-        let Ok(id) = self.store.insert_pane(session, &dir) else {
-            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
-            return (self.wake)();
+        let id = match self.store.insert_pane(session, &dir) {
+            Ok(id) => id,
+            Err(report) => {
+                self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
+                return (self.wake)();
+            }
         };
         let row = PaneRow {
             id,
@@ -2253,14 +2346,18 @@ impl SessionsActor {
         {
             Ok(dropped) => {
                 for pane in dropped {
+                    self.services.log.line(
+                        "delete",
+                        &format!("pane row {} (session {})", pane.0, session.0),
+                    );
                     self.panes.remove(&pane);
                     for row in self.rows.iter_mut().filter(|row| row.pane_id == Some(pane)) {
                         row.pane_id = None;
                     }
                 }
             }
-            Err(_) => {
-                self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+            Err(report) => {
+                self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
                 (self.wake)();
             }
         }
@@ -2274,8 +2371,8 @@ impl SessionsActor {
                 project_filter: app.sessions.filter,
             }
         };
-        if self.store.save_ui(&ui).is_err() {
-            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+        if let Err(report) = self.store.save_ui(&ui) {
+            self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
             (self.wake)();
         }
     }
@@ -2283,8 +2380,8 @@ impl SessionsActor {
     /// Saves the jump list, showing why if it can't.
     fn save_jumps(&self) {
         let jumps = self.state.read().jumps.entries().to_vec();
-        if self.store.save_jumps(&jumps).is_err() {
-            self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+        if let Err(report) = self.store.save_jumps(&jumps) {
+            self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
             (self.wake)();
         }
     }
@@ -2303,8 +2400,8 @@ impl SessionsActor {
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
-            if saved.is_err() {
-                sessions.error = Some(SAVE_FAILED.to_owned());
+            if let Err(report) = &saved {
+                sessions.error = Some(save_failed(&self.services.log, report));
             }
             if let Some(thread) = thread_mut(sessions, id) {
                 let status = thread.status;
@@ -2328,8 +2425,8 @@ impl SessionsActor {
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
-            if saved.is_err() {
-                sessions.error = Some(SAVE_FAILED.to_owned());
+            if let Err(report) = &saved {
+                sessions.error = Some(save_failed(&self.services.log, report));
             }
             if let Some(shown) = sessions.sessions.iter_mut().find(|shown| shown.id == id) {
                 *shown = show_session(row);
@@ -2370,14 +2467,24 @@ impl SessionsActor {
             Ok(live) => marked
                 .into_iter()
                 .partition(|(_, short_id)| live.contains(short_id)),
-            Err(_) => (marked, Vec::new()),
+            Err(report) => {
+                self.services
+                    .log
+                    .error("couldn't list claude --bg sessions", &report);
+                (marked, Vec::new())
+            }
         };
         self.forget_migrated(&ended.iter().map(|(pane, _)| *pane).collect::<Vec<_>>());
         if !live.is_empty() {
             announce(live.len());
         }
         for (pane, short_id) in &live {
-            let _ = claude.stop_migrated(short_id).await;
+            if let Err(report) = claude.stop_migrated(short_id).await {
+                self.services.log.error(
+                    &format!("couldn't stop old claude --bg session {short_id}"),
+                    &report,
+                );
+            }
             self.forget_migrated(&[*pane]);
         }
     }
@@ -2395,8 +2502,8 @@ impl SessionsActor {
                     }
                 }
             }
-            Err(_) => {
-                self.state.write().sessions.error = Some(SAVE_FAILED.to_owned());
+            Err(report) => {
+                self.state.write().sessions.error = Some(save_failed(&self.services.log, &report));
                 (self.wake)();
             }
         }
@@ -2404,6 +2511,9 @@ impl SessionsActor {
 
     /// Shows a harness failure in the mode line.
     fn fail(&self, report: &Report<HarnessError>) {
+        self.services
+            .log
+            .error_on_change("poll: harness", "harness poll failed", report);
         self.state.write().sessions.error = Some(reason(report));
         (self.wake)();
     }
@@ -2728,6 +2838,58 @@ fn display_title(row: &ThreadRow) -> Option<String> {
         .or_else(|| row.title.clone())
 }
 
+/// Logs `error` behind the message `shown` and returns `shown` for the
+/// message box.
+fn failed<E>(log: &Log, shown: &str, error: &E) -> String
+where
+    E: std::fmt::Debug,
+{
+    log.error(shown, error);
+    shown.to_owned()
+}
+
+/// [`failed`] with the store's fixed message.
+fn save_failed<E>(log: &Log, error: &E) -> String
+where
+    E: std::fmt::Debug,
+{
+    failed(log, SAVE_FAILED, error)
+}
+
+/// Logs the git failure `report` behind `what` and returns git's reason for
+/// the message box.
+fn git_failed(log: &Log, what: &str, report: &Report<GitError>) -> String {
+    log.error(what, report);
+    git_reason(report)
+}
+
+/// `ids` sorted with repeats dropped, for a log line.
+fn sorted_ids<I>(ids: I) -> Vec<i64>
+where
+    I: Iterator<Item = i64>,
+{
+    let mut ids: Vec<i64> = ids.collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Removes `dir`, made for a session that then failed to start, logging why
+/// if it can't. A folder that was never made is fine.
+fn remove_unstarted(log: &Log, dir: &Path) {
+    if let Err(error) = fs::remove_dir_all(dir)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        log.error(
+            &format!(
+                "couldn't remove the folder {} after a failed start",
+                dir.display()
+            ),
+            &error,
+        );
+    }
+}
+
 /// The one-line reason a harness failure carries.
 fn reason(report: &Report<HarnessError>) -> String {
     report
@@ -2894,6 +3056,9 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
     let saved = match store.layouts() {
         Ok(saved) => saved,
         Err(report) => {
+            services
+                .log
+                .error("couldn't fully read orb's saved layouts", &report);
             return RestoredLayouts {
                 panes: HashMap::new(),
                 sessions: HashMap::new(),
@@ -2923,6 +3088,9 @@ fn restore_layouts(store: &Store, services: &Services, orb_root: &Path) -> Resto
                             tab.hand_changed,
                         )),
                         Err(report) => {
+                            services
+                                .log
+                                .error("couldn't fully read orb's saved layouts", &report);
                             error.get_or_insert_with(|| unread_message(&report));
                             unread.entry(session.id).or_default().tabs.push(tab.clone());
                             None
@@ -3109,7 +3277,7 @@ mod tests {
     use crate::Focus;
     use crate::TextInput;
     use crate::command::Workspace;
-    use crate::common::{Services, State};
+    use crate::common::{Log, Services, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
     use crate::feat::harness::claude::ClaudeCode;
     use crate::feat::harness::claude::fake::FakeClaude;
@@ -3468,6 +3636,7 @@ mod tests {
                 stderr: String::new(),
             })),
             PathBuf::from("/zmx"),
+            Log::default(),
         )
     }
 
@@ -3646,8 +3815,9 @@ mod tests {
                     claude.clone(),
                     claude_dir.to_owned(),
                 ))]),
-                git: GitService::new(git.clone()),
+                git: GitService::new(git.clone(), Log::default()),
                 zmx,
+                log: Log::default(),
             },
             state: state.clone(),
             store,
@@ -3682,8 +3852,9 @@ mod tests {
                     )),
                     other.clone(),
                 ]),
-                git: GitService::new(git),
+                git: GitService::new(git, Log::default()),
                 zmx,
+                log: Log::default(),
             },
             state: state.clone(),
             store,
@@ -4277,7 +4448,10 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }));
-        (zmx.clone(), ZmxService::new(zmx, PathBuf::from("/zmx")))
+        (
+            zmx.clone(),
+            ZmxService::new(zmx, PathBuf::from("/zmx"), Log::default()),
+        )
     }
 
     /// The zmx session names `zmx` was asked to kill, in order.
@@ -9921,8 +10095,9 @@ mod tests {
             let actor = SessionsActor::restore(SessionsActorDeps {
                 services: Services {
                     harnesses: Harnesses::new(vec![harness]),
-                    git: GitService::new(git),
+                    git: GitService::new(git, Log::default()),
                     zmx: zmx(thread.pane),
+                    log: Log::default(),
                 },
                 state: state.clone(),
                 store,
@@ -9978,6 +10153,7 @@ mod tests {
         ZmxService::new(
             Arc::new(FakeZmx::new(ZmxOutput::default())),
             PathBuf::from("/zmx"),
+            Log::default(),
         )
     }
 
@@ -10375,7 +10551,7 @@ mod tests {
             ),
             stderr: String::new(),
         }));
-        actor.services.zmx = ZmxService::new(zmx.clone(), PathBuf::from("/zmx"));
+        actor.services.zmx = ZmxService::new(zmx.clone(), PathBuf::from("/zmx"), Log::default());
 
         // When killing the settled sessions' panes.
         actor.kill_settled();
@@ -10405,6 +10581,93 @@ mod tests {
         assert!(
             host.stopped().is_empty(),
             "an auto-settle should leave the session's agents running"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn deleting_a_session_logs_it_and_its_panes() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session with a second pane, and a log.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
+        let host = listing(Vec::new());
+        let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("orb.log");
+        actor.services.log = Log::new(path.clone());
+
+        // When deleting aa's session.
+        actor.delete_session(inserted.session);
+
+        // Then the log names the session, its thread and both panes.
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        let expected = format!(
+            "delete session {} with threads [{}] and panes [{}, {}]: ok",
+            inserted.session.0, inserted.thread.0, inserted.pane.0, second.0
+        );
+        assert!(
+            content.contains(&expected),
+            "expected {expected:?} in the log, got {content:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saving_a_layout_logs_each_dropped_pane_row() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session split in two, its first pane closed, and
+        // a log.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+        state.write().layouts.fit_to(Rect::new(0, 0, 80, 24));
+        actor.add_pane(inserted.session, Placement::Split(Split::Right));
+        state.write().layouts.close_pane(inserted.pane);
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("orb.log");
+        actor.services.log = Log::new(path.clone());
+
+        // When saving the layout.
+        actor.save_layout(inserted.session);
+
+        // Then the log names the dropped pane row and its session.
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        let expected = format!(
+            "delete pane row {} (session {})",
+            inserted.pane.0, inserted.session.0
+        );
+        assert!(
+            content.contains(&expected),
+            "expected {expected:?} in the log, got {content:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn failed_save_logs_the_cause_behind_the_message() -> Result<(), Report<StoreError>> {
+        // Given a store whose jumps table is gone, and a log.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let db = dir.path().join("state.sqlite");
+        let store = Store::open(&db)?;
+        insert_thread(&store, "aa")?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        rusqlite::Connection::open(&db)
+            .and_then(|conn| conn.execute("DROP TABLE jumps", []))
+            .change_context(StoreError)?;
+        let path = dir.path().join("orb.log");
+        actor.services.log = Log::new(path.clone());
+
+        // When saving the jump list.
+        actor.save_jumps();
+
+        // Then the log has the message and the cause behind it.
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            content.contains("couldn't save orb's state")
+                && content.contains("no such table: jumps"),
+            "expected the message and its cause in the log, got {content:?}"
         );
         Ok(())
     }

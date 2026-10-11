@@ -13,6 +13,8 @@ use std::sync::Arc;
 use error_stack::Report;
 use wherror::Error;
 
+use crate::Log;
+
 /// A zmx call failed. Every report carries a one-line reason as its latest
 /// `String` attachment, fit for the mode line.
 #[derive(Debug, Error)]
@@ -146,11 +148,12 @@ pub trait Zmx: Send + Sync {
 pub struct ZmxService {
     zmx: Arc<dyn Zmx>,
     dir: PathBuf,
+    log: Log,
 }
 
 impl ZmxService {
-    pub fn new(zmx: Arc<dyn Zmx>, dir: PathBuf) -> Self {
-        Self { zmx, dir }
+    pub fn new(zmx: Arc<dyn Zmx>, dir: PathBuf, log: Log) -> Self {
+        Self { zmx, dir, log }
     }
 
     /// orb's pane socket directory.
@@ -181,22 +184,36 @@ impl ZmxService {
         }
     }
 
-    /// Ends `session` (`zmx kill <name>` on its directory). A session that's
-    /// already gone (`SessionNotFound`) counts as ended.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error, zmx's first line as the reason, for any other failure.
-    pub fn kill(&self, session: &ZmxSession) -> Result<(), Report<ZmxError>> {
-        let output = self
+    /// Ends `session` (`zmx kill <name>` on its directory) and logs it with
+    /// `why`: `kill <name> (<dir>) <why>: ok`, `already gone` for a session zmx
+    /// no longer has, or `failed: <zmx's first error line>`.
+    pub fn kill(&self, session: &ZmxSession, why: &str) {
+        let outcome = match self
             .zmx
-            .run(&zmx_argv(&session.dir, ["kill", session.name.as_str()]))?;
-        if output.success || output.stderr.contains("SessionNotFound") {
-            Ok(())
-        } else {
-            Err(output.failure())
-        }
+            .run(&zmx_argv(&session.dir, ["kill", session.name.as_str()]))
+        {
+            Ok(output) if output.success => "ok".to_owned(),
+            Ok(output) if output.stderr.contains("SessionNotFound") => "already gone".to_owned(),
+            Ok(output) => format!("failed: {}", first_line(&output.failure())),
+            Err(report) => format!("failed: {}", first_line(&report)),
+        };
+        self.log.line(
+            "kill",
+            &format!(
+                "{} ({}) {why}: {outcome}",
+                session.name,
+                session.dir.display()
+            ),
+        );
     }
+}
+
+/// The one-line reason a zmx report carries, else `zmx failed`.
+fn first_line(report: &Report<ZmxError>) -> String {
+    report
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_else(|| "zmx failed".to_owned())
 }
 
 impl fmt::Debug for ZmxService {
@@ -268,6 +285,7 @@ mod tests {
 
     use super::fake::FakeZmx;
     use super::{ZmxEntry, ZmxError, ZmxOutput, ZmxService, ZmxSession, attach_argv, parse_list};
+    use crate::Log;
 
     fn words(words: &[&str]) -> Vec<OsString> {
         words.iter().map(OsString::from).collect()
@@ -281,7 +299,20 @@ mod tests {
     }
 
     fn service(zmx: &Arc<FakeZmx>) -> ZmxService {
-        ZmxService::new(zmx.clone(), PathBuf::from("/home/u/.orb/zmx"))
+        ZmxService::new(
+            zmx.clone(),
+            PathBuf::from("/home/u/.orb/zmx"),
+            Log::default(),
+        )
+    }
+
+    /// A service whose log is written to `path`.
+    fn service_logging(zmx: &Arc<FakeZmx>, path: &Path) -> ZmxService {
+        ZmxService::new(
+            zmx.clone(),
+            PathBuf::from("/home/u/.orb/zmx"),
+            Log::new(path.to_path_buf()),
+        )
     }
 
     fn failed(stderr: &str) -> ZmxOutput {
@@ -453,7 +484,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn kill_runs_zmx_kill_on_the_sessions_dir() -> Result<(), Report<ZmxError>> {
+    fn kill_runs_zmx_kill_on_the_sessions_dir() {
         // Given a zmx that kills.
         let zmx = Arc::new(FakeZmx::new(ZmxOutput {
             success: true,
@@ -461,7 +492,7 @@ mod tests {
         }));
 
         // When killing orb-p7 on /z.
-        service(&zmx).kill(&orb_p7("/z"))?;
+        service(&zmx).kill(&orb_p7("/z"), "closed");
 
         // Then zmx kill ran on /z.
         assert_eq!(
@@ -476,39 +507,72 @@ mod tests {
             ])],
             "zmx kill on the session's dir"
         );
+    }
+
+    #[rstest::rstest]
+    fn kill_logs_the_session_and_why() -> Result<(), std::io::Error> {
+        // Given a zmx that kills and a log file.
+        let zmx = Arc::new(FakeZmx::new(ZmxOutput {
+            success: true,
+            ..ZmxOutput::default()
+        }));
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("orb.log");
+
+        // When killing orb-p7 on /z because it closed.
+        service_logging(&zmx, &path).kill(&orb_p7("/z"), "closed");
+
+        // Then the log names the session, its dir, why and the outcome.
+        let log = std::fs::read_to_string(&path)?;
+        assert!(
+            log.contains(" kill orb-p7 (/z) closed: ok\n"),
+            "the kill line should be logged, got {log:?}"
+        );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn kill_of_a_gone_session_succeeds() {
+    fn failed_kill_logs_zmxs_first_error_line() -> Result<(), std::io::Error> {
+        // Given zmx kill failing for a reason other than a gone session.
+        let zmx = Arc::new(FakeZmx::new(failed(
+            "error: failed to kill session=orb-p7: ConnectionRefused\n",
+        )));
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("orb.log");
+
+        // When killing it.
+        service_logging(&zmx, &path).kill(&orb_p7("/z"), "closed");
+
+        // Then the log carries zmx's first error line.
+        let log = std::fs::read_to_string(&path)?;
+        assert!(
+            log.contains(
+                " kill orb-p7 (/z) closed: failed: error: failed to kill session=orb-p7: ConnectionRefused\n"
+            ),
+            "the failure reason should be logged, got {log:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn kill_of_a_gone_session_logs_already_gone() -> Result<(), std::io::Error> {
         // Given zmx kill finding no session.
         let zmx = Arc::new(FakeZmx::new(failed(
             "error: failed to kill session=orb-p7: SessionNotFound\n",
         )));
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("orb.log");
 
         // When killing it.
-        let result = service(&zmx).kill(&orb_p7("/z"));
+        service_logging(&zmx, &path).kill(&orb_p7("/z"), "closed");
 
-        // Then it counts as ended.
-        assert!(result.is_ok(), "a gone session counts as ended");
-    }
-
-    #[rstest::rstest]
-    fn kill_reports_zmxs_first_error_line() {
-        // Given zmx kill failing for another reason.
-        let zmx = Arc::new(FakeZmx::new(failed(
-            "error: failed to kill session=orb-p7: ConnectionRefused\n",
-        )));
-
-        // When killing it.
-        let result = service(&zmx).kill(&orb_p7("/z"));
-
-        // Then zmx's line is the reason.
-        assert_eq!(
-            reason(result).as_deref(),
-            Some("error: failed to kill session=orb-p7: ConnectionRefused"),
-            "zmx's first line should be the reason"
+        // Then the log says it was already gone.
+        let log = std::fs::read_to_string(&path)?;
+        assert!(
+            log.contains(" kill orb-p7 (/z) closed: already gone\n"),
+            "a gone session should be logged as already gone, got {log:?}"
         );
+        Ok(())
     }
 
     #[rstest::rstest]

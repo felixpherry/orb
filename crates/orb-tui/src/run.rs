@@ -37,7 +37,8 @@
 //! back in. Settling
 //! or deleting a session ends its panes' clients; `⏎` on a settled session
 //! brings its panes back the way start-up does. A pane whose program exits
-//! within a second of attaching leaves `session exited at start` on the start screen.
+//! within a second of attaching leaves `session <title> exited at start` on
+//! the start screen.
 //!
 //! When a thread finishes a turn or starts needing an approval or an answer
 //! while orb's terminal isn't focused, the loop sends it as a desktop
@@ -91,7 +92,7 @@ use orb_domain::feat::sessions::state::{PaneId, SessionId, ThreadId};
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::worktrees::worktrees_actor::{self, WorktreesActor};
 use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
-use orb_domain::{AppState, Command, Focus, Intent, IntentHandler, State, Wake};
+use orb_domain::{AppState, Command, Focus, Intent, IntentHandler, Log, State, Wake};
 use orb_term::{Pane, PaneCommand, PaneEvent, PaneSize};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
@@ -150,8 +151,9 @@ impl Frontend {
     /// to `search`; a thread whose worktree under `worktrees_root` is gone has
     /// it recreated before attaching; the branch picker's refs come from
     /// `git`; panes run with `env` and attach through `zmx`; notices are
-    /// announced through `notifier` while orb's terminal isn't focused. The
-    /// terminal is restored on exit and on panic.
+    /// announced through `notifier` while orb's terminal isn't focused;
+    /// problems are written to `log`. The terminal is restored on exit and
+    /// on panic.
     ///
     /// # Errors
     ///
@@ -169,6 +171,7 @@ impl Frontend {
         env: Vec<(OsString, OsString)>,
         zmx: ZmxService,
         notifier: NotifierService,
+        log: Log,
     ) -> Result<(), Report<TuiRunError>> {
         let Self { tx, rx, tz } = self;
         ratatui::run(|terminal| -> io::Result<()> {
@@ -185,6 +188,7 @@ impl Frontend {
                 env,
                 zmx,
                 notifier,
+                log,
                 tx,
                 tz,
             )
@@ -403,17 +407,19 @@ fn classify_exit(listed: Option<bool>, respawned: bool) -> PaneExit {
     }
 }
 
-/// The start screen's pane error once panes are dropped, given whether each
-/// dropped pane's program exited within [`EARLY_EXIT`] of starting:
-/// `session exited at start` when one did, else `error` as it was.
-fn pane_error_after<I>(error: Option<String>, early_exits: I) -> Option<String>
+/// The start screen's pane error once panes are dropped, given for each
+/// dropped pane whether its program exited within [`EARLY_EXIT`] of
+/// starting and its session's title: `session <title> exited at start`
+/// for the first that did (`session exited at start` with no title), else
+/// `error` as it was.
+fn pane_error_after<I>(error: Option<String>, dropped: I) -> Option<String>
 where
-    I: IntoIterator<Item = bool>,
+    I: IntoIterator<Item = (bool, Option<String>)>,
 {
-    if early_exits.into_iter().any(|early| early) {
-        Some(EXITED_AT_START.to_owned())
-    } else {
-        error
+    match dropped.into_iter().find(|(early, _)| *early) {
+        Some((_, Some(title))) => Some(format!("session {title} exited at start")),
+        Some((_, None)) => Some(EXITED_AT_START.to_owned()),
+        None => error,
     }
 }
 
@@ -496,6 +502,8 @@ struct App {
     zmx: ZmxService,
     /// Announces the sessions actor's notices.
     notifier: NotifierService,
+    /// orb's log file.
+    log: Log,
     /// The zone the mode line's clock shows.
     tz: TimeZone,
     tx: Sender<LoopEvent>,
@@ -525,6 +533,7 @@ impl App {
         env: Vec<(OsString, OsString)>,
         zmx: ZmxService,
         notifier: NotifierService,
+        log: Log,
         tx: Sender<LoopEvent>,
         tz: TimeZone,
     ) -> Self {
@@ -553,6 +562,7 @@ impl App {
             env,
             zmx,
             notifier,
+            log,
             tz,
             tx,
             pane_area: Rect::default(),
@@ -1132,6 +1142,12 @@ impl App {
             let listed = self
                 .zmx
                 .list(&session.dir)
+                .inspect_err(|report| {
+                    self.log.error(
+                        &format!("couldn't list zmx sessions on {}", session.dir.display()),
+                        report,
+                    );
+                })
                 .ok()
                 .map(|entries| entries.iter().any(|entry| entry.name == session.name));
             let exit = classify_exit(listed, self.respawned.contains(&id));
@@ -1170,16 +1186,27 @@ impl App {
     /// session that ended closes in its layout, which is saved; a session
     /// whose layout emptied leaves `attached`. A dropped pane no layout holds
     /// any more that didn't end is killed with `zmx kill`. A pane that ended
-    /// within [`EARLY_EXIT`] of starting leaves `session exited at start` on
-    /// the start screen. Every pane of an attached session gets a client;
+    /// within [`EARLY_EXIT`] of starting leaves `session <title> exited at
+    /// start` on the start screen, and that line in the log. Every pane of an attached session gets a client;
     /// when one can't start, its session leaves `attached` and `couldn't
     /// start zmx attach` shows on the start screen. If the keys were in a
     /// pane and no layout is shown any more, they go to the sidebar.
     fn reconcile(&mut self) {
         let ended = self.classify_exits();
-        let (keep, all, edited) = {
+        let (keep, all, edited, titles) = {
             let mut app = self.state.write();
             let app = &mut *app;
+            let titles: HashMap<PaneId, String> = self
+                .panes
+                .iter()
+                .filter(|(_, pane)| pane.exited_early(EARLY_EXIT))
+                .filter_map(|(id, _)| {
+                    app.layouts
+                        .owner_of(*id)
+                        .and_then(|owner| app.sessions.session(owner))
+                        .map(|session| (*id, app.sessions.title(session)))
+                })
+                .collect();
             let edited = closed_in_layouts(&mut app.layouts, &app.attached, &ended);
             app.attached
                 .retain(|owner| app.layouts.get(*owner).is_some());
@@ -1188,7 +1215,7 @@ impl App {
                 .iter()
                 .flat_map(|owner| app.layouts.session_panes(*owner))
                 .collect();
-            (keep, app.layouts.pane_ids(), edited)
+            (keep, app.layouts.pane_ids(), edited, titles)
         };
         for owner in edited {
             let _ = self
@@ -1197,15 +1224,21 @@ impl App {
                 .try_send();
         }
         let gone = to_drop(self.panes.keys().map(|id| (*id, ended.contains(id))), &keep);
-        self.pane_error = pane_error_after(
-            self.pane_error.take(),
-            gone.iter()
-                .filter_map(|id| self.panes.get(id))
-                .map(|pane| pane.exited_early(EARLY_EXIT)),
+        let early_exit = pane_error_after(
+            None,
+            gone.iter().filter_map(|id| {
+                self.panes
+                    .get(id)
+                    .map(|pane| (pane.exited_early(EARLY_EXIT), titles.get(id).cloned()))
+            }),
         );
+        if let Some(text) = &early_exit {
+            self.log.line("error", text);
+        }
+        self.pane_error = early_exit.or_else(|| self.pane_error.take());
         for id in to_kill(&gone, &ended, &all) {
             if let Some(session) = self.pane_sessions.get(&id) {
-                let _ = self.zmx.kill(session);
+                self.zmx.kill(session, "closed in its layout");
             }
         }
         for id in &gone {
@@ -1269,6 +1302,12 @@ impl App {
                 let names = self
                     .zmx
                     .list(&dir)
+                    .inspect_err(|report| {
+                        self.log.error(
+                            &format!("couldn't list zmx sessions on {}", dir.display()),
+                            report,
+                        );
+                    })
                     .ok()
                     .map(|entries| entries.into_iter().map(|entry| entry.name).collect());
                 (dir, names)
@@ -1425,13 +1464,20 @@ impl App {
         let listed = self
             .zmx
             .list(self.zmx.dir())
+            .inspect_err(|report| {
+                self.log.error(
+                    &format!("couldn't list zmx sessions on {}", self.zmx.dir().display()),
+                    report,
+                );
+            })
             .unwrap_or_default()
             .into_iter()
             .map(|entry| entry.name)
             .collect();
         let partial_load = self.state.read().sessions.partial_load;
         for name in stale_sessions(listed, &owned, partial_load) {
-            let _ = self.zmx.kill(&self.zmx.session(name));
+            self.zmx
+                .kill(&self.zmx.session(name), "no pane names it at start");
         }
         let panes = reattachable(&self.state.read());
         let running: HashSet<ZmxSession> = {
@@ -1440,6 +1486,12 @@ impl App {
                 .flat_map(|dir| {
                     self.zmx
                         .list(dir)
+                        .inspect_err(|report| {
+                            self.log.error(
+                                &format!("couldn't list zmx sessions on {}", dir.display()),
+                                report,
+                            );
+                        })
                         .unwrap_or_default()
                         .into_iter()
                         .map(move |entry| ZmxSession {
@@ -1504,6 +1556,12 @@ impl App {
         };
         Pane::spawn(&command, PaneSize::from(area), move |event| {
             let _ = tx.send(LoopEvent::Pane(id, event));
+        })
+        .inspect_err(|report| {
+            self.log.error(
+                &format!("couldn't start zmx attach for {}", session.name),
+                report,
+            );
         })
         .ok()
     }
@@ -2284,18 +2342,34 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn early_exit_sets_session_exited_at_start() {
+    fn early_exit_names_the_session() {
         // Given no pane error.
         let error = None;
 
-        // When one of the dropped panes exited early.
-        let error = pane_error_after(error, [false, true]);
+        // When one of the dropped panes, of session `orb-tui`, exited early.
+        let error = pane_error_after(error, [(false, None), (true, Some("orb-tui".to_owned()))]);
+
+        // Then the start screen names the session that exited at start.
+        assert_eq!(
+            error.as_deref(),
+            Some("session orb-tui exited at start"),
+            "an early exit names its session"
+        );
+    }
+
+    #[rstest::rstest]
+    fn early_exit_of_an_untitled_session_says_session_exited_at_start() {
+        // Given no pane error.
+        let error = None;
+
+        // When a dropped pane with no session title exited early.
+        let error = pane_error_after(error, [(true, None)]);
 
         // Then the start screen says the session exited at start.
         assert_eq!(
             error.as_deref(),
             Some("session exited at start"),
-            "an early exit sets the pane error"
+            "an untitled early exit keeps the plain text"
         );
     }
 
@@ -2305,7 +2379,7 @@ mod tests {
         let error = Some("couldn't start the attach command".to_owned());
 
         // When the only dropped pane exited later.
-        let error = pane_error_after(error, [false]);
+        let error = pane_error_after(error, [(false, None)]);
 
         // Then the pane error is unchanged.
         assert_eq!(

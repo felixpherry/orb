@@ -18,7 +18,7 @@ use kameo::prelude::{Actor, ActorRef, Context, Message, Spawn};
 use super::index::{Hit, SearchIndex, SearchIndexError, ThreadKey, snippet};
 use super::state::SearchProgress;
 use crate::AppState;
-use crate::common::{State, Wake};
+use crate::common::{Log, State, Wake};
 use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::picker::list::PickerItem;
 use crate::feat::picker::state::{PickerState, hit_label};
@@ -34,6 +34,8 @@ pub struct SearchActorDeps {
     pub index_path: PathBuf,
     /// Tells the frontend to redraw.
     pub wake: Wake,
+    /// orb's log file.
+    pub log: Log,
 }
 
 /// Owns [`SearchProgress`] and the search index. Writes the search picker's
@@ -44,6 +46,7 @@ pub struct SearchActor {
     /// `None` when the index couldn't be opened; then every message is a no-op.
     index: Option<SearchIndex>,
     wake: Wake,
+    log: Log,
     /// Transcripts the startup indexing hasn't read yet, newest chat first,
     /// with the harness each thread runs in.
     queue: VecDeque<(ThreadKey, HarnessId, PathBuf)>,
@@ -134,10 +137,12 @@ impl SearchActor {
             harnesses,
             index_path,
             wake,
+            log,
         } = deps;
         let mut index = match SearchIndex::open(&index_path) {
             Ok(index) => index,
             Err(report) => {
+                log.error_on_change("search: open", "couldn't open the search index", &report);
                 state.write().search.error = Some(reason(&report));
                 wake();
                 return Self {
@@ -145,6 +150,7 @@ impl SearchActor {
                     harnesses,
                     index: None,
                     wake,
+                    log,
                     queue: VecDeque::new(),
                 };
             }
@@ -167,7 +173,13 @@ impl SearchActor {
             (keys, queue)
         };
         // A failure leaves the rows; the next catch-up retries.
-        let _ = index.retain_threads(&keys);
+        if let Err(report) = index.retain_threads(&keys) {
+            log.error_on_change(
+                "search: retain",
+                "couldn't drop gone threads from the search index",
+                &report,
+            );
+        }
         state.write().search = SearchProgress {
             indexed: 0,
             total: queue.len(),
@@ -179,6 +191,7 @@ impl SearchActor {
             harnesses,
             index: Some(index),
             wake,
+            log,
             queue,
         }
     }
@@ -193,10 +206,16 @@ impl SearchActor {
         };
         if let Some(index) = &mut self.index
             && let Some(harness) = self.harnesses.get(&harness)
+            && let Err(report) =
+                index.index_transcript(key, &path, |path, offset, prompt_offset| {
+                    harness.messages(path, offset, prompt_offset)
+                })
         {
-            let _ = index.index_transcript(key, &path, |path, offset, prompt_offset| {
-                harness.messages(path, offset, prompt_offset)
-            });
+            self.log.error_on_change(
+                &format!("search: index {}", path.display()),
+                &format!("couldn't index {}", path.display()),
+                &report,
+            );
         }
         self.state.write().search.indexed += 1;
         (self.wake)();
@@ -224,9 +243,14 @@ impl SearchActor {
         {
             return;
         }
-        catch_up(index, &self.state, &self.harnesses, &self.queue);
-        let Ok(found) = index.query(query) else {
-            return;
+        catch_up(index, &self.state, &self.harnesses, &self.queue, &self.log);
+        let found = match index.query(query) {
+            Ok(found) => found,
+            Err(report) => {
+                self.log
+                    .error_on_change("search: query", "couldn't run the search query", &report);
+                return;
+            }
         };
         let items = rows(&self.state.read(), found.hits);
         let first = {
@@ -260,8 +284,16 @@ impl SearchActor {
         let Some(index) = &self.index else {
             return;
         };
-        let Ok(messages) = index.exchange(&path, prompt_offset) else {
-            return;
+        let messages = match index.exchange(&path, prompt_offset) {
+            Ok(messages) => messages,
+            Err(report) => {
+                self.log.error_on_change(
+                    "search: preview",
+                    &format!("couldn't read the search preview from {}", path.display()),
+                    &report,
+                );
+                return;
+            }
         };
         if let Some(picker) = &mut self.state.write().picker {
             picker.show_search_preview(hit, messages);
@@ -279,6 +311,7 @@ fn catch_up(
     state: &State,
     harnesses: &Harnesses,
     queue: &VecDeque<(ThreadKey, HarnessId, PathBuf)>,
+    log: &Log,
 ) {
     let (keys, current) = {
         let app = state.read();
@@ -294,7 +327,13 @@ fn catch_up(
             .collect();
         (keys, current)
     };
-    let _ = index.retain_threads(&keys);
+    if let Err(report) = index.retain_threads(&keys) {
+        log.error_on_change(
+            "search: retain",
+            "couldn't drop gone threads from the search index",
+            &report,
+        );
+    }
     for (key, harness, path) in current {
         if queue.iter().any(|(_, _, queued)| *queued == path) {
             continue;
@@ -306,10 +345,17 @@ fn catch_up(
             continue;
         };
         // An unreadable saved offset counts as changed.
-        if index.transcript_offset(&path).ok().flatten() != Some(len) {
-            let _ = index.index_transcript(key, &path, |path, offset, prompt_offset| {
-                harness.messages(path, offset, prompt_offset)
-            });
+        if index.transcript_offset(&path).ok().flatten() != Some(len)
+            && let Err(report) =
+                index.index_transcript(key, &path, |path, offset, prompt_offset| {
+                    harness.messages(path, offset, prompt_offset)
+                })
+        {
+            log.error_on_change(
+                &format!("search: index {}", path.display()),
+                &format!("couldn't index {}", path.display()),
+                &report,
+            );
         }
     }
 }
@@ -382,7 +428,7 @@ mod tests {
     use super::{
         LoadSearchPreview, SearchActor, SearchActorDeps, SearchTranscripts, spawn_search_actor,
     };
-    use crate::common::State;
+    use crate::common::{Log, State};
     use crate::feat::harness::Harnesses;
     use crate::feat::harness::claude::ClaudeCode;
     use crate::feat::harness::claude::supervisor::ClaudeSupervisor;
@@ -471,6 +517,7 @@ mod tests {
             harnesses: Harnesses::new(vec![Arc::new(claude)]),
             index_path,
             wake: Arc::new(|| {}),
+            log: Log::default(),
         }
     }
 

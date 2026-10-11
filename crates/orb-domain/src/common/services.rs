@@ -1,5 +1,6 @@
 //! The services actors use, created once at startup and shared by cloning.
 
+use crate::Log;
 use crate::feat::git::git_service::GitService;
 use crate::feat::harness::Harnesses;
 use crate::feat::zmx::zmx_service::ZmxService;
@@ -12,4 +13,6 @@ pub struct Services {
     pub git: GitService,
     /// Runs every pane's program under zmx.
     pub zmx: ZmxService,
+    /// orb's log file.
+    pub log: Log,
 }

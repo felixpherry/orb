@@ -4,8 +4,11 @@
 - Name check: every code name AGENTS.md and the Record put in backticks
   (outside fenced blocks) must exist in orb's code.
 - Architecture deny-list: AGENTS.md section 3 must not describe a bus.
+- Dropped results: production Rust code must not `let _ =` a kill or removal,
+  nor drop an error report with a `|_report|` closure.
 
-`--self-test` plants a bad name and a bad phrase and exits 0 only if both are reported.
+`--self-test` plants a bad name, a bad phrase, a dropped kill and a dropped
+report, and exits 0 only if all are reported.
 """
 
 import re
@@ -32,6 +35,19 @@ SECTION_START = "## 3. Architecture"
 SECTION_END = "## 4. Tests"
 DENY_PHRASES = ["actor host", "pub/sub", "message bus"]
 DENY_WORD = re.compile(r"\bbus\b", re.IGNORECASE)
+
+# Production code that may drop a kill or removal result.
+LET_DROP_ALLOWLIST = {
+    ("crates/orb-term/src/pane.rs", ".kill("): "dropping a pane's attach client kills it; a client already gone is fine",
+    ("crates/orb-domain/src/common/child.rs", ".kill("): "a timed-out helper is killed; its error is the timeout already returned",
+}
+# The whole statement up to its `;`, so a `let _ =` whose call is on a later line still matches.
+LET_DROP = re.compile(
+    r"let _ =[^;]*?(\.kill\(|remove_worktree|delete_branch|remove_dir_all|remove_file|delete_)",
+    re.S,
+)
+DROPPED_REPORT = re.compile(r"\|_report\|")
+TEST_MODULE = re.compile(r"^#\[cfg\(test\)\]", re.M)
 
 SPAN = re.compile(r"`([^`\n]+)`")
 IDENT = re.compile(r"^[A-Za-z_]\w*(::\w+)*$")
@@ -94,17 +110,47 @@ def check_section3(label, text):
     return reports
 
 
+def production(text):
+    """The text before a file's first `#[cfg(test)]` line."""
+    test = TEST_MODULE.search(text)
+    return text[: test.start()] if test else text
+
+
+def check_drops(label, text):
+    """Report dropped kill/removal results and dropped error reports in production code."""
+    code = production(text)
+    reports = []
+    for found in LET_DROP.finditer(code):
+        if (label, found.group(1)) in LET_DROP_ALLOWLIST:
+            continue
+        number = code.count("\n", 0, found.start()) + 1
+        reports.append(f"{label}:{number}: dropped kill/remove result")
+    for found in DROPPED_REPORT.finditer(code):
+        number = code.count("\n", 0, found.start()) + 1
+        reports.append(f"{label}:{number}: dropped error report")
+    return reports
+
+
+def rust_files():
+    for code_dir in CODE_DIRS:
+        for path in sorted((ROOT / code_dir).rglob("*.rs")):
+            if "target" not in path.relative_to(ROOT).parts:
+                yield path
+
+
 def self_test():
     names = check_names("self-test", "Uses `NoSuchTypeForSelfTest` here.\n")
     deny = check_section3(
         "self-test", f"{SECTION_START}\nEvents go on the message bus.\n{SECTION_END}\n"
     )
-    for report in names + deny:
-        print(report)
-    if not names or not deny:
-        print("self-test: check did not fail on the planted name")
+    kill = check_drops("self-test", "fn f() {\n    let _ = zmx\n        .kill(&s);\n}\n")
+    report = check_drops("self-test", "fn f() {\n    x.map_err(|_report| X);\n}\n")
+    for line in names + deny + kill + report:
+        print(line)
+    if not names or not deny or not kill or not report:
+        print("self-test: a check did not fail on its planted text")
         return 1
-    print("self-test: both checks reported the planted name and phrase")
+    print("self-test: every check reported its planted text")
     return 0
 
 
@@ -115,6 +161,8 @@ def main():
     for doc in DOCS:
         reports += check_names(doc, (ROOT / doc).read_text())
     reports += check_section3("AGENTS.md", (ROOT / "AGENTS.md").read_text())
+    for path in rust_files():
+        reports += check_drops(str(path.relative_to(ROOT)), path.read_text())
     for report in reports:
         print(report)
     if reports:

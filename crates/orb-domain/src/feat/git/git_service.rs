@@ -12,6 +12,8 @@ use std::time::SystemTime;
 use error_stack::Report;
 use wherror::Error;
 
+use crate::Log;
+
 /// A git call failed. Every report carries a one-line reason as its latest
 /// `String` attachment, fit for the mode line.
 #[derive(Debug, Error)]
@@ -191,11 +193,12 @@ pub fn git_reason(report: &Report<GitError>) -> String {
 #[derive(Clone)]
 pub struct GitService {
     git: Arc<dyn Git>,
+    log: Log,
 }
 
 impl GitService {
-    pub fn new(git: Arc<dyn Git>) -> Self {
-        Self { git }
+    pub fn new(git: Arc<dyn Git>, log: Log) -> Self {
+        Self { git, log }
     }
 
     /// The refs of the repository containing `cwd`, in the order [`Git::refs`]
@@ -247,7 +250,8 @@ impl GitService {
         self.git.add_worktree(repo, path, branch, base)
     }
 
-    /// Removes the worktree at `path`.
+    /// Removes the worktree at `path` and logs it with `why`
+    /// (`prune <path> <why>: ok`, or `failed` with git's whole error).
     ///
     /// # Errors
     ///
@@ -257,8 +261,15 @@ impl GitService {
         repo: &Path,
         path: &Path,
         force: bool,
+        why: &str,
     ) -> Result<(), Report<GitError>> {
-        self.git.remove_worktree(repo, path, force)
+        let removed = self.git.remove_worktree(repo, path, force);
+        let what = format!("{} {why}", path.display());
+        match &removed {
+            Ok(()) => self.log.line("prune", &format!("{what}: ok")),
+            Err(report) => self.log.error(&format!("prune {what}: failed"), report),
+        }
+        removed
     }
 
     /// Adds a worktree at `path` on the existing `branch`.
@@ -299,18 +310,15 @@ impl GitService {
         self.git.disk_usage(path)
     }
 
-    /// Deletes a local branch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if git refuses.
-    pub fn delete_branch(
-        &self,
-        repo: &Path,
-        branch: &str,
-        force: bool,
-    ) -> Result<(), Report<GitError>> {
-        self.git.delete_branch(repo, branch, force)
+    /// Deletes a local branch and logs it with `why`
+    /// (`delete branch <branch> (<repo>) <why>: ok`, or `failed` with git's
+    /// whole error).
+    pub fn delete_branch(&self, repo: &Path, branch: &str, force: bool, why: &str) {
+        let what = format!("branch {branch} ({}) {why}", repo.display());
+        match self.git.delete_branch(repo, branch, force) {
+            Ok(()) => self.log.line("delete", &format!("{what}: ok")),
+            Err(report) => self.log.error(&format!("delete {what}: failed"), &report),
+        }
     }
 
     /// Whether the local branch exists.
@@ -364,5 +372,182 @@ impl GitService {
 impl fmt::Debug for GitService {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Git<{}>", self.git.name())
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "tests propagate setup failures with `?` and assert on the outcome"
+)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use error_stack::Report;
+
+    use super::{Git, GitError, GitRef, GitService, WorktreeFacts};
+    use crate::Log;
+
+    /// A git whose removals give `result`; every other call is a harmless
+    /// default.
+    struct FakeGit {
+        result: Result<(), String>,
+    }
+
+    impl FakeGit {
+        fn outcome(&self) -> Result<(), Report<GitError>> {
+            self.result
+                .clone()
+                .map_err(|reason| Report::new(GitError).attach(reason))
+        }
+    }
+
+    impl Git for FakeGit {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn refs(&self, _: &Path) -> Result<Vec<GitRef>, Report<GitError>> {
+            Ok(Vec::new())
+        }
+        fn default_branch(&self, _: &Path) -> Result<String, Report<GitError>> {
+            Ok("main".to_owned())
+        }
+        fn has_origin(&self, _: &Path) -> bool {
+            false
+        }
+        fn fetch(&self, _: &Path, _: &str) -> Result<bool, Report<GitError>> {
+            Ok(false)
+        }
+        fn add_worktree(
+            &self,
+            _: &Path,
+            _: &Path,
+            _: &str,
+            _: &str,
+        ) -> Result<(), Report<GitError>> {
+            Ok(())
+        }
+        fn remove_worktree(&self, _: &Path, _: &Path, _: bool) -> Result<(), Report<GitError>> {
+            self.outcome()
+        }
+        fn add_worktree_on(&self, _: &Path, _: &Path, _: &str) -> Result<(), Report<GitError>> {
+            Ok(())
+        }
+        fn prune_worktrees(&self, _: &Path) -> Result<(), Report<GitError>> {
+            Ok(())
+        }
+        fn worktree_facts(&self, _: &Path) -> Result<WorktreeFacts, Report<GitError>> {
+            Ok(WorktreeFacts {
+                branch: None,
+                changes: 0,
+                last_commit: None,
+            })
+        }
+        fn disk_usage(&self, _: &Path) -> Option<u64> {
+            None
+        }
+        fn delete_branch(&self, _: &Path, _: &str, _: bool) -> Result<(), Report<GitError>> {
+            self.outcome()
+        }
+        fn branch_exists(&self, _: &Path, _: &str) -> bool {
+            false
+        }
+        fn is_merged(&self, _: &Path, _: &str) -> bool {
+            false
+        }
+        fn has_remote_branch(&self, _: &Path, _: &str) -> bool {
+            false
+        }
+        fn init(&self, _: &Path) -> Result<(), Report<GitError>> {
+            Ok(())
+        }
+        fn checkout(&self, _: &Path, _: &GitRef) -> Result<String, Report<GitError>> {
+            Ok("main".to_owned())
+        }
+        fn rename_branch(&self, _: &Path, _: &str, _: &str) -> Result<(), Report<GitError>> {
+            Ok(())
+        }
+        fn project_path(&self, _: &Path) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    /// A service over a git giving `result`, logging to `path`.
+    fn service_logging(result: Result<(), String>, path: &Path) -> GitService {
+        GitService::new(Arc::new(FakeGit { result }), Log::new(path.to_path_buf()))
+    }
+
+    #[rstest::rstest]
+    fn remove_worktree_logs_the_path_and_why()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Given a git that removes worktrees and a log file.
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("orb.log");
+
+        // When removing /w/orb-1 because it was unused.
+        service_logging(Ok(()), &path).remove_worktree(
+            Path::new("/repo"),
+            Path::new("/w/orb-1"),
+            false,
+            "unused, swept",
+        )?;
+
+        // Then the log names the path, why and the outcome.
+        let log = std::fs::read_to_string(&path)?;
+        assert!(
+            log.contains(" prune /w/orb-1 unused, swept: ok\n"),
+            "the prune line should be logged, got {log:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn failed_remove_worktree_logs_the_reason() -> Result<(), std::io::Error> {
+        // Given a git that refuses a dirty worktree.
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("orb.log");
+        let service = service_logging(Err("contains modified files".to_owned()), &path);
+
+        // When removing /w/orb-1.
+        let removed = service.remove_worktree(
+            Path::new("/repo"),
+            Path::new("/w/orb-1"),
+            false,
+            "unused, swept",
+        );
+
+        // Then the log carries the failure and git's reason.
+        let log = std::fs::read_to_string(&path)?;
+        assert!(
+            removed.is_err()
+                && log.contains(" prune /w/orb-1 unused, swept: failed")
+                && log.contains("contains modified files"),
+            "the failure and its reason should be logged, got {log:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn delete_branch_logs_the_branch() -> Result<(), std::io::Error> {
+        // Given a git that deletes branches and a log file.
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("orb.log");
+
+        // When deleting orb/abc because its start failed.
+        service_logging(Ok(()), &path).delete_branch(
+            Path::new("/repo"),
+            "orb/abc",
+            false,
+            "start failed",
+        );
+
+        // Then the log names the branch, its repo, why and the outcome.
+        let log = std::fs::read_to_string(&path)?;
+        assert!(
+            log.contains(" delete branch orb/abc (/repo) start failed: ok\n"),
+            "the delete line should be logged, got {log:?}"
+        );
+        Ok(())
     }
 }

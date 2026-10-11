@@ -181,7 +181,10 @@ impl WorktreesActor {
                         && verdict(&users(&app, path), facts, &app.attached, SystemTime::now())
                             == Verdict::PruneNow
                 };
-                due && self.git.remove_worktree(repo, path, false).is_ok()
+                due && self
+                    .git
+                    .remove_worktree(repo, path, false, "unused, swept")
+                    .is_ok()
             })
             .count()
     }
@@ -209,7 +212,7 @@ impl WorktreesActor {
             None => Some("not a git worktree".to_owned()),
             Some(repo) => self
                 .git
-                .remove_worktree(&repo, path, true)
+                .remove_worktree(&repo, path, true, "deleted from the worktree picker")
                 .err()
                 .map(|report| git_reason(&report)),
         };
@@ -345,7 +348,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{SWEEP_EVERY, WorktreesActor, WorktreesActorDeps, spawn_worktrees_actor};
-    use crate::common::State;
+    use crate::common::{Log, State};
     use crate::feat::git::git_service::{Git, GitError, GitRef, GitService, WorktreeFacts};
     use crate::feat::picker::state::PickerState;
     use crate::feat::sessions::state::{Project, ProjectId, ProjectKind, Sessions};
@@ -602,7 +605,7 @@ mod tests {
         every: Duration,
     ) -> WorktreesActorDeps {
         WorktreesActorDeps {
-            git: GitService::new(git.clone()),
+            git: GitService::new(git.clone(), Log::default()),
             state: state.clone(),
             worktrees_root: root.path().to_owned(),
             wake: Arc::new(|| {}),

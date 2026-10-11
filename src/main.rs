@@ -30,7 +30,7 @@ use orb_domain::feat::worktrees::worktrees_actor::{
 };
 use orb_domain::feat::zmx::zmx_cli::ZmxCli;
 use orb_domain::feat::zmx::zmx_service::ZmxService;
-use orb_domain::{AppState, Finished, Services, State, ancestry, parse_parents, run_within};
+use orb_domain::{AppState, Finished, Log, Services, State, ancestry, parse_parents, run_within};
 use orb_tui::Frontend;
 use wherror::Error;
 
@@ -43,9 +43,27 @@ fn main() -> Result<(), Report<OrbError>> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| Report::new(OrbError).attach("HOME is not set"))?;
+    let orb_root = home.join(".orb");
+    let log = Log::new(orb_root.join("orb.log"));
+    log.line(
+        "start",
+        &format!(
+            "orb {} pid {}",
+            env!("CARGO_PKG_VERSION"),
+            std::process::id()
+        ),
+    );
+    let ended = run(home, orb_root, &log);
+    if let Err(report) = &ended {
+        log.error("orb stopped", report);
+    }
+    ended
+}
+
+/// Everything after the log opens: integrations, store, actors, frontend.
+fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbError>> {
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let claude_dir = integration::claude_dir(config_dir, &home);
-    let orb_root = home.join(".orb");
     let integrations = integration_paths(&home, &orb_root, &claude_dir);
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "integration") {
@@ -69,13 +87,18 @@ fn main() -> Result<(), Report<OrbError>> {
     });
     let frontend = Frontend::new(tz);
     let services = {
-        let git = GitService::new(Arc::new(GitCli::new(env.clone())));
+        let git = GitService::new(Arc::new(GitCli::new(env.clone())), log.clone());
         let claude = ClaudeCode::new(Arc::new(ClaudeSupervisor::new(env.clone())), claude_dir);
         let pi = Pi::new(pi_sessions);
         Services {
             harnesses: Harnesses::new(vec![Arc::new(claude), Arc::new(pi)]),
             git,
-            zmx: ZmxService::new(Arc::new(ZmxCli::new(env.clone())), orb_root.join("zmx")),
+            zmx: ZmxService::new(
+                Arc::new(ZmxCli::new(env.clone())),
+                orb_root.join("zmx"),
+                log.clone(),
+            ),
+            log: log.clone(),
         }
     };
     let git = services.git.clone();
@@ -115,6 +138,7 @@ fn main() -> Result<(), Report<OrbError>> {
         harnesses: harnesses.clone(),
         index_path: search_index,
         wake: frontend.waker(),
+        log: log.clone(),
     });
     frontend
         .run(
@@ -128,6 +152,7 @@ fn main() -> Result<(), Report<OrbError>> {
             env,
             zmx,
             notifier,
+            log.clone(),
         )
         .change_context(OrbError)
 }

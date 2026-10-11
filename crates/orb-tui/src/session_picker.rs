@@ -4,10 +4,10 @@
 //!
 //! The list box is titled `Sessions`, followed by the active filter
 //! (`Sessions · blocked`) unless it shows all. Its input row holds the typed text and how many sessions are shown
-//! out of those listed, over an orange rule. Each row is a session's status
-//! icon (its most urgent agent's), its dim `<project>/` and bright title,
-//! and how long its agent has worked or since its last chat; status and time
-//! are drawn live. Settled rows are dimmed behind a check. Nothing matched
+//! out of those listed, over an orange rule. Each row is one agent running in
+//! a session's pane: the agent's status icon, its dim `<project>/` and bright
+//! `<session>/<agent>`, and how long the agent has worked or since its last
+//! chat; status and time are drawn live. Settled rows are dimmed behind a check. Nothing matched
 //! leaves the list empty.
 //!
 //! The popup's bottom row, under both boxes, holds the picker's keys, dim.
