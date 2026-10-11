@@ -102,6 +102,7 @@ pub(crate) mod fake {
 
     use async_trait::async_trait;
     use error_stack::Report;
+    use tokio::sync::oneshot;
 
     use super::supervisor::ClaudeAgents;
     use crate::feat::harness::{HarnessError, RunningAgent};
@@ -111,6 +112,8 @@ pub(crate) mod fake {
         running: Mutex<Result<Vec<RunningAgent>, String>>,
         /// How many times `list` was called.
         lists: AtomicUsize,
+        /// While set, `list` waits until its sender is used or dropped.
+        gate: Mutex<Option<oneshot::Receiver<()>>>,
     }
 
     impl FakeClaude {
@@ -119,7 +122,19 @@ pub(crate) mod fake {
             Self {
                 running: Mutex::new(Ok(running)),
                 lists: AtomicUsize::new(0),
+                gate: Mutex::new(None),
             }
+        }
+
+        /// A `claude` running `running` whose first `list` waits until the
+        /// returned sender is used or dropped.
+        pub(crate) fn gated(running: Vec<RunningAgent>) -> (Self, oneshot::Sender<()>) {
+            let (open, gate) = oneshot::channel();
+            let claude = Self {
+                gate: Mutex::new(Some(gate)),
+                ..Self::running(running)
+            };
+            (claude, open)
         }
 
         /// How many times `list` was called.
@@ -141,6 +156,14 @@ pub(crate) mod fake {
 
         async fn list(&self) -> Result<Vec<RunningAgent>, Report<HarnessError>> {
             self.lists.fetch_add(1, Ordering::SeqCst);
+            let gate = self
+                .gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
             self.running
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

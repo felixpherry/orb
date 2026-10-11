@@ -67,7 +67,7 @@ ZMX_LIST_SITES = {
     # reattach_live running: error -> empty -> panes come back as fresh shells, no kill
     #   (start_attaches_a_session_whose_panes_all_died)
     "crates/orb-domain/src/feat/sessions/sessions_actor.rs": 2,
-    # poll: error -> that dir's panes left as they were (poll_leaves_a_pane_thread_as_it_was_when_zmx_cant_list)
+    # poll probe (ticker): error -> that dir's panes left as they were (poll_leaves_a_pane_thread_as_it_was_when_zmx_cant_list)
     # kill_settled: error -> empty -> nothing killed (kill_settled_kills_nothing_when_zmx_cant_list)
 }
 

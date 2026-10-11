@@ -9,14 +9,22 @@
 //! under the pane (by process ancestry from the pane's zmx process). A thread
 //! with no pane is Stopped. Then it stamps when a turn starts, reads
 //! new transcript lines for titles and branches, and saves what changed.
+//! Asking the harnesses and zmx happens beside the actor's queue, between
+//! the poll's start and the actor showing what it saw, so other requests
+//! are handled meanwhile.
 //!
 //! It makes new sessions: a session row with one tab running a shell, in a
 //! project's checkout, a worktree it already has, a new worktree made from a
 //! base branch, or orb's Incognito folder (made first when missing). The new
 //! session is selected and the frontend asked to attach it. A failure shows
-//! the reason and removes the worktree and branch orb made for it. Whether
-//! each project is a git repository is found at start, on add and after
-//! Initialize Git.
+//! the reason and removes the worktree and branch orb made for it. A new
+//! worktree (for a new session, a move, or a restore) is made beside the
+//! actor's queue, so the actor keeps handling other requests meanwhile; its
+//! result is checked again when it arrives. A worktree made for a new
+//! session whose project was removed meanwhile, or for a move whose session
+//! was deleted or had its first turn meanwhile, is removed with its branch.
+//! Whether each project is a git repository is found at start, on add and
+//! after Initialize Git.
 //!
 //! Before a session's first agent turn it can move the session to another
 //! workspace: the project's checkout, a worktree that already exists, or a
@@ -114,7 +122,7 @@ use crate::feat::layout::floats::{Float, FloatLayout, Floats};
 use crate::feat::layout::state::{Layouts, PaneEntry, SessionLayout, Tab};
 use crate::feat::layout::tree::{Split, TileLayout};
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
-use crate::feat::zmx::zmx_service::{ZmxEntry, ZmxSession};
+use crate::feat::zmx::zmx_service::{ZmxEntry, ZmxService, ZmxSession};
 use crate::{AppState, Focus};
 
 /// How long to wait between polls while a turn is underway in any agent pane.
@@ -192,23 +200,112 @@ pub struct SessionsActor {
     pane_reports: HashMap<PaneId, PaneReport>,
 }
 
-/// Poll the harnesses now.
+/// Start a poll: apply the agents' pane reports and say what to ask.
 #[derive(Debug)]
-pub struct Poll;
+pub struct PollPlan;
+
+/// What a poll must ask outside the actor. Reply to [`PollPlan`].
+#[derive(Reply)]
+pub struct Probe {
+    /// The harnesses a known pane holds a thread of.
+    asked: Vec<Arc<dyn Harness>>,
+    /// The rest: listed as running nothing.
+    skipped: Vec<HarnessId>,
+    /// Every socket dir a bound pane runs on.
+    dirs: Vec<PathBuf>,
+    zmx: ZmxService,
+    log: Log,
+}
+
+/// What the poll saw; the actor applies it. Reply: [`NextPoll`].
+#[derive(Debug)]
+pub struct PollSeen {
+    listed: HashMap<HarnessId, Vec<RunningAgent>>,
+    /// The last harness that couldn't be asked.
+    failure: Option<Report<HarnessError>>,
+    /// Each probed socket dir's sessions, `None` when zmx couldn't list it.
+    dirs: HashMap<PathBuf, Option<Vec<ZmxEntry>>>,
+}
 
 /// Kill the panes zmx still runs for sessions that are already settled.
 #[derive(Debug)]
 pub struct KillSettled;
 
-/// How long to wait before the next [`Poll`].
+/// How long to wait before the next [`PollPlan`].
 #[derive(Debug, Reply)]
 pub struct NextPoll(pub Duration);
 
 /// A worktree orb made, on its new branch.
+#[derive(Debug)]
 struct MadeWorktree {
     repo: PathBuf,
     path: PathBuf,
     branch: String,
+}
+
+/// The error shown when a worktree job ends without an answer.
+const WORKTREE_UNMADE: &str = "couldn't make the worktree";
+
+/// Which start a worktree job belongs to, with what applying its result
+/// needs.
+#[derive(Debug)]
+enum Start {
+    New {
+        project: ProjectId,
+        kind: ProjectKind,
+        name: Option<String>,
+    },
+    Move {
+        session: SessionId,
+        moving: Moving,
+    },
+    Restore {
+        session: SessionId,
+    },
+}
+
+/// Where a session being moved is, from before its new worktree was made.
+#[derive(Debug)]
+struct Moving {
+    root: PathBuf,
+    old_dir: PathBuf,
+    old_branch: Option<String>,
+    name: Option<String>,
+}
+
+/// A worktree job made (or failed to make) the worktree a start asked for.
+#[derive(Debug)]
+pub struct WorktreeReady {
+    start: Start,
+    made: Result<MadeWorktree, String>,
+}
+
+/// The slow part of a start: the git work that makes its worktree, run
+/// beside the actor's queue.
+struct WorktreeJob {
+    start: Start,
+    work: Work,
+}
+
+/// The git work of a [`WorktreeJob`]. It writes only the actor's own
+/// `fetching` label.
+struct Work {
+    services: Services,
+    state: State,
+    wake: Wake,
+    worktrees_root: PathBuf,
+    repo: PathBuf,
+    make: Make,
+}
+
+/// What a [`Work`] makes.
+enum Make {
+    /// A new worktree from `base`, on `orb/<slug of name>` when that branch
+    /// is free.
+    New { base: String, name: Option<String> },
+    /// A missing worktree at `cwd` again, on the first of `branches` that
+    /// exists, else on the first made anew from the default branch.
+    Again { cwd: PathBuf, branches: Vec<String> },
 }
 
 /// Spawns the sessions actor with a mailbox that never refuses a message.
@@ -234,7 +331,11 @@ impl Actor for SessionsActor {
         }
         let poke = actor.poke.clone();
         tokio::spawn(async move {
-            while let Ok(NextPoll(next)) = actor_ref.ask(Poll).await {
+            while let Ok(probe) = actor_ref.ask(PollPlan).await {
+                let seen = probe.run().await;
+                let Ok(NextPoll(next)) = actor_ref.ask(seen).await else {
+                    break;
+                };
                 tokio::select! {
                     () = tokio::time::sleep(next) => {}
                     () = poke.notified() => {}
@@ -251,7 +352,7 @@ impl Message<SessionsCommand> for SessionsActor {
     fn handle(
         &mut self,
         msg: SessionsCommand,
-        _ctx: &mut Context<Self, Self::Reply>,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> impl Future<Output = Self::Reply> + Send {
         match msg {
             SessionsCommand::SplitPane { session, split } => {
@@ -266,9 +367,17 @@ impl Message<SessionsCommand> for SessionsActor {
                 project,
                 workspace,
                 name,
-            } => self.new_session(project, workspace, name),
+            } => {
+                if let Some(job) = self.new_session(project, workspace, name) {
+                    job.spawn(ctx.actor_ref().clone());
+                }
+            }
             SessionsCommand::InitGit(id) => self.init_git(id),
-            SessionsCommand::ChangeWorkspace { session, to } => self.change_workspace(session, to),
+            SessionsCommand::ChangeWorkspace { session, to } => {
+                if let Some(job) = self.change_workspace(session, to) {
+                    job.spawn(ctx.actor_ref().clone());
+                }
+            }
             SessionsCommand::SwitchBranch {
                 session,
                 git_ref,
@@ -289,8 +398,25 @@ impl Message<SessionsCommand> for SessionsActor {
             SessionsCommand::NewFolderSession { kind, name } => {
                 self.new_folder_session(kind, &name);
             }
-            SessionsCommand::RestoreWorktree(id) => self.restore_worktree(id),
+            SessionsCommand::RestoreWorktree(id) => {
+                if let Some(job) = self.restore_worktree(id) {
+                    job.spawn(ctx.actor_ref().clone());
+                }
+            }
         }
+        std::future::ready(())
+    }
+}
+
+impl Message<WorktreeReady> for SessionsActor {
+    type Reply = ();
+
+    fn handle(
+        &mut self,
+        msg: WorktreeReady,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> impl Future<Output = Self::Reply> + Send {
+        self.worktree_ready(msg);
         std::future::ready(())
     }
 }
@@ -307,11 +433,84 @@ impl Message<KillSettled> for SessionsActor {
     }
 }
 
-impl Message<Poll> for SessionsActor {
+impl Message<PollPlan> for SessionsActor {
+    type Reply = Probe;
+
+    fn handle(
+        &mut self,
+        _msg: PollPlan,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> impl Future<Output = Self::Reply> + Send {
+        std::future::ready(self.poll_plan())
+    }
+}
+
+impl Message<PollSeen> for SessionsActor {
     type Reply = NextPoll;
 
-    async fn handle(&mut self, _msg: Poll, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        NextPoll(self.poll().await)
+    fn handle(
+        &mut self,
+        msg: PollSeen,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> impl Future<Output = Self::Reply> + Send {
+        std::future::ready(NextPoll(self.poll_seen(msg)))
+    }
+}
+
+impl Probe {
+    /// Asks the harnesses what their agents are doing, then zmx what runs in
+    /// each socket dir, beside the actor's queue. A harness that can't be
+    /// asked is left out of the listing; a dir zmx can't list is left
+    /// unlisted.
+    async fn run(self) -> PollSeen {
+        let Self {
+            asked,
+            skipped,
+            dirs,
+            zmx,
+            log,
+        } = self;
+        let mut listed: HashMap<HarnessId, Vec<RunningAgent>> =
+            skipped.into_iter().map(|id| (id, Vec::new())).collect();
+        let mut failure = None;
+        for harness in asked {
+            match harness.running().await {
+                Ok(agents) => {
+                    listed.insert(harness.id(), agents);
+                }
+                Err(report) => failure = Some(report),
+            }
+        }
+        let dirs = {
+            let job_log = log.clone();
+            tokio::task::spawn_blocking(move || {
+                dirs.into_iter()
+                    .map(|dir| {
+                        let found = zmx
+                            .list(&dir)
+                            .inspect_err(|report| {
+                                job_log.error_on_change(
+                                    &format!("poll: zmx list {}", dir.display()),
+                                    "couldn't list zmx sessions",
+                                    report,
+                                );
+                            })
+                            .ok();
+                        (dir, found)
+                    })
+                    .collect()
+            })
+            .await
+            .unwrap_or_else(|error| {
+                log.error("poll: zmx probe", &error);
+                HashMap::new()
+            })
+        };
+        PollSeen {
+            listed,
+            failure,
+            dirs,
+        }
     }
 }
 
@@ -477,12 +676,45 @@ impl SessionsActor {
         }
     }
 
-    /// Asks the harnesses what every agent is doing and shows it. Returns how
-    /// long to wait before the next poll: a second while any agent pane has a
-    /// turn underway.
+    /// One whole poll, as the ticker runs it, for tests.
+    #[cfg(test)]
     async fn poll(&mut self) -> Duration {
+        let seen = self.poll_plan().run().await;
+        self.poll_seen(seen)
+    }
+
+    /// Starts a poll: applies the agents' pane reports, then says what to
+    /// ask outside the actor. A harness no pane holds a thread of isn't
+    /// asked and counts as running nothing.
+    fn poll_plan(&mut self) -> Probe {
         self.follow_pane_files();
-        if let Err(report) = self.sync().await {
+        let bound = self.bound();
+        let known: HashSet<PaneId> = bound.iter().map(|(pane, _)| *pane).collect();
+        let (asked, skipped): (Vec<_>, Vec<_>) =
+            self.services.harnesses.all().iter().partition(|harness| {
+                let id = harness.id();
+                self.rows.iter().any(|row| {
+                    row.harness == id && row.pane_id.is_some_and(|pane| known.contains(&pane))
+                })
+            });
+        let dirs: HashSet<PathBuf> = bound.into_iter().map(|(_, zmx)| zmx.dir).collect();
+        Probe {
+            asked: asked.into_iter().cloned().collect(),
+            skipped: skipped.iter().map(|harness| harness.id()).collect(),
+            dirs: dirs.into_iter().collect(),
+            zmx: self.services.zmx.clone(),
+            log: self.services.log.clone(),
+        }
+    }
+
+    /// Shows what the poll saw. A harness that couldn't be asked leaves its
+    /// threads as they were; the others still update, and the failure shows
+    /// after. Returns how long to wait before the next poll: a second while
+    /// any agent pane has a turn underway.
+    fn poll_seen(&mut self, seen: PollSeen) -> Duration {
+        let live = self.live(&seen.listed, &seen.dirs);
+        self.apply(&seen.listed, &live);
+        if let Some(report) = seen.failure {
             self.fail(&report);
         }
         let app = self.state.read();
@@ -720,75 +952,26 @@ impl SessionsActor {
         Ok(())
     }
 
-    /// Asks the harnesses what every agent is doing and shows it.
-    /// A harness no pane holds a thread of isn't asked and counts as running
-    /// nothing. A harness that can't be asked leaves its threads as they were;
-    /// the others still update, and the failure is returned after.
-    async fn sync(&mut self) -> Result<(), Report<HarnessError>> {
-        let mut listed: HashMap<HarnessId, Vec<RunningAgent>> = HashMap::new();
-        let mut failure = None;
-        let known: HashSet<PaneId> = {
-            let app = self.state.read();
-            self.rows
-                .iter()
-                .filter_map(|row| row.pane_id)
-                .filter(|&pane| pane_home(&app.layouts, &self.unread, pane).is_some())
-                .collect()
-        };
-        for harness in self.services.harnesses.all() {
-            let id = harness.id();
-            let held = self.rows.iter().any(|row| {
-                row.harness == id && row.pane_id.is_some_and(|pane| known.contains(&pane))
-            });
-            if !held {
-                listed.insert(id, Vec::new());
-                continue;
-            }
-            match harness.running().await {
-                Ok(agents) => {
-                    listed.insert(id, agents);
-                }
-                Err(report) => failure = Some(report),
-            }
-        }
-        let live = self.live(&listed);
-        self.apply(&listed, &live);
-        failure.map_or(Ok(()), Err)
+    /// Every pane a saved thread is bound to, with its zmx session.
+    fn bound(&self) -> Vec<(PaneId, ZmxSession)> {
+        let app = self.state.read();
+        self.rows
+            .iter()
+            .filter_map(|row| pane_home(&app.layouts, &self.unread, row.pane_id?))
+            .map(|(_, entry)| (entry.id, entry.zmx.clone()))
+            .collect()
     }
 
-    /// What the poll sees of the panes threads run in: each one's zmx session
-    /// (one `zmx list` per socket dir; a dir zmx can't list leaves its panes
-    /// out) and the agents matched to the panes their processes run under.
-    fn live(&self, listed: &HashMap<HarnessId, Vec<RunningAgent>>) -> Live {
-        let bound: Vec<(PaneId, ZmxSession)> = {
-            let app = self.state.read();
-            self.rows
-                .iter()
-                .filter_map(|row| pane_home(&app.layouts, &self.unread, row.pane_id?))
-                .map(|(_, entry)| (entry.id, entry.zmx.clone()))
-                .collect()
-        };
-        let dirs: HashMap<&Path, Option<Vec<ZmxEntry>>> = bound
-            .iter()
-            .map(|(_, zmx)| zmx.dir.as_path())
-            .collect::<HashSet<&Path>>()
-            .into_iter()
-            .map(|dir| {
-                let listed = self
-                    .services
-                    .zmx
-                    .list(dir)
-                    .inspect_err(|report| {
-                        self.services.log.error_on_change(
-                            &format!("poll: zmx list {}", dir.display()),
-                            "couldn't list zmx sessions",
-                            report,
-                        );
-                    })
-                    .ok();
-                (dir, listed)
-            })
-            .collect();
+    /// What the poll sees of the panes threads run in now: each one's zmx
+    /// session from its socket dir's listing (a dir not listed leaves its
+    /// panes out) and the agents matched to the panes their processes run
+    /// under.
+    fn live(
+        &self,
+        listed: &HashMap<HarnessId, Vec<RunningAgent>>,
+        dirs: &HashMap<PathBuf, Option<Vec<ZmxEntry>>>,
+    ) -> Live {
+        let bound = self.bound();
         let sessions: HashMap<PaneId, Option<ZmxEntry>> = bound
             .iter()
             .filter_map(|(pane, zmx)| {
@@ -1028,30 +1211,132 @@ impl SessionsActor {
     /// Makes a session of project `id` in `workspace`, named `name`, with one
     /// tab running a shell, selects it and asks the frontend to attach it. The checkout or
     /// an existing worktree must still be a folder; a new worktree is made
-    /// from its base (fetched from origin first, see `add_worktree`); the
-    /// Incognito project's folder is made first. On failure the reason
-    /// shows, and a worktree orb made for it is removed with its branch.
-    fn new_session(&mut self, id: ProjectId, workspace: Workspace, name: Option<String>) {
+    /// by the returned job (see [`Work`]), and the session once its result
+    /// arrives (see [`Self::worktree_ready`]); the Incognito project's folder
+    /// is made first. On failure the reason shows.
+    #[must_use]
+    fn new_session(
+        &mut self,
+        id: ProjectId,
+        workspace: Workspace,
+        name: Option<String>,
+    ) -> Option<WorktreeJob> {
         let Some((root, kind)) = self.project_of(id) else {
-            return self.end_start(Err("the project is gone".to_owned()));
+            self.end_start(Err("the project is gone".to_owned()));
+            return None;
         };
         if kind == ProjectKind::Incognito
             && let Err(error) = fs::create_dir_all(&root)
         {
-            return self.end_start(Err(failed(&self.services.log, FOLDER_UNMADE, &error)));
+            self.end_start(Err(failed(&self.services.log, FOLDER_UNMADE, &error)));
+            return None;
         }
-        let (dir, made) = match self.reach(&root, workspace, name.as_deref()) {
-            Ok(reached) => reached,
-            Err(error) => return self.end_start(Err(error)),
-        };
-        let branch = self.branch_of(&dir, made.as_ref());
-        let result = self.save_session(id, session_kind(kind), &dir, branch, name);
-        if result.is_err()
-            && let Some(made) = &made
-        {
-            self.remove_made(made, "new session couldn't be saved");
+        match workspace {
+            Workspace::NewWorktree { base } => {
+                let make = Make::New {
+                    base,
+                    name: name.clone(),
+                };
+                let start = Start::New {
+                    project: id,
+                    kind,
+                    name,
+                };
+                Some(self.job(root, make, start))
+            }
+            to => {
+                let result = reach(&root, to).and_then(|dir| {
+                    let branch = current_branch(&self.services.git, &dir);
+                    self.save_session(id, session_kind(kind), &dir, branch, name)
+                });
+                self.end_start(result);
+                None
+            }
         }
-        self.end_start(result);
+    }
+
+    /// A job making the worktree `make` of the repository at `repo` for
+    /// `start`.
+    fn job(&self, repo: PathBuf, make: Make, start: Start) -> WorktreeJob {
+        WorktreeJob {
+            start,
+            work: Work {
+                services: self.services.clone(),
+                state: self.state.clone(),
+                wake: self.wake.clone(),
+                worktrees_root: self.worktrees_root.clone(),
+                repo,
+                make,
+            },
+        }
+    }
+
+    /// Applies a worktree job's result, checking first that its start still
+    /// holds. A new session's project must still be there, else its
+    /// worktree is removed; a moved session must still exist and still have
+    /// had no turn, else its worktree is removed; a restored session must
+    /// still exist (a worktree re-added for one that's gone is left for the
+    /// sweep). However it ends, the start ends, and the fetch label goes.
+    fn worktree_ready(&mut self, ready: WorktreeReady) {
+        self.state.write().sessions.fetching = None;
+        let WorktreeReady { start, made } = ready;
+        match start {
+            Start::New {
+                project,
+                kind,
+                name,
+            } => {
+                let result = made.and_then(|made| {
+                    let live = self
+                        .state
+                        .read()
+                        .sessions
+                        .project(project)
+                        .is_some_and(|project| !project.removed);
+                    if !live {
+                        self.remove_made(&made, "its project was removed while it was made");
+                        return Err("the project is gone".to_owned());
+                    }
+                    let branch = Some(made.branch.clone());
+                    let result =
+                        self.save_session(project, session_kind(kind), &made.path, branch, name);
+                    if result.is_err() {
+                        self.remove_made(&made, "new session couldn't be saved");
+                    }
+                    result
+                });
+                self.end_start(result);
+            }
+            Start::Move { session, moving } => {
+                let result = made.and_then(|made| {
+                    let still = if self.state.read().sessions.deleting.contains(&session) {
+                        Err("the session is gone".to_owned())
+                    } else {
+                        self.moving(session).map(drop)
+                    };
+                    if still.is_err() {
+                        self.remove_made(&made, "its session changed while it was made");
+                    }
+                    still?;
+                    self.move_to(session, &moving, &made.path, Some(&made))
+                });
+                self.state.write().sessions.attach = Some(session);
+                self.end_start(result);
+            }
+            Start::Restore { session } => {
+                let result = made.and_then(|made| {
+                    if !self.sessions.contains_key(&session)
+                        || self.state.read().sessions.deleting.contains(&session)
+                    {
+                        return Err("the session is gone".to_owned());
+                    }
+                    self.show_branch(&made.path, &made.branch)?;
+                    self.state.write().sessions.attach = Some(session);
+                    Ok(())
+                });
+                self.end_start(result);
+            }
+        }
     }
 
     /// Saves a new `kind` session of project `project` named `name` in `dir`
@@ -1120,69 +1405,58 @@ impl SessionsActor {
             .map(|project| (project.root.clone(), project.kind))
     }
 
-    /// Where `to` is for a session named `name` of the project rooted at
-    /// `root`: the checkout or an existing worktree, which must still be a
-    /// folder, or a new worktree made from its base (fetched from origin
-    /// first, see `add_worktree`) on `orb/<slug>` of the name when that
-    /// branch doesn't exist yet, else on `orb/<hex>`, with the worktree orb
-    /// made. The error is the message box text.
-    fn reach(
-        &self,
-        root: &Path,
-        to: Workspace,
-        name: Option<&str>,
-    ) -> Result<(PathBuf, Option<MadeWorktree>), String> {
-        match to {
-            Workspace::Checkout if root.is_dir() => Ok((root.to_owned(), None)),
-            Workspace::Checkout => Err(format!(
-                "project folder no longer exists: {}",
-                root.display()
-            )),
-            Workspace::Existing(path) if path.is_dir() => Ok((path, None)),
-            Workspace::Existing(path) => {
-                Err(format!("worktree no longer exists: {}", path.display()))
-            }
-            Workspace::NewWorktree { base } => {
-                let branch = name
-                    .and_then(slug)
-                    .map(|slug| format!("orb/{slug}"))
-                    .filter(|branch| !self.services.git.branch_exists(root, branch));
-                self.add_worktree(root, Some(&base), branch.as_deref())
-                    .map(|made| (made.path.clone(), Some(made)))
-                    .map_err(|report| {
-                        git_failed(&self.services.log, "couldn't make the worktree", &report)
-                    })
-            }
-        }
-    }
-
-    /// The branch a session in `dir` is on: the one orb `made` there, else
-    /// the one checked out, if git can tell.
-    fn branch_of(&self, dir: &Path, made: Option<&MadeWorktree>) -> Option<String> {
-        made.map_or_else(
-            || current_branch(&self.services.git, dir),
-            |made| Some(made.branch.clone()),
-        )
-    }
-
     /// Moves session `id`, which has had no agent turn, to `to`: the
-    /// checkout, an existing worktree, or a new one made from its base. Saves
-    /// the session and its panes at the new directory, kills every pane,
-    /// unbinds the threads in them and clears their resume commands, and
-    /// points the layout at the new directory. The worktree it left is
+    /// checkout, an existing worktree, or a new one made by the returned job
+    /// (moved to once its result arrives, see [`Self::worktree_ready`]).
+    /// Saves the session and its panes at the new directory, kills every
+    /// pane, unbinds the threads in them and clears their resume commands,
+    /// and points the layout at the new directory. The worktree it left is
     /// removed with its branch when orb made it and no other session uses it
     /// (git refuses one with changes). However it ends, the frontend is
     /// asked to attach the session again, which starts a fresh shell in each
     /// pane; a session that has had a turn, or a target that can't be
     /// reached, stays where it was with the reason shown.
-    fn change_workspace(&mut self, id: SessionId, to: Workspace) {
-        let result = self.move_session(id, to);
+    #[must_use]
+    fn change_workspace(&mut self, id: SessionId, to: Workspace) -> Option<WorktreeJob> {
+        match (self.moving(id), to) {
+            (Ok(moving), Workspace::NewWorktree { base }) => {
+                let make = Make::New {
+                    base,
+                    name: moving.name.clone(),
+                };
+                let repo = moving.root.clone();
+                Some(self.job(
+                    repo,
+                    make,
+                    Start::Move {
+                        session: id,
+                        moving,
+                    },
+                ))
+            }
+            (moving, to) => {
+                self.move_here(id, moving, to);
+                None
+            }
+        }
+    }
+
+    /// Moves session `id` to `to`, the checkout or an existing worktree,
+    /// when `moving` says it can move, then asks the frontend to attach it
+    /// again and ends the start.
+    fn move_here(&mut self, id: SessionId, moving: Result<Moving, String>, to: Workspace) {
+        let result = moving.and_then(|moving| {
+            let dir = reach(&moving.root, to)?;
+            self.move_to(id, &moving, &dir, None)
+        });
         self.state.write().sessions.attach = Some(id);
         self.end_start(result);
     }
 
-    /// The work of [`Self::change_workspace`], up to asking for the attach.
-    fn move_session(&mut self, id: SessionId, to: Workspace) -> Result<(), String> {
+    /// Where session `id` is, if it can still move: it exists, its project
+    /// does, and it has had no agent turn. The error is the message box
+    /// text.
+    fn moving(&self, id: SessionId) -> Result<Moving, String> {
         let (project, old_dir, old_branch, name) = self
             .sessions
             .get(&id)
@@ -1202,10 +1476,29 @@ impl SessionsActor {
             };
             return Err(format!("Workspace locked · {workspace}"));
         }
-        let (dir, made) = self.reach(&root, to, name.as_deref())?;
-        let branch = self.branch_of(&dir, made.as_ref());
-        if let Err(report) = self.store.move_session(id, &dir, branch.as_deref()) {
-            if let Some(made) = &made {
+        Ok(Moving {
+            root,
+            old_dir,
+            old_branch,
+            name,
+        })
+    }
+
+    /// The work of a move of session `id` from where `moving` says to `dir`,
+    /// where orb `made` a worktree if it did, up to asking for the attach.
+    fn move_to(
+        &mut self,
+        id: SessionId,
+        moving: &Moving,
+        dir: &Path,
+        made: Option<&MadeWorktree>,
+    ) -> Result<(), String> {
+        let branch = made.map_or_else(
+            || current_branch(&self.services.git, dir),
+            |made| Some(made.branch.clone()),
+        );
+        if let Err(report) = self.store.move_session(id, dir, branch.as_deref()) {
+            if let Some(made) = made {
                 self.remove_made(made, "workspace change couldn't be saved");
             }
             return Err(save_failed(&self.services.log, &report));
@@ -1238,17 +1531,17 @@ impl SessionsActor {
             .into_iter()
             .flat_map(|kept| &mut kept.panes)
         {
-            entry.cwd.clone_from(&dir);
+            dir.clone_into(&mut entry.cwd);
         }
         let shown = self.sessions.get_mut(&id).map(|row| {
-            row.dir.clone_from(&dir);
+            dir.clone_into(&mut row.dir);
             row.branch.clone_from(&branch);
             show_session(row)
         });
         {
             let mut guard = self.state.write();
             let app = &mut *guard;
-            app.layouts.move_session(id, &dir);
+            app.layouts.move_session(id, dir);
             let sessions = &mut app.sessions;
             if let (Some(shown), Some(session)) = (
                 shown,
@@ -1271,7 +1564,7 @@ impl SessionsActor {
                 }
             }
         }
-        self.remove_left(&root, &old_dir, old_branch);
+        self.remove_left(&moving.root, &moving.old_dir, moving.old_branch.clone());
         saved
     }
 
@@ -1294,51 +1587,6 @@ impl SessionsActor {
         }
     }
 
-    /// Makes a new worktree of the repository at `repo` on the new branch
-    /// `branch` (else a new `orb/<hex>` one), from `base` (else the default
-    /// branch) as origin has it, else as it is locally. A ref of another
-    /// remote, like `upstream/x`, is used as it is.
-    fn add_worktree(
-        &self,
-        repo: &Path,
-        base: Option<&str>,
-        branch: Option<&str>,
-    ) -> Result<MadeWorktree, Report<GitError>> {
-        let git = &self.services.git;
-        let base = match base {
-            Some(base) => base.to_owned(),
-            None => git.default_branch(repo)?,
-        };
-        let base = start_point(git, repo, &base, |branch| self.fetch(repo, branch))?;
-        let (path, branch) = (0..WORKTREE_NAME_ATTEMPTS)
-            .map(|attempt| {
-                let hex = hex(attempt);
-                (
-                    new_worktree_path(&self.worktrees_root, repo, &hex),
-                    branch.map_or_else(|| format!("orb/{hex}"), str::to_owned),
-                )
-            })
-            .find(|(path, branch)| !path.exists() && !git.branch_exists(repo, branch))
-            .ok_or_else(|| Report::new(GitError).attach("couldn't pick a new worktree name"))?;
-        git.add_worktree(repo, &path, &branch, &base)?;
-        Ok(MadeWorktree {
-            repo: repo.to_owned(),
-            path,
-            branch,
-        })
-    }
-
-    /// Fetches `branch` from origin, showing `fetching origin/<branch>…`
-    /// while it runs.
-    fn fetch(&self, repo: &Path, branch: &str) -> Result<bool, Report<GitError>> {
-        self.state.write().sessions.fetching = Some(format!("origin/{branch}"));
-        (self.wake)();
-        let fetched = self.services.git.fetch(repo, branch);
-        self.state.write().sessions.fetching = None;
-        (self.wake)();
-        fetched
-    }
-
     /// Removes a worktree orb just made, and its branch, discarding anything
     /// in them.
     fn remove_made(&self, made: &MadeWorktree, why: &str) {
@@ -1351,60 +1599,28 @@ impl SessionsActor {
         }
     }
 
-    /// Recreates session `id`'s worktree at its path and asks the frontend to
-    /// attach to the session, ending the start the frontend marked. On
-    /// failure, git's reason shows and nothing attaches.
-    fn restore_worktree(&mut self, id: SessionId) {
-        let result = self.recreate_worktree(id).and_then(|added| {
-            if let Some((cwd, branch)) = added {
-                self.show_branch(&cwd, &branch)?;
-            }
-            self.state.write().sessions.attach = Some(id);
-            Ok(())
-        });
-        self.end_start(result);
-    }
-
-    /// Prunes git's record of session `id`'s missing worktree, then adds it
-    /// back on the first of its branches that still exists (see
-    /// [`Self::restore_target`]), or on the likeliest one made anew from the
-    /// default branch (as origin has it) when all are gone. A directory that
-    /// is back already needs nothing. Returns the directory and the branch
-    /// it was added on, if it was.
-    fn recreate_worktree(&self, id: SessionId) -> Result<Option<(PathBuf, String)>, String> {
-        let (root, cwd, branches) = self
-            .restore_target(id)
-            .ok_or_else(|| "the session is gone".to_owned())?;
+    /// Recreates session `id`'s worktree at its path through the returned
+    /// job (see [`Work`]) and asks the frontend to attach to the session once
+    /// its result arrives (see [`Self::worktree_ready`]), ending the start
+    /// the frontend marked. A directory that is back already needs nothing.
+    /// On failure, git's reason shows and nothing attaches.
+    #[must_use]
+    fn restore_worktree(&mut self, id: SessionId) -> Option<WorktreeJob> {
+        let Some((root, cwd, branches)) = self.restore_target(id) else {
+            self.end_start(Err("the session is gone".to_owned()));
+            return None;
+        };
         if cwd.is_dir() {
-            return Ok(None);
+            self.state.write().sessions.attach = Some(id);
+            self.end_start(Ok(()));
+            return None;
         }
-        let branch = branches
-            .first()
-            .ok_or_else(|| "couldn't tell the worktree's branch".to_owned())?;
-        let git = &self.services.git;
-        git.prune_worktrees(&root)
-            .and_then(|()| {
-                if let Some(existing) = branches
-                    .iter()
-                    .find(|branch| git.branch_exists(&root, branch))
-                {
-                    return git
-                        .add_worktree_on(&root, &cwd, existing)
-                        .map(|()| existing.clone());
-                }
-                let base = git.default_branch(&root)?;
-                let base = start_point(git, &root, &base, |b| self.fetch(&root, b))?;
-                git.add_worktree(&root, &cwd, branch, &base)
-                    .map(|()| branch.clone())
-            })
-            .map(|branch| Some((cwd, branch)))
-            .map_err(|report| {
-                git_failed(
-                    &self.services.log,
-                    "couldn't recreate the worktree",
-                    &report,
-                )
-            })
+        if branches.is_empty() {
+            self.end_start(Err("couldn't tell the worktree's branch".to_owned()));
+            return None;
+        }
+        let make = Make::Again { cwd, branches };
+        Some(self.job(root, make, Start::Restore { session: id }))
     }
 
     /// Session `id`'s project root, its directory, and the branches its
@@ -1479,7 +1695,8 @@ impl SessionsActor {
             return self.end_start(Err("the session is gone".to_owned()));
         };
         if self.state.read().sessions.turned(id) {
-            return self.change_workspace(id, Workspace::Checkout);
+            let moving = self.moving(id);
+            return self.move_here(id, moving, Workspace::Checkout);
         }
         if self.busy_in(&root) {
             self.state.write().sessions.attach = Some(id);
@@ -1488,7 +1705,8 @@ impl SessionsActor {
         match self.services.git.checkout(&root, git_ref) {
             Ok(local) => {
                 let _ = self.show_branch(&root, &local);
-                self.change_workspace(id, Workspace::Checkout);
+                let moving = self.moving(id);
+                self.move_here(id, moving, Workspace::Checkout);
             }
             Err(report) => {
                 self.state.write().sessions.attach = Some(id);
@@ -1499,15 +1717,24 @@ impl SessionsActor {
     }
 
     /// Saves and shows `branch` on every thread and every session in `cwd`.
+    /// The saves run before the state is locked.
     fn show_branch(&mut self, cwd: &Path, branch: &str) -> Result<(), String> {
         let mut saved = Ok(());
-        let mut guard = self.state.write();
-        let app = &mut *guard;
         for row in self.rows.iter_mut().filter(|row| row.cwd == cwd) {
             row.branch = Some(branch.to_owned());
             if let Err(report) = self.store.save_thread(row) {
                 saved = Err(save_failed(&self.services.log, &report));
             }
+        }
+        for row in self.sessions.values_mut().filter(|row| row.dir == cwd) {
+            row.branch = Some(branch.to_owned());
+            if let Err(report) = self.store.save_session(row) {
+                saved = Err(save_failed(&self.services.log, &report));
+            }
+        }
+        let mut guard = self.state.write();
+        let app = &mut *guard;
+        for row in self.rows.iter().filter(|row| row.cwd == cwd) {
             if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
                 let status = thread.status;
                 show(
@@ -1518,11 +1745,7 @@ impl SessionsActor {
                 );
             }
         }
-        for row in self.sessions.values_mut().filter(|row| row.dir == cwd) {
-            row.branch = Some(branch.to_owned());
-            if let Err(report) = self.store.save_session(row) {
-                saved = Err(save_failed(&self.services.log, &report));
-            }
+        for row in self.sessions.values().filter(|row| row.dir == cwd) {
             if let Some(shown) = app.sessions.sessions.iter_mut().find(|s| s.id == row.id) {
                 *shown = show_session(row);
             }
@@ -1551,6 +1774,7 @@ impl SessionsActor {
         } else {
             Err(format!("not a directory: {}", root.display()))
         };
+        let repo = added.is_ok() && self.services.git.project_path(&root).is_some();
         {
             let mut app = self.state.write();
             let sessions = &mut app.sessions;
@@ -1558,7 +1782,6 @@ impl SessionsActor {
                 Ok(id) => {
                     sessions.error = None;
                     sessions.notice = Some(format!("Added project {title}"));
-                    let repo = self.services.git.project_path(&root).is_some();
                     show_project(sessions, id, title, root, ProjectKind::Normal, repo, now);
                 }
                 Err(error) => {
@@ -2828,6 +3051,141 @@ fn current_branch(git: &GitService, cwd: &Path) -> Option<String> {
         .map(|git_ref| git_ref.name)
 }
 
+/// Where `to` is under the project rooted at `root`: the checkout or an
+/// existing worktree, which must still be a folder. A new worktree is made
+/// by a [`WorktreeJob`] instead. The error is the message box text.
+fn reach(root: &Path, to: Workspace) -> Result<PathBuf, String> {
+    match to {
+        Workspace::Checkout if root.is_dir() => Ok(root.to_owned()),
+        Workspace::Checkout => Err(format!(
+            "project folder no longer exists: {}",
+            root.display()
+        )),
+        Workspace::Existing(path) if path.is_dir() => Ok(path),
+        Workspace::Existing(path) => Err(format!("worktree no longer exists: {}", path.display())),
+        Workspace::NewWorktree { .. } => Err(WORKTREE_UNMADE.to_owned()),
+    }
+}
+
+impl WorktreeJob {
+    /// Runs the job beside the actor's queue and posts its result back to
+    /// `actor`; a job that dies posts a failure, so its start always ends.
+    fn spawn(self, actor: ActorRef<SessionsActor>) {
+        let Self { start, work } = self;
+        let log = work.services.log.clone();
+        tokio::spawn(async move {
+            let made = tokio::task::spawn_blocking(move || work.run())
+                .await
+                .unwrap_or_else(|error| {
+                    log.error("worktree job", &error);
+                    Err(WORKTREE_UNMADE.to_owned())
+                });
+            let path = made.as_ref().ok().map(|made| made.path.clone());
+            if actor.tell(WorktreeReady { start, made }).await.is_err()
+                && let Some(path) = path
+            {
+                log.line(
+                    "worktree",
+                    &format!("made for a start that never finished: {}", path.display()),
+                );
+            }
+        });
+    }
+}
+
+impl Work {
+    /// Makes the worktree. The error is the message box text.
+    fn run(self) -> Result<MadeWorktree, String> {
+        let log = &self.services.log;
+        match &self.make {
+            Make::New { base, name } => {
+                let branch = name
+                    .as_deref()
+                    .and_then(slug)
+                    .map(|slug| format!("orb/{slug}"))
+                    .filter(|branch| !self.services.git.branch_exists(&self.repo, branch));
+                self.add_worktree(base, branch.as_deref())
+                    .map_err(|report| git_failed(log, WORKTREE_UNMADE, &report))
+            }
+            Make::Again { cwd, branches } => self
+                .add_again(cwd, branches)
+                .map_err(|report| git_failed(log, "couldn't recreate the worktree", &report)),
+        }
+    }
+
+    /// Makes a new worktree on the new branch `branch` (else a new
+    /// `orb/<hex>` one), from `base` as origin has it, else as it is
+    /// locally. A ref of another remote, like `upstream/x`, is used as it
+    /// is.
+    fn add_worktree(
+        &self,
+        base: &str,
+        branch: Option<&str>,
+    ) -> Result<MadeWorktree, Report<GitError>> {
+        let (git, repo) = (&self.services.git, &self.repo);
+        let base = start_point(git, repo, base, |branch| self.fetch(branch))?;
+        let (path, branch) = (0..WORKTREE_NAME_ATTEMPTS)
+            .map(|attempt| {
+                let hex = hex(attempt);
+                (
+                    new_worktree_path(&self.worktrees_root, repo, &hex),
+                    branch.map_or_else(|| format!("orb/{hex}"), str::to_owned),
+                )
+            })
+            .find(|(path, branch)| !path.exists() && !git.branch_exists(repo, branch))
+            .ok_or_else(|| Report::new(GitError).attach("couldn't pick a new worktree name"))?;
+        git.add_worktree(repo, &path, &branch, &base)?;
+        Ok(MadeWorktree {
+            repo: repo.clone(),
+            path,
+            branch,
+        })
+    }
+
+    /// Prunes git's record of the missing worktree at `cwd`, then adds it
+    /// back on the first of `branches` that still exists, or on the first
+    /// made anew from the default branch (as origin has it) when all are
+    /// gone.
+    fn add_again(&self, cwd: &Path, branches: &[String]) -> Result<MadeWorktree, Report<GitError>> {
+        let (git, repo) = (&self.services.git, &self.repo);
+        let branch = branches
+            .first()
+            .ok_or_else(|| Report::new(GitError).attach("couldn't tell the worktree's branch"))?;
+        git.prune_worktrees(repo)?;
+        let branch = match branches
+            .iter()
+            .find(|branch| git.branch_exists(repo, branch))
+        {
+            Some(existing) => {
+                git.add_worktree_on(repo, cwd, existing)?;
+                existing.clone()
+            }
+            None => {
+                let base = git.default_branch(repo)?;
+                let base = start_point(git, repo, &base, |b| self.fetch(b))?;
+                git.add_worktree(repo, cwd, branch, &base)?;
+                branch.clone()
+            }
+        };
+        Ok(MadeWorktree {
+            repo: repo.clone(),
+            path: cwd.to_owned(),
+            branch,
+        })
+    }
+
+    /// Fetches `branch` from origin, showing `fetching origin/<branch>…`
+    /// while it runs.
+    fn fetch(&self, branch: &str) -> Result<bool, Report<GitError>> {
+        self.state.write().sessions.fetching = Some(format!("origin/{branch}"));
+        (self.wake)();
+        let fetched = self.services.git.fetch(&self.repo, branch);
+        self.state.write().sessions.fetching = None;
+        (self.wake)();
+        fetched
+    }
+}
+
 /// The ref a new worktree of `repo` starts from for `base`: `origin/<b>` when
 /// the repository has an origin and `origin_has` says it has `b` (a fetch of
 /// `b` from origin), else `base` as is.
@@ -2943,7 +3301,8 @@ mod tests {
 
     use super::{
         FAST_POLL, Placement, SAVE_FAILED, SLOW_POLL, SessionsActor, SessionsActorDeps,
-        notice_kind, now_ms, project_title, settle_session_row, spawn_sessions_actor,
+        WorktreeJob, WorktreeReady, notice_kind, now_ms, project_title, settle_session_row,
+        spawn_sessions_actor,
     };
     use crate::Focus;
     use crate::TextInput;
@@ -3041,6 +3400,14 @@ mod tests {
         watched: OnceLock<State>,
         /// What `sessions.fetching` was each time `fetch` ran, while watched.
         fetching_seen: Mutex<Vec<Option<String>>>,
+        /// While set, the first `add_worktree` waits until its sender is
+        /// used or dropped.
+        gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        /// Whether `add_worktree` panics, as a worktree job that dies.
+        panics: bool,
+        /// Whether a write could take the watched state's lock each time
+        /// `project_path` ran.
+        free_at_project_path: Mutex<Vec<bool>>,
     }
 
     impl FakeGit {
@@ -3058,12 +3425,34 @@ mod tests {
                 calls: Mutex::default(),
                 watched: OnceLock::new(),
                 fetching_seen: Mutex::default(),
+                gate: Mutex::default(),
+                panics: false,
+                free_at_project_path: Mutex::default(),
             }
         }
 
         /// A repository without an `origin`.
         fn local() -> Arc<Self> {
             Arc::new(Self::answering())
+        }
+
+        /// A repository without an `origin` whose first `add_worktree` waits
+        /// until the returned sender is used or dropped.
+        fn gated() -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+            let (open, gate) = std::sync::mpsc::channel();
+            let git = Self {
+                gate: Mutex::new(Some(gate)),
+                ..Self::answering()
+            };
+            (Arc::new(git), open)
+        }
+
+        /// A repository without an `origin` whose `add_worktree` panics.
+        fn panicking() -> Arc<Self> {
+            Arc::new(Self {
+                panics: true,
+                ..Self::answering()
+            })
         }
 
         /// A repository with an `origin` that answers fetches with `fetch`.
@@ -3120,6 +3509,15 @@ mod tests {
         /// Looks at `state` on every later fetch.
         fn watch(&self, state: &State) {
             let _ = self.watched.set(state.clone());
+        }
+
+        /// Whether a write could take the watched state's lock each time
+        /// `project_path` ran.
+        fn lock_free_at_project_path(&self) -> Vec<bool> {
+            self.free_at_project_path
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
         }
 
         /// What `sessions.fetching` read while each watched fetch ran.
@@ -3199,6 +3597,15 @@ mod tests {
                 branch: branch.to_owned(),
                 base: base.to_owned(),
             });
+            let gate = self
+                .gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(gate) = gate {
+                let _ = gate.recv();
+            }
+            assert!(!self.panics, "the worktree job died");
             Ok(())
         }
 
@@ -3295,6 +3702,12 @@ mod tests {
         }
 
         fn project_path(&self, _cwd: &Path) -> Option<PathBuf> {
+            if let Some(state) = self.watched.get() {
+                self.free_at_project_path
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(state.write_is_free());
+            }
             self.project.clone()
         }
     }
@@ -6036,7 +6449,8 @@ mod tests {
         let (store, id) = store_with_project()?;
         let (mut actor, state) =
             start_with(store, &listing(Vec::new()), git, Path::new(NO_CLAUDE_DIR));
-        actor.new_session(id, workspace, name.map(str::to_owned));
+        let job = actor.new_session(id, workspace, name.map(str::to_owned));
+        finish(&mut actor, job);
         Ok((actor, state))
     }
 
@@ -6185,7 +6599,8 @@ mod tests {
         );
 
         // When making a session of it in its checkout.
-        actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None);
+        finish(&mut actor, job);
 
         // Then the message box says orb couldn't save its state.
         assert_eq!(
@@ -6272,7 +6687,8 @@ mod tests {
         state.write().sessions.starting = true;
 
         // When making a session.
-        actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None);
+        finish(&mut actor, job);
 
         // Then nothing is starting any more.
         assert!(
@@ -6449,13 +6865,14 @@ mod tests {
         });
 
         // When making a session of it in a new worktree.
-        actor.new_session(
+        let job = actor.new_session(
             ProjectId(99),
             Workspace::NewWorktree {
                 base: "main".to_owned(),
             },
             None,
         );
+        finish(&mut actor, job);
 
         // Then the worktree and branch orb made are force-removed.
         let (path, branch) = git
@@ -6486,7 +6903,8 @@ mod tests {
         let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
         // When making a session in its checkout.
-        actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None);
+        finish(&mut actor, job);
 
         // Then the mode line names the missing folder.
         assert_eq!(
@@ -6519,7 +6937,8 @@ mod tests {
             .ok_or_else(|| Report::new(StoreError).attach("no Incognito project"))?;
 
         // When making an Incognito session.
-        actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None);
+        finish(&mut actor, job);
 
         // Then its folder is back and the session runs there.
         assert_eq!(
@@ -6614,13 +7033,14 @@ mod tests {
         git.watch(&state);
 
         // When making a session in a new worktree from `main`.
-        actor.new_session(
+        let job = actor.new_session(
             id,
             Workspace::NewWorktree {
                 base: "main".to_owned(),
             },
             None,
         );
+        finish(&mut actor, job);
 
         // Then, while git fetched, origin/main showed as being fetched.
         assert_eq!(
@@ -6674,11 +7094,12 @@ mod tests {
         });
 
         // When making a session of it in that worktree.
-        actor.new_session(
+        let job = actor.new_session(
             ProjectId(99),
             Workspace::Existing(worktree.path().to_owned()),
             None,
         );
+        finish(&mut actor, job);
 
         // Then git is asked to remove no worktree and delete no branch.
         let calls = git.calls();
@@ -6715,7 +7136,8 @@ mod tests {
             .ok_or_else(|| Report::new(StoreError).attach("no Incognito project"))?;
 
         // When making an Incognito session.
-        actor.new_session(id, Workspace::Checkout, None);
+        let job = actor.new_session(id, Workspace::Checkout, None);
+        finish(&mut actor, job);
 
         // Then the mode line says the folder couldn't be made.
         assert_eq!(
@@ -6731,6 +7153,122 @@ mod tests {
         let store = Store::open_in_memory()?;
         let id = orb_project(&store)?;
         Ok((store, id))
+    }
+
+    /// Runs `job`, if any, here and hands its result to `actor`, as if it
+    /// had arrived through the mailbox.
+    fn finish(actor: &mut SessionsActor, job: Option<WorktreeJob>) {
+        if let Some(WorktreeJob { start, work }) = job {
+            let made = work.run();
+            actor.worktree_ready(WorktreeReady { start, made });
+        }
+    }
+
+    /// Whether git was asked to force-remove the worktree it added, and its
+    /// branch.
+    fn made_worktree_removed(git: &FakeGit) -> Result<bool, Report<StoreError>> {
+        let (path, branch) = git
+            .added()
+            .ok_or_else(|| Report::new(StoreError).attach("no worktree was added"))?;
+        let calls = git.calls();
+        Ok(
+            calls.contains(&GitCall::RemoveWorktree { path, force: true })
+                && calls.contains(&GitCall::DeleteBranch {
+                    branch,
+                    force: true,
+                }),
+        )
+    }
+
+    /// A new worktree from `main`.
+    fn new_worktree() -> Workspace {
+        Workspace::NewWorktree {
+            base: "main".to_owned(),
+        }
+    }
+
+    #[rstest::rstest]
+    fn starting_stays_on_while_the_worktree_is_made() -> Result<(), Report<StoreError>> {
+        // Given a start of the orb project marked as starting.
+        let (store, id) = store_with_project()?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.starting = true;
+
+        // When asking for a session in a new worktree, its job not yet run.
+        let _job = actor.new_session(id, new_worktree(), None);
+
+        // Then it still shows as starting.
+        assert!(
+            state.read().sessions.starting,
+            "a start stays on while its worktree is being made"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn starting_ends_once_the_worktree_result_is_applied() -> Result<(), Report<StoreError>> {
+        // Given a start of the orb project in a new worktree, marked as
+        // starting.
+        let (store, id) = store_with_project()?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        state.write().sessions.starting = true;
+        let job = actor.new_session(id, new_worktree(), None);
+
+        // When its worktree is made and the result applied.
+        finish(&mut actor, job);
+
+        // Then nothing is starting any more.
+        assert!(
+            !state.read().sessions.starting,
+            "a start ends once its worktree result is applied"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn start_whose_project_was_removed_meanwhile_removes_its_worktree()
+    -> Result<(), Report<StoreError>> {
+        // Given a start of the orb project in a new worktree, and the
+        // project removed while the worktree is made.
+        let (store, id) = store_with_project()?;
+        let git = FakeGit::local();
+        let (mut actor, _state) =
+            start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
+        let job = actor.new_session(id, new_worktree(), None);
+        actor.remove_project(id);
+
+        // When the worktree result is applied.
+        finish(&mut actor, job);
+
+        // Then the worktree and branch orb made are force-removed.
+        assert!(
+            made_worktree_removed(&git)?,
+            "a start whose project is gone leaves no worktree, got {:?}",
+            git.calls()
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn start_whose_project_was_removed_meanwhile_shows_the_project_is_gone()
+    -> Result<(), Report<StoreError>> {
+        // Given a start of the orb project in a new worktree, and the
+        // project removed while the worktree is made.
+        let (store, id) = store_with_project()?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let job = actor.new_session(id, new_worktree(), None);
+        actor.remove_project(id);
+
+        // When the worktree result is applied.
+        finish(&mut actor, job);
+
+        // Then the start says the project is gone.
+        assert_eq!(
+            error_of(&state).as_deref(),
+            Some("the project is gone"),
+            "a start whose project was removed says so"
+        );
+        Ok(())
     }
 
     /// Whether project `id` shows as a git repository.
@@ -6826,6 +7364,31 @@ mod tests {
             error_of(&state).as_deref(),
             Some("Git initialization failed: fatal: cannot mkdir .git: Permission denied"),
             "a failed git init should show git's reason"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn add_project_checks_git_without_holding_the_state() -> Result<(), Report<StoreError>> {
+        // Given an existing directory, and git watching the app state.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let git = FakeGit::local();
+        let (mut actor, state) = start_with(
+            Store::open_in_memory()?,
+            &listing(Vec::new()),
+            &git,
+            Path::new(NO_CLAUDE_DIR),
+        );
+        git.watch(&state);
+
+        // When adding it as a project.
+        actor.add_project(dir.path().to_owned());
+
+        // Then git was asked once, with the state free.
+        assert_eq!(
+            git.lock_free_at_project_path(),
+            vec![true],
+            "adding a project asks git without holding the state"
         );
         Ok(())
     }
@@ -7976,7 +8539,8 @@ mod tests {
             start_with(store, &listing(Vec::new()), git, Path::new(NO_CLAUDE_DIR));
         let (zmx, service) = recording_zmx();
         actor.services.zmx = service;
-        actor.change_workspace(seeded.session, to);
+        let job = actor.change_workspace(seeded.session, to);
+        finish(&mut actor, job);
         Ok((actor, state, seeded, second, zmx))
     }
 
@@ -8098,7 +8662,8 @@ mod tests {
         let to = tempfile::tempdir().change_context(StoreError)?;
 
         // When moving it.
-        actor.change_workspace(seeded.session, Workspace::Existing(to.path().to_owned()));
+        let job = actor.change_workspace(seeded.session, Workspace::Existing(to.path().to_owned()));
+        finish(&mut actor, job);
 
         // Then it stays, locked.
         assert_eq!(
@@ -8108,6 +8673,86 @@ mod tests {
                 Some("Workspace locked · Local checkout".to_owned())
             ),
             "a session that had a turn keeps its workspace"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn move_whose_session_was_deleted_meanwhile_removes_its_worktree()
+    -> Result<(), Report<StoreError>> {
+        // Given a move of aa's session to a new worktree, and the session
+        // deleted while the worktree is made.
+        let (store, seeded, _) = movable()?;
+        let git = FakeGit::local();
+        let (mut actor, _state) =
+            start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
+        let job = actor.change_workspace(seeded.session, new_worktree());
+        actor.delete_session(seeded.session);
+
+        // When the worktree result is applied.
+        finish(&mut actor, job);
+
+        // Then the worktree and branch orb made are force-removed.
+        assert!(
+            made_worktree_removed(&git)?,
+            "a move of a deleted session leaves no worktree, got {:?}",
+            git.calls()
+        );
+        Ok(())
+    }
+
+    /// Gives thread `thread` a title in the app state, as its first turn
+    /// does.
+    fn title_in_state(state: &State, thread: ThreadId) {
+        if let Some(thread) = super::thread_mut(&mut state.write().sessions, thread) {
+            thread.title = Some("Fix the parser".to_owned());
+        }
+    }
+
+    #[rstest::rstest]
+    fn move_whose_session_had_a_turn_meanwhile_is_refused() -> Result<(), Report<StoreError>> {
+        // Given a move of aa's session to a new worktree, and aa's first
+        // turn while the worktree is made.
+        let (store, seeded, _) = movable()?;
+        let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let job = actor.change_workspace(seeded.session, new_worktree());
+        title_in_state(&state, seeded.thread);
+
+        // When the worktree result is applied.
+        finish(&mut actor, job);
+
+        // Then it stays, locked.
+        assert_eq!(
+            (dir_of(&state, seeded.session), error_of(&state)),
+            (
+                Some(PathBuf::from(PROJECT_ROOT)),
+                Some("Workspace locked · Local checkout".to_owned())
+            ),
+            "a session that had a turn meanwhile keeps its workspace"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn move_whose_session_had_a_turn_meanwhile_removes_its_worktree()
+    -> Result<(), Report<StoreError>> {
+        // Given a move of aa's session to a new worktree, and aa's first
+        // turn while the worktree is made.
+        let (store, seeded, _) = movable()?;
+        let git = FakeGit::local();
+        let (mut actor, state) =
+            start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
+        let job = actor.change_workspace(seeded.session, new_worktree());
+        title_in_state(&state, seeded.thread);
+
+        // When the worktree result is applied.
+        finish(&mut actor, job);
+
+        // Then the worktree and branch orb made are force-removed.
+        assert!(
+            made_worktree_removed(&git)?,
+            "a refused move leaves no worktree, got {:?}",
+            git.calls()
         );
         Ok(())
     }
@@ -8145,7 +8790,8 @@ mod tests {
             start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
 
         // When moving it to the checkout.
-        actor.change_workspace(seeded.session, Workspace::Checkout);
+        let job = actor.change_workspace(seeded.session, Workspace::Checkout);
+        finish(&mut actor, job);
 
         // Then the old worktree and its branch are removed, without force.
         assert_eq!(
@@ -8176,7 +8822,8 @@ mod tests {
             start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
 
         // When moving one of them to the checkout.
-        actor.change_workspace(seeded.session, Workspace::Checkout);
+        let job = actor.change_workspace(seeded.session, Workspace::Checkout);
+        finish(&mut actor, job);
 
         // Then git removes nothing.
         assert!(
@@ -8206,12 +8853,13 @@ mod tests {
             start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
 
         // When moving it to a new worktree.
-        actor.change_workspace(
+        let job = actor.change_workspace(
             seeded.session,
             Workspace::NewWorktree {
                 base: "main".to_owned(),
             },
         );
+        finish(&mut actor, job);
 
         // Then the worktree and branch orb made are force-removed.
         let (path, branch) = git
@@ -8252,10 +8900,11 @@ mod tests {
             start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
 
         // When moving it to that worktree.
-        actor.change_workspace(
+        let job = actor.change_workspace(
             seeded.session,
             Workspace::Existing(worktree.path().to_owned()),
         );
+        finish(&mut actor, job);
 
         // Then git is asked to remove no worktree and delete no branch.
         let calls = git.calls();
@@ -9100,7 +9749,8 @@ mod tests {
     fn restore_calls(store: Store, git: &Arc<FakeGit>, id: SessionId) -> Vec<GitCall> {
         let (mut actor, _state) =
             start_with(store, &listing(vec![]), git, Path::new(NO_CLAUDE_DIR));
-        actor.restore_worktree(id);
+        let job = actor.restore_worktree(id);
+        finish(&mut actor, job);
         git.calls()
     }
 
@@ -9195,7 +9845,8 @@ mod tests {
         );
 
         // When restoring its worktree.
-        actor.restore_worktree(id);
+        let job = actor.restore_worktree(id);
+        finish(&mut actor, job);
 
         // Then the session shows fix-parser.
         assert_eq!(
@@ -9285,7 +9936,8 @@ mod tests {
         );
 
         // When restoring its worktree.
-        actor.restore_worktree(id);
+        let job = actor.restore_worktree(id);
+        finish(&mut actor, job);
 
         // Then the frontend is asked to attach to the session.
         assert_eq!(
@@ -9309,7 +9961,8 @@ mod tests {
         );
 
         // When restoring its worktree.
-        actor.restore_worktree(id);
+        let job = actor.restore_worktree(id);
+        finish(&mut actor, job);
 
         // Then git's reason shows and nothing attaches.
         let sessions = &state.read().sessions;
@@ -9335,7 +9988,8 @@ mod tests {
         state.write().sessions.starting = true;
 
         // When restoring its worktree.
-        actor.restore_worktree(id);
+        let job = actor.restore_worktree(id);
+        finish(&mut actor, job);
 
         // Then nothing is starting any more.
         assert!(
@@ -10353,6 +11007,16 @@ mod tests {
         claude: &Arc<FakeClaude>,
         zmx: ZmxService,
     ) -> Result<(ActorRef<SessionsActor>, State), Report<StoreError>> {
+        spawned_with(store, claude, FakeGit::local(), zmx).await
+    }
+
+    /// [`spawned`], with `git` in place of the local fake git.
+    async fn spawned_with(
+        store: Store,
+        claude: &Arc<FakeClaude>,
+        git: Arc<FakeGit>,
+        zmx: ZmxService,
+    ) -> Result<(ActorRef<SessionsActor>, State), Report<StoreError>> {
         let state = State::default();
         let actor = spawn_sessions_actor(SessionsActorDeps {
             services: Services {
@@ -10360,7 +11024,7 @@ mod tests {
                     claude.clone(),
                     PathBuf::from(NO_CLAUDE_DIR),
                 ))]),
-                git: GitService::new(FakeGit::local(), Log::default()),
+                git: GitService::new(git, Log::default()),
                 zmx,
                 log: Log::default(),
             },
@@ -10533,6 +11197,152 @@ mod tests {
             killed(&zmx),
             vec![settled.pane.zmx_name()],
             "only a settled session's listed pane should be killed at start"
+        );
+        Ok(())
+    }
+
+    /// Waits, at most [`LIMIT`], until `condition` holds.
+    async fn wait_until<F>(condition: F)
+    where
+        F: Fn() -> bool,
+    {
+        let waited = tokio::time::Instant::now();
+        while !condition() && waited.elapsed() < LIMIT {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[rstest::rstest]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn split_is_handled_while_a_new_worktree_is_being_made() -> Result<(), Report<StoreError>>
+    {
+        // Given thread aa's session, the actor started through its mailbox
+        // with a git whose worktree add waits until the test ends, and a new
+        // session in a new worktree asked for and reaching that add.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let project = orb_project(&store)?;
+        let zmx = zmx_running(&store);
+        let (git, _open) = FakeGit::gated();
+        let (actor, state) = spawned_with(store, &listing(Vec::new()), git.clone(), zmx).await?;
+        actor
+            .tell(SessionsCommand::NewSession {
+                project,
+                workspace: Workspace::NewWorktree {
+                    base: "main".to_owned(),
+                },
+                name: None,
+            })
+            .await
+            .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))?;
+        wait_until(|| git.added().is_some()).await;
+
+        // When splitting aa's pane through the mailbox.
+        ask_within(
+            &actor,
+            SessionsCommand::SplitPane {
+                session: inserted.session,
+                split: Split::Right,
+            },
+        )
+        .await?;
+
+        // Then aa's session has two panes.
+        assert_eq!(
+            state.read().layouts.session_panes(inserted.session).len(),
+            2,
+            "a split should be handled while a new worktree is being made"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn split_is_handled_while_the_status_check_runs() -> Result<(), Report<StoreError>> {
+        // Given thread aa's session and the actor started through its
+        // mailbox, its poll asking a claude whose listing waits until the
+        // test ends.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let zmx = zmx_running(&store);
+        let (claude, _open) = FakeClaude::gated(Vec::new());
+        let claude = Arc::new(claude);
+        let (actor, state) = spawned(store, &claude, zmx).await?;
+        wait_until(|| claude.lists() >= 1).await;
+
+        // When splitting aa's pane through the mailbox.
+        ask_within(
+            &actor,
+            SessionsCommand::SplitPane {
+                session: inserted.session,
+                split: Split::Right,
+            },
+        )
+        .await?;
+
+        // Then aa's session has two panes.
+        assert_eq!(
+            state.read().layouts.session_panes(inserted.session).len(),
+            2,
+            "a split should be handled while the status check runs"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn restore_through_the_mailbox_asks_to_attach_after_its_job()
+    -> Result<(), Report<StoreError>> {
+        // Given thread aa's pruned worktree and the actor started through
+        // its mailbox.
+        let (store, id) = pruned_thread(Some("fix-parser"))?;
+        let zmx = zmx_running(&store);
+        let (actor, state) =
+            spawned_with(store, &listing(Vec::new()), FakeGit::local(), zmx).await?;
+
+        // When asking it to restore the worktree, and its job finishing.
+        ask_within(&actor, SessionsCommand::RestoreWorktree(id)).await?;
+        wait_until(|| state.read().sessions.attach.is_some()).await;
+
+        // Then the frontend is asked to attach the session.
+        assert_eq!(
+            state.read().sessions.attach,
+            Some(id),
+            "a restored session is attached once its worktree is back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn a_worktree_job_that_panics_still_ends_the_start() -> Result<(), Report<StoreError>> {
+        // Given the actor started through its mailbox, with a git whose
+        // worktree add panics, and a start marked as starting.
+        let store = Store::open_in_memory()?;
+        let project = orb_project(&store)?;
+        let zmx = zmx_running(&store);
+        let (actor, state) =
+            spawned_with(store, &listing(Vec::new()), FakeGit::panicking(), zmx).await?;
+        state.write().sessions.starting = true;
+
+        // When asking for a session in a new worktree, and its job dying.
+        ask_within(
+            &actor,
+            SessionsCommand::NewSession {
+                project,
+                workspace: new_worktree(),
+                name: None,
+            },
+        )
+        .await?;
+        wait_until(|| !state.read().sessions.starting).await;
+
+        // Then the start ends with the failure shown.
+        let sessions = &state.read().sessions;
+        assert_eq!(
+            (sessions.starting, sessions.error.as_deref()),
+            (false, Some("couldn't make the worktree")),
+            "a job that dies still ends its start"
         );
         Ok(())
     }
