@@ -74,7 +74,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In a picker other than the projects screen and the session and worktree pickers, typing filters, `<C-j>`/`<C-k>` or `↑`/`↓` move one item, wrapping from the last to the first and back, `<C-d>`/`<C-u>` move half a page, stopping at the ends, `⏎` picks, and `Esc` cancels.
 - (keybinds) The projects screen, the session picker and the worktree picker open in list mode, where `j`/`k`, `gg`/`G` and `<C-d>`/`<C-u>` move and `Esc` closes.
 - (keybinds) In the projects screen, the session picker and the worktree picker, `/` moves the keys to the input box, where typing filters, `⏎` picks, and `Esc` returns to the list keeping the typed text.
-- (keybinds) `␣p` opens a directory picker at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
+- (keybinds) The directory picker that `a` opens in the projects screen starts at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
 - (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the selected thread's or draft's branch and project (`<project>/<group>` in a group) on the left; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
 - (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
@@ -312,8 +312,8 @@ Entries are added or amended **only with human approval**.
 - (tui) Errors and notices show in a message box like LazyVim's notifier, just under the tab bar at the right edge, titled Error in red or Messages in cyan.
 - (tui) The message box is at least 40 columns wide and at most 40% of the pane, and cuts longer lines with `…`.
 - (tui) The message box hides after 3 s for info or 5 s for errors, a newer message replaces it, and the same message sent again does not bring it back.
-- (projects) Adding a project with `␣p` shows `Added project <name>` in the message box, even when the project was already added or had been removed.
-- (projects) When adding a project with `␣p` fails, the message box shows the reason as an error.
+- (projects) Adding a project from the projects screen shows `Added project <name>` in the message box, even when the project was already added or had been removed.
+- (projects) When adding a project from the projects screen fails, the message box shows the reason as an error.
 - (keybinds) `<C-g> r` in a pane enters resize mode, where `h/j/k/l` or the arrow keys push the focused pane's border on that side out 5% of the tab, `H/J/K/L` pull it in 5%, and `+`/`=`/`-` act as `Cmd +`/`Cmd -`.
 - (keybinds) In resize mode, pushing a border out toward the tab's edge (or past a neighbour's minimum size) pulls the opposite border in 5% instead; pulling a border in toward the tab's edge does nothing.
 - (keybinds) `<C-g> m` in a pane enters move mode, where `h/j/k/l` or the arrow keys swap the focused pane with its neighbour on that side and `n`/`Tab`/`p` swap it with the next or previous pane, wrapping, with the focus staying on the moved pane.
