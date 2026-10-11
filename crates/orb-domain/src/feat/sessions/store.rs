@@ -31,7 +31,7 @@ use wherror::Error;
 
 use super::state::{PaneId, ProjectId, ProjectKind, SessionId, SessionKind, SidebarItem, ThreadId};
 use crate::feat::harness::HarnessId;
-use crate::feat::layout::floats::FloatRect;
+use crate::feat::layout::floats::{FloatLayout, FloatRect};
 use crate::feat::layout::tree::{Node, SwapLayout, TileLayout};
 
 #[derive(Debug, Error)]
@@ -147,6 +147,8 @@ pub struct SessionRow {
     pub dir: PathBuf,
     /// The position of the tab it shows.
     pub active_tab: usize,
+    /// Where its floats go when laid out.
+    pub float_layout: FloatLayout,
     /// Whether its floats were moved or resized by hand since they were last laid out.
     pub floats_hand_changed: bool,
     pub pinned_at: Option<i64>,
@@ -186,6 +188,15 @@ pub struct FloatRow {
     pub rect: FloatRect,
     /// Whether it stays drawn while the floats are hidden.
     pub pinned: bool,
+}
+
+/// A session's floats as saved: each float, their layout, and whether they
+/// were changed by hand since last laid out.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionFloats {
+    pub rows: Vec<FloatRow>,
+    pub layout: FloatLayout,
+    pub hand_changed: bool,
 }
 
 /// A saved pane.
@@ -524,7 +535,7 @@ impl Store {
             .query(
                 "SELECT id, dir, active_tab, pinned_at, settled_override, settled_at,
                         unsettled_at, last_activity_at, project_id, kind, name, branch,
-                        created_at, floats_hand_changed
+                        created_at, floats_hand_changed, float_layout
                  FROM sessions ORDER BY id",
                 |row| {
                     Ok(SessionRow {
@@ -545,6 +556,7 @@ impl Store {
                         branch: row.get(11)?,
                         created_at: row.get(12)?,
                         floats_hand_changed: row.get(13)?,
+                        float_layout: float_layout(&row.get::<_, String>(14)?),
                     })
                 },
             )
@@ -698,8 +710,9 @@ impl Store {
     }
 
     /// Saves `session`'s tabs and its floats, replacing the ones it had, the
-    /// position of its active tab, whether its floats were changed by hand, and the names of `panes`, which are every
-    /// pane its tabs and floats hold. Its other panes are deleted, and a
+    /// position of its active tab, its float layout and whether its floats
+    /// were changed by hand, and the names of `panes`, which are every pane
+    /// its tabs and floats hold. Its other panes are deleted, and a
     /// thread running in one of them no longer has a pane. Returns the
     /// deleted panes.
     ///
@@ -712,8 +725,7 @@ impl Store {
         session: SessionId,
         active_tab: usize,
         tabs: &[TabRow],
-        floats: &[FloatRow],
-        floats_hand_changed: bool,
+        floats: &SessionFloats,
         panes: &[(PaneId, Option<String>)],
     ) -> Result<Vec<PaneId>, Report<StoreError>> {
         let tx = self
@@ -740,7 +752,7 @@ impl Store {
                 )?;
             }
             tx.execute("DELETE FROM floats WHERE session_id = ?1", [session.0])?;
-            for float in floats {
+            for float in &floats.rows {
                 tx.execute(
                     "INSERT INTO floats (session_id, position, pane_id, x, y, width, height,
                                          pinned)
@@ -758,8 +770,14 @@ impl Store {
                 )?;
             }
             tx.execute(
-                "UPDATE sessions SET active_tab = ?2, floats_hand_changed = ?3 WHERE id = ?1",
-                params![session.0, active_tab, floats_hand_changed],
+                "UPDATE sessions SET active_tab = ?2, floats_hand_changed = ?3, float_layout = ?4
+                 WHERE id = ?1",
+                params![
+                    session.0,
+                    active_tab,
+                    floats.hand_changed,
+                    float_layout_text(floats.layout)
+                ],
             )?;
             for (pane, name) in panes {
                 tx.execute(
@@ -1561,6 +1579,24 @@ fn swap_layout(text: &str) -> SwapLayout {
     }
 }
 
+/// How a session's float layout is saved.
+fn float_layout_text(layout: FloatLayout) -> &'static str {
+    match layout {
+        FloatLayout::Staggered => "staggered",
+        FloatLayout::Enlarged => "enlarged",
+        FloatLayout::Spread => "spread",
+    }
+}
+
+/// The float layout saved as `text`; anything orb doesn't know is staggered.
+fn float_layout(text: &str) -> FloatLayout {
+    match text {
+        "enlarged" => FloatLayout::Enlarged,
+        "spread" => FloatLayout::Spread,
+        _ => FloatLayout::Staggered,
+    }
+}
+
 /// How a jump-list row is saved: its kind and id; the Settled header and
 /// agent rows aren't.
 fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
@@ -1590,13 +1626,13 @@ mod tests {
     use error_stack::{Report, ResultExt};
     use rusqlite::Connection;
 
-    use crate::feat::layout::floats::FloatRect;
+    use crate::feat::layout::floats::{FloatLayout, FloatRect};
     use crate::feat::layout::tree::SwapLayout;
 
     use super::{
         FloatRow, MIGRATIONS, NewPaneThread, PaneId, ProjectId, ProjectKind, SavedLayouts,
-        SessionId, SessionKind, SessionRow, SettledOverride, SidebarItem, Store, StoreError,
-        TabRow, ThreadRow, Ui, lock,
+        SessionFloats, SessionId, SessionKind, SessionRow, SettledOverride, SidebarItem, Store,
+        StoreError, TabRow, ThreadRow, Ui, lock,
     };
 
     fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
@@ -3576,8 +3612,7 @@ mod tests {
             inserted.session,
             1,
             &tabs,
-            &[],
-            false,
+            &SessionFloats::default(),
             &[(inserted.pane, None), (second, Some("logs".to_owned()))],
         )?;
 
@@ -3615,8 +3650,7 @@ mod tests {
             inserted.session,
             0,
             &[tab],
-            &[],
-            false,
+            &SessionFloats::default(),
             &[(inserted.pane, None)],
         )?;
 
@@ -3693,8 +3727,7 @@ mod tests {
             inserted.session,
             0,
             &[tab],
-            &[],
-            false,
+            &SessionFloats::default(),
             &[(inserted.pane, None)],
         )?;
 
@@ -3781,8 +3814,10 @@ mod tests {
             inserted.session,
             0,
             &[lone_tab(inserted.session, inserted.pane)],
-            &floats,
-            false,
+            &SessionFloats {
+                rows: floats.clone(),
+                ..SessionFloats::default()
+            },
             &[(inserted.pane, None), (first, None), (second, None)],
         )?;
 
@@ -3809,8 +3844,10 @@ mod tests {
             inserted.session,
             0,
             &[lone_tab(inserted.session, inserted.pane)],
-            &[float_row(inserted.session, 0, float, false)],
-            false,
+            &SessionFloats {
+                rows: vec![float_row(inserted.session, 0, float, false)],
+                ..SessionFloats::default()
+            },
             &[(inserted.pane, None), (float, None)],
         )?;
 
@@ -3842,8 +3879,10 @@ mod tests {
             inserted.session,
             0,
             &[lone_tab(inserted.session, inserted.pane)],
-            &[],
-            true,
+            &SessionFloats {
+                hand_changed: true,
+                ..SessionFloats::default()
+            },
             &[(inserted.pane, None)],
         )?;
 
@@ -3854,6 +3893,40 @@ mod tests {
             .first()
             .is_some_and(|row| row.floats_hand_changed);
         assert!(marked, "the floats' mark should load back");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saved_float_layout_loads_back() -> Result<(), Report<StoreError>> {
+        // Given a thread's session.
+        let store = Store::open_in_memory()?;
+        let project_id =
+            store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let inserted = insert_thread(&store, project_id)?;
+
+        // When saving its layout with the floats spread.
+        store.save_layout(
+            inserted.session,
+            0,
+            &[lone_tab(inserted.session, inserted.pane)],
+            &SessionFloats {
+                layout: FloatLayout::Spread,
+                ..SessionFloats::default()
+            },
+            &[(inserted.pane, None)],
+        )?;
+
+        // Then the session loads back spread.
+        let layout = store
+            .layouts()?
+            .sessions
+            .first()
+            .map(|row| row.float_layout);
+        assert_eq!(
+            layout,
+            Some(FloatLayout::Spread),
+            "the float layout should load back"
+        );
         Ok(())
     }
 
@@ -3869,8 +3942,10 @@ mod tests {
             inserted.session,
             0,
             &[lone_tab(inserted.session, inserted.pane)],
-            &[float_row(inserted.session, 0, float, false)],
-            false,
+            &SessionFloats {
+                rows: vec![float_row(inserted.session, 0, float, false)],
+                ..SessionFloats::default()
+            },
             &[(inserted.pane, None), (float, None)],
         )?;
 
@@ -3879,8 +3954,7 @@ mod tests {
             inserted.session,
             0,
             &[lone_tab(inserted.session, inserted.pane)],
-            &[],
-            false,
+            &SessionFloats::default(),
             &[(inserted.pane, None)],
         )?;
 
@@ -3905,8 +3979,10 @@ mod tests {
             inserted.session,
             0,
             &[lone_tab(inserted.session, inserted.pane)],
-            &[float_row(inserted.session, 0, float, false)],
-            false,
+            &SessionFloats {
+                rows: vec![float_row(inserted.session, 0, float, false)],
+                ..SessionFloats::default()
+            },
             &[(inserted.pane, None), (float, None)],
         )?;
 

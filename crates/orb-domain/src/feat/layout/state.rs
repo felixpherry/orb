@@ -745,8 +745,9 @@ impl Layouts {
     }
 
     /// Puts the top float back into the shown tab, focused, as a new pane is
-    /// added there, and hides the floats. Nothing unless a float has the keys
-    /// and a tab is shown. Whether it changed.
+    /// added there, and hides the floats, laying the rest out again unless
+    /// they were changed by hand. Nothing unless a float has the keys and a
+    /// tab is shown. Whether it changed.
     pub fn embed_float(&mut self, owner: SessionId) -> bool {
         let body = self.body;
         let Some(layout) = self.sessions.get_mut(&owner) else {
@@ -755,7 +756,7 @@ impl Layouts {
         if layout.active_tab().is_none() {
             return false;
         }
-        let Some(pane) = layout.floats.take_focused() else {
+        let Some(pane) = layout.floats.take_focused(body) else {
             return false;
         };
         if let Some(tab) = layout.tab_mut() {
@@ -806,15 +807,17 @@ impl Layouts {
     /// swap layout unless it was changed by hand, when the closed pane's
     /// neighbour takes its space; a tab left without panes goes, and the tab
     /// before it is shown. A float closes; the floats hide when it was the
-    /// last. A layout left without tabs or floats goes.
+    /// last, else the rest are laid out again unless changed by hand. A
+    /// layout left without tabs or floats goes.
     pub fn close_pane(&mut self, pane: PaneId) {
+        let body = self.body;
         let Some(owner) = self.owner_of(pane) else {
             return;
         };
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
         };
-        if layout.floats.remove(pane) {
+        if layout.floats.remove(pane, body) {
             layout.drop_loose_entries();
             self.drop_if_empty(owner);
             return;
@@ -1011,6 +1014,15 @@ impl Layouts {
         }
     }
 
+    /// `Cmd ]` (or `Cmd [` when `back`) while a float has the keys: the floats
+    /// go to the next layout that fits their count, wrapping; floats changed
+    /// by hand get their own layout back first. Whether a float had the keys.
+    pub fn cycle_float_layout(&mut self, owner: SessionId, back: bool) -> bool {
+        let body = self.body;
+        self.focused_floats(owner)
+            .is_some_and(|floats| floats.cycle(back, body))
+    }
+
     /// Swaps the shown tab with the one before it; the first stays put.
     pub fn move_tab_left(&mut self, owner: SessionId) {
         if let Some(layout) = self.sessions.get_mut(&owner)
@@ -1120,7 +1132,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{FocusMove, Layouts, Placed, Placement, SessionLayout, Tab, test_entry as entry};
-    use crate::feat::layout::floats::{Float, FloatRect, Floats};
+    use crate::feat::layout::floats::{Float, FloatLayout, FloatRect, Floats};
     use crate::feat::layout::tree::{NavDirection, Split, SwapLayout, TileLayout};
     use crate::feat::sessions::state::{PaneId, SessionId};
 
@@ -1306,6 +1318,7 @@ mod tests {
                 },
                 pinned: false,
             }],
+            FloatLayout::Staggered,
             false,
         );
 
@@ -3508,7 +3521,11 @@ mod tests {
             },
             pinned,
         };
-        let floats = Floats::restore(vec![float(20, false), float(21, true)], false);
+        let floats = Floats::restore(
+            vec![float(20, false), float(21, true)],
+            FloatLayout::Staggered,
+            false,
+        );
 
         // When restoring the session.
         let mut layouts = Layouts::default();
@@ -3826,6 +3843,123 @@ mod tests {
             (changed, floats_marked(&layouts)),
             (true, false),
             "hidden floats leave resize mode to the tab"
+        );
+    }
+
+    /// Session 1's layout of pane 7 with its floats laid out `layout` and
+    /// each of `panes` added as a float in turn.
+    fn floats_in(layout: FloatLayout, panes: &[i64]) -> Layouts {
+        let mut layouts = Layouts::default();
+        layouts.insert(
+            OWNER,
+            SessionLayout::restore(
+                vec![Tab::restore(
+                    None,
+                    TileLayout::new(PaneId(7)),
+                    SwapLayout::Vertical,
+                    false,
+                )],
+                0,
+                vec![entry(7)],
+                Floats::restore(Vec::new(), layout, false),
+            ),
+        );
+        layouts.fit_to(BODY);
+        for &pane in panes {
+            layouts.add_float(OWNER, entry(pane));
+        }
+        layouts
+    }
+
+    /// Every float's frame in the tests' body, bottom first.
+    fn float_frames(layouts: &Layouts) -> Vec<Rect> {
+        layouts
+            .get(OWNER)
+            .map(|layout| {
+                layout
+                    .floats()
+                    .visible(BODY)
+                    .map(|(_, frame, _)| frame)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[rstest::rstest]
+    fn adding_a_float_to_floats_moved_by_hand_does_not_re_lay_them() {
+        // Given a float moved two steps right, at (28, 6).
+        let mut layouts = with_float_moved(&[(NavDirection::Right, 2)]);
+
+        // When adding float 21.
+        layouts.add_float(OWNER, entry(21));
+
+        // Then the moved float stays put and float 21 takes the staggered spot.
+        assert_eq!(
+            float_frames(&layouts),
+            vec![Rect::new(28, 6, 40, 12), Rect::new(20, 6, 40, 12)],
+            "floats moved by hand keep their places"
+        );
+    }
+
+    #[rstest::rstest]
+    fn fifth_float_under_spread_moves_to_the_next_fitting_layout() {
+        // Given four spread floats.
+        let mut layouts = floats_in(FloatLayout::Spread, &[20, 21, 22, 23]);
+
+        // When adding a fifth.
+        layouts.add_float(OWNER, entry(24));
+
+        // Then the floats are staggered.
+        assert_eq!(
+            layouts.get(OWNER).map(|layout| layout.floats().layout()),
+            Some(FloatLayout::Staggered),
+            "spread fits at most four floats"
+        );
+    }
+
+    #[rstest::rstest]
+    fn cycle_float_layout_without_a_float_focused_changes_nothing() {
+        // Given a float, hidden.
+        let mut layouts = floats_in(FloatLayout::Staggered, &[20]);
+        layouts.toggle_floats(OWNER);
+
+        // When cycling the float layout.
+        let cycled = layouts.cycle_float_layout(OWNER, false);
+
+        // Then nothing is cycled.
+        assert!(!cycled, "hidden floats don't have the keys to cycle");
+    }
+
+    #[rstest::rstest]
+    fn closing_a_float_re_lays_the_rest() {
+        // Given three enlarged floats, a row apart.
+        let mut layouts = floats_in(FloatLayout::Enlarged, &[20, 21, 22]);
+
+        // When closing the middle one.
+        layouts.close_pane(PaneId(21));
+
+        // Then the other two sit on rows 1 and 2.
+        assert_eq!(
+            float_frames(&layouts),
+            vec![Rect::new(4, 1, 72, 21), Rect::new(4, 2, 72, 21)],
+            "the floats above a closed one move into its place"
+        );
+    }
+
+    #[rstest::rstest]
+    fn embedding_a_float_re_lays_the_rest() {
+        // Given two spread floats.
+        let mut layouts = floats_in(FloatLayout::Spread, &[20, 21]);
+
+        // When putting the top float back into the tab and showing the floats.
+        layouts.embed_float(OWNER);
+        layouts.toggle_floats(OWNER);
+
+        // Then the other float takes spread's place for one float.
+        assert_eq!(
+            float_frames(&layouts),
+            vec![Rect::new(40, 12, 40, 12)],
+            "the float left takes the one-float place"
         );
     }
 }

@@ -222,8 +222,8 @@ impl IntentHandler {
             Intent::RenameTab => rename_tab(state),
             Intent::RenamePane => rename_pane(state),
             Intent::GoToTab(n) => on_tabs(state, |layouts, owner| layouts.go_to_tab(owner, *n)),
-            Intent::NextSwapLayout => on_tabs(state, Layouts::next_swap_layout),
-            Intent::PreviousSwapLayout => on_tabs(state, Layouts::previous_swap_layout),
+            Intent::NextSwapLayout => swap_layout(state, false),
+            Intent::PreviousSwapLayout => swap_layout(state, true),
             Intent::MoveTabLeft => on_tabs(state, Layouts::move_tab_left),
             Intent::MoveTabRight => on_tabs(state, Layouts::move_tab_right),
             Intent::FocusPane(pane) => {
@@ -1381,6 +1381,18 @@ where
     vec![Command::SaveLayout(owner)]
 }
 
+/// `Cmd ]` (or `Cmd [` when `back`): cycles the floats' layout while a float
+/// has the keys, else the shown tab's swap layout; saves the layout.
+fn swap_layout(state: &mut AppState, back: bool) -> Vec<Command> {
+    match (validate_float_action(state), back) {
+        (Ok(()), _) => save_if_changed(state, |layouts, owner| {
+            layouts.cycle_float_layout(owner, back)
+        }),
+        (Err(_), true) => on_tabs(state, Layouts::previous_swap_layout),
+        (Err(_), false) => on_tabs(state, Layouts::next_swap_layout),
+    }
+}
+
 /// Moves the focus to the pane `nav` of the focused one, or across to the
 /// tab beside it, and saves the layout.
 fn move_focus(state: &mut AppState, nav: NavDirection) -> Vec<Command> {
@@ -1745,6 +1757,7 @@ mod tests {
     use crate::command::Workspace;
     use crate::feat::git::git_service::{GitRef, WorktreeFacts};
     use crate::feat::jumps::state::JumpList;
+    use crate::feat::layout::floats::FloatLayout;
     use crate::feat::layout::state::{Layouts, SessionLayout, Tab, test_entry};
     use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
     use crate::feat::picker::list::{PickerItem, WorkspaceChoice};
@@ -8407,6 +8420,79 @@ mod tests {
             shown_swap_layout(&state),
             Some(SwapLayout::Horizontal),
             "Cmd [ wraps BASE back to horizontal"
+        );
+    }
+
+    /// The shown session's float layout.
+    fn shown_float_layout(state: &AppState) -> Option<FloatLayout> {
+        state.shown_layout().map(|layout| layout.floats().layout())
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_with_a_float_focused_cycles_the_float_layout() {
+        // Given a staggered float of session 1 with the keys.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When handling Intent::NextSwapLayout.
+        IntentHandler::handle(&Intent::NextSwapLayout, &mut state);
+
+        // Then the floats are enlarged.
+        assert_eq!(
+            shown_float_layout(&state),
+            Some(FloatLayout::Enlarged),
+            "Cmd ] on a float steps staggered to enlarged"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_with_a_float_focused_keeps_the_tab_layout() {
+        // Given a float of session 1 with the keys over a fresh tab (BASE).
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When handling Intent::NextSwapLayout.
+        IntentHandler::handle(&Intent::NextSwapLayout, &mut state);
+
+        // Then the tab is still BASE.
+        assert_eq!(
+            shown_swap_layout(&state),
+            Some(SwapLayout::Base),
+            "Cmd ] on a float leaves the tab's layout alone"
+        );
+    }
+
+    #[rstest::rstest]
+    fn previous_swap_layout_with_a_float_focused_saves_the_layout() {
+        // Given a float of session 1 with the keys.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When handling Intent::PreviousSwapLayout.
+        let commands = IntentHandler::handle(&Intent::PreviousSwapLayout, &mut state);
+
+        // Then session 1's layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "a float layout step should be saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn next_swap_layout_from_the_sidebar_with_floats_shown_cycles_the_tab() {
+        // Given a float of session 1 shown while the sidebar has the keys.
+        let mut state = with_layout(Focus::Sidebar);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When handling Intent::NextSwapLayout.
+        IntentHandler::handle(&Intent::NextSwapLayout, &mut state);
+
+        // Then the tab steps to vertical.
+        assert_eq!(
+            shown_swap_layout(&state),
+            Some(SwapLayout::Vertical),
+            "Cmd ] from the sidebar cycles the tab, not the floats"
         );
     }
 

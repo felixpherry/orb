@@ -1319,6 +1319,63 @@ mod tests {
         assert!(!bar.contains("Cmd <[]>"), "tab bar was '{bar}'");
     }
 
+    #[rstest::rstest]
+    fn tab_bar_shows_the_float_layout_while_a_float_has_the_keys() {
+        // Given a float of session 1 with the keys over a one-pane tab.
+        let state = laid_out(|state| {
+            state.focus = Focus::Pane;
+            state.layouts.add_float(SessionId(1), entry(2));
+        });
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the bar ends with the keys' hint and the float layout name.
+        let bar = tab_bar(&buffer);
+        assert!(
+            bar.trim_end()
+                .ends_with(" Cmd <[]> \u{e0b0} STAGGERED \u{e0b0}"),
+            "tab bar was '{bar}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn float_layout_name_is_dim_once_the_floats_are_changed_by_hand() {
+        // Given a float of session 1 with the keys, moved by hand.
+        let state = laid_out(|state| {
+            state.focus = Focus::Pane;
+            state.layouts.fit_to(Rect::new(0, 0, 80, 24));
+            state.layouts.add_float(SessionId(1), entry(2));
+            state.layouts.move_pane(
+                SessionId(1),
+                orb_domain::feat::layout::tree::NavDirection::Right,
+            );
+        });
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the float layout name is dim, like the other tabs.
+        assert_eq!(
+            bar_style(&buffer, "STAGGERED"),
+            Some((COMMENT, GUTTER, false)),
+            "the dim float layout name"
+        );
+    }
+
+    #[rstest::rstest]
+    fn tab_bar_keeps_the_tab_layout_while_the_keys_are_in_the_sidebar() {
+        // Given a float of session 1 shown over a one-pane tab, the keys in the sidebar.
+        let state = laid_out(|state| state.layouts.add_float(SessionId(1), entry(2)));
+
+        // When drawing a frame.
+        let buffer = draw(&state);
+
+        // Then the bar has no layout indicator, as for any one-pane tab.
+        let bar = tab_bar(&buffer);
+        assert!(!bar.contains("Cmd <[]>"), "tab bar was '{bar}'");
+    }
+
     /// Thread 1's session with ten tabs, tab `shown` (1-based) shown.
     fn ten_tabs(shown: usize) -> AppState {
         laid_out(|state| {

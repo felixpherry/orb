@@ -6,12 +6,14 @@
 //! centred list naming its panes, one row each between two dim bars and a
 //! `>` outside the left bar on the shown one, above the shown pane. Floats
 //! are drawn last, over the tiled panes and stack lists; a pinned float
-//! stays drawn while the floats are hidden.
+//! stays drawn while the floats are hidden. While a float has the keys, the
+//! tab bar names the floats' layout instead of the tab's.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
 use orb_domain::AppState;
+use orb_domain::feat::layout::floats::FloatLayout;
 use orb_domain::feat::layout::state::{Placed, Placement, SessionLayout, StackList};
 use orb_domain::feat::layout::tree::SwapLayout;
 use orb_domain::feat::sessions::state::PaneId;
@@ -54,7 +56,7 @@ pub(crate) fn render(
     hits: &mut HitMap,
 ) -> Option<Position> {
     let [bar, body] = areas(right);
-    tab_bar(state, layout, bar, buf, hits);
+    tab_bar(state, layout, keys_in_pane, bar, buf, hits);
     let placement = placement(state, layout, body);
     let mut cursor = None;
     for place in placement.panes.iter().filter(|place| !place.floating) {
@@ -203,11 +205,14 @@ pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
 /// Then, right-aligned, the `Cmd <[]>` hint and the shown tab's swap layout
 /// name, lit while the tab is untouched and dim once it's changed by hand; a
 /// 1-pane tab has none, and it's dropped when the tabs leave no room for it.
+/// While a float has the keys (`keys_in_pane`), the name is the floats'
+/// layout instead, lit or dim the same way, whatever the tab's pane count.
 /// Records the bar, each tab and chip with the tab it shows, and the `+` in
 /// `hits`.
 fn tab_bar(
     state: &AppState,
     layout: &SessionLayout,
+    keys_in_pane: bool,
     bar: Rect,
     buf: &mut Buffer,
     hits: &mut HitMap,
@@ -267,7 +272,16 @@ fn tab_bar(
         hits.record_new_tab(plus);
     }
     chevron(&mut spans, PLUS.to_owned(), rest);
-    if let Some(tab) = layout.active_tab().filter(|tab| tab.pane_count() > 1) {
+    let indicator = if keys_in_pane && layout.float_focused() {
+        let floats = layout.floats();
+        Some((float_layout_name(floats.layout()), floats.hand_changed()))
+    } else {
+        layout
+            .active_tab()
+            .filter(|tab| tab.pane_count() > 1)
+            .map(|tab| (swap_layout_name(tab.swap_layout()), tab.hand_changed()))
+    };
+    if let Some((name, hand_changed)) = indicator {
         let hint = Span::styled(
             SWAP_KEYS,
             Style::new()
@@ -275,13 +289,13 @@ fn tab_bar(
                 .bg(BLACK)
                 .add_modifier(Modifier::BOLD),
         );
-        let name = format!(" {} ", swap_layout_name(tab.swap_layout()));
+        let name = format!(" {name} ");
         let width = span_width(&hint).saturating_add(chevron_width(&name));
         let left = bar.right().saturating_sub(x);
         if left >= width {
             spans.push(Span::raw(" ".repeat(usize::from(left - width))));
             spans.push(hint);
-            let style = if tab.hand_changed() { rest } else { shown };
+            let style = if hand_changed { rest } else { shown };
             chevron(&mut spans, name, style);
         }
     }
@@ -332,6 +346,15 @@ fn swap_layout_name(layout: SwapLayout) -> &'static str {
         SwapLayout::Horizontal => "HORIZONTAL",
         SwapLayout::Stacked => "STACKED",
         SwapLayout::HalfStacked => "HALF-STACKED",
+    }
+}
+
+/// What the tab bar calls the floats' `layout`, in caps.
+fn float_layout_name(layout: FloatLayout) -> &'static str {
+    match layout {
+        FloatLayout::Staggered => "STAGGERED",
+        FloatLayout::Enlarged => "ENLARGED",
+        FloatLayout::Spread => "SPREAD",
     }
 }
 
