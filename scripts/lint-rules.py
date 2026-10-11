@@ -28,13 +28,6 @@ ALLOWLIST = {
     "replace_all": "example inside the Record's own format template",
 }
 
-# False Record entries proposed for correction; remove each once the approved edit lands.
-PENDING_RECORD_APPROVAL = {
-    "claude rm": "pending Record approval: RECORD.md 67, 118, 176, 179",
-    "pi not found": "pending Record approval: RECORD.md 270",
-    "zmx not found": "pending Record approval: RECORD.md 270",
-}
-
 SECTION_START = "## 3. Architecture"
 SECTION_END = "## 4. Tests"
 DENY_PHRASES = ["actor host", "pub/sub", "message bus"]
@@ -74,7 +67,7 @@ def check_names(label, text):
         if fenced:
             continue
         for span in SPAN.findall(line):
-            if span in ALLOWLIST or span in PENDING_RECORD_APPROVAL:
+            if span in ALLOWLIST:
                 continue
             if not span_ok(span):
                 reports.append(f"{label}:{number}: unknown name `{span}`")
