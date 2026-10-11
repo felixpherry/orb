@@ -150,6 +150,13 @@ impl IntentHandler {
                 }
             }
             Intent::AddPane => match (validate_pane_action(state), state.shown_session()) {
+                (Ok(()), Some(session))
+                    if state
+                        .shown_layout()
+                        .is_some_and(SessionLayout::float_focused) =>
+                {
+                    vec![Command::AddFloat(session)]
+                }
                 (Ok(()), Some(session)) => vec![Command::AddPane(session)],
                 _ => vec![],
             },
@@ -158,6 +165,7 @@ impl IntentHandler {
                 _ => vec![],
             },
             Intent::ClosePane => close_pane(state),
+            Intent::ToggleFloats => toggle_floats(state),
             Intent::SendCtrlG => match validate_pane_action(state) {
                 Ok(()) => vec![Command::SendCtrlG],
                 Err(_) => vec![],
@@ -1365,6 +1373,19 @@ fn move_focus(state: &mut AppState, nav: NavDirection) -> Vec<Command> {
     match state.layouts.move_focus(owner, nav) {
         FocusMove::Moved => vec![Command::SaveLayout(owner)],
         FocusMove::Stuck => vec![],
+    }
+}
+
+/// Shows or hides the shown session's floats and saves the layout; with
+/// none, asks for a shell float. Only while the keys are in a pane.
+fn toggle_floats(state: &mut AppState) -> Vec<Command> {
+    let (Ok(()), Some(owner)) = (validate_pane_action(state), state.shown_session()) else {
+        return vec![];
+    };
+    if state.layouts.toggle_floats(owner) {
+        vec![Command::SaveLayout(owner)]
+    } else {
+        vec![Command::AddFloat(owner)]
     }
 }
 
@@ -7200,6 +7221,71 @@ mod tests {
             commands,
             vec![Command::AddPane(SessionId(1))],
             "adding goes through the sessions actor, which makes the pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn add_pane_while_a_float_has_the_keys_asks_for_a_float() {
+        // Given a float of session 1 with the keys.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When adding a pane.
+        let commands = IntentHandler::handle(&Intent::AddPane, &mut state);
+
+        // Then the sessions actor is asked for another float.
+        assert_eq!(
+            commands,
+            vec![Command::AddFloat(SessionId(1))],
+            "a new pane opens as a float while a float has the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_floats_with_no_floats_asks_for_a_float() {
+        // Given thread 1's lone pane with the keys and no floats.
+        let mut state = with_layout(Focus::Pane);
+
+        // When showing the floats.
+        let commands = IntentHandler::handle(&Intent::ToggleFloats, &mut state);
+
+        // Then the sessions actor is asked for a shell float.
+        assert_eq!(
+            commands,
+            vec![Command::AddFloat(SessionId(1))],
+            "with no floats, showing them opens one"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_floats_with_floats_saves_the_layout() {
+        // Given a float of session 1, shown.
+        let mut state = with_layout(Focus::Pane);
+        state.layouts.add_float(SessionId(1), test_entry(70));
+
+        // When hiding the floats.
+        let commands = IntentHandler::handle(&Intent::ToggleFloats, &mut state);
+
+        // Then the layout is saved.
+        assert_eq!(
+            commands,
+            vec![Command::SaveLayout(SessionId(1))],
+            "hiding the floats moves the keys, so the layout is saved"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_floats_outside_a_pane_does_nothing() {
+        // Given thread 1's layout shown while the sidebar has the keys.
+        let mut state = with_layout(Focus::Sidebar);
+
+        // When showing the floats.
+        let commands = IntentHandler::handle(&Intent::ToggleFloats, &mut state);
+
+        // Then nothing is asked for.
+        assert!(
+            commands.is_empty(),
+            "showing the floats needs the keys in a pane"
         );
     }
 

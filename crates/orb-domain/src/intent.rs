@@ -40,7 +40,8 @@ pub enum Intent {
     /// taking the focus; outside the tab's stack, add it to that stack.
     StackPane,
     /// Add a shell to the shown tab and re-tile it by pane count unless it
-    /// was changed by hand, the new shell taking the focus.
+    /// was changed by hand, the new shell taking the focus; while a float has
+    /// the keys, open a float instead.
     AddPane,
     /// Close the focused pane; on the thread's own pane, detach the thread.
     ClosePane,
@@ -48,6 +49,9 @@ pub enum Intent {
     ToggleZoom,
     /// Move the focused pane to a new tab of its own and show it.
     BreakPane,
+    /// Show or hide the shown session's floats; with none, open a shell float.
+    /// Only while the keys are in a pane.
+    ToggleFloats,
     /// Grow the focused pane, or widen the sidebar while it has the keys.
     GrowFocused,
     /// Shrink the focused pane, or narrow the sidebar while it has the keys.
@@ -222,6 +226,7 @@ impl fmt::Display for Intent {
             Self::ClosePane => "close pane",
             Self::ToggleZoom => "zoom",
             Self::BreakPane => "break pane",
+            Self::ToggleFloats => "floats",
             Self::GrowFocused => "grow",
             Self::ShrinkFocused => "shrink",
             Self::EnterPaneMode(PaneMode::Resize) => "resize mode",
@@ -314,6 +319,7 @@ mod tests {
     #[case(Intent::FocusPane(PaneId(-1)), "focus pane")]
     #[case(Intent::ShowStacked(PaneId(-1)), "show pane")]
     #[case(Intent::SendCtrlG, "send ctrl g")]
+    #[case(Intent::ToggleFloats, "floats")]
     fn layout_intents_display_their_labels(#[case] intent: Intent, #[case] expected: &str) {
         // Given / When / Then: which-key labels the layout intent.
         assert_eq!(intent.to_string(), expected, "which-key label");

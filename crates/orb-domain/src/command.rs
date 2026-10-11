@@ -5,8 +5,8 @@
 //! out by the frontend loop; session commands (new sessions, add or remove a
 //! project, move a session to another workspace, switch a session's branch,
 //! refresh, pin, rename, settle, delete and visit a session, save the
-//! sidebar's width and filter, save the jump list, split a pane, open a tab,
-//! save a layout) go to the sessions actor; worktree commands (refresh,
+//! sidebar's width and filter, save the jump list, split a pane, add a float,
+//! open a tab, save a layout) go to the sessions actor; worktree commands (refresh,
 //! delete) go to the worktrees actor; search commands (query, preview) go to
 //! the search actor.
 
@@ -32,6 +32,9 @@ pub enum Command {
     /// Add a shell to `session`'s shown tab and re-tile it unless it was
     /// changed by hand; the sessions actor makes the pane.
     AddPane(SessionId),
+    /// Open a shell float on top of `session`'s floats and show them; the
+    /// sessions actor makes the pane.
+    AddFloat(SessionId),
     /// Stack a shell with `session`'s focused pane; the sessions actor makes
     /// the pane.
     StackPane(SessionId),

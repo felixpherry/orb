@@ -207,6 +207,11 @@ pub struct SplitPane {
 #[derive(Debug)]
 pub struct AddPane(pub SessionId);
 
+/// Open a shell float on top of `session`'s floats, show them, and save the
+/// layout.
+#[derive(Debug)]
+pub struct AddFloat(pub SessionId);
+
 /// Stack a new shell pane with `session`'s focused pane, show it, and save
 /// the layout.
 #[derive(Debug)]
@@ -390,6 +395,18 @@ impl Message<AddPane> for SessionsActor {
 
     async fn handle(&mut self, msg: AddPane, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.add_pane(msg.0, Placement::Tile);
+    }
+}
+
+impl Message<AddFloat> for SessionsActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: AddFloat,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.add_pane(msg.0, Placement::Float);
     }
 }
 
@@ -688,6 +705,8 @@ enum Placement {
     Stack,
     /// In a new tab, or the first tab of a session without a layout.
     Tab,
+    /// On top of the session's floats, which are shown.
+    Float,
 }
 
 impl SessionsActor {
@@ -2076,7 +2095,7 @@ impl SessionsActor {
 
     /// Adds a shell pane in `session`'s directory where `placement` says: in
     /// the shown tab re-tiled by pane count unless it was changed by hand,
-    /// splitting the focused pane, or in a new tab. A session with no layout
+    /// splitting the focused pane, in a new tab, or as a float. A session with no layout
     /// (its last pane closed) gets a first tab of that shell from
     /// [`Placement::Tab`] and is attached once it's saved; the other
     /// placements do nothing there. Then saves the layout. A pane that can't
@@ -2116,6 +2135,7 @@ impl SessionsActor {
                     app.sessions.attach = Some(session);
                 }
                 Placement::Tab => app.layouts.new_tab(session, entry),
+                Placement::Float => app.layouts.add_float(session, entry),
             }
         }
         self.save_layout(session);
@@ -4521,6 +4541,32 @@ mod tests {
             (new_pane.is_some(), focus),
             (true, vec![new_pane]),
             "a split should save a new focused pane"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn float_add_pane_shows_a_float_with_the_keys() -> Result<(), Report<StoreError>> {
+        // Given a thread's one-pane session.
+        let store = Store::open_in_memory()?;
+        let inserted = insert_thread(&store, "aa")?;
+        let host = listing(Vec::new());
+        let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
+
+        // When adding a pane as a float.
+        actor.add_pane(inserted.session, Placement::Float);
+
+        // Then a new pane, a float, has the keys.
+        let shown = state.read().layouts.get(inserted.session).map(|layout| {
+            (
+                layout.float_focused(),
+                layout.focused().is_some_and(|pane| pane != inserted.pane),
+            )
+        });
+        assert_eq!(
+            shown,
+            Some((true, true)),
+            "the new float should be shown with the keys"
         );
         Ok(())
     }

@@ -915,6 +915,12 @@ impl App {
                     .tell(sessions_actor::AddPane(*session))
                     .try_send();
             }
+            Command::AddFloat(session) => {
+                let _ = self
+                    .sessions
+                    .tell(sessions_actor::AddFloat(*session))
+                    .try_send();
+            }
             Command::StackPane(session) => {
                 let _ = self
                     .sessions

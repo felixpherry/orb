@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
 
+use super::floats::Floats;
 use super::tree::{Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction};
 use crate::feat::sessions::state::{PaneId, SessionId};
 use crate::feat::zmx::zmx_service::ZmxSession;
@@ -231,13 +232,14 @@ impl Tab {
     }
 }
 
-/// A session's tabs, in order, the one shown, and where each of their panes
-/// runs.
+/// A session's tabs, in order, the one shown, where each of their panes
+/// runs, and its floats.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionLayout {
     tabs: Vec<Tab>,
     active: usize,
     panes: HashMap<PaneId, PaneEntry>,
+    floats: Floats,
 }
 
 impl SessionLayout {
@@ -247,6 +249,7 @@ impl SessionLayout {
             tabs: vec![Tab::new(pane.id)],
             active: 0,
             panes: HashMap::from([(pane.id, pane)]),
+            floats: Floats::default(),
         }
     }
 
@@ -262,6 +265,7 @@ impl SessionLayout {
             active: active.min(tabs.len().saturating_sub(1)),
             tabs,
             panes,
+            floats: Floats::default(),
         }
     }
 
@@ -284,9 +288,17 @@ impl SessionLayout {
         self.tabs.get(self.active)
     }
 
-    /// The shown tab's focused pane.
+    /// The pane with the keys: the top float while the floats are shown,
+    /// else the shown tab's focused pane.
     pub fn focused(&self) -> Option<PaneId> {
-        self.active_tab().map(Tab::focused)
+        self.floats
+            .focused()
+            .or_else(|| self.active_tab().map(Tab::focused))
+    }
+
+    /// Whether a float has the focus.
+    pub fn float_focused(&self) -> bool {
+        self.floats.focused().is_some()
     }
 
     /// What the tab bar shows for the tab at 0-based `index`: its number,
@@ -312,93 +324,44 @@ impl SessionLayout {
     /// pane below it at the stack's full width. `list_width` gives a stack's
     /// list width, bars included, from its panes; the list is centred,
     /// leaving at least two columns on each side for the shown row's `>` (at
-    /// least 3 wide, at most the stack's width).
+    /// least 3 wide, at most the stack's width). Shown floats come last,
+    /// bottom first, also with no tab; while one has the keys, no tiled pane
+    /// is placed as focused.
     pub fn placed<F>(&self, body: Rect, list_width: F) -> Placement
     where
         F: Fn(&[PaneId]) -> u16,
     {
-        let Some(tab) = self.active_tab() else {
-            return Placement::default();
-        };
-        if tab.zoomed {
-            return Placement {
-                panes: vec![Placed {
-                    pane: tab.tree.focused(),
-                    area: body,
-                    focused: true,
-                }],
-                stacks: vec![],
-            };
+        let mut placement = self
+            .active_tab()
+            .map(|tab| tiled(tab, body, &list_width))
+            .unwrap_or_default();
+        if self.float_focused() {
+            for place in &mut placement.panes {
+                place.focused = false;
+            }
         }
-        let stacks = tab.tree.stacks(body);
-        let mut panes: Vec<Placed> = tab
-            .tree
-            .panes(body)
-            .into_iter()
-            .filter(|info| !stacks.iter().any(|stack| stack.panes.contains(&info.id)))
-            .map(|info| Placed {
-                pane: info.id,
-                area: info.rect,
-                focused: info.is_focused,
-            })
-            .collect();
-        let stacks = stacks
-            .into_iter()
-            .map(|stack| {
-                let fits = stack
-                    .panes
-                    .len()
-                    .min(usize::from(stack.area.height / 2))
-                    .max(1);
-                let rows = u16::try_from(fits).unwrap_or(u16::MAX);
-                let area = {
-                    let width = list_width(&stack.panes)
-                        .min(stack.area.width.saturating_sub(4))
-                        .max(3)
-                        .min(stack.area.width);
-                    let x = stack.area.x + (stack.area.width - width) / 2;
-                    Rect::new(x, stack.area.y, width, rows)
-                };
-                panes.push(Placed {
-                    pane: stack.expanded,
-                    area: Rect::new(
-                        stack.area.x,
-                        stack.area.y.saturating_add(rows),
-                        stack.area.width,
-                        stack.area.height.saturating_sub(rows),
-                    ),
-                    focused: tab.tree.focused() == stack.expanded,
-                });
-                let start = if stack.panes.len() > fits {
-                    stack
-                        .panes
-                        .iter()
-                        .position(|id| *id == stack.expanded)
-                        .unwrap_or_default()
-                        .saturating_sub(fits - 1)
-                } else {
-                    0
-                };
-                let rows = stack
-                    .panes
-                    .iter()
-                    .skip(start)
-                    .zip(inside_bars(area).rows())
-                    .map(|(id, row)| (*id, row))
-                    .collect();
-                StackList {
-                    area,
-                    rows,
-                    shown: stack.expanded,
-                    panes: stack.panes,
-                }
-            })
-            .collect();
-        Placement { panes, stacks }
+        let top = self.floats.focused();
+        placement
+            .panes
+            .extend(self.floats.visible(body).map(|(pane, area)| Placed {
+                pane,
+                area,
+                focused: Some(pane) == top,
+                floating: true,
+            }));
+        placement
     }
 
     fn holds(&self, pane: PaneId) -> bool {
-        self.tabs.iter().any(|tab| tab.holds(pane))
+        self.tabs.iter().any(|tab| tab.holds(pane)) || self.floats.holds(pane)
+    }
+
+    /// Every pane of every tab and float.
+    fn pane_ids(&self) -> impl Iterator<Item = PaneId> + '_ {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.tree.pane_ids())
+            .chain(self.floats.pane_ids())
     }
 
     fn tab_mut(&mut self) -> Option<&mut Tab> {
@@ -415,30 +378,116 @@ impl SessionLayout {
         }
     }
 
-    /// Forgets where panes no tab holds any more run.
+    /// Forgets where panes no tab or float holds any more run.
     fn drop_loose_entries(&mut self) {
-        let held: HashSet<PaneId> = self
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.tree.pane_ids())
-            .collect();
+        let held: HashSet<PaneId> = self.pane_ids().collect();
         self.panes.retain(|id, _| held.contains(id));
     }
 }
 
-/// Where the shown tab draws its panes, and a list per stack.
+/// Where `tab`'s panes are drawn in `body` (see [`SessionLayout::placed`]).
+fn tiled<F>(tab: &Tab, body: Rect, list_width: &F) -> Placement
+where
+    F: Fn(&[PaneId]) -> u16,
+{
+    if tab.zoomed {
+        return Placement {
+            panes: vec![Placed {
+                pane: tab.tree.focused(),
+                area: body,
+                focused: true,
+                floating: false,
+            }],
+            stacks: vec![],
+        };
+    }
+    let stacks = tab.tree.stacks(body);
+    let mut panes: Vec<Placed> = tab
+        .tree
+        .panes(body)
+        .into_iter()
+        .filter(|info| !stacks.iter().any(|stack| stack.panes.contains(&info.id)))
+        .map(|info| Placed {
+            pane: info.id,
+            area: info.rect,
+            focused: info.is_focused,
+            floating: false,
+        })
+        .collect();
+    let stacks = stacks
+        .into_iter()
+        .map(|stack| {
+            let fits = stack
+                .panes
+                .len()
+                .min(usize::from(stack.area.height / 2))
+                .max(1);
+            let rows = u16::try_from(fits).unwrap_or(u16::MAX);
+            let area = {
+                let width = list_width(&stack.panes)
+                    .min(stack.area.width.saturating_sub(4))
+                    .max(3)
+                    .min(stack.area.width);
+                let x = stack.area.x + (stack.area.width - width) / 2;
+                Rect::new(x, stack.area.y, width, rows)
+            };
+            panes.push(Placed {
+                pane: stack.expanded,
+                area: Rect::new(
+                    stack.area.x,
+                    stack.area.y.saturating_add(rows),
+                    stack.area.width,
+                    stack.area.height.saturating_sub(rows),
+                ),
+                focused: tab.tree.focused() == stack.expanded,
+                floating: false,
+            });
+            let start = if stack.panes.len() > fits {
+                stack
+                    .panes
+                    .iter()
+                    .position(|id| *id == stack.expanded)
+                    .unwrap_or_default()
+                    .saturating_sub(fits - 1)
+            } else {
+                0
+            };
+            let rows = stack
+                .panes
+                .iter()
+                .skip(start)
+                .zip(inside_bars(area).rows())
+                .map(|(id, row)| (*id, row))
+                .collect();
+            StackList {
+                area,
+                rows,
+                shown: stack.expanded,
+                panes: stack.panes,
+            }
+        })
+        .collect();
+    Placement { panes, stacks }
+}
+
+/// Where the shown tab draws its panes, then the shown floats bottom first,
+/// and a list per stack.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Placement {
     pub panes: Vec<Placed>,
     pub stacks: Vec<StackList>,
 }
 
-/// A pane with a frame: the frame's outer rect and whether it has the focus.
+/// A pane with a frame: the frame's outer rect, whether it has the focus,
+/// and whether it floats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placed {
     pub pane: PaneId,
     pub area: Rect,
+    /// Gets the keys while they are in the panes.
     pub focused: bool,
+    /// Drawn over the tiled panes.
+    pub floating: bool,
 }
 
 impl Placed {
@@ -521,9 +570,9 @@ pub enum FocusMove {
 
 /// Every session's tabs and splits. Written by the sessions actor (loading
 /// them at start, adding a pane on add, split, new tab or a new session,
-/// pointing a moved session's panes at its new directory, dropping a deleted
-/// session), the intent handler (focus, resize, zoom, tab moves,
-/// renames, closes) and the frontend (closing panes whose program ended, the
+/// adding a float, pointing a moved session's panes at its new directory,
+/// dropping a deleted session), the intent handler (focus, resize, zoom, tab
+/// moves, renames, closes, showing and hiding floats) and the frontend (closing panes whose program ended, the
 /// tab body's size).
 #[derive(Debug, Default)]
 pub struct Layouts {
@@ -548,7 +597,7 @@ impl Layouts {
         self.sessions.get(&owner)
     }
 
-    /// The session whose layout holds `pane`.
+    /// The session whose layout holds `pane`, in a tab or a float.
     pub fn owner_of(&self, pane: PaneId) -> Option<SessionId> {
         self.sessions
             .iter()
@@ -563,26 +612,19 @@ impl Layouts {
             .find_map(|layout| layout.panes.get(&pane))
     }
 
-    /// Every pane of every tab of `owner`'s layout.
+    /// Every pane of every tab and float of `owner`'s layout.
     pub fn session_panes(&self, owner: SessionId) -> Vec<PaneId> {
         self.sessions
             .get(&owner)
-            .map(|layout| {
-                layout
-                    .tabs
-                    .iter()
-                    .flat_map(|tab| tab.tree.pane_ids())
-                    .collect()
-            })
+            .map(|layout| layout.pane_ids().collect())
             .unwrap_or_default()
     }
 
-    /// Every pane of every tab of every layout.
+    /// Every pane of every tab and float of every layout.
     pub fn pane_ids(&self) -> HashSet<PaneId> {
         self.sessions
             .values()
-            .flat_map(|layout| &layout.tabs)
-            .flat_map(|tab| tab.tree.pane_ids())
+            .flat_map(SessionLayout::pane_ids)
             .collect()
     }
 
@@ -650,6 +692,22 @@ impl Layouts {
         }
     }
 
+    /// Puts `pane` on top of `owner`'s floats in the staggered spot and shows them.
+    pub fn add_float(&mut self, owner: SessionId, pane: PaneEntry) {
+        let body = self.body;
+        if let Some(layout) = self.sessions.get_mut(&owner) {
+            layout.floats.add(pane.id, body);
+            layout.panes.insert(pane.id, pane);
+        }
+    }
+
+    /// Shows or hides `owner`'s floats; nothing with none. Whether it changed.
+    pub fn toggle_floats(&mut self, owner: SessionId) -> bool {
+        self.sessions
+            .get_mut(&owner)
+            .is_some_and(|layout| layout.floats.toggle())
+    }
+
     /// Moves the shown tab's focused pane to a new tab after the last one and
     /// shows it; the tab it leaves is re-tiled
     /// in its swap layout unless it was changed by hand. A tab of one pane
@@ -677,8 +735,8 @@ impl Layouts {
     /// Closes `pane` wherever it is. The tab it leaves is re-tiled in its
     /// swap layout unless it was changed by hand, when the closed pane's
     /// neighbour takes its space; a tab left without panes goes, and the tab
-    /// before it is shown;
-    /// a layout left without tabs goes.
+    /// before it is shown. A float closes; the floats hide when it was the
+    /// last. A layout left without tabs or floats goes.
     pub fn close_pane(&mut self, pane: PaneId) {
         let Some(owner) = self.owner_of(pane) else {
             return;
@@ -686,6 +744,11 @@ impl Layouts {
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return;
         };
+        if layout.floats.remove(pane) {
+            layout.drop_loose_entries();
+            self.drop_if_empty(owner);
+            return;
+        }
         let Some(index) = layout.tabs.iter().position(|tab| tab.holds(pane)) else {
             return;
         };
@@ -705,7 +768,7 @@ impl Layouts {
     }
 
     /// Closes the shown tab; the tab before it is shown. A layout left
-    /// without tabs goes.
+    /// without tabs or floats goes.
     pub fn close_tab(&mut self, owner: SessionId) {
         if let Some(layout) = self.sessions.get_mut(&owner) {
             layout.remove_tab(layout.active);
@@ -717,12 +780,22 @@ impl Layouts {
     /// Moves the focus to the pane `nav` of the focused one. With none to the
     /// left or right, the previous or next tab is shown, wrapping, and the
     /// pane on the edge it's entered from gets the focus. With one tab
-    /// nothing changes.
+    /// nothing changes. While a float has the keys, the focus moves among
+    /// the floats only and never changes tab.
     pub fn move_focus(&mut self, owner: SessionId, nav: NavDirection) -> FocusMove {
         let body = self.body;
         let Some(layout) = self.sessions.get_mut(&owner) else {
             return FocusMove::Stuck;
         };
+        if layout.float_focused() {
+            return match layout.floats.neighbour(nav, body) {
+                Some(id) => {
+                    layout.floats.raise(id);
+                    FocusMove::Moved
+                }
+                None => FocusMove::Stuck,
+            };
+        }
         let tab_count = layout.tabs.len();
         let active = layout.active;
         let Some(tab) = layout.tab_mut() else {
@@ -917,11 +990,12 @@ impl Layouts {
         self.sessions.get_mut(&owner)?.tab_mut()
     }
 
+    /// Drops `owner`'s layout when it has no tabs and no floats left.
     fn drop_if_empty(&mut self, owner: SessionId) {
         if self
             .sessions
             .get(&owner)
-            .is_some_and(|layout| layout.tabs.is_empty())
+            .is_some_and(|layout| layout.tabs.is_empty() && layout.floats.is_empty())
         {
             self.sessions.remove(&owner);
         }
@@ -1749,6 +1823,7 @@ mod tests {
                     pane: PaneId(8),
                     area: BODY,
                     focused: true,
+                    floating: false,
                 }],
                 stacks: vec![],
             },
@@ -1809,6 +1884,7 @@ mod tests {
             pane: PaneId(7),
             area: Rect::new(0, 0, 40, 24),
             focused: false,
+            floating: false,
         };
 
         // When asking where its screen goes.
@@ -2995,5 +3071,209 @@ mod tests {
 
         // Then each list starts 10 columns into its own stack.
         assert_eq!(lists, vec![10, 50], "each list is centred over its stack");
+    }
+
+    /// Session 1's layout of pane 7 with float 20 added.
+    fn with_float() -> Layouts {
+        let mut layouts = opened();
+        layouts.add_float(OWNER, entry(20));
+        layouts
+    }
+
+    /// Session 1's two side-by-side panes with floats 20 and 21 added, 21 on top.
+    fn split_with_two_floats() -> Layouts {
+        let mut layouts = split_right();
+        layouts.add_float(OWNER, entry(20));
+        layouts.add_float(OWNER, entry(21));
+        layouts
+    }
+
+    #[rstest::rstest]
+    fn add_float_gives_the_float_the_keys() {
+        // Given session 1's layout of pane 7.
+        let mut layouts = opened();
+
+        // When adding float 20.
+        layouts.add_float(OWNER, entry(20));
+
+        // Then the float has the keys.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(20)),
+            "a new float takes the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn toggle_floats_while_shown_gives_the_keys_back_to_the_tab() {
+        // Given a shown float over pane 7.
+        let mut layouts = with_float();
+
+        // When hiding the floats.
+        layouts.toggle_floats(OWNER);
+
+        // Then pane 7 has the keys again.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(7)),
+            "hidden floats give the keys back"
+        );
+    }
+
+    #[rstest::rstest]
+    fn go_to_tab_keeps_the_float_focused() {
+        // Given three tabs and a shown float.
+        let mut layouts = three_tabs();
+        layouts.add_float(OWNER, entry(20));
+
+        // When showing the second tab.
+        layouts.go_to_tab(OWNER, 2);
+
+        // Then the float still has the keys.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(20)),
+            "floats sit over every tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn closing_the_last_float_gives_the_keys_back_to_the_tab() {
+        // Given a shown float over pane 7.
+        let mut layouts = with_float();
+
+        // When closing the float.
+        layouts.close_pane(PaneId(20));
+
+        // Then pane 7 has the keys again.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(7)),
+            "the tab gets the keys back"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_focus_right_with_no_float_there_is_stuck() {
+        // Given three tabs and one shown float.
+        let mut layouts = three_tabs();
+        layouts.add_float(OWNER, entry(20));
+
+        // When moving the focus right.
+        let moved = layouts.move_focus(OWNER, NavDirection::Right);
+
+        // Then nothing moves and the first tab stays shown.
+        assert_eq!(
+            (moved, active(&layouts)),
+            (FocusMove::Stuck, Some(0)),
+            "focus among floats never changes tab"
+        );
+    }
+
+    #[rstest::rstest]
+    fn move_focus_left_reaches_the_float_on_the_left() {
+        // Given two staggered floats, 21 on top of 20.
+        let mut layouts = opened();
+        layouts.add_float(OWNER, entry(20));
+        layouts.add_float(OWNER, entry(21));
+
+        // When moving the focus left.
+        layouts.move_focus(OWNER, NavDirection::Left);
+
+        // Then float 20 has the keys.
+        assert_eq!(
+            focused(&layouts),
+            Some(PaneId(20)),
+            "the float to the left gets the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn placed_lists_shown_floats_last_bottom_first() {
+        // Given two side-by-side panes and floats 20 and 21.
+        let layouts = split_with_two_floats();
+
+        // When placing them.
+        let last: Vec<(PaneId, bool)> = placed(&layouts)
+            .iter()
+            .skip(2)
+            .map(|place| (place.pane, place.floating))
+            .collect();
+
+        // Then the floats come last, bottom first.
+        assert_eq!(
+            last,
+            vec![(PaneId(20), true), (PaneId(21), true)],
+            "floats are placed after the tiled panes"
+        );
+    }
+
+    #[rstest::rstest]
+    fn placed_focuses_only_the_top_float() {
+        // Given two side-by-side panes and floats 20 and 21.
+        let layouts = split_with_two_floats();
+
+        // When placing them.
+        let lit: Vec<PaneId> = placed(&layouts)
+            .iter()
+            .filter(|place| place.focused)
+            .map(|place| place.pane)
+            .collect();
+
+        // Then only the top float is lit.
+        assert_eq!(lit, vec![PaneId(21)], "one frame has the focus");
+    }
+
+    #[rstest::rstest]
+    fn hidden_floats_are_not_placed() {
+        // Given a float that has been hidden.
+        let mut layouts = with_float();
+        layouts.toggle_floats(OWNER);
+
+        // When placing the panes.
+        let floating = placed(&layouts).iter().any(|place| place.floating);
+
+        // Then no float is placed.
+        assert!(!floating, "hidden floats are not drawn");
+    }
+
+    #[rstest::rstest]
+    fn floats_keep_a_layout_without_tabs() {
+        // Given a float over the lone pane 7.
+        let mut layouts = with_float();
+
+        // When closing pane 7.
+        layouts.close_pane(PaneId(7));
+
+        // Then the layout stays.
+        assert!(layouts.get(OWNER).is_some(), "a layout with floats is kept");
+    }
+
+    #[rstest::rstest]
+    fn pane_ids_include_hidden_floats() {
+        // Given a float that has been hidden.
+        let mut layouts = with_float();
+        layouts.toggle_floats(OWNER);
+
+        // When listing every pane.
+        let ids = layouts.pane_ids();
+
+        // Then the hidden float is among them.
+        assert!(
+            ids.contains(&PaneId(20)),
+            "hidden floats keep their programs"
+        );
+    }
+
+    #[rstest::rstest]
+    fn owner_of_finds_a_floats_session() {
+        // Given float 20 in session 1.
+        let layouts = with_float();
+
+        // When looking up the float's session.
+        let owner = layouts.owner_of(PaneId(20));
+
+        // Then it is session 1.
+        assert_eq!(owner, Some(OWNER), "a float belongs to its session");
     }
 }

@@ -4,13 +4,14 @@
 //! has the keys, grey while it has the focus and the keys are elsewhere,
 //! dim otherwise. A zoomed tab shows only its focused pane. Each stack is a
 //! centred list naming its panes, one row each between two dim bars and a
-//! `>` outside the left bar on the shown one, above the shown pane.
+//! `>` outside the left bar on the shown one, above the shown pane. Floats
+//! are drawn last, over the tiled panes and stack lists.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
 use orb_domain::AppState;
-use orb_domain::feat::layout::state::{Placement, SessionLayout, StackList};
+use orb_domain::feat::layout::state::{Placed, Placement, SessionLayout, StackList};
 use orb_domain::feat::layout::tree::SwapLayout;
 use orb_domain::feat::sessions::state::PaneId;
 use orb_term::Pane;
@@ -18,7 +19,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Widget};
+use ratatui::widgets::{Block, BorderType, Clear, Widget};
 
 use crate::mouse::HitMap;
 use crate::session_picker::cut_right;
@@ -37,7 +38,8 @@ pub(crate) fn areas(right: Rect) -> [Rect; 2] {
 }
 
 /// Draws `layout` into `right`: the tab bar, then each placed pane that has
-/// a client in `panes` inside its frame, and each stack's list. Records each
+/// a client in `panes` inside its frame, each stack's list, then the shown
+/// floats over them, each on a cleared area. Records each
 /// pane's screen, and whether its program reads the mouse, in `hits`.
 /// Returns the focused pane's cursor while `keys_in_pane`.
 pub(crate) fn render(
@@ -53,31 +55,8 @@ pub(crate) fn render(
     tab_bar(state, layout, bar, buf, hits);
     let placement = placement(state, layout, body);
     let mut cursor = None;
-    for place in &placement.panes {
-        let lit = place.focused && keys_in_pane;
-        let content = place.content();
-        let reads_mouse = panes.get(&place.pane).is_some_and(Pane::reads_mouse);
-        hits.record_pane(content, place.pane, reads_mouse);
-        let drawn = panes
-            .get(&place.pane)
-            .filter(|_| !content.is_empty())
-            .and_then(|pane| pane.render(content, buf));
-        if lit {
-            cursor = drawn;
-        }
-        let (border, title) = match (lit, place.focused) {
-            (true, _) => (BLUE, Style::new().fg(BLUE).add_modifier(Modifier::BOLD)),
-            (false, true) => (COMMENT, Style::new().fg(FG_DARK)),
-            (false, false) => (GUTTER, Style::new().fg(DARK3)),
-        };
-        Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(border))
-            .title(Line::styled(
-                format!(" {} ", pane_title(state, place.pane)),
-                title,
-            ))
-            .render(place.area, buf);
+    for place in placement.panes.iter().filter(|place| !place.floating) {
+        cursor = draw_pane(state, place, panes, keys_in_pane, buf, hits).or(cursor);
     }
     for stack in &placement.stacks {
         let lit = keys_in_pane
@@ -93,7 +72,45 @@ pub(crate) fn render(
         stack_list(state, stack, left, lit, buf, hits);
         hits.record_stack(stack.area, stack.panes.clone(), stack.shown);
     }
+    for place in placement.panes.iter().filter(|place| place.floating) {
+        Clear.render(place.area, buf);
+        cursor = draw_pane(state, place, panes, keys_in_pane, buf, hits).or(cursor);
+    }
     cursor
+}
+
+/// Draws one placed pane's client (when `panes` has one) inside its frame and
+/// records its screen in `hits`. Returns its cursor while it has the keys.
+fn draw_pane(
+    state: &AppState,
+    place: &Placed,
+    panes: &HashMap<PaneId, Pane>,
+    keys_in_pane: bool,
+    buf: &mut Buffer,
+    hits: &mut HitMap,
+) -> Option<Position> {
+    let lit = place.focused && keys_in_pane;
+    let content = place.content();
+    let reads_mouse = panes.get(&place.pane).is_some_and(Pane::reads_mouse);
+    hits.record_pane(content, place.pane, reads_mouse);
+    let drawn = panes
+        .get(&place.pane)
+        .filter(|_| !content.is_empty())
+        .and_then(|pane| pane.render(content, buf));
+    let (border, title) = match (lit, place.focused) {
+        (true, _) => (BLUE, Style::new().fg(BLUE).add_modifier(Modifier::BOLD)),
+        (false, true) => (COMMENT, Style::new().fg(FG_DARK)),
+        (false, false) => (GUTTER, Style::new().fg(DARK3)),
+    };
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(border))
+        .title(Line::styled(
+            format!(" {} ", pane_title(state, place.pane)),
+            title,
+        ))
+        .render(place.area, buf);
+    drawn.filter(|_| lit)
 }
 
 /// Where `layout`'s shown tab draws its panes in `body`, each stack's list as
@@ -348,7 +365,70 @@ fn visible_tabs(widths: &[u16], active: usize, room: u16) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::visible_tabs;
+    use std::collections::HashMap;
+
+    use orb_domain::AppState;
+    use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
+    use orb_domain::feat::layout::tree::Split;
+    use orb_domain::feat::sessions::state::{PaneId, SessionId};
+    use orb_domain::feat::zmx::zmx_service::ZmxSession;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    use super::{areas, render, visible_tabs};
+    use crate::mouse::HitMap;
+
+    fn entry(id: i64) -> PaneEntry {
+        PaneEntry {
+            id: PaneId(id),
+            zmx: ZmxSession {
+                name: format!("orb-p{id}"),
+                dir: "/tmp/zmx".into(),
+            },
+            cwd: "/tmp".into(),
+            name: None,
+            resume: None,
+        }
+    }
+
+    #[rstest::rstest]
+    fn float_hides_the_tiled_frames_beneath_it() {
+        // Given panes 7 and 8 side by side (frames meeting at column 40) and
+        // a float over the middle of the body.
+        let right = Rect::new(0, 0, 80, 25);
+        let layouts = {
+            let mut layouts = Layouts::default();
+            layouts.insert(SessionId(1), SessionLayout::of(entry(7)));
+            layouts.fit_to(areas(right)[1]);
+            layouts.split(SessionId(1), Split::Right, entry(8));
+            layouts.add_float(SessionId(1), entry(20));
+            layouts
+        };
+
+        // When rendering the tab area.
+        let buf = layouts.get(SessionId(1)).map(|layout| {
+            let mut buf = Buffer::empty(right);
+            render(
+                &AppState::default(),
+                layout,
+                &HashMap::new(),
+                true,
+                right,
+                &mut buf,
+                &mut HitMap::default(),
+            );
+            buf
+        });
+
+        // Then the tiled border column is blank inside the float.
+        assert_eq!(
+            buf.as_ref()
+                .and_then(|buf| buf.cell((40, 12)))
+                .map(ratatui::buffer::Cell::symbol),
+            Some(" "),
+            "the float covers the tiled frames"
+        );
+    }
 
     #[rstest::rstest]
     fn all_tabs_that_fit_are_visible() {
