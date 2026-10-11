@@ -114,6 +114,9 @@ use crate::{outer_terminal, render, tabs};
 /// failed start.
 const EARLY_EXIT: Duration = Duration::from_secs(1);
 
+/// How often the session picker re-reads the same thread's growing transcript.
+const PREVIEW_EVERY: Duration = Duration::from_secs(1);
+
 /// What the start screen says after an attached program exits within
 /// [`EARLY_EXIT`] of starting.
 const EXITED_AT_START: &str = "session exited at start";
@@ -575,6 +578,8 @@ struct App {
     /// orb's pane has the outer terminal's focus, as its last focus event
     /// said; `true` until one arrives.
     focused: bool,
+    /// The thread the session picker's preview was last read for, and when.
+    last_preview: Option<(ThreadId, Instant)>,
 }
 
 impl App {
@@ -631,6 +636,7 @@ impl App {
             hits: HitMap::default(),
             clicks: Clicks::default(),
             focused: true,
+            last_preview: None,
         }
     }
 
@@ -706,7 +712,9 @@ impl App {
     /// When the loop must wake without an event: a pane's synchronized
     /// update times out, a spinner frame passes while a thread is working
     /// or a session is starting, so the spinners and elapsed time tick, or
-    /// the message box runs out, so it hides.
+    /// the message box runs out, so it hides, or the session picker's preview
+    /// waits to be read again, so a transcript that stopped growing still
+    /// catches up.
     fn deadline(&self) -> Option<Instant> {
         let tick = self
             .state
@@ -716,7 +724,13 @@ impl App {
             .then(|| Instant::now() + SPINNER_FRAME);
         let sync = self.panes.values().filter_map(Pane::sync_deadline);
         let toast = self.toasts.deadline(Instant::now());
-        tick.into_iter().chain(sync).chain(toast).min()
+        let preview = stale_preview(&self.state.read())
+            .map(|(thread, _)| preview_due(self.last_preview, thread, Instant::now()));
+        tick.into_iter()
+            .chain(sync)
+            .chain(toast)
+            .chain(preview)
+            .min()
     }
 
     /// Lays the screen of `size` out: the tab body becomes the pane area,
@@ -1492,7 +1506,7 @@ impl App {
     /// Reads `thread`'s transcript, in its harness's format, into the open
     /// picker's preview. An unreadable transcript, or one whose harness orb
     /// doesn't know, gives an empty preview, which shows as no transcript.
-    fn load_preview(&self, thread: ThreadId, transcript: &Path) {
+    fn load_preview(&mut self, thread: ThreadId, transcript: &Path) {
         let harness = self
             .state
             .read()
@@ -1506,14 +1520,20 @@ impl App {
         if let Some(picker) = &mut self.state.write().picker {
             picker.show_preview(thread, len, exchanges);
         }
+        self.last_preview = Some((thread, Instant::now()));
     }
 
     /// Reads the session picker's preview again when the selected thread's
     /// transcript isn't the length it was read at: it grew while the thread
-    /// works, or it was found or replaced (`/clear`) since.
-    fn refresh_preview(&self) {
+    /// works, or it was found or replaced (`/clear`) since. The same thread
+    /// is read at most once every [`PREVIEW_EVERY`]; the loop's deadline
+    /// wakes it for the next read.
+    fn refresh_preview(&mut self) {
+        let now = Instant::now();
         let stale = stale_preview(&self.state.read());
-        if let Some((thread, transcript)) = stale {
+        if let Some((thread, transcript)) = stale
+            && preview_due(self.last_preview, thread, now) <= now
+        {
             self.load_preview(thread, &transcript);
         }
     }
@@ -1749,6 +1769,15 @@ fn stale_preview(state: &AppState) -> Option<(ThreadId, PathBuf)> {
     picker.wants_preview(len).then(|| (id, transcript.clone()))
 }
 
+/// When the preview of `thread` may be read: at once for a thread other than
+/// the one `last` read, else [`PREVIEW_EVERY`] after that read.
+fn preview_due(last: Option<(ThreadId, Instant)>, thread: ThreadId, now: Instant) -> Instant {
+    match last {
+        Some((read, at)) if read == thread => at + PREVIEW_EVERY,
+        _ => now,
+    }
+}
+
 /// Reads terminal events on a background thread and sends them to the loop.
 fn spawn_input_thread(tx: Sender<LoopEvent>) -> io::Result<()> {
     thread::Builder::new()
@@ -1788,10 +1817,10 @@ mod tests {
     use orb_domain::feat::layout::state::{Layouts, PaneEntry, SessionLayout};
     use orb_domain::feat::layout::tree::Split;
     use orb_domain::feat::picker::list::PickerItem;
-    use orb_domain::feat::picker::state::PickerState;
+    use orb_domain::feat::picker::state::{PickerState, SessionFilter, session_items};
     use orb_domain::feat::sessions::state::{
-        PaneId, Project, ProjectId, ProjectKind, Session, SessionId, SessionKind, Sessions, Thread,
-        ThreadId, ThreadStatus,
+        PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Session, SessionId, SessionKind,
+        Sessions, Thread, ThreadId, ThreadStatus,
     };
     use std::ffi::OsString;
     use std::sync::Arc;
@@ -1815,14 +1844,14 @@ mod tests {
     use tempfile::TempDir;
     use tokio::runtime::Runtime;
 
-    use crate::test_support::{FakeZmx, NoGit, pane, session as session_id};
+    use crate::test_support::{FakeZmx, NoGit, pane, session as session_id, sessions_for};
 
     use super::{
-        App, AttachPlan, ExitOutcome, LoopEvent, PaneExit, StartedAttach, after_pane,
-        attach_at_start, attach_or_restore, broken_pane_message, classify_exit, clear_detached,
-        closed_in_layouts, cursor_style, exit_outcome, handle_mouse_intents, list_directories,
-        pane_error_after, present_at_start, reattachable, resume_plan, stale_preview,
-        stale_sessions, started_attach, to_drop, to_kill, to_spawn,
+        App, AttachPlan, ExitOutcome, LoopEvent, PREVIEW_EVERY, PaneExit, StartedAttach,
+        after_pane, attach_at_start, attach_or_restore, broken_pane_message, classify_exit,
+        clear_detached, closed_in_layouts, cursor_style, exit_outcome, handle_mouse_intents,
+        list_directories, pane_error_after, present_at_start, preview_due, reattachable,
+        resume_plan, stale_preview, stale_sessions, started_attach, to_drop, to_kill, to_spawn,
     };
 
     /// Pane `id`, a shell in `orb-p<id>`.
@@ -2006,6 +2035,53 @@ mod tests {
 
         // Then it is the shape for that focus.
         assert_eq!(style, expected, "cursor shape in {focus:?}");
+    }
+
+    #[rstest::rstest]
+    fn preview_of_a_newly_selected_thread_is_due_at_once() {
+        // Given thread 1's preview was just read.
+        let now = Instant::now();
+        let last = Some((ThreadId(1), now));
+
+        // When asking when thread 2's preview is due.
+        let due = preview_due(last, ThreadId(2), now);
+
+        // Then it is due at once.
+        assert_eq!(due, now, "another thread's preview should be due at once");
+    }
+
+    #[rstest::rstest]
+    fn preview_of_the_same_thread_waits_a_second_after_its_last_read() {
+        // Given thread 1's preview was read at `read_at`.
+        let read_at = Instant::now();
+        let last = Some((ThreadId(1), read_at));
+
+        // When asking 300 ms later when thread 1's preview is due.
+        let asked = read_at + Duration::from_millis(300);
+        let due = preview_due(last, ThreadId(1), asked);
+
+        // Then it is due a second after the last read, later than the ask.
+        assert!(
+            due == read_at + PREVIEW_EVERY && due > asked,
+            "the same thread should wait a second after its last read, due {due:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn preview_of_the_same_thread_is_due_once_a_second_has_passed() {
+        // Given thread 1's preview was read at `read_at`.
+        let read_at = Instant::now();
+        let last = Some((ThreadId(1), read_at));
+
+        // When asking a second later when thread 1's preview is due.
+        let asked = read_at + PREVIEW_EVERY;
+        let due = preview_due(last, ThreadId(1), asked);
+
+        // Then it is due by then.
+        assert!(
+            due <= asked,
+            "the same thread should be due once a second has passed"
+        );
     }
 
     #[rstest::rstest]
@@ -2888,6 +2964,68 @@ mod tests {
             test.zmx.killed(),
             [pane(2).zmx_name()],
             "a closed broken pane's session is killed"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn deadline_wakes_the_loop_for_a_pending_preview_read() -> io::Result<()> {
+        // Given the session picker on thread 1, its preview just read, and
+        // its transcript grown since.
+        let mut test = loop_app(FakeZmx::listing(""), keeps_running)?;
+        let transcript = test.dir.path().join("1.jsonl");
+        fs::write(&transcript, "{}\n")?;
+        {
+            let mut state = test.state.write();
+            let projects = vec![Project {
+                id: ProjectId(1),
+                title: "orb".to_owned(),
+                root: PathBuf::from("/repo"),
+                created_at: UNIX_EPOCH,
+                threads: vec![Thread {
+                    last_session: None,
+                    harness: HarnessId::new("claude"),
+                    id: ThreadId(1),
+                    title: None,
+                    cwd: "/tmp".into(),
+                    transcript: Some(transcript.clone()),
+                    status: ThreadStatus::Idle,
+                    turn_started_at: None,
+                    pane: Some(PaneLaunch {
+                        pane: PaneId(1),
+                        session: SessionId(1),
+                    }),
+                    branch: None,
+                    created_at: UNIX_EPOCH,
+                    last_activity_at: UNIX_EPOCH,
+                    unseen: false,
+                    model: None,
+                }],
+                repo: true,
+                removed: false,
+                kind: ProjectKind::Normal,
+            }];
+            state.sessions = Sessions {
+                sessions: sessions_for(&projects),
+                projects,
+                ..Sessions::default()
+            };
+            state.picker = Some(PickerState::sessions(
+                session_items(&state.sessions, &Layouts::default(), SessionFilter::All),
+                Focus::Sidebar,
+            ));
+        }
+        test.app.load_preview(ThreadId(1), &transcript);
+        let read_at = Instant::now();
+        fs::write(&transcript, "{}\n{}\n")?;
+
+        // When asking when the loop must wake.
+        let deadline = test.app.deadline();
+
+        // Then it wakes within a second of the read, for the next one.
+        assert!(
+            deadline.is_some_and(|due| read_at < due && due <= read_at + PREVIEW_EVERY),
+            "a pending preview read should wake the loop within a second, got {deadline:?}"
         );
         Ok(())
     }

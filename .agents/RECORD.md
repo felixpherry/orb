@@ -49,6 +49,7 @@ Entries are added or amended **only with human approval**.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
 - (sessions) zmx hosts every pane's program, as the zmx session `orb-p<id>` on `~/.orb/zmx`.
+- (arch) While orb waits on a zmx, git or `du` command, it checks whether the command has ended every millisecond for its first 20 ms and every 10 ms after, so one that ends at once holds orb up for only a millisecond or two.
 - (sessions) Agent status is polled every second while a turn is underway in any agent pane and every 5 seconds otherwise; a Claude agent's comes from `claude agents --json --all`, matched to its pane by process ancestry.
 - (sessions) The poll asks `claude agents` only while a pane holds a Claude thread.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
@@ -97,6 +98,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) `<C-g> b` in the sidebar or a pane opens a branch picker of local branches and remote refs; `⏎` checks the branch out in the session's directory.
 - (branches) After a session's first agent turn, the branch picker disables branches checked out in another worktree and shows where.
 - (branches) Switching branch is refused while any thread in the same directory is working or waiting.
+- (branches) The branch picker's four git reads run at the same time.
 - (keybinds) Keys that do nothing for the selection are not bound, so which-key doesn't list them: `<C-g> w`/`<C-g> b` not on Incognito, Research or Learn sessions; `<C-g> p`, `<C-g> r`, `<C-g> m`, `<C-g> t b` and `<C-g> <C-g>` only in a pane; the other `<C-g> t` keys only with a session selected; `<C-g> f` only in the sidebar; `p`/`s` only on a session card, and `r`/`d` on a card or an agent row.
 - (keybinds) In the sidebar, `gg`/`G` jump to the first/last row and `<C-d>`/`<C-u>` move half its visible height.
 - (keybinds) In the sidebar, `j`/`k` wrap from the last row to the first and back.
@@ -180,6 +182,7 @@ Entries are added or amended **only with human approval**.
 - (picker) `⏎` in the session picker reveals the agent's session in the sidebar and moves the keys into the agent's pane, like `⏎` on its agent row.
 - (picker) The session and worktree pickers are drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions or Worktrees with `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.
 - (picker) The session picker's preview shows the selected thread's status, branch and model, then its latest exchanges from the transcript (the prompt, the tools the session ran, and the end of its last reply as Markdown), or `No transcript yet` when there is none, and refreshes while the transcript grows.
+- (picker) While the session picker is open, a growing transcript re-reads the preview at most once a second, and a newly selected thread's preview loads at once; a transcript that stopped growing is re-read within a second without a key press.
 - (mouse) orb captures the mouse from startup until it exits.
 - (mouse) A click on a sidebar row or the sidebar's input box moves the keys to the sidebar, and a press on a pane moves the keys into it without reaching its program; the start screen takes no clicks.
 - (mouse) A double-click is two clicks on the same sidebar or picker row within 500 ms.

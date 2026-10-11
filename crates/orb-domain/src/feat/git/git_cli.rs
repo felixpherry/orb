@@ -9,7 +9,8 @@
 //! lock or a slow disk fails instead of hanging its caller. A call that only
 //! reads gets 5 s and is run once more if it times out; one that changes a
 //! repository gets 60 s and is never run again; a fetch gets 15 s, so an
-//! origin that can't be reached fails the fetch.
+//! origin that can't be reached fails the fetch. Listing refs runs its four
+//! reads at the same time.
 //!
 //! A worktree's size comes from `du`, run with the same environment. `du` gets
 //! 10 s, and a worktree it can't size in time has no size.
@@ -17,6 +18,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use error_stack::Report;
@@ -182,23 +184,35 @@ impl Git for GitCli {
         "git"
     }
 
+    /// Runs its four git reads at the same time, so listing refs takes about
+    /// one call's time.
     fn refs(&self, cwd: &Path) -> Result<Vec<GitRef>, Report<GitError>> {
-        let listed = self.read(
-            cwd,
-            [
-                "for-each-ref",
-                "--format=%(refname)%09%(committerdate:unix)%09%(symref)",
-                "refs/heads",
-                "refs/remotes",
-            ],
-        )?;
-        let worktrees = checked_out(&self.read(cwd, ["worktree", "list", "--porcelain", "-z"])?);
-        Ok(ordered(
-            &listed,
-            self.current_branch(cwd).as_deref(),
-            self.origin_head(cwd).as_deref(),
-            &worktrees,
-        ))
+        thread::scope(|scope| {
+            let worktrees =
+                scope.spawn(|| self.read(cwd, ["worktree", "list", "--porcelain", "-z"]));
+            let current = scope.spawn(|| self.current_branch(cwd));
+            let origin = scope.spawn(|| self.origin_head(cwd));
+            let listed = self.read(
+                cwd,
+                [
+                    "for-each-ref",
+                    "--format=%(refname)%09%(committerdate:unix)%09%(symref)",
+                    "refs/heads",
+                    "refs/remotes",
+                ],
+            );
+            let worktrees = worktrees.join().unwrap_or_else(|_| {
+                Err(Report::new(GitError).attach("git worktree list crashed".to_owned()))
+            });
+            let current = current.join().ok().flatten();
+            let origin = origin.join().ok().flatten();
+            Ok(ordered(
+                &listed?,
+                current.as_deref(),
+                origin.as_deref(),
+                &checked_out(&worktrees?),
+            ))
+        })
     }
 
     fn default_branch(&self, repo: &Path) -> Result<String, Report<GitError>> {
@@ -570,7 +584,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
@@ -952,6 +966,25 @@ mod tests {
 
         // Then git refuses.
         assert!(refs.is_err(), "a plain directory has no refs");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn refs_from_a_slow_git_take_about_one_calls_time() -> Result<(), Report<GitError>> {
+        // Given a git that takes 300 ms to answer anything and prints nothing.
+        let sandbox = Sandbox::new()?;
+        let git = sandbox.faking("git", "sleep 0.3", Duration::from_secs(5))?;
+
+        // When listing refs.
+        let started = Instant::now();
+        let refs = git.refs(sandbox.home.path());
+        let took = started.elapsed();
+
+        // Then they come back in about one call's time, not four.
+        assert!(
+            refs.is_ok() && took < Duration::from_millis(900),
+            "four 300 ms reads should run at the same time, took {took:?} for {refs:?}"
+        );
         Ok(())
     }
 

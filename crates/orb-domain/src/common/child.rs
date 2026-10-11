@@ -6,8 +6,14 @@ use std::process::{Command, Output, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-/// How often a running child is checked for having exited.
+/// How often a running child is checked for having exited once it has run
+/// [`FAST_FOR`].
 const POLL: Duration = Duration::from_millis(10);
+/// How often a child is checked in its first [`FAST_FOR`], so one that exits
+/// at once is back in a millisecond or two.
+const FAST_POLL: Duration = Duration::from_millis(1);
+/// How long a child is checked every [`FAST_POLL`].
+const FAST_FOR: Duration = Duration::from_millis(20);
 
 /// How a child run by [`run_within`] ended.
 #[derive(Debug)]
@@ -19,7 +25,8 @@ pub enum Finished {
 }
 
 /// Runs `command` with no stdin and piped stdout/stderr for at most `limit`,
-/// killing (and reaping) it if it runs longer.
+/// killing (and reaping) it if it runs longer. A child that exits at once is
+/// noticed within a millisecond or two.
 ///
 /// # Errors
 ///
@@ -32,11 +39,16 @@ pub fn run_within(mut command: Command, limit: Duration) -> std::io::Result<Fini
         .spawn()?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
-    let deadline = Instant::now() + limit;
+    let started = Instant::now();
+    let deadline = started + limit;
     let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
-            None if Instant::now() < deadline => thread::sleep(POLL),
+            None if Instant::now() < deadline => thread::sleep(if started.elapsed() < FAST_FOR {
+                FAST_POLL
+            } else {
+                POLL
+            }),
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -74,7 +86,7 @@ where
 mod tests {
     use std::fs;
     use std::process::{Command, Stdio};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
 
@@ -85,6 +97,43 @@ mod tests {
         let mut command = Command::new(program);
         command.args(args);
         command
+    }
+
+    #[rstest::rstest]
+    fn run_within_adds_under_5_ms_to_a_command_that_exits_at_once() {
+        // Given a command that exits at once, and how fast it runs when simply
+        // started and waited on (best of five), so a busy machine slows both
+        // the same.
+        let bare = (0..5)
+            .filter_map(|_| {
+                let started = Instant::now();
+                command("true", &[])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| child.wait())
+                    .ok()
+                    .map(|_| started.elapsed())
+            })
+            .min();
+
+        // When running it through run_within five times, keeping the fastest.
+        let fastest = (0..5)
+            .filter_map(|_| {
+                let started = Instant::now();
+                run_within(command("true", &[]), Duration::from_secs(5))
+                    .ok()
+                    .map(|_| started.elapsed())
+            })
+            .min();
+
+        // Then run_within added under 5 ms.
+        assert!(
+            fastest
+                .zip(bare)
+                .is_some_and(|(took, bare)| took.saturating_sub(bare) < Duration::from_millis(5)),
+            "run_within should add under 5 ms to a command that exits at once, fastest took {fastest:?} against {bare:?} bare"
+        );
     }
 
     #[rstest::rstest]
