@@ -5972,38 +5972,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn restore_ignores_saved_groups() -> Result<(), Report<StoreError>> {
-        // Given a store holding a group row and no session.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = dir.path().join("state.sqlite");
-        let project = orb_project(&Store::open(&path)?)?;
-        rusqlite::Connection::open(&path)
-            .and_then(|conn| {
-                conn.execute(
-                    "INSERT INTO groups (project_id, kind, name, created_at)
-                     VALUES (?1, 'research', 'tokio-cancel', 1000)",
-                    [project.0],
-                )
-            })
-            .change_context(StoreError)?;
-
-        // When the actor starts.
-        let (_actor, state) = start(
-            Store::open(&path)?,
-            &listing(Vec::new()),
-            Path::new(NO_CLAUDE_DIR),
-        );
-
-        // Then the sidebar has no row for it.
-        let rows = {
-            let app = state.read();
-            app.sessions.sidebar(&app.layouts).len()
-        };
-        assert_eq!(rows, 0, "a saved group should not show");
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn restore_without_integrations_shows_the_install_nudge() -> Result<(), Report<StoreError>> {
         // Given neither orb's Claude hook nor its pi extension is installed.
         let claude = listing(Vec::new());

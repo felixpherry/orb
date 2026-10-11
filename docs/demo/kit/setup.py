@@ -289,14 +289,14 @@ db = sqlite3.connect(f"{HOME}/.orb/userdata/state.sqlite")
 assert db.execute("PRAGMA user_version").fetchone()[0] >= 11, "orb didn't create its store"
 
 PROJECTS = {}
-for i, (name, root, kind, ago) in enumerate([
-        ("payments-api", f"{HOME}/dev/payments-api", None, 1 * MIN),
-        ("storefront", f"{HOME}/dev/storefront", None, 12 * MIN),
-        ("shipit", f"{HOME}/dev/shipit", None, 40 * MIN),
-        ("Research", f"{HOME}/.orb/research", "research", 3 * HOUR)]):
+for i, (name, root, kind) in enumerate([
+        ("payments-api", f"{HOME}/dev/payments-api", None),
+        ("storefront", f"{HOME}/dev/storefront", None),
+        ("shipit", f"{HOME}/dev/shipit", None),
+        ("Research", f"{HOME}/.orb/research", "research")]):
     PROJECTS[name] = db.execute(
-        "INSERT INTO projects (root, title, created_at, last_used_at, kind) VALUES (?, ?, ?, ?, ?)",
-        (root, name, NOW - 30 * DAY + i, NOW - ago, kind)).lastrowid
+        "INSERT INTO projects (root, title, created_at, kind) VALUES (?, ?, ?, ?)",
+        (root, name, NOW - 30 * DAY + i, kind)).lastrowid
 
 pane_ids = iter(range(1, 100))
 

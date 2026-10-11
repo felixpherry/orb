@@ -3,10 +3,10 @@
 //!
 //! For each project it keeps the directory its sessions start in. For each
 //! thread it keeps the session ids, the titles, the git branch, how far the
-//! transcript has been read, when the running turn started, whether it is
-//! pinned or settled, when it last had activity and was last visited, and the
-//! model and permission mode its session started with. It also keeps the
-//! sidebar's width and project filter. For each project it also keeps its
+//! transcript has been read, when the running turn started, when it last had
+//! activity and was last visited, and the model its session started with.
+//! It also keeps the sidebar's width and project filter. For each project it
+//! also keeps its
 //! kind (one the user added, or orb's Research or Learn folder). It also
 //! keeps the jump list's rows, oldest first. Each session
 //! keeps its directory and its tabs in order, each tab its split tree,
@@ -350,6 +350,34 @@ const MIGRATIONS: &[Migration] = &[
       pinned INTEGER NOT NULL DEFAULT 0);
     ALTER TABLE sessions ADD COLUMN float_layout TEXT NOT NULL DEFAULT 'staggered';
     ALTER TABLE sessions ADD COLUMN floats_hand_changed INTEGER NOT NULL DEFAULT 0;
+"),
+    Migration::Sql("
+    CREATE TABLE threads_new (
+      id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),
+      short_id TEXT NOT NULL UNIQUE, session_id TEXT, title TEXT, cwd TEXT NOT NULL,
+      transcript_path TEXT, transcript_offset INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL, turn_started_at INTEGER, custom_title TEXT, branch TEXT,
+      last_activity_at INTEGER NOT NULL DEFAULT 0, last_visited_at INTEGER NOT NULL DEFAULT 0,
+      ai_titled INTEGER NOT NULL DEFAULT 0, model TEXT, renamed_title TEXT,
+      harness TEXT NOT NULL DEFAULT 'claude',
+      pane_id INTEGER REFERENCES panes(id), orb_session_id INTEGER REFERENCES sessions(id));
+    INSERT INTO threads_new (id, project_id, short_id, session_id, title, cwd, transcript_path,
+      transcript_offset, created_at, turn_started_at, custom_title, branch, last_activity_at,
+      last_visited_at, ai_titled, model, renamed_title, harness, pane_id, orb_session_id)
+    SELECT id, project_id, short_id, session_id, title, cwd, transcript_path,
+      transcript_offset, created_at, turn_started_at, custom_title, branch, last_activity_at,
+      last_visited_at, ai_titled, model, renamed_title, harness, pane_id, orb_session_id
+    FROM threads;
+    DROP TABLE threads;
+    ALTER TABLE threads_new RENAME TO threads;
+    DROP TABLE groups;
+    DROP TABLE drafts;
+    ALTER TABLE projects DROP COLUMN last_workspace;
+    ALTER TABLE projects DROP COLUMN last_model;
+    ALTER TABLE projects DROP COLUMN last_permission_mode;
+    ALTER TABLE projects DROP COLUMN last_used_at;
+    ALTER TABLE projects DROP COLUMN last_harness;
+    ALTER TABLE panes DROP COLUMN migrated_bg;
 "),
 ];
 
@@ -1281,7 +1309,7 @@ fn prune_copies(path: &Path, kept: usize, log: &Log) {
 /// alone in its tab. Thread ids don't change. Pane
 /// ids start above every thread id, since earlier versions named zmx sessions
 /// `orb-p<thread id>`. The `groups` and `drafts` tables and the threads' old
-/// columns stay.
+/// columns stay until v14 drops them.
 fn v11(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "
@@ -1992,7 +2020,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn migrating_a_v4_database_adds_drafts_and_last_used() -> Result<(), Report<StoreError>> {
+    fn migrating_a_v4_database_adds_the_thread_model_and_keeps_its_threads()
+    -> Result<(), Report<StoreError>> {
         // Given a database at schema version 4 holding a thread.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let path = dir.path().join("state.sqlite");
@@ -2016,21 +2045,15 @@ mod tests {
         // When opening the store.
         let (_, threads) = Store::open(&path)?.load()?;
 
-        // Then it's at the latest version, the thread survives, and the new
-        // table and columns exist.
+        // Then it's at the latest version, the thread survives, and the
+        // thread model column exists.
         let conn = Connection::open(&path).change_context(StoreError)?;
-        let has_schema = [
-            "SELECT project_id, workspace, workspace_path, branch, model, permission_mode, created_at FROM drafts",
-            "SELECT last_workspace, last_model, last_permission_mode, last_used_at FROM projects",
-            "SELECT model, permission_mode FROM threads",
-        ]
-        .iter()
-        .all(|sql| conn.prepare(sql).is_ok());
+        let has_schema = conn.prepare("SELECT model FROM threads").is_ok();
         let short_ids: Vec<String> = threads.into_iter().map(|row| row.short_id).collect();
         assert_eq!(
             (user_version(&path)?, short_ids, has_schema),
             (MIGRATIONS.len(), vec!["28bf38e2".to_owned()], true),
-            "migration v5 should keep threads and add drafts and last-used columns"
+            "migration v5 should keep threads and add the thread model column"
         );
         Ok(())
     }
@@ -2062,8 +2085,8 @@ mod tests {
         // When opening the store.
         let (projects, threads) = Store::open(&path)?.load()?;
 
-        // Then it's at the latest version, every row survives, and the ui
-        // table and removed_at column exist.
+        // Then it's at the latest version, the project and thread survive, and
+        // the ui table and removed_at column exist.
         let conn = Connection::open(&path).change_context(StoreError)?;
         let has_schema = [
             "SELECT id, sidebar_width, project_filter FROM ui",
@@ -2071,26 +2094,22 @@ mod tests {
         ]
         .iter()
         .all(|sql| conn.prepare(sql).is_ok());
-        let drafts: i64 = conn
-            .query_row("SELECT COUNT(*) FROM drafts", [], |row| row.get(0))
-            .change_context(StoreError)?;
         assert_eq!(
             (
                 user_version(&path)?,
                 projects.len(),
                 threads.len(),
-                drafts,
                 has_schema
             ),
-            (MIGRATIONS.len(), 1, 1, 1, true),
-            "migration v6 should keep every row and add ui and projects.removed_at"
+            (MIGRATIONS.len(), 1, 1, true),
+            "migration v6 should keep projects and threads and add ui and projects.removed_at"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn migrating_a_v7_database_adds_groups_and_keeps_its_threads() -> Result<(), Report<StoreError>>
-    {
+    fn migrating_a_v7_database_adds_the_project_kind_and_keeps_its_threads()
+    -> Result<(), Report<StoreError>> {
         // Given a database at schema version 7 holding a project and a thread.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let path = dir.path().join("state.sqlite");
@@ -2114,20 +2133,14 @@ mod tests {
         // When opening the store and loading.
         let threads = Store::open(&path)?.load()?.1;
 
-        // Then it's at the latest version, the thread survives, and the groups
-        // table and kind and group_id columns exist.
+        // Then it's at the latest version, the thread survives, and the
+        // project kind column exists.
         let conn = Connection::open(&path).change_context(StoreError)?;
-        let has_schema = [
-            "SELECT kind FROM projects",
-            "SELECT id, name FROM groups",
-            "SELECT group_id FROM threads",
-        ]
-        .iter()
-        .all(|sql| conn.prepare(sql).is_ok());
+        let has_schema = conn.prepare("SELECT kind FROM projects").is_ok();
         assert_eq!(
             (user_version(&path)?, threads.len(), has_schema),
             (MIGRATIONS.len(), 1, true),
-            "migration v8 should keep threads and add groups, projects.kind and threads.group_id"
+            "migration v8 should keep threads and add projects.kind"
         );
         Ok(())
     }
@@ -2202,56 +2215,13 @@ mod tests {
 
         // When opening the store and loading.
         let (_, threads) = Store::open(&path)?.load()?;
-        let saved = |sql: &str| -> Result<Vec<String>, Report<StoreError>> {
-            let conn = Connection::open(&path).change_context(StoreError)?;
-            let mut statement = conn.prepare(sql).change_context(StoreError)?;
-            statement
-                .query_map([], |row| row.get(0))
-                .and_then(Iterator::collect)
-                .change_context(StoreError)
-        };
 
-        // Then every thread, draft and group runs in claude.
-        let harnesses: Vec<String> = threads
-            .iter()
-            .map(|row| row.harness.to_string())
-            .chain(saved("SELECT harness FROM drafts")?)
-            .chain(saved("SELECT harness FROM groups ORDER BY id")?)
-            .collect();
+        // Then the thread runs in claude.
+        let harnesses: Vec<String> = threads.iter().map(|row| row.harness.to_string()).collect();
         assert_eq!(
             harnesses,
-            vec!["claude"; 4],
+            vec!["claude"],
             "migration v10 should store claude as the harness of everything saved before it"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn migrating_a_v9_database_gives_only_threadless_groups_a_draft()
-    -> Result<(), Report<StoreError>> {
-        // Given a v9 database with a group holding a thread and an empty one.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = dir.path().join("state.sqlite");
-        v9_database(&path)?;
-
-        // When opening the store.
-        drop(Store::open(&path)?);
-
-        // Then only the empty group has a draft.
-        let has_draft: Vec<(i64, bool)> = {
-            let conn = Connection::open(&path).change_context(StoreError)?;
-            let mut statement = conn
-                .prepare("SELECT id, has_draft FROM groups ORDER BY id")
-                .change_context(StoreError)?;
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .and_then(Iterator::collect)
-                .change_context(StoreError)?
-        };
-        assert_eq!(
-            has_draft,
-            vec![(1, false), (2, true)],
-            "migration v10 should give a draft only to a group without threads"
         );
         Ok(())
     }
@@ -2367,6 +2337,335 @@ mod tests {
             columns,
             vec![("staggered".to_owned(), false)],
             "migration v13 should give old sessions the float defaults"
+        );
+        Ok(())
+    }
+
+    /// Every table orb keeps and its columns in order, tables by name.
+    const LIVE_SCHEMA: &[(&str, &[&str])] = &[
+        (
+            "floats",
+            &[
+                "session_id",
+                "position",
+                "pane_id",
+                "x",
+                "y",
+                "width",
+                "height",
+                "pinned",
+            ],
+        ),
+        ("jumps", &["position", "kind", "item_id"]),
+        (
+            "panes",
+            &[
+                "id",
+                "session_id",
+                "cwd",
+                "zmx_name",
+                "zmx_dir",
+                "resume",
+                "name",
+            ],
+        ),
+        (
+            "projects",
+            &["id", "root", "title", "created_at", "removed_at", "kind"],
+        ),
+        (
+            "sessions",
+            &[
+                "id",
+                "project_id",
+                "kind",
+                "dir",
+                "name",
+                "branch",
+                "created_at",
+                "pinned_at",
+                "settled_override",
+                "settled_at",
+                "unsettled_at",
+                "last_activity_at",
+                "last_visited_at",
+                "active_tab",
+                "float_layout",
+                "floats_hand_changed",
+            ],
+        ),
+        ("sqlite_sequence", &["name", "seq"]),
+        (
+            "tabs",
+            &[
+                "id",
+                "session_id",
+                "position",
+                "name",
+                "layout",
+                "focus_pane",
+                "swap_layout",
+                "hand_changed",
+            ],
+        ),
+        (
+            "threads",
+            &[
+                "id",
+                "project_id",
+                "short_id",
+                "session_id",
+                "title",
+                "cwd",
+                "transcript_path",
+                "transcript_offset",
+                "created_at",
+                "turn_started_at",
+                "custom_title",
+                "branch",
+                "last_activity_at",
+                "last_visited_at",
+                "ai_titled",
+                "model",
+                "renamed_title",
+                "harness",
+                "pane_id",
+                "orb_session_id",
+            ],
+        ),
+        ("ui", &["id", "sidebar_width", "project_filter"]),
+    ];
+
+    /// `LIVE_SCHEMA` as owned names, to compare with `schema`.
+    fn live_schema() -> Vec<(String, Vec<String>)> {
+        LIVE_SCHEMA
+            .iter()
+            .map(|(table, columns)| {
+                (
+                    (*table).to_owned(),
+                    columns.iter().map(|&column| column.to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Every table in the database at `path` and its columns in order,
+    /// tables by name.
+    fn schema(path: &Path) -> Result<Vec<(String, Vec<String>)>, Report<StoreError>> {
+        let conn = Connection::open(path).change_context(StoreError)?;
+        let mut statement = conn
+            .prepare(
+                "SELECT m.name, p.name FROM sqlite_master m JOIN pragma_table_info(m.name) p
+                 WHERE m.type = 'table' ORDER BY m.name, p.cid",
+            )
+            .change_context(StoreError)?;
+        let columns: Vec<(String, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .and_then(Iterator::collect)
+            .change_context(StoreError)?;
+        Ok(columns
+            .into_iter()
+            .fold(Vec::new(), |mut tables, (table, column)| {
+                match tables.last_mut() {
+                    Some((name, names)) if *name == table => names.push(column),
+                    _ => tables.push((table, vec![column])),
+                }
+                tables
+            }))
+    }
+
+    /// A database at schema version 13 holding live and leftover data:
+    /// project 1 and removed Research project 2, both with their last-used
+    /// values; group 41 and a draft of project 1; settled session 11 and
+    /// pinned, named session 12; panes 101 (session 11, named, resumes a
+    /// Claude session, marked as a `--bg` session), 102 and float pane 103
+    /// (session 12); a tab of each session; Claude thread 301 in pane 101,
+    /// every column set and in group 41; pi thread 302 in pane 102; two jumps;
+    /// the ui row. Panes up to 150 were made once, so the pane sequence is at 150.
+    fn v13_database(path: &Path) -> Result<(), Report<StoreError>> {
+        database_at(path, 13)?;
+        Connection::open(path)
+            .and_then(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO projects (id, root, title, created_at, last_workspace, last_model,
+                                           last_permission_mode, last_used_at, removed_at, kind,
+                                           last_harness)
+                     VALUES (1, '/work/orb', 'orb', 100, 'local', 'opus', 'plan', 900, NULL,
+                             NULL, 'pi'),
+                            (2, '/r/papers', 'papers', 110, 'local', 'sonnet', 'default', 910,
+                             950, 'research', 'claude');
+                     INSERT INTO groups (id, project_id, kind, name, created_at)
+                     VALUES (41, 1, 'feature', 'login', 200);
+                     INSERT INTO drafts (project_id, workspace, created_at) VALUES (1, 'local', 210);
+                     INSERT INTO sessions (id, project_id, kind, dir, name, branch, created_at,
+                                           pinned_at, settled_override, settled_at, unsettled_at,
+                                           last_activity_at, last_visited_at, active_tab,
+                                           float_layout, floats_hand_changed)
+                     VALUES (11, 1, 'plain', '/work/orb', NULL, NULL, 1000, NULL, 'settled',
+                             8000, NULL, 1500, 1600, 0, 'staggered', 0),
+                            (12, 1, 'plain', '/wt/login', 'login', 'login', 1100, 5000, NULL,
+                             NULL, 7000, 1700, 1800, 0, 'spread', 1);
+                     INSERT INTO panes (id, session_id, cwd, zmx_name, zmx_dir, resume,
+                                        migrated_bg, name)
+                     VALUES (101, 11, '/work/orb', 'orb-p101', 'pi', 'claude --resume s-aa11',
+                             'aa11', 'build'),
+                            (102, 12, '/wt/login', NULL, NULL, NULL, NULL, NULL),
+                            (103, 12, '/wt/login', NULL, NULL, NULL, NULL, 'notes');
+                     INSERT INTO tabs (id, session_id, position, name, layout, focus_pane,
+                                       swap_layout, hand_changed)
+                     VALUES (201, 11, 0, 'main', '{\"pane\":101}', 101, 'base', 1),
+                            (202, 12, 0, NULL, '{\"pane\":102}', 102, 'vertical', 0);
+                     INSERT INTO floats (session_id, position, pane_id, x, y, width, height,
+                                         pinned)
+                     VALUES (12, 0, 103, 0.1, 0.2, 0.5, 0.4, 1);
+                     INSERT INTO threads (id, project_id, short_id, session_id, title, cwd,
+                                          transcript_path, transcript_offset, created_at,
+                                          turn_started_at, custom_title, branch, pinned_at,
+                                          settled_override, settled_at, unsettled_at,
+                                          last_activity_at, last_visited_at, ai_titled, model,
+                                          permission_mode, renamed_title, group_id, harness,
+                                          pane_id, orb_session_id)
+                     VALUES (301, 1, 'aa11', 's-aa11', 'Fix login', '/work/orb', '/t/aa11.jsonl',
+                             4096, 1000, 1400, 'Login fix', 'main', 5000, 'settled', 8000, 7000,
+                             1500, 1600, 1, 'opus', 'plan', 'Fix the login', 41, 'claude', 101,
+                             11),
+                            (302, 1, 'bb22', NULL, NULL, '/wt/login', NULL, 0, 1100, NULL, NULL,
+                             NULL, NULL, NULL, NULL, NULL, 1700, 1800, 0, NULL, NULL, NULL, NULL,
+                             'pi', 102, 12);
+                     INSERT INTO jumps (position, kind, item_id)
+                     VALUES (0, 'session', 11), (1, 'agent', 101);
+                     INSERT INTO ui (id, sidebar_width, project_filter) VALUES (1, 44, 1);
+                     UPDATE sqlite_sequence SET seq = 150 WHERE name = 'panes';",
+                )
+            })
+            .change_context(StoreError)
+    }
+
+    /// Every live row in the database at `path`, only its live columns, each
+    /// table in key order, tagged with its table.
+    fn live_values(path: &Path) -> Result<Vec<Vec<String>>, Report<StoreError>> {
+        [
+            "SELECT 'projects', id, root, title, created_at, removed_at, kind
+             FROM projects ORDER BY id",
+            "SELECT 'threads', id, project_id, short_id, session_id, title, cwd, transcript_path,
+                    transcript_offset, created_at, turn_started_at, custom_title, branch,
+                    last_activity_at, last_visited_at, ai_titled, model, renamed_title, harness,
+                    pane_id, orb_session_id
+             FROM threads ORDER BY id",
+            "SELECT 'sessions', * FROM sessions ORDER BY id",
+            "SELECT 'tabs', * FROM tabs ORDER BY id",
+            "SELECT 'panes', id, session_id, cwd, zmx_name, zmx_dir, resume, name
+             FROM panes ORDER BY id",
+            "SELECT 'floats', * FROM floats ORDER BY session_id, position",
+            "SELECT 'jumps', * FROM jumps ORDER BY position",
+            "SELECT 'ui', * FROM ui",
+            "SELECT 'sqlite_sequence', * FROM sqlite_sequence ORDER BY name",
+        ]
+        .iter()
+        .map(|sql| rows(path, sql))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|tables| tables.concat())
+    }
+
+    #[rstest::rstest]
+    fn fresh_database_has_exactly_the_live_schema() -> Result<(), Report<StoreError>> {
+        // Given a path with no database.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then its tables and columns are exactly the live ones.
+        assert_eq!(
+            schema(&path)?,
+            live_schema(),
+            "a fresh database should hold only the live tables and columns"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn upgrading_a_v13_database_keeps_every_live_value() -> Result<(), Report<StoreError>> {
+        // Given a v13 database holding live and leftover data.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v13_database(&path)?;
+        let before = live_values(&path)?;
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then every live row keeps its id and values.
+        assert_eq!(
+            live_values(&path)?,
+            before,
+            "the upgrade should keep every live row, id and value"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn upgrading_a_v13_database_leaves_no_broken_reference() -> Result<(), Report<StoreError>> {
+        // Given a v13 database holding live and leftover data.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v13_database(&path)?;
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then the foreign key check finds nothing.
+        assert_eq!(
+            rows(&path, "PRAGMA foreign_key_check")?,
+            Vec::<Vec<String>>::new(),
+            "the upgrade should leave every reference pointing at a row"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn upgrading_a_v13_database_gives_it_the_live_schema() -> Result<(), Report<StoreError>> {
+        // Given a v13 database holding live and leftover data.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v13_database(&path)?;
+
+        // When opening the store.
+        drop(Store::open(&path)?);
+
+        // Then it's at version 14 with exactly the live tables and columns.
+        assert_eq!(
+            (user_version(&path)?, schema(&path)?),
+            (14, live_schema()),
+            "the upgrade should reach version 14 and drop every leftover table and column"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn upgrading_a_v13_database_keeps_new_pane_ids_above_old_ones() -> Result<(), Report<StoreError>>
+    {
+        // Given a v13 database whose panes up to 150 were once made.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let path = dir.path().join("state.sqlite");
+        v13_database(&path)?;
+
+        // When opening the store and saving a new session.
+        let (_, pane) = Store::open(&path)?.insert_session(
+            ProjectId(1),
+            SessionKind::Plain,
+            Path::new("/work/orb"),
+            None,
+            None,
+            2_000,
+        )?;
+
+        // Then its pane's id is above every pane made before.
+        assert!(
+            pane.0 > 150,
+            "a pane made after the upgrade should get an id above 150, got {}",
+            pane.0
         );
         Ok(())
     }
@@ -3683,8 +3982,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn migrating_v10_records_a_claude_panes_resume_and_bg_session() -> Result<(), Report<StoreError>>
-    {
+    fn migrating_v10_records_a_claude_panes_resume() -> Result<(), Report<StoreError>> {
         // Given a migrated v10 database.
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let path = migrated_v10(dir.path())?;
@@ -3693,18 +3991,15 @@ mod tests {
         let pane = pane_of(&path, 3)?;
         let found = rows(
             &path,
-            &format!(
-                "SELECT cwd, zmx_name, zmx_dir, resume, migrated_bg FROM panes WHERE id = {pane}"
-            ),
+            &format!("SELECT cwd, zmx_name, zmx_dir, resume FROM panes WHERE id = {pane}"),
         )?;
 
-        // Then it resumes the Claude session and still has its --bg session to stop.
+        // Then it resumes the Claude session.
         let expected = vec![vec![
             "Text(\"/work/orb\")".to_owned(),
             "Null".to_owned(),
             "Null".to_owned(),
             "Text(\"claude --resume s-aa11\")".to_owned(),
-            "Text(\"aa11\")".to_owned(),
         ]];
         assert_eq!(found, expected, "a Claude pane should resume its session");
         Ok(())
@@ -3720,7 +4015,7 @@ mod tests {
         let pane = pane_of(&path, 4)?;
         let found = rows(
             &path,
-            &format!("SELECT zmx_name, zmx_dir, resume, migrated_bg FROM panes WHERE id = {pane}"),
+            &format!("SELECT zmx_name, zmx_dir, resume FROM panes WHERE id = {pane}"),
         )?;
 
         // Then it keeps pi's zmx session under orb's pi dir.
@@ -3728,7 +4023,6 @@ mod tests {
             format!("Text(\"{PI_SHORT_ID}\")"),
             "Text(\"pi\")".to_owned(),
             format!("Text(\"pi --session-id {PI_SHORT_ID}\")"),
-            "Null".to_owned(),
         ]];
         assert_eq!(found, expected, "a pi pane should keep its zmx session");
         Ok(())
@@ -4074,27 +4368,6 @@ mod tests {
         // Then the sessions are the same.
         let after: i64 = value(&path, "SELECT COUNT(*) FROM sessions")?;
         assert_eq!(after, before, "the migration should run only once");
-        Ok(())
-    }
-
-    #[rstest::rstest]
-    fn migrating_v10_keeps_groups_and_drafts() -> Result<(), Report<StoreError>> {
-        // Given a migrated v10 database.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let path = migrated_v10(dir.path())?;
-
-        // When counting its groups and drafts.
-        let counts = (
-            value::<i64>(&path, "SELECT COUNT(*) FROM groups")?,
-            value::<i64>(&path, "SELECT COUNT(*) FROM drafts")?,
-        );
-
-        // Then every group and the draft are still there.
-        assert_eq!(
-            counts,
-            (3, 1),
-            "the migration should keep groups and drafts"
-        );
         Ok(())
     }
 

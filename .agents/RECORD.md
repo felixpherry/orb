@@ -328,3 +328,4 @@ Entries are added or amended **only with human approval**.
 - (integration) A pane's report file is deleted when the pane's saved row is.
 - (store) A new session is saved through the normal layout save; its first tab keeps its swap layout.
 - (start) orb no longer stops old `claude --bg` sessions at start.
+- (store) Schema v14 dropped the pre-session leftovers: the `groups` and `drafts` tables and 12 unused columns; a test pins the exact schema.
