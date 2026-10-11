@@ -16,7 +16,8 @@ mod intent_handler;
 pub use app_state::{AppState, Focus, PaneMode};
 pub use command::Command;
 pub use common::{
-    Finished, Log, Services, State, TextInput, Wake, ancestry, parse_parents, run_within, tilde,
+    Finished, Log, Services, State, TextInput, Wake, ancestry, ends_orb, panic_text, parse_parents,
+    run_within, tilde,
 };
 pub use intent::Intent;
 pub use intent_handler::IntentHandler;

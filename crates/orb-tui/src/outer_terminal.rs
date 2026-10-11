@@ -5,13 +5,17 @@
 //! unambiguously), bracketed paste, and focus changes. The mouse is captured
 //! from startup until orb exits, and the child's cursor shape and clipboard
 //! copies are passed through to the outer terminal. Everything is switched back
-//! off on exit and on panic.
+//! off on exit and on panic, except when only one pane's output handling
+//! crashed.
 
 use std::io::{self, Write};
 use std::panic;
+use std::thread;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use orb_domain::{Log, ends_orb, panic_text};
+use orb_term::PANE_READER_THREAD;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -62,10 +66,16 @@ where
 }
 
 /// Restores the outer terminal on panic. Install it after ratatui's own hook,
-/// so this one runs first, before ratatui leaves the alternate screen.
-pub(crate) fn install_panic_hook() {
+/// so this one runs first, before ratatui leaves the alternate screen. A
+/// crash on a pane reader leaves the screen alone: it writes its line to
+/// `log` and orb keeps running without that pane.
+pub(crate) fn install_panic_hook(log: Log) {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
+        if !ends_orb(thread::current().name(), PANE_READER_THREAD) {
+            log.line("panic", &panic_text(info));
+            return;
+        }
         let _ = disable(&mut io::stdout());
         previous(info);
     }));

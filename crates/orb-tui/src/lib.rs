@@ -20,4 +20,5 @@ mod toast;
 mod which_key;
 mod worktree_picker;
 
+pub use orb_term::PANE_READER_THREAD;
 pub use run::{Frontend, TuiRunError};

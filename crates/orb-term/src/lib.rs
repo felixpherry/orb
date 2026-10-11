@@ -16,4 +16,4 @@ mod encode;
 mod pane;
 mod render;
 
-pub use pane::{Pane, PaneCommand, PaneError, PaneEvent, PaneSize};
+pub use pane::{PANE_READER_THREAD, Pane, PaneCommand, PaneError, PaneEvent, PaneSize};

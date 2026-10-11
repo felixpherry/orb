@@ -4,6 +4,7 @@
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::{self, Read, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -76,7 +77,13 @@ pub enum PaneEvent {
     Clipboard(String),
     /// The child exited.
     Exited,
+    /// Showing the child's output failed; the pane shows nothing more.
+    Broken,
 }
+
+/// The name of the thread that feeds a pane's output into its screen. A
+/// crash on it stops showing only that pane.
+pub const PANE_READER_THREAD: &str = "orb-pane-reader";
 
 /// The pane's child could not be started.
 #[derive(Debug, Error)]
@@ -313,20 +320,35 @@ fn spawn_reader(
     notify: Notify,
 ) -> Result<(), Report<PaneError>> {
     thread::Builder::new()
-        .name("orb-pane-reader".to_owned())
-        .spawn(move || {
-            let mut buf = vec![0; 64 * 1024];
-            while let Ok(n) = reader.read(&mut buf) {
-                let Some(chunk) = buf.get(..n).filter(|chunk| !chunk.is_empty()) else {
-                    break;
-                };
-                lock(&emulator).feed(chunk);
-                notify(PaneEvent::Output);
-            }
-        })
+        .name(PANE_READER_THREAD.to_owned())
+        .spawn(move || read_into(&mut reader, |chunk| lock(&emulator).feed(chunk), &*notify))
         .change_context(PaneError)
         .attach("failed to start the pane reader thread")?;
     Ok(())
+}
+
+/// Feeds what `reader` yields to `feed` until it ends or fails, telling
+/// `notify` after each chunk. A crash in `feed` is caught: `notify` hears
+/// [`PaneEvent::Broken`] once and reading stops.
+fn read_into<R, F, N>(reader: &mut R, mut feed: F, notify: &N)
+where
+    R: Read,
+    F: FnMut(&[u8]),
+    N: Fn(PaneEvent) + ?Sized,
+{
+    let caught = panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut buf = vec![0; 64 * 1024];
+        while let Ok(n) = reader.read(&mut buf) {
+            let Some(chunk) = buf.get(..n).filter(|chunk| !chunk.is_empty()) else {
+                break;
+            };
+            feed(chunk);
+            notify(PaneEvent::Output);
+        }
+    }));
+    if caught.is_err() {
+        notify(PaneEvent::Broken);
+    }
 }
 
 /// Waits for the child to exit, then marks the pane exited. This, not the
@@ -381,7 +403,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
 
-    use super::{Pane, PaneCommand, PaneError, PaneEvent, PaneSize};
+    use super::{Pane, PaneCommand, PaneError, PaneEvent, PaneSize, read_into};
     use crate::emulator::lock;
 
     const SIZE: PaneSize = PaneSize { cols: 80, rows: 24 };
@@ -621,5 +643,29 @@ mod tests {
             screen(&pane)
         );
         Ok(())
+    }
+
+    #[rstest::rstest]
+    #[expect(clippy::panic, reason = "the test's output handler crashes on purpose")]
+    fn panicking_output_handler_reports_the_pane_broken() {
+        // Given output to show and an output handler that crashes on its
+        // first chunk.
+        let mut output = std::io::Cursor::new(b"hello".to_vec());
+        let (events, notify) = recorder();
+        let mut fed = 0;
+        let feed = |_: &[u8]| {
+            fed += 1;
+            panic!("the output handler crashed");
+        };
+
+        // When reading the output into the handler.
+        read_into(&mut output, feed, &notify);
+
+        // Then the pane is reported broken once, after one chunk.
+        assert_eq!(
+            (lock(&events).clone(), fed),
+            (vec![PaneEvent::Broken], 1),
+            "a crashing handler should report the pane broken once"
+        );
     }
 }

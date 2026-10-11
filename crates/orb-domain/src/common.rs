@@ -3,10 +3,11 @@
 //! redraw, the [`Services`] actors use, [`tilde`] for showing a path,
 //! [`run_within`] for a child process that mustn't hang orb, [`ancestry`]
 //! for walking a process's parents, and the [`TextInput`] behind every line
-//! the user types into, and the [`Log`] that records failures, kills and
-//! removals.
+//! the user types into, the [`Log`] that records failures, kills and
+//! removals, and what orb logs when it crashes.
 
 mod child;
+mod crash;
 mod log;
 mod paths;
 mod process;
@@ -15,6 +16,7 @@ mod state;
 mod text_input;
 
 pub use child::{Finished, run_within};
+pub use crash::{ends_orb, panic_text};
 pub use log::Log;
 pub use paths::tilde;
 pub use process::{ancestry, parse_parents};

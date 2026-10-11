@@ -1,12 +1,14 @@
 //! Binary entry point for orb. This is the only place that reads process state
 //! (the environment).
 
+use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{panic, thread};
 
 use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
@@ -30,8 +32,11 @@ use orb_domain::feat::worktrees::worktrees_actor::{
 };
 use orb_domain::feat::zmx::zmx_cli::ZmxCli;
 use orb_domain::feat::zmx::zmx_service::ZmxService;
-use orb_domain::{AppState, Finished, Log, Services, State, ancestry, parse_parents, run_within};
-use orb_tui::Frontend;
+use orb_domain::{
+    AppState, Finished, Log, Services, State, ancestry, ends_orb, panic_text, parse_parents,
+    run_within,
+};
+use orb_tui::{Frontend, PANE_READER_THREAD};
 use wherror::Error;
 
 /// orb couldn't start, or its frontend failed.
@@ -53,11 +58,33 @@ fn main() -> Result<(), Report<OrbError>> {
             std::process::id()
         ),
     );
+    install_crash_hook(log.clone());
     let ended = run(home, orb_root, &log);
     if let Err(report) = &ended {
         log.error("orb stopped", report);
     }
     ended
+}
+
+/// Makes every crash end orb at once: the crash and a backtrace go to `log`,
+/// the default message prints, and orb exits with 101; panes keep running.
+/// A crash on a pane reader only writes its line; the reader stops showing
+/// that pane.
+#[expect(
+    clippy::exit,
+    reason = "a crash ends orb at once; panes keep running in zmx"
+)]
+fn install_crash_hook(log: Log) {
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        log.line("panic", &panic_text(info));
+        if !ends_orb(thread::current().name(), PANE_READER_THREAD) {
+            return;
+        }
+        log.line("panic", &Backtrace::force_capture().to_string());
+        previous(info);
+        std::process::exit(101);
+    }));
 }
 
 /// Everything after the log opens: integrations, store, actors, frontend.

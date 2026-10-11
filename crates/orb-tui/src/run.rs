@@ -176,7 +176,7 @@ impl Frontend {
         let Self { tx, rx, tz } = self;
         ratatui::run(|terminal| -> io::Result<()> {
             outer_terminal::enable(terminal.backend_mut())?;
-            outer_terminal::install_panic_hook();
+            outer_terminal::install_panic_hook(log.clone());
             let result = App::new(
                 state,
                 sessions,
@@ -320,12 +320,27 @@ fn to_kill(gone: &[PaneId], ended: &HashSet<PaneId>, all: &HashSet<PaneId>) -> V
         .collect()
 }
 
-/// Every kept pane without a client in `live`.
-fn to_spawn<P>(keep: &HashSet<PaneId>, live: &HashMap<PaneId, P>) -> Vec<PaneId> {
+/// Every kept pane without a client in `live`, except the `broken` ones.
+fn to_spawn<P>(
+    keep: &HashSet<PaneId>,
+    live: &HashMap<PaneId, P>,
+    broken: &HashSet<PaneId>,
+) -> Vec<PaneId> {
     keep.iter()
         .copied()
-        .filter(|id| !live.contains_key(id))
+        .filter(|id| !live.contains_key(id) && !broken.contains(id))
         .collect()
+}
+
+/// Forgets the `broken` panes no attached session holds (`keep`), so they
+/// get a client again the next time their session is attached.
+fn clear_detached(broken: &mut HashSet<PaneId>, keep: &HashSet<PaneId>) {
+    broken.retain(|id| keep.contains(id));
+}
+
+/// The message box text after pane `name` stopped showing.
+fn broken_pane_message(name: &str) -> String {
+    format!("stopped showing pane {name} after an error; it keeps running")
 }
 
 /// What to type into each pane about to get a client, given as (pane, its
@@ -487,6 +502,9 @@ struct App {
     exited: Vec<PaneId>,
     /// Panes already attached again once after their client died.
     respawned: HashSet<PaneId>,
+    /// Panes whose output handling crashed; they get no client until their
+    /// session leaves `attached`.
+    broken: HashSet<PaneId>,
     /// Resume commands waiting for their fresh pane's first output.
     typing: HashMap<PaneId, String>,
     /// Shown on the start screen when a pane's client couldn't start.
@@ -555,6 +573,7 @@ impl App {
             focused_pane: None,
             exited: Vec::new(),
             respawned: HashSet::new(),
+            broken: HashSet::new(),
             typing: HashMap::new(),
             pane_error: None,
             toasts: Toasts::default(),
@@ -855,6 +874,7 @@ impl App {
             // `reconcile` sweeps exited thread panes.
             LoopEvent::Pane(id, PaneEvent::Output) => self.type_resume(id),
             LoopEvent::Input(_) => {}
+            LoopEvent::Pane(id, PaneEvent::Broken) => self.drop_broken(id),
             LoopEvent::StateChanged => self.relist_projects(),
             LoopEvent::Pane(id, PaneEvent::Exited) => self.exited.push(id),
             LoopEvent::InputFailed(error) => return Err(error),
@@ -1124,6 +1144,27 @@ impl App {
         }
     }
 
+    /// Drops broken pane `id`'s client (its program keeps running in zmx),
+    /// keeps it from getting another while its session stays attached, and
+    /// says so in the message box and the log.
+    fn drop_broken(&mut self, id: PaneId) {
+        if self.panes.remove(&id).is_none() {
+            return;
+        }
+        self.pane_sessions.remove(&id);
+        self.respawned.remove(&id);
+        self.typing.remove(&id);
+        self.broken.insert(id);
+        let text = {
+            let mut app = self.state.write();
+            let app = &mut *app;
+            let text = broken_pane_message(app.layouts.agent_name(id, app.sessions.agent_in(id)));
+            app.sessions.error = Some(text.clone());
+            text
+        };
+        self.log.line("error", &text);
+    }
+
     /// Classifies each pane whose client exit arrived (see [`classify_exit`]):
     /// attaches a dead client again once, and on a second death detaches its
     /// session, keeping the pane and its program, and puts `couldn't reattach
@@ -1247,7 +1288,8 @@ impl App {
             self.respawned.remove(id);
             self.typing.remove(id);
         }
-        let spawning = to_spawn(&keep, &self.panes);
+        clear_detached(&mut self.broken, &keep);
+        let spawning = to_spawn(&keep, &self.panes, &self.broken);
         let plan = self.plan_resumes(&spawning);
         self.typing.extend(plan);
         for id in spawning {
@@ -1714,9 +1756,9 @@ mod tests {
 
     use super::{
         AttachPlan, PaneExit, StartedAttach, after_pane, attach_at_start, attach_or_restore,
-        classify_exit, closed_in_layouts, cursor_style, handle_mouse_intents, list_directories,
-        pane_error_after, reattachable, resume_plan, stale_preview, stale_sessions, started_attach,
-        to_drop, to_kill, to_spawn,
+        broken_pane_message, classify_exit, clear_detached, closed_in_layouts, cursor_style,
+        handle_mouse_intents, list_directories, pane_error_after, reattachable, resume_plan,
+        stale_preview, stale_sessions, started_attach, to_drop, to_kill, to_spawn,
     };
 
     /// Pane `id`, a shell in `orb-p<id>`.
@@ -2110,13 +2152,52 @@ mod tests {
         let live: HashMap<PaneId, &str> = HashMap::from([(PaneId(8), "client")]);
 
         // When choosing the panes to start.
-        let spawned = to_spawn(&keep, &live);
+        let spawned = to_spawn(&keep, &live, &HashSet::new());
 
         // Then pane 7 gets a client.
         assert_eq!(
             spawned,
             vec![PaneId(7)],
             "a kept pane without a client starts"
+        );
+    }
+
+    #[rstest::rstest]
+    fn broken_pane_is_not_reconnected() {
+        // Given kept panes 7 and 8, neither with a client, pane 8 broken.
+        let keep = HashSet::from([PaneId(7), PaneId(8)]);
+        let live: HashMap<PaneId, &str> = HashMap::new();
+        let broken = HashSet::from([PaneId(8)]);
+
+        // When choosing the panes to start.
+        let spawned = to_spawn(&keep, &live, &broken);
+
+        // Then only pane 7 gets a client.
+        assert_eq!(spawned, vec![PaneId(7)], "a broken pane gets no new client");
+    }
+
+    #[rstest::rstest]
+    fn broken_mark_clears_when_its_session_detaches() {
+        // Given broken pane 7 whose session is no longer attached.
+        let mut broken = HashSet::from([PaneId(7)]);
+
+        // When clearing marks against the kept panes.
+        clear_detached(&mut broken, &HashSet::new());
+
+        // Then pane 7 is no longer marked broken.
+        assert!(broken.is_empty(), "a detached session's broken mark clears");
+    }
+
+    #[rstest::rstest]
+    fn broken_pane_message_names_the_pane() {
+        // Given a pane named claude.
+        // When building the broken-pane message.
+        let text = broken_pane_message("claude");
+
+        // Then it names the pane and says it keeps running.
+        assert_eq!(
+            text, "stopped showing pane claude after an error; it keeps running",
+            "the message names the broken pane"
         );
     }
 
