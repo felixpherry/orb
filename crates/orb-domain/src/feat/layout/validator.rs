@@ -177,7 +177,7 @@ mod tests {
     }
 
     /// Thread 1 selected, running in pane 1 of session 1, with the keys at
-    /// `focus`; attached, so its session is shown, when `open`.
+    /// `focus`; attached and active, so its session is shown, when `open`.
     fn selected(focus: Focus, open: bool) -> AppState {
         let mut state = AppState {
             sessions: Sessions {
@@ -203,6 +203,7 @@ mod tests {
             .insert(SessionId(1), SessionLayout::of(test_entry(1)));
         if open {
             state.attached.insert(SessionId(1));
+            state.sessions.enter(SessionId(1));
         }
         state
     }

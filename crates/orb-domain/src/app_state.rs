@@ -9,7 +9,7 @@ use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::PickerState;
 use crate::feat::search::state::SearchProgress;
-use crate::feat::sessions::state::{SessionId, Sessions, SidebarItem};
+use crate::feat::sessions::state::{Session, SessionId, Sessions, SidebarItem};
 use crate::feat::sidebar::state::{Rename, SidebarView};
 use crate::feat::worktrees::state::Worktrees;
 
@@ -58,7 +58,7 @@ pub struct AppState {
     /// removed by settling, deleting, a workspace change, a failed spawn and
     /// the layout emptying.
     /// Every pane of a session in here has a client, and the right-hand area
-    /// shows the selected session while it is in here. Written by the intent
+    /// shows the active session while it is in here. Written by the intent
     /// handler, the frontend, and the sessions actor (which drops a session it
     /// deletes).
     pub attached: HashSet<SessionId>,
@@ -94,10 +94,10 @@ impl AppState {
         self.pane_mode.filter(|_| self.focus == Focus::Pane)
     }
 
-    /// The session the right-hand area shows: the selected one, while it is
+    /// The session the right-hand area shows: the active one, while it is
     /// attached and has a layout.
     pub fn shown_session(&self) -> Option<SessionId> {
-        let id = self.sessions.selected_session()?.id;
+        let id = self.sessions.active()?;
         (self.attached.contains(&id) && self.layouts.get(id).is_some()).then_some(id)
     }
 
@@ -109,6 +109,27 @@ impl AppState {
                 SidebarItem::Agent { session: id, pane }
             }
             _ => SidebarItem::Session(id),
+        }
+    }
+
+    /// The active marker's row: the active session's card while it's folded,
+    /// else the agent row of its focused pane, or its card when that pane is
+    /// a shell. Follows every focus change inside the session.
+    pub fn active_row(&self) -> Option<SidebarItem> {
+        let id = self.sessions.active()?;
+        Some(if self.sessions.hides_agents(id) {
+            SidebarItem::Session(id)
+        } else {
+            self.entry_row(id)
+        })
+    }
+
+    /// The session `␣w` and `␣b` act on: the shown one while the keys are in
+    /// a pane, else the one under the sidebar cursor.
+    pub fn keyed_session(&self) -> Option<&Session> {
+        match self.focus {
+            Focus::Pane => self.sessions.session(self.shown_session()?),
+            _ => self.sessions.selected_session(),
         }
     }
 
@@ -196,8 +217,8 @@ mod tests {
         }
     }
 
-    /// Thread 1 selected, running in pane 10 of session 1; attached when
-    /// `attached`.
+    /// Thread 1 selected, running in pane 10 of session 1; attached and
+    /// active when `attached`.
     fn selecting_thread(attached: bool) -> AppState {
         let mut state = one_project();
         if let Some(project) = state.sessions.projects.first_mut() {
@@ -220,13 +241,14 @@ mod tests {
         );
         if attached {
             state.attached.insert(SessionId(1));
+            state.sessions.enter(SessionId(1));
         }
         state
     }
 
     #[rstest::rstest]
-    fn shown_layout_is_the_selected_attached_threads_session() {
-        // Given selected thread 1 attached, running in session 1.
+    fn shown_layout_is_the_active_attached_threads_session() {
+        // Given thread 1 attached and active, running in session 1.
         let state = selecting_thread(true);
 
         // When asking for the shown layout.
@@ -235,7 +257,7 @@ mod tests {
         // Then it is session 1's.
         assert!(
             shown.is_some() && shown == state.layouts.get(SessionId(1)),
-            "the selected attached thread's session is shown"
+            "the active attached thread's session is shown"
         );
     }
 

@@ -342,7 +342,7 @@ pub struct Search {
 /// when a start ends, `fetching`, `attach`, the cursor and `filter`
 /// after a restore, the cursor on a new session, removing a session from
 /// `deleting`, pushing `notices`) and by the intent handler (the cursor on
-/// navigation, settle and delete, `shelf_open`, `folded`, `starting` when a
+/// navigation, settle and delete, `active`, `shelf_open`, `folded`, `starting` when a
 /// start begins, adding a session to `deleting`, `filter`). The frontend loop takes
 /// `attach` and `notices`.
 #[derive(Debug, Clone, Default)]
@@ -354,6 +354,11 @@ pub struct Sessions {
     pub sessions: Vec<Session>,
     /// What the sidebar's cursor is on.
     pub cursor: Option<SidebarItem>,
+    /// The session the right-hand area shows, set by entering a row; `None`
+    /// before any is entered and after the active session is settled or
+    /// deleted. Written only by the intent handler; read it through
+    /// [`Sessions::active`].
+    pub active: Option<SessionId>,
     /// The Settled shelf shows its sessions. Written only by the intent
     /// handler.
     pub shelf_open: bool,
@@ -626,6 +631,24 @@ impl Sessions {
         if self.position(&items).is_none() {
             self.cursor = items.first().copied();
         }
+    }
+
+    /// Makes session `id` the one the right-hand area shows.
+    pub fn enter(&mut self, id: SessionId) {
+        self.active = Some(id);
+    }
+
+    /// Leaves session `id`: nothing is active any more if it was.
+    pub fn leave(&mut self, id: SessionId) {
+        if self.active == Some(id) {
+            self.active = None;
+        }
+    }
+
+    /// The active session, while it still exists and isn't being deleted.
+    pub fn active(&self) -> Option<SessionId> {
+        self.active
+            .filter(|id| !self.deleting.contains(id) && self.session(*id).is_some())
     }
 
     /// The session under the cursor, or whose agent row it's on, if it still

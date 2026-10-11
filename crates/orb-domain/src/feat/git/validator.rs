@@ -1,4 +1,4 @@
-//! Checks whether the user's git actions on the selected session can
+//! Checks whether the user's git actions on the keyed session can
 //! proceed: changing its workspace, and switching its branch.
 
 use std::path::Path;
@@ -8,11 +8,11 @@ use wherror::Error;
 use crate::AppState;
 use crate::feat::sessions::state::Sessions;
 
-/// Why changing the selected session's workspace can't proceed.
+/// Why changing the keyed session's workspace can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum ChangeWorkspaceError {
-    /// The cursor isn't on a session.
+    /// There is no keyed session (see [`AppState::keyed_session`]).
     NoSelection,
     /// A session is already being made, or a workspace changed.
     Starting,
@@ -21,17 +21,19 @@ pub enum ChangeWorkspaceError {
     Locked { worktree: bool },
 }
 
-/// Allow changing the selected session's workspace before its first agent
+/// Allow changing the keyed session's workspace before its first agent
 /// turn, one start at a time.
 ///
 /// # Errors
 ///
-/// Returns [`ChangeWorkspaceError::NoSelection`] without a selected session,
+/// Returns [`ChangeWorkspaceError::NoSelection`] without a keyed session,
 /// [`ChangeWorkspaceError::Starting`] while a start is in flight, and
 /// [`ChangeWorkspaceError::Locked`] once an agent turn has run in it.
 pub fn validate_change_workspace(state: &AppState) -> Result<(), ChangeWorkspaceError> {
     let sessions = &state.sessions;
-    match (sessions.selected_session(), sessions.selected_project()) {
+    let session = state.keyed_session();
+    let project = session.and_then(|session| sessions.project(session.project));
+    match (session, project) {
         (None, _) | (Some(_), None) => Err(ChangeWorkspaceError::NoSelection),
         _ if sessions.starting => Err(ChangeWorkspaceError::Starting),
         (Some(session), Some(project)) if sessions.turned(session.id) => {
@@ -47,11 +49,11 @@ pub fn validate_change_workspace(state: &AppState) -> Result<(), ChangeWorkspace
 /// [`SwitchBranchError::Busy`].
 pub const BUSY_DIRECTORY: &str = "A session is working in this directory";
 
-/// Why switching the selected session's branch can't proceed.
+/// Why switching the keyed session's branch can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum SwitchBranchError {
-    /// The cursor isn't on a session.
+    /// There is no keyed session (see [`AppState::keyed_session`]).
     NoSelection,
     /// A session is already being made, or a workspace changed.
     Starting,
@@ -60,18 +62,18 @@ pub enum SwitchBranchError {
     Busy,
 }
 
-/// Allow switching the branch in the selected session's directory, unless
+/// Allow switching the branch in the keyed session's directory, unless
 /// a start is in flight or a turn is underway in that directory.
 ///
 /// # Errors
 ///
-/// Returns [`SwitchBranchError::NoSelection`] without a selected session,
+/// Returns [`SwitchBranchError::NoSelection`] without a keyed session,
 /// [`SwitchBranchError::Starting`] while a start is in flight, and
 /// [`SwitchBranchError::Busy`] while any thread in its directory is in
 /// progress.
 pub fn validate_switch_branch(state: &AppState) -> Result<(), SwitchBranchError> {
     let sessions = &state.sessions;
-    match sessions.selected_session() {
+    match state.keyed_session() {
         None => Err(SwitchBranchError::NoSelection),
         _ if sessions.starting => Err(SwitchBranchError::Starting),
         Some(session) => not_busy(sessions, &session.dir),

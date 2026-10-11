@@ -477,11 +477,12 @@ mod tests {
         }
     }
 
-    /// Thread 1, selected and attached, running in pane 1, the one tab of
-    /// session 1, with the given focus.
+    /// Thread 1, selected, attached and active, running in pane 1, the one
+    /// tab of session 1, with the given focus.
     fn shown(focus: Focus) -> AppState {
         let mut state = selected(focus);
         state.attached.insert(SessionId(1));
+        state.sessions.enter(SessionId(1));
         if let Some(thread) = state
             .sessions
             .projects
@@ -896,12 +897,14 @@ mod tests {
         );
     }
 
-    /// Thread 1, selected in the sidebar and attached.
+    /// Thread 1, selected in the sidebar, attached and active.
     fn left_pane() -> AppState {
-        AppState {
+        let mut state = AppState {
             attached: HashSet::from([SessionId(1)]),
             ..selected(Focus::Sidebar)
-        }
+        };
+        state.sessions.enter(SessionId(1));
+        state
     }
 
     #[rstest::rstest]
