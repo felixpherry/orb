@@ -10452,6 +10452,22 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn attach_on_a_hovered_row_shows_its_session() {
+        // Given sessions 1 and 2 attached, session 1 active, session 2 hovered.
+        let mut state = left_pane_showing_1(&[1, 2], 2);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then the right side shows session 2.
+        assert_eq!(
+            state.shown_session(),
+            Some(SessionId(2)),
+            "⏎ should switch the right side to the hovered session"
+        );
+    }
+
+    #[rstest::rstest]
     fn attach_on_a_hovered_row_keeps_the_cursor_on_its_entered_row() {
         // Given sessions 1 and 2 attached, session 1 active, session 2 hovered.
         let mut state = left_pane_showing_1(&[1, 2], 2);
@@ -10634,6 +10650,22 @@ mod tests {
             state.sessions.active(),
             None,
             "a deleted session should stop being active"
+        );
+    }
+
+    #[rstest::rstest]
+    fn deleting_the_active_session_shows_the_dashboard() {
+        // Given active session 1 hovered, its delete confirm on Yes.
+        let mut state = left_pane_showing_1(&[1], 1);
+        answer_yes(&Intent::Delete, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then no layout is shown, so the right side draws the dashboard.
+        assert!(
+            state.shown_layout().is_none(),
+            "deleting the active session should leave the dashboard on the right"
         );
     }
 

@@ -58,7 +58,7 @@ Entries are added or amended **only with human approval**.
 - (pane) Attaching runs `claude attach <id>` for a Claude thread, or `zmx attach <id> pi --session-id <id>` for a pi thread, in a PTY emulated by `alacritty_terminal`, rendered in the right-hand area.
 - (keybinds) `␣n` opens the project picker; picking a project opens its draft, creating it if needed.
 - (paths) orb persists its state to `~/.orb/userdata/state.sqlite`.
-- (pane) The right-hand area shows the selected thread's Claude pane while orb is attached to that thread, except while the dashboard has the keys; otherwise it shows the dashboard.
+- (pane) The right-hand area shows the active session's panes while orb is attached to it; otherwise it shows the dashboard.
 - (sidebar) Pinned rows (lone threads and groups) come first, then active ones, then a collapsible Settled shelf at the bottom of the sidebar.
 - (sidebar) A thread shows a green check and "done" when its latest turn ended after the user last selected it.
 - (settle) Any new turn, approval request, or input request un-settles a lone thread, or the group of a thread in one.
@@ -76,7 +76,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In the projects screen, the session picker and the worktree picker, `/` moves the keys to the input box, where typing filters, `⏎` picks, and `Esc` returns to the list keeping the typed text.
 - (keybinds) The directory picker that `a` opens in the projects screen starts at `~/`; `Tab` opens the highlighted directory and `⏎` adds it as a project.
 - (tui) orb paints `#222436` under every cell that has no background of its own, including the attached pane's default-background cells.
-- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the selected thread's or draft's branch and project (`<project>/<group>` in a group) on the left; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, the selected row's `at/shown` position, and the local time on the right.
+- (tui) The mode line is drawn like LazyVim's lualine in tokyonight-moon: the mode in a block of its colour, then the active session's branch and `<project>/<session>` on the left, or only the mode while no session is active; `N running`, `fetching origin/<base>…` while Start fetches, or `starting session…` with a spinner, the approval and input counts, and the local time on the right.
 - (tui) The mode line's running, approval and input counts include every thread, even ones the project filter hides.
 - (tui) When the mode line is too narrow, its right side stays whole while it fits, and its left side is cut at its end.
 - (picker) Every picker but the session, worktree and search pickers is drawn like LazyVim's vim.ui.select in tokyonight-moon: a rounded popup 44–72 columns wide (wider when its name needs it) with its name centred in the top border, a > prompt over an orange rule (a / prompt in the projects screen), numbered one-line rows, and the selected row filled; it is only as tall as its rows, at most 60% of the screen, and keeps its top edge fixed while filtering.
@@ -334,3 +334,8 @@ Entries are added or amended **only with human approval**.
 - (layout) While a float has the keys, the tab bar's layout name shows the float layout instead of the tab's.
 - (mouse) Clicking a float focuses it and brings it to the top, dragging its frame moves it, and clicking a tiled pane hides the floats.
 - (sessions) Each session's floats, their positions as shares of the tab body, their pins and the float layout persist to orb's database, and the floats come back hidden except pinned ones.
+- (sidebar) The sidebar's hovered row and its active row are separate: moving the hover never changes the right-hand area, and only entering a row (`⏎`, a double-click, a picker pick, a jump, a search ended by `⏎`, a session or draft starting, `<C-S-l>`) makes it active.
+- (sidebar) The active row is the active session's focused agent pane's row, else its card when that pane is a shell or the card is folded, and it follows every focus change inside the session.
+- (sidebar) The hovered row has a filled background, and the active row has a blue bar at its left edge and a bold first line.
+- (sidebar) When the keys come back to the sidebar from a pane, the hover starts on the active row, unless a click on a row or a jump put it elsewhere or the project filter hides the active row.
+- (sidebar) Deleting or settling the active session leaves no active session.
