@@ -8,7 +8,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
-use crate::feat::sessions::state::{ProjectId, ProjectKind, SessionId, ThreadId};
+use crate::feat::sessions::state::{PaneId, ProjectId, ProjectKind, SessionId, ThreadId};
 
 /// One row a picker can show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,13 +33,15 @@ pub enum PickerItem {
     AllProjects,
     /// A confirm picker's answer: `Yes` or `No`. Matched on its label.
     Confirm(bool),
-    /// A session in the session picker, labelled `<project>/title` and
-    /// matched on the whole label. `split` is the byte offset where the title
-    /// starts. `thread` is its most recently active agent's, whose transcript
-    /// the preview reads. `settled` is whether it is settled.
+    /// An agent in the session picker: the agent `thread` running in pane
+    /// `pane` of session `id`, labelled `<project>/<session>/<agent>` and
+    /// matched on the whole label. `split` is the byte offset where the
+    /// session title starts. The preview reads `thread`'s transcript.
+    /// `settled` is whether its session is settled.
     Session {
         id: SessionId,
-        thread: Option<ThreadId>,
+        thread: ThreadId,
+        pane: PaneId,
         label: String,
         split: usize,
         settled: bool,

@@ -29,8 +29,8 @@ use std::time::{Duration, SystemTime};
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::sessions::state::{
-    FolderKind, NEW_THREAD, Project, Session, SessionId, SessionKind, Sessions, SidebarItem,
-    SidebarRow, Thread, ThreadStatus, most_urgent,
+    FolderKind, Project, Session, SessionId, SessionKind, Sessions, SidebarItem, SidebarRow,
+    Thread, ThreadStatus, most_urgent,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::tilde;
@@ -459,10 +459,7 @@ fn render_row(
             pane,
             last,
         } => {
-            let label = layouts
-                .entry(*pane)
-                .and_then(|entry| entry.name.as_deref())
-                .unwrap_or_else(|| title_of(thread));
+            let label = layouts.agent_name(*pane, Some(thread));
             render_agent(
                 sessions,
                 harnesses,
@@ -747,11 +744,6 @@ fn when(thread: &Thread, now: SystemTime) -> String {
     }
 }
 
-/// A thread's title, else `New thread`.
-fn title_of(thread: &Thread) -> &str {
-    thread.title.as_deref().unwrap_or(NEW_THREAD)
-}
-
 fn span<'a, T>(text: T, fg: Color) -> Span<'a>
 where
     T: Into<Cow<'a, str>>,
@@ -970,7 +962,7 @@ pub(crate) const COMPLETED_ICON: &str = "\u{f058}";
 /// Stopped (`nf-fa-stop`).
 const STOPPED_ICON: &str = "\u{f04d}";
 /// Idle, or a status orb doesn't know (`nf-fa-circle_o`).
-const IDLE_ICON: &str = "\u{f10c}";
+pub(crate) const IDLE_ICON: &str = "\u{f10c}";
 /// Idle while orb is attached (`nf-fa-circle`).
 const ATTACHED_ICON: &str = "\u{f111}";
 /// How long each spinner frame shows; the loop redraws this often while a

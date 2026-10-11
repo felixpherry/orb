@@ -21,7 +21,7 @@ use crate::feat::picker::state::{
     PickTarget, PickerKind, PickerState, SessionFilter, session_items, worktree_items,
 };
 use crate::feat::picker::validator::{
-    DeleteWorktreeError, validate_add_directory, validate_delete_listed_session,
+    DeleteWorktreeError, validate_add_directory, validate_close_listed_agent,
     validate_delete_worktree, validate_open_directory, validate_pick_project,
     validate_pick_session, validate_remove_project,
 };
@@ -333,7 +333,7 @@ impl IntentHandler {
                 _ => vec![],
             },
             Intent::OpenSessionPicker => {
-                let items = session_items(&state.sessions, SessionFilter::All);
+                let items = session_items(&state.sessions, &state.layouts, SessionFilter::All);
                 open_picker(state, PickerState::sessions(items, state.focus));
                 preview_command(state)
             }
@@ -653,11 +653,6 @@ impl IntentHandler {
                         _ => vec![],
                     }
                 }
-                Some(&PickerKind::DeleteSession { session, .. })
-                    if state.picker.as_ref().and_then(PickerState::under).is_some() =>
-                {
-                    leave_delete_listed_session(state, session)
-                }
                 Some(&PickerKind::DeleteSession { session, .. }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
                         Some(PickerItem::Confirm(true))
@@ -667,6 +662,11 @@ impl IntentHandler {
                         }
                         _ => vec![],
                     }
+                }
+                Some(&PickerKind::ClosePane { pane, session })
+                    if state.picker.as_ref().and_then(PickerState::under).is_some() =>
+                {
+                    leave_close_listed_agent(state, session, pane)
                 }
                 Some(&PickerKind::ClosePane { pane, session }) => {
                     match close_picker(state).as_ref().and_then(PickerState::selected) {
@@ -688,7 +688,15 @@ impl IntentHandler {
                 Some(PickerKind::Branches { .. }) => close_picker(state)
                     .map(|picker| pick_branch(state, &picker))
                     .unwrap_or_default(),
-                Some(PickerKind::Sessions { .. } | PickerKind::Search { .. }) => {
+                Some(PickerKind::Sessions { .. }) => {
+                    let valid = validate_pick_session(state);
+                    let agent = close_picker(state).and_then(|picker| picker.selected_agent());
+                    match (valid, agent) {
+                        (Ok(()), Some((session, pane))) => pick_agent(state, session, pane),
+                        _ => vec![],
+                    }
+                }
+                Some(PickerKind::Search { .. }) => {
                     let valid = validate_pick_session(state);
                     let session = close_picker(state)
                         .and_then(|picker| picker.picked_session(&state.sessions));
@@ -729,7 +737,7 @@ impl IntentHandler {
             }
             Intent::PickerRemove => match state.picker.as_ref().map(PickerState::kind) {
                 Some(PickerKind::Worktrees) => ask_delete_worktree(state),
-                Some(PickerKind::Sessions { .. }) => ask_delete_listed_session(state),
+                Some(PickerKind::Sessions { .. }) => ask_close_listed_agent(state),
                 _ => match (
                     validate_remove_project(state),
                     state.picker.as_ref().and_then(PickerState::selected),
@@ -748,7 +756,7 @@ impl IntentHandler {
             Intent::PickerFilter(pressed) => {
                 let before = picked(state);
                 if let Some(picker) = &mut state.picker {
-                    picker.set_filter(*pressed, &state.sessions);
+                    picker.set_filter(*pressed, &state.sessions, &state.layouts);
                 }
                 with_preview(state, before, vec![])
             }
@@ -1007,13 +1015,15 @@ fn still_deletable(state: &AppState, item: SidebarItem) -> bool {
 }
 
 /// Closes agent pane `pane` of `session`, answered `Yes` in its confirm:
-/// the tab it leaves re-tiles unless it was changed by hand, the cursor goes
-/// to the session's card, and the layout is saved (the frontend kills the
+/// the tab it leaves re-tiles unless it was changed by hand, a cursor on that
+/// agent's row goes to the session's card, and the layout is saved (the frontend kills the
 /// pane's program; a session whose last pane closed gets a new shell when
 /// its layout is saved).
 fn close_agent_pane(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Command> {
     state.layouts.close_pane(pane);
-    state.sessions.cursor = Some(SidebarItem::Session(session));
+    if state.sessions.cursor == Some(SidebarItem::Agent { session, pane }) {
+        state.sessions.cursor = Some(SidebarItem::Session(session));
+    }
     vec![Command::SaveLayout(session)]
 }
 
@@ -1199,12 +1209,27 @@ fn detach_moving(state: &mut AppState, session: SessionId, command: Command) -> 
     vec![command]
 }
 
-/// Jumps to `session`, picked in the session or search picker: puts the
-/// cursor on it and attaches like `⏎` on its row, recording the move as a
-/// jump.
+/// Jumps to `session`, picked in the search picker: puts the cursor on it
+/// and attaches like `⏎` on its row, recording the move as a jump.
 fn pick_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
+    pick(state, SidebarItem::Session(session))
+}
+
+/// Jumps to agent `pane` of `session`, picked in the session picker: shows
+/// the pane in its tab, puts the cursor on its agent row and moves the keys
+/// into it like `⏎` on that row, recording the move as a jump.
+fn pick_agent(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Command> {
+    state.layouts.reveal(session, pane);
+    let mut commands = pick(state, SidebarItem::Agent { session, pane });
+    commands.push(Command::SaveLayout(session));
+    commands
+}
+
+/// Puts the cursor on `target`, records the move as a jump and attaches its
+/// session.
+fn pick(state: &mut AppState, target: SidebarItem) -> Vec<Command> {
     let from = state.sessions.cursor;
-    state.sessions.cursor = Some(SidebarItem::Session(session));
+    state.sessions.cursor = Some(target);
     let mut commands = record_jump(state, from);
     commands.extend(show_pane(state));
     with_visit(state, commands)
@@ -1337,19 +1362,18 @@ fn ask_delete_worktree(state: &mut AppState) -> Vec<Command> {
     vec![]
 }
 
-/// `d` in the session picker's list: the sidebar's delete confirm (the
-/// folder variant for a Research or Learn session) over the list.
-fn ask_delete_listed_session(state: &mut AppState) -> Vec<Command> {
-    let (Ok(()), Some(&PickerItem::Session { id: session, .. })) = (
-        validate_delete_listed_session(state),
-        state.picker.as_ref().and_then(PickerState::selected),
+/// `d` in the session picker's list: the sidebar agent row's close confirm
+/// over the list.
+fn ask_close_listed_agent(state: &mut AppState) -> Vec<Command> {
+    let (Ok(()), Some((session, pane))) = (
+        validate_close_listed_agent(state),
+        state.picker.as_ref().and_then(PickerState::selected_agent),
     ) else {
         return vec![];
     };
-    let folder = deletes_folder(state, session);
     if let Some(list) = state.picker.take() {
         let return_to = list.return_to();
-        state.picker = Some(PickerState::delete_session(session, folder, return_to).over(list));
+        state.picker = Some(PickerState::close_pane(pane, session, return_to).over(list));
     }
     vec![]
 }
@@ -1362,27 +1386,25 @@ fn deletes_folder(state: &AppState, session: SessionId) -> bool {
         .is_some_and(|session| matches!(session.kind, SessionKind::Research | SessionKind::Learn))
 }
 
-/// Ends the delete confirm over the session picker: `Yes` on a session that
-/// still exists and isn't being deleted deletes it and goes back to the list
-/// without its row, loading the new selection's preview; anything else goes
-/// back to the list as it was.
-fn leave_delete_listed_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
+/// Ends the close confirm over the session picker: `Yes` on a pane that
+/// still runs one of the session's agents closes it and goes back to the
+/// list without its row, loading the new selection's preview; anything else
+/// goes back to the list as it was.
+fn leave_close_listed_agent(
+    state: &mut AppState,
+    session: SessionId,
+    pane: PaneId,
+) -> Vec<Command> {
     let yes = state.picker.as_ref().and_then(PickerState::selected)
         == Some(&PickerItem::Confirm(true))
-        && listed_session_deletable(state, session);
+        && state.sessions.runs_agent(session, pane);
     back_to_list(state, yes);
     if !yes {
         return vec![];
     }
-    let mut commands = delete_session(state, session);
+    let mut commands = close_agent_pane(state, session, pane);
     commands.extend(preview_command(state));
     commands
-}
-
-/// Whether `session`, answered `Yes` over the session picker, still exists
-/// and isn't already being deleted.
-fn listed_session_deletable(state: &AppState, session: SessionId) -> bool {
-    state.sessions.session(session).is_some() && !state.sessions.deleting.contains(&session)
 }
 
 /// Ends the delete-worktree confirm: `Yes` returns `DeleteWorktree` for its
@@ -6377,7 +6399,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn lone_thread_row_is_labelled_project_and_title() {
+    fn lone_thread_row_is_labelled_project_session_and_title() {
         // Given thread 1, titled `fix login`, in project `work`.
         let state = state_at(
             vec![named(thread(1, ThreadStatus::Idle), "fix login")],
@@ -6387,16 +6409,17 @@ mod tests {
         // When opening the session picker.
         let state = open_sessions(state);
 
-        // Then its row reads `work/fix login`.
+        // Then its row reads `work/fix login/fix login`: the session is
+        // named by its agent too.
         assert_eq!(
             session_labels(&state),
-            ["work/fix login"],
+            ["work/fix login/fix login"],
             "a lone thread is labelled by its project"
         );
     }
 
     #[rstest::rstest]
-    fn incognito_thread_row_is_labelled_incognito_and_title() {
+    fn incognito_thread_row_is_labelled_incognito_session_and_title() {
         // Given thread 1, titled `scratch`, in orb's Incognito project.
         let mut state = with_projects(&["Incognito"]);
         if let Some(project) = state.sessions.projects.first_mut() {
@@ -6408,16 +6431,16 @@ mod tests {
         // When opening the session picker.
         let state = open_sessions(state);
 
-        // Then its row reads `Incognito/scratch`.
+        // Then its row reads `Incognito/scratch/scratch`.
         assert_eq!(
             session_labels(&state),
-            ["Incognito/scratch"],
+            ["Incognito/scratch/scratch"],
             "an Incognito thread is labelled Incognito"
         );
     }
 
     #[rstest::rstest]
-    fn untitled_session_row_ends_in_its_folder() {
+    fn untitled_session_row_ends_in_its_folder_and_new_thread() {
         // Given untitled thread 1 in project `work`, running in /work/1.
         let state = state_at(
             vec![thread(1, ThreadStatus::Idle)],
@@ -6427,10 +6450,10 @@ mod tests {
         // When opening the session picker.
         let state = open_sessions(state);
 
-        // Then its row reads `work/1`.
+        // Then its row reads `work/1/New thread`.
         assert_eq!(
             session_labels(&state),
-            ["work/1"],
+            ["work/1/New thread"],
             "an untitled session is labelled by its folder"
         );
     }
@@ -6556,51 +6579,24 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn d_in_the_session_picker_opens_delete_session_over_the_list() {
+    fn d_in_the_session_picker_opens_close_pane_over_the_list() {
         // Given the session picker on thread 1.
         let mut state = picking_thread_1();
 
         // When handling PickerRemove.
         IntentHandler::handle(&Intent::PickerRemove, &mut state);
 
-        // Then thread 1's delete confirm is open over the session picker.
+        // Then thread 1's close confirm is open over the session picker.
         assert_eq!(
             picker_and_under(&state),
             Some((
-                PickerKind::DeleteSession {
+                PickerKind::ClosePane {
+                    pane: PaneId(1),
                     session: SessionId(1),
-                    folder: false,
                 },
                 Some(all_sessions()),
             )),
-            "d should ask to delete the session over the list"
-        );
-    }
-
-    #[rstest::rstest]
-    fn d_on_a_research_session_asks_the_folder_variant() {
-        // Given the session picker on thread 1, a Research session.
-        let mut state = picking_thread_1();
-        if let Some(session) = state
-            .sessions
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == SessionId(1))
-        {
-            session.kind = SessionKind::Research;
-        }
-
-        // When handling PickerRemove.
-        IntentHandler::handle(&Intent::PickerRemove, &mut state);
-
-        // Then the confirm says the folder goes too.
-        assert_eq!(
-            picker_kind(&state),
-            Some(PickerKind::DeleteSession {
-                session: SessionId(1),
-                folder: true,
-            }),
-            "a Research session should ask the folder variant"
+            "d should ask to close the agent over the list"
         );
     }
 
@@ -6623,24 +6619,24 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn yes_over_the_session_picker_returns_delete_session() {
-        // Given Yes highlighted in thread 1's delete confirm over the list.
+    fn yes_over_the_session_picker_returns_save_layout() {
+        // Given Yes highlighted in thread 1's close confirm over the list.
         let mut state = picking_thread_1();
         answer_yes(&Intent::PickerRemove, &mut state);
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the sessions actor is asked to delete it.
+        // Then session 1's layout, without the pane, is saved.
         assert!(
-            commands.contains(&Command::DeleteSession(SessionId(1))),
-            "Yes over the list should delete the session"
+            commands.contains(&Command::SaveLayout(SessionId(1))),
+            "Yes over the list should save the layout it closed a pane of"
         );
     }
 
     #[rstest::rstest]
     fn yes_over_the_session_picker_drops_the_row() {
-        // Given Yes highlighted in thread 1's delete confirm over the list.
+        // Given Yes highlighted in thread 1's close confirm over the list.
         let mut state = picking_thread_1();
         answer_yes(&Intent::PickerRemove, &mut state);
 
@@ -6651,14 +6647,14 @@ mod tests {
         assert_eq!(
             (picker_kind(&state), session_ids(&state)),
             (Some(all_sessions()), vec![SessionId(2)]),
-            "the deleted session's row should go"
+            "the closed agent's row should go"
         );
     }
 
     #[rstest::rstest]
     fn yes_over_the_session_picker_leaves_the_sidebar_cursor_elsewhere() {
         // Given the sidebar cursor on thread 2, and Yes highlighted in
-        // thread 1's delete confirm over the list.
+        // thread 1's close confirm over the list.
         let mut state = picking_thread_1();
         answer_yes(&Intent::PickerRemove, &mut state);
 
@@ -6674,12 +6670,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn yes_over_the_session_picker_after_the_session_went_returns_to_the_list() {
-        // Given Yes highlighted in thread 1's delete confirm over the list,
-        // and then thread 1's session starts being deleted.
+    fn yes_over_the_session_picker_after_the_pane_closed_returns_to_the_list() {
+        // Given Yes highlighted in thread 1's close confirm over the list,
+        // and then thread 1's pane closes.
         let mut state = picking_thread_1();
         answer_yes(&Intent::PickerRemove, &mut state);
-        state.sessions.deleting.insert(SessionId(1));
+        close_thread_1s_pane(&mut state);
 
         // When confirming.
         let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
@@ -6692,13 +6688,64 @@ mod tests {
                 Some(all_sessions()),
                 vec![SessionId(2), SessionId(1)]
             ),
-            "Yes on a gone session should only go back to the list"
+            "Yes on a closed pane should only go back to the list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn yes_over_the_session_picker_closes_only_that_agent() {
+        // Given session 1 running thread 1 in pane 1 and thread 2 in pane 2,
+        // and Yes highlighted in thread 1's close confirm over the list.
+        let mut state = state_with(
+            vec![
+                thread(1, ThreadStatus::Idle),
+                Thread {
+                    pane: Some(PaneLaunch {
+                        pane: PaneId(2),
+                        session: SessionId(1),
+                    }),
+                    ..thread(2, ThreadStatus::Idle)
+                },
+            ],
+            1,
+        );
+        state.layouts = {
+            let mut layouts = Layouts::default();
+            layouts.insert(SessionId(1), SessionLayout::of(test_entry(1)));
+            layouts.split(SessionId(1), Split::Right, test_entry(2));
+            layouts
+        };
+        let mut state = open_sessions(state);
+        highlight(
+            &mut state,
+            &PickerItem::Session {
+                id: SessionId(1),
+                thread: ThreadId(1),
+                pane: PaneId(1),
+                label: "work/1/New thread".into(),
+                split: 5,
+                settled: false,
+            },
+        );
+        answer_yes(&Intent::PickerRemove, &mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then pane 1 is gone and its sibling pane 2 stays.
+        assert_eq!(
+            (
+                state.layouts.entry(PaneId(1)).is_some(),
+                state.layouts.entry(PaneId(2)).is_some()
+            ),
+            (false, true),
+            "Yes should close only the listed agent's pane"
         );
     }
 
     #[rstest::rstest]
     fn no_over_the_session_picker_returns_to_the_list() {
-        // Given No highlighted in thread 1's delete confirm over the list.
+        // Given No highlighted in thread 1's close confirm over the list.
         let mut state = picking_thread_1();
         IntentHandler::handle(&Intent::PickerRemove, &mut state);
         highlight(&mut state, &PickerItem::Confirm(false));
@@ -6715,23 +6762,86 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn picking_a_session_moves_the_cursor_to_it() {
+    fn picking_an_agent_moves_the_cursor_to_its_row() {
         // Given the session picker on thread 1, opened on thread 2.
         let mut state = picking_thread_1();
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then the cursor is on thread 1.
+        // Then the cursor is on thread 1's agent row.
         assert_eq!(
             state.sessions.cursor,
-            Some(on_thread(1)),
-            "picking should select the thread"
+            Some(agent_row_1()),
+            "picking should select the agent's row"
+        );
+    }
+
+    /// Thread 1's agent row: pane 1 of session 1.
+    fn agent_row_1() -> SidebarItem {
+        SidebarItem::Agent {
+            session: SessionId(1),
+            pane: PaneId(1),
+        }
+    }
+
+    /// Closes thread 1's pane, leaving it last in session 1.
+    fn close_thread_1s_pane(state: &mut AppState) {
+        for thread in state
+            .sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| project.threads.iter_mut())
+            .filter(|thread| thread.id == ThreadId(1))
+        {
+            thread.pane = None;
+            thread.last_session = Some(SessionId(1));
+        }
+    }
+
+    #[rstest::rstest]
+    fn picking_an_agent_reveals_its_pane() {
+        // Given the session picker on thread 1, opened on thread 2.
+        let mut state = picking_thread_1();
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then session 1's layout, showing the pane, is saved.
+        assert!(
+            commands.contains(&Command::SaveLayout(SessionId(1))),
+            "picking should save the layout it revealed the pane in"
         );
     }
 
     #[rstest::rstest]
-    fn picking_a_session_attaches_it() {
+    fn picking_an_agent_whose_pane_closed_closes_the_picker() {
+        // Given thread 1 highlighted, its pane closed since the picker opened.
+        let mut state = picking_thread_1();
+        close_thread_1s_pane(&mut state);
+
+        // When confirming.
+        IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then the picker is closed.
+        assert!(state.picker.is_none(), "the picker should close");
+    }
+
+    #[rstest::rstest]
+    fn picking_an_agent_whose_pane_closed_returns_no_commands() {
+        // Given thread 1 highlighted, its pane closed since the picker opened.
+        let mut state = picking_thread_1();
+        close_thread_1s_pane(&mut state);
+
+        // When confirming.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing happens.
+        assert!(commands.is_empty(), "a closed pane can't be jumped into");
+    }
+
+    #[rstest::rstest]
+    fn picking_an_agent_attaches_its_session() {
         // Given the session picker on thread 1, opened on thread 2.
         let mut state = picking_thread_1();
 
@@ -6746,7 +6856,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn picking_a_session_focuses_the_pane() {
+    fn picking_an_agent_focuses_the_pane() {
         // Given the session picker on thread 1, opened on thread 2.
         let mut state = picking_thread_1();
 
@@ -6758,25 +6868,31 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn picking_a_session_records_the_row_left_then_the_thread() {
+    fn picking_an_agent_records_the_row_left_then_its_row() {
         // Given the session picker on thread 1, opened on thread 2.
         let mut state = picking_thread_1();
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then thread 2, then thread 1, are recorded.
+        // Then thread 2, then thread 1's agent row, are recorded.
         assert_eq!(
             state.jumps.entries(),
-            [on_thread(2), on_thread(1)],
+            [on_thread(2), agent_row_1()],
             "picking should record where it left and where it landed"
         );
     }
 
     #[rstest::rstest]
     fn picking_the_selected_thread_records_no_jump() {
-        // Given the session picker on thread 2, opened on thread 2.
-        let mut state = open_sessions(jumping(Focus::Sidebar, &[], &[]));
+        // Given the session picker on thread 2, opened on thread 2's agent
+        // row.
+        let mut state = jumping(Focus::Sidebar, &[], &[]);
+        state.sessions.cursor = Some(SidebarItem::Agent {
+            session: SessionId(2),
+            pane: PaneId(2),
+        });
+        let mut state = open_sessions(state);
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);

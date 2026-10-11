@@ -8,7 +8,7 @@ use ratatui::layout::Rect;
 
 use super::floats::Floats;
 use super::tree::{Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction};
-use crate::feat::sessions::state::{PaneId, SessionId};
+use crate::feat::sessions::state::{NEW_THREAD, PaneId, SessionId, Thread};
 use crate::feat::zmx::zmx_service::ZmxSession;
 
 /// Where a pane's program runs: its zmx session and directory, the name the
@@ -627,6 +627,16 @@ impl Layouts {
             .find_map(|layout| layout.panes.get(&pane))
     }
 
+    /// What agent pane `pane` is called: its name, else `thread`'s title,
+    /// else `New thread`. The sidebar's agent row, the close confirm and the
+    /// session picker all use it.
+    pub fn agent_name<'a>(&'a self, pane: PaneId, thread: Option<&'a Thread>) -> &'a str {
+        self.entry(pane)
+            .and_then(|entry| entry.name.as_deref())
+            .or_else(|| thread?.title.as_deref())
+            .unwrap_or(NEW_THREAD)
+    }
+
     /// Every pane of every tab and float of `owner`'s layout.
     pub fn session_panes(&self, owner: SessionId) -> Vec<PaneId> {
         self.sessions
@@ -1146,9 +1156,11 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{FocusMove, Layouts, Placed, Placement, SessionLayout, Tab, test_entry as entry};
+    use crate::feat::harness::HarnessId;
     use crate::feat::layout::floats::{Float, FloatLayout, FloatRect, Floats};
     use crate::feat::layout::tree::{NavDirection, Split, SwapLayout, TileLayout};
-    use crate::feat::sessions::state::{PaneId, SessionId};
+    use crate::feat::sessions::state::{PaneId, SessionId, Thread, ThreadId, ThreadStatus};
+    use std::time::UNIX_EPOCH;
 
     const OWNER: SessionId = SessionId(1);
     const BODY: Rect = Rect::new(0, 0, 80, 24);
@@ -4028,5 +4040,46 @@ mod tests {
             Some(&Rect::new(5, 5, 40, 12)),
             "a dragged float is changed by hand and not laid out again"
         );
+    }
+
+    /// Thread 7 titled `title`, for naming pane 7.
+    fn titled(title: Option<&str>) -> Thread {
+        Thread {
+            harness: HarnessId::new("claude"),
+            id: ThreadId(7),
+            title: title.map(str::to_owned),
+            cwd: "/work".into(),
+            transcript: None,
+            status: ThreadStatus::Idle,
+            turn_started_at: None,
+            pane: None,
+            last_session: None,
+            branch: None,
+            created_at: UNIX_EPOCH,
+            last_activity_at: UNIX_EPOCH,
+            unseen: false,
+            model: None,
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::pane_name(Some("api"), Some("fix"), "api")]
+    #[case::title(None, Some("fix"), "fix")]
+    #[case::new_thread(None, None, "New thread")]
+    fn agent_name_prefers_pane_name_then_title_then_new_thread(
+        #[case] pane_name: Option<&str>,
+        #[case] title: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        // Given pane 7 named `pane_name`, running a thread titled `title`.
+        let mut layouts = opened();
+        layouts.rename_pane(PaneId(7), pane_name.map(str::to_owned));
+        let thread = titled(title);
+
+        // When naming its agent.
+        let name = layouts.agent_name(PaneId(7), Some(&thread));
+
+        // Then it is `expected`.
+        assert_eq!(name, expected, "pane {pane_name:?}, title {title:?}");
     }
 }

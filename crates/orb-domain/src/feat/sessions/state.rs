@@ -479,6 +479,12 @@ impl Sessions {
             .collect()
     }
 
+    /// Whether pane `pane` still runs one of session `id`'s agents (never
+    /// while the session is being deleted).
+    pub fn runs_agent(&self, id: SessionId, pane: PaneId) -> bool {
+        self.agent_rows(id).iter().any(|&(_, shown)| shown == pane)
+    }
+
     /// Whether session `id`'s card hides its agent rows: it's folded and no
     /// search has text, since a search lists a folded card as if open.
     pub fn hides_agents(&self, id: SessionId) -> bool {
@@ -2936,5 +2942,24 @@ mod tests {
             Some(agent_row(3, 3)),
             "search matches should stop on agent rows"
         );
+    }
+
+    #[rstest::rstest]
+    fn runs_agent_is_false_for_a_closed_pane() {
+        // Given session 1 whose agent's pane 1 closed.
+        let sessions = holding(
+            vec![Thread {
+                pane: None,
+                last_session: Some(SessionId(1)),
+                ..thread(1)
+            }],
+            vec![session(1)],
+        );
+
+        // When asking whether pane 1 runs one of session 1's agents.
+        let runs = sessions.runs_agent(SessionId(1), PaneId(1));
+
+        // Then it doesn't.
+        assert!(!runs, "a closed pane runs no agent");
     }
 }

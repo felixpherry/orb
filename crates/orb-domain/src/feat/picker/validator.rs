@@ -144,6 +144,9 @@ pub enum PickSessionError {
     Deleted,
     /// The hit's thread never ran in a session.
     NoSession,
+    /// The agent row's pane closed or no longer runs an agent since the
+    /// picker opened.
+    PaneGone,
 }
 
 /// Allow jumping to the session highlighted in the session picker, or the
@@ -154,8 +157,10 @@ pub enum PickSessionError {
 /// Returns [`PickSessionError::NoPicker`] unless the session or search
 /// picker is open, [`PickSessionError::NoSelection`] when no session or hit
 /// is highlighted, [`PickSessionError::NoSession`] when the hit's thread
-/// never ran in a session, and [`PickSessionError::Deleted`] when the
-/// session or the hit's thread is gone or being deleted.
+/// never ran in a session, [`PickSessionError::Deleted`] when the
+/// session or the hit's thread is gone or being deleted, and
+/// [`PickSessionError::PaneGone`] when the agent row's pane no longer runs
+/// one of its session's agents.
 pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
     let picker = match &state.picker {
         Some(picker)
@@ -168,54 +173,62 @@ pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
         }
         _ => return Err(PickSessionError::NoPicker),
     };
-    let session = match picker.selected() {
-        Some(&PickerItem::Session { id, .. }) => id,
-        Some(&PickerItem::Hit { thread, .. }) => state
-            .sessions
-            .threads()
-            .find(|shown| shown.id == thread)
-            .ok_or(PickSessionError::Deleted)?
-            .home()
-            .ok_or(PickSessionError::NoSession)?,
+    let (session, pane) = match picker.selected() {
+        Some(&PickerItem::Session { id, pane, .. }) => (id, Some(pane)),
+        Some(&PickerItem::Hit { thread, .. }) => (
+            state
+                .sessions
+                .threads()
+                .find(|shown| shown.id == thread)
+                .ok_or(PickSessionError::Deleted)?
+                .home()
+                .ok_or(PickSessionError::NoSession)?,
+            None,
+        ),
         _ => return Err(PickSessionError::NoSelection),
     };
     match state.sessions.session(session) {
-        Some(_) if !state.sessions.deleting.contains(&session) => Ok(()),
-        _ => Err(PickSessionError::Deleted),
+        Some(_) if !state.sessions.deleting.contains(&session) => {}
+        _ => return Err(PickSessionError::Deleted),
+    }
+    match pane {
+        Some(pane) if !state.sessions.runs_agent(session, pane) => Err(PickSessionError::PaneGone),
+        _ => Ok(()),
     }
 }
 
-/// Why deleting the session picker's highlighted session can't proceed.
+/// Why closing the session picker's highlighted agent can't proceed.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
-pub enum DeleteListedSessionError {
+pub enum CloseListedAgentError {
     /// The session picker isn't open.
     NoPicker,
-    /// No session row is highlighted.
-    NoSession,
-    /// The row's session is gone or already being deleted.
+    /// No agent row is highlighted.
+    NoAgent,
+    /// The row's session is gone or being deleted, or its pane no longer
+    /// runs an agent.
     Gone,
 }
 
-/// Allow `d` on the session picker's highlighted session.
+/// Allow `d` on the session picker's highlighted agent.
 ///
 /// # Errors
 ///
-/// Returns [`DeleteListedSessionError::NoPicker`] unless the session picker
-/// is open, [`DeleteListedSessionError::NoSession`] when no session row is
-/// highlighted, and [`DeleteListedSessionError::Gone`] when the row's
-/// session is gone or being deleted.
-pub fn validate_delete_listed_session(state: &AppState) -> Result<(), DeleteListedSessionError> {
+/// Returns [`CloseListedAgentError::NoPicker`] unless the session picker is
+/// open, [`CloseListedAgentError::NoAgent`] when no agent row is highlighted,
+/// and [`CloseListedAgentError::Gone`] when the row's session is gone or
+/// being deleted or its pane no longer runs an agent.
+pub fn validate_close_listed_agent(state: &AppState) -> Result<(), CloseListedAgentError> {
     let picker = match &state.picker {
         Some(picker) if matches!(picker.kind(), PickerKind::Sessions { .. }) => picker,
-        _ => return Err(DeleteListedSessionError::NoPicker),
+        _ => return Err(CloseListedAgentError::NoPicker),
     };
-    let Some(&PickerItem::Session { id, .. }) = picker.selected() else {
-        return Err(DeleteListedSessionError::NoSession);
+    let Some((session, pane)) = picker.selected_agent() else {
+        return Err(CloseListedAgentError::NoAgent);
     };
-    match state.sessions.session(id) {
-        Some(_) if !state.sessions.deleting.contains(&id) => Ok(()),
-        _ => Err(DeleteListedSessionError::Gone),
+    match state.sessions.session(session) {
+        Some(_) if state.sessions.runs_agent(session, pane) => Ok(()),
+        _ => Err(CloseListedAgentError::Gone),
     }
 }
 
@@ -275,9 +288,9 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        AddDirectoryError, DeleteListedSessionError, DeleteWorktreeError, OpenDirectoryError,
+        AddDirectoryError, CloseListedAgentError, DeleteWorktreeError, OpenDirectoryError,
         PickProjectError, PickSessionError, RemoveProjectError, validate_add_directory,
-        validate_delete_listed_session, validate_delete_worktree, validate_open_directory,
+        validate_close_listed_agent, validate_delete_worktree, validate_open_directory,
         validate_pick_project, validate_pick_session, validate_remove_project,
     };
     use crate::feat::picker::list::PickerItem;
@@ -304,7 +317,8 @@ mod tests {
         PickerState::sessions(
             vec![PickerItem::Session {
                 id: SessionId(1),
-                thread: Some(ThreadId(1)),
+                thread: ThreadId(1),
+                pane: PaneId(1),
                 label: "work/New thread".into(),
                 split: 5,
                 settled: false,
@@ -626,7 +640,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn delete_listed_session_rejected_when_session_gone() {
+    fn close_listed_agent_rejected_when_session_gone() {
         // Given thread 1's session highlighted in the session picker, but no
         // longer in the sidebar.
         let state = AppState {
@@ -635,18 +649,18 @@ mod tests {
         };
 
         // When validating `d`.
-        let result = validate_delete_listed_session(&state);
+        let result = validate_close_listed_agent(&state);
 
         // Then validation fails with Gone.
         assert_eq!(
             result,
-            Err(DeleteListedSessionError::Gone),
-            "a gone session can't be deleted"
+            Err(CloseListedAgentError::Gone),
+            "a gone session's agent can't be closed"
         );
     }
 
     #[rstest::rstest]
-    fn delete_listed_session_rejected_outside_the_session_picker() {
+    fn close_listed_agent_rejected_outside_the_session_picker() {
         // Given the project picker open.
         let state = AppState {
             picker: Some(PickerState::projects(vec![alpha()], Focus::Sidebar)),
@@ -654,13 +668,53 @@ mod tests {
         };
 
         // When validating `d`.
-        let result = validate_delete_listed_session(&state);
+        let result = validate_close_listed_agent(&state);
 
         // Then validation fails with NoPicker.
         assert_eq!(
             result,
-            Err(DeleteListedSessionError::NoPicker),
-            "only the session picker deletes sessions"
+            Err(CloseListedAgentError::NoPicker),
+            "only the session picker closes listed agents"
+        );
+    }
+
+    #[rstest::rstest]
+    fn close_listed_agent_rejected_when_pane_gone() {
+        // Given thread 1 highlighted in the session picker, its pane closed
+        // since.
+        let state = AppState {
+            picker: Some(picking_thread_1()),
+            ..ended(deleting(ThreadStatus::Idle), Some(SessionId(1)))
+        };
+
+        // When validating `d`.
+        let result = validate_close_listed_agent(&state);
+
+        // Then validation fails with Gone.
+        assert_eq!(
+            result,
+            Err(CloseListedAgentError::Gone),
+            "a closed pane's agent can't be closed again"
+        );
+    }
+
+    #[rstest::rstest]
+    fn pick_session_rejected_when_pane_gone() {
+        // Given thread 1 highlighted in the session picker, its pane closed
+        // since.
+        let state = AppState {
+            picker: Some(picking_thread_1()),
+            ..ended(deleting(ThreadStatus::Idle), Some(SessionId(1)))
+        };
+
+        // When validating a pick.
+        let result = validate_pick_session(&state);
+
+        // Then validation fails with PaneGone.
+        assert_eq!(
+            result,
+            Err(PickSessionError::PaneGone),
+            "a closed pane can't be jumped into"
         );
     }
 

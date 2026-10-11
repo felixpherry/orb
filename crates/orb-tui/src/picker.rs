@@ -31,7 +31,7 @@ use orb_domain::feat::picker::list::{
     ALL_PROJECTS, BranchRow, INIT_GIT, Matches, PickerItem, WorkspaceChoice, confirm_label,
 };
 use orb_domain::feat::picker::state::{PickerKind, PickerState, split_path};
-use orb_domain::feat::sessions::state::{NEW_THREAD, ProjectKind, Sessions};
+use orb_domain::feat::sessions::state::{ProjectKind, Sessions};
 use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -171,11 +171,7 @@ fn title(kind: &PickerKind, sessions: &Sessions, layouts: &Layouts) -> Cow<'stat
             folder: true,
         } => return Cow::Owned(format!("Delete {} and its folder?", named(*session))),
         PickerKind::ClosePane { pane, .. } => {
-            let label = layouts
-                .entry(*pane)
-                .and_then(|entry| entry.name.clone())
-                .or_else(|| sessions.agent_in(*pane)?.title.clone())
-                .unwrap_or_else(|| NEW_THREAD.to_owned());
+            let label = layouts.agent_name(*pane, sessions.agent_in(*pane));
             return Cow::Owned(format!("Close {label}?"));
         }
         PickerKind::Projects | PickerKind::ManageProjects => "Projects",
@@ -208,7 +204,7 @@ pub(crate) fn hints(picker: &PickerState) -> Line<'static> {
         (true, _, _) => {
             let own: &[(&str, &str)] = match kind {
                 PickerKind::ManageProjects => &[("a", "add"), ("d", "remove")],
-                PickerKind::Sessions { .. } => &[("a/b/w/i/s", "filter"), ("d", "delete")],
+                PickerKind::Sessions { .. } => &[("a/b/w/i/s", "filter"), ("d", "close")],
                 _ => &[("d", "delete")],
             };
             [("↑↓/j/k", "rows"), ("/", "search")]

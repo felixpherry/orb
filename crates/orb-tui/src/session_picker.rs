@@ -24,7 +24,7 @@ use std::time::SystemTime;
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::picker::list::{Matches, PickerItem};
 use orb_domain::feat::picker::state::{PickerKind, PickerState, SessionFilter};
-use orb_domain::feat::sessions::state::{Session, SessionId, Sessions, Thread, ThreadStatus};
+use orb_domain::feat::sessions::state::{SessionId, Sessions, Thread, ThreadStatus};
 use orb_domain::feat::sessions::transcript::Exchange;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -39,8 +39,7 @@ use crate::picker::{
 };
 use crate::sidebar::{
     BG_DARK, BLACK, BLUE, BORDER, BRANCH, COMMENT, COMPLETED_ICON, CYAN, DARK3, DARK5, FG, FG_DARK,
-    GREEN1, GUTTER, ORANGE, VISUAL, ago_label, mark, render_split, session_status, status,
-    working_label,
+    GREEN1, GUTTER, ORANGE, VISUAL, ago_label, mark, render_split, status, working_label,
 };
 
 /// Draws the session picker over `area`: the list of `picker`'s rows with
@@ -225,9 +224,10 @@ pub(crate) fn render_input(
     Position::new(area.x + x, area.y)
 }
 
-/// One session row: its status icon (a dim check when settled), its label
-/// with the prefix dim and the matches lit, and its time on the right. A
-/// session gone from `sessions` shows only its label, dim.
+/// One agent row: its agent's status icon (a dim check when its session is
+/// settled), its label with the project dim and the matches lit, and its
+/// agent's time on the right. A row whose session or agent is gone from
+/// `sessions` shows only its label, dim.
 fn render_row(
     item: &PickerItem,
     matches: &Matches,
@@ -239,6 +239,7 @@ fn render_row(
 ) {
     let PickerItem::Session {
         id,
+        thread,
         label,
         split,
         settled,
@@ -247,22 +248,19 @@ fn render_row(
     else {
         return;
     };
-    let session = sessions.session(*id);
-    let agents = sessions.agents(*id);
-    let (icon, (dim, bright), time) = match (session, settled) {
+    let agent = sessions
+        .session(*id)
+        .and_then(|_| sessions.threads().find(|shown| shown.id == *thread));
+    let (icon, (dim, bright), time) = match (agent, settled) {
         (None, _) => (Span::raw("  "), (DARK3, DARK3), String::new()),
-        (Some(session), true) => (
+        (Some(agent), true) => (
             span(format!("{COMPLETED_ICON} "), DARK3),
             (DARK3, COMMENT),
-            session_when(session, &agents, now),
+            when(agent, now),
         ),
-        (Some(session), false) => {
-            let (glyph, _, fg) = session_status(&agents, attached.contains(id), now);
-            (
-                span(format!("{glyph} "), fg),
-                (DARK5, FG),
-                session_when(session, &agents, now),
-            )
+        (Some(agent), false) => {
+            let (glyph, _, fg) = status(agent, attached.contains(id), now);
+            (span(format!("{glyph} "), fg), (DARK5, FG), when(agent, now))
         }
     };
     let left: Line = [Span::raw(" "), icon]
@@ -280,22 +278,6 @@ fn render_row(
         },
         buf,
     );
-}
-
-/// How long its working agent's turn has run, else how long since its
-/// agents' last chat, else since the session's last activity.
-fn session_when(session: &Session, agents: &[&Thread], now: SystemTime) -> String {
-    match agents
-        .iter()
-        .find(|thread| thread.status == ThreadStatus::Working)
-        .or_else(|| agents.iter().max_by_key(|thread| thread.last_chat()))
-    {
-        Some(thread) => when(thread, now),
-        None => ago_label(
-            now.duration_since(session.last_activity_at)
-                .unwrap_or_default(),
-        ),
-    }
 }
 
 /// How long the turn has run while working, else how long since the last
@@ -330,7 +312,7 @@ fn render_preview(
     let block = boxed(Some(Line::from(span(format!(" {label} "), BLUE))));
     let inner = block.inner(area);
     block.render(area, buf);
-    let thread = thread.and_then(|thread| sessions.threads().find(|shown| shown.id == thread));
+    let thread = sessions.threads().find(|shown| shown.id == *thread);
     let info = thread.and_then(|thread| harnesses.iter().find(|info| info.id == thread.harness));
     let meta = thread.map_or_else(Line::default, |thread| {
         meta(thread, info, attached.contains(id), now)
@@ -693,6 +675,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use orb_domain::Focus;
+    use orb_domain::feat::layout::state::Layouts;
     use orb_domain::feat::picker::state::{PickerState, SessionFilter, session_items};
     use orb_domain::feat::sessions::state::{
         PaneId, PaneLaunch, Project, ProjectId, ProjectKind, SessionId, Sessions, Thread, ThreadId,
@@ -707,7 +690,7 @@ mod tests {
     use super::render;
     use crate::mouse::HitMap;
     use crate::picker::PickerScroll;
-    use crate::sidebar::{BLACK, BRANCH, COMPLETED_ICON, DARK3, DARK5, VISUAL};
+    use crate::sidebar::{BLACK, BRANCH, COMPLETED_ICON, DARK3, DARK5, IDLE_ICON, VISUAL};
     use crate::test_support::sessions_for;
 
     /// The clock every picker is drawn at.
@@ -770,7 +753,10 @@ mod tests {
 
     /// The session picker over `sessions`, on all threads.
     fn picker(sessions: &Sessions) -> PickerState {
-        PickerState::sessions(session_items(sessions, SessionFilter::All), Focus::Sidebar)
+        PickerState::sessions(
+            session_items(sessions, &Layouts::default(), SessionFilter::All),
+            Focus::Sidebar,
+        )
     }
 
     /// Types `text` into `picker`.
@@ -938,7 +924,7 @@ mod tests {
         // Given the session picker filtered to `filter`.
         let sessions = two();
         let mut picker = picker(&sessions);
-        picker.set_filter(filter, &sessions);
+        picker.set_filter(filter, &sessions, &Layouts::default());
 
         // When drawing the picker.
         let (buf, _) = draw(&picker, &sessions, 140, 30);
@@ -1032,7 +1018,7 @@ mod tests {
         // Given a settled thread, with settled threads shown.
         let sessions = settled(sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]));
         let mut picker = picker(&sessions);
-        picker.set_filter(SessionFilter::Settled, &sessions);
+        picker.set_filter(SessionFilter::Settled, &sessions, &Layouts::default());
 
         // When drawing the stacked picker, the list above the preview.
         let (buf, _) = draw(&picker, &sessions, 100, 30);
@@ -1061,6 +1047,28 @@ mod tests {
             row.contains("Fix the bug") && row.contains("2m │"),
             "row was {row}"
         );
+    }
+
+    #[rstest::rstest]
+    fn idle_agent_beside_a_working_sibling_shows_the_idle_icon() {
+        // Given session 1 running working agent 1 and idle agent 2.
+        let sessions = sessions(vec![
+            thread(1, "Fix the bug", ThreadStatus::Working),
+            Thread {
+                pane: Some(PaneLaunch {
+                    pane: PaneId(2),
+                    session: SessionId(1),
+                }),
+                ..thread(2, "Write docs", ThreadStatus::Idle)
+            },
+        ]);
+
+        // When drawing the stacked picker, the list above the preview.
+        let (buf, _) = draw(&picker(&sessions), &sessions, 100, 30);
+
+        // Then the idle agent's row shows the idle icon.
+        let row = line_of(&buf, "Write docs");
+        assert!(row.contains(IDLE_ICON), "row was {row}");
     }
 
     #[rstest::rstest]
@@ -1318,8 +1326,8 @@ mod tests {
         // When drawing the picker.
         let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
 
-        // Then the hints name the filters, delete and open.
-        let expected = "↑↓/j/k rows · / search · a/b/w/i/s filter · d delete · ⏎ open · Esc close";
+        // Then the hints name the filters, close and open.
+        let expected = "↑↓/j/k rows · / search · a/b/w/i/s filter · d close · ⏎ open · Esc close";
         assert!(find(&buf, expected).is_some(), "the hints {expected:?}");
     }
 
