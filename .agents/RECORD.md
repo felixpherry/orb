@@ -225,7 +225,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) A pi agent is only ever working, idle or stopped, because its pane reports carry only those states.
 - (sessions) A pi thread's title is a name an older orb's `r` saved, else its latest `/name`, else its first prompt, else "New thread".
 - (sessions) A pi thread's branch is read from git in its directory after each turn.
-- (pane) An attach pane whose program exits within about a second of starting shows `session exited at start`.
+- (pane) An attach pane whose program exits within about a second of starting shows `session <title> exited at start`, naming its session, and writes that text to the log; with no title it shows `session exited at start`.
 - (sidebar) An agent row ends with its harness's mark: `✳` for Claude, `π` for pi.
 - (picker) The session and search pickers' previews head each reply with its harness's icon and name, `✳ Claude Code` for Claude and `π pi` for pi.
 - (search) `<C-g> /` searches pi session files alongside Claude transcripts.
@@ -297,3 +297,7 @@ Entries are added or amended **only with human approval**.
 - (worktrees) When orb renames a worktree's `orb/<hex>` branch to `orb/<slug>`, the sessions in that worktree take the new branch too, so the tab bar shows it.
 - (worktrees) Restoring a pruned worktree adds it back on the first of its session's recorded branch and its threads' branches that still exists, and makes the session's branch anew from the default branch only when none exists; the session then shows the branch it came back on.
 - (repo) `just lint` checks that every code name AGENTS.md and the Record mention outside code blocks exists in orb's code, except an allowlist of the style guide's examples and outside names.
+- (log) orb appends a log to `~/.orb/orb.log`, moved to `~/.orb/orb.log.1` once it reaches 5 MB, keeping one old file.
+- (log) Each orb start, including `orb integration`, writes a `start` line with orb's version and process id to the log, and an error that ends orb is written as `orb stopped` with its causes.
+- (log) Every failed load, save, git step, folder step or harness step that orb shows in the message box, and every failed kill, worktree removal, pane start, zmx listing and search index step, is written to the log with its full chain of causes; one that repeats on every status poll or search keystroke is written only when its text changes. Failed actor mailbox sends, transcript scans, the branch read after a turn, worktree fact reads, the session picker's preview read and desktop notifications are still not logged.
+- (log) Every zmx kill, worktree removal and branch deletion writes one line to the log saying what was removed, why, and whether it worked (a kill of a session zmx no longer has says `already gone`); every session deletion writes one line naming the session, its threads and panes and whether it worked; every pane row dropped by a layout save writes one line naming the pane and its session.
