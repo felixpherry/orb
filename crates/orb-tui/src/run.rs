@@ -97,6 +97,7 @@ use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
+use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::layout::{Margin, Position, Rect};
 use wherror::Error;
 
@@ -586,6 +587,9 @@ impl App {
                     Instant::now(),
                 );
             }
+            // The terminal shows only the finished frame, so the cursor never
+            // visibly crosses the screen while cells are written.
+            ratatui::crossterm::queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
             terminal.draw(|frame| {
                 let state = self.state.read();
                 drawn = render::render(
@@ -602,6 +606,7 @@ impl App {
                     &mut self.hits,
                 );
             })?;
+            ratatui::crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
             // Navigation scrolls by what was just drawn.
             let (sidebar_layout, picker_page) = drawn;
             if let Some(layout) = sidebar_layout
