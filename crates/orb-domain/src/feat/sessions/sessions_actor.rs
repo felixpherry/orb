@@ -3500,9 +3500,9 @@ mod tests {
         gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
         /// Whether `add_worktree` panics, as a worktree job that dies.
         panics: bool,
-        /// Whether a write could take the watched state's lock each time
-        /// `project_path` ran.
-        free_at_project_path: Mutex<Vec<bool>>,
+        /// While set, the first `project_path` says so on the sender, then
+        /// waits until the receiver's sender is used or dropped.
+        project_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     }
 
     impl FakeGit {
@@ -3522,7 +3522,7 @@ mod tests {
                 fetching_seen: Mutex::default(),
                 gate: Mutex::default(),
                 panics: false,
-                free_at_project_path: Mutex::default(),
+                project_gate: Mutex::default(),
             }
         }
 
@@ -3540,6 +3540,23 @@ mod tests {
                 ..Self::answering()
             };
             (Arc::new(git), open)
+        }
+
+        /// A repository without an `origin` whose first `project_path` sends
+        /// on the returned receiver's sender once asked, then waits until the
+        /// returned sender is used or dropped.
+        fn slow_project_check() -> (
+            Arc<Self>,
+            std::sync::mpsc::Receiver<()>,
+            std::sync::mpsc::Sender<()>,
+        ) {
+            let (asked, asking) = std::sync::mpsc::channel();
+            let (open, gate) = std::sync::mpsc::channel();
+            let git = Self {
+                project_gate: Mutex::new(Some((asked, gate))),
+                ..Self::answering()
+            };
+            (Arc::new(git), asking, open)
         }
 
         /// A repository without an `origin` whose `add_worktree` panics.
@@ -3604,15 +3621,6 @@ mod tests {
         /// Looks at `state` on every later fetch.
         fn watch(&self, state: &State) {
             let _ = self.watched.set(state.clone());
-        }
-
-        /// Whether a write could take the watched state's lock each time
-        /// `project_path` ran.
-        fn lock_free_at_project_path(&self) -> Vec<bool> {
-            self.free_at_project_path
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
         }
 
         /// What `sessions.fetching` read while each watched fetch ran.
@@ -3797,11 +3805,14 @@ mod tests {
         }
 
         fn project_path(&self, _cwd: &Path) -> Option<PathBuf> {
-            if let Some(state) = self.watched.get() {
-                self.free_at_project_path
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(state.write_is_free());
+            let gate = self
+                .project_gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some((asked, gate)) = gate {
+                let _ = asked.send(());
+                let _ = gate.recv();
             }
             self.project.clone()
         }
@@ -7515,31 +7526,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn add_project_checks_git_without_holding_the_state() -> Result<(), Report<StoreError>> {
-        // Given an existing directory, and git watching the app state.
-        let dir = tempfile::tempdir().change_context(StoreError)?;
-        let git = FakeGit::local();
-        let (mut actor, state) = start_with(
-            Store::open_in_memory()?,
-            &listing(Vec::new()),
-            &git,
-            Path::new(NO_CLAUDE_DIR),
-        );
-        git.watch(&state);
-
-        // When adding it as a project.
-        actor.add_project(dir.path().to_owned());
-
-        // Then git was asked once, with the state free.
-        assert_eq!(
-            git.lock_free_at_project_path(),
-            vec![true],
-            "adding a project asks git without holding the state"
-        );
-        Ok(())
-    }
-
-    #[rstest::rstest]
     fn adding_a_directory_shows_it_as_a_project() -> Result<(), Report<StoreError>> {
         // Given no projects and an existing directory.
         let dir = tempfile::tempdir().change_context(StoreError)?;
@@ -8884,6 +8870,28 @@ mod tests {
             made_worktree_removed(&git)?,
             "a move of a deleted session leaves no worktree, got {:?}",
             git.calls()
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn move_whose_session_was_deleted_meanwhile_shows_the_session_is_gone()
+    -> Result<(), Report<StoreError>> {
+        // Given a move of aa's session to a new worktree, and the session
+        // deleted while the worktree is made.
+        let (store, seeded, _) = movable()?;
+        let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
+        let job = actor.change_workspace(seeded.session, new_worktree(), None);
+        actor.delete_session(seeded.session);
+
+        // When the worktree result is applied.
+        finish(&mut actor, job);
+
+        // Then the move says the session is gone.
+        assert_eq!(
+            error_of(&actor).as_deref(),
+            Some("the session is gone"),
+            "a move of a deleted session says so"
         );
         Ok(())
     }
@@ -11600,6 +11608,43 @@ mod tests {
             (state.read().sessions.starting, report.shown_error()),
             (false, Some("couldn't make the worktree".to_owned())),
             "a job that dies still ends its start"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn screen_reads_the_state_while_a_project_is_checked_for_git()
+    -> Result<(), Report<StoreError>> {
+        // Given the actor started through its mailbox with a git whose
+        // project check waits until the test ends, and an existing
+        // directory being added as a project, reaching that check.
+        let dir = tempfile::tempdir().change_context(StoreError)?;
+        let store = Store::open_in_memory()?;
+        let zmx = zmx_running(&store);
+        let (git, asking, _open) = FakeGit::slow_project_check();
+        let (actor, state) = spawned_with(store, &listing(Vec::new()), git, zmx).await?;
+        actor
+            .tell(SessionsCommand::AddProject(dir.path().to_owned()))
+            .await
+            .map_err(|error| Report::new(StoreError).attach(format!("{error:?}")))?;
+        tokio::task::spawn_blocking(move || asking.recv_timeout(LIMIT))
+            .await
+            .change_context(StoreError)?
+            .change_context(StoreError)
+            .attach("the project check wasn't asked in time")?;
+
+        // When the screen reads the app state.
+        let read = tokio::time::timeout(
+            LIMIT,
+            tokio::task::spawn_blocking(move || state.read().sessions.projects.len()),
+        )
+        .await;
+
+        // Then the read finishes without waiting for git.
+        assert!(
+            read.is_ok(),
+            "the screen should read the state while git checks a project"
         );
         Ok(())
     }

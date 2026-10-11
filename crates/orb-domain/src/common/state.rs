@@ -35,12 +35,6 @@ impl State {
     pub fn write(&self) -> RwLockWriteGuard<'_, AppState> {
         self.inner.write().unwrap_or_else(PoisonError::into_inner)
     }
-
-    /// Whether a write could take the lock now (nothing holds it). For tests.
-    #[cfg(test)]
-    pub(crate) fn write_is_free(&self) -> bool {
-        self.inner.try_write().is_ok()
-    }
 }
 
 /// What a worker tells the frontend loop. Durable facts (sessions, statuses,

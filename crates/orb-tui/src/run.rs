@@ -89,6 +89,7 @@ use orb_domain::feat::search::search_actor::SearchActor;
 use orb_domain::feat::sessions::child_env::pane_env;
 use orb_domain::feat::sessions::sessions_actor::SessionsActor;
 use orb_domain::feat::sessions::state::{Notice, PaneId, SessionId, ThreadId};
+use orb_domain::feat::sessions::validator::validate_new_session;
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::worktrees::worktrees_actor::WorktreesActor;
 use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
@@ -1057,14 +1058,20 @@ impl App {
                         attach_or_restore(&dir, &self.worktrees_root) == AttachPlan::Restore
                     })
                 {
+                    {
+                        let mut app = self.state.write();
+                        app.focus = Focus::Sidebar;
+                        app.attached.remove(session);
+                        // One start at a time, as for a new session.
+                        if validate_new_session(&app).is_err() {
+                            return;
+                        }
+                        app.sessions.starting = true;
+                    }
                     let _ = self
                         .sessions
                         .tell(SessionsCommand::RestoreWorktree(*session))
                         .try_send();
-                    let mut app = self.state.write();
-                    app.focus = Focus::Sidebar;
-                    app.attached.remove(session);
-                    app.sessions.starting = true;
                     return;
                 }
                 self.pane_error = None;
@@ -1769,7 +1776,8 @@ mod tests {
     use orb_domain::feat::worktrees::worktrees_actor::{WorktreesActorDeps, spawn_worktrees_actor};
     use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession};
     use orb_domain::{
-        AppState, Focus, Intent, IntentHandler, Log, Outcome, PaneMode, Reporter, Services, State,
+        AppState, Command, Focus, Intent, IntentHandler, Log, Outcome, PaneMode, Reporter,
+        Services, SessionsCommand, State,
     };
     use orb_term::PaneEvent;
     use ratatui::crossterm::cursor::SetCursorStyle;
@@ -3014,8 +3022,9 @@ mod tests {
     }
 
     /// An `App` over fakes, for loop tests: its actors run on their own
-    /// runtime over an in-memory store and a state of their own; panes
-    /// attach with the given command in a temp dir; zmx is `zmx`.
+    /// runtime over an in-memory store and a state of their own, reporting
+    /// on the loop's channel; panes attach with the given command in a temp
+    /// dir; zmx is `zmx`.
     struct LoopTest {
         app: App,
         state: State,
@@ -3024,7 +3033,7 @@ mod tests {
         /// The panes' cwd, the sessions' dir and the actors' roots.
         dir: TempDir,
         /// Dropped after the app.
-        _runtime: Runtime,
+        runtime: Runtime,
     }
 
     fn loop_app(zmx: FakeZmx, attach: fn(&ZmxSession) -> Vec<OsString>) -> io::Result<LoopTest> {
@@ -3033,9 +3042,15 @@ mod tests {
         let store =
             Store::open_in_memory().map_err(|report| io::Error::other(report.to_string()))?;
         let git = GitService::new(Arc::new(NoGit), Log::default());
+        let (tx, rx) = mpsc::channel();
         let (sessions, worktrees, search) = {
             let _context = runtime.enter();
-            let report = Reporter::new(|_| {});
+            let report = {
+                let tx = tx.clone();
+                Reporter::new(move |outcome| {
+                    let _ = tx.send(LoopEvent::Reported(outcome));
+                })
+            };
             let sessions = spawn_sessions_actor(SessionsActorDeps {
                 services: Services {
                     harnesses: Harnesses::new(vec![]),
@@ -3074,7 +3089,6 @@ mod tests {
         runtime.block_on(sessions.wait_for_startup());
         let zmx = Arc::new(zmx);
         let state = State::default();
-        let (tx, rx) = mpsc::channel();
         let mut app = App::new(
             state.clone(),
             sessions,
@@ -3098,7 +3112,7 @@ mod tests {
             zmx,
             rx,
             dir,
-            _runtime: runtime,
+            runtime,
         })
     }
 
@@ -3178,6 +3192,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[rstest::rstest]
+    fn entering_a_gone_worktree_while_a_start_runs_asks_for_no_restore() -> io::Result<()> {
+        // Given a session start in flight, and session 1 whose orb worktree
+        // is gone.
+        let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+        {
+            let mut state = test.state.write();
+            state.sessions.starting = true;
+            state.sessions.sessions = vec![Session {
+                id: session_id(1),
+                dir: test.dir.path().join("worktrees/orb/orb-1a2b3c4d"),
+                ..session(1, false)
+            }];
+        }
+
+        // When the loop attaches session 1, as `⏎` on its row asks, and the
+        // sessions worker has handled what it was sent.
+        test.app.execute(&Command::Attach(session_id(1)));
+        let sessions = test.app.sessions.clone();
+        test.runtime
+            .block_on(async move { sessions.ask(SessionsCommand::SaveUi).await })
+            .map_err(|error| io::Error::other(format!("{error:?}")))?;
+
+        // Then the worker reports no failure: no second restore ran.
+        let failures: Vec<String> = test
+            .rx
+            .try_iter()
+            .filter_map(|event| match event {
+                LoopEvent::Reported(Outcome::Failed(error)) => Some(error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            failures,
+            Vec::<String>::new(),
+            "a restore should wait for the start in flight"
+        );
+        Ok(())
     }
 
     #[rstest::rstest]

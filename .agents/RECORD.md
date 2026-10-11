@@ -205,7 +205,7 @@ Entries are added or amended **only with human approval**.
 - (worktrees) Pruning removes the worktree's directory and keeps its branch.
 - (worktrees) orb sweeps for worktrees to prune at start and then every hour, showing `pruned N worktrees` in the message box when it removes any.
 - (worktrees) A worktree's size is given up after 10 s of `du`, and the worktree then shows no size.
-- (worktrees) Attaching to a session whose worktree is gone first recreates it at the same path on the session's branch, or on a new branch of that name from the project's default branch when the branch is gone.
+- (worktrees) Attaching to a session whose worktree is gone first recreates it at the same path on the session's branch, or on a new branch of that name from the project's default branch when the branch is gone; while another session is starting, it does nothing, as a new session would.
 - (keybinds) `<C-g> W` in the sidebar or a pane opens the worktree picker.
 - (picker) The worktree picker lists every directory under `~/.orb/worktrees/<repo>/`, active ones first and unused ones last, most recently used first within each, each with its state: `active · <title>`, `settled <age>` or `no session`.
 - (picker) The worktree picker's preview shows the worktree's path, branch, size, uncommitted changes, last commit, last use, sweep verdict, and the sessions that use it.

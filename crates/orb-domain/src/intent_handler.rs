@@ -5985,6 +5985,24 @@ mod tests {
     }
 
     #[rstest::rstest]
+    fn confirming_a_folder_name_while_another_session_starts_asks_for_nothing() {
+        // Given the name box holding a fresh name, and another session
+        // being made.
+        let mut state = naming_research("tokio select");
+        state.sessions.starting = true;
+
+        // When handling PickerConfirm.
+        let commands = IntentHandler::handle(&Intent::PickerConfirm, &mut state);
+
+        // Then nothing is asked for, as for any other start meanwhile.
+        assert_eq!(
+            commands,
+            vec![],
+            "a folder session should wait for the start in flight"
+        );
+    }
+
+    #[rstest::rstest]
     fn confirming_an_invalid_folder_name_shows_the_char() {
         // Given the name box holding `a/b`.
         let mut state = naming_research("a/b");
