@@ -92,6 +92,7 @@ pub(crate) fn render(
     } else {
         let (selected_y, sidebar_layout, search_cursor) = sidebar::render(
             &state.sessions,
+            state.active_row(),
             &state.attached,
             &state.harnesses,
             &state.layouts,

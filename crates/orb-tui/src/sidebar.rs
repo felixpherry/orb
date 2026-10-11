@@ -11,10 +11,11 @@
 //! one row per agent pane hanging one level under that line, with its
 //! status, name or title and harness mark. A card with agent rows ends its
 //! last line with `⌄`, or with `›` while folded and its rows hidden. The
-//! selected row's first line is highlighted. Settled sessions fold into a
-//! shelf at the bottom, drawn as one-line rows while it's open. The sidebar
-//! scrolls to keep the whole selected row in view, unless the wheel
-//! scrolled it while the keys are elsewhere.
+//! hovered row's first line is highlighted, and the active row (the one the
+//! right side shows) has a blue bar at its left edge and a bold first line.
+//! Settled sessions fold into a shelf at the bottom, drawn as one-line rows
+//! while it's open. The sidebar scrolls to keep the whole selected row in
+//! view, unless the wheel scrolled it while the keys are elsewhere.
 //!
 //! While the user searches, the typed text follows the prompt, and only
 //! the sessions whose title or an agent's title matches it are
@@ -36,7 +37,7 @@ use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::tilde;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use unicode_segmentation::UnicodeSegmentation;
@@ -110,13 +111,15 @@ impl SidebarScroll {
 /// layout, and the search text's cursor while there is a search. An idle
 /// agent of a session in `attached` shows a filled circle; an agent row reads
 /// its pane's name from `layouts` and ends with its harness's mark from
-/// `harnesses`.
+/// `harnesses`. The active row (`active`) has a blue bar at its left edge
+/// and a bold first line.
 #[expect(
     clippy::too_many_arguments,
     reason = "the sidebar's inputs plus the scroll and hit map it updates"
 )]
 pub(crate) fn render(
     sessions: &Sessions,
+    active: Option<SidebarItem>,
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     layouts: &Layouts,
@@ -141,7 +144,7 @@ pub(crate) fn render(
         heights: rows.iter().map(height).collect(),
     };
     let selected_y = render_list(
-        sessions, attached, harnesses, layouts, home, rows, now, list, buf, scroll, hits,
+        sessions, active, attached, harnesses, layouts, home, rows, now, list, buf, scroll, hits,
     );
     (selected_y, layout, search_cursor)
 }
@@ -264,6 +267,7 @@ fn count(sessions: &Sessions, rows: &[SidebarRow<'_>]) -> String {
 )]
 fn render_list(
     sessions: &Sessions,
+    active: Option<SidebarItem>,
     attached: &HashSet<SessionId>,
     harnesses: &[HarnessInfo],
     layouts: &Layouts,
@@ -330,6 +334,16 @@ fn render_list(
                 sessions, attached, harnesses, layouts, home, row, ends_shelf, now, row_area,
                 &mut list,
             );
+            if Some(row.item()) == active {
+                list.set_style(
+                    Rect {
+                        height: 1,
+                        ..row_area
+                    },
+                    Style::new().add_modifier(Modifier::BOLD),
+                );
+                list.set_string(row_area.x, row_area.y, ACTIVE_BAR, Style::new().fg(BLUE));
+            }
         }
         list
     };
@@ -989,6 +1003,8 @@ const AGENT_ICONS: usize = 8;
 const FOLD_OPEN: &str = "\u{f47c}";
 /// A folded card (`nf-oct-chevron_right`).
 const FOLD_CLOSED: &str = "\u{f460}";
+/// The active row's bar at its left edge (`▎`, left one-quarter block).
+const ACTIVE_BAR: &str = "\u{258e}";
 /// The tree guide before a node's middle line and a settled row.
 const GUIDE: &str = " ├╴";
 /// The tree guide before a node's last line and the last settled row.
@@ -1132,6 +1148,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
         let (selected_y, layout, _) = render(
             sessions,
+            None,
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
@@ -1166,6 +1183,7 @@ mod tests {
             .collect::<HashSet<_>>();
         render(
             sessions,
+            None,
             &attached,
             &[info()],
             &Layouts::default(),
@@ -1421,6 +1439,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
         let (_, _, cursor) = render(
             &sessions,
+            None,
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
@@ -1447,6 +1466,7 @@ mod tests {
         let mut hits = HitMap::default();
         let (_, _, cursor) = render(
             &sessions,
+            None,
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
@@ -1519,6 +1539,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
         let (_, _, cursor) = render(
             &sessions,
+            None,
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
@@ -1816,6 +1837,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 32, 8));
         render(
             sessions,
+            None,
             &HashSet::new(),
             harnesses,
             &Layouts::default(),
@@ -2558,6 +2580,7 @@ mod tests {
         let mut hits = HitMap::default();
         let (selected_y, _, _) = render(
             sessions,
+            None,
             &HashSet::new(),
             &[info()],
             &Layouts::default(),
@@ -2753,6 +2776,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
         render(
             sessions,
+            None,
             &HashSet::new(),
             &[info()],
             layouts,
@@ -2906,5 +2930,74 @@ mod tests {
 
         // Then the count is two sessions out of two.
         assert!(prompt.trim_end().ends_with("2/2│"), "line was '{prompt}'");
+    }
+
+    /// Draws a 32-column sidebar 10 lines tall with `active` the active row.
+    /// Thread 1's card takes lines 3 to 5, its agent row line 6.
+    fn draw_active(sessions: &Sessions, active: SidebarItem) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
+        render(
+            sessions,
+            Some(active),
+            &HashSet::new(),
+            &[info()],
+            &Layouts::default(),
+            Path::new(HOME),
+            at(1000),
+            buf.area,
+            &mut buf,
+            &mut SidebarScroll::default(),
+            &mut HitMap::default(),
+        );
+        buf
+    }
+
+    #[rstest::rstest]
+    fn active_row_starts_with_a_blue_bar() {
+        // Given the hover on thread 1's card and its agent row active.
+        let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+
+        // When rendering the sidebar.
+        let buf = draw_active(&sessions, agent_one());
+
+        // Then the agent row's first cell is a blue bar.
+        assert_eq!(
+            glyph(&buf, 0, 6),
+            Some(("\u{258e}".to_owned(), BLUE)),
+            "active row's first cell"
+        );
+    }
+
+    #[rstest::rstest]
+    fn active_rows_first_line_is_bold() {
+        // Given the hover on thread 1's card and its agent row active.
+        let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+
+        // When rendering the sidebar.
+        let buf = draw_active(&sessions, agent_one());
+
+        // Then every cell of the agent row's line is bold.
+        assert!(
+            (1..31).all(|x| buf
+                .cell((x, 6))
+                .is_some_and(|cell| cell.modifier.contains(Modifier::BOLD))),
+            "active row's line should be bold"
+        );
+    }
+
+    #[rstest::rstest]
+    fn hovered_row_keeps_the_visual_background_beside_the_active_row() {
+        // Given the hover on thread 1's card and its agent row active.
+        let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+
+        // When rendering the sidebar.
+        let buf = draw_active(&sessions, agent_one());
+
+        // Then the card's first line has the hover background.
+        assert_eq!(
+            buf.cell((1, 3)).map(|cell| cell.bg),
+            Some(VISUAL),
+            "hovered card's background"
+        );
     }
 }

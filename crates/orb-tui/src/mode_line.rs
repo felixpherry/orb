@@ -2,12 +2,11 @@
 //! tokyonight-moon.
 //!
 //! On the left, the mode in a block of its colour, an arrow into the
-//! selected session's branch, then its place, `<project>/<title>`. On the
+//! active session's branch, then its place, `<project>/<title>`. On the
 //! right, `N running`, `fetching origin/<base>…` while Start fetches, or
 //! `starting session…` with a spinner, how many agents need an approval or
-//! an answer, the selected row's place among the listed rows, and the local
-//! time in the mode's colour. When the line is too narrow, the right side
-//! stays whole and the left side is cut at its end.
+//! an answer, and the local time in the mode's colour. When the line is too
+//! narrow, the right side stays whole and the left side is cut at its end.
 
 use std::borrow::Cow;
 use std::time::SystemTime;
@@ -15,7 +14,7 @@ use std::time::SystemTime;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use orb_domain::feat::picker::state::PickerState;
-use orb_domain::feat::sessions::state::{Sessions, SidebarItem, SidebarRow, ThreadStatus};
+use orb_domain::feat::sessions::state::{Sessions, SidebarItem, ThreadStatus};
 use orb_domain::{AppState, Focus, PaneMode};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -35,10 +34,10 @@ const ARROW_LEFT: &str = "\u{e0b2}";
 /// Before the time (`nf-fa-clock_o`).
 const CLOCK: &str = "\u{f017}";
 
-/// Draws the mode line into `area`: the mode, the selected row's branch and
-/// project on the left; the activity, the approval and input counts, the selected row's
-/// position and the time `now` in `tz` on the right. The right side keeps
-/// its width, and the left is cut at its end.
+/// Draws the mode line into `area`: the mode, the active session's branch and
+/// project on the left; the activity, the approval and input counts and the
+/// time `now` in `tz` on the right. The right side keeps its width, and the
+/// left is cut at its end.
 pub(crate) fn render(
     state: &AppState,
     now: SystemTime,
@@ -54,7 +53,7 @@ pub(crate) fn render(
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_width)]).areas(area);
     buf.set_style(area, Style::new().bg(BG_DARK));
-    left(&state.sessions, mode, colour).render(left_area, buf);
+    left(state, mode, colour).render(left_area, buf);
     right.render(right_area, buf);
 }
 
@@ -76,21 +75,31 @@ fn mode(state: &AppState) -> (&'static str, Color) {
 }
 
 /// a · b · c: the mode block, the branch block when there's a branch, then the
-/// project. On a session, the project
-/// reads `<project>/<title>` and the branch is its lead agent's, else the
-/// one the session recorded.
-fn left(sessions: &Sessions, mode: &str, colour: Color) -> Line<'static> {
-    let (branch, project): (Option<&str>, Option<String>) = match sessions.selected_session() {
-        Some(session) => (
-            sessions
-                .selected_thread()
-                .and_then(|thread| thread.branch.as_deref())
-                .or(session.branch.as_deref()),
-            sessions
-                .project(session.project)
-                .map(|project| format!("{}/{}", project.title, sessions.title(session))),
-        ),
-        None => (None, None),
+/// project, all of the active session. The project reads `<project>/<title>`;
+/// the branch is the active agent's (its lead agent's while the active row
+/// is its card), else the one the session recorded. With nothing active,
+/// only the mode block.
+fn left(state: &AppState, mode: &str, colour: Color) -> Line<'static> {
+    let sessions = &state.sessions;
+    let active = sessions.active().and_then(|id| sessions.session(id));
+    let (branch, project): (Option<&str>, Option<String>) = match (active, state.active_row()) {
+        (Some(session), Some(row)) => {
+            let agent = match row {
+                SidebarItem::Agent { pane, .. } => sessions.agent_in(pane),
+                SidebarItem::Session(_) | SidebarItem::SettledShelf => {
+                    sessions.agents(session.id).into_iter().next()
+                }
+            };
+            (
+                agent
+                    .and_then(|thread| thread.branch.as_deref())
+                    .or(session.branch.as_deref()),
+                sessions
+                    .project(session.project)
+                    .map(|project| format!("{}/{}", project.title, sessions.title(session))),
+            )
+        }
+        _ => (None, None),
     };
     let mut spans = vec![on(format!(" {mode} "), BLACK, colour).bold()];
     match branch {
@@ -106,8 +115,7 @@ fn left(sessions: &Sessions, mode: &str, colour: Color) -> Line<'static> {
     Line::from(spans)
 }
 
-/// x · y · z: the activity and the counts, the position block when the cursor
-/// is on a listed row, then the clock block.
+/// x · y: the activity and the counts, then the clock block.
 fn right(sessions: &Sessions, colour: Color, now: SystemTime, tz: &TimeZone) -> Line<'static> {
     let counts = [
         (APPROVAL_ICON, ThreadStatus::NeedsApproval, YELLOW),
@@ -123,14 +131,7 @@ fn right(sessions: &Sessions, colour: Color, now: SystemTime, tz: &TimeZone) -> 
             }
         }))
         .collect();
-    match position(sessions) {
-        Some((at, shown)) => spans.extend([
-            on(ARROW_LEFT, GUTTER, BG_DARK),
-            on(format!(" {at}/{shown} "), colour, GUTTER),
-            on(ARROW_LEFT, colour, GUTTER),
-        ]),
-        None => spans.push(on(ARROW_LEFT, colour, BG_DARK)),
-    }
+    spans.push(on(ARROW_LEFT, colour, BG_DARK));
     spans.push(on(format!(" {CLOCK} {} ", clock(now, tz)), BLACK, colour).bold());
     Line::from(spans)
 }
@@ -148,28 +149,6 @@ fn activity(sessions: &Sessions, now: SystemTime) -> Option<String> {
         (false, _, 0) => None,
         (false, _, working) => Some(format!("{} {working} running", spinner(now))),
     }
-}
-
-/// The cursor's session, 1-based, among the listed sessions (not the
-/// Settled header or agent rows), and how many are listed.
-fn position(sessions: &Sessions) -> Option<(usize, usize)> {
-    let items: Vec<SidebarItem> = sessions
-        .sidebar()
-        .iter()
-        .filter(|row| {
-            !matches!(
-                row,
-                SidebarRow::ShelfHeader { .. } | SidebarRow::Agent { .. }
-            )
-        })
-        .map(SidebarRow::item)
-        .collect();
-    let cursor = match sessions.cursor_row()? {
-        SidebarItem::Agent { session, .. } => SidebarItem::Session(session),
-        item => item,
-    };
-    let at = items.iter().position(|&item| item == cursor)?;
-    Some((at + 1, items.len()))
 }
 
 /// `now` in `tz` as `HH:MM`, or `--:--` when jiff can't represent it.
@@ -290,23 +269,25 @@ mod tests {
         }
     }
 
-    /// Thread 1 (Idle) selected, with the given focus.
+    /// Thread 1 (Idle) hovered and active, with the given focus.
     fn selected(focus: Focus) -> AppState {
         AppState {
             focus,
             sessions: Sessions {
                 cursor: Some(SidebarItem::Session(SessionId(1))),
+                active: Some(SessionId(1)),
                 ..sessions(vec![thread(1, ThreadStatus::Idle)])
             },
             ..AppState::default()
         }
     }
 
-    /// Session 1 selected, in a project titled `title`.
+    /// Session 1 hovered and active, in a project titled `title`.
     fn selected_in(title: &str) -> AppState {
         AppState {
             sessions: Sessions {
                 cursor: Some(SidebarItem::Session(SessionId(1))),
+                active: Some(SessionId(1)),
                 ..fill(Sessions {
                     projects: vec![project(1, title, vec![thread(1, ThreadStatus::Idle)])],
                     ..Sessions::default()
@@ -508,9 +489,9 @@ mod tests {
 
     #[rstest::rstest]
     fn branch_block_shows_the_lead_agents_branch() {
-        // Given a selected session whose agent is on branch orb/x.
+        // Given an active session whose agent is on branch orb/x.
         let state = with_sessions(Sessions {
-            cursor: Some(SidebarItem::Session(SessionId(1))),
+            active: Some(SessionId(1)),
             ..sessions(vec![Thread {
                 branch: Some("orb/x".to_owned()),
                 ..thread(1, ThreadStatus::Idle)
@@ -555,18 +536,70 @@ mod tests {
         );
     }
 
+    /// Threads 1 (branch `main`) and 2 (titled `Other`, branch `orb/z`),
+    /// the hover on session 2 and session 1 active.
+    fn hover_on_two_active_one() -> AppState {
+        with_sessions(Sessions {
+            cursor: Some(SidebarItem::Session(SessionId(2))),
+            active: Some(SessionId(1)),
+            ..sessions(vec![
+                Thread {
+                    branch: Some("main".to_owned()),
+                    ..thread(1, ThreadStatus::Idle)
+                },
+                Thread {
+                    title: Some("Other".to_owned()),
+                    branch: Some("orb/z".to_owned()),
+                    ..thread(2, ThreadStatus::Idle)
+                },
+            ])
+        })
+    }
+
     #[rstest::rstest]
-    fn nothing_selected_shows_no_branch_project_or_position() {
-        // Given a thread on a branch, but no cursor.
-        let state = with_sessions(sessions(vec![Thread {
-            branch: Some("orb/x".to_owned()),
-            ..thread(1, ThreadStatus::Idle)
-        }]));
+    fn branch_block_shows_the_active_sessions_branch_not_the_hovers() {
+        // Given the hover on session 2 and session 1, on main, active.
+        let state = hover_on_two_active_one();
 
         // When drawing the mode line.
         let buffer = draw(&state);
 
-        // Then there is no branch, project or position.
+        // Then the branch block names main.
+        let text = text(&buffer);
+        assert!(text.contains("\u{e0a0} main"), "mode line was '{text}'");
+    }
+
+    #[rstest::rstest]
+    fn project_shows_the_active_session_not_the_hovered_one() {
+        // Given the hover on session 2 (Other) and session 1 active.
+        let state = hover_on_two_active_one();
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then the project reads session 1's orb/Fix the bug.
+        let text = text(&buffer);
+        assert!(
+            text.contains("\u{f07b} orb/Fix the bug"),
+            "mode line was '{text}'"
+        );
+    }
+
+    #[rstest::rstest]
+    fn nothing_active_shows_only_the_mode_block() {
+        // Given a hovered thread on a branch, but no active session.
+        let state = with_sessions(Sessions {
+            cursor: Some(SidebarItem::Session(SessionId(1))),
+            ..sessions(vec![Thread {
+                branch: Some("orb/x".to_owned()),
+                ..thread(1, ThreadStatus::Idle)
+            }])
+        });
+
+        // When drawing the mode line.
+        let buffer = draw(&state);
+
+        // Then there is no branch or project.
         let text = text(&buffer);
         assert!(
             !text.contains('\u{e0a0}') && !text.contains('\u{f07b}') && !text.contains('/'),
@@ -789,38 +822,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn position_shows_the_cursors_row_of_the_shown_rows() {
-        // Given seven threads with the cursor on the third row (thread 5).
+    fn no_row_position_on_the_right() {
+        // Given seven threads, the hover and the active session on thread 5.
         let state = with_sessions(Sessions {
             cursor: Some(SidebarItem::Session(SessionId(5))),
+            active: Some(SessionId(5)),
             ..sessions((1..=7).map(|id| thread(id, ThreadStatus::Idle)).collect())
         });
 
         // When drawing the mode line.
         let buffer = draw(&state);
 
-        // Then the position reads 3/7.
+        // Then no n/m position shows.
         let text = text(&buffer);
-        assert!(text.contains(" 3/7 "), "mode line was '{text}'");
-    }
-
-    #[rstest::rstest]
-    fn position_on_an_agent_row_reads_as_its_session() {
-        // Given seven threads with the cursor on thread 5's agent row.
-        let state = with_sessions(Sessions {
-            cursor: Some(SidebarItem::Agent {
-                session: SessionId(5),
-                pane: PaneId(5),
-            }),
-            ..sessions((1..=7).map(|id| thread(id, ThreadStatus::Idle)).collect())
-        });
-
-        // When drawing the mode line.
-        let buffer = draw(&state);
-
-        // Then the position reads 3/7, its session's.
-        let text = text(&buffer);
-        assert!(text.contains(" 3/7 "), "mode line was '{text}'");
+        assert!(!text.contains(" 3/7 "), "mode line was '{text}'");
     }
 
     #[rstest::rstest]
@@ -932,12 +947,12 @@ mod tests {
         let state = selected_in("a日");
 
         // When drawing the mode line so the left side ends mid-character.
-        let buffer = draw_in(&state, 30, &TimeZone::UTC);
+        let buffer = draw_in(&state, 24, &TimeZone::UTC);
 
         // Then the wide character is left out and the right side stays whole.
         let text = text(&buffer);
         assert_eq!(
-            text, " NORMAL \u{e0b0} \u{f07b} a \u{e0b2} 1/1 \u{e0b2} \u{f017} 22:13 ",
+            text, " NORMAL \u{e0b0} \u{f07b} a \u{e0b2} \u{f017} 22:13 ",
             "mode line"
         );
     }
