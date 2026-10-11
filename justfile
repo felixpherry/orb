@@ -29,12 +29,18 @@ fmt:
 fmt-fix:
     cargo fmt
 
-# Run all linters (check + clippy + fmt check + test-attr guard)
+# Run all linters (check + clippy + fmt check + test-attr guard + doc rules)
 lint:
     cargo check --workspace
     just clippy
     cargo fmt -- --check
     just lint-testattr
+    just lint-rules
+
+# Check that code names in AGENTS.md and the Record exist in orb, and that AGENTS.md §3 names no bus
+lint-rules:
+    python3 scripts/lint-rules.py
+    python3 scripts/lint-rules.py --self-test
 
 # Fail on bare #[test]/#[tokio::test] lacking an rstest attr (escapes the rstest timeout)
 lint-testattr:

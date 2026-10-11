@@ -208,49 +208,52 @@ let c = {
 ### Data Flow
 
 ```
-  Keyboard (crossterm)
+  Keyboard / mouse (crossterm)
          │
          ▼
-  Keymap (produces Intent)
+  Keymap → Intent
          │
          ▼
-  IntentHandler (sync, single match block)
-    ├── validator  → passes or rejects
-    ├── mutate AppState directly
-    └── return commands
+  IntentHandler (sync): validate → mutate AppState → return commands
          │
          ▼
-  bus  →  kameo actors (async)
+  Frontend loop: pane commands run here; every other command → tell → owning actor
+         │                                   (SessionsActor, WorktreesActor, SearchActor)
+         ▼
+  Actors write their own AppState fields, then Wake the loop
          │
          ▼
-  actors write their owned AppState fields
-         │
-         ▼
-  renderer reads AppState on the next redraw
+  Loop drains its one channel (input, pane output/exit, wakes) → reconcile panes → draw
 ```
 
-Unidirectional: frontend → actor system. No feedback loop.
-The shared AppState is the feedback — domain actors write their fields,
-the renderer reads it on the next redraw.
+**Keys become intents.** The keymap turns a key into an `Intent`. The `IntentHandler` (crates/orb-domain/src/intent_handler.rs) validates it, mutates `AppState` directly and returns `Command`s. It never touches outside services.
 
-Redraw is event-driven: input, PTY output, and actor state changes wake the
-loop. There is no fixed tick.
+**The frontend loop carries out the commands** (crates/orb-tui/src/run.rs, `execute`). It runs the pane commands itself (attach, detach, sending Ctrl-g to the attached pane) and a few quick reads (branch and folder lists for a picker, the thread preview). Every other command is sent with `tell` to the one actor that owns it.
 
-### Command/Event System
+**There are three actors**, `SessionsActor`, `WorktreesActor` and `SearchActor`, all spawned in src/main.rs. Each gets a handle to the shared `AppState` and a `Wake`.
 
-**Intents are for user input only.** The `IntentHandler` validates, mutates `AppState` directly, and returns commands. It never accesses external services and never emits events.
+**Actors write the `AppState` fields they own, then call their `Wake`.** The wakes, terminal input and the pane threads (output, clipboard, exit) all feed one channel (`LoopEvent`). The loop handles everything pending, reconciles the panes against the layouts, then draws one frame. There is no fixed tick: besides that channel, the loop wakes only for a pane's held screen update, a spinner frame, or the message box running out.
 
-**All domain logic goes through commands.** When something needs to happen — send a message, switch provider, run a tool — the IntentHandler returns a `Command`. Commands are routed by the actor host to exactly one subscribed actor.
+**The loop owns every pane's attach client** (`App.panes`). It decides which pane clients close and which reconnect, and kills the pane sessions that left every layout (`reconcile`, `classify_exits`, `reattach_live` in run.rs). Actors change the layouts; the loop makes the panes match. (The sessions actor also kills a session's panes itself when it settles or deletes that session.)
 
-**Actors handle all async operations.** They communicate through the actor host's pub/sub routing. Events are broadcast to all subscribers; commands route to exactly one. Actors may emit events or commands back onto the bus in response.
+**Actors also leave notes for the loop to act on.** Today these are:
 
-Each `AppState` field/sub-struct is written by **at most one actor** — its owner. "At most one" is an upper bound on co-writers, not a requirement that a dedicated writing actor exist. Writing state is ordinary inline work for whatever actor already owns that field's domain (it may also persist to disk, subscribe to the bus, forward to a channel, run business logic). Do not create an actor in order to write.
+- the sessions actor's request to attach to a session it just started (`sessions.attach`), which the loop opens while that session is still selected and the keys are back in the sidebar;
+- the sessions actor's notices (`sessions.notices`), which the loop announces while orb's terminal isn't focused;
+- results the worktrees and search actors fill into the open picker;
+- after any actor wake, the loop replays `Intent::ProjectsChanged` so an open projects screen re-lists.
+
+### Ownership
+
+**Intents are for user input only.** **All domain logic goes through commands**: when something needs to happen (start a session, settle one, search transcripts) the `IntentHandler` returns a `Command`, and the loop either runs it (pane commands) or hands it to exactly one actor.
+
+Each `AppState` field/sub-struct is written by **at most one actor** — its owner. "At most one" is an upper bound on co-writers, not a requirement that a dedicated writing actor exist. Writing state is ordinary inline work for whatever actor already owns that field's domain (it may also persist to disk, forward to a channel, run business logic). Do not create an actor in order to write.
 
 The `IntentHandler` is **not an actor** and is exempt from this rule. It is the synchronous frontend mutator (user input → `AppState`). It may write any field, in frontend or elsewhere; it is never counted as a writer. An actor owning a field the `IntentHandler` also writes is not a conflict (e.g. optimistic IntentHandler write + authoritative actor write is fine).
 
 Ownership is per-field, not per-top-level-struct: a domain actor writing `frontend.pins` it owns is correct; the `IntentHandler` writing it too is also correct (exempt); a _second actor_ writing it is the red flag. A cross-boundary write is mutating a field you don't own, regardless of which top-level struct it lives under.
 
-**Anti-pattern — the "sync sibling."** Do not split one domain boundary across two actors where one persists/forwards and a second "sync" actor subscribes to the first's event just to write `AppState`. If you keep an actor "pure" (no `State`) and spawn a sibling to do the write, the sibling is the bug — give the first actor a `State` clone and write inline. One boundary = one actor.
+**Anti-pattern — the "sync sibling."** Do not split one domain boundary across two actors where one persists/forwards and a second "sync" actor exists only to write `AppState` from the first one's results. If you keep an actor "pure" (no `State`) and spawn a sibling to do the write, the sibling is the bug — give the first actor a `State` clone and write inline. One boundary = one actor.
 
 ## 4. Tests
 
@@ -536,7 +539,7 @@ Skills refer to commands by **role**; the table below resolves each role to this
 | `vcs`        | Git                       | `git status`, `git diff`, `git log`. `main` is the trunk. No remote; never push.             |
 | `check`      | `just check`              | `cargo check --workspace`.                                                                   |
 | `test`       | `just test`               | `cargo test --workspace` — **all tests must pass before committing**.                        |
-| `lint`       | `just lint`               | check + clippy (`-D warnings`) + fmt check + `lint-testattr`.                                |
+| `lint`       | `just lint`               | check + clippy (`-D warnings`) + fmt check + `lint-testattr` + `lint-rules`.                 |
 | `format`     | `just fmt-fix`            | Apply formatting.                                                                            |
 | `commit`     | `just commit '<message>'` | Stages everything (`git add --all`) and commits. Review the staged diff first.               |
 | `sync-trunk` | `git merge main`          | Sync `main` into your working branch; resolve conflicts and re-test.                         |

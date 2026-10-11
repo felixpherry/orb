@@ -13,7 +13,9 @@ Phases: 1 debt audit → 2 falsify findings → **checkpoint 1** (user ranks fin
 - **Pre-migration fix:** commit 1a6728a (F-1 triggers + F-3 branch bug; "couldn't read or check never means gone"). The branch was renamed by orb to `orb/simplifying-technical-explanation`.
 - **Done:** Phase 5 `target.md` (16 decisions) and Phase 6 `target-falsified.md` (verdicts: D-1 merged into D-14; D-3, D-4, D-6, D-11, D-12, D-13, D-15 shrunk; D-7's worker-report half is a spike: A report channel vs B local fixes, built in two throwaway worktrees).
 - **Checkpoint 2 (2026-10-11):** the user accepted all 17 decisions below, with answers to each question. Spike A (report channel) chosen over B.
-- **Next (new session):** migration step 1. Run each step as its own small plan: tests first, change, `just test` + `just lint`, RECORD facts, Drift log entry if the step left the target, commit, then **checkpoint 3**: stop and tell the user in plain words what changed and what to try.
+- **Next:** Record corrections for step 1 await the user's OK, then migration step 2 (`/phased-task-loop .plans/overhaul-1-safety-net phase 2 only`). Each step runs as its own small plan: tests first, change, `just test` + `just lint`, RECORD facts, Drift log entry if the step left the target, commit, then **checkpoint 3**: stop and tell the user in plain words what changed and what to try.
+- **Plans (2026-10-11):** the 18 steps are split into five phased plans in `.plans/` of worktree `orb-696e18ac`, run in order, one phase (= one step) per `/phased-task-loop … phase N only` so checkpoint 3 follows each: `overhaul-1-safety-net` (steps 1–5), `overhaul-2-less-waiting` (6–9), `overhaul-3-pane-records` (10–12, **effort high**), `overhaul-4-messaging` (13–15, **effort high**), `overhaul-5-code-shape` (16–18).
+- **Step 1 done (2026-10-11):** AGENTS.md §3 describes today's flow, a name check in `just lint` keeps AGENTS.md and the Record honest, and the Record corrections wait for the user's OK in `record-proposal.md`.
 - **Reference worktrees (throwaway, keep until step 15 is done):** spike A at `~/dev/orb/.claude/worktrees/agent-aa9053172de9c6e06` (branch `worktree-agent-aa9053172de9c6e06`, commit 8a56291, on 46c82e6); spike B at `~/dev/orb/.claude/worktrees/agent-ace3f1d0644bc8968`.
 - **Working files:** `.plans/architecture-overhaul/` in worktree `orb-696e18ac` (git-ignored): `brief.md` (shared agent brief), `audit/*.md` (one file per audit agent), `clusters.md` (duplicate map), `falsified.md` (surviving findings). Only accepted results are copied here.
 
@@ -96,7 +98,7 @@ Each step: tests first → change → `just test` + `just lint` → RECORD facts
 17. **D-13** split hub files + thread→agent rename, in a quiet window.
 18. **D-16** final docs pass.
 
-Still in the backlog after the plan: B-2 (the "new reply" mark clears when the user moves into the agent's pane), B-10 (jump list may save back empty when layouts can't be read).
+Still in the backlog after the plan: B-11 a suspended (stopped, state T) old `claude` in the same pane keeps reporting "busy" in `claude agents --json`, so the agent row shows working and "1 running" counts it; ignore stopped processes or prefer the pane's foreground process (seen 2026-10-11: pids 49709 stopped + 28162 live, same session id). B-2 (the "new reply" mark clears when the user moves into the agent's pane), B-10 (jump list may save back empty when layouts can't be read).
 
 ## Drift log
 
