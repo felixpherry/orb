@@ -47,6 +47,9 @@ impl IntentHandler {
     /// which the user has now seen; otherwise an intent that fails validation
     /// changes nothing. After every intent, a cursor left on an agent row of
     /// a folded card unfolds it, unless a search lists the row anyway.
+    /// A focus key, tab switch, pane click or float toggle that moves the
+    /// keys from one pane to another records the agent left and the agent
+    /// entered, each only if its pane runs an agent.
     /// Every intent but `PickerG` also ends a `gg` in progress.
     /// `ProjectsChanged`, which only re-lists, leaves both alone.
     #[expect(
@@ -64,7 +67,8 @@ impl IntentHandler {
                 picker.forget_g();
             }
         }
-        let commands = match intent {
+        let left = (state.focus == Focus::Pane).then(|| state.focused_agent());
+        let mut commands = match intent {
             Intent::Quit => {
                 state.should_quit = true;
                 vec![]
@@ -271,7 +275,7 @@ impl IntentHandler {
                 Ok(()) => {
                     let target = state
                         .jumps
-                        .back(state.sessions.cursor, |item| state.sessions.jumpable(item));
+                        .back(state.jump_from(), |item| state.sessions.jumpable(item));
                     land(state, target)
                 }
                 Err(_) => vec![],
@@ -280,7 +284,7 @@ impl IntentHandler {
                 Ok(()) => {
                     let target = state
                         .jumps
-                        .forward(state.sessions.cursor, |item| state.sessions.jumpable(item));
+                        .forward(state.jump_from(), |item| state.sessions.jumpable(item));
                     land(state, target)
                 }
                 Err(_) => vec![],
@@ -868,6 +872,19 @@ impl IntentHandler {
                 _ => vec![],
             },
         };
+        if let Some(left) = left
+            && state.focus == Focus::Pane
+            && matches!(
+                intent,
+                Intent::MoveFocus(_)
+                    | Intent::GoToTab(_)
+                    | Intent::FocusPane(_)
+                    | Intent::ShowStacked(_)
+                    | Intent::ToggleFloats
+            )
+        {
+            commands = record_focus_move(state, left, commands);
+        }
         if let Some(SidebarItem::Agent { session, .. }) = state.sessions.cursor
             && !state.sessions.searching()
         {
@@ -875,6 +892,23 @@ impl IntentHandler {
         }
         commands
     }
+}
+
+/// Records leaving agent row `left` for the focused agent, each only if it
+/// runs an agent; nothing when the focus stayed on the same agent.
+fn record_focus_move(
+    state: &mut AppState,
+    left: Option<SidebarItem>,
+    mut commands: Vec<Command>,
+) -> Vec<Command> {
+    let entered = state.focused_agent();
+    if left != entered && (left.is_some() || entered.is_some()) {
+        state.jumps.jump(left, entered);
+        if !commands.contains(&Command::SaveJumps) {
+            commands.push(Command::SaveJumps);
+        }
+    }
+    commands
 }
 
 /// The picker row for `project`.
@@ -1210,31 +1244,36 @@ fn detach_moving(state: &mut AppState, session: SessionId, command: Command) -> 
 }
 
 /// Jumps to `session`, picked in the search picker: puts the cursor on it
-/// and attaches like `⏎` on its row, recording the move as a jump.
+/// and attaches like `⏎` on its row, recording the move as a jump to the
+/// agent in its focused pane, else its card.
 fn pick_session(state: &mut AppState, session: SessionId) -> Vec<Command> {
-    let card = SidebarItem::Session(session);
-    pick(state, card, card)
+    let from = state.jump_from();
+    let entry = state.entry_row(session);
+    pick(state, from, SidebarItem::Session(session), entry)
 }
 
 /// Jumps to agent `pane` of `session`, picked in the session picker: shows
 /// the pane in its tab, puts the cursor on its agent row and moves the keys
-/// into it like `⏎` on that row, recording the move as a jump to its
-/// session's card, the row a jump can land on.
+/// into it like `⏎` on that row, recording the move as a jump to the agent.
 fn pick_agent(state: &mut AppState, session: SessionId, pane: PaneId) -> Vec<Command> {
+    let from = state.jump_from();
     state.layouts.reveal(session, pane);
-    let mut commands = pick(
-        state,
-        SidebarItem::Agent { session, pane },
-        SidebarItem::Session(session),
-    );
+    let agent = SidebarItem::Agent { session, pane };
+    let mut commands = pick(state, from, agent, agent);
     commands.push(Command::SaveLayout(session));
     commands
 }
 
-/// Puts the cursor on `cursor`, records the move as a jump to `jump_to` and
-/// attaches its session. Staying on the same row or session isn't a jump.
-fn pick(state: &mut AppState, cursor: SidebarItem, jump_to: SidebarItem) -> Vec<Command> {
-    let from = state.sessions.cursor.replace(cursor);
+/// Puts the cursor on `cursor`, records the move from `from` (where a jump
+/// starts, read before the pick changes anything) as a jump to `jump_to` and
+/// attaches its session. Staying on the same row isn't a jump.
+fn pick(
+    state: &mut AppState,
+    from: Option<SidebarItem>,
+    cursor: SidebarItem,
+    jump_to: SidebarItem,
+) -> Vec<Command> {
+    state.sessions.cursor = Some(cursor);
     let mut commands = if from == Some(cursor) || from == Some(jump_to) {
         vec![]
     } else {
@@ -1455,15 +1494,15 @@ fn back_to_list(state: &mut AppState, drop_row: bool) {
     }
 }
 
-/// Attaches to the selected session and records entering it as a jump,
-/// unless it can't be attached to or is the row the last `<C-[>`/`<C-]>`
-/// landed on.
+/// Attaches to the selected session and records entering it as a jump to
+/// the agent in its focused pane (a shell pane records the card), unless it
+/// can't be attached to or is where the last `<C-[>`/`<C-]>` landed.
 fn attach_session(state: &mut AppState) -> Vec<Command> {
     let mut commands = show_pane(state);
     if let (false, Some(id)) = (
         commands.is_empty(),
         state.sessions.selected_session().map(|session| session.id),
-    ) && state.jumps.enter(SidebarItem::Session(id))
+    ) && state.jumps.enter(state.entry_row(id))
     {
         commands.push(Command::SaveJumps);
     }
@@ -1883,8 +1922,9 @@ fn record_jump(state: &mut AppState, from: Option<SidebarItem>) -> Vec<Command> 
 }
 
 /// Lands a jump back or forward on `target`: the cursor moves there. From a
-/// pane, the keys follow into the target's pane while
-/// orb is attached to it, else go to the sidebar; elsewhere they stay put.
+/// pane, the keys follow into the target's pane (an agent's own pane, which
+/// is revealed and its layout saved) while orb is attached to it, else go to
+/// the sidebar; elsewhere they stay put.
 fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
     let Some(target) = target else {
         return vec![];
@@ -1893,6 +1933,14 @@ fn land(state: &mut AppState, target: Option<SidebarItem>) -> Vec<Command> {
     state.sessions.cursor = Some(target);
     let pane = match target {
         SidebarItem::Session(id) if from_pane && state.attached.contains(&id) => show_pane(state),
+        SidebarItem::Agent { session, pane } if from_pane && state.attached.contains(&session) => {
+            state.layouts.reveal(session, pane);
+            let mut commands = show_pane(state);
+            if !commands.is_empty() {
+                commands.push(Command::SaveLayout(session));
+            }
+            commands
+        }
         _ => vec![],
     };
     let mut commands = vec![Command::SaveJumps];
@@ -4468,6 +4516,14 @@ mod tests {
         SidebarItem::Session(SessionId(id))
     }
 
+    /// The agent row of pane `pane` in session `session`.
+    fn agent(session: i64, pane: i64) -> SidebarItem {
+        SidebarItem::Agent {
+            session: SessionId(session),
+            pane: PaneId(pane),
+        }
+    }
+
     #[rstest::rstest]
     fn filter_projects_lists_all_projects_then_the_projects() {
         // Given projects alpha and beta.
@@ -5718,7 +5774,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn attach_on_b_after_a_lists_a_then_b() {
+    fn attach_on_b_after_a_lists_their_agents() {
         // Given thread 1 entered, then the cursor moved to thread 2.
         let mut state = jumping(Focus::Sidebar, &[], &[]);
         state.sessions.cursor = Some(on_thread(1));
@@ -5729,11 +5785,11 @@ mod tests {
         // When handling Attach on thread 2.
         IntentHandler::handle(&Intent::Attach, &mut state);
 
-        // Then the jump list is thread 1, then thread 2.
+        // Then the jump list is thread 1's agent, then thread 2's.
         assert_eq!(
             state.jumps.entries(),
-            [on_thread(1), on_thread(2)],
-            "entering each pane should record it"
+            [agent(1, 1), agent(2, 2)],
+            "entering each pane should record its agent"
         );
     }
 
@@ -5917,7 +5973,7 @@ mod tests {
     #[rstest::rstest]
     fn jump_back_from_a_pane_onto_an_attached_thread_focuses_its_pane() {
         // Given the keys in thread 2's pane, with thread 1 attached and listed.
-        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), on_thread(2)]);
+        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), agent(2, 2)]);
 
         // When handling JumpBack.
         IntentHandler::handle(&Intent::JumpBack, &mut state);
@@ -5936,7 +5992,7 @@ mod tests {
     #[rstest::rstest]
     fn jump_back_from_a_pane_onto_an_attached_thread_returns_attach() {
         // Given the keys in thread 2's pane, with thread 1 attached and listed.
-        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), on_thread(2)]);
+        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), agent(2, 2)]);
 
         // When handling JumpBack.
         let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
@@ -5951,7 +6007,7 @@ mod tests {
     #[rstest::rstest]
     fn jump_back_into_a_pane_adds_no_entry() {
         // Given the keys in thread 2's pane, with thread 1 attached and listed.
-        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), on_thread(2)]);
+        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), agent(2, 2)]);
 
         // When handling JumpBack.
         IntentHandler::handle(&Intent::JumpBack, &mut state);
@@ -5959,7 +6015,7 @@ mod tests {
         // Then the list is unchanged.
         assert_eq!(
             state.jumps.entries(),
-            [on_thread(1), on_thread(2)],
+            [on_thread(1), agent(2, 2)],
             "landing in a pane isn't itself a jump"
         );
     }
@@ -5968,7 +6024,7 @@ mod tests {
     fn re_entering_the_pane_jump_back_landed_in_keeps_jump_forward() {
         // Given a jump back from thread 2's pane into thread 1's, then a
         // click on the sidebar and `<C-S-l>` back into thread 1's pane.
-        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), on_thread(2)]);
+        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), agent(2, 2)]);
         IntentHandler::handle(&Intent::JumpBack, &mut state);
         IntentHandler::handle(&Intent::LeavePane, &mut state);
         IntentHandler::handle(&Intent::FocusPanes, &mut state);
@@ -5976,10 +6032,10 @@ mod tests {
         // When handling JumpForward.
         IntentHandler::handle(&Intent::JumpForward, &mut state);
 
-        // Then the cursor is back on thread 2.
+        // Then the cursor is back on thread 2's agent.
         assert_eq!(
             state.sessions.cursor,
-            Some(on_thread(2)),
+            Some(agent(2, 2)),
             "re-entering the landed pane should keep <C-]>"
         );
     }
@@ -5988,7 +6044,7 @@ mod tests {
     fn re_entering_the_pane_jump_back_landed_in_returns_no_save_jumps() {
         // Given a jump back from thread 2's pane into thread 1's, then a
         // click on the sidebar.
-        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), on_thread(2)]);
+        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), agent(2, 2)]);
         IntentHandler::handle(&Intent::JumpBack, &mut state);
         IntentHandler::handle(&Intent::LeavePane, &mut state);
 
@@ -6037,7 +6093,7 @@ mod tests {
     #[rstest::rstest]
     fn jump_back_from_a_pane_onto_a_thread_without_a_pane_focuses_the_sidebar() {
         // Given the keys in thread 2's pane, with thread 1 listed and unattached.
-        let mut state = jumping(Focus::Pane, &[2], &[on_thread(1), on_thread(2)]);
+        let mut state = jumping(Focus::Pane, &[2], &[on_thread(1), agent(2, 2)]);
 
         // When handling JumpBack.
         IntentHandler::handle(&Intent::JumpBack, &mut state);
@@ -6053,7 +6109,7 @@ mod tests {
     #[rstest::rstest]
     fn jump_back_from_a_pane_onto_a_thread_without_a_pane_returns_detach() {
         // Given the keys in thread 2's pane, with thread 1 listed and unattached.
-        let mut state = jumping(Focus::Pane, &[2], &[on_thread(1), on_thread(2)]);
+        let mut state = jumping(Focus::Pane, &[2], &[on_thread(1), agent(2, 2)]);
 
         // When handling JumpBack.
         let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
@@ -6069,7 +6125,7 @@ mod tests {
     fn jump_back_from_a_pane_with_the_sidebar_hidden_focuses_the_hidden_sidebar() {
         // Given the keys in thread 2's pane with the sidebar hidden, and
         // thread 1 listed and unattached.
-        let mut state = jumping(Focus::Pane, &[2], &[on_thread(1), on_thread(2)]);
+        let mut state = jumping(Focus::Pane, &[2], &[on_thread(1), agent(2, 2)]);
         state.sidebar.hidden = true;
 
         // When handling JumpBack.
@@ -6878,38 +6934,37 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn picking_an_agent_records_the_row_left_then_its_session() {
+    fn picking_an_agent_records_the_row_left_then_the_agent() {
         // Given the session picker on thread 1, opened on thread 2.
         let mut state = picking_thread_1();
 
         // When confirming.
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-        // Then thread 2, then thread 1's card, are recorded.
+        // Then thread 2, then thread 1's agent, are recorded.
         assert_eq!(
             state.jumps.entries(),
-            [on_thread(2), on_thread(1)],
-            "picking should record where it left and the session it landed in"
+            [on_thread(2), agent(1, 1)],
+            "picking should record where it left and the agent it landed in"
         );
     }
 
     #[rstest::rstest]
-    fn jumping_back_past_a_picked_agent_then_forward_returns_to_its_session() {
-        // Given thread 1's agent picked from thread 2, then two `<C-[>`
-        // (thread 1's card, then thread 2).
+    fn jumping_back_past_a_picked_agent_then_forward_returns_to_the_agent() {
+        // Given thread 1's agent picked from thread 2, then a `<C-[>` onto
+        // thread 2's card.
         let mut state = picking_thread_1();
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
-        IntentHandler::handle(&Intent::JumpBack, &mut state);
         IntentHandler::handle(&Intent::JumpBack, &mut state);
 
         // When handling JumpForward.
         IntentHandler::handle(&Intent::JumpForward, &mut state);
 
-        // Then the cursor is back on thread 1.
+        // Then the cursor is back on thread 1's agent row.
         assert_eq!(
             state.sessions.cursor,
-            Some(on_thread(1)),
-            "forward should return to the picked session"
+            Some(agent(1, 1)),
+            "forward should return to the picked agent"
         );
     }
 
@@ -6926,10 +6981,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn jumping_back_after_chained_agent_picks_reaches_the_middle_session() {
+    fn jumping_back_after_chained_agent_picks_reaches_the_middle_agent() {
         // Given threads 1-3 on thread 3, then thread 2's agent picked, then
-        // thread 1's agent picked, and one `<C-[>` landing on thread 1's
-        // card.
+        // thread 1's agent picked.
         let mut state = state_with(
             vec![
                 thread(1, ThreadStatus::Idle),
@@ -6940,16 +6994,15 @@ mod tests {
         );
         pick_agent_of(&mut state, 2);
         pick_agent_of(&mut state, 1);
+
+        // When handling JumpBack.
         IntentHandler::handle(&Intent::JumpBack, &mut state);
 
-        // When handling JumpBack again.
-        IntentHandler::handle(&Intent::JumpBack, &mut state);
-
-        // Then the cursor is on thread 2.
+        // Then the cursor is on thread 2's agent row.
         assert_eq!(
             state.sessions.cursor,
-            Some(on_thread(2)),
-            "back should reach the session picked in the middle"
+            Some(agent(2, 2)),
+            "back should reach the agent picked in the middle"
         );
     }
 
@@ -8353,9 +8406,8 @@ mod tests {
         let commands = IntentHandler::handle(&Intent::ToggleFloats, &mut state);
 
         // Then the layout is saved.
-        assert_eq!(
-            commands,
-            vec![Command::SaveLayout(SessionId(1))],
+        assert!(
+            commands.contains(&Command::SaveLayout(SessionId(1))),
             "hiding the floats moves the keys, so the layout is saved"
         );
     }
@@ -8507,10 +8559,280 @@ mod tests {
         let commands = IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
 
         // Then session 1's layout is saved.
-        assert_eq!(
-            commands,
-            vec![Command::SaveLayout(SessionId(1))],
+        assert!(
+            commands.contains(&Command::SaveLayout(SessionId(1))),
             "a focus move should be saved"
+        );
+    }
+
+    /// Session 1 attached and shown over an 80×24 body, running thread 1
+    /// in pane 1 and thread 2 in pane 2 split off to its right, with pane 2
+    /// focused, the cursor on session 1's card and the keys in the pane.
+    fn two_agents() -> AppState {
+        let mut state = AppState {
+            focus: Focus::Pane,
+            attached: HashSet::from([SessionId(1)]),
+            ..state_with(
+                vec![
+                    thread(1, ThreadStatus::Idle),
+                    Thread {
+                        pane: Some(PaneLaunch {
+                            pane: PaneId(2),
+                            session: SessionId(1),
+                        }),
+                        ..thread(2, ThreadStatus::Idle)
+                    },
+                ],
+                1,
+            )
+        };
+        state.layouts = {
+            let mut layouts = Layouts::default();
+            layouts.insert(SessionId(1), SessionLayout::of(test_entry(1)));
+            layouts.split(SessionId(1), Split::Right, test_entry(2));
+            layouts.fit_to(Rect::new(0, 0, 80, 24));
+            layouts
+        };
+        state
+    }
+
+    /// [`two_agents`] with the keys in the sidebar, the cursor on `cursor`
+    /// and `jumps` listed, oldest first.
+    fn two_agents_from_sidebar(cursor: SidebarItem, jumps: &[SidebarItem]) -> AppState {
+        let mut state = two_agents();
+        state.focus = Focus::Sidebar;
+        state.sessions.cursor = Some(cursor);
+        state.jumps = JumpList::from_saved(jumps.to_vec());
+        state
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_a_pane_onto_an_agent_focuses_its_pane() {
+        // Given the keys in agent 2's pane, with agent 1 listed before it.
+        let mut state = two_agents();
+        state.jumps = JumpList::from_saved(vec![agent(1, 1)]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the keys are in agent 1's pane.
+        assert_eq!(
+            (state.focus, shown_focus(&state)),
+            (Focus::Pane, Some(PaneId(1))),
+            "<C-[> from a pane should follow into the agent's pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_a_pane_onto_an_agent_saves_its_layout() {
+        // Given the keys in agent 2's pane, with agent 1 listed before it.
+        let mut state = two_agents();
+        state.jumps = JumpList::from_saved(vec![agent(1, 1)]);
+
+        // When handling JumpBack.
+        let commands = IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then session 1's layout, showing agent 1's pane, is saved.
+        assert!(
+            commands.contains(&Command::SaveLayout(SessionId(1))),
+            "revealing the agent's pane should save the layout"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_the_sidebar_onto_an_agent_keeps_the_sidebar_focused() {
+        // Given the sidebar on agent 2's row, with agent 1 listed before it.
+        let mut state = two_agents_from_sidebar(agent(1, 2), &[agent(1, 1), agent(1, 2)]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the sidebar keeps the keys.
+        assert_eq!(
+            state.focus,
+            Focus::Sidebar,
+            "a sidebar <C-[> onto an agent never moves the keys"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_onto_an_agent_puts_the_cursor_on_its_row() {
+        // Given the sidebar on agent 2's row, with agent 1 listed before it.
+        let mut state = two_agents_from_sidebar(agent(1, 2), &[agent(1, 1), agent(1, 2)]);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the cursor is on agent 1's row.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(agent(1, 1)),
+            "<C-[> should land on the agent's row"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_skips_a_closed_agent() {
+        // Given the sidebar on thread 2, with thread 1's card, then its
+        // agent, listed before it, and then thread 1's pane closed.
+        let mut state = jumping(Focus::Sidebar, &[], &[on_thread(1), agent(1, 1)]);
+        close_thread_1s_pane(&mut state);
+
+        // When handling JumpBack.
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // Then the cursor skips the closed agent for thread 1's card.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(on_thread(1)),
+            "<C-[> should skip an agent whose pane closed"
+        );
+    }
+
+    #[rstest::rstest]
+    fn jump_back_from_a_pane_starts_at_the_focused_agent() {
+        // Given the keys in agent 2's pane, the cursor on session 1's card,
+        // agent 1 listed, and a `<C-[>` onto agent 1.
+        let mut state = two_agents();
+        state.jumps = JumpList::from_saved(vec![agent(1, 1)]);
+        IntentHandler::handle(&Intent::JumpBack, &mut state);
+
+        // When handling JumpForward.
+        IntentHandler::handle(&Intent::JumpForward, &mut state);
+
+        // Then the cursor is back on agent 2's row.
+        assert_eq!(
+            state.sessions.cursor,
+            Some(agent(1, 2)),
+            "<C-[> from a pane should start at its agent, so <C-]> returns there"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_an_agent_row_records_the_agent() {
+        // Given the sidebar on agent 1's row, with agent 2's pane focused.
+        let mut state = two_agents_from_sidebar(agent(1, 1), &[]);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then agent 1 is recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [agent(1, 1)],
+            "⏎ on an agent row should record that agent"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_card_records_its_focused_agent() {
+        // Given the sidebar on session 1's card, with agent 2's pane focused.
+        let mut state = two_agents_from_sidebar(on_thread(1), &[]);
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then agent 2 is recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [agent(1, 2)],
+            "⏎ on a card should record the agent in its focused pane"
+        );
+    }
+
+    #[rstest::rstest]
+    fn enter_on_a_card_with_a_shell_focused_records_the_card() {
+        // Given the sidebar on session 1's card, with shell pane 50 focused.
+        let mut state = split_layout();
+        state.focus = Focus::Sidebar;
+
+        // When handling Attach.
+        IntentHandler::handle(&Intent::Attach, &mut state);
+
+        // Then session 1's card is recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [on_thread(1)],
+            "⏎ on a card with a shell focused should record the card"
+        );
+    }
+
+    #[rstest::rstest]
+    fn moving_focus_to_another_agent_records_the_agent_left_then_the_agent_entered() {
+        // Given the keys in agent 2's pane, agent 1's pane to its left.
+        let mut state = two_agents();
+
+        // When moving the focus left.
+        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
+
+        // Then agent 2, then agent 1, are recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [agent(1, 2), agent(1, 1)],
+            "a focus move between agents should record both"
+        );
+    }
+
+    #[rstest::rstest]
+    fn moving_focus_returns_save_jumps() {
+        // Given the keys in agent 2's pane, agent 1's pane to its left.
+        let mut state = two_agents();
+
+        // When moving the focus left.
+        let commands = IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
+
+        // Then the jump list is saved.
+        assert!(
+            commands.contains(&Command::SaveJumps),
+            "a focus move between agents should save the jump list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn moving_focus_from_an_agent_to_a_shell_records_only_the_agent_left() {
+        // Given the keys in thread 1's pane, shell pane 50 to its right.
+        let mut state = split_layout();
+        state.layouts.focus_pane(SessionId(1), PaneId(1));
+
+        // When moving the focus right.
+        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+
+        // Then only thread 1's agent is recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [agent(1, 1)],
+            "a shell pane is never recorded"
+        );
+    }
+
+    #[rstest::rstest]
+    fn clicking_another_agents_pane_records_the_move() {
+        // Given the keys in agent 2's pane.
+        let mut state = two_agents();
+
+        // When clicking agent 1's pane.
+        IntentHandler::handle(&Intent::FocusPane(PaneId(1)), &mut state);
+
+        // Then agent 2, then agent 1, are recorded.
+        assert_eq!(
+            state.jumps.entries(),
+            [agent(1, 2), agent(1, 1)],
+            "a click between agents should record the agent left then the one entered"
+        );
+    }
+
+    #[rstest::rstest]
+    fn moving_focus_onto_the_same_pane_records_nothing() {
+        // Given the keys in agent 2's pane, the rightmost.
+        let mut state = two_agents();
+
+        // When moving the focus right, past the edge.
+        IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
+
+        // Then nothing is recorded.
+        assert!(
+            state.jumps.entries().is_empty(),
+            "a stuck focus move isn't a jump"
         );
     }
 

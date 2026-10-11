@@ -9,7 +9,7 @@ use crate::feat::jumps::state::JumpList;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::state::PickerState;
 use crate::feat::search::state::SearchProgress;
-use crate::feat::sessions::state::{SessionId, Sessions};
+use crate::feat::sessions::state::{SessionId, Sessions, SidebarItem};
 use crate::feat::sidebar::state::{Rename, SidebarView};
 use crate::feat::worktrees::state::Worktrees;
 
@@ -99,6 +99,33 @@ impl AppState {
     pub fn shown_session(&self) -> Option<SessionId> {
         let id = self.sessions.selected_session()?.id;
         (self.attached.contains(&id) && self.layouts.get(id).is_some()).then_some(id)
+    }
+
+    /// The row entering session `id` records: the agent row of its focused
+    /// pane while that pane runs an agent, else its card.
+    pub fn entry_row(&self, id: SessionId) -> SidebarItem {
+        match self.layouts.get(id).and_then(SessionLayout::focused) {
+            Some(pane) if self.sessions.runs_agent(id, pane) => {
+                SidebarItem::Agent { session: id, pane }
+            }
+            _ => SidebarItem::Session(id),
+        }
+    }
+
+    /// The agent row of the shown session's focused pane, while it runs an
+    /// agent.
+    pub fn focused_agent(&self) -> Option<SidebarItem> {
+        Some(self.entry_row(self.shown_session()?))
+            .filter(|row| matches!(row, SidebarItem::Agent { .. }))
+    }
+
+    /// Where a jump starts: the focused agent while the keys are in a pane,
+    /// else the sidebar cursor.
+    pub fn jump_from(&self) -> Option<SidebarItem> {
+        match self.focus {
+            Focus::Pane => self.focused_agent().or(self.sessions.cursor),
+            _ => self.sessions.cursor,
+        }
     }
 
     /// The layout the right-hand area shows: the shown session's. `None`

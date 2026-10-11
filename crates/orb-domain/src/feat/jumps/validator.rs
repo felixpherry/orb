@@ -20,7 +20,7 @@ pub enum JumpError {
 pub fn validate_jump_back(state: &AppState) -> Result<(), JumpError> {
     state
         .jumps
-        .peek_back(state.sessions.cursor, |item| state.sessions.jumpable(item))
+        .peek_back(state.jump_from(), |item| state.sessions.jumpable(item))
         .map(drop)
         .ok_or(JumpError::NoTarget)
 }
@@ -33,7 +33,7 @@ pub fn validate_jump_back(state: &AppState) -> Result<(), JumpError> {
 pub fn validate_jump_forward(state: &AppState) -> Result<(), JumpError> {
     state
         .jumps
-        .peek_forward(state.sessions.cursor, |item| state.sessions.jumpable(item))
+        .peek_forward(state.jump_from(), |item| state.sessions.jumpable(item))
         .map(drop)
         .ok_or(JumpError::NoTarget)
 }

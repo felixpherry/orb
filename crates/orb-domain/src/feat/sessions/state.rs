@@ -832,8 +832,8 @@ impl Sessions {
     }
 
     /// Whether a jump can land on `item`: it still exists, isn't being
-    /// deleted, and the project filter lists it. Never the Settled header or
-    /// an agent row.
+    /// deleted, and the project filter lists it. Never the Settled header; an
+    /// agent row only while its pane still runs an agent.
     pub fn jumpable(&self, item: SidebarItem) -> bool {
         let mut projects = self.listed_projects();
         match item {
@@ -843,7 +843,10 @@ impl Sessions {
                         projects.any(|project| project.id == session.project)
                     })
             }
-            SidebarItem::SettledShelf | SidebarItem::Agent { .. } => false,
+            SidebarItem::Agent { session, pane } => {
+                self.jumpable(SidebarItem::Session(session)) && self.runs_agent(session, pane)
+            }
+            SidebarItem::SettledShelf => false,
         }
     }
 
@@ -2910,15 +2913,50 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn agent_rows_are_not_jumpable() {
-        // Given session 1 running agent 1.
+    fn jumpable_accepts_an_agent_row_while_its_pane_runs_an_agent() {
+        // Given session 1 running agent 1 in pane 1.
         let sessions = two_sessions(on(1));
 
         // When asking whether its agent row is jumpable.
         let jumpable = sessions.jumpable(agent_row(1, 1));
 
+        // Then it is.
+        assert!(jumpable, "a running agent's row is a jump target");
+    }
+
+    #[rstest::rstest]
+    fn jumpable_skips_an_agent_row_whose_pane_no_longer_runs_an_agent() {
+        // Given session 1 whose thread 1 left pane 1.
+        let mut sessions = two_sessions(on(1));
+        for thread in sessions
+            .projects
+            .iter_mut()
+            .flat_map(|project| project.threads.iter_mut())
+            .filter(|thread| thread.id == ThreadId(1))
+        {
+            thread.pane = None;
+        }
+
+        // When asking whether pane 1's agent row is jumpable.
+        let jumpable = sessions.jumpable(agent_row(1, 1));
+
         // Then it isn't.
-        assert!(!jumpable, "a jump lands on sessions, not agent rows");
+        assert!(!jumpable, "a closed agent is skipped");
+    }
+
+    #[rstest::rstest]
+    fn jumpable_skips_an_agent_row_of_a_session_being_deleted() {
+        // Given session 1, running agent 1, being deleted.
+        let sessions = Sessions {
+            deleting: HashSet::from([SessionId(1)]),
+            ..two_sessions(on(2))
+        };
+
+        // When asking whether its agent row is jumpable.
+        let jumpable = sessions.jumpable(agent_row(1, 1));
+
+        // Then it isn't.
+        assert!(!jumpable, "an agent of a session being deleted is gone");
     }
 
     #[rstest::rstest]

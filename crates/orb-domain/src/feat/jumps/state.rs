@@ -50,11 +50,17 @@ impl JumpList {
     }
 
     /// Records entering `item`'s pane, unless it's the row the last
-    /// `<C-[>`/`<C-]>` landed on: coming back into that pane keeps the place
-    /// in the list, so `<C-]>` still goes forward. Returns whether it
-    /// recorded.
+    /// `<C-[>`/`<C-]>` landed on, or an agent of the session it landed on:
+    /// coming back into that pane keeps the place in the list, so `<C-]>`
+    /// still goes forward. Returns whether it recorded.
     pub fn enter(&mut self, item: SidebarItem) -> bool {
-        let browsing = self.at.and_then(|at| self.entries.get(at)) == Some(&item);
+        let browsing = match (self.at.and_then(|at| self.entries.get(at)), item) {
+            (Some(&landed), _) if landed == item => true,
+            (Some(&SidebarItem::Session(landed)), SidebarItem::Agent { session, .. }) => {
+                landed == session
+            }
+            _ => false,
+        };
         if !browsing {
             self.record(item);
         }
@@ -122,18 +128,19 @@ impl JumpList {
         Some(target)
     }
 
-    /// Drops `item`, a row that no longer exists. Removing the row the last
-    /// jump landed on ends the move through the list.
+    /// Drops `item`, a row that no longer exists, and for a session also
+    /// its agent rows. Removing the row the last jump landed on ends the
+    /// move through the list.
     pub fn remove(&mut self, item: SidebarItem) {
-        let Some(gone) = self.entries.iter().position(|&entry| entry == item) else {
-            return;
+        let gone = |entry: &SidebarItem| match (item, *entry) {
+            (SidebarItem::Session(id), SidebarItem::Agent { session, .. }) => session == id,
+            _ => *entry == item,
         };
-        self.entries.remove(gone);
-        self.at = match self.at {
-            Some(at) if gone < at => Some(at - 1),
-            Some(at) if gone == at => None,
-            at => at,
-        };
+        self.at = self
+            .at
+            .filter(|&at| !self.entries.get(at).is_some_and(gone))
+            .map(|at| at - self.entries.iter().take(at).filter(|e| gone(e)).count());
+        self.entries.retain(|entry| !gone(entry));
     }
 
     /// The list as a `<C-[>` from `current` sees it: with `current`
@@ -155,10 +162,18 @@ impl JumpList {
 #[cfg(test)]
 mod tests {
     use super::{JUMP_LIMIT, JumpList};
-    use crate::feat::sessions::state::{SessionId, SidebarItem};
+    use crate::feat::sessions::state::{PaneId, SessionId, SidebarItem};
 
     fn on(id: i64) -> SidebarItem {
         SidebarItem::Session(SessionId(id))
+    }
+
+    /// The agent row of pane `pane` in session `session`.
+    fn agent(session: i64, pane: i64) -> SidebarItem {
+        SidebarItem::Agent {
+            session: SessionId(session),
+            pane: PaneId(pane),
+        }
     }
 
     /// A list holding threads `ids`, oldest first.
@@ -301,6 +316,38 @@ mod tests {
             list.forward(Some(on(2)), anywhere),
             Some(on(3)),
             "re-entering the landed row should keep <C-]>"
+        );
+    }
+
+    #[rstest::rstest]
+    fn entering_an_agent_of_the_landed_session_records_nothing() {
+        // Given threads 1 and 2, gone back from thread 3 to thread 2's card.
+        let mut list = list_of(&[1, 2]);
+        list.back(Some(on(3)), anywhere);
+
+        // When entering thread 2's session through its agent in pane 2.
+        let recorded = list.enter(agent(2, 2));
+
+        // Then nothing is recorded.
+        assert!(
+            !recorded,
+            "an agent of the landed session is the same place in the list"
+        );
+    }
+
+    #[rstest::rstest]
+    fn removing_a_session_drops_its_agent_rows() {
+        // Given thread 1's card, its agents in panes 1 and 5, and thread 2.
+        let mut list = JumpList::from_saved(vec![on(1), agent(1, 1), on(2), agent(1, 5)]);
+
+        // When removing thread 1's session.
+        list.remove(on(1));
+
+        // Then only thread 2 remains.
+        assert_eq!(
+            list.entries(),
+            [on(2)],
+            "a deleted session's agent rows should go with it"
         );
     }
 

@@ -1029,17 +1029,26 @@ impl Store {
         Ok(())
     }
 
-    /// The saved jump list's rows, oldest first; a row of an unknown kind is
-    /// skipped.
+    /// The saved jump list's rows, oldest first; a row of an unknown kind, or
+    /// an agent row whose pane is gone, is skipped.
     ///
     /// # Errors
     ///
     /// Returns an error if the database can't be read.
     pub fn jumps(&self) -> Result<Vec<SidebarItem>, Report<StoreError>> {
         let rows = self
-            .query("SELECT kind, item_id FROM jumps ORDER BY position", |row| {
-                Ok(jump_item(&row.get::<_, String>(0)?, row.get(1)?))
-            })
+            .query(
+                "SELECT j.kind, j.item_id, p.session_id FROM jumps j
+                 LEFT JOIN panes p ON j.kind = 'agent' AND p.id = j.item_id
+                 ORDER BY j.position",
+                |row| {
+                    Ok(jump_item(
+                        &row.get::<_, String>(0)?,
+                        row.get(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
             .attach("failed to read the jump list")?;
         Ok(rows.into_iter().flatten().collect())
     }
@@ -1597,19 +1606,25 @@ fn float_layout(text: &str) -> FloatLayout {
     }
 }
 
-/// How a jump-list row is saved: its kind and id; the Settled header and
-/// agent rows aren't.
+/// How a jump-list row is saved: its kind and id (an agent by its pane); the
+/// Settled header isn't.
 fn jump_kind(item: SidebarItem) -> Option<(&'static str, i64)> {
     match item {
         SidebarItem::Session(id) => Some(("session", id.0)),
-        SidebarItem::SettledShelf | SidebarItem::Agent { .. } => None,
+        SidebarItem::Agent { pane, .. } => Some(("agent", pane.0)),
+        SidebarItem::SettledShelf => None,
     }
 }
 
-/// The jump-list row saved as `kind` and `id`; `None` for an unknown kind.
-fn jump_item(kind: &str, id: i64) -> Option<SidebarItem> {
+/// The jump-list row saved as `kind` and `id`; an agent row needs its pane's
+/// `session`. `None` for an unknown kind or an agent whose pane is gone.
+fn jump_item(kind: &str, id: i64, session: Option<i64>) -> Option<SidebarItem> {
     match kind {
         "session" => Some(SidebarItem::Session(SessionId(id))),
+        "agent" => Some(SidebarItem::Agent {
+            session: SessionId(session?),
+            pane: PaneId(id),
+        }),
         _ => None,
     }
 }
@@ -2794,11 +2809,43 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn saved_jumps_skip_agent_rows() -> Result<(), Report<StoreError>> {
+    fn jumps_round_trip_agent_rows() -> Result<(), Report<StoreError>> {
+        // Given a store with a session and a second pane in it.
+        let store = Store::open_in_memory()?;
+        let project = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
+        let (session, _) = store.insert_session(
+            project,
+            SessionKind::Plain,
+            Path::new("/tmp/orb"),
+            None,
+            None,
+            1_000,
+        )?;
+        let pane = store.insert_pane(session, Path::new("/tmp/orb"))?;
+
+        // When saving the session's card, then the pane's agent row.
+        let jumps = vec![
+            SidebarItem::Session(session),
+            SidebarItem::Agent { session, pane },
+        ];
+        store.save_jumps(&jumps)?;
+
+        // Then both rows read back in the same order.
+        assert_eq!(
+            store.jumps()?,
+            jumps,
+            "an agent row should read back with its pane's session"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn saved_jumps_drop_an_unknown_pane() -> Result<(), Report<StoreError>> {
         // Given a fresh store.
         let store = Store::open_in_memory()?;
 
-        // When saving an agent row and a session row.
+        // When saving an agent row whose pane isn't in the store, and a
+        // session row.
         store.save_jumps(&[
             SidebarItem::Agent {
                 session: SessionId(1),
@@ -2811,7 +2858,7 @@ mod tests {
         assert_eq!(
             store.jumps()?,
             vec![SidebarItem::Session(SessionId(2))],
-            "agent rows should not be saved in the jump list"
+            "an agent row with an unknown pane should not read back"
         );
         Ok(())
     }
