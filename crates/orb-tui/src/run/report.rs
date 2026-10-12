@@ -10,7 +10,8 @@ pub(super) struct Ready {
     session: SessionId,
     /// The session that was active when the user asked.
     if_active: Option<SessionId>,
-    /// It waited for the keys to come back to the sidebar.
+    /// It waited while the user typed in a picker, the rename box or the
+    /// search.
     waited: bool,
 }
 
@@ -19,18 +20,19 @@ pub(super) struct Ready {
 pub(super) enum StartedAttach {
     /// The user opened another session meanwhile: drop it.
     Drop,
-    /// The user is typing (a picker, the rename box, the search) or in a
-    /// pane: keep the request until the keys are back.
+    /// The user is typing (a picker, the rename box, the search): keep the
+    /// request until the keys are back.
     Wait,
-    /// Attach now. `keep_keys` leaves the keys where they are, for a request
-    /// that waited.
+    /// Attach now. `keep_keys` leaves the keys in the sidebar, for a request
+    /// that waited and came back there.
     Attach { keep_keys: bool },
 }
 
 /// What to do with a ready session, asked for while `if_active` was the
 /// active session, given the `active` session now, where the keys are, and
-/// whether it has `waited` already. Moving the cursor around doesn't cancel
-/// it; opening another session does.
+/// whether it has `waited` already. From the sidebar or a pane it opens at
+/// once; in a pane it takes the keys into its own pane. Moving the cursor
+/// around doesn't cancel it; opening another session does.
 pub(super) fn started_attach(
     if_active: Option<SessionId>,
     active: Option<SessionId>,
@@ -39,7 +41,8 @@ pub(super) fn started_attach(
 ) -> StartedAttach {
     match focus {
         _ if if_active != active => StartedAttach::Drop,
-        Focus::Picker | Focus::Rename | Focus::Search | Focus::Pane => StartedAttach::Wait,
+        Focus::Picker | Focus::Rename | Focus::Search => StartedAttach::Wait,
+        Focus::Pane => StartedAttach::Attach { keep_keys: false },
         Focus::Sidebar => StartedAttach::Attach { keep_keys: waited },
     }
 }
@@ -123,9 +126,10 @@ impl App {
     }
 
     /// Opens the ready session as [`started_attach`] decides: at once, or,
-    /// if the user was typing or in a pane when it came up, once the keys
-    /// are back in the sidebar, leaving them there with the pane drawn (as a
-    /// click on the sidebar does). One the user moved on from is dropped.
+    /// if the user was typing when it came up, once the keys are back,
+    /// leaving them in the sidebar with the pane drawn if they came back
+    /// there (as a click on the sidebar does). One the user moved on from is
+    /// dropped.
     pub(super) fn open_ready(&mut self) {
         let Some(ready) = self.ready.take() else {
             return;

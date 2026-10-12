@@ -450,8 +450,7 @@ fn new_session_opens_when_nothing_was_active_and_still_isnt() {
 #[case(Focus::Picker)]
 #[case(Focus::Rename)]
 #[case(Focus::Search)]
-#[case(Focus::Pane)]
-fn ready_session_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
+fn ready_session_waits_while_typing(#[case] focus: Focus) {
     // Given session 1 ready while it is still active, e.g. while a picker
     // has the keys.
     let active = Some(SessionId(1));
@@ -464,6 +463,23 @@ fn ready_session_waits_while_typing_or_in_a_pane(#[case] focus: Focus) {
         decision,
         StartedAttach::Wait,
         "the open should wait in {focus:?}"
+    );
+}
+
+#[rstest::rstest]
+fn ready_session_opens_at_once_from_a_pane() {
+    // Given session 1 ready while it is still active and the keys are in a
+    // pane.
+    let active = Some(SessionId(1));
+
+    // When deciding what to do in the pane.
+    let decision = started_attach(active, active, Focus::Pane, false);
+
+    // Then orb opens it, taking the keys into its pane.
+    assert_eq!(
+        decision,
+        StartedAttach::Attach { keep_keys: false },
+        "being in a pane shouldn't hold the open back"
     );
 }
 
@@ -481,6 +497,23 @@ fn waited_ready_session_opens_once_the_keys_are_back() {
         decision,
         StartedAttach::Attach { keep_keys: true },
         "a waited open should keep the keys where they came back to"
+    );
+}
+
+#[rstest::rstest]
+fn waited_ready_session_takes_the_keys_when_they_come_back_to_a_pane() {
+    // Given session 1 waited while the user was in a picker, and it is
+    // still active.
+    let active = Some(SessionId(1));
+
+    // When deciding what to do once the keys are back in a pane.
+    let decision = started_attach(active, active, Focus::Pane, true);
+
+    // Then orb opens it, taking the keys into its pane.
+    assert_eq!(
+        decision,
+        StartedAttach::Attach { keep_keys: false },
+        "a waited open coming back to a pane should take the keys"
     );
 }
 
