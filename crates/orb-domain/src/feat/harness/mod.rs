@@ -203,10 +203,12 @@ pub(crate) mod fake {
     };
     use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
-    /// A harness named `id` with no transcripts, that sees the agents the
-    /// test scripts running.
+    /// A harness named `id` whose every transcript holds the exchanges the
+    /// test scripts, and that sees the agents the test scripts running.
     pub(crate) struct FakeHarness {
         id: &'static str,
+        /// What [`TranscriptFormat::exchanges`] answers for any path.
+        exchanges: Vec<Exchange>,
         /// What [`Harness::running`] answers.
         running: Mutex<Result<Vec<RunningAgent>, String>>,
         /// What [`Harness::reports_status`] answers.
@@ -218,9 +220,15 @@ pub(crate) mod fake {
         pub(crate) fn new(id: &'static str, running: Vec<RunningAgent>) -> Self {
             Self {
                 id,
+                exchanges: Vec::new(),
                 running: Mutex::new(Ok(running)),
                 reports: false,
             }
+        }
+
+        /// This harness, reading `exchanges` from any transcript.
+        pub(crate) fn with_exchanges(self, exchanges: Vec<Exchange>) -> Self {
+            Self { exchanges, ..self }
         }
 
         /// A harness like pi, whose status comes from its pane reports.
@@ -248,7 +256,7 @@ pub(crate) mod fake {
         }
 
         fn exchanges(&self, _path: &Path) -> io::Result<(u64, Vec<Exchange>)> {
-            Ok((0, Vec::new()))
+            Ok((0, self.exchanges.clone()))
         }
 
         fn messages(

@@ -2117,3 +2117,60 @@ fn pane_io_without_a_client_is_not_found() -> io::Result<()> {
     );
     Ok(())
 }
+
+#[rstest::rstest]
+fn agent_prompt_pastes_the_text_then_presses_enter() -> io::Result<()> {
+    // Given attached pane 1 whose client has printed.
+    let mut test = loop_app(FakeZmx::listing(""), prints_then_records)?;
+    test.attach(&[PaneId(1)]);
+    test.handle_until_output(PaneId(1))?;
+    let (tx, _rx) = mpsc::channel();
+
+    // When an agent prompts pane 1 with `hello`.
+    let prompt = PaneRequest::Prompt {
+        pane: PaneId(1),
+        text: "hello".into(),
+    };
+    test.app
+        .handle(LoopEvent::Control(prompt, tx), &mut io::sink())?;
+
+    // Then the text and Enter reach the program in the pane.
+    let typed = log_holding(&test.dir.path().join("typed"), "hello\n");
+    assert_eq!(typed, "hello\n", "the prompt is pasted and entered");
+    Ok(())
+}
+
+#[rstest::rstest]
+fn agent_launch_into_a_pane_with_a_waiting_line_is_pane_busy() -> io::Result<()> {
+    // Given attached pane 1, silent so far, with a run of `first` waiting to
+    // be typed.
+    let mut test = loop_app(FakeZmx::listing(""), records_silently)?;
+    test.attach(&[PaneId(1)]);
+    let run = PaneRequest::Run {
+        pane: PaneId(1),
+        line: "first".into(),
+    };
+    let (run_tx, _run_rx) = mpsc::channel();
+    test.app
+        .handle(LoopEvent::Control(run, run_tx), &mut io::sink())?;
+    let (tx, rx) = mpsc::channel();
+
+    // When an agent starts an agent in pane 1.
+    let launch = PaneRequest::Launch {
+        pane: PaneId(1),
+        line: "claude".into(),
+    };
+    test.app
+        .handle(LoopEvent::Control(launch, tx), &mut io::sink())?;
+
+    // Then the start is refused as pane_busy.
+    let answer = rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        answer.map_err(|error| error.code),
+        Err(ErrorCode::PaneBusy),
+        "a pane with a line waiting can't start an agent"
+    );
+    Ok(())
+}

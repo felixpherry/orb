@@ -6,23 +6,29 @@ use std::fs::{self, Permissions};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use error_stack::{Report, ResultExt};
 use kameo::actor::ActorRef;
 use wherror::Error;
 
+use crate::command::SessionsCommand;
+use crate::feat::control::agent::{self, Timing};
 use crate::feat::control::change::Change;
 use crate::feat::control::pane_control::{PaneControl, PaneRequest, key_event};
 use crate::feat::control::protocol::{
     AgentRow, AgentsResult, ApiError, Done, ErrorCode, Op, PaneResult, PaneRow, PanesResult,
-    ReadResult, Reply, Request, SessionRow, SessionsResult, StartResult, TabRow, TabsResult,
+    PromptResult, ReadResult, Reply, Request, SessionRow, SessionsResult, StartResult, TabRow,
+    TabsResult,
 };
 use crate::feat::control::target::{self, Resolved, Target};
 use crate::feat::control::validator;
+use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::sessions::sessions_actor::{ApiAdd, ApiPlace, ApiStart, SessionsActor};
+use crate::feat::sessions::state::Agent;
 use crate::ids::{PaneId, ProjectId, SessionId};
 use crate::{AppState, Log, State};
 
@@ -44,6 +50,8 @@ pub struct ControlDeps {
     pub runtime: tokio::runtime::Handle,
     /// The screen loop, which applies changes to what it owns.
     pub panes: PaneControl,
+    /// Read agents' transcripts for their replies.
+    pub harnesses: Harnesses,
 }
 
 /// Opens the control socket at `path`, only for the user, and answers each
@@ -151,11 +159,31 @@ enum Action {
     Pane(PaneRequest),
     /// A pane's text the screen loop reads.
     Read(PaneRequest),
+    /// An agent the screen loop types into a pane, then waits for.
+    StartAgent {
+        pane: PaneId,
+        line: String,
+        name: Option<String>,
+    },
+    /// A prompt pasted into an agent, then maybe waited on.
+    Prompt {
+        pane: PaneId,
+        text: String,
+        wait: bool,
+        timeout: Option<Duration>,
+    },
+    /// A wait until the pane's agent is idle or blocked.
+    Wait {
+        pane: PaneId,
+        timeout: Option<Duration>,
+    },
+    /// The last reply in an agent's transcript.
+    Transcript { harness: HarnessId, path: PathBuf },
 }
 
 /// The reply to `request`: worked out from the state (with no lock held
-/// after), then carried out. Each change writes one `api` log line; lists and
-/// reads write none.
+/// after), then carried out. Each change writes one `api` log line; lists,
+/// reads and waits write none.
 fn answer(deps: &ControlDeps, request: &Request) -> Reply {
     let planned = plan(&deps.state.read(), request);
     let reply = match planned {
@@ -168,10 +196,31 @@ fn answer(deps: &ControlDeps, request: &Request) -> Reply {
                 Err(error) => Reply::err(error),
             };
         }
+        Ok(Action::Wait { pane, timeout }) => {
+            let deadline = timeout.map(|limit| Instant::now() + limit);
+            let poke = || poke(deps);
+            return match agent::wait_done(&deps.state, pane, &poke, Timing::REAL, deadline) {
+                Ok(done) => Reply::ok(&done),
+                Err(error) => Reply::err(error),
+            };
+        }
+        Ok(Action::Transcript { harness, path }) => {
+            return match agent::last_reply(&deps.harnesses, &harness, &path) {
+                Ok(reply) => Reply::ok(&reply),
+                Err(error) => Reply::err(error),
+            };
+        }
         Ok(Action::Add(add)) => add_pane(deps, add),
         Ok(Action::Start(start)) => start_session(deps, start),
         Ok(Action::Change(change)) => typed(deps, PaneRequest::Change(change)),
         Ok(Action::Pane(request)) => typed(deps, request),
+        Ok(Action::StartAgent { pane, line, name }) => start_agent(deps, pane, line, name),
+        Ok(Action::Prompt {
+            pane,
+            text,
+            wait,
+            timeout,
+        }) => prompt_agent(deps, pane, text, wait, timeout),
         Err(error) => Reply::err(error),
     };
     deps.log.line("api", &log_text(request, &reply));
@@ -271,6 +320,132 @@ fn plan(app: &AppState, request: &Request) -> Result<Action, ApiError> {
         Op::PaneSend { .. } | Op::PaneKeys { .. } | Op::PaneRun { .. } | Op::PaneRead { .. } => {
             pane_io(app, &request.op, caller)
         }
+        Op::AgentStart { .. }
+        | Op::AgentPrompt { .. }
+        | Op::AgentWait { .. }
+        | Op::AgentGet { .. }
+        | Op::AgentReply { .. } => agent_io(app, &request.op, caller),
+    }
+}
+
+/// What an agent request comes to, read from `app`. A wait is refused on a
+/// settled session; a get and a reply are answered there.
+fn agent_io(app: &AppState, op: &Op, caller: Option<PaneId>) -> Result<Action, ApiError> {
+    match op {
+        Op::AgentStart {
+            pane,
+            kind,
+            name,
+            args,
+        } => {
+            let Some(pane) = changing(app, pane.map(Target::Pane), caller)?.pane else {
+                return Err(ApiError::new(ErrorCode::BadRequest, "no pane to start in"));
+            };
+            validator::pane_free(app, pane)?;
+            Ok(Action::StartAgent {
+                pane,
+                line: agent::shell_line(*kind, args),
+                name: name.clone(),
+            })
+        }
+        Op::AgentPrompt {
+            pane,
+            text,
+            wait,
+            timeout,
+        } => {
+            changing(app, Some(Target::Pane(*pane)), caller)?;
+            validator::agent_ready(app, *pane)?;
+            Ok(Action::Prompt {
+                pane: *pane,
+                text: text.clone(),
+                wait: *wait,
+                timeout: timeout.map(Duration::from_millis),
+            })
+        }
+        Op::AgentWait { pane, timeout } => {
+            changing(app, Some(Target::Pane(*pane)), caller)?;
+            Ok(Action::Wait {
+                pane: *pane,
+                timeout: timeout.map(Duration::from_millis),
+            })
+        }
+        Op::AgentGet { pane } => {
+            let session = target::resolve(app, Some(Target::Pane(*pane)), caller)?.session;
+            let agent = agent::pane_agent(app, *pane).ok_or_else(|| agent::no_agent(*pane))?;
+            Ok(Action::Answered(Reply::ok(&agent_row(
+                app, session, agent, *pane,
+            ))))
+        }
+        Op::AgentReply { pane } => {
+            target::resolve(app, Some(Target::Pane(*pane)), caller)?;
+            let agent = agent::pane_agent(app, *pane).ok_or_else(|| agent::no_agent(*pane))?;
+            let path = agent
+                .transcript
+                .clone()
+                .ok_or_else(|| ApiError::new(ErrorCode::NoReply, "no transcript yet"))?;
+            Ok(Action::Transcript {
+                harness: agent.harness.clone(),
+                path,
+            })
+        }
+        _ => Err(ApiError::new(ErrorCode::BadRequest, "not an agent request")),
+    }
+}
+
+/// Pokes the sessions poll so it reads the panes now.
+fn poke(deps: &ControlDeps) {
+    let _ = deps
+        .sessions
+        .tell(SessionsCommand::RefreshSessions)
+        .try_send();
+}
+
+/// Has the screen loop paste `text` into `pane`'s agent and press Enter;
+/// with `wait`, waits for the turn to end or the agent to be blocked, with
+/// `timeout` over the whole call.
+fn prompt_agent(
+    deps: &ControlDeps,
+    pane: PaneId,
+    text: String,
+    wait: bool,
+    timeout: Option<Duration>,
+) -> Reply {
+    let deadline = timeout.map(|limit| Instant::now() + limit);
+    let pasted = SystemTime::now();
+    if let Err(error) = deps.panes.ask(PaneRequest::Prompt { pane, text }) {
+        return Reply::err(error);
+    }
+    if !wait {
+        return Reply::ok(&PromptResult { submitted: true });
+    }
+    let poke = || poke(deps);
+    match agent::wait_prompted(&deps.state, pane, &poke, Timing::REAL, deadline, pasted) {
+        Ok(done) => Reply::ok(&done),
+        Err(error) => Reply::err(error),
+    }
+}
+
+/// Has the screen loop type `line` into `pane`, names the pane `name` if
+/// given (a failed rename is logged, not replied), then waits for the agent
+/// to start.
+fn start_agent(deps: &ControlDeps, pane: PaneId, line: String, name: Option<String>) -> Reply {
+    if let Err(error) = deps.panes.ask(PaneRequest::Launch { pane, line }) {
+        return Reply::err(error);
+    }
+    if let Some(name) = name
+        && let Err(error) = deps
+            .panes
+            .ask(PaneRequest::Change(Change::RenamePane { pane, name }))
+    {
+        deps.log.line(
+            "control",
+            &format!("couldn't name pane {}: {}", pane.0, error.message),
+        );
+    }
+    match agent::wait_started(&deps.state, pane, &|| poke(deps), Timing::REAL) {
+        Ok(started) => Reply::ok(&started),
+        Err(error) => Reply::err(error),
     }
 }
 
@@ -552,19 +727,25 @@ fn agents(app: &AppState) -> AgentsResult {
             app.sessions
                 .agent_rows(session.id, &app.layouts)
                 .into_iter()
-                .map(move |(agent, pane)| AgentRow {
-                    id: agent.id,
-                    pane: Some(pane),
-                    session: session.id,
-                    harness: agent.harness.to_string(),
-                    name: app.layouts.agent_name(pane, Some(agent)).to_owned(),
-                    status: agent.status,
-                    cwd: agent.cwd.to_string_lossy().into_owned(),
-                    branch: agent.branch.clone(),
-                })
+                .map(move |(agent, pane)| agent_row(app, session.id, agent, pane))
         })
         .collect();
     AgentsResult { agents }
+}
+
+/// `agent`'s row in `agent list`, running in `pane` of `session`.
+fn agent_row(app: &AppState, session: SessionId, agent: &Agent, pane: PaneId) -> AgentRow {
+    AgentRow {
+        id: agent.id,
+        pane: Some(pane),
+        session,
+        harness: agent.harness.to_string(),
+        name: app.layouts.agent_name(pane, Some(agent)).to_owned(),
+        title: agent.title.clone(),
+        status: agent.status,
+        cwd: agent.cwd.to_string_lossy().into_owned(),
+        branch: agent.branch.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -580,10 +761,10 @@ mod tests {
     use error_stack::{Report, ResultExt};
     use tempfile::TempDir;
 
-    use super::{ControlServerError, log_text, open, plan, route};
+    use super::{Action, ControlServerError, log_text, open, plan, route};
     use crate::feat::control::client;
     use crate::feat::control::protocol::{
-        ApiError, Direction, Done, ErrorCode, Op, Reply, Request,
+        AgentKind, ApiError, Direction, Done, ErrorCode, Op, Reply, Request,
     };
     use crate::feat::layout::state::test_entry;
     use crate::feat::sessions::state::AgentStatus;
@@ -693,6 +874,9 @@ mod tests {
     #[case::pane_keys(Op::PaneKeys { pane: PaneId(1), keys: vec!["enter".into()] })]
     #[case::pane_run(Op::PaneRun { pane: PaneId(1), command: "x".into() })]
     #[case::pane_read(Op::PaneRead { pane: None, lines: 0 })]
+    #[case::agent_start(Op::AgentStart { pane: None, kind: AgentKind::Claude, name: None, args: vec![] })]
+    #[case::agent_prompt(Op::AgentPrompt { pane: PaneId(1), text: "x".into(), wait: false, timeout: None })]
+    #[case::agent_wait(Op::AgentWait { pane: PaneId(1), timeout: None })]
     fn request_on_a_settled_session_is_refused(#[case] op: Op) {
         // Given session 1, settled, with pane 1.
         let app = settle(state_with(vec![stopped(1)], 1), &[1]);
@@ -793,6 +977,48 @@ mod tests {
         assert_eq!(
             text, "pane.send caller=1 pane=3 -> ok",
             "typed text never reaches the log"
+        );
+    }
+
+    #[rstest::rstest]
+    fn agent_get_on_a_settled_session_is_answered() {
+        // Given session 1, settled, with stopped agent 1 in pane 1.
+        let app = settle(state_with(vec![stopped(1)], 1), &[1]);
+
+        // When planning `agent get` for pane 1.
+        let request = Request {
+            caller: None,
+            op: Op::AgentGet { pane: PaneId(1) },
+        };
+        let planned = plan(&app, &request);
+
+        // Then it is answered from the state.
+        assert!(
+            matches!(&planned, Ok(Action::Answered(reply)) if reply.ok),
+            "a settled session's agent can still be read, got {planned:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    fn log_line_of_a_prompt_leaves_out_the_text() {
+        // Given pane 1 prompting the agent in pane 3 with private text, done.
+        let request = Request {
+            caller: Some(PaneId(1)),
+            op: Op::AgentPrompt {
+                pane: PaneId(3),
+                text: "secret".into(),
+                wait: true,
+                timeout: Some(9),
+            },
+        };
+
+        // When writing its log line.
+        let text = log_text(&request, &Reply::ok(&Done {}));
+
+        // Then it has the op and the IDs, and not the text.
+        assert_eq!(
+            text, "agent.prompt caller=1 pane=3 -> ok",
+            "a prompt's text never reaches the log"
         );
     }
 }

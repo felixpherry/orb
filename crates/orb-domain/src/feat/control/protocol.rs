@@ -148,6 +148,55 @@ pub enum Op {
         #[serde(default)]
         lines: usize,
     },
+    /// Starts an agent in a shell pane and waits until orb sees it.
+    #[serde(rename = "agent.start")]
+    AgentStart {
+        /// The pane, else the caller's.
+        #[serde(default)]
+        pane: Option<PaneId>,
+        kind: AgentKind,
+        /// A name for the pane.
+        #[serde(default)]
+        name: Option<String>,
+        /// Typed after the program, each quoted for the shell.
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    /// Pastes a prompt into an agent and presses Enter.
+    #[serde(rename = "agent.prompt")]
+    AgentPrompt {
+        pane: PaneId,
+        text: String,
+        /// Wait for the turn to end or the agent to be blocked.
+        #[serde(default)]
+        wait: bool,
+        /// Milliseconds the whole call may take; none waits as long as work
+        /// goes on.
+        #[serde(default)]
+        timeout: Option<u64>,
+    },
+    /// Waits until a pane's agent is idle or waits on the user.
+    #[serde(rename = "agent.wait")]
+    AgentWait {
+        pane: PaneId,
+        /// Milliseconds to wait; none waits as long as work goes on.
+        #[serde(default)]
+        timeout: Option<u64>,
+    },
+    /// A pane's agent, as `agent list` shows it.
+    #[serde(rename = "agent.get")]
+    AgentGet { pane: PaneId },
+    /// The last reply in a pane's agent's transcript.
+    #[serde(rename = "agent.reply")]
+    AgentReply { pane: PaneId },
+}
+
+/// The program `agent start` types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentKind {
+    Claude,
+    Pi,
 }
 
 /// Which side of a pane `pane split` puts the new one.
@@ -325,6 +374,8 @@ pub struct AgentRow {
     pub harness: String,
     /// The name the sidebar shows.
     pub name: String,
+    /// The agent's own title, once its transcript names it.
+    pub title: Option<String>,
     pub status: AgentStatus,
     pub cwd: String,
     pub branch: Option<String>,
@@ -355,6 +406,45 @@ pub struct Done {}
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadResult {
     pub text: String,
+}
+
+/// `agent start`'s result: the agent orb saw start in the pane.
+#[derive(Debug, Clone, Serialize)]
+pub struct StartedResult {
+    pub pane: PaneId,
+    pub agent: AgentId,
+    pub harness: String,
+    pub status: AgentStatus,
+}
+
+/// `agent prompt`'s result without `--wait`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptResult {
+    pub submitted: bool,
+}
+
+/// How a wait on an agent ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitEnd {
+    /// The turn ended.
+    Idle,
+    /// The agent waits for an approval or an answer.
+    Blocked,
+}
+
+/// `agent wait`'s (and `agent prompt --wait`'s) result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WaitResult {
+    pub status: WaitEnd,
+}
+
+/// `agent reply`'s result: the last reply's text and when it was written,
+/// in unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReplyResult {
+    pub text: String,
+    pub at: Option<i64>,
 }
 
 /// `agent list`'s result.

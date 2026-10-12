@@ -203,6 +203,7 @@ fn run(
             sessions: sessions.clone(),
             runtime: runtime.handle().clone(),
             panes: frontend.controller(),
+            harnesses: harnesses.clone(),
         },
     );
     let ended = frontend

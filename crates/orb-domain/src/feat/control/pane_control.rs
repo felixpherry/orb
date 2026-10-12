@@ -31,6 +31,17 @@ pub enum PaneRequest {
         pane: PaneId,
         line: String,
     },
+    /// Type `line` and Enter as `Run` does, unless a line already waits to be
+    /// typed in the pane (`pane_busy`).
+    Launch {
+        pane: PaneId,
+        line: String,
+    },
+    /// Paste `text`, then press Enter, with nothing in between.
+    Prompt {
+        pane: PaneId,
+        text: String,
+    },
     /// The pane's screen, after up to `lines` lines of history, as text.
     Read {
         pane: PaneId,

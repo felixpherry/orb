@@ -8,6 +8,7 @@ use orb_domain::feat::control::pane_control::{PaneReply, PaneRequest};
 use orb_domain::feat::control::protocol::{ApiError, ErrorCode};
 use orb_domain::ids::PaneId;
 use orb_term::Pane;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::App;
 
@@ -37,6 +38,12 @@ impl App {
                 None
             }),
             PaneRequest::Run { pane, line } => self.run_line(pane, line),
+            PaneRequest::Launch { pane, line } => self.launch(pane, line),
+            PaneRequest::Prompt { pane, text } => self.live_pane(pane).map(|live| {
+                live.paste(&text);
+                live.key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                None
+            }),
             PaneRequest::Read { pane, lines } => {
                 self.live_pane(pane).map(|live| Some(live.text(lines)))
             }
@@ -57,6 +64,19 @@ impl App {
             .get(&id)
             .filter(|pane| !pane.has_exited())
             .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no live pane"))
+    }
+
+    /// Types `line` as a run does, unless a line already waits in pane `id`
+    /// (a restored agent's resume command): then `pane_busy`.
+    fn launch(&mut self, id: PaneId, line: String) -> PaneReply {
+        self.live_pane(id)?;
+        if self.typing.contains_key(&id) {
+            return Err(ApiError::new(
+                ErrorCode::PaneBusy,
+                "a command waits to be typed in this pane",
+            ));
+        }
+        self.run_line(id, line)
     }
 
     /// Types `line` and Enter into pane `id`. Until the pane's program has
