@@ -1,17 +1,17 @@
 //! Key routing: which keys do what in each focus. Only keys the user has
 //! defined are bound.
 //!
-//! The Cmd keys (focus moves, split, close, grow and shrink, tab moves),
-//! `<C-S-h>`/`<C-S-l>` (the keys to the sidebar and into the panes) and
+//! The Alt keys (focus moves, split, close, grow and shrink, tab moves) and
 //! `<C-[>`/`<C-]>` (back and forward through the jump list) come first, in
-//! the sidebar and in panes, outside which-key: it has no Super modifier,
-//! Ctrl+Shift+h must never match a plain `<C-h>`, and Ctrl+[ must never
-//! match a plain Esc. `<C-g>` is the which-key leader in both; its popup
-//! lists only the keys that do something for the selection (`<C-g> w`/`<C-g>
-//! b` not on Incognito, Research and Learn sessions, `<C-g> p` and `<C-g>
-//! <C-g>` only in a pane, `<C-g> t` only with a session selected and its
-//! `b` only in a pane, `<C-g> f` only in the sidebar); `<C-g> e` hides or
-//! shows the sidebar and `<C-g> q` quits. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
+//! the sidebar and in panes, outside which-key: they must win over a pane's
+//! program, and Ctrl+[ must never match a plain Esc. `<C-g>` is the
+//! which-key leader in both; its popup lists only the keys that do something
+//! for the selection (`<C-g> w`/`<C-g> b` not on Incognito, Research and
+//! Learn sessions, `<C-g> p`, `<C-g> <C-g>` and `<C-g> h` only in a pane,
+//! `<C-g> t` only with a session selected and its `b` only in a pane, `<C-g>
+//! f` and `<C-g> l` only in the sidebar); `<C-g> h` moves the keys to the
+//! sidebar, `<C-g> l` into the panes, `<C-g> e` hides or shows the sidebar
+//! and `<C-g> q` quits. The sidebar's own keys (`j`/`k`, `gg`/`G`, `<C-d>`/`<C-u>`, `⏎`,
 //! `/` and `i`, `l`/`h`, `r`/`p`/`s`/`d` on a session, `r`/`d` on an agent
 //! row) go through the same keymap. In a pane every other key goes to its
 //! program. An open picker, the rename box and
@@ -200,6 +200,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
                 Intent::FilterProjects,
                 KeyCategory::Sessions,
                 scope,
+            )
+            .bind(
+                "<leader>l",
+                Intent::FocusPanes,
+                KeyCategory::Navigation,
+                scope,
             );
     }
     for scope in [Scope::Sidebar, Scope::SidebarIncognito] {
@@ -314,6 +320,12 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     for scope in PANE {
         keymap
             .bind(
+                "<leader>h",
+                Intent::LeavePane,
+                KeyCategory::Navigation,
+                scope,
+            )
+            .bind(
                 "<leader>pd",
                 Intent::SplitPane(Split::Down),
                 KeyCategory::Navigation,
@@ -411,7 +423,7 @@ pub(crate) fn press(keys: &mut Keys, key: KeyEvent) -> Option<Intent> {
 /// Where a key goes in the sidebar or a pane.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Route {
-    /// A Cmd key or a jump key: run this intent.
+    /// An Alt key or a jump key: run this intent.
     Intent(Intent),
     /// Feed it to the which-key keymap.
     Keymap,
@@ -420,14 +432,11 @@ pub(crate) enum Route {
 }
 
 /// Where `key` goes in the sidebar, or in a pane when `in_pane`, with a
-/// which-key sequence `pending` or not: the Cmd keys, then `<C-S-h>` and
-/// `<C-S-l>`, then the jump keys, then the keymap. In a pane only `<C-g>` and the rest of the sequence it
+/// which-key sequence `pending` or not: the Alt keys, then the jump keys,
+/// then the keymap. In a pane only `<C-g>` and the rest of the sequence it
 /// starts go to the keymap; every other key goes to its program.
 pub(crate) fn route(key: KeyEvent, in_pane: bool, pending: bool) -> Route {
-    match cmd_route(key)
-        .or_else(|| ctrl_shift_route(key))
-        .or_else(|| jump_route(key))
-    {
+    match alt_route(key).or_else(|| jump_route(key)) {
         Some(intent) => Route::Intent(intent),
         None if !in_pane || pending || is_leader(key) => Route::Keymap,
         None => Route::Forward,
@@ -437,22 +446,6 @@ pub(crate) fn route(key: KeyEvent, in_pane: bool, pending: bool) -> Route {
 /// Whether `key` is `<C-g>`, whatever its kind or lock state.
 fn is_leader(key: KeyEvent) -> bool {
     (key.code, key.modifiers) == (LEADER.code, LEADER.modifiers)
-}
-
-/// The move of the keys `key` asks for: `<C-S-h>` to the sidebar and
-/// `<C-S-l>` into the panes. Kitty's alternate key report makes crossterm
-/// read Ctrl+Shift+h as `H` with only Ctrl; without it the key is `h` with
-/// Ctrl and Shift. Plain `<C-h>` and `<C-l>` never match: in a pane they
-/// belong to its program.
-fn ctrl_shift_route(key: KeyEvent) -> Option<Intent> {
-    let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('H'), KeyModifiers::CONTROL) => Some(Intent::LeavePane),
-        (KeyCode::Char('h'), modifiers) if modifiers == ctrl_shift => Some(Intent::LeavePane),
-        (KeyCode::Char('L'), KeyModifiers::CONTROL) => Some(Intent::FocusPanes),
-        (KeyCode::Char('l'), modifiers) if modifiers == ctrl_shift => Some(Intent::FocusPanes),
-        _ => None,
-    }
 }
 
 /// The jump `key` asks for: `<C-[>` goes back through the jump list and
@@ -468,12 +461,11 @@ fn jump_route(key: KeyEvent) -> Option<Intent> {
     }
 }
 
-/// The Cmd key `key` asks for, in the sidebar or a pane. Cmd arrives as
-/// Super through kitty's `map cmd+<key> send_key super+<key>`. Shift is
-/// ignored so `Cmd +` matches however kitty reports it. `None` for any other
-/// key, Cmd or not.
-fn cmd_route(key: KeyEvent) -> Option<Intent> {
-    if key.modifiers - KeyModifiers::SHIFT != KeyModifiers::SUPER {
+/// The Alt key `key` asks for, in the sidebar or a pane. Shift is ignored so
+/// `Alt +` matches however the terminal reports it. A terminal that sends Cmd
+/// as Alt makes these Cmd keys. `None` for any other key, Alt or not.
+fn alt_route(key: KeyEvent) -> Option<Intent> {
+    if key.modifiers - KeyModifiers::SHIFT != KeyModifiers::ALT {
         return None;
     }
     match key.code {
@@ -495,12 +487,11 @@ fn cmd_route(key: KeyEvent) -> Option<Intent> {
     }
 }
 
-/// What `key` does while pane mode `mode` is on: the Cmd keys, `<C-S-h>`
-/// and `<C-S-l>` and the jump keys as usual, then the mode's own keys.
-/// `None` means the key does nothing; it never reaches the pane.
+/// What `key` does while pane mode `mode` is on: the Alt keys and the jump
+/// keys as usual, then the mode's own keys. `None` means the key does
+/// nothing; it never reaches the pane, and `<C-g>` does nothing until the mode ends.
 pub(crate) fn mode_route(mode: PaneMode, key: KeyEvent) -> Option<Intent> {
-    cmd_route(key)
-        .or_else(|| ctrl_shift_route(key))
+    alt_route(key)
         .or_else(|| jump_route(key))
         .or_else(|| mode_key(mode, key))
 }
@@ -621,7 +612,7 @@ mod tests {
     use ratatui_which_key::{Key, NodeResult};
 
     use super::{
-        KeyCategory, Keys, LEADER, Route, Scope, Selection, cmd_route, keymap, mode_route,
+        KeyCategory, Keys, LEADER, Route, Scope, Selection, alt_route, keymap, mode_route,
         picker_list_route, picker_route, press, route,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
@@ -1140,8 +1131,8 @@ mod tests {
         );
     }
 
-    fn cmd(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::SUPER)
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
     }
 
     #[rstest::rstest]
@@ -1172,91 +1163,88 @@ mod tests {
     #[case(KeyCode::Char(']'), Intent::NextSwapLayout)]
     #[case(KeyCode::Char('i'), Intent::MoveTabLeft)]
     #[case(KeyCode::Char('o'), Intent::MoveTabRight)]
-    fn cmd_keys_route_to_their_intents(
+    fn alt_keys_route_to_their_intents(
         #[case] code: KeyCode,
         #[case] expected: Intent,
         #[values(false, true)] in_pane: bool,
     ) {
-        // Given / When routing Cmd with `code` in the sidebar or a pane.
-        let routed = route(cmd(code), in_pane, false);
+        // Given / When routing Alt with `code` in the sidebar or a pane.
+        let routed = route(alt(code), in_pane, false);
 
         // Then it asks for its intent.
         assert_eq!(
             routed,
             Route::Intent(expected),
-            "Cmd {code} should route (in a pane: {in_pane})"
+            "Alt {code} should route (in a pane: {in_pane})"
         );
     }
 
     #[rstest::rstest]
-    fn cmd_plus_with_shift_grows() {
-        // Given Cmd + as kitty reports it with Shift.
-        let pressed = KeyEvent::new(
-            KeyCode::Char('+'),
-            KeyModifiers::SUPER | KeyModifiers::SHIFT,
-        );
+    fn alt_plus_with_shift_grows() {
+        // Given Alt + as the terminal reports it with Shift.
+        let pressed = KeyEvent::new(KeyCode::Char('+'), KeyModifiers::ALT | KeyModifiers::SHIFT);
 
         // When routing it.
-        let intent = cmd_route(pressed);
+        let intent = alt_route(pressed);
 
         // Then it grows.
-        assert_eq!(intent, Some(Intent::GrowFocused), "Cmd Shift + should grow");
+        assert_eq!(intent, Some(Intent::GrowFocused), "Alt Shift + should grow");
     }
 
     #[rstest::rstest]
-    fn ctrl_letters_are_not_cmd_keys() {
-        // Given Ctrl h.
-        let pressed = ctrl('h');
-
-        // When routing it as a Cmd key.
-        let intent = cmd_route(pressed);
-
-        // Then it isn't one.
-        assert_eq!(intent, None, "<C-h> is not a Cmd key");
-    }
-
-    #[rstest::rstest]
-    #[case::kitty_alternate_h(KeyCode::Char('H'), KeyModifiers::CONTROL, Intent::LeavePane)]
-    #[case::shifted_h(
-        KeyCode::Char('h'),
-        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        Intent::LeavePane
-    )]
-    #[case::kitty_alternate_l(KeyCode::Char('L'), KeyModifiers::CONTROL, Intent::FocusPanes)]
-    #[case::shifted_l(
-        KeyCode::Char('l'),
-        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        Intent::FocusPanes
-    )]
-    fn ctrl_shift_h_and_l_move_the_keys(
-        #[case] code: KeyCode,
-        #[case] modifiers: KeyModifiers,
-        #[case] expected: Intent,
-        #[values(false, true)] in_pane: bool,
-    ) {
-        // Given / When routing Ctrl+Shift with `code` in the sidebar or a pane.
-        let routed = route(KeyEvent::new(code, modifiers), in_pane, false);
-
-        // Then it asks for its intent.
-        assert_eq!(
-            routed,
-            Route::Intent(expected),
-            "{code} with {modifiers:?} should route (in a pane: {in_pane})"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case('h')]
-    #[case('l')]
-    fn plain_ctrl_h_and_l_go_to_the_pane(#[case] c: char) {
-        // Given plain Ctrl with `c`.
-        let pressed = ctrl(c);
+    fn super_keys_go_to_the_pane() {
+        // Given Super h.
+        let pressed = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::SUPER);
 
         // When routing it in a pane.
         let routed = route(pressed, true, false);
 
         // Then the pane's program gets it.
-        assert_eq!(routed, Route::Forward, "<C-{c}> belongs to the pane");
+        assert_eq!(routed, Route::Forward, "Super h belongs to the pane");
+    }
+
+    #[rstest::rstest]
+    fn other_alt_keys_go_to_the_pane() {
+        // Given Alt b, which isn't one of orb's keys.
+        let pressed = alt(KeyCode::Char('b'));
+
+        // When routing it in a pane.
+        let routed = route(pressed, true, false);
+
+        // Then the pane's program gets it.
+        assert_eq!(routed, Route::Forward, "Alt b belongs to the pane");
+    }
+
+    #[rstest::rstest]
+    fn ctrl_letters_are_not_alt_keys() {
+        // Given Ctrl h.
+        let pressed = ctrl('h');
+
+        // When routing it as an Alt key.
+        let intent = alt_route(pressed);
+
+        // Then it isn't one.
+        assert_eq!(intent, None, "<C-h> is not an Alt key");
+    }
+
+    #[rstest::rstest]
+    #[case::kitty_alternate_h(KeyCode::Char('H'), KeyModifiers::CONTROL)]
+    #[case::shifted_h(KeyCode::Char('h'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)]
+    #[case::kitty_alternate_l(KeyCode::Char('L'), KeyModifiers::CONTROL)]
+    #[case::shifted_l(KeyCode::Char('l'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)]
+    fn ctrl_shift_h_and_l_go_to_the_pane(#[case] code: KeyCode, #[case] modifiers: KeyModifiers) {
+        // Given Ctrl+Shift with `code`, in either form kitty reports it.
+        let pressed = KeyEvent::new(code, modifiers);
+
+        // When routing it in a pane.
+        let routed = route(pressed, true, false);
+
+        // Then the pane's program gets it.
+        assert_eq!(
+            routed,
+            Route::Forward,
+            "{code} with {modifiers:?} belongs to the pane"
+        );
     }
 
     #[rstest::rstest]
@@ -1568,7 +1556,7 @@ mod tests {
     #[case::plus('+', Intent::GrowFocused)]
     #[case::equals('=', Intent::GrowFocused)]
     #[case::minus('-', Intent::ShrinkFocused)]
-    fn plus_equals_minus_act_as_cmd_plus_minus_in_resize_mode(
+    fn plus_equals_minus_act_as_alt_plus_minus_in_resize_mode(
         #[case] c: char,
         #[case] expected: Intent,
     ) {
@@ -1577,7 +1565,7 @@ mod tests {
         // When pressing the key.
         let intent = mode_route(PaneMode::Resize, key(KeyCode::Char(c)));
 
-        // Then it does what Cmd with that key does.
+        // Then it does what Alt with that key does.
         assert_eq!(intent, Some(expected), "{c:?} in resize mode");
     }
 
@@ -1630,21 +1618,32 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn cmd_keys_still_work_in_resize_mode() {
+    fn alt_keys_still_work_in_resize_mode() {
         // Given resize mode.
 
-        // When pressing Cmd h.
+        // When pressing Alt h.
         let intent = mode_route(
             PaneMode::Resize,
-            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::SUPER),
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT),
         );
 
         // Then the focus moves left, as outside the mode.
         assert_eq!(
             intent,
             Some(Intent::MoveFocus(NavDirection::Left)),
-            "Cmd h in resize mode"
+            "Alt h in resize mode"
         );
+    }
+
+    #[rstest::rstest]
+    fn ctrl_g_does_nothing_in_resize_mode() {
+        // Given resize mode.
+
+        // When pressing `<C-g>`.
+        let intent = mode_route(PaneMode::Resize, LEADER);
+
+        // Then nothing happens until the mode ends.
+        assert_eq!(intent, None, "<C-g> in resize mode");
     }
 
     #[rstest::rstest]
@@ -1713,6 +1712,10 @@ mod tests {
     #[case(Scope::PaneIncognito, "m", Intent::EnterPaneMode(PaneMode::Move))]
     #[case(Scope::Sidebar, "q", Intent::Quit)]
     #[case(Scope::SidebarEmpty, "q", Intent::Quit)]
+    #[case(Scope::Pane, "h", Intent::LeavePane)]
+    #[case(Scope::PaneIncognito, "h", Intent::LeavePane)]
+    #[case(Scope::Sidebar, "l", Intent::FocusPanes)]
+    #[case(Scope::SidebarEmpty, "l", Intent::FocusPanes)]
     fn leader_keys_yield_their_intents(
         #[case] scope: Scope,
         #[case] then: &str,
@@ -1738,13 +1741,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Scope::Sidebar, "/ P Space W b e f g i n q t w")]
-    #[case(Scope::SidebarEmpty, "/ P Space W e f g i n q")]
-    #[case(Scope::SidebarIncognito, "/ P Space W e f g i n q t")]
-    #[case(Scope::Pane, "/ <C-g> P Space W b e g i m n p q r t w")]
-    #[case(Scope::PaneIncognito, "/ <C-g> P Space W e g i m n p q r t")]
-    #[case(Scope::SidebarAgent, "/ P Space W b e f g i n q t w")]
-    #[case(Scope::SidebarAgentIncognito, "/ P Space W e f g i n q t")]
+    #[case(Scope::Sidebar, "/ P Space W b e f g i l n q t w")]
+    #[case(Scope::SidebarEmpty, "/ P Space W e f g i l n q")]
+    #[case(Scope::SidebarIncognito, "/ P Space W e f g i l n q t")]
+    #[case(Scope::Pane, "/ <C-g> P Space W b e g h i m n p q r t w")]
+    #[case(Scope::PaneIncognito, "/ <C-g> P Space W e g h i m n p q r t")]
+    #[case(Scope::SidebarAgent, "/ P Space W b e f g i l n q t w")]
+    #[case(Scope::SidebarAgentIncognito, "/ P Space W e f g i l n q t")]
     fn leader_popup_matches_the_scope_table(#[case] scope: Scope, #[case] expected: &str) {
         // Given orb's keymap in the scope.
 
@@ -1856,17 +1859,17 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn cmd_keys_still_win_while_a_sequence_is_pending() {
+    fn alt_keys_still_win_while_a_sequence_is_pending() {
         // Given a `<C-g>` sequence pending in a pane.
 
-        // When routing Cmd h.
-        let routed = route(cmd(KeyCode::Char('h')), true, true);
+        // When routing Alt h.
+        let routed = route(alt(KeyCode::Char('h')), true, true);
 
         // Then it moves the focus.
         assert_eq!(
             routed,
             Route::Intent(Intent::MoveFocus(NavDirection::Left)),
-            "Cmd h should win over a pending sequence"
+            "Alt h should win over a pending sequence"
         );
     }
 

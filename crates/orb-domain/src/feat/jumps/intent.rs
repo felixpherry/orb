@@ -199,7 +199,7 @@ mod tests {
     #[rstest::rstest]
     fn re_entering_the_pane_jump_back_landed_in_keeps_jump_forward() {
         // Given a jump back from agent 2's pane into agent 1's, then a
-        // click on the sidebar and `<C-S-l>` back into agent 1's pane.
+        // click on the sidebar and `<C-g> l` back into agent 1's pane.
         let mut state = jumping(Focus::Pane, &[1, 2], &[on_agent(1), agent_row(2, 2)]);
         IntentHandler::handle(&Intent::JumpBack, &mut state);
         IntentHandler::handle(&Intent::LeavePane, &mut state);

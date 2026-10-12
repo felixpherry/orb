@@ -18,18 +18,18 @@ use wherror::Error;
 
 use crate::ids::PaneId;
 
-/// The fewest rows a pane outside a stack keeps after a `Cmd +` step, its
+/// The fewest rows a pane outside a stack keeps after an `Alt +` step, its
 /// frame included. A stack keeps twice this, since its list takes up to
 /// half its rows.
 const MIN_PANE_ROWS: u16 = 5;
-/// The fewest columns any pane or stack keeps after a `Cmd +` step, its
+/// The fewest columns any pane or stack keeps after an `Alt +` step, its
 /// frame included.
 const MIN_PANE_COLS: u16 = 5;
 
-/// The `Cmd +`/`Cmd -` step, in percent of the tab, when the stacked one has
+/// The `Alt +`/`Alt -` step, in percent of the tab, when the stacked one has
 /// nowhere to go, and the least share of the tab a moved pane keeps.
 const RESIZE_PERCENT: f32 = 5.0;
-/// The share of the tab `Cmd +`/`Cmd -` try first.
+/// The share of the tab `Alt +`/`Alt -` try first.
 const STACKED_RESIZE_PERCENT: f32 = 30.0;
 
 /// `percent` of `extent` cells, rounded, at least 1.
@@ -513,7 +513,7 @@ impl TileLayout {
         }
     }
 
-    /// `Cmd +`: towards the first neighbour above, below,
+    /// `Alt +`: towards the first neighbour above, below,
     /// left or right that lines up with the focused pane (or its stack) along
     /// its whole edge, grows it [`STACKED_RESIZE_PERCENT`] of the tab, or
     /// when that leaves a pane there too small, stacks it with that
@@ -543,7 +543,7 @@ impl TileLayout {
         }
     }
 
-    /// `Cmd -`: breaks one pane out of the focused pane's
+    /// `Alt -`: breaks one pane out of the focused pane's
     /// stack, else shrinks the focused pane [`STACKED_RESIZE_PERCENT`] of the
     /// tab, else [`RESIZE_PERCENT`], any way that fits. Whether it changed.
     pub fn shrink_focused(&mut self, body: Rect) -> bool {

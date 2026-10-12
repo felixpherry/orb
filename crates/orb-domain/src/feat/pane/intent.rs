@@ -403,7 +403,7 @@ mod tests {
             ..attached()
         };
 
-        // When handling LeavePane (`<C-S-h>`).
+        // When handling LeavePane (`<C-g> h`).
         IntentHandler::handle(&Intent::LeavePane, &mut state);
 
         // Then the sidebar is shown and has the keys.
@@ -435,14 +435,14 @@ mod tests {
         // Given the sidebar on attached agent 2.
         let mut state = left_pane(&[2], 2);
 
-        // When handling FocusPanes (`<C-S-l>`).
+        // When handling FocusPanes (`<C-g> l`).
         IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then keys go into agent 2's pane.
         assert_eq!(
             state.focus,
             Focus::Pane,
-            "<C-S-l> should go into the selected session's pane"
+            "<C-g> l should go into the selected session's pane"
         );
     }
 
@@ -451,7 +451,7 @@ mod tests {
         // Given the sidebar on attached agent 2.
         let mut state = left_pane(&[2], 2);
 
-        // When handling FocusPanes (`<C-S-l>`).
+        // When handling FocusPanes (`<C-g> l`).
         let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the loop attaches to agent 2 and the statuses are refreshed.
@@ -462,7 +462,7 @@ mod tests {
                 Command::Sessions(SessionsCommand::RefreshSessions),
                 Command::Sessions(SessionsCommand::SaveJumps),
             ],
-            "<C-S-l> should attach to the selected session, then refresh"
+            "<C-g> l should attach to the selected session, then refresh"
         );
     }
 
@@ -477,13 +477,13 @@ mod tests {
         let mut state = left_pane(attached, 2);
         let before = state.focus;
 
-        // When handling FocusPanes (`<C-S-l>`).
+        // When handling FocusPanes (`<C-g> l`).
         IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the keys stay put.
         assert_eq!(
             state.focus, before,
-            "<C-S-l> with {attached:?} attached should keep the keys"
+            "<C-g> l with {attached:?} attached should keep the keys"
         );
     }
 
@@ -560,7 +560,7 @@ mod tests {
         IntentHandler::handle(&Intent::JumpBack, &mut state);
         IntentHandler::handle(&Intent::LeavePane, &mut state);
 
-        // When handling `<C-S-l>` back into agent 1's pane.
+        // When handling `<C-g> l` back into agent 1's pane.
         let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the list isn't saved: nothing was recorded.
@@ -624,7 +624,7 @@ mod tests {
         // Given agent 1 selected but not attached.
         let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
-        // When handling FocusPanes (`<C-S-l>`).
+        // When handling FocusPanes (`<C-g> l`).
         IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the sidebar keeps the keys.
@@ -636,7 +636,7 @@ mod tests {
         // Given agent 1's pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
-        // When handling FocusPanes (`<C-S-l>`).
+        // When handling FocusPanes (`<C-g> l`).
         let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then nothing happens.
@@ -756,14 +756,14 @@ mod tests {
         let mut state = left_pane_showing_1(&[1], 2);
         let active_row = state.active_row();
 
-        // When handling FocusPanes (`<C-S-l>`).
+        // When handling FocusPanes (`<C-g> l`).
         IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the keys are in session 1 with the cursor on its active row.
         assert_eq!(
             (state.focus, state.sessions.cursor),
             (Focus::Pane, active_row),
-            "<C-S-l> should fall back to the active session"
+            "<C-g> l should fall back to the active session"
         );
     }
 

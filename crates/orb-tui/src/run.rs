@@ -26,15 +26,15 @@
 //! lists it is attached again once; a second death closes the pane with an
 //! error in the message box. One whose session isn't shown any more is
 //! dropped, keeping its program. While a pane
-//! has the keys, input goes straight to its program except orb's Cmd keys,
+//! has the keys, input goes straight to its program except orb's Alt keys,
 //! `<C-[>`/`<C-]>` and a `<C-g>` sequence (see [`keymap::route`]). The loop
 //! itself reads the directory picker's listings, the branch picker's refs
 //! and the session picker's preview, re-reading the preview whenever the
 //! selected agent's transcript changes length, since each takes
 //! milliseconds.
 //!
-//! A click on the sidebar, `<C-S-h>` or `<C-g> e` from a pane moves the keys
-//! to the sidebar and leaves the panes drawn, so `<C-S-l>` or `<C-g> e` goes
+//! A click on the sidebar, `<C-g> h` or `<C-g> e` from a pane moves the keys
+//! to the sidebar and leaves the panes drawn, so `<C-g> l` or `<C-g> e` goes
 //! back in. Settling
 //! or deleting a session ends its panes' clients; `⏎` on a settled session
 //! brings its panes back the way start-up does. A pane whose program exits
@@ -657,7 +657,7 @@ impl App {
                     (Focus::Sidebar | Focus::Pane, _) => {
                         match keymap::route(key, focus == Focus::Pane, self.keys.is_pending()) {
                             Route::Intent(intent) => {
-                                // A Cmd key or a jump ends any key sequence in progress.
+                                // An Alt key or a jump ends any key sequence in progress.
                                 self.keys.dismiss();
                                 Some(intent)
                             }

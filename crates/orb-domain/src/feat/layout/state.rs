@@ -25,21 +25,21 @@ pub struct PaneEntry {
     pub resume: Option<String>,
 }
 
-/// The trees `Cmd +` and `Cmd -` can go back to. It holds only while the
+/// The trees `Alt +` and `Alt -` can go back to. It holds only while the
 /// tab's tree is still the one the last of them left.
 #[derive(Debug, Clone, PartialEq)]
 struct ResizeHistory {
-    /// The tree the last `Cmd +` or `Cmd -` left.
+    /// The tree the last `Alt +` or `Alt -` left.
     after: TileLayout,
-    /// The trees from before each `Cmd +`, newest last; `Cmd -` goes back to them.
+    /// The trees from before each `Alt +`, newest last; `Alt -` goes back to them.
     before_grow: Vec<TileLayout>,
-    /// The trees from before each `Cmd -`, newest last; `Cmd +` goes back to them.
+    /// The trees from before each `Alt -`, newest last; `Alt +` goes back to them.
     before_shrink: Vec<TileLayout>,
 }
 
 /// One tab: its name, its panes' tree, whether it shows only the focused
 /// pane, its swap layout and whether it was changed by hand, and what
-/// `Cmd +` and `Cmd -` can undo.
+/// `Alt +` and `Alt -` can undo.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
     /// Set by renaming the tab; unnamed tabs show only their number.
@@ -48,7 +48,7 @@ pub struct Tab {
     zoomed: bool,
     /// Where the tab is in the swap layout list.
     swap_layout: SwapLayout,
-    /// Changed by hand: a split, a stack, or a `Cmd +`/`Cmd -` that changed
+    /// Changed by hand: a split, a stack, or an `Alt +`/`Alt -` that changed
     /// the tree. Adds and closes don't re-tile while it's set; a relayout
     /// clears it.
     hand_changed: bool,
@@ -97,7 +97,7 @@ impl Tab {
     /// Re-tiles the tab in the first swap layout that fits its pane count,
     /// clears the mark and shows every pane. `cycle` is `None` for an add or
     /// close (the search starts at the tab's own layout, forwards) and
-    /// `Some(back)` for `Cmd ]`/`Cmd [`, which first steps one layout that way
+    /// `Some(back)` for `Alt ]`/`Alt [`, which first steps one layout that way
     /// unless the tab was changed by hand.
     fn relayout(&mut self, cycle: Option<bool>) {
         let step = cycle.is_some() && !self.hand_changed;
@@ -175,7 +175,7 @@ impl Tab {
     }
 
     /// Runs `step` with the tab's resize history, emptied first when the tree
-    /// is no longer the one the last `Cmd +` or `Cmd -` left, then keeps the
+    /// is no longer the one the last `Alt +` or `Alt -` left, then keeps the
     /// history for the tree `step` leaves. Whether `step` changed the tree.
     fn with_history<F>(&mut self, step: F) -> bool
     where
@@ -196,7 +196,7 @@ impl Tab {
         changed
     }
 
-    /// Goes back to the tree from before the last `Cmd -`, or grows or
+    /// Goes back to the tree from before the last `Alt -`, or grows or
     /// stacks the focused pane. With nothing left to grow or stack, the tab
     /// zooms unless the pane is its only one. A zoomed tab doesn't grow, and
     /// neither does one with no
@@ -226,7 +226,7 @@ impl Tab {
         })
     }
 
-    /// Leaves a zoom, or goes back to the tree from before the last `Cmd +`,
+    /// Leaves a zoom, or goes back to the tree from before the last `Alt +`,
     /// or breaks a pane out of the focused stack, or shrinks the focused pane.
     /// Whether the tree changed; leaving a zoom isn't a change.
     fn shrink(&mut self, body: Rect) -> bool {
@@ -1023,7 +1023,7 @@ impl Layouts {
         }
     }
 
-    /// `Cmd +` (`grow`) or `Cmd -` on the shown tab's focused pane: see
+    /// `Alt +` (`grow`) or `Alt -` on the shown tab's focused pane: see
     /// [`Tab::grow`] and [`Tab::shrink`]. Each undoes the other first. Whether
     /// the tree changed, which marks the tab changed by hand; a zoom or
     /// unzoom alone isn't a change. While a float has the keys, every side of
@@ -1112,7 +1112,7 @@ impl Layouts {
         }
     }
 
-    /// `Cmd ]` (or `Cmd [` when `back`) while a float has the keys: the floats
+    /// `Alt ]` (or `Alt [` when `back`) while a float has the keys: the floats
     /// go to the next layout that fits their count, wrapping; floats changed
     /// by hand get their own layout back first. Whether a float had the keys.
     pub fn cycle_float_layout(&mut self, owner: SessionId, back: bool) -> bool {

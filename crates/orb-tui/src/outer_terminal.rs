@@ -151,7 +151,7 @@ mod tests {
         // Then it pushes kitty's disambiguate and alternate-key flags (1 | 4).
         assert!(
             String::from_utf8_lossy(&out).contains("\x1b[>5u"),
-            "enable should push kitty flags 5, so Ctrl+[ and Super arrive distinct"
+            "enable should push kitty flags 5, so Ctrl+[ and Alt+[ arrive distinct"
         );
     }
 }

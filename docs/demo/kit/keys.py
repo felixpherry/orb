@@ -5,8 +5,8 @@ VHS has no Cmd key, its Alt sends nothing extra on macOS, and its terminal
 speaks no kitty keyboard protocol. So the tape types a marker character and
 this wrapper rewrites it into the sequence orb reads:
 
-  ⌘<key>     Cmd+<key>          (kitty CSI <code>;9u)
-  ⌃H / ⌃L    Ctrl+Shift+h / l   (move the keys to the sidebar / panes)
+  ⌘<key>     Alt+<key>, what Cmd sends through kitty's Cmd→Alt maps (kitty CSI <code>;3u)
+  ⌃H / ⌃L    <C-g> h / <C-g> l  (move the keys to the sidebar / panes)
   ⌃[ / ⌃]    Ctrl+[ / Ctrl+]    (jump back / forward)
   🖱x,y;      a left click at column x, row y (1-based, SGR mouse)
 
@@ -14,7 +14,7 @@ Usage: keys.py <command> [args...]
 """
 import fcntl, os, pty, select, signal, sys, termios, tty
 
-CTRL = {"H": b"\x1b[104;6u", "L": b"\x1b[108;6u", "[": b"\x1b[91;5u", "]": b"\x1b[93;5u"}
+CTRL = {"H": b"\x1b[103;5uh", "L": b"\x1b[103;5ul", "[": b"\x1b[91;5u", "]": b"\x1b[93;5u"}
 
 
 class Translator:
@@ -36,7 +36,7 @@ class Translator:
                 else:
                     self.pending += ch
             elif self.pending == "⌘":
-                out += b"\x1b[%d;9u" % ord(ch)
+                out += b"\x1b[%d;3u" % ord(ch)
                 self.pending = ""
             elif self.pending == "⌃":
                 out += CTRL.get(ch, ch.encode())
@@ -86,8 +86,8 @@ def main():
 
 def check():
     t = Translator()
-    assert t.feed("⌘".encode()) == b"" and t.feed(b"n") == b"\x1b[110;9u"
-    assert t.feed("⌃H".encode()) == b"\x1b[104;6u"
+    assert t.feed("⌘".encode()) == b"" and t.feed(b"n") == b"\x1b[110;3u"
+    assert t.feed("⌃H".encode()) == b"\x1b[103;5uh"
     assert t.feed(b"\x1b[A") == b"\x1b[A"
     assert t.feed("🖱12,".encode()) == b"" and t.feed(b"3;") == b"\x1b[<0;12;3M\x1b[<0;12;3m"
     assert t.feed("é".encode()) == "é".encode()

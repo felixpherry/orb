@@ -1091,7 +1091,7 @@ fn swap_layout_indicator_ends_the_tab_bar() {
     let bar = tab_bar(&buffer);
     assert!(
         bar.trim_end()
-            .ends_with(" Cmd <[]> \u{e0b0} VERTICAL \u{e0b0}"),
+            .ends_with(" Alt <[]> \u{e0b0} VERTICAL \u{e0b0}"),
         "tab bar was '{bar}'"
     );
 }
@@ -1106,7 +1106,7 @@ fn one_pane_tab_draws_no_swap_layout_indicator() {
 
     // Then the bar has no swap layout indicator.
     let bar = tab_bar(&buffer);
-    assert!(!bar.contains("Cmd <[]>"), "tab bar was '{bar}'");
+    assert!(!bar.contains("Alt <[]>"), "tab bar was '{bar}'");
 }
 
 #[rstest::rstest]
@@ -1123,7 +1123,7 @@ fn swap_layout_indicator_gives_way_to_tabs() {
 
     // Then the indicator is dropped.
     let bar = tab_bar(&buffer);
-    assert!(!bar.contains("Cmd <[]>"), "tab bar was '{bar}'");
+    assert!(!bar.contains("Alt <[]>"), "tab bar was '{bar}'");
 }
 
 #[rstest::rstest]
@@ -1141,7 +1141,7 @@ fn tab_bar_shows_the_float_layout_while_a_float_has_the_keys() {
     let bar = tab_bar(&buffer);
     assert!(
         bar.trim_end()
-            .ends_with(" Cmd <[]> \u{e0b0} STAGGERED \u{e0b0}"),
+            .ends_with(" Alt <[]> \u{e0b0} STAGGERED \u{e0b0}"),
         "tab bar was '{bar}'"
     );
 }
@@ -1180,7 +1180,7 @@ fn tab_bar_keeps_the_tab_layout_while_the_keys_are_in_the_sidebar() {
 
     // Then the bar has no layout indicator, as for any one-pane tab.
     let bar = tab_bar(&buffer);
-    assert!(!bar.contains("Cmd <[]>"), "tab bar was '{bar}'");
+    assert!(!bar.contains("Alt <[]>"), "tab bar was '{bar}'");
 }
 
 /// Agent 1's session with ten tabs, tab `shown` (1-based) shown.

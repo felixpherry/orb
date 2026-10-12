@@ -228,9 +228,9 @@ where
 /// Which way a swap-layout key cycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwapStep {
-    /// `Cmd ]`: the next layout.
+    /// `Alt ]`: the next layout.
     Next,
-    /// `Cmd [`: the previous layout.
+    /// `Alt [`: the previous layout.
     Previous,
 }
 
@@ -241,7 +241,7 @@ pub(crate) enum SizeStep {
     Shrink,
 }
 
-/// `Cmd ]` (or `Cmd [` for [`SwapStep::Previous`]): cycles the floats' layout
+/// `Alt ]` (or `Alt [` for [`SwapStep::Previous`]): cycles the floats' layout
 /// while a float has the keys, else the shown tab's swap layout; saves the
 /// layout.
 pub(crate) fn swap_layout(state: &mut AppState, step: SwapStep) -> Vec<Command> {
@@ -857,14 +857,14 @@ mod tests {
         // Given agent 1's lone pane in its only tab, with the keys.
         let mut state = with_layout(Focus::Pane);
 
-        // When moving the focus left (`Cmd h`).
+        // When moving the focus left (`Alt h`).
         let commands = IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
 
         // Then the pane keeps the keys and nothing happens.
         assert_eq!(
             (state.focus, commands),
             (Focus::Pane, vec![]),
-            "Cmd h never reaches the sidebar"
+            "Alt h never reaches the sidebar"
         );
     }
 
@@ -877,14 +877,14 @@ mod tests {
         // Given agent 1's layout shown while the sidebar has the keys.
         let mut state = with_layout(Focus::Sidebar);
 
-        // When moving the focus (`Cmd h/j/k/l`).
+        // When moving the focus (`Alt h/j/k/l`).
         let commands = IntentHandler::handle(&Intent::MoveFocus(nav), &mut state);
 
         // Then the sidebar keeps the keys and nothing happens.
         assert_eq!(
             (state.focus, commands),
             (Focus::Sidebar, vec![]),
-            "Cmd {nav:?} does nothing in the sidebar"
+            "Alt {nav:?} does nothing in the sidebar"
         );
     }
 
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(
             width(&state),
             before.map(|width| width + 24),
-            "Cmd + grows the focused pane"
+            "Alt + grows the focused pane"
         );
     }
 
@@ -955,13 +955,13 @@ mod tests {
         assert_eq!(
             commands,
             vec![Command::Sessions(SessionsCommand::SaveLayout(SessionId(1)))],
-            "a Cmd + that stacks the split saves the layout"
+            "an Alt + that stacks the split saves the layout"
         );
     }
 
     #[rstest::rstest]
     fn grow_that_only_zooms_returns_no_commands() {
-        // Given two panes over a 10-column body that one Cmd + stacked.
+        // Given two panes over a 10-column body that one Alt + stacked.
         let mut state = split_layout();
         state.layouts.fit_to(Rect::new(0, 0, 10, 24));
         IntentHandler::handle(&Intent::GrowFocused, &mut state);
@@ -972,7 +972,7 @@ mod tests {
         // Then nothing is saved.
         assert!(
             commands.is_empty(),
-            "a Cmd + that only zooms leaves the saved tree alone"
+            "an Alt + that only zooms leaves the saved tree alone"
         );
     }
 
@@ -1332,7 +1332,7 @@ mod tests {
         IntentHandler::handle(&Intent::GoToTab(1), &mut state);
 
         // Then the first tab is shown.
-        assert_eq!(shown_tab(&state), Some(0), "Cmd 1 shows the first tab");
+        assert_eq!(shown_tab(&state), Some(0), "Alt 1 shows the first tab");
     }
 
     #[rstest::rstest]
@@ -1347,7 +1347,7 @@ mod tests {
         assert_eq!(
             shown_swap_layout(&state),
             Some(SwapLayout::Vertical),
-            "Cmd ] steps BASE to vertical"
+            "Alt ] steps BASE to vertical"
         );
     }
 
@@ -1363,7 +1363,7 @@ mod tests {
         assert_eq!(
             shown_swap_layout(&state),
             Some(SwapLayout::Horizontal),
-            "Cmd [ wraps BASE back to horizontal"
+            "Alt [ wraps BASE back to horizontal"
         );
     }
 
@@ -1385,7 +1385,7 @@ mod tests {
         assert_eq!(
             shown_float_layout(&state),
             Some(FloatLayout::Enlarged),
-            "Cmd ] on a float steps staggered to enlarged"
+            "Alt ] on a float steps staggered to enlarged"
         );
     }
 
@@ -1402,7 +1402,7 @@ mod tests {
         assert_eq!(
             shown_swap_layout(&state),
             Some(SwapLayout::Base),
-            "Cmd ] on a float leaves the tab's layout alone"
+            "Alt ] on a float leaves the tab's layout alone"
         );
     }
 
@@ -1436,7 +1436,7 @@ mod tests {
         assert_eq!(
             shown_swap_layout(&state),
             Some(SwapLayout::Vertical),
-            "Cmd ] from the sidebar cycles the tab, not the floats"
+            "Alt ] from the sidebar cycles the tab, not the floats"
         );
     }
 
@@ -1471,7 +1471,7 @@ mod tests {
         assert_eq!(
             (shown_tab(&state), shown_tab_name(&state).as_deref()),
             (Some(0), Some("logs")),
-            "Cmd i moves the tab left"
+            "Alt i moves the tab left"
         );
     }
 
