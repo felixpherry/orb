@@ -1,5 +1,6 @@
 //! Domain features, one directory each.
 
+pub mod control;
 pub mod git;
 pub mod harness;
 pub mod integration;

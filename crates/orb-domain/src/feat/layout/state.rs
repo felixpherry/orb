@@ -159,6 +159,11 @@ impl Tab {
         self.tree.pane_ids().contains(&pane)
     }
 
+    /// The tab's panes, in tree order.
+    pub fn pane_ids(&self) -> Vec<PaneId> {
+        self.tree.pane_ids()
+    }
+
     /// The tab's focused pane.
     pub fn focused(&self) -> PaneId {
         self.tree.focused()

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
@@ -13,6 +14,9 @@ use std::{panic, thread};
 
 use error_stack::{Report, ResultExt};
 use jiff::tz::TimeZone;
+use orb_domain::feat::control::client;
+use orb_domain::feat::control::protocol::socket_path;
+use orb_domain::feat::control::server::{self, ControlDeps};
 use orb_domain::feat::git::git_cli::GitCli;
 use orb_domain::feat::git::git_service::GitService;
 use orb_domain::feat::harness::Harnesses;
@@ -23,7 +27,7 @@ use orb_domain::feat::integration::{self, IntegrationPaths};
 use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
-use orb_domain::feat::sessions::child_env::child_env;
+use orb_domain::feat::sessions::child_env::{ORB_PANE_ID, child_env};
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
 use orb_domain::feat::sessions::store::{self, Store, Upgrade};
 use orb_domain::feat::worktrees::worktrees_actor::{
@@ -31,6 +35,7 @@ use orb_domain::feat::worktrees::worktrees_actor::{
 };
 use orb_domain::feat::zmx::zmx_cli::ZmxCli;
 use orb_domain::feat::zmx::zmx_service::ZmxService;
+use orb_domain::ids::PaneId;
 use orb_domain::{
     AppState, Finished, Log, Services, State, ancestry, ends_orb, panic_text, parse_parents,
     run_within, stop_gracefully,
@@ -50,11 +55,29 @@ const QUIT_CAP: Duration = Duration::from_secs(2);
 /// How long quitting waits for the runtime's tasks after the workers stopped.
 const RUNTIME_SHUTDOWN: Duration = Duration::from_millis(200);
 
-fn main() -> Result<(), Report<OrbError>> {
+fn main() -> Result<ExitCode, Report<OrbError>> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| Report::new(OrbError).attach("HOME is not set"))?;
     let orb_root = home.join(".orb");
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|arg| client::NOUNS.iter().any(|noun| arg == noun))
+    {
+        let caller = std::env::var(ORB_PANE_ID)
+            .ok()
+            .and_then(|id| id.parse().ok())
+            .map(PaneId);
+        let code = client::run(
+            &args,
+            caller,
+            &socket_path(&orb_root),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        );
+        return Ok(ExitCode::from(code));
+    }
     let log = Log::new(orb_root.join("orb.log"));
     log.line(
         "start",
@@ -65,11 +88,11 @@ fn main() -> Result<(), Report<OrbError>> {
         ),
     );
     install_crash_hook(log.clone());
-    let ended = run(home, orb_root, &log);
+    let ended = run(home, orb_root, &args, &log);
     if let Err(report) = &ended {
         log.error("orb stopped", report);
     }
-    ended
+    ended.map(|()| ExitCode::SUCCESS)
 }
 
 /// Makes every crash end orb at once: the crash and a backtrace go to `log`,
@@ -110,23 +133,28 @@ fn upgrade_policy(home: &Path, args: &[OsString]) -> Upgrade {
 
 /// Everything after the log opens: integrations, store, actors, frontend,
 /// then the shutdown in order.
-fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbError>> {
+fn run(
+    home: PathBuf,
+    orb_root: PathBuf,
+    args: &[OsString],
+    log: &Log,
+) -> Result<(), Report<OrbError>> {
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let claude_dir = integration::claude_dir(config_dir, &home);
     let integrations = integration_paths(&home, &orb_root, &claude_dir);
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "integration") {
-        return install_integrations(&args, &integrations, &home);
+        return install_integrations(args, &integrations, &home);
     }
     let pi_sessions = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
         .map_or_else(|| home.join(".pi/agent/sessions"), PathBuf::from);
     let env = child_env(std::env::vars_os());
     let tz = TimeZone::system();
     let notifier = desktop_notifier();
+    let socket = socket_path(&orb_root);
     let store_path = orb_root.join("userdata/state.sqlite");
     let store_lock = store::lock(&store_path).change_context(OrbError)?;
-    let store = Store::open_live(&store_path, upgrade_policy(&home, &args), log)
-        .change_context(OrbError)?;
+    let store =
+        Store::open_live(&store_path, upgrade_policy(&home, args), log).change_context(OrbError)?;
     let search_index = orb_root.join("userdata/search.sqlite");
     let worktrees_root = orb_root.join("worktrees");
     let runtime = tokio::runtime::Runtime::new().change_context(OrbError)?;
@@ -137,21 +165,7 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
     });
     let frontend = Frontend::new(tz);
     quit_on_signals(frontend.quitter(), log);
-    let services = {
-        let git = GitService::new(Arc::new(GitCli::new(env.clone())), log.clone());
-        let claude = ClaudeCode::new(Arc::new(ClaudeSupervisor::new(env.clone())), claude_dir);
-        let pi = Pi::new(pi_sessions);
-        Services {
-            harnesses: Harnesses::new(vec![Arc::new(claude), Arc::new(pi)]),
-            git,
-            zmx: ZmxService::new(
-                Arc::new(ZmxCli::new(env.clone())),
-                orb_root.join("zmx"),
-                log.clone(),
-            ),
-            log: log.clone(),
-        }
-    };
+    let services = services(&env, claude_dir, pi_sessions, &orb_root, log);
     let git = services.git.clone();
     let harnesses = services.harnesses.clone();
     let zmx = services.zmx.clone();
@@ -181,6 +195,13 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
         log: log.clone(),
     });
     let workers = (sessions.clone(), worktrees.clone(), search.clone());
+    let control = ControlDeps {
+        state: state.clone(),
+        log: log.clone(),
+    };
+    if let Err(report) = server::listen(&socket, control) {
+        log.error("couldn't open the agent control socket", &report);
+    }
     let ended = frontend
         .run(
             state,
@@ -196,6 +217,7 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
             log.clone(),
         )
         .change_context(OrbError);
+    server::remove_socket(&socket, log);
     let stopped = runtime.block_on(tokio::time::timeout(QUIT_CAP, async {
         tokio::join!(
             stop_gracefully(&workers.0),
@@ -211,6 +233,30 @@ fn run(home: PathBuf, orb_root: PathBuf, log: &Log) -> Result<(), Report<OrbErro
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
     drop(store_lock);
     ended
+}
+
+/// The outside services the actors use: git, the agent harnesses, zmx and the
+/// log.
+fn services(
+    env: &[(OsString, OsString)],
+    claude_dir: PathBuf,
+    pi_sessions: PathBuf,
+    orb_root: &Path,
+    log: &Log,
+) -> Services {
+    let git = GitService::new(Arc::new(GitCli::new(env.to_vec())), log.clone());
+    let claude = ClaudeCode::new(Arc::new(ClaudeSupervisor::new(env.to_vec())), claude_dir);
+    let pi = Pi::new(pi_sessions);
+    Services {
+        harnesses: Harnesses::new(vec![Arc::new(claude), Arc::new(pi)]),
+        git,
+        zmx: ZmxService::new(
+            Arc::new(ZmxCli::new(env.to_vec())),
+            orb_root.join("zmx"),
+            log.clone(),
+        ),
+        log: log.clone(),
+    }
 }
 
 /// Quits orb, as `<C-g> q` does, on SIGTERM, SIGINT or SIGHUP. A signal orb

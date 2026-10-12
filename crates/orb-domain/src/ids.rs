@@ -3,11 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Identifies an agent across launches (its row in orb's store).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct AgentId(pub i64);
 
 /// Identifies a session across launches (its row in orb's store).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SessionId(pub i64);
 
 /// Identifies a pane across launches (its row in orb's store).
@@ -23,5 +25,6 @@ impl PaneId {
 }
 
 /// Identifies a project across launches (its row in orb's store).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct ProjectId(pub i64);
