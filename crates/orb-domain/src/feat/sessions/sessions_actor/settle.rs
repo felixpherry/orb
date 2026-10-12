@@ -59,14 +59,14 @@ impl SessionsActor {
         self.edit_session(id, unsettle_session_row);
     }
 
-    /// Marks the latest turn of each of session `id`'s agents seen.
-    pub(super) fn visit(&mut self, id: SessionId) {
-        let unseen: Vec<AgentId> = self
-            .session_rows(id)
-            .filter(|row| row.last_activity_at > row.last_visited_at)
-            .map(|row| row.id)
-            .collect();
-        for agent in unseen {
+    /// Marks the latest turn of the agent in pane `pane` seen.
+    pub(super) fn visit(&mut self, pane: PaneId) {
+        let unseen = self
+            .rows
+            .iter()
+            .find(|row| row.pane_id == Some(pane) && row.last_activity_at > row.last_visited_at)
+            .map(|row| row.id);
+        if let Some(agent) = unseen {
             self.edit(agent, |row, now| row.last_visited_at = now);
         }
     }

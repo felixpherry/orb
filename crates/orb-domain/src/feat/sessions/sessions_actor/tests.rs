@@ -1820,7 +1820,7 @@ fn unsettle_session_keeps_it_active() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 #[tokio::test]
-async fn visit_marks_the_sessions_agents_seen() -> Result<(), Report<StoreError>> {
+async fn visiting_an_agent_pane_marks_that_agent_seen() -> Result<(), Report<StoreError>> {
     // Given agent aa whose turn ended unseen.
     let store = Store::open_in_memory()?;
     let inserted = insert_agent(&store, "aa")?;
@@ -1830,14 +1830,55 @@ async fn visit_marks_the_sessions_agents_seen() -> Result<(), Report<StoreError>
     host.set_running(Ok(vec![record("aa", AgentStatus::Idle)]));
     actor.poll().await;
 
-    // When visiting its session.
-    actor.visit(inserted.session);
+    // When visiting its pane.
+    actor.visit(inserted.pane);
 
     // Then aa is seen.
     assert_eq!(
         shown(&state, inserted.agent).map(|agent| agent.unseen),
         Some(false),
-        "visiting a session should see its agents' turns"
+        "visiting an agent's pane should see its turn"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn visiting_one_agent_pane_leaves_its_sessions_other_agents_unseen()
+-> Result<(), Report<StoreError>> {
+    // Given agents aa and bb in two tabs of one session, both turns
+    // ended unseen.
+    let store = Store::open_in_memory()?;
+    let inserted = insert_agent(&store, "aa")?;
+    let second = second_tab(&store, &inserted)?;
+    let (bb, _) = store.insert_pane_agent(&NewPaneAgent {
+        pane: second,
+        session_id: "bb".to_owned(),
+        transcript_path: None,
+        harness: HarnessId::new("claude"),
+        cwd: PathBuf::from(PROJECT_ROOT),
+        created_at: now_ms() - HOUR_MS,
+    })?;
+    let host = listing(vec![
+        record("aa", AgentStatus::Working),
+        record("bb", AgentStatus::Working),
+    ]);
+    let (mut actor, state) = start_unselected(store, &host);
+    actor.poll().await;
+    host.set_running(Ok(vec![
+        record("aa", AgentStatus::Idle),
+        record("bb", AgentStatus::Idle),
+    ]));
+    actor.poll().await;
+
+    // When visiting aa's pane.
+    actor.visit(inserted.pane);
+
+    // Then bb is still unseen.
+    assert_eq!(
+        shown(&state, bb).map(|agent| agent.unseen),
+        Some(true),
+        "visiting one agent's pane should leave the others unseen"
     );
     Ok(())
 }

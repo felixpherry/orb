@@ -4,7 +4,6 @@
 use crate::command::SessionsCommand;
 use crate::feat::pane::intent::{focus_right, show_pane};
 use crate::feat::picker::intent::PickerKey;
-use crate::feat::sessions::intent::with_visit;
 use crate::feat::sessions::intent::{confirm_folder_name, confirm_session_name};
 use crate::feat::sessions::state::{Search, SidebarItem};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
@@ -14,29 +13,27 @@ use crate::{AppState, Command, Focus, TextInput};
 /// Moves the cursor to the next row.
 pub(crate) fn select_next(state: &mut AppState) -> Vec<Command> {
     state.sessions.select_next(&state.layouts);
-    with_visit(state, vec![])
+    vec![]
 }
 
 /// Moves the cursor to the previous row.
 pub(crate) fn select_prev(state: &mut AppState) -> Vec<Command> {
     state.sessions.select_prev(&state.layouts);
-    with_visit(state, vec![])
+    vec![]
 }
 
 /// `gg`: moves the cursor to the first row, recording the jump.
 pub(crate) fn select_first(state: &mut AppState) -> Vec<Command> {
     let from = state.sessions.cursor;
     state.sessions.select_first(&state.layouts);
-    let commands = record_jump(state, from);
-    with_visit(state, commands)
+    record_jump(state, from)
 }
 
 /// `G`: moves the cursor to the last row, recording the jump.
 pub(crate) fn select_last(state: &mut AppState) -> Vec<Command> {
     let from = state.sessions.cursor;
     state.sessions.select_last(&state.layouts);
-    let commands = record_jump(state, from);
-    with_visit(state, commands)
+    record_jump(state, from)
 }
 
 /// Moves the cursor half a page down.
@@ -44,7 +41,7 @@ pub(crate) fn half_page_down(state: &mut AppState) -> Vec<Command> {
     state
         .sessions
         .half_page_down(&state.sidebar.layout, &state.layouts);
-    with_visit(state, vec![])
+    vec![]
 }
 
 /// Moves the cursor half a page up.
@@ -52,7 +49,7 @@ pub(crate) fn half_page_up(state: &mut AppState) -> Vec<Command> {
     state
         .sessions
         .half_page_up(&state.sidebar.layout, &state.layouts);
-    with_visit(state, vec![])
+    vec![]
 }
 
 /// A click on row `item`: moves the cursor there; during a search it also
@@ -63,7 +60,7 @@ pub(crate) fn select_row(state: &mut AppState, item: SidebarItem) -> Vec<Command
         return search_key(PickerKey::Confirm, state);
     }
     state.sessions.select_row(item, &state.layouts);
-    with_visit(state, vec![])
+    vec![]
 }
 
 /// Shows or hides the sidebar.
@@ -279,8 +276,7 @@ pub(crate) fn search_key(key: PickerKey, state: &mut AppState) -> Vec<Command> {
                 sessions.enter(id);
             }
             state.focus = Focus::Sidebar;
-            let commands = record_jump(state, from);
-            return with_visit(state, commands);
+            return record_jump(state, from);
         }
         (PickerKey::Confirm | PickerKey::Cancel, _) => {
             sessions.cancel_search(&state.layouts);
@@ -288,7 +284,7 @@ pub(crate) fn search_key(key: PickerKey, state: &mut AppState) -> Vec<Command> {
         }
         _ => return vec![],
     }
-    with_visit(state, vec![])
+    vec![]
 }
 
 /// Records the move from `from` to the cursor as a jump and asks for the list
@@ -484,14 +480,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Intent::SelectFirst, 3)]
-    #[case(Intent::SelectLast, 1)]
-    #[case(Intent::SelectHalfPageDown, 2)]
-    #[case(Intent::SelectHalfPageUp, 3)]
-    fn sidebar_jumps_show_and_visit_the_agent_they_land_on(
-        #[case] intent: Intent,
-        #[case] expected: i64,
-    ) {
+    #[case(Intent::SelectFirst)]
+    #[case(Intent::SelectLast)]
+    #[case(Intent::SelectHalfPageDown)]
+    #[case(Intent::SelectHalfPageUp)]
+    fn sidebar_jumps_visit_nothing(#[case] intent: Intent) {
         // Given agents 3, 2 and 1 in sidebar order, with agent 2 selected.
         let mut state = state_with(
             vec![
@@ -505,17 +498,17 @@ mod tests {
         // When handling the jump.
         let commands = IntentHandler::handle(&intent, &mut state);
 
-        // Then the agent it lands on is visited.
+        // Then nothing is visited.
         assert!(
-            commands.contains(&Command::Sessions(SessionsCommand::Visit(SessionId(
-                expected
-            )))),
-            "{intent:?} should visit agent {expected}"
+            !commands
+                .iter()
+                .any(|command| matches!(command, Command::Sessions(SessionsCommand::Visit(_)))),
+            "{intent:?} only moves the hover, so it should visit nothing"
         );
     }
 
     #[rstest::rstest]
-    fn select_next_returns_visit() {
+    fn select_next_visits_nothing() {
         // Given sessions 2 and 1 in sidebar order, with session 2's agent row
         // selected.
         let mut state = state_with(
@@ -530,10 +523,12 @@ mod tests {
         // When handling SelectNext.
         let commands = IntentHandler::handle(&Intent::SelectNext, &mut state);
 
-        // Then the newly selected agent is visited.
+        // Then nothing is visited.
         assert!(
-            commands.contains(&Command::Sessions(SessionsCommand::Visit(SessionId(1)))),
-            "SelectNext should visit the agent it lands on"
+            !commands
+                .iter()
+                .any(|command| matches!(command, Command::Sessions(SessionsCommand::Visit(_)))),
+            "a hover move should visit nothing"
         );
     }
 
