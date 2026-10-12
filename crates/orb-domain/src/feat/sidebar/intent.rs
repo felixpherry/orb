@@ -2,12 +2,14 @@
 //! sidebar, and the rename box and search that take the picker's keys.
 
 use crate::command::SessionsCommand;
+use crate::feat::pane::intent::{focus_right, show_pane};
+use crate::feat::picker::intent::PickerKey;
+use crate::feat::sessions::intent::with_visit;
 use crate::feat::sessions::intent::{confirm_folder_name, confirm_session_name};
 use crate::feat::sessions::state::{Search, SidebarItem};
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::validate_rename;
-use crate::intent_handler::{focus_right, show_pane, with_visit};
-use crate::{AppState, Command, Focus, Intent, TextInput};
+use crate::{AppState, Command, Focus, TextInput};
 
 /// Moves the cursor to the next row.
 pub(crate) fn select_next(state: &mut AppState) -> Vec<Command> {
@@ -58,7 +60,7 @@ pub(crate) fn half_page_up(state: &mut AppState) -> Vec<Command> {
 pub(crate) fn select_row(state: &mut AppState, item: SidebarItem) -> Vec<Command> {
     if state.focus == Focus::Search {
         state.sessions.select_row(item, &state.layouts);
-        return search_key(&Intent::PickerConfirm, state);
+        return search_key(PickerKey::Confirm, state);
     }
     state.sessions.select_row(item, &state.layouts);
     with_visit(state, vec![])
@@ -138,23 +140,23 @@ pub(crate) fn search(state: &mut AppState) -> Vec<Command> {
 /// What a picker key does in the rename box: edit the name, save it (a blank
 /// name goes back to the harness's title) or cancel, both giving the sidebar back
 /// the keys. The picker's other keys do nothing.
-pub(crate) fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
-    match (intent, &mut state.rename) {
-        (Intent::PickerInput(ch), Some(rename)) => rename.input.insert(*ch),
-        (Intent::PickerBackspace, Some(rename)) => rename.input.backspace(),
-        (Intent::PickerDeleteWord, Some(rename)) => rename.input.delete_word(),
-        (Intent::PickerCursorLeft, Some(rename)) => rename.input.cursor_left(),
-        (Intent::PickerCursorRight, Some(rename)) => rename.input.cursor_right(),
-        (Intent::PickerCursorTo(index), Some(rename)) => rename.input.cursor_to(*index),
+pub(crate) fn rename_key(key: PickerKey, state: &mut AppState) -> Vec<Command> {
+    match (key, &mut state.rename) {
+        (PickerKey::Input(ch), Some(rename)) => rename.input.insert(ch),
+        (PickerKey::Backspace, Some(rename)) => rename.input.backspace(),
+        (PickerKey::DeleteWord, Some(rename)) => rename.input.delete_word(),
+        (PickerKey::CursorLeft, Some(rename)) => rename.input.cursor_left(),
+        (PickerKey::CursorRight, Some(rename)) => rename.input.cursor_right(),
+        (PickerKey::CursorTo(index), Some(rename)) => rename.input.cursor_to(index),
         (
-            Intent::PickerConfirm,
+            PickerKey::Confirm,
             Some(Rename {
                 target: RenameTarget::NewFolder(_),
                 ..
             }),
         ) => return confirm_folder_name(state),
         (
-            Intent::PickerConfirm,
+            PickerKey::Confirm,
             Some(Rename {
                 target: RenameTarget::NewSession { project, return_to },
                 ..
@@ -164,7 +166,7 @@ pub(crate) fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> 
             return confirm_session_name(state, project, return_to);
         }
         (
-            Intent::PickerCancel,
+            PickerKey::Cancel,
             Some(Rename {
                 target: RenameTarget::NewSession { return_to, .. },
                 ..
@@ -173,7 +175,7 @@ pub(crate) fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> 
             state.focus = *return_to;
             state.rename = None;
         }
-        (Intent::PickerConfirm, _) => {
+        (PickerKey::Confirm, _) => {
             state.focus = Focus::Sidebar;
             let Some(rename) = state.rename.take() else {
                 return vec![];
@@ -220,7 +222,7 @@ pub(crate) fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> 
                 }
             };
         }
-        (Intent::PickerCancel, _) => {
+        (PickerKey::Cancel, _) => {
             state.focus = Focus::Sidebar;
             // A tab's or pane's rename box was opened from the panes; the keys
             // go back there.
@@ -242,36 +244,36 @@ pub(crate) fn rename_key(intent: &Intent, state: &mut AppState) -> Vec<Command> 
 /// giving the sidebar back the keys. `⏎` keeps the cursor on its match and enters its session (with
 /// no match it acts as `Esc`); `Esc` puts it back where it was. The picker's
 /// other keys do nothing.
-pub(crate) fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
+pub(crate) fn search_key(key: PickerKey, state: &mut AppState) -> Vec<Command> {
     let sessions = &mut state.sessions;
-    match (intent, &mut sessions.search) {
-        (Intent::PickerInput(ch), Some(search)) => {
-            search.input.insert(*ch);
+    match (key, &mut sessions.search) {
+        (PickerKey::Input(ch), Some(search)) => {
+            search.input.insert(ch);
             sessions.select_first_match(&state.layouts);
         }
-        (Intent::PickerBackspace, Some(search)) => {
+        (PickerKey::Backspace, Some(search)) => {
             search.input.backspace();
             sessions.select_first_match(&state.layouts);
         }
-        (Intent::PickerDeleteWord, Some(search)) => {
+        (PickerKey::DeleteWord, Some(search)) => {
             search.input.delete_word();
             sessions.select_first_match(&state.layouts);
         }
-        (Intent::PickerCursorLeft, Some(search)) => {
+        (PickerKey::CursorLeft, Some(search)) => {
             search.input.cursor_left();
             return vec![];
         }
-        (Intent::PickerCursorRight, Some(search)) => {
+        (PickerKey::CursorRight, Some(search)) => {
             search.input.cursor_right();
             return vec![];
         }
-        (Intent::PickerCursorTo(index), Some(search)) => {
-            search.input.cursor_to(*index);
+        (PickerKey::CursorTo(index), Some(search)) => {
+            search.input.cursor_to(index);
             return vec![];
         }
-        (Intent::PickerNext, _) => sessions.select_next_match(&state.layouts),
-        (Intent::PickerPrev, _) => sessions.select_prev_match(&state.layouts),
-        (Intent::PickerConfirm, _) if sessions.cursor.is_some() => {
+        (PickerKey::Next, _) => sessions.select_next_match(&state.layouts),
+        (PickerKey::Prev, _) => sessions.select_prev_match(&state.layouts),
+        (PickerKey::Confirm, _) if sessions.cursor.is_some() => {
             let from = sessions.search.take().and_then(|search| search.return_to);
             if let Some(id) = sessions.selected_session().map(|session| session.id) {
                 sessions.enter(id);
@@ -280,7 +282,7 @@ pub(crate) fn search_key(intent: &Intent, state: &mut AppState) -> Vec<Command> 
             let commands = record_jump(state, from);
             return with_visit(state, commands);
         }
-        (Intent::PickerConfirm | Intent::PickerCancel, _) => {
+        (PickerKey::Confirm | PickerKey::Cancel, _) => {
             sessions.cancel_search(&state.layouts);
             state.focus = Focus::Sidebar;
         }
@@ -514,7 +516,7 @@ mod tests {
 
     #[rstest::rstest]
     fn select_next_returns_visit() {
-        // Given agents 2 and 1 in sidebar order, with agent 2's agent row
+        // Given sessions 2 and 1 in sidebar order, with session 2's agent row
         // selected.
         let mut state = state_with(
             vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],

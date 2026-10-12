@@ -1669,7 +1669,7 @@ fn free_scroll_stops_at_the_lists_end() {
     // When rendering the sidebar.
     let (_, hits) = render_with(&sessions, &mut scroll, 8);
 
-    // Then the last line shows the list's last row, agent 1's agent
+    // Then the last line shows the list's last row, session 1's agent
     // row.
     assert_eq!(
         hits.row_at(Position::new(1, 7)),
@@ -1866,7 +1866,7 @@ fn agent_name_is_the_same_in_sidebar_picker_and_search(
 
 #[rstest::rstest]
 fn selected_agent_row_has_the_visual_background() {
-    // Given the cursor on agent 1's agent row.
+    // Given the cursor on session 1's agent row.
     let sessions = Sessions {
         cursor: Some(agent_one()),
         ..sessions(vec![agent(1, AgentStatus::Idle)])

@@ -2,8 +2,9 @@
 //! panes and back.
 
 use crate::command::SessionsCommand;
+use crate::feat::pane::validator::validate_attach;
 use crate::feat::sessions::state::SidebarItem;
-use crate::intent_handler::{attach_session, focus_right};
+use crate::ids::SessionId;
 use crate::{AppState, Command, Focus};
 
 /// `⏎` on a sidebar row: on the settled shelf opens or closes it; on an
@@ -49,6 +50,97 @@ pub(crate) fn leave_pane(state: &mut AppState) -> Vec<Command> {
             ]
         }
         _ => vec![],
+    }
+}
+
+/// Attaches to the selected session and records entering it as a jump (see
+/// [`enter_session`]), unless it can't be attached to. The cursor lands on
+/// the session's active row.
+pub(crate) fn attach_session(state: &mut AppState) -> Vec<Command> {
+    match (
+        validate_attach(state),
+        state.sessions.selected_session().map(|session| session.id),
+    ) {
+        (Ok(()), Some(id)) => {
+            let commands = enter_session(state, id);
+            state.sessions.cursor = state.active_row();
+            commands
+        }
+        _ => vec![],
+    }
+}
+
+/// [`show_session`] `id`, recording entering it as a jump to the agent in
+/// its focused pane (a shell pane records the card), unless that is where
+/// the last `<C-[>`/`<C-]>` landed.
+pub(crate) fn enter_session(state: &mut AppState, id: SessionId) -> Vec<Command> {
+    let mut commands = show_session(state, id);
+    if state.jumps.enter(state.entry_row(id)) {
+        commands.push(Command::Sessions(SessionsCommand::SaveJumps));
+    }
+    commands
+}
+
+/// Attaches to the selected session (see [`show_session`]), unless it can't
+/// be attached to.
+pub(crate) fn show_pane(state: &mut AppState) -> Vec<Command> {
+    match (
+        validate_attach(state),
+        state.sessions.selected_session().map(|session| session.id),
+    ) {
+        (Ok(()), Some(id)) => show_session(state, id),
+        _ => vec![],
+    }
+}
+
+/// Makes session `id` active and attaches to it, adding it to the attached
+/// sessions and showing its layout with the keys in its focused pane. A
+/// settled session is un-settled first. A session with no layout (its last
+/// pane closed) gets a tab of one shell; the sessions actor then asks to
+/// attach it, and the keys stay where they are until then. The keys always
+/// arrive with no pane mode on.
+fn show_session(state: &mut AppState, id: SessionId) -> Vec<Command> {
+    let settled = state
+        .sessions
+        .session(id)
+        .is_some_and(|session| session.settled_at.is_some());
+    state.sessions.enter(id);
+    let unsettle = settled.then_some(Command::Sessions(SessionsCommand::UnsettleSession(id)));
+    match state.layouts.get(id) {
+        Some(_) => {
+            state.focus = Focus::Pane;
+            state.pane_mode = None;
+            state.attached.insert(id);
+            unsettle
+                .into_iter()
+                .chain([
+                    Command::Attach(id),
+                    Command::Sessions(SessionsCommand::RefreshSessions),
+                ])
+                .collect()
+        }
+        None => unsettle
+            .into_iter()
+            .chain([Command::Sessions(SessionsCommand::NewTab(id))])
+            .collect(),
+    }
+}
+
+/// Moves the keys into the right-hand area: into the hovered session while
+/// it's attached, else into the shown session with the cursor on its active
+/// row; with nothing shown they stay put.
+pub(crate) fn focus_right(state: &mut AppState) -> Vec<Command> {
+    match state.sessions.selected_session().map(|session| session.id) {
+        Some(id) if state.attached.contains(&id) && validate_attach(state).is_ok() => {
+            attach_session(state)
+        }
+        _ => match (state.shown_session(), state.active_row()) {
+            (Some(_), Some(row)) => {
+                state.sessions.cursor = Some(row);
+                attach_session(state)
+            }
+            _ => vec![],
+        },
     }
 }
 
@@ -380,7 +472,7 @@ mod tests {
     fn focus_panes_from_the_sidebar_on_an_unattached_session_keeps_the_keys(
         #[case] attached: &[i64],
     ) {
-        // Given agent 2 selected and unattached, with no agent or agent 1
+        // Given session 2 selected and unattached, with no session or session 1
         // attached.
         let mut state = left_pane(attached, 2);
         let before = state.focus;
@@ -437,7 +529,7 @@ mod tests {
         // When handling Attach on agent 2.
         IntentHandler::handle(&Intent::Attach, &mut state);
 
-        // Then the jump list is agent 1's agent, then agent 2's.
+        // Then the jump list is session 1's agent, then session 2's.
         assert_eq!(
             state.jumps.entries(),
             [agent_row(1, 1), agent_row(2, 2)],

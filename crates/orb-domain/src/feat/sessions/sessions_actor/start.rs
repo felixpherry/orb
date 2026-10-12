@@ -90,7 +90,7 @@ impl SessionsActor {
             }
             to => {
                 let saved = reach(&root, to).and_then(|dir| {
-                    let branch = current_branch(&self.services, &dir);
+                    let branch = current_branch(&self.services.git, &self.services.log, &dir);
                     self.save_session(id, session_kind(kind), &dir, branch, name)
                 });
                 let opens = saved
@@ -370,7 +370,7 @@ impl SessionsActor {
         made: Option<&MadeWorktree>,
     ) -> Result<(), String> {
         let branch = made.map_or_else(
-            || current_branch(&self.services, dir),
+            || current_branch(&self.services.git, &self.services.log, dir),
             |made| Some(made.branch.clone()),
         );
         if let Err(report) = self.store.move_session(id, dir, branch.as_deref()) {
@@ -698,12 +698,12 @@ pub(super) fn rename_hex_branch(
 /// The branch checked out in `cwd`, if git can tell. A failed read in a
 /// git repository is logged, once per folder until its text changes; a
 /// folder outside git has no branch, so its failure isn't logged.
-pub(super) fn current_branch(services: &Services, cwd: &Path) -> Option<String> {
-    let refs = match services.git.refs(cwd) {
+pub(super) fn current_branch(git: &GitService, log: &Log, cwd: &Path) -> Option<String> {
+    let refs = match git.refs(cwd) {
         Ok(refs) => refs,
-        Err(_) if services.git.project_path(cwd).is_none() => return None,
+        Err(_) if git.project_path(cwd).is_none() => return None,
         Err(report) => {
-            services.log.error_on_change(
+            log.error_on_change(
                 &format!("branch read {}", cwd.display()),
                 &format!("couldn't read the branch in {}", cwd.display()),
                 &report,

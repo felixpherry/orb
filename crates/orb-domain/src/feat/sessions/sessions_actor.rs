@@ -3,7 +3,7 @@
 //! At start it restores the saved agents into the shared state. Then it polls
 //! the harnesses: every second while a turn is underway in any agent pane,
 //! every five seconds otherwise, and right away when asked. Each poll reads
-//! what each agent's agent is doing from the agent's pane: Stopped when the
+//! what each agent is doing from its pane: Stopped when the
 //! pane's zmx session isn't running, else the latest report a harness like pi
 //! wrote to the pane file, or the status of the Claude whose process runs
 //! under the pane (by process ancestry from the pane's zmx process). An agent
@@ -113,7 +113,7 @@ use crate::feat::git::git_service::{GitError, GitRef, GitService, git_reason};
 use crate::feat::git::validator::BUSY_DIRECTORY;
 use crate::feat::git::worktree::{hex, hex_branch, is_orb_worktree, new_worktree_path, slug};
 use crate::feat::harness::{
-    Harness, HarnessError, HarnessId, RunningAgent, Scan, TranscriptFormat,
+    Harness, HarnessError, HarnessId, RunningAgent, Scan, TranscriptFormat, unreadable_transcript,
 };
 use crate::feat::integration::pane_file::{AgentEvent, AgentReport, PaneFiles};
 use crate::feat::integration::{NUDGE, panes_dir};

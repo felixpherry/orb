@@ -353,7 +353,10 @@ impl SessionsActor {
             let format = harness.map(|harness| harness.as_ref() as &dyn TranscriptFormat);
             let asks_git = update_row(row, status, now, format, &self.services.log);
             if was_in_progress && !status.in_progress() {
-                if asks_git && let Some(branch) = current_branch(&self.services, &row.cwd) {
+                if asks_git
+                    && let Some(branch) =
+                        current_branch(&self.services.git, &self.services.log, &row.cwd)
+                {
                     row.branch = Some(branch);
                 }
                 if let Some(new) = rename_hex_branch(&self.services.git, &self.worktrees_root, row)
@@ -618,11 +621,7 @@ fn update_row(
         Err(report) => {
             log.error_on_change(
                 &format!("transcript scan {}", row.id.0),
-                &format!(
-                    "couldn't read agent {}'s transcript {}",
-                    row.id.0,
-                    path.display()
-                ),
+                &unreadable_transcript(row.id, path),
                 &report,
             );
             return false;

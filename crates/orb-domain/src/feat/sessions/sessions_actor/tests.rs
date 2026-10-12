@@ -3153,7 +3153,7 @@ async fn failed_poll_shows_the_reason() -> Result<(), Report<StoreError>> {
 #[tokio::test]
 async fn poll_doesnt_ask_claude_while_no_pane_holds_a_claude_agent()
 -> Result<(), Report<StoreError>> {
-    // Given a Claude agent whose agent has ended, so no pane holds it.
+    // Given a Claude agent whose program has ended, so no pane holds it.
     let store = Store::open_in_memory()?;
     insert_agent(&store, "aa")?;
     resave(&store, "aa", |row| AgentRow {
@@ -5345,7 +5345,7 @@ fn failed_branch_reads_in_two_folders_are_each_logged_once() -> Result<(), Repor
 
     // When the branch is read in two folders in turn, twice.
     for folder in ["/repo/a", "/repo/b", "/repo/a", "/repo/b"] {
-        let _ = current_branch(&actor.services, Path::new(folder));
+        let _ = current_branch(&actor.services.git, &actor.services.log, Path::new(folder));
     }
 
     // Then each folder's failure is logged once.
@@ -5525,7 +5525,7 @@ fn change_workspace_unbinds_the_agents_in_its_panes() -> Result<(), Report<Store
     assert_eq!(
         saved(&actor.store, "aa")?.pane_id,
         None,
-        "a killed agent's agent leaves its pane"
+        "a killed agent leaves its pane"
     );
     Ok(())
 }

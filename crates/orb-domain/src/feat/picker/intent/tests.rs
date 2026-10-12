@@ -1980,8 +1980,8 @@ fn search_prev_moves_to_the_previous_match() {
     // When handling PickerPrev (`<C-k>`).
     IntentHandler::handle(&Intent::PickerPrev, &mut state);
 
-    // Then the cursor is on agent 3's agent row, past the unmatched
-    // agent 2.
+    // Then the cursor is on session 3's agent row, past the unmatched
+    // session 2.
     assert_eq!(
         state.sessions.cursor,
         Some(SidebarItem::Agent {
@@ -2001,7 +2001,7 @@ fn search_next_moves_from_a_card_to_its_agent_row() {
     // When handling PickerNext (`<C-j>`).
     IntentHandler::handle(&Intent::PickerNext, &mut state);
 
-    // Then the cursor is on agent 3's agent row.
+    // Then the cursor is on session 3's agent row.
     assert_eq!(
         state.sessions.cursor,
         Some(SidebarItem::Agent {
@@ -2876,7 +2876,7 @@ fn picking_an_agent_moves_the_cursor_to_its_row() {
     // When confirming.
     IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-    // Then the cursor is on agent 1's agent row.
+    // Then the cursor is on session 1's agent row.
     assert_eq!(
         state.sessions.cursor,
         Some(agent_row_1()),
@@ -2970,7 +2970,7 @@ fn picking_an_agent_records_the_row_left_then_the_agent() {
     // When confirming.
     IntentHandler::handle(&Intent::PickerConfirm, &mut state);
 
-    // Then agent 2, then agent 1's agent, are recorded.
+    // Then session 2, then session 1's agent, are recorded.
     assert_eq!(
         state.jumps.entries(),
         [on_agent(2), agent_row(1, 1)],
@@ -2980,7 +2980,7 @@ fn picking_an_agent_records_the_row_left_then_the_agent() {
 
 #[rstest::rstest]
 fn picking_the_selected_agent_records_no_jump() {
-    // Given the session picker on agent 2, opened on agent 2's agent
+    // Given the session picker on session 2, opened on session 2's agent
     // row.
     let mut state = jumping(Focus::Sidebar, &[], &[]);
     state.sessions.cursor = Some(SidebarItem::Agent {

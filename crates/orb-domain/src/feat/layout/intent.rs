@@ -8,10 +8,10 @@ use crate::feat::layout::validator::{
     validate_float_action, validate_focus_pane, validate_pane_action, validate_tab_action,
     validate_tiled_action,
 };
+use crate::feat::pane::intent::enter_session;
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::sidebar::validator::validate_resize;
 use crate::ids::{PaneId, SessionId};
-use crate::intent_handler::enter_session;
 use crate::{AppState, Command, Focus, PaneMode, TextInput};
 
 /// Splits the focused pane to the right or down.
@@ -225,9 +225,27 @@ where
     vec![Command::Sessions(SessionsCommand::SaveLayout(owner))]
 }
 
-/// `Cmd ]` (or `Cmd [` when `back`): cycles the floats' layout while a float
-/// has the keys, else the shown tab's swap layout; saves the layout.
-pub(crate) fn swap_layout(state: &mut AppState, back: bool) -> Vec<Command> {
+/// Which way a swap-layout key cycles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwapStep {
+    /// `Cmd ]`: the next layout.
+    Next,
+    /// `Cmd [`: the previous layout.
+    Previous,
+}
+
+/// Whether a resize key grows or shrinks what has the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SizeStep {
+    Grow,
+    Shrink,
+}
+
+/// `Cmd ]` (or `Cmd [` for [`SwapStep::Previous`]): cycles the floats' layout
+/// while a float has the keys, else the shown tab's swap layout; saves the
+/// layout.
+pub(crate) fn swap_layout(state: &mut AppState, step: SwapStep) -> Vec<Command> {
+    let back = step == SwapStep::Previous;
     match (validate_float_action(state), back) {
         (Ok(()), _) => save_if_changed(state, |layouts, owner| {
             layouts.cycle_float_layout(owner, back)
@@ -302,9 +320,10 @@ where
         .collect()
 }
 
-/// Grows (`grow`) or shrinks what has the keys: the sidebar, saving its new
+/// Grows or shrinks (`step`) what has the keys: the sidebar, saving its new
 /// width, or the focused pane.
-pub(crate) fn grow_or_shrink(state: &mut AppState, grow: bool) -> Vec<Command> {
+pub(crate) fn grow_or_shrink(state: &mut AppState, step: SizeStep) -> Vec<Command> {
+    let grow = step == SizeStep::Grow;
     match state.focus {
         Focus::Sidebar => {
             if validate_resize(state).is_err() {
@@ -1736,7 +1755,7 @@ mod tests {
 
     #[rstest::rstest]
     fn focusing_a_shell_pane_marks_the_card() {
-        // Given agent 1's agent pane focused, shell pane 50 to its right.
+        // Given session 1's agent pane focused, shell pane 50 to its right.
         let mut state = split_layout();
         IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
 

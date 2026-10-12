@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 use ratatui::layout::Rect;
 
 use super::floats::Floats;
-use super::tree::{
-    Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction, stack_list_rows,
-};
+use super::tree::{Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction};
 use crate::feat::sessions::state::{Agent, NEW_AGENT};
 use crate::feat::zmx::zmx_service::ZmxSession;
 use crate::ids::{PaneId, SessionId};
@@ -444,15 +442,7 @@ where
     let stacks = stacks
         .into_iter()
         .map(|stack| {
-            let (rows, start) = stack_list_rows(
-                stack.panes.len(),
-                stack.area.height,
-                stack
-                    .panes
-                    .iter()
-                    .position(|id| *id == stack.expanded)
-                    .unwrap_or_default(),
-            );
+            let (rows, start) = stack.list_rows();
             let area = {
                 let width = list_width(&stack.panes)
                     .min(stack.area.width.saturating_sub(4))

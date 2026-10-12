@@ -2,6 +2,8 @@
 //! sessions, and what the confirms and name boxes for them ask for.
 
 use crate::command::{SessionsCommand, Workspace};
+use crate::feat::git::intent::workspace_items;
+use crate::feat::picker::intent::open_picker;
 use crate::feat::picker::state::{PickTarget, PickerState};
 use crate::feat::sessions::state::{
     FolderKind, ProjectKind, SessionKind, SidebarItem, folder_slug,
@@ -13,7 +15,6 @@ use crate::feat::sessions::validator::{
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::ids::{ProjectId, SessionId};
-use crate::intent_handler::{new_session, open_picker, with_visit, workspace_items};
 use crate::{AppState, Command, Focus, TextInput};
 
 /// Asks for a new Incognito session in its checkout, clearing a filter to
@@ -326,6 +327,44 @@ fn new_folder_session(state: &mut AppState) -> Vec<Command> {
     state.sessions.starting = true;
     state.jumps.jump(state.sessions.cursor, None);
     vec![command, Command::Sessions(SessionsCommand::SaveJumps)]
+}
+
+/// Asks for a new session of `project` in `workspace`, named `name`, one at
+/// a time: marks the start and records the row it leaves as a jump
+/// (`attach_session` records the new session's row when the frontend
+/// attaches it).
+pub(crate) fn new_session(
+    state: &mut AppState,
+    project: ProjectId,
+    workspace: Workspace,
+    name: Option<String>,
+) -> Vec<Command> {
+    if validate_new_session(state).is_err() {
+        return vec![];
+    }
+    state.sessions.starting = true;
+    state.jumps.jump(state.sessions.cursor, None);
+    let if_active = state.sessions.active();
+    vec![
+        Command::Sessions(SessionsCommand::NewSession {
+            project,
+            workspace,
+            name,
+            if_active,
+        }),
+        Command::Sessions(SessionsCommand::SaveJumps),
+    ]
+}
+
+/// `commands`, then a visit to the session under the cursor, if any.
+pub(crate) fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
+    commands.extend(
+        state
+            .sessions
+            .selected_session()
+            .map(|session| Command::Sessions(SessionsCommand::Visit(session.id))),
+    );
+    commands
 }
 
 #[cfg(test)]

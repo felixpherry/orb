@@ -87,6 +87,28 @@ pub struct StackInfo {
     pub expanded: PaneId,
 }
 
+impl StackInfo {
+    /// The stack's drawn list: how many rows it takes (at most half the
+    /// stack, at least one) and the first pane it lists, scrolled so the
+    /// shown pane stays listed.
+    #[must_use]
+    pub fn list_rows(&self) -> (u16, usize) {
+        let len = self.panes.len();
+        let at = self
+            .panes
+            .iter()
+            .position(|id| *id == self.expanded)
+            .unwrap_or_default();
+        let fits = len.min(usize::from(self.area.height / 2)).max(1);
+        let start = if len > fits {
+            at.saturating_sub(fits - 1)
+        } else {
+            0
+        };
+        (u16::try_from(fits).unwrap_or(u16::MAX), start)
+    }
+}
+
 /// What a [`TileLayout::grow_focused`] step did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grow {
@@ -270,16 +292,11 @@ impl TileLayout {
             .filter(|info| !drawn.iter().any(|stack| stack.panes.contains(&info.id)))
             .collect();
         for stack in drawn {
-            let a = stack.area;
-            let at = stack
-                .panes
-                .iter()
-                .position(|id| *id == stack.expanded)
-                .unwrap_or_default();
-            let (rows, start) = stack_list_rows(stack.panes.len(), a.height, at);
+            let bounds = stack.area;
+            let (rows, start) = stack.list_rows();
             // A stack with no rows has no list, so its shown pane sits at
             // its top edge, right above the pane below it.
-            let rows = rows.min(a.height);
+            let rows = rows.min(bounds.height);
             // ponytail: a list row counts as the stack's full width; the drawn
             // list is only as wide as its names, which only the frontend knows.
             // Pass the list width in if a pane overlapping only the stack's
@@ -289,10 +306,10 @@ impl TileLayout {
                     .panes
                     .iter()
                     .skip(start)
-                    .zip(a.y..a.y.saturating_add(rows))
+                    .zip(bounds.y..bounds.y.saturating_add(rows))
                     .map(|(id, y)| PaneInfo {
                         id: *id,
-                        rect: Rect::new(a.x, y, a.width, 1),
+                        rect: Rect::new(bounds.x, y, bounds.width, 1),
                         is_focused: false,
                         collapsed: true,
                     }),
@@ -300,10 +317,10 @@ impl TileLayout {
             panes.push(PaneInfo {
                 id: stack.expanded,
                 rect: Rect::new(
-                    a.x,
-                    a.y.saturating_add(rows),
-                    a.width,
-                    a.height.saturating_sub(rows),
+                    bounds.x,
+                    bounds.y.saturating_add(rows),
+                    bounds.width,
+                    bounds.height.saturating_sub(rows),
                 ),
                 is_focused: false,
                 collapsed: false,
@@ -1149,20 +1166,6 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
             }
         }
     }
-}
-
-/// A stack's drawn list for `len` panes in a stack `height` rows tall, the
-/// shown pane at list index `at`: how many rows it takes (at most half the
-/// stack, at least one) and the first pane it lists, scrolled so the shown
-/// pane stays listed.
-pub(super) fn stack_list_rows(len: usize, height: u16, at: usize) -> (u16, usize) {
-    let fits = len.min(usize::from(height / 2)).max(1);
-    let start = if len > fits {
-        at.saturating_sub(fits - 1)
-    } else {
-        0
-    };
-    (u16::try_from(fits).unwrap_or(u16::MAX), start)
 }
 
 fn stacks_in(node: &Node, area: Rect, stacks: &mut Vec<StackInfo>) {

@@ -81,7 +81,7 @@ use jiff::tz::TimeZone;
 use kameo::prelude::ActorRef;
 use orb_domain::feat::git::git_service::{GitService, git_reason};
 use orb_domain::feat::git::worktree::is_orb_worktree;
-use orb_domain::feat::harness::Harnesses;
+use orb_domain::feat::harness::{Harnesses, unreadable_transcript};
 use orb_domain::feat::layout::state::{Layouts, SessionLayout};
 use orb_domain::feat::notify::notifier::NotifierService;
 use orb_domain::feat::picker::state::{PickerKind, worktree_items};
@@ -736,14 +736,9 @@ impl App {
                         }
                         app.sessions.starting = true;
                     }
-                    if let Err(error) = self
-                        .sessions
-                        .tell(SessionsCommand::RestoreWorktree(*session))
-                        .try_send()
-                    {
-                        self.log
-                            .error("couldn't send to the sessions actor", &error);
-                    }
+                    let command = SessionsCommand::RestoreWorktree(*session);
+                    let sent = self.sessions.tell(command.clone()).try_send();
+                    log_unsent(&self.log, "sessions", &command, sent);
                     return;
                 }
                 self.pane_error = None;
@@ -783,21 +778,16 @@ impl App {
                 self.load_preview(*agent, transcript);
             }
             Command::Sessions(command) => {
-                if let Err(error) = self.sessions.tell(command.clone()).try_send() {
-                    self.log
-                        .error("couldn't send to the sessions actor", &error);
-                }
+                let sent = self.sessions.tell(command.clone()).try_send();
+                log_unsent(&self.log, "sessions", command, sent);
             }
             Command::Worktrees(command) => {
-                if let Err(error) = self.worktrees.tell(command.clone()).try_send() {
-                    self.log
-                        .error("couldn't send to the worktrees actor", &error);
-                }
+                let sent = self.worktrees.tell(command.clone()).try_send();
+                log_unsent(&self.log, "worktrees", command, sent);
             }
             Command::Search(command) => {
-                if let Err(error) = self.search.tell(command.clone()).try_send() {
-                    self.log.error("couldn't send to the search actor", &error);
-                }
+                let sent = self.search.tell(command.clone()).try_send();
+                log_unsent(&self.log, "search", command, sent);
             }
         }
     }
@@ -819,11 +809,7 @@ impl App {
             Some(Err(report)) => {
                 self.log.error_on_change(
                     &format!("preview read {}", agent.0),
-                    &format!(
-                        "couldn't read agent {}'s transcript {}",
-                        agent.0,
-                        transcript.display()
-                    ),
+                    &unreadable_transcript(agent, transcript),
                     &report,
                 );
                 Default::default()
@@ -904,6 +890,26 @@ impl App {
         }
         self.cursor_style = style;
         outer_terminal::set_cursor_style(out, style)
+    }
+}
+
+/// Logs a command that didn't reach the `actor` actor: which kind of command
+/// it was and why, not what it carried (a search holds the user's text).
+fn log_unsent<C, E>(log: &Log, actor: &str, command: &C, sent: Result<(), E>)
+where
+    C: std::fmt::Debug,
+    E: std::fmt::Display,
+{
+    if let Err(error) = sent {
+        let shown = format!("{command:?}");
+        let kind = shown
+            .split(|c: char| !c.is_alphanumeric())
+            .next()
+            .unwrap_or_default();
+        log.line(
+            "error",
+            &format!("couldn't send {kind} to the {actor} actor: {error}"),
+        );
     }
 }
 

@@ -1,41 +1,34 @@
 //! What the git keys do: moving a session to another workspace and switching
 //! its branch, and what picking in those pickers asks for.
 
+use std::path::Path;
+
 use crate::command::{SessionsCommand, Workspace};
 use crate::feat::git::validator::{
     BUSY_DIRECTORY, ChangeWorkspaceError, SwitchBranchError, validate_change_workspace,
     validate_switch_branch,
 };
+use crate::feat::git::worktree::previous_worktree;
+use crate::feat::picker::intent::open_picker;
 use crate::feat::picker::list::{BranchRow, PickerItem, WorkspaceChoice};
 use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
+use crate::feat::sessions::intent::new_session;
+use crate::feat::sessions::state::{Project, Session, Sessions};
 use crate::feat::sessions::validator::validate_new_session;
 use crate::ids::{ProjectId, SessionId};
-use crate::intent_handler::{new_session, open_picker, workspace_items};
 use crate::{AppState, Command, Focus};
 
 /// Opens the workspace picker for the keyed session, `git init`'s
 /// confirm for a project that isn't a repo, or why its workspace is locked.
 pub(crate) fn open_workspace_picker(state: &mut AppState) -> Vec<Command> {
-    match (
-        validate_change_workspace(state),
-        state
-            .keyed_session()
-            .and_then(|session| state.sessions.project(session.project)),
-        state.keyed_session(),
-    ) {
-        (Ok(()), Some(project), Some(_)) if !project.repo => {
-            let picker = PickerState::init_git(project.id, state.focus);
-            open_picker(state, picker);
-            vec![]
-        }
-        (Ok(()), Some(project), Some(session)) => {
+    match validate_change_workspace(state) {
+        Ok(()) => open_for_keyed_repo(state, |state, session, project| {
             let worktree = session.dir != project.root;
             let items = workspace_items(&state.sessions, project, &session.dir, worktree);
             let target = PickTarget::Move(session.id);
-            open_picker(state, PickerState::workspace(target, items, state.focus));
-            vec![]
-        }
-        (Err(ChangeWorkspaceError::Locked { worktree }), ..) => {
+            (PickerState::workspace(target, items, state.focus), vec![])
+        }),
+        Err(ChangeWorkspaceError::Locked { worktree }) => {
             let workspace = if worktree {
                 "Worktree"
             } else {
@@ -44,38 +37,48 @@ pub(crate) fn open_workspace_picker(state: &mut AppState) -> Vec<Command> {
             state.sessions.error = Some(format!("Workspace locked · {workspace}"));
             vec![]
         }
-        _ => vec![],
+        Err(_) => vec![],
     }
 }
 
 /// Opens the branch picker for the keyed session, `git init`'s confirm
 /// for a project that isn't a repo, or why its directory is busy.
 pub(crate) fn switch_branch(state: &mut AppState) -> Vec<Command> {
-    match (
-        validate_switch_branch(state),
-        state
-            .keyed_session()
-            .and_then(|session| state.sessions.project(session.project)),
-        state.keyed_session(),
-    ) {
-        (Ok(()), Some(project), Some(_)) if !project.repo => {
-            let picker = PickerState::init_git(project.id, state.focus);
-            open_picker(state, picker);
-            vec![]
-        }
-        (Ok(()), Some(_), Some(session)) => {
+    match validate_switch_branch(state) {
+        Ok(()) => open_for_keyed_repo(state, |state, session, _| {
             let (id, cwd) = (session.id, session.dir.clone());
             let unstarted = !state.sessions.turned(id);
             let picker = PickerState::branches(id, cwd.clone(), unstarted, None, state.focus);
-            open_picker(state, picker);
-            vec![Command::ListBranches(cwd)]
-        }
-        (Err(SwitchBranchError::Busy), ..) => {
+            (picker, vec![Command::ListBranches(cwd)])
+        }),
+        Err(SwitchBranchError::Busy) => {
             state.sessions.error = Some(BUSY_DIRECTORY.to_owned());
             vec![]
         }
-        _ => vec![],
+        Err(_) => vec![],
     }
+}
+
+/// Opens the picker `build` makes for the keyed session and its project,
+/// returning the commands `build` asks for; for a project that isn't a repo,
+/// opens `git init`'s confirm instead. Nothing without a keyed session in a
+/// known project.
+fn open_for_keyed_repo<F>(state: &mut AppState, build: F) -> Vec<Command>
+where
+    F: FnOnce(&AppState, &Session, &Project) -> (PickerState, Vec<Command>),
+{
+    let Some((picker, commands)) = state.keyed_session().and_then(|session| {
+        let project = state.sessions.project(session.project)?;
+        Some(if project.repo {
+            build(state, session, project)
+        } else {
+            (PickerState::init_git(project.id, state.focus), vec![])
+        })
+    }) else {
+        return vec![];
+    };
+    open_picker(state, picker);
+    commands
 }
 
 /// What picking the selected branch of `picker`, a closed branch picker, asks
@@ -221,6 +224,28 @@ fn detach_moving(state: &mut AppState, session: SessionId, command: Command) -> 
         state.focus = Focus::Sidebar;
     }
     vec![command]
+}
+
+/// The workspace picker's rows for something in `cwd`: stay there
+/// (`worktree` is whether that's a worktree), a new worktree, then the
+/// project's previous worktree other than `cwd`.
+pub(crate) fn workspace_items(
+    sessions: &Sessions,
+    project: &Project,
+    cwd: &Path,
+    worktree: bool,
+) -> Vec<PickerItem> {
+    [
+        WorkspaceChoice::Current { worktree },
+        WorkspaceChoice::NewWorktree,
+    ]
+    .into_iter()
+    .chain(
+        previous_worktree(sessions, project, cwd)
+            .map(|(path, branch)| WorkspaceChoice::Previous { path, branch }),
+    )
+    .map(PickerItem::Workspace)
+    .collect()
 }
 
 #[cfg(test)]

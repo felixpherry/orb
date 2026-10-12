@@ -1,16 +1,12 @@
 //! The [`IntentHandler`]: the single decision point for all user input.
 
-use std::path::Path;
-
-use crate::command::{SessionsCommand, Workspace};
-use crate::feat::git::worktree::previous_worktree;
-use crate::feat::pane::validator::validate_attach;
-use crate::feat::picker::list::{PickerItem, WorkspaceChoice};
-use crate::feat::picker::state::PickerState;
-use crate::feat::sessions::state::{Project, Sessions, SidebarItem};
-use crate::feat::sessions::validator::validate_new_session;
+use crate::command::SessionsCommand;
+use crate::feat::layout::intent::{SizeStep, SwapStep};
+use crate::feat::pane::intent::enter_session;
+use crate::feat::picker::intent::{PickerKey, project_item};
+use crate::feat::sessions::state::SidebarItem;
 use crate::feat::{git, jumps, layout, pane, picker, sessions, sidebar};
-use crate::ids::{ProjectId, SessionId};
+use crate::ids::SessionId;
 use crate::{AppState, Command, Focus, Intent};
 
 /// Applies each [`Intent`] to [`AppState`] in one match; each arm calls its
@@ -67,8 +63,8 @@ impl IntentHandler {
             Intent::SendCtrlG => layout::intent::send_ctrl_g(state),
             Intent::ToggleZoom => layout::intent::toggle_zoom(state),
             Intent::BreakPane => layout::intent::break_pane(state),
-            Intent::GrowFocused => layout::intent::grow_or_shrink(state, true),
-            Intent::ShrinkFocused => layout::intent::grow_or_shrink(state, false),
+            Intent::GrowFocused => layout::intent::grow_or_shrink(state, SizeStep::Grow),
+            Intent::ShrinkFocused => layout::intent::grow_or_shrink(state, SizeStep::Shrink),
             Intent::EnterPaneMode(mode) => layout::intent::enter_pane_mode(state, *mode),
             Intent::ExitPaneMode => layout::intent::exit_pane_mode(state),
             Intent::ResizeFocused { dir, grow } => {
@@ -83,8 +79,8 @@ impl IntentHandler {
             Intent::RenameTab => layout::intent::rename_tab(state),
             Intent::RenamePane => layout::intent::rename_pane(state),
             Intent::GoToTab(n) => layout::intent::go_to_tab(state, *n),
-            Intent::NextSwapLayout => layout::intent::swap_layout(state, false),
-            Intent::PreviousSwapLayout => layout::intent::swap_layout(state, true),
+            Intent::NextSwapLayout => layout::intent::swap_layout(state, SwapStep::Next),
+            Intent::PreviousSwapLayout => layout::intent::swap_layout(state, SwapStep::Previous),
             Intent::MoveTabLeft => layout::intent::move_tab_left(state),
             Intent::MoveTabRight => layout::intent::move_tab_right(state),
             Intent::FocusPane(pane) => layout::intent::focus_pane(state, *pane),
@@ -102,23 +98,27 @@ impl IntentHandler {
             Intent::FilterProjects => picker::intent::filter_projects(state),
             Intent::AddProject => picker::intent::add_project(state),
             Intent::ChangeWorkspace => git::intent::open_workspace_picker(state),
-            Intent::PickerInput(_)
-            | Intent::PickerBackspace
-            | Intent::PickerDeleteWord
-            | Intent::PickerCursorLeft
-            | Intent::PickerCursorRight
-            | Intent::PickerCursorTo(_)
-            | Intent::PickerNext
-            | Intent::PickerPrev
-            | Intent::PickerHalfPageDown
-            | Intent::PickerHalfPageUp
-            | Intent::PickerConfirm
-            | Intent::PickerOpen
-            | Intent::PickerCancel
-            | Intent::PickerRemove
-            | Intent::PickerSelectRow(_)
-            | Intent::PickerWheelNext
-            | Intent::PickerWheelPrev => picker::intent::key(intent, state),
+            Intent::PickerInput(ch) => picker::intent::key(state, PickerKey::Input(*ch)),
+            Intent::PickerBackspace => picker::intent::key(state, PickerKey::Backspace),
+            Intent::PickerDeleteWord => picker::intent::key(state, PickerKey::DeleteWord),
+            Intent::PickerCursorLeft => picker::intent::key(state, PickerKey::CursorLeft),
+            Intent::PickerCursorRight => picker::intent::key(state, PickerKey::CursorRight),
+            Intent::PickerCursorTo(index) => {
+                picker::intent::key(state, PickerKey::CursorTo(*index))
+            }
+            Intent::PickerNext => picker::intent::key(state, PickerKey::Next),
+            Intent::PickerPrev => picker::intent::key(state, PickerKey::Prev),
+            Intent::PickerHalfPageDown => picker::intent::key(state, PickerKey::HalfPageDown),
+            Intent::PickerHalfPageUp => picker::intent::key(state, PickerKey::HalfPageUp),
+            Intent::PickerConfirm => picker::intent::key(state, PickerKey::Confirm),
+            Intent::PickerOpen => picker::intent::key(state, PickerKey::Open),
+            Intent::PickerCancel => picker::intent::key(state, PickerKey::Cancel),
+            Intent::PickerRemove => picker::intent::key(state, PickerKey::Remove),
+            Intent::PickerSelectRow(index) => {
+                picker::intent::key(state, PickerKey::SelectRow(*index))
+            }
+            Intent::PickerWheelNext => picker::intent::key(state, PickerKey::WheelNext),
+            Intent::PickerWheelPrev => picker::intent::key(state, PickerKey::WheelPrev),
             Intent::PickerStartSearch => picker::intent::start_search(state),
             Intent::PickerLast => picker::intent::last(state),
             Intent::PickerG => picker::intent::press_g(state),
@@ -217,173 +217,6 @@ fn record_focus_move(
             commands.push(Command::Sessions(SessionsCommand::SaveJumps));
         }
     }
-    commands
-}
-
-/// The picker row for `project`.
-pub(crate) fn project_item(project: &Project) -> PickerItem {
-    PickerItem::Project {
-        id: project.id,
-        title: project.title.clone(),
-        root: project.root.clone(),
-        kind: project.kind,
-    }
-}
-
-/// The workspace picker's rows for something in `cwd`: stay there
-/// (`worktree` is whether that's a worktree), a new worktree, then the
-/// project's previous worktree other than `cwd`.
-pub(crate) fn workspace_items(
-    sessions: &Sessions,
-    project: &Project,
-    cwd: &Path,
-    worktree: bool,
-) -> Vec<PickerItem> {
-    [
-        WorkspaceChoice::Current { worktree },
-        WorkspaceChoice::NewWorktree,
-    ]
-    .into_iter()
-    .chain(
-        previous_worktree(sessions, project, cwd)
-            .map(|(path, branch)| WorkspaceChoice::Previous { path, branch }),
-    )
-    .map(PickerItem::Workspace)
-    .collect()
-}
-
-/// Asks for a new session of `project` in `workspace`, named `name`, one at
-/// a time: marks the start and records the row it leaves as a jump
-/// (`attach_session` records the new session's row when the frontend
-/// attaches it).
-pub(crate) fn new_session(
-    state: &mut AppState,
-    project: ProjectId,
-    workspace: Workspace,
-    name: Option<String>,
-) -> Vec<Command> {
-    if validate_new_session(state).is_err() {
-        return vec![];
-    }
-    state.sessions.starting = true;
-    state.jumps.jump(state.sessions.cursor, None);
-    let if_active = state.sessions.active();
-    vec![
-        Command::Sessions(SessionsCommand::NewSession {
-            project,
-            workspace,
-            name,
-            if_active,
-        }),
-        Command::Sessions(SessionsCommand::SaveJumps),
-    ]
-}
-
-/// Opens `picker` and gives it the keys.
-pub(crate) fn open_picker(state: &mut AppState, picker: PickerState) {
-    state.picker = Some(picker);
-    state.focus = Focus::Picker;
-}
-
-/// Attaches to the selected session and records entering it as a jump (see
-/// [`enter_session`]), unless it can't be attached to. The cursor lands on
-/// the session's active row.
-pub(crate) fn attach_session(state: &mut AppState) -> Vec<Command> {
-    match (
-        validate_attach(state),
-        state.sessions.selected_session().map(|session| session.id),
-    ) {
-        (Ok(()), Some(id)) => {
-            let commands = enter_session(state, id);
-            state.sessions.cursor = state.active_row();
-            commands
-        }
-        _ => vec![],
-    }
-}
-
-/// [`show_session`] `id`, recording entering it as a jump to the agent in
-/// its focused pane (a shell pane records the card), unless that is where
-/// the last `<C-[>`/`<C-]>` landed.
-pub(crate) fn enter_session(state: &mut AppState, id: SessionId) -> Vec<Command> {
-    let mut commands = show_session(state, id);
-    if state.jumps.enter(state.entry_row(id)) {
-        commands.push(Command::Sessions(SessionsCommand::SaveJumps));
-    }
-    commands
-}
-
-/// Attaches to the selected session (see [`show_session`]), unless it can't
-/// be attached to.
-pub(crate) fn show_pane(state: &mut AppState) -> Vec<Command> {
-    match (
-        validate_attach(state),
-        state.sessions.selected_session().map(|session| session.id),
-    ) {
-        (Ok(()), Some(id)) => show_session(state, id),
-        _ => vec![],
-    }
-}
-
-/// Makes session `id` active and attaches to it, adding it to the attached
-/// sessions and showing its layout with the keys in its focused pane. A
-/// settled session is un-settled first. A session with no layout (its last
-/// pane closed) gets a tab of one shell; the sessions actor then asks to
-/// attach it, and the keys stay where they are until then. The keys always
-/// arrive with no pane mode on.
-fn show_session(state: &mut AppState, id: SessionId) -> Vec<Command> {
-    let settled = state
-        .sessions
-        .session(id)
-        .is_some_and(|session| session.settled_at.is_some());
-    state.sessions.enter(id);
-    let unsettle = settled.then_some(Command::Sessions(SessionsCommand::UnsettleSession(id)));
-    match state.layouts.get(id) {
-        Some(_) => {
-            state.focus = Focus::Pane;
-            state.pane_mode = None;
-            state.attached.insert(id);
-            unsettle
-                .into_iter()
-                .chain([
-                    Command::Attach(id),
-                    Command::Sessions(SessionsCommand::RefreshSessions),
-                ])
-                .collect()
-        }
-        None => unsettle
-            .into_iter()
-            .chain([Command::Sessions(SessionsCommand::NewTab(id))])
-            .collect(),
-    }
-}
-
-/// Moves the keys into the right-hand area: into the hovered session while
-/// it's attached, else into the shown session with the cursor on its active
-/// row; with nothing shown they stay put.
-pub(crate) fn focus_right(state: &mut AppState) -> Vec<Command> {
-    match state.sessions.selected_session().map(|session| session.id) {
-        Some(id) if state.attached.contains(&id) && validate_attach(state).is_ok() => {
-            attach_session(state)
-        }
-        _ => match (state.shown_session(), state.active_row()) {
-            (Some(_), Some(row)) => {
-                state.sessions.cursor = Some(row);
-                attach_session(state)
-            }
-            _ => vec![],
-        },
-    }
-}
-
-/// `commands`, then a visit to the session under the cursor, if any.
-pub(crate) fn with_visit(state: &AppState, mut commands: Vec<Command>) -> Vec<Command> {
-    commands.extend(
-        state
-            .sessions
-            .selected_session()
-            .map(|session| Command::Sessions(SessionsCommand::Visit(session.id))),
-    );
     commands
 }
 
@@ -583,7 +416,7 @@ mod tests {
         // When moving the focus right.
         IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
 
-        // Then only agent 1's agent is recorded.
+        // Then only session 1's agent is recorded.
         assert_eq!(
             state.jumps.entries(),
             [agent_row(1, 1)],

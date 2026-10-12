@@ -2,8 +2,9 @@
 
 use crate::command::SessionsCommand;
 use crate::feat::jumps::validator::{validate_jump_back, validate_jump_forward};
+use crate::feat::pane::intent::show_pane;
+use crate::feat::sessions::intent::with_visit;
 use crate::feat::sessions::state::SidebarItem;
-use crate::intent_handler::{show_pane, with_visit};
 use crate::{AppState, Command, Focus};
 
 /// `<C-[>`: lands on the row before the current one in the jump list.
@@ -207,7 +208,7 @@ mod tests {
         // When handling JumpForward.
         IntentHandler::handle(&Intent::JumpForward, &mut state);
 
-        // Then the cursor is back on agent 2's agent.
+        // Then the cursor is back on session 2's agent.
         assert_eq!(
             state.sessions.cursor,
             Some(agent_row(2, 2)),
@@ -346,8 +347,8 @@ mod tests {
 
     #[rstest::rstest]
     fn jumping_back_past_a_picked_agent_then_forward_returns_to_the_agent() {
-        // Given agent 1's agent picked from agent 2, then a `<C-[>` onto
-        // agent 2's card.
+        // Given session 1's agent picked from session 2, then a `<C-[>` onto
+        // session 2's card.
         let mut state = picking_agent_1();
         IntentHandler::handle(&Intent::PickerConfirm, &mut state);
         IntentHandler::handle(&Intent::JumpBack, &mut state);
@@ -355,7 +356,7 @@ mod tests {
         // When handling JumpForward.
         IntentHandler::handle(&Intent::JumpForward, &mut state);
 
-        // Then the cursor is back on agent 1's agent row.
+        // Then the cursor is back on session 1's agent row.
         assert_eq!(
             state.sessions.cursor,
             Some(agent_row(1, 1)),
@@ -363,7 +364,7 @@ mod tests {
         );
     }
 
-    /// Picks agent `id`'s agent in the session picker opened from `state`.
+    /// Picks session `id`'s agent in the session picker opened from `state`.
     fn pick_agent_of(state: &mut AppState, id: i64) {
         IntentHandler::handle(&Intent::OpenSessionPicker, state);
         for _ in 0..3 {
@@ -377,8 +378,8 @@ mod tests {
 
     #[rstest::rstest]
     fn jumping_back_after_chained_agent_picks_reaches_the_middle_agent() {
-        // Given agents 1-3 on agent 3, then agent 2's agent picked, then
-        // agent 1's agent picked.
+        // Given sessions 1-3 on session 3, then session 2's agent picked, then
+        // session 1's agent picked.
         let mut state = state_with(
             vec![
                 agent(1, AgentStatus::Idle),
@@ -393,7 +394,7 @@ mod tests {
         // When handling JumpBack.
         IntentHandler::handle(&Intent::JumpBack, &mut state);
 
-        // Then the cursor is on agent 2's agent row.
+        // Then the cursor is on session 2's agent row.
         assert_eq!(
             state.sessions.cursor,
             Some(agent_row(2, 2)),
@@ -480,7 +481,7 @@ mod tests {
         // When handling JumpBack.
         IntentHandler::handle(&Intent::JumpBack, &mut state);
 
-        // Then the cursor skips the closed agent for agent 1's card.
+        // Then the cursor skips the closed agent for session 1's card.
         assert_eq!(
             state.sessions.cursor,
             Some(on_agent(1)),

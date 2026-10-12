@@ -125,7 +125,7 @@ impl SettledOverride {
     }
 }
 
-/// An agent an agent report started in an existing pane.
+/// An agent that a harness report started in an existing pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewPaneAgent {
     pub pane: PaneId,

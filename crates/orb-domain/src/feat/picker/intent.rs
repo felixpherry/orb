@@ -8,6 +8,7 @@ use crate::command::{SearchCommand, SessionsCommand, Workspace, WorktreesCommand
 use crate::feat::git::intent::{
     change_workspace, pick_branch, pick_move_workspace, pick_new_workspace,
 };
+use crate::feat::pane::intent::show_pane;
 use crate::feat::picker::list::PickerItem;
 use crate::feat::picker::state::{
     PickTarget, PickerKind, PickerState, SessionFilter, session_items, worktree_items,
@@ -20,11 +21,12 @@ use crate::feat::picker::validator::{
 use crate::feat::sessions::intent::{
     delete_session, filter_to, pick_project, remove_project, settle_session, still_deletable,
 };
+use crate::feat::sessions::intent::{new_session, with_visit};
+use crate::feat::sessions::state::Project;
 use crate::feat::sessions::state::{ProjectKind, SidebarItem};
 use crate::feat::sidebar;
 use crate::ids::{AgentId, PaneId, SessionId};
-use crate::intent_handler::{new_session, open_picker, project_item, show_pane, with_visit};
-use crate::{AppState, Command, Focus, Intent};
+use crate::{AppState, Command, Focus};
 
 /// Opens the new-session picker over orb's projects, most recent first.
 pub(crate) fn open_project_picker(state: &mut AppState) -> Vec<Command> {
@@ -151,31 +153,70 @@ pub(crate) fn filter(state: &mut AppState, pressed: SessionFilter) -> Vec<Comman
     with_preview(state, before, vec![])
 }
 
+/// A key the picker's box takes, which the rename box and the sidebar
+/// search take too while they have the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickerKey {
+    /// Types a character.
+    Input(char),
+    /// Deletes the grapheme before the cursor.
+    Backspace,
+    /// Deletes the word before the cursor.
+    DeleteWord,
+    /// Moves the cursor one grapheme left.
+    CursorLeft,
+    /// Moves the cursor one grapheme right.
+    CursorRight,
+    /// Moves the cursor to this grapheme (a click).
+    CursorTo(usize),
+    /// Selects the next row or match.
+    Next,
+    /// Selects the previous row or match.
+    Prev,
+    /// Moves the selection half a page down.
+    HalfPageDown,
+    /// Moves the selection half a page up.
+    HalfPageUp,
+    /// Picks the selected row, saves the name, or ends the search.
+    Confirm,
+    /// Browses into the selected directory.
+    Open,
+    /// Closes without picking.
+    Cancel,
+    /// Asks to remove the highlighted row.
+    Remove,
+    /// Selects the shown row at this index (a click).
+    SelectRow(usize),
+    /// Selects the next row, stopping on the last (the wheel).
+    WheelNext,
+    /// Selects the previous row, stopping on the first (the wheel).
+    WheelPrev,
+}
+
 /// A key for the picker's box: the rename box or the sidebar search take it
 /// while they have the keys; otherwise the open picker does.
-pub(crate) fn key(intent: &Intent, state: &mut AppState) -> Vec<Command> {
+pub(crate) fn key(state: &mut AppState, key: PickerKey) -> Vec<Command> {
     match state.focus {
-        Focus::Rename => sidebar::intent::rename_key(intent, state),
-        Focus::Search => sidebar::intent::search_key(intent, state),
-        _ => match intent {
-            Intent::PickerInput(ch) => input(state, *ch),
-            Intent::PickerBackspace => backspace(state),
-            Intent::PickerDeleteWord => delete_word(state),
-            Intent::PickerCursorLeft => cursor_left(state),
-            Intent::PickerCursorRight => cursor_right(state),
-            Intent::PickerCursorTo(index) => cursor_to(state, *index),
-            Intent::PickerNext => next(state),
-            Intent::PickerPrev => prev(state),
-            Intent::PickerHalfPageDown => half_page_down(state),
-            Intent::PickerHalfPageUp => half_page_up(state),
-            Intent::PickerSelectRow(index) => select_row(state, *index),
-            Intent::PickerWheelNext => wheel_next(state),
-            Intent::PickerWheelPrev => wheel_prev(state),
-            Intent::PickerOpen => open(state),
-            Intent::PickerConfirm => confirm(state),
-            Intent::PickerCancel => cancel(state),
-            Intent::PickerRemove => remove(state),
-            _ => vec![],
+        Focus::Rename => sidebar::intent::rename_key(key, state),
+        Focus::Search => sidebar::intent::search_key(key, state),
+        _ => match key {
+            PickerKey::Input(ch) => input(state, ch),
+            PickerKey::Backspace => backspace(state),
+            PickerKey::DeleteWord => delete_word(state),
+            PickerKey::CursorLeft => cursor_left(state),
+            PickerKey::CursorRight => cursor_right(state),
+            PickerKey::CursorTo(index) => cursor_to(state, index),
+            PickerKey::Next => next(state),
+            PickerKey::Prev => prev(state),
+            PickerKey::HalfPageDown => half_page_down(state),
+            PickerKey::HalfPageUp => half_page_up(state),
+            PickerKey::SelectRow(index) => select_row(state, index),
+            PickerKey::WheelNext => wheel_next(state),
+            PickerKey::WheelPrev => wheel_prev(state),
+            PickerKey::Open => open(state),
+            PickerKey::Confirm => confirm(state),
+            PickerKey::Cancel => cancel(state),
+            PickerKey::Remove => remove(state),
         },
     }
 }
@@ -722,6 +763,22 @@ fn leave_delete_worktree(state: &mut AppState) -> Vec<Command> {
         .map(|path| Command::Worktrees(WorktreesCommand::DeleteWorktree { path }))
         .into_iter()
         .collect()
+}
+
+/// The picker row for `project`.
+pub(crate) fn project_item(project: &Project) -> PickerItem {
+    PickerItem::Project {
+        id: project.id,
+        title: project.title.clone(),
+        root: project.root.clone(),
+        kind: project.kind,
+    }
+}
+
+/// Opens `picker` and gives it the keys.
+pub(crate) fn open_picker(state: &mut AppState, picker: PickerState) {
+    state.picker = Some(picker);
+    state.focus = Focus::Picker;
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ use wherror::Error;
 
 use super::sessions::state::AgentStatus;
 use super::sessions::transcript::{Exchange, MessageRead};
+use crate::ids::AgentId;
 
 /// The id a harness is stored and looked up by.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -94,6 +95,16 @@ pub trait TranscriptFormat: Send + Sync {
     ///
     /// Returns an error if the transcript can't be read.
     fn messages(&self, path: &Path, offset: u64, prompt_offset: u64) -> io::Result<MessageRead>;
+}
+
+/// The log text for agent `agent`'s transcript at `path` that couldn't be
+/// read.
+pub fn unreadable_transcript(agent: AgentId, path: &Path) -> String {
+    format!(
+        "couldn't read agent {}'s transcript {}",
+        agent.0,
+        path.display()
+    )
 }
 
 /// A harness call failed. Every report carries a one-line reason as its

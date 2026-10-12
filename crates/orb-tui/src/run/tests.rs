@@ -1687,11 +1687,39 @@ fn a_command_for_a_stopped_actor_is_logged() -> io::Result<()> {
         orb_domain::SearchCommand::SearchTranscripts { query: "x".into() },
     ));
 
-    // Then the log says the command couldn't be sent.
+    // Then the log says which command couldn't be sent, and to which actor.
     let content = fs::read_to_string(&path)?;
     assert!(
-        content.contains("couldn't send to the search actor"),
+        content.contains("couldn't send SearchTranscripts to the search actor"),
         "the lost command should be logged, got {content:?}"
+    );
+    Ok(())
+}
+
+#[rstest::rstest]
+fn a_lost_search_does_not_log_its_text() -> io::Result<()> {
+    // Given a loop whose search actor has stopped, and a log.
+    let mut test = loop_app(FakeZmx::listing(""), exits_at_once)?;
+    let path = test.dir.path().join("orb.log");
+    test.app.log = Log::new(path.clone());
+    let search = test.app.search.clone();
+    test.runtime.block_on(async move {
+        let _ = search.stop_gracefully().await;
+        search.wait_for_shutdown().await;
+    });
+
+    // When the loop sends it a search for some private words.
+    test.app.execute(&Command::Search(
+        orb_domain::SearchCommand::SearchTranscripts {
+            query: "private words".into(),
+        },
+    ));
+
+    // Then the log line leaves the searched text out.
+    let content = fs::read_to_string(&path)?;
+    assert!(
+        !content.is_empty() && !content.contains("private words"),
+        "the lost search should be logged without its text, got {content:?}"
     );
     Ok(())
 }
