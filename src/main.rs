@@ -26,6 +26,7 @@ use orb_domain::feat::harness::pi::Pi;
 use orb_domain::feat::integration::{self, IntegrationPaths};
 use orb_domain::feat::notify::click::{ClickTarget, Kitty, NiriTarget, on_path};
 use orb_domain::feat::notify::notifier::NotifierService;
+use orb_domain::feat::notify::sound::SoundService;
 use orb_domain::feat::search::search_actor::{SearchActorDeps, spawn_search_actor};
 use orb_domain::feat::sessions::child_env::{ORB_PANE_ID, child_env};
 use orb_domain::feat::sessions::sessions_actor::{SessionsActorDeps, spawn_sessions_actor};
@@ -150,6 +151,7 @@ fn run(
     let env = child_env(std::env::vars_os());
     let tz = TimeZone::system();
     let notifier = desktop_notifier();
+    let sounds = desktop_sounds(&orb_root, log);
     let socket = socket_path(&orb_root);
     let store_path = orb_root.join("userdata/state.sqlite");
     let store_lock = store::lock(&store_path).change_context(OrbError)?;
@@ -218,6 +220,7 @@ fn run(
             env,
             zmx,
             notifier,
+            sounds,
             log.clone(),
         )
         .change_context(OrbError);
@@ -364,6 +367,16 @@ fn desktop_notifier() -> NotifierService {
             ancestors: own_ancestry(),
         });
     NotifierService::desktop(&path, ClickTarget { kitty, niri })
+}
+
+/// herdr's sounds, written into `~/.orb/sounds` and played by the OS's own
+/// player; silent, after one log line, when they can't be written.
+fn desktop_sounds(orb_root: &Path, log: &Log) -> SoundService {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    SoundService::desktop(&orb_root.join("sounds"), &path).unwrap_or_else(|report| {
+        log.error("couldn't set up sounds", &report);
+        SoundService::silent()
+    })
 }
 
 /// orb's process and its parents, for finding the window it runs in; just

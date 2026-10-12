@@ -1,6 +1,6 @@
 //! The loop's handling of the actors' reports: open a ready session, show
-//! errors and notices in the message box, and announce status changes on the
-//! desktop.
+//! errors and notices in the message box, and announce status changes with a
+//! sound and on the desktop.
 
 use super::*;
 
@@ -176,11 +176,29 @@ impl App {
         }
     }
 
-    /// While orb's terminal isn't focused, sends `notice` on a thread of
-    /// its own (the desktop's notification server can be slow to answer);
-    /// while it is, the sidebar already shows it and it's dropped. A notice
-    /// that can't be sent is logged and dropped.
+    /// Plays `notice`'s sound on a thread of its own: a request always, a
+    /// finished turn unless orb is focused and the agent's pane is on
+    /// screen. Then, while orb's terminal isn't focused, sends `notice` on a
+    /// thread of its own (the desktop's notification server can be slow to
+    /// answer); while it is, the sidebar already shows it and it's dropped.
+    /// A sound that can't play or a notice that can't be sent is logged and
+    /// dropped.
     fn announce(&self, notice: Notice) {
+        let looking = self.focused && self.state.read().agent_on_screen(notice.agent);
+        if let Some(sound) = sound_for(notice.kind, looking) {
+            let sounds = self.sounds.clone();
+            let log = self.log.clone();
+            if let Err(error) = thread::Builder::new()
+                .name("orb-sound".into())
+                .spawn(move || {
+                    if let Err(report) = sounds.play(sound) {
+                        log.error("couldn't play a sound", &report);
+                    }
+                })
+            {
+                self.log.error("couldn't start the sound thread", &error);
+            }
+        }
         if self.focused {
             return;
         }

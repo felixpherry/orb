@@ -16,10 +16,17 @@
 //! forward on niri. With no notification server, nothing is shown.
 //!
 //! On any other OS, nothing is shown.
+//!
+//! Alongside the notification, orb plays herdr's sounds, whether or not its
+//! terminal is focused: "request" each time an agent starts needing an
+//! approval or an answer, and "done" when a turn finishes, unless the user is
+//! looking at that agent (orb focused and its pane on screen). A sound that
+//! can't play is skipped.
 
 pub mod click;
 pub mod none;
 pub mod notifier;
 pub mod osascript;
+pub mod sound;
 pub mod terminal_notifier;
 pub mod xdg;

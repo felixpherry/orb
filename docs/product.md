@@ -36,6 +36,7 @@ Deliberately **not** built, because native Claude already does them inside its p
   - The kitty `map` lines for the Cmd keys: `map cmd+X send_key super+X` for `h`, `j`, `k`, `l`, the four arrows, `n`, `x`, `plus`, `equal`, `minus`, `1` to `9`, `[`, `]`, `i` and `o`, plus `map ctrl+shift+h no_op` and `map ctrl+shift+l no_op` so kitty's own `show_scrollback` and `next_layout` let `<C-S-h>`/`<C-S-l>` through (README lists them).
   - terminal-notifier allowed in System Settings → Notifications. Until then, it prints `Notifications are not allowed for this application` and exits 3, and orb re-sends each notice through `osascript`, whose click opens Script Editor instead of going back to orb.
   - kitty's remote control on a socket (`allow_remote_control` and `listen_on` in `kitty.conf`, which set `KITTY_LISTEN_ON`), so that a notification click can bring kitty forward.
+  - Sounds (herdr's "done" and "request", built into orb and written to `~/.orb/sounds` at startup) play through `afplay` on macOS. On Linux they need one of paplay, pw-play, ffplay, mpg123 or mpv on `PATH`, tried in that order; on EndeavourOS pw-play comes with PipeWire. With none, nothing plays.
 
 ## UX specification
 
