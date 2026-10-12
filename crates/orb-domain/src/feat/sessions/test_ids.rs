@@ -1,11 +1,11 @@
 //! Ids for tests, each kind in its own range, so a test that mixes up a
-//! thread, a session and a pane id fails instead of passing by accident.
+//! agent, a session and a pane id fails instead of passing by accident.
 
-use crate::ids::{PaneId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, SessionId};
 
-/// Agent (thread) `n`, for `n < 100`: 100 + n.
-pub(crate) fn agent(n: i64) -> ThreadId {
-    ThreadId(100 + below_100(n))
+/// Agent (agent) `n`, for `n < 100`: 100 + n.
+pub(crate) fn agent(n: i64) -> AgentId {
+    AgentId(100 + below_100(n))
 }
 
 /// Session `n`, for `n < 100`: 200 + n.

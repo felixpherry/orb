@@ -51,19 +51,19 @@ mod tests {
     use crate::AppState;
     use crate::feat::jumps::state::JumpList;
     use crate::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus, sessions_for,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, sessions_for,
     };
-    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
-    fn thread(id: i64) -> Thread {
-        Thread {
+    fn agent(id: i64) -> Agent {
+        Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: None,
             cwd: "/tmp".into(),
             transcript: None,
-            status: ThreadStatus::Idle,
+            status: AgentStatus::Idle,
             turn_started_at: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
@@ -81,7 +81,7 @@ mod tests {
         SidebarItem::Session(SessionId(id))
     }
 
-    /// Threads 1 and 2, the cursor on thread 2, and a jump list of `jumps`.
+    /// Agents 1 and 2, the cursor on agent 2, and a jump list of `jumps`.
     fn jumping(jumps: &[i64]) -> AppState {
         let mut state = AppState {
             sessions: Sessions {
@@ -92,7 +92,7 @@ mod tests {
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
                     repo: true,
-                    threads: vec![thread(1), thread(2)],
+                    agents: vec![agent(1), agent(2)],
                     kind: ProjectKind::Normal,
                 }],
                 cursor: Some(on(2)),
@@ -107,7 +107,7 @@ mod tests {
 
     #[rstest::rstest]
     fn jump_back_without_an_older_row_is_rejected() {
-        // Given a jump list holding only the cursor's thread.
+        // Given a jump list holding only the cursor's agent.
         let state = jumping(&[2]);
 
         // When validating a jump back.
@@ -119,13 +119,13 @@ mod tests {
 
     #[rstest::rstest]
     fn jump_back_onto_an_older_row_is_allowed() {
-        // Given thread 1 listed before the cursor's thread 2.
+        // Given agent 1 listed before the cursor's agent 2.
         let state = jumping(&[1, 2]);
 
         // When validating a jump back.
         let result = validate_jump_back(&state);
 
         // Then the jump can go ahead.
-        assert_eq!(result, Ok(()), "<C-[> onto thread 1 should be allowed");
+        assert_eq!(result, Ok(()), "<C-[> onto agent 1 should be allowed");
     }
 }

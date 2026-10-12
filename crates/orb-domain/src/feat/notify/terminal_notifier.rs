@@ -11,7 +11,7 @@
 //! a value starting with `(`, `{` or `"` as a property list and takes one
 //! starting with `-` for the next option. terminal-notifier strips one leading
 //! backslash from every value to allow for that, so orb prefixes every value
-//! with one. A later notification about the same thread replaces the earlier
+//! with one. A later notification about the same agent replaces the earlier
 //! one. Like `osascript`, each one runs with no stdin, stdout or stderr, and a
 //! thread of its own waits for it to exit. If it fails, for example because
 //! it isn't allowed to notify, that thread sends the same notification through
@@ -25,7 +25,7 @@ use error_stack::Report;
 
 use super::click::ClickTarget;
 use super::notifier::{Notifier, NotifyError, Urgency, spawn_detached};
-use crate::ids::ThreadId;
+use crate::ids::AgentId;
 
 /// Shows notifications with `terminal-notifier`, whose click runs a command,
 /// and through `fallback` when terminal-notifier exits unsuccessfully.
@@ -46,10 +46,10 @@ impl TerminalNotifierNotifier {
     }
 
     /// terminal-notifier's arguments to show `title` and `body` about
-    /// `thread`, replacing an earlier one about it, whose click goes back to
+    /// `agent`, replacing an earlier one about it, whose click goes back to
     /// orb.
-    fn args(&self, title: &str, body: &str, thread: ThreadId) -> Vec<OsString> {
-        let group = format!("orb-{}", thread.0);
+    fn args(&self, title: &str, body: &str, agent: AgentId) -> Vec<OsString> {
+        let group = format!("orb-{}", agent.0);
         let execute = self.click_command();
         [
             ("-title", Some(title)),
@@ -92,16 +92,16 @@ impl Notifier for TerminalNotifierNotifier {
         title: &str,
         body: &str,
         urgency: Urgency,
-        thread: ThreadId,
+        agent: AgentId,
     ) -> Result<(), Report<NotifyError>> {
         let resend = {
             let fallback = Arc::clone(&self.fallback);
             let (title, body) = (title.to_owned(), body.to_owned());
             move || {
-                let _ = fallback.notify(&title, &body, urgency, thread);
+                let _ = fallback.notify(&title, &body, urgency, agent);
             }
         };
-        spawn_detached(&self.program, self.args(title, body, thread), resend)
+        spawn_detached(&self.program, self.args(title, body, agent), resend)
     }
 }
 
@@ -135,10 +135,10 @@ mod tests {
     use super::TerminalNotifierNotifier;
     use crate::feat::notify::click::{ClickTarget, Kitty};
     use crate::feat::notify::notifier::{Notifier, NotifyError, Urgency};
-    use crate::ids::ThreadId;
+    use crate::ids::AgentId;
 
-    /// What a fallback notifier was asked to show: title, body and thread.
-    type Resent = (String, String, ThreadId);
+    /// What a fallback notifier was asked to show: title, body and agent.
+    type Resent = (String, String, AgentId);
 
     /// A fallback notifier that sends each notification it's asked to show
     /// down a channel.
@@ -154,9 +154,9 @@ mod tests {
             title: &str,
             body: &str,
             _urgency: Urgency,
-            thread: ThreadId,
+            agent: AgentId,
         ) -> Result<(), Report<NotifyError>> {
-            let _ = self.0.send((title.to_owned(), body.to_owned(), thread));
+            let _ = self.0.send((title.to_owned(), body.to_owned(), agent));
             Ok(())
         }
     }
@@ -200,10 +200,10 @@ mod tests {
         // Given a notifier with nothing to go back to, and a title that looks like an option.
         let notifier = notifier(ClickTarget::default());
 
-        // When building the arguments for thread 7.
-        let args = notifier.args("-orb · (x) \"y\"", "Finished", ThreadId(7));
+        // When building the arguments for agent 7.
+        let args = notifier.args("-orb · (x) \"y\"", "Finished", AgentId(7));
 
-        // Then title, body and the thread's group each carry one leading backslash.
+        // Then title, body and the agent's group each carry one leading backslash.
         let expected: Vec<OsString> = [
             "-title",
             "\\-orb · (x) \"y\"",
@@ -227,7 +227,7 @@ mod tests {
         });
 
         // When building the arguments.
-        let args = notifier.args("orb · x", "Finished", ThreadId(7));
+        let args = notifier.args("orb · x", "Finished", AgentId(7));
 
         // Then the value after -execute starts with one backslash.
         let value = args
@@ -249,7 +249,7 @@ mod tests {
         });
 
         // When building the arguments.
-        let args = notifier.args("orb · x", "Finished", ThreadId(7));
+        let args = notifier.args("orb · x", "Finished", AgentId(7));
 
         // Then -execute has kitty focus window 9.
         assert_eq!(
@@ -267,7 +267,7 @@ mod tests {
         let notifier = notifier(ClickTarget { kitty, niri: None });
 
         // When building the arguments.
-        let args = notifier.args("orb · x", "Finished", ThreadId(7));
+        let args = notifier.args("orb · x", "Finished", AgentId(7));
 
         // Then there is no -execute.
         assert_eq!(execute(&args), None, "no click command in {args:?}");
@@ -306,7 +306,7 @@ mod tests {
             }),
             niri: None,
         };
-        let args = notifier(click).args("orb · x", "Finished", ThreadId(7));
+        let args = notifier(click).args("orb · x", "Finished", AgentId(7));
 
         // When sh runs the -execute line in the temporary directory.
         let line = execute(&args).unwrap_or_default();
@@ -344,13 +344,13 @@ mod tests {
             fallback,
         );
 
-        // When notifying that thread 7 finished.
-        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(7))?;
+        // When notifying that agent 7 finished.
+        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(7))?;
 
         // Then the fallback is asked to show the same notification.
         assert_eq!(
             resent.recv_timeout(Duration::from_secs(5)).ok(),
-            Some(("orb · x".to_owned(), "Finished".to_owned(), ThreadId(7))),
+            Some(("orb · x".to_owned(), "Finished".to_owned(), AgentId(7))),
             "what the fallback showed after terminal-notifier exited {code}"
         );
         Ok(())
@@ -368,8 +368,8 @@ mod tests {
             fallback,
         );
 
-        // When notifying that thread 7 finished.
-        notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(7))?;
+        // When notifying that agent 7 finished.
+        notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(7))?;
 
         // Then the fallback is asked to show nothing.
         assert!(

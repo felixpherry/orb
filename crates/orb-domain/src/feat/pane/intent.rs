@@ -56,20 +56,20 @@ pub(crate) fn leave_pane(state: &mut AppState) -> Vec<Command> {
 mod tests {
     use crate::command::SessionsCommand;
     use crate::feat::layout::state::{Layouts, SessionLayout, test_entry};
-    use crate::feat::sessions::state::{SidebarItem, ThreadStatus};
+    use crate::feat::sessions::state::{AgentStatus, SidebarItem};
     use crate::feat::sidebar::state::SidebarView;
     use crate::ids::{PaneId, SessionId};
     use crate::intent_handler::test_support::{
-        agent, attached, jumping, left_pane, left_pane_showing_1, on_agent_in_another_tab,
-        on_thread, settle, shown_focus, split_layout, state_at, state_with, stopped, thread,
+        agent, agent_row, attached, jumping, left_pane, left_pane_showing_1, on_agent,
+        on_agent_in_another_tab, settle, shown_focus, split_layout, state_at, state_with, stopped,
         two_agents_from_sidebar, two_projects, with_layout,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler, PaneMode};
 
     #[rstest::rstest]
-    fn attach_to_live_thread_sets_focus_attached() {
-        // Given a selected idle thread.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+    fn attach_to_live_agent_sets_focus_attached() {
+        // Given a selected idle agent.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
         // When handling Attach.
         IntentHandler::handle(&Intent::Attach, &mut state);
@@ -79,14 +79,14 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn attach_to_live_thread_returns_attach_and_refresh() {
-        // Given a selected idle thread.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+    fn attach_to_live_agent_returns_attach_and_refresh() {
+        // Given a selected idle agent.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
         // When handling Attach.
         let commands = IntentHandler::handle(&Intent::Attach, &mut state);
 
-        // Then the loop attaches to that thread and the statuses are refreshed.
+        // Then the loop attaches to that agent and the statuses are refreshed.
         assert_eq!(
             commands,
             vec![
@@ -94,7 +94,7 @@ mod tests {
                 Command::Sessions(SessionsCommand::RefreshSessions),
                 Command::Sessions(SessionsCommand::SaveJumps),
             ],
-            "Attach should target the selected thread, then refresh"
+            "Attach should target the selected agent, then refresh"
         );
     }
 
@@ -219,9 +219,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn attach_shows_the_threads_session() {
-        // Given a selected idle thread running in session 1.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+    fn attach_shows_the_agents_session() {
+        // Given a selected idle agent running in session 1.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
         // When handling Attach.
         IntentHandler::handle(&Intent::Attach, &mut state);
@@ -230,22 +230,22 @@ mod tests {
         assert_eq!(
             state.shown_session(),
             Some(SessionId(1)),
-            "attaching should show the thread's session"
+            "attaching should show the agent's session"
         );
     }
 
     #[rstest::rstest]
-    fn attach_adds_the_thread_to_attached() {
-        // Given a selected idle thread.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+    fn attach_adds_the_agent_to_attached() {
+        // Given a selected idle agent.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
         // When handling Attach.
         IntentHandler::handle(&Intent::Attach, &mut state);
 
-        // Then the thread is attached.
+        // Then the agent is attached.
         assert!(
             state.attached.contains(&SessionId(1)),
-            "Attach should add the thread to attached"
+            "Attach should add the agent to attached"
         );
     }
 
@@ -266,17 +266,17 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn leave_pane_keeps_the_thread_attached() {
-        // Given keys going to thread 1's attached session.
+    fn leave_pane_keeps_the_agent_attached() {
+        // Given keys going to agent 1's attached session.
         let mut state = attached();
 
         // When handling LeavePane.
         IntentHandler::handle(&Intent::LeavePane, &mut state);
 
-        // Then thread 1 is still attached.
+        // Then agent 1 is still attached.
         assert!(
             state.attached.contains(&SessionId(1)),
-            "LeavePane should keep the thread attached"
+            "LeavePane should keep the agent attached"
         );
     }
 
@@ -324,7 +324,7 @@ mod tests {
 
     #[rstest::rstest]
     fn leave_pane_from_the_sidebar_does_nothing() {
-        // Given the sidebar on attached thread 2.
+        // Given the sidebar on attached agent 2.
         let mut state = left_pane(&[2], 2);
 
         // When handling LeavePane.
@@ -340,13 +340,13 @@ mod tests {
 
     #[rstest::rstest]
     fn focus_panes_from_the_sidebar_on_an_attached_session_enters_its_panes() {
-        // Given the sidebar on attached thread 2.
+        // Given the sidebar on attached agent 2.
         let mut state = left_pane(&[2], 2);
 
         // When handling FocusPanes (`<C-S-l>`).
         IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
-        // Then keys go into thread 2's pane.
+        // Then keys go into agent 2's pane.
         assert_eq!(
             state.focus,
             Focus::Pane,
@@ -356,13 +356,13 @@ mod tests {
 
     #[rstest::rstest]
     fn focus_panes_from_the_sidebar_returns_attach_and_refresh() {
-        // Given the sidebar on attached thread 2.
+        // Given the sidebar on attached agent 2.
         let mut state = left_pane(&[2], 2);
 
         // When handling FocusPanes (`<C-S-l>`).
         let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
-        // Then the loop attaches to thread 2 and the statuses are refreshed.
+        // Then the loop attaches to agent 2 and the statuses are refreshed.
         assert_eq!(
             commands,
             vec![
@@ -380,7 +380,7 @@ mod tests {
     fn focus_panes_from_the_sidebar_on_an_unattached_session_keeps_the_keys(
         #[case] attached: &[i64],
     ) {
-        // Given thread 2 selected and unattached, with no thread or thread 1
+        // Given agent 2 selected and unattached, with no agent or agent 1
         // attached.
         let mut state = left_pane(attached, 2);
         let before = state.focus;
@@ -427,27 +427,27 @@ mod tests {
 
     #[rstest::rstest]
     fn attach_on_b_after_a_lists_their_agents() {
-        // Given thread 1 entered, then the cursor moved to thread 2.
+        // Given agent 1 entered, then the cursor moved to agent 2.
         let mut state = jumping(Focus::Sidebar, &[], &[]);
-        state.sessions.cursor = Some(on_thread(1));
+        state.sessions.cursor = Some(on_agent(1));
         IntentHandler::handle(&Intent::Attach, &mut state);
         state.focus = Focus::Sidebar;
-        state.sessions.cursor = Some(on_thread(2));
+        state.sessions.cursor = Some(on_agent(2));
 
-        // When handling Attach on thread 2.
+        // When handling Attach on agent 2.
         IntentHandler::handle(&Intent::Attach, &mut state);
 
-        // Then the jump list is thread 1's agent, then thread 2's.
+        // Then the jump list is agent 1's agent, then agent 2's.
         assert_eq!(
             state.jumps.entries(),
-            [agent(1, 1), agent(2, 2)],
+            [agent_row(1, 1), agent_row(2, 2)],
             "entering each pane should record its agent"
         );
     }
 
     #[rstest::rstest]
     fn attach_returns_save_jumps() {
-        // Given thread 2 selected.
+        // Given agent 2 selected.
         let mut state = jumping(Focus::Sidebar, &[], &[]);
 
         // When handling Attach.
@@ -462,13 +462,13 @@ mod tests {
 
     #[rstest::rstest]
     fn re_entering_the_pane_jump_back_landed_in_returns_no_save_jumps() {
-        // Given a jump back from thread 2's pane into thread 1's, then a
+        // Given a jump back from agent 2's pane into agent 1's, then a
         // click on the sidebar.
-        let mut state = jumping(Focus::Pane, &[1, 2], &[on_thread(1), agent(2, 2)]);
+        let mut state = jumping(Focus::Pane, &[1, 2], &[on_agent(1), agent_row(2, 2)]);
         IntentHandler::handle(&Intent::JumpBack, &mut state);
         IntentHandler::handle(&Intent::LeavePane, &mut state);
 
-        // When handling `<C-S-l>` back into thread 1's pane.
+        // When handling `<C-S-l>` back into agent 1's pane.
         let commands = IntentHandler::handle(&Intent::FocusPanes, &mut state);
 
         // Then the list isn't saved: nothing was recorded.
@@ -481,7 +481,7 @@ mod tests {
     #[rstest::rstest]
     fn enter_on_an_agent_row_records_the_agent() {
         // Given the sidebar on agent 1's row, with agent 2's pane focused.
-        let mut state = two_agents_from_sidebar(agent(1, 1), &[]);
+        let mut state = two_agents_from_sidebar(agent_row(1, 1), &[]);
 
         // When handling Attach.
         IntentHandler::handle(&Intent::Attach, &mut state);
@@ -489,7 +489,7 @@ mod tests {
         // Then agent 1 is recorded.
         assert_eq!(
             state.jumps.entries(),
-            [agent(1, 1)],
+            [agent_row(1, 1)],
             "⏎ on an agent row should record that agent"
         );
     }
@@ -497,7 +497,7 @@ mod tests {
     #[rstest::rstest]
     fn enter_on_a_card_records_its_focused_agent() {
         // Given the sidebar on session 1's card, with agent 2's pane focused.
-        let mut state = two_agents_from_sidebar(on_thread(1), &[]);
+        let mut state = two_agents_from_sidebar(on_agent(1), &[]);
 
         // When handling Attach.
         IntentHandler::handle(&Intent::Attach, &mut state);
@@ -505,7 +505,7 @@ mod tests {
         // Then agent 2 is recorded.
         assert_eq!(
             state.jumps.entries(),
-            [agent(1, 2)],
+            [agent_row(1, 2)],
             "⏎ on a card should record the agent in its focused pane"
         );
     }
@@ -522,15 +522,15 @@ mod tests {
         // Then session 1's card is recorded.
         assert_eq!(
             state.jumps.entries(),
-            [on_thread(1)],
+            [on_agent(1)],
             "⏎ on a card with a shell focused should record the card"
         );
     }
 
     #[rstest::rstest]
     fn focus_panes_from_the_sidebar_without_a_layout_keeps_the_keys() {
-        // Given thread 1 selected but not attached.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        // Given agent 1 selected but not attached.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
         // When handling FocusPanes (`<C-S-l>`).
         IntentHandler::handle(&Intent::FocusPanes, &mut state);
@@ -541,7 +541,7 @@ mod tests {
 
     #[rstest::rstest]
     fn focus_panes_from_a_pane_does_nothing() {
-        // Given thread 1's pane with the keys.
+        // Given agent 1's pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
         // When handling FocusPanes (`<C-S-l>`).
@@ -570,7 +570,7 @@ mod tests {
 
     #[rstest::rstest]
     fn attach_on_an_agent_row_of_a_float_shows_it_on_top() {
-        // Given thread 1's pane turned into a hidden float beside shell pane
+        // Given agent 1's pane turned into a hidden float beside shell pane
         // 50, the cursor on its agent row in the sidebar.
         let mut state = split_layout();
         state.layouts.focus_pane(SessionId(1), PaneId(1));
@@ -585,7 +585,7 @@ mod tests {
         // When handling Attach.
         IntentHandler::handle(&Intent::Attach, &mut state);
 
-        // Then the floats are shown with thread 1's float on top.
+        // Then the floats are shown with agent 1's float on top.
         assert_eq!(
             shown_focus(&state),
             Some(PaneId(1)),
@@ -643,9 +643,9 @@ mod tests {
 
     #[rstest::rstest]
     fn leave_pane_puts_the_cursor_on_the_active_row() {
-        // Given the keys in active session 2's pane, the cursor on thread 1.
+        // Given the keys in active session 2's pane, the cursor on agent 1.
         let mut state = jumping(Focus::Pane, &[2], &[]);
-        state.sessions.cursor = Some(on_thread(1));
+        state.sessions.cursor = Some(on_agent(1));
         let active_row = state.active_row();
 
         // When handling LeavePane.
@@ -660,7 +660,7 @@ mod tests {
 
     #[rstest::rstest]
     fn focus_panes_on_an_unattached_row_enters_the_active_session() {
-        // Given session 1 attached and active, unattached thread 2 hovered.
+        // Given session 1 attached and active, unattached agent 2 hovered.
         let mut state = left_pane_showing_1(&[1], 2);
         let active_row = state.active_row();
 
@@ -677,9 +677,9 @@ mod tests {
 
     #[rstest::rstest]
     fn leave_pane_keeps_the_cursor_when_the_active_row_is_filtered_out() {
-        // Given the keys in alpha's thread 11, the sidebar filtered to beta
-        // with the cursor on thread 21.
-        let mut state = two_projects(Some(2), on_thread(21));
+        // Given the keys in alpha's agent 11, the sidebar filtered to beta
+        // with the cursor on agent 21.
+        let mut state = two_projects(Some(2), on_agent(21));
         state
             .layouts
             .insert(SessionId(11), SessionLayout::of(test_entry(11)));
@@ -690,10 +690,10 @@ mod tests {
         // When handling LeavePane.
         IntentHandler::handle(&Intent::LeavePane, &mut state);
 
-        // Then the cursor stays on thread 21.
+        // Then the cursor stays on agent 21.
         assert_eq!(
             state.sessions.cursor,
-            Some(on_thread(21)),
+            Some(on_agent(21)),
             "a filtered-out active row should not take the hover"
         );
     }

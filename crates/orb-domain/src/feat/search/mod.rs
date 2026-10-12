@@ -1,7 +1,7 @@
-//! Search — finding what was said in orb's threads.
+//! Search — finding what was said in orb's agents.
 //!
 //! orb keeps an index of the prompts the user typed and the text replies
-//! from every thread's transcripts, so typed text finds the messages that
+//! from every agent's transcripts, so typed text finds the messages that
 //! contain it, newest first, and the exchange each one belongs to.
 //!
 //! The index fills in the background at startup, newest chat first, and

@@ -448,7 +448,7 @@ fn row_content(
 }
 
 /// A branch row: its name after a branch glyph coloured by where it lives,
-/// and on the right its badge, or where it's checked out when the thread
+/// and on the right its badge, or where it's checked out when the agent
 /// can't follow it.
 fn branch_row(
     row: &BranchRow,
@@ -623,10 +623,10 @@ mod tests {
     use orb_domain::feat::picker::list::{PickerItem, WorkspaceChoice};
     use orb_domain::feat::picker::state::{PickTarget, PickerState};
     use orb_domain::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Session, SessionKind, Sessions, Thread, ThreadStatus,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Session, SessionKind, Sessions,
     };
     use orb_domain::feat::zmx::zmx_service::ZmxSession;
-    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
     use ratatui::style::Modifier;
@@ -903,12 +903,12 @@ mod tests {
     /// Session 1's agent `fix login`, running in pane 1, which is named
     /// `name`.
     fn fix_login_in_pane_one(name: Option<&str>) -> (Sessions, Layouts) {
-        let thread = Thread {
-            id: ThreadId(1),
+        let agent = Agent {
+            id: AgentId(1),
             title: Some("fix login".to_owned()),
             cwd: PathBuf::from("/code/orb"),
             transcript: None,
-            status: ThreadStatus::Idle,
+            status: AgentStatus::Idle,
             turn_started_at: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(1),
@@ -928,7 +928,7 @@ mod tests {
                 title: "orb".to_owned(),
                 root: PathBuf::from("/code/orb"),
                 created_at: UNIX_EPOCH,
-                threads: vec![thread],
+                agents: vec![agent],
                 repo: true,
                 removed: false,
                 kind: ProjectKind::Normal,
@@ -1482,7 +1482,7 @@ mod tests {
         );
     }
 
-    /// The repository the branch pickers list, and the thread's directory.
+    /// The repository the branch pickers list, and the agent's directory.
     const REPO: &str = "/Users/me/dev/orb";
 
     fn branch(name: &str, worktree: Option<&str>) -> GitRef {

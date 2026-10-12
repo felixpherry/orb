@@ -698,11 +698,11 @@ mod tests {
 
     use super::{Click, ClickTarget, Clicks, HitMap, MouseRoute, route};
 
-    const THREAD_1: SidebarItem = SidebarItem::Session(SessionId(1));
+    const AGENT_1: SidebarItem = SidebarItem::Session(SessionId(1));
 
     /// A 30-column sidebar and a 50-column right side, 20 lines tall over the
-    /// mode line: the input box on lines 0 to 2 and thread 1 on lines 3 to 5;
-    /// on the right a tab bar on line 0, then thread 1's pane in columns 30
+    /// mode line: the input box on lines 0 to 2 and agent 1 on lines 3 to 5;
+    /// on the right a tab bar on line 0, then agent 1's pane in columns 30
     /// to 54 and pane -1 in columns 56 to 79, both running programs that
     /// read the mouse.
     fn hits() -> HitMap {
@@ -718,7 +718,7 @@ mod tests {
     fn hits_reading(reads_mouse: bool) -> HitMap {
         let mut hits = HitMap::new(Rect::new(0, 0, 30, 20), Rect::new(30, 0, 50, 20));
         hits.record_sidebar_input(Rect::new(0, 0, 29, 3));
-        hits.record_row(Rect::new(0, 3, 29, 3), THREAD_1);
+        hits.record_row(Rect::new(0, 3, 29, 3), AGENT_1);
         hits.record_pane(Rect::new(30, 1, 25, 19), PaneId(1), reads_mouse);
         hits.record_pane(Rect::new(56, 1, 24, 19), PaneId(-1), reads_mouse);
         hits
@@ -737,7 +737,7 @@ mod tests {
         mouse(MouseEventKind::Down(MouseButton::Left), column, row)
     }
 
-    /// Routes `event` with `focus`, thread 1's pane focused and no earlier
+    /// Routes `event` with `focus`, agent 1's pane focused and no earlier
     /// click.
     fn route_once(event: MouseEvent, focus: Focus) -> MouseRoute {
         route(
@@ -750,7 +750,7 @@ mod tests {
         )
     }
 
-    /// Routes `event` over `hits` with `focus`, thread 1's pane focused and
+    /// Routes `event` over `hits` with `focus`, agent 1's pane focused and
     /// the gesture so far in `clicks`.
     fn route_with(
         event: MouseEvent,
@@ -780,13 +780,13 @@ mod tests {
     #[rstest::rstest]
     fn click_on_a_row_with_the_sidebar_focused_selects_it() {
         // Given the sidebar has the keys.
-        // When clicking thread 1's row.
+        // When clicking agent 1's row.
         let routed = route_once(left_click(5, 4), Focus::Sidebar);
 
         // Then the row is selected.
         assert_eq!(
             routed,
-            MouseRoute::Intents(vec![Intent::SelectRow(THREAD_1)]),
+            MouseRoute::Intents(vec![Intent::SelectRow(AGENT_1)]),
             "a click on a row should select it"
         );
     }
@@ -794,20 +794,20 @@ mod tests {
     #[rstest::rstest]
     fn click_on_a_row_from_the_pane_leaves_it_first() {
         // Given the attached pane has the keys.
-        // When clicking thread 1's row.
+        // When clicking agent 1's row.
         let routed = route_once(left_click(5, 4), Focus::Pane);
 
         // Then the pane is left, then the row is selected.
         assert_eq!(
             routed,
-            MouseRoute::Intents(vec![Intent::LeavePane, Intent::SelectRow(THREAD_1)]),
+            MouseRoute::Intents(vec![Intent::LeavePane, Intent::SelectRow(AGENT_1)]),
             "a click on a row should leave the pane first"
         );
     }
 
     #[rstest::rstest]
     fn double_click_on_a_row_attaches() {
-        // Given the sidebar has the keys and thread 1's row was just clicked.
+        // Given the sidebar has the keys and agent 1's row was just clicked.
         let (hits, mut clicks, now) = (hits(), Clicks::default(), Instant::now());
         route(
             left_click(5, 4),
@@ -838,7 +838,7 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_the_focused_pane_while_attached_is_forwarded() {
-        // Given thread 1's focused pane has the keys and its program reads
+        // Given agent 1's focused pane has the keys and its program reads
         // the mouse.
         // When clicking inside it.
         let routed = route_once(left_click(40, 5), Focus::Pane);
@@ -853,7 +853,7 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_another_pane_while_attached_focuses_it() {
-        // Given thread 1's focused pane has the keys and pane -1's program
+        // Given agent 1's focused pane has the keys and pane -1's program
         // reads the mouse.
         // When clicking pane -1.
         let routed = route_once(left_click(60, 5), Focus::Pane);
@@ -868,7 +868,7 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_another_pane_while_attached_is_not_forwarded() {
-        // Given thread 1's focused pane has the keys.
+        // Given agent 1's focused pane has the keys.
         // When clicking pane -1.
         let routed = route_once(left_click(60, 5), Focus::Pane);
 
@@ -1030,9 +1030,9 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_a_pane_from_the_sidebar_focuses_it() {
-        // Given the sidebar has the keys and thread 1's pane's program reads
+        // Given the sidebar has the keys and agent 1's pane's program reads
         // the mouse.
-        // When clicking thread 1's pane.
+        // When clicking agent 1's pane.
         let routed = route_once(left_click(35, 5), Focus::Sidebar);
 
         // Then the pane takes the focus and the keys.
@@ -1078,13 +1078,13 @@ mod tests {
     #[rstest::rstest]
     fn click_on_a_row_during_a_search_selects_it() {
         // Given a search has the keys.
-        // When clicking thread 1's row.
+        // When clicking agent 1's row.
         let routed = route_once(left_click(5, 4), Focus::Search);
 
         // Then the row is selected.
         assert_eq!(
             routed,
-            MouseRoute::Intents(vec![Intent::SelectRow(THREAD_1)]),
+            MouseRoute::Intents(vec![Intent::SelectRow(AGENT_1)]),
             "a click on a row during a search should select it"
         );
     }
@@ -1092,7 +1092,7 @@ mod tests {
     #[rstest::rstest]
     fn click_on_a_pane_during_a_search_confirms_and_focuses_it() {
         // Given a search has the keys.
-        // When clicking thread 1's pane.
+        // When clicking agent 1's pane.
         let routed = route_once(left_click(50, 5), Focus::Search);
 
         // Then the search ends on its match and the pane takes the keys.
@@ -1118,7 +1118,7 @@ mod tests {
     }
 
     /// `hits()` under a picker popup over columns 20 to 59, lines 4 to 13
-    /// (it covers part of thread 1's row), with shown row 1 on line 8.
+    /// (it covers part of agent 1's row), with shown row 1 on line 8.
     fn picker_hits() -> HitMap {
         let mut hits = hits();
         hits.record_overlay(Rect::new(20, 4, 40, 10));
@@ -1152,7 +1152,7 @@ mod tests {
     #[rstest::rstest]
     fn click_outside_a_picker_cancels_it() {
         // Given a picker has the keys.
-        // When clicking thread 1's row, outside the popup.
+        // When clicking agent 1's row, outside the popup.
         let routed = route_over(left_click(5, 4), &picker_hits(), Focus::Picker);
 
         // Then the picker is cancelled and the row isn't selected.
@@ -1326,11 +1326,11 @@ mod tests {
         );
     }
 
-    /// `hits()` while searching for "thread": the box's inner line is
+    /// `hits()` while searching for "agents": the box's inner line is
     /// columns 1 to 27 of line 1, the text after the two-column `> `.
     fn search_hits() -> HitMap {
         let mut hits = hits();
-        hits.record_text(Rect::new(1, 1, 27, 1), 2, "thread", 6, 24);
+        hits.record_text(Rect::new(1, 1, 27, 1), 2, "agents", 6, 24);
         hits
     }
 
@@ -1344,11 +1344,11 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_the_search_text_moves_its_cursor() {
-        // Given the sidebar search has the keys, "thread" typed.
-        // When clicking the "r" of "thread".
+        // Given the sidebar search has the keys, "agents" typed.
+        // When clicking the "e" of "agents".
         let routed = route_over(left_click(5, 1), &search_hits(), Focus::Search);
 
-        // Then the search cursor moves before the "r".
+        // Then the search cursor moves before the "e".
         assert_eq!(
             routed,
             MouseRoute::Intents(vec![Intent::PickerCursorTo(2)]),
@@ -1358,7 +1358,7 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_the_search_prompt_moves_the_cursor_to_the_start() {
-        // Given the sidebar search has the keys, "thread" typed.
+        // Given the sidebar search has the keys, "agents" typed.
         // When clicking the `>` of the prompt.
         let routed = route_over(left_click(1, 1), &search_hits(), Focus::Search);
 
@@ -1372,7 +1372,7 @@ mod tests {
 
     #[rstest::rstest]
     fn click_on_the_search_box_border_does_nothing() {
-        // Given the sidebar search has the keys, "thread" typed.
+        // Given the sidebar search has the keys, "agents" typed.
         // When clicking the box's top border, off the text line.
         let routed = route_over(left_click(5, 0), &search_hits(), Focus::Search);
 
@@ -1403,7 +1403,7 @@ mod tests {
     #[rstest::rstest]
     fn click_before_the_picker_is_drawn_does_nothing() {
         // Given a picker has the keys but no frame has drawn it yet.
-        // When clicking thread 1's row.
+        // When clicking agent 1's row.
         let routed = route_over(left_click(5, 4), &hits(), Focus::Picker);
 
         // Then nothing happens.
@@ -1435,11 +1435,11 @@ mod tests {
         );
     }
 
-    const ROW_1: Option<ClickTarget> = Some(ClickTarget::Row(THREAD_1));
+    const ROW_1: Option<ClickTarget> = Some(ClickTarget::Row(AGENT_1));
 
     #[rstest::rstest]
     fn two_quick_clicks_on_the_same_row_are_a_double_click() {
-        // Given a click on thread 1's row.
+        // Given a click on agent 1's row.
         let (mut clicks, now) = (Clicks::default(), Instant::now());
         clicks.click(ROW_1, now);
 
@@ -1452,7 +1452,7 @@ mod tests {
 
     #[rstest::rstest]
     fn clicks_600ms_apart_are_two_singles() {
-        // Given a click on thread 1's row.
+        // Given a click on agent 1's row.
         let (mut clicks, now) = (Clicks::default(), Instant::now());
         clicks.click(ROW_1, now);
 
@@ -1465,11 +1465,11 @@ mod tests {
 
     #[rstest::rstest]
     fn clicks_on_different_rows_are_two_singles() {
-        // Given a click on thread 1's row.
+        // Given a click on agent 1's row.
         let (mut clicks, now) = (Clicks::default(), Instant::now());
         clicks.click(ROW_1, now);
 
-        // When clicking thread 2's row 100 ms later.
+        // When clicking agent 2's row 100 ms later.
         let click = clicks.click(
             Some(ClickTarget::Row(SidebarItem::Session(SessionId(2)))),
             now + Duration::from_millis(100),
@@ -1481,7 +1481,7 @@ mod tests {
 
     #[rstest::rstest]
     fn third_quick_click_is_a_single() {
-        // Given a double-click on thread 1's row.
+        // Given a double-click on agent 1's row.
         let (mut clicks, now) = (Clicks::default(), Instant::now());
         clicks.click(ROW_1, now);
         clicks.click(ROW_1, now + Duration::from_millis(100));
@@ -1495,7 +1495,7 @@ mod tests {
 
     #[rstest::rstest]
     fn press_on_the_focused_shell_pane_starts_a_selection() {
-        // Given thread 1's focused shell pane has the keys.
+        // Given agent 1's focused shell pane has the keys.
         // When pressing inside it.
         let routed = route_with(
             left_click(40, 5),
@@ -1514,7 +1514,7 @@ mod tests {
 
     #[rstest::rstest]
     fn drag_after_a_selecting_press_extends_the_selection() {
-        // Given a press that started a selection in thread 1's shell pane.
+        // Given a press that started a selection in agent 1's shell pane.
         let (hits, mut clicks) = (shell_hits(), Clicks::default());
         route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
 
@@ -1531,7 +1531,7 @@ mod tests {
 
     #[rstest::rstest]
     fn release_after_a_selecting_press_copies() {
-        // Given a press that started a selection in thread 1's shell pane.
+        // Given a press that started a selection in agent 1's shell pane.
         let (hits, mut clicks) = (shell_hits(), Clicks::default());
         route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
 
@@ -1548,7 +1548,7 @@ mod tests {
 
     #[rstest::rstest]
     fn drag_past_the_pane_keeps_extending_the_selection() {
-        // Given a press that started a selection in thread 1's shell pane.
+        // Given a press that started a selection in agent 1's shell pane.
         let (hits, mut clicks) = (shell_hits(), Clicks::default());
         route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
 
@@ -1565,7 +1565,7 @@ mod tests {
 
     #[rstest::rstest]
     fn press_in_a_mouse_tracking_program_is_forwarded() {
-        // Given thread 1's focused pane has the keys and its program reads
+        // Given agent 1's focused pane has the keys and its program reads
         // the mouse.
         // When pressing inside it.
         let routed = route_with(
@@ -1585,7 +1585,7 @@ mod tests {
 
     #[rstest::rstest]
     fn drag_in_a_mouse_tracking_program_is_forwarded() {
-        // Given a press forwarded to thread 1's mouse-reading program.
+        // Given a press forwarded to agent 1's mouse-reading program.
         let (hits, mut clicks) = (hits(), Clicks::default());
         route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
 
@@ -1602,7 +1602,7 @@ mod tests {
 
     #[rstest::rstest]
     fn release_in_a_mouse_tracking_program_is_forwarded() {
-        // Given a press forwarded to thread 1's mouse-reading program.
+        // Given a press forwarded to agent 1's mouse-reading program.
         let (hits, mut clicks) = (hits(), Clicks::default());
         route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
 
@@ -1619,7 +1619,7 @@ mod tests {
 
     #[rstest::rstest]
     fn press_on_another_shell_pane_focuses_it_and_starts_a_selection() {
-        // Given thread 1's focused pane has the keys and pane -1 runs a shell.
+        // Given agent 1's focused pane has the keys and pane -1 runs a shell.
         // When pressing pane -1.
         let routed = route_with(
             left_click(60, 5),
@@ -1638,8 +1638,8 @@ mod tests {
 
     #[rstest::rstest]
     fn press_on_a_shell_pane_from_the_sidebar_focuses_it_and_starts_a_selection() {
-        // Given the sidebar has the keys and thread 1's pane runs a shell.
-        // When pressing thread 1's pane.
+        // Given the sidebar has the keys and agent 1's pane runs a shell.
+        // When pressing agent 1's pane.
         let routed = route_with(
             left_click(40, 5),
             &shell_hits(),
@@ -1661,7 +1661,7 @@ mod tests {
         let (hits, mut clicks) = (hits(), Clicks::default());
         route_with(left_click(60, 5), &hits, Focus::Pane, &mut clicks);
 
-        // When releasing over thread 1's focused pane while it has the keys.
+        // When releasing over agent 1's focused pane while it has the keys.
         let routed = route_with(left_release(40, 5), &hits, Focus::Pane, &mut clicks);
 
         // Then nothing happens.
@@ -1761,7 +1761,7 @@ mod tests {
 
     #[rstest::rstest]
     fn wheel_during_a_selection_does_nothing() {
-        // Given a press that started a selection in thread 1's shell pane.
+        // Given a press that started a selection in agent 1's shell pane.
         let (hits, mut clicks) = (shell_hits(), Clicks::default());
         route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
 
@@ -1783,7 +1783,7 @@ mod tests {
 
     #[rstest::rstest]
     fn press_after_a_lost_release_starts_a_new_selection() {
-        // Given a selection in thread 1's shell pane whose release never came.
+        // Given a selection in agent 1's shell pane whose release never came.
         let (hits, mut clicks) = (shell_hits(), Clicks::default());
         route_with(left_click(40, 5), &hits, Focus::Pane, &mut clicks);
 
@@ -1809,7 +1809,7 @@ mod tests {
 
     #[rstest::rstest]
     fn pane_at_returns_the_float_over_a_tiled_pane() {
-        // Given float 9 drawn over thread 1's pane.
+        // Given float 9 drawn over agent 1's pane.
         let hits = float_hits();
 
         // When asking which pane is at a cell of both.
@@ -1821,7 +1821,7 @@ mod tests {
 
     #[rstest::rstest]
     fn pane_at_on_a_float_border_is_no_pane() {
-        // Given float 9's border drawn over thread 1's pane.
+        // Given float 9's border drawn over agent 1's pane.
         let hits = float_hits();
 
         // When asking which pane is on the border.
@@ -1833,7 +1833,7 @@ mod tests {
 
     #[rstest::rstest]
     fn press_on_a_float_border_focuses_the_float() {
-        // Given float 9 drawn over thread 1's focused pane.
+        // Given float 9 drawn over agent 1's focused pane.
         let (hits, mut clicks) = (float_hits(), Clicks::default());
 
         // When pressing on the float's border.
@@ -1888,7 +1888,7 @@ mod tests {
 
     #[rstest::rstest]
     fn press_on_a_float_over_the_focused_pane_focuses_the_float() {
-        // Given float 9 drawn over thread 1's focused pane, which has the keys.
+        // Given float 9 drawn over agent 1's focused pane, which has the keys.
         let (hits, mut clicks) = (float_hits(), Clicks::default());
 
         // When pressing on the float's content.
@@ -1907,7 +1907,7 @@ mod tests {
         // Given float 9 with the keys.
         let hits = float_hits();
 
-        // When clicking thread 1's pane outside the float.
+        // When clicking agent 1's pane outside the float.
         let routed = route(
             left_click(40, 15),
             &hits,
@@ -1917,7 +1917,7 @@ mod tests {
             Instant::now(),
         );
 
-        // Then thread 1's pane gets the keys.
+        // Then agent 1's pane gets the keys.
         assert_eq!(
             routed,
             MouseRoute::Intents(vec![Intent::FocusPane(PaneId(1))]),

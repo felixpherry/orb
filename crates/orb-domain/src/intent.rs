@@ -45,7 +45,7 @@ pub enum Intent {
     /// was changed by hand, the new shell taking the focus; while a float has
     /// the keys, open a float instead.
     AddPane,
-    /// Close the focused pane; on the thread's own pane, detach the thread.
+    /// Close the focused pane; on the agent's own pane, detach the agent.
     ClosePane,
     /// Show only the focused pane over its tab, or every pane again.
     ToggleZoom,
@@ -78,7 +78,7 @@ pub enum Intent {
     MovePaneInOrder { forward: bool },
     /// Open a tab with one shell, shown.
     NewTab,
-    /// Close the shown tab; one holding a pane a thread runs in detaches the thread.
+    /// Close the shown tab; one holding a pane an agent runs in detaches the agent.
     CloseTab,
     /// Open the rename box for the shown tab.
     RenameTab,
@@ -124,7 +124,7 @@ pub enum Intent {
     NewSession,
     /// Make a session in orb's Incognito folder, with one shell.
     NewIncognito,
-    /// Open the session picker over the threads inside the project filter,
+    /// Open the session picker over the agents inside the project filter,
     /// newest chat first, to jump into one.
     OpenSessionPicker,
     /// Open the worktree picker over every directory under
@@ -134,7 +134,7 @@ pub enum Intent {
     /// start a session in one, add one or remove one.
     OpenProjects,
     /// Open the search picker, which finds typed text in the prompts and
-    /// replies of every thread's transcripts, newest message first.
+    /// replies of every agent's transcripts, newest message first.
     OpenSearch,
     /// Open the project filter picker to filter the sidebar to one project,
     /// or to all of them.
@@ -144,7 +144,7 @@ pub enum Intent {
     /// Open the rename box for the selected session, filled in with its
     /// title.
     Rename,
-    /// Move the keys to the sidebar's input box to search thread titles.
+    /// Move the keys to the sidebar's input box to search agent titles.
     Search,
     /// Un-settle the selected session, or ask to settle it.
     ToggleSettle,
@@ -162,10 +162,10 @@ pub enum Intent {
     /// Open the directory picker, over the projects screen, to add a project
     /// (`a`).
     AddProject,
-    /// Open the workspace picker for the selected thread before its first
+    /// Open the workspace picker for the selected agent before its first
     /// prompt.
     ChangeWorkspace,
-    /// Open the branch picker for the selected thread.
+    /// Open the branch picker for the selected agent.
     SwitchBranch,
     /// Type a character into the picker's filter, the rename box, or the
     /// sidebar search.

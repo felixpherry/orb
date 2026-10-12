@@ -35,7 +35,7 @@ pub(crate) enum KeyCategory {
     General,
     Navigation,
     Sessions,
-    Threads,
+    Agents,
 }
 
 impl fmt::Display for KeyCategory {
@@ -44,7 +44,7 @@ impl fmt::Display for KeyCategory {
             Self::General => "general",
             Self::Navigation => "navigation",
             Self::Sessions => "sessions",
-            Self::Threads => "threads",
+            Self::Agents => "agents",
         })
     }
 }
@@ -204,15 +204,15 @@ pub(crate) fn keymap() -> Keymap<KeyEvent, Scope, Intent, KeyCategory> {
     }
     for scope in [Scope::Sidebar, Scope::SidebarIncognito] {
         keymap
-            .bind("r", Intent::Rename, KeyCategory::Threads, scope)
-            .bind("p", Intent::TogglePin, KeyCategory::Threads, scope)
-            .bind("s", Intent::ToggleSettle, KeyCategory::Threads, scope)
-            .bind("d", Intent::Delete, KeyCategory::Threads, scope);
+            .bind("r", Intent::Rename, KeyCategory::Agents, scope)
+            .bind("p", Intent::TogglePin, KeyCategory::Agents, scope)
+            .bind("s", Intent::ToggleSettle, KeyCategory::Agents, scope)
+            .bind("d", Intent::Delete, KeyCategory::Agents, scope);
     }
     for scope in [Scope::SidebarAgent, Scope::SidebarAgentIncognito] {
         keymap
-            .bind("r", Intent::Rename, KeyCategory::Threads, scope)
-            .bind("d", Intent::Delete, KeyCategory::Threads, scope);
+            .bind("r", Intent::Rename, KeyCategory::Agents, scope)
+            .bind("d", Intent::Delete, KeyCategory::Agents, scope);
     }
     for scope in SIDEBAR.into_iter().chain(PANE) {
         keymap
@@ -613,16 +613,16 @@ mod tests {
 
     use crate::test_support::{layouts_for, sessions_for};
     use orb_domain::feat::sessions::state::{
-        FolderKind, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus,
+        Agent, AgentStatus, FolderKind, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem,
     };
-    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
     use orb_domain::{Focus, Intent, PaneMode};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui_which_key::{Key, NodeResult};
 
     use super::{
-        Keys, LEADER, Route, Scope, Selection, cmd_route, keymap, mode_route, picker_list_route,
-        picker_route, press, route,
+        KeyCategory, Keys, LEADER, Route, Scope, Selection, cmd_route, keymap, mode_route,
+        picker_list_route, picker_route, press, route,
     };
     use orb_domain::feat::layout::tree::{NavDirection, Split};
     use orb_domain::feat::picker::state::{PickerKind, SessionFilter};
@@ -898,7 +898,7 @@ mod tests {
         );
     }
 
-    /// One project of `kind` holding thread 1 in session 1, with the cursor
+    /// One project of `kind` holding agent 1 in session 1, with the cursor
     /// on `cursor`.
     fn lone(kind: ProjectKind, cursor: SidebarItem) -> Sessions {
         let projects = vec![Project {
@@ -908,14 +908,14 @@ mod tests {
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
             repo: true,
-            threads: vec![Thread {
+            agents: vec![Agent {
                 last_session: None,
                 harness: HarnessId::new("claude"),
-                id: ThreadId(1),
+                id: AgentId(1),
                 title: None,
                 cwd: "/orb".into(),
                 transcript: None,
-                status: ThreadStatus::Idle,
+                status: AgentStatus::Idle,
                 turn_started_at: None,
                 pane: Some(PaneLaunch {
                     pane: PaneId(1),
@@ -938,12 +938,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::normal_thread(
+    #[case::normal_session(
         ProjectKind::Normal,
         SidebarItem::Session(SessionId(1)),
         Selection::Session
     )]
-    #[case::incognito_thread(
+    #[case::incognito_session(
         ProjectKind::Incognito,
         SidebarItem::Session(SessionId(1)),
         Selection::OwnFolderSession
@@ -1101,13 +1101,13 @@ mod tests {
         let intent = press(&mut keys, key(KeyCode::Char('r')));
 
         // Then nothing happens.
-        assert_eq!(intent, None, "only a thread can be renamed");
+        assert_eq!(intent, None, "only an agent can be renamed");
     }
 
     #[rstest::rstest]
     #[case('s', Intent::ToggleSettle)]
     #[case('d', Intent::Delete)]
-    fn sidebar_thread_key_yields_its_intent(#[case] c: char, #[case] expected: Intent) {
+    fn sidebar_agent_key_yields_its_intent(#[case] c: char, #[case] expected: Intent) {
         // Given the keymap in Sidebar focus.
         let mut keys = Keys::new(keymap(), Scope::Sidebar);
 
@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn held_j_selects_the_next_thread() {
+    fn held_j_selects_the_next_agent() {
         // Given a held `j` as the kitty protocol reports it.
         let mut keys = Keys::new(keymap(), Scope::Sidebar);
         let held = KeyEvent::new_with_kind_and_state(
@@ -1132,11 +1132,11 @@ mod tests {
         // When pressing it.
         let intent = press(&mut keys, held);
 
-        // Then it still selects the next thread.
+        // Then it still selects the next agent.
         assert_eq!(
             intent,
             Some(Intent::SelectNext),
-            "a repeated j should select the next thread"
+            "a repeated j should select the next agent"
         );
     }
 
@@ -1885,5 +1885,17 @@ mod tests {
             Some(Intent::SendCtrlG),
             "<C-g> <C-g> should send Ctrl g"
         );
+    }
+
+    #[rstest::rstest]
+    fn agents_category_reads_agents() {
+        // Given the which-key section for agent keys.
+        let category = KeyCategory::Agents;
+
+        // When formatting it.
+        let label = category.to_string();
+
+        // Then it reads "agents".
+        assert_eq!(label, "agents", "the agents section should read agents");
     }
 }

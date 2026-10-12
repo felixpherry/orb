@@ -13,7 +13,7 @@ use super::click::{ClickTarget, on_path};
 use super::osascript::OsascriptNotifier;
 use super::terminal_notifier::TerminalNotifierNotifier;
 use crate::feat::sessions::state::{Notice, NoticeKind};
-use crate::ids::ThreadId;
+use crate::ids::AgentId;
 
 /// A notification couldn't be sent.
 #[derive(Debug, Error)]
@@ -33,10 +33,10 @@ pub enum Urgency {
 pub trait Notifier: Send + Sync {
     fn name(&self) -> &'static str;
 
-    /// Shows a notification titled `title` saying `body` about `thread`,
+    /// Shows a notification titled `title` saying `body` about `agent`,
     /// without waiting for it to be shown, asking at `urgency` where the
     /// notifier can say how insistently. A notifier that can replaces an
-    /// earlier notification about `thread`, and takes a click back to orb.
+    /// earlier notification about `agent`, and takes a click back to orb.
     ///
     /// # Errors
     ///
@@ -46,7 +46,7 @@ pub trait Notifier: Send + Sync {
         title: &str,
         body: &str,
         urgency: Urgency,
-        thread: ThreadId,
+        agent: AgentId,
     ) -> Result<(), Report<NotifyError>>;
 }
 
@@ -74,8 +74,8 @@ impl NotifierService {
         Self::new(notifier)
     }
 
-    /// Announces `notice`: titled `<project> · <thread title>`, saying why
-    /// the thread needs the user. A click goes back to orb.
+    /// Announces `notice`: titled `<project> · <agent title>`, saying why
+    /// the agent needs the user. A click goes back to orb.
     ///
     /// # Errors
     ///
@@ -86,12 +86,12 @@ impl NotifierService {
             &title,
             notice.kind.label(),
             urgency(notice.kind),
-            notice.thread,
+            notice.agent,
         )
     }
 }
 
-/// How insistently a notice of `kind` asks: a thread that is blocked on the
+/// How insistently a notice of `kind` asks: an agent that is blocked on the
 /// user is critical, a finished turn is not.
 fn urgency(kind: NoticeKind) -> Urgency {
     match kind {
@@ -193,7 +193,7 @@ mod tests {
     use super::{Notifier, NotifierService, NotifyError, Urgency};
     use crate::feat::notify::click::ClickTarget;
     use crate::feat::sessions::state::{Notice, NoticeKind};
-    use crate::ids::ThreadId;
+    use crate::ids::AgentId;
 
     /// What the fake notifier was asked to show.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,7 +201,7 @@ mod tests {
         title: String,
         body: String,
         urgency: Urgency,
-        thread: ThreadId,
+        agent: AgentId,
     }
 
     /// A notifier that records each notification it was asked to show.
@@ -229,7 +229,7 @@ mod tests {
             title: &str,
             body: &str,
             urgency: Urgency,
-            thread: ThreadId,
+            agent: AgentId,
         ) -> Result<(), Report<NotifyError>> {
             self.shown
                 .lock()
@@ -238,7 +238,7 @@ mod tests {
                     title: title.to_owned(),
                     body: body.to_owned(),
                     urgency,
-                    thread,
+                    agent,
                 });
             Ok(())
         }
@@ -246,7 +246,7 @@ mod tests {
 
     fn notice(kind: NoticeKind) -> Notice {
         Notice {
-            thread: ThreadId(1),
+            agent: AgentId(1),
             kind,
             project: "orb".to_owned(),
             title: "Parser fix".to_owned(),
@@ -254,14 +254,14 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn announce_titles_the_notification_by_project_and_thread() -> Result<(), Report<NotifyError>> {
+    fn announce_titles_the_notification_by_project_and_agent() -> Result<(), Report<NotifyError>> {
         // Given a notifier.
         let notifier = Arc::new(FakeNotifier::default());
 
-        // When announcing that orb's "Parser fix" thread finished.
+        // When announcing that orb's "Parser fix" agent finished.
         NotifierService::new(notifier.clone()).announce(&notice(NoticeKind::Finished))?;
 
-        // Then one notification is titled by the project and the thread.
+        // Then one notification is titled by the project and the agent.
         let titles: Vec<String> = notifier
             .shown()
             .into_iter()
@@ -320,20 +320,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn announce_tells_the_notifier_the_thread() -> Result<(), Report<NotifyError>> {
+    fn announce_tells_the_notifier_the_agent() -> Result<(), Report<NotifyError>> {
         // Given a notifier.
         let notifier = Arc::new(FakeNotifier::default());
 
-        // When announcing thread 1's notice.
+        // When announcing agent 1's notice.
         NotifierService::new(notifier.clone()).announce(&notice(NoticeKind::Finished))?;
 
-        // Then the notifier hears of thread 1.
-        let heard: Vec<ThreadId> = notifier
+        // Then the notifier hears of agent 1.
+        let heard: Vec<AgentId> = notifier
             .shown()
             .into_iter()
-            .map(|shown| shown.thread)
+            .map(|shown| shown.agent)
             .collect();
-        assert_eq!(heard, [ThreadId(1)], "the thread");
+        assert_eq!(heard, [AgentId(1)], "the agent");
         Ok(())
     }
 

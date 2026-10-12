@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Identifies a thread across launches (its row in orb's store).
+/// Identifies an agent across launches (its row in orb's store).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ThreadId(pub i64);
+pub struct AgentId(pub i64);
 
 /// Identifies a session across launches (its row in orb's store).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

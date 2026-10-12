@@ -1,12 +1,12 @@
-//! The sessions actor — the owner of orb's threads, their statuses, and titles.
+//! The sessions actor — the owner of orb's agents, their statuses, and titles.
 //!
-//! At start it restores the saved threads into the shared state. Then it polls
+//! At start it restores the saved agents into the shared state. Then it polls
 //! the harnesses: every second while a turn is underway in any agent pane,
 //! every five seconds otherwise, and right away when asked. Each poll reads
-//! what each thread's agent is doing from the thread's pane: Stopped when the
+//! what each agent's agent is doing from the agent's pane: Stopped when the
 //! pane's zmx session isn't running, else the latest report a harness like pi
 //! wrote to the pane file, or the status of the Claude whose process runs
-//! under the pane (by process ancestry from the pane's zmx process). A thread
+//! under the pane (by process ancestry from the pane's zmx process). An agent
 //! with no pane is Stopped. Then it stamps when a turn starts, reads
 //! new transcript lines for titles and branches, and saves what changed.
 //! Asking the harnesses and zmx happens beside the actor's queue, between
@@ -28,7 +28,7 @@
 //!
 //! Before a session's first agent turn it can move the session to another
 //! workspace: the project's checkout, a worktree that already exists, or a
-//! new one made from a base branch. Every pane is killed, the threads in
+//! new one made from a base branch. Every pane is killed, the agents in
 //! them unbound, and the session and its panes point at the new directory;
 //! it is reported ready to open again, and opening it starts a fresh shell
 //! in each pane.
@@ -36,12 +36,12 @@
 //! worktree no session uses after a move is removed unless it has changes.
 //! When a turn
 //! ends in a worktree still on orb's `orb/<hex>` branch, and the harness or
-//! the user has titled the thread, the branch is renamed after that title.
+//! the user has titled the agent, the branch is renamed after that title.
 //!
-//! When the frontend finds a thread's orb worktree gone as it attaches, the
+//! When the frontend finds an agent's orb worktree gone as it attaches, the
 //! actor recreates it at the same path, so the session resumes the conversation
 //! there. It prunes git's record of the old worktree, then checks out the
-//! branch the worktree was on: the session's, else one of its threads', else
+//! branch the worktree was on: the session's, else one of its agents', else
 //! orb's `orb/<hex>` for the directory.
 //! When that branch is gone it makes it again from the project's default
 //! branch, fetched first from origin. Then it reports the session ready to
@@ -54,7 +54,7 @@
 //!
 //! At start it shows every harness by its name and mark.
 //!
-//! A thread whose harness orb doesn't know shows as Gone.
+//! An agent whose harness orb doesn't know shows as Gone.
 //!
 //! A turn that ends while the user is on another session shows as unseen
 //! until they select it. A session being deleted is hidden from the sidebar
@@ -80,9 +80,9 @@
 //! saves them when asked. It does the same for the jump list, dropping saved
 //! rows that no longer exist.
 //!
-//! It reports a notice for the frontend to announce when a thread it has
+//! It reports a notice for the frontend to announce when an agent it has
 //! polled since orb started finishes a turn, or starts needing an approval or
-//! an answer, in any project, unless the thread is being deleted.
+//! an answer, in any project, unless the agent is being deleted.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -98,12 +98,12 @@ use tokio::sync::Notify;
 
 use super::pane_status::{PaneReport, match_records, pane_status};
 use super::state::{
-    FolderKind, NEW_THREAD, Notice, NoticeKind, PaneLaunch, Project, ProjectKind, Session,
-    SessionKind, Sessions, SidebarItem, Thread, ThreadStatus,
+    Agent, AgentStatus, FolderKind, NEW_AGENT, Notice, NoticeKind, PaneLaunch, Project,
+    ProjectKind, Session, SessionKind, Sessions, SidebarItem,
 };
 use super::store::{
-    FloatRow, NewPaneThread, PaneRow, SessionFloats, SessionRow, SettledOverride, Store,
-    StoreError, TabRow, ThreadRow, Ui,
+    AgentRow, FloatRow, NewPaneAgent, PaneRow, SessionFloats, SessionRow, SettledOverride, Store,
+    StoreError, TabRow, Ui,
 };
 use super::template;
 use super::validator::folder_exists;
@@ -123,7 +123,7 @@ use crate::feat::layout::state::{Layouts, PaneEntry, SessionLayout, Tab};
 use crate::feat::layout::tree::{Split, TileLayout};
 use crate::feat::sidebar::state::{DEFAULT_WIDTH, clamp_width};
 use crate::feat::zmx::zmx_service::{ZmxEntry, ZmxService, ZmxSession};
-use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 use crate::{AppState, Focus};
 
 mod panes;
@@ -133,7 +133,7 @@ mod restore;
 mod settle;
 mod start;
 
-use self::poll::{display_title, show, thread_mut};
+use self::poll::{agent_mut, display_title, show};
 use self::restore::{pane_entry, pane_home, pane_launch, session_entries, unpolled};
 use self::start::{answer_name_box, current_branch, rename_hex_branch};
 
@@ -175,7 +175,7 @@ pub struct SessionsActorDeps {
 
 /// Owns [`Sessions`](super::state::Sessions) and the harnesses the frontend
 /// shows (`AppState::harnesses`): the projects, the
-/// sessions with their names, pins and settles, the threads' statuses and
+/// sessions with their names, pins and settles, the agents' statuses and
 /// titles, and the origin ref a start is fetching; it reports errors,
 /// notices and the session a start made ready to the frontend loop. It adds
 /// orb's Incognito project at start. It also restores the sidebar's width
@@ -186,7 +186,7 @@ pub struct SessionsActorDeps {
 /// session's layout, and saves a layout when asked. The intent handler also
 /// moves the cursor, opens and closes the shelf, marks a start as starting,
 /// and resizes or
-/// filters the sidebar before asking for that to be saved. It binds threads
+/// filters the sidebar before asking for that to be saved. It binds agents
 /// to panes from the agents' pane files, keeps each pane's latest report and
 /// resume command current, and owns each session's name, pin, settle and
 /// activity state on its store row.
@@ -199,8 +199,8 @@ pub struct SessionsActor {
     report: Reporter,
     /// Cuts the ticker's wait short so it polls now.
     poke: Arc<Notify>,
-    /// The saved threads, as last written to the store.
-    rows: Vec<ThreadRow>,
+    /// The saved agents, as last written to the store.
+    rows: Vec<AgentRow>,
     /// Each saved session: its directory, where its new panes start, and
     /// its settle lifecycle.
     sessions: HashMap<SessionId, SessionRow>,
@@ -220,7 +220,7 @@ pub struct PollPlan;
 /// What a poll must ask outside the actor. Reply to [`PollPlan`].
 #[derive(Reply)]
 pub struct Probe {
-    /// The harnesses a known pane holds a thread of.
+    /// The harnesses a known pane holds an agent of.
     asked: Vec<Arc<dyn Harness>>,
     /// The rest: listed as running nothing.
     skipped: Vec<HarnessId>,
@@ -564,25 +564,25 @@ enum Placement {
 }
 
 impl SessionsActor {
-    /// Changes thread `id`'s saved row with `change` (given the time now),
-    /// then saves and shows it. Does nothing if the thread is gone.
-    fn edit<F>(&mut self, id: ThreadId, change: F)
+    /// Changes agent `id`'s saved row with `change` (given the time now),
+    /// then saves and shows it. Does nothing if the agent is gone.
+    fn edit<F>(&mut self, id: AgentId, change: F)
     where
-        F: FnOnce(&mut ThreadRow, i64),
+        F: FnOnce(&mut AgentRow, i64),
     {
         let Some(row) = self.rows.iter_mut().find(|row| row.id == id) else {
             return;
         };
         change(row, now_ms());
-        let saved = self.store.save_thread(row);
+        let saved = self.store.save_agent(row);
         {
             let mut guard = self.state.write();
             let app = &mut *guard;
             let sessions = &mut app.sessions;
-            if let Some(thread) = thread_mut(sessions, id) {
-                let status = thread.status;
+            if let Some(agent) = agent_mut(sessions, id) {
+                let status = agent.status;
                 show(
-                    thread,
+                    agent,
                     row,
                     status,
                     pane_launch(row, &app.layouts, &self.unread),
@@ -644,14 +644,14 @@ impl SessionsActor {
             .map(|project| project.root.clone())
     }
 
-    /// What thread `id`'s session was doing at the last poll.
-    fn status(&self, id: ThreadId) -> Option<ThreadStatus> {
+    /// What agent `id`'s session was doing at the last poll.
+    fn status(&self, id: AgentId) -> Option<AgentStatus> {
         self.state
             .read()
             .sessions
-            .threads()
-            .find(|thread| thread.id == id)
-            .map(|thread| thread.status)
+            .all_agents()
+            .find(|agent| agent.id == id)
+            .map(|agent| agent.status)
     }
 }
 
@@ -729,9 +729,9 @@ fn reason(report: &Report<HarnessError>) -> String {
         .unwrap_or_else(|| "harness command failed".to_owned())
 }
 
-/// How a saved thread looks with `status`, its pane run as `pane`.
-fn thread(row: &ThreadRow, status: ThreadStatus, pane: Option<PaneLaunch>) -> Thread {
-    Thread {
+/// How a saved agent looks with `status`, its pane run as `pane`.
+fn agent(row: &AgentRow, status: AgentStatus, pane: Option<PaneLaunch>) -> Agent {
+    Agent {
         id: row.id,
         title: display_title(row),
         cwd: row.cwd.clone(),
@@ -749,7 +749,7 @@ fn thread(row: &ThreadRow, status: ThreadStatus, pane: Option<PaneLaunch>) -> Th
     }
 }
 
-/// The kind of session a project's new thread gets.
+/// The kind of session a project's new agent gets.
 fn session_kind(kind: ProjectKind) -> SessionKind {
     match kind {
         ProjectKind::Normal => SessionKind::Plain,

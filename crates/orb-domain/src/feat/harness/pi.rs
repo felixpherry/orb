@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use super::{Harness, HarnessId, HarnessInfo, Scan, TranscriptFormat};
 use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
-/// The id pi threads are stored under.
+/// The id pi agents are stored under.
 pub const ID: &str = "pi";
 
 /// The name the user sees for pi.

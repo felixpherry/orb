@@ -24,7 +24,7 @@ use std::time::SystemTime;
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::picker::list::{Matches, PickerItem};
 use orb_domain::feat::picker::state::{PickerKind, PickerState, SessionFilter};
-use orb_domain::feat::sessions::state::{Sessions, Thread, ThreadStatus};
+use orb_domain::feat::sessions::state::{Agent, AgentStatus, Sessions};
 use orb_domain::feat::sessions::transcript::Exchange;
 use orb_domain::ids::SessionId;
 use ratatui::buffer::Buffer;
@@ -240,7 +240,7 @@ fn render_row(
 ) {
     let PickerItem::Session {
         id,
-        thread,
+        agent: agent_id,
         label,
         split,
         settled,
@@ -251,7 +251,7 @@ fn render_row(
     };
     let agent = sessions
         .session(*id)
-        .and_then(|_| sessions.threads().find(|shown| shown.id == *thread));
+        .and_then(|_| sessions.all_agents().find(|shown| shown.id == *agent_id));
     let (icon, (dim, bright), time) = match (agent, settled) {
         (None, _) => (Span::raw("  "), (DARK3, DARK3), String::new()),
         (Some(agent), true) => (
@@ -283,17 +283,17 @@ fn render_row(
 
 /// How long the turn has run while working, else how long since the last
 /// chat.
-fn when(thread: &Thread, now: SystemTime) -> String {
-    match (thread.status, thread.turn_started_at) {
-        (ThreadStatus::Working, Some(at)) => {
+fn when(agent: &Agent, now: SystemTime) -> String {
+    match (agent.status, agent.turn_started_at) {
+        (AgentStatus::Working, Some(at)) => {
             working_label(now.duration_since(at).unwrap_or_default())
         }
-        _ => ago_label(now.duration_since(thread.last_chat()).unwrap_or_default()),
+        _ => ago_label(now.duration_since(agent.last_chat()).unwrap_or_default()),
     }
 }
 
-/// The preview box: untitled and empty with no thread selected, else
-/// titled with the row's label and holding the thread's chat card.
+/// The preview box: untitled and empty with no agent selected, else
+/// titled with the row's label and holding the agent's chat card.
 fn render_preview(
     picker: &PickerState,
     sessions: &Sessions,
@@ -304,7 +304,7 @@ fn render_preview(
     buf: &mut Buffer,
 ) {
     let Some(PickerItem::Session {
-        id, thread, label, ..
+        id, agent, label, ..
     }) = picker.selected()
     else {
         boxed(None).render(area, buf);
@@ -313,10 +313,10 @@ fn render_preview(
     let block = boxed(Some(Line::from(span(format!(" {label} "), BLUE))));
     let inner = block.inner(area);
     block.render(area, buf);
-    let thread = sessions.threads().find(|shown| shown.id == *thread);
-    let info = thread.and_then(|thread| harnesses.iter().find(|info| info.id == thread.harness));
-    let meta = thread.map_or_else(Line::default, |thread| {
-        meta(thread, info, attached.contains(id), now)
+    let agent = sessions.all_agents().find(|shown| shown.id == *agent);
+    let info = agent.and_then(|agent| harnesses.iter().find(|info| info.id == agent.harness));
+    let meta = agent.map_or_else(Line::default, |agent| {
+        meta(agent, info, attached.contains(id), now)
     });
     let exchanges = picker
         .preview()
@@ -329,24 +329,24 @@ fn render_preview(
     }
 }
 
-/// The selected thread's status (`idle` while idle), branch and model after
+/// The selected agent's status (`idle` while idle), branch and model after
 /// its harness's (`info`'s) mark, dim.
 pub(crate) fn meta(
-    thread: &Thread,
+    agent: &Agent,
     info: Option<&HarnessInfo>,
     attached: bool,
     now: SystemTime,
 ) -> Line<'static> {
-    let (glyph, word, fg) = status(thread, attached, now);
+    let (glyph, word, fg) = status(agent, attached, now);
     let mut spans = vec![
         span(format!(" {glyph} "), fg),
         span(word.unwrap_or("idle"), fg),
     ];
-    if let Some(branch) = &thread.branch {
+    if let Some(branch) = &agent.branch {
         spans.push(span(" · ", DARK3));
         spans.push(span(format!("{BRANCH} {branch}"), DARK5));
     }
-    if let Some(model) = &thread.model {
+    if let Some(model) = &agent.model {
         spans.push(span(" · ", DARK3));
         let (glyph, _) = mark(info.and_then(|info| info.icon.as_deref()));
         spans.push(span(format!("{glyph} {model}"), DARK5));
@@ -454,7 +454,7 @@ fn exchange_lines(
         Some((reply, _)) => markdown(reply, width, "   ", Style::new().fg(FG)),
         None => vec![Line::from(span("   …", DARK5))],
     };
-    // The reply's end says where the thread stands, so a long one keeps
+    // The reply's end says where the agent stands, so a long one keeps
     // its last lines under a `⋮`.
     let left = room.saturating_sub(head.len()).min(reply_cap);
     let body = if body.len() > left {
@@ -678,10 +678,10 @@ mod tests {
     use orb_domain::Focus;
     use orb_domain::feat::picker::state::{PickerState, SessionFilter, session_items};
     use orb_domain::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions,
     };
     use orb_domain::feat::sessions::transcript::Exchange;
-    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
     use ratatui::style::Modifier;
@@ -698,13 +698,13 @@ mod tests {
         UNIX_EPOCH + Duration::from_hours(240)
     }
 
-    /// Thread `id` titled `title`, alone in session `id`, last active five
+    /// Agent `id` titled `title`, alone in session `id`, last active five
     /// minutes before [`now`].
-    fn thread(id: i64, title: &str, status: ThreadStatus) -> Thread {
-        Thread {
+    fn agent(id: i64, title: &str, status: AgentStatus) -> Agent {
+        Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: Some(title.to_owned()),
             cwd: "/Users/me/dev/orb".into(),
             transcript: None,
@@ -732,8 +732,8 @@ mod tests {
         sessions
     }
 
-    /// `threads` in one project, `orb`, each in its own session.
-    fn sessions(threads: Vec<Thread>) -> Sessions {
+    /// `agents` in one project, `orb`, each in its own session.
+    fn sessions(agents: Vec<Agent>) -> Sessions {
         let projects = vec![Project {
             id: ProjectId(1),
             title: "orb".to_owned(),
@@ -741,7 +741,7 @@ mod tests {
             created_at: UNIX_EPOCH,
             removed: false,
             repo: true,
-            threads,
+            agents,
             kind: ProjectKind::Normal,
         }];
         Sessions {
@@ -751,7 +751,7 @@ mod tests {
         }
     }
 
-    /// The session picker over `sessions`, on all threads.
+    /// The session picker over `sessions`, on all agents.
     fn picker(sessions: &Sessions) -> PickerState {
         PickerState::sessions(
             session_items(
@@ -782,11 +782,11 @@ mod tests {
         }
     }
 
-    /// The picker over one thread, `orb/Fix the bug`, previewing `exchanges`.
+    /// The picker over one agent, `orb/Fix the bug`, previewing `exchanges`.
     fn previewing(exchanges: Vec<Exchange>) -> (PickerState, Sessions) {
-        let sessions = sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]);
+        let sessions = sessions(vec![agent(1, "Fix the bug", AgentStatus::Idle)]);
         let mut picker = picker(&sessions);
-        picker.show_preview(ThreadId(1), 1, exchanges);
+        picker.show_preview(AgentId(1), 1, exchanges);
         (picker, sessions)
     }
 
@@ -833,12 +833,12 @@ mod tests {
         (hits, cursor)
     }
 
-    /// Three idle threads in `orb`.
-    fn three_threads() -> Sessions {
+    /// Three idle agents in `orb`.
+    fn three_agents() -> Sessions {
         sessions(vec![
-            thread(1, "one", ThreadStatus::Idle),
-            thread(2, "two", ThreadStatus::Idle),
-            thread(3, "three", ThreadStatus::Idle),
+            agent(1, "one", AgentStatus::Idle),
+            agent(2, "two", AgentStatus::Idle),
+            agent(3, "three", AgentStatus::Idle),
         ])
     }
 
@@ -876,17 +876,17 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Two threads, `orb/Fix the bug` and `orb/Write docs`.
+    /// Two agents, `orb/Fix the bug` and `orb/Write docs`.
     fn two() -> Sessions {
         sessions(vec![
-            thread(1, "Fix the bug", ThreadStatus::Idle),
-            thread(2, "Write docs", ThreadStatus::Idle),
+            agent(1, "Fix the bug", AgentStatus::Idle),
+            agent(2, "Write docs", AgentStatus::Idle),
         ])
     }
 
     #[rstest::rstest]
     fn wide_area_puts_the_boxes_side_by_side() {
-        // Given two threads on a 140-column screen.
+        // Given two agents on a 140-column screen.
         let sessions = two();
 
         // When drawing the picker.
@@ -899,7 +899,7 @@ mod tests {
 
     #[rstest::rstest]
     fn narrow_area_stacks_the_list_over_the_preview() {
-        // Given two threads on a 100-column screen.
+        // Given two agents on a 100-column screen.
         let sessions = two();
 
         // When drawing the picker.
@@ -940,7 +940,7 @@ mod tests {
 
     #[rstest::rstest]
     fn title_on_all_names_no_filter() {
-        // Given the session picker on all threads.
+        // Given the session picker on all agents.
         let sessions = two();
 
         // When drawing the picker.
@@ -956,7 +956,7 @@ mod tests {
 
     #[rstest::rstest]
     fn count_sits_at_the_input_rows_right_end() {
-        // Given two threads, with `docs` typed.
+        // Given two agents, with `docs` typed.
         let sessions = two();
         let mut picker = picker(&sessions);
         typed(&mut picker, &['d', 'o', 'c', 's']);
@@ -971,7 +971,7 @@ mod tests {
 
     #[rstest::rstest]
     fn nothing_matched_draws_no_rows() {
-        // Given two threads, with `zzz` typed.
+        // Given two agents, with `zzz` typed.
         let sessions = two();
         let mut picker = picker(&sessions);
         typed(&mut picker, &['z', 'z', 'z']);
@@ -989,7 +989,7 @@ mod tests {
 
     #[rstest::rstest]
     fn selected_row_is_filled_with_visual() {
-        // Given two threads.
+        // Given two agents.
         let sessions = two();
 
         // When drawing the stacked picker, the list above the preview.
@@ -1004,8 +1004,8 @@ mod tests {
 
     #[rstest::rstest]
     fn row_prefix_is_dark5() {
-        // Given one thread.
-        let sessions = sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]);
+        // Given one agent.
+        let sessions = sessions(vec![agent(1, "Fix the bug", AgentStatus::Idle)]);
 
         // When drawing the stacked picker, the list above the preview.
         let (buf, _) = draw(&picker(&sessions), &sessions, 100, 30);
@@ -1019,8 +1019,8 @@ mod tests {
 
     #[rstest::rstest]
     fn settled_row_shows_the_check_in_dark3() {
-        // Given a settled thread, with settled threads shown.
-        let sessions = settled(sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]));
+        // Given a settled agent, with settled agents shown.
+        let sessions = settled(sessions(vec![agent(1, "Fix the bug", AgentStatus::Idle)]));
         let mut picker = picker(&sessions);
         picker.set_filter(
             SessionFilter::Settled,
@@ -1040,10 +1040,10 @@ mod tests {
 
     #[rstest::rstest]
     fn working_row_shows_the_spinner_and_its_turn_time() {
-        // Given a thread two minutes into its turn.
-        let sessions = sessions(vec![Thread {
+        // Given an agent two minutes into its turn.
+        let sessions = sessions(vec![Agent {
             turn_started_at: Some(now() - Duration::from_mins(2)),
-            ..thread(1, "Fix the bug", ThreadStatus::Working)
+            ..agent(1, "Fix the bug", AgentStatus::Working)
         }]);
 
         // When drawing the stacked picker, the list above the preview.
@@ -1061,13 +1061,13 @@ mod tests {
     fn idle_agent_beside_a_working_sibling_shows_the_idle_icon() {
         // Given session 1 running working agent 1 and idle agent 2.
         let sessions = sessions(vec![
-            thread(1, "Fix the bug", ThreadStatus::Working),
-            Thread {
+            agent(1, "Fix the bug", AgentStatus::Working),
+            Agent {
                 pane: Some(PaneLaunch {
                     pane: PaneId(2),
                     session: SessionId(1),
                 }),
-                ..thread(2, "Write docs", ThreadStatus::Idle)
+                ..agent(2, "Write docs", AgentStatus::Idle)
             },
         ]);
 
@@ -1080,15 +1080,15 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn deleted_thread_row_is_dark3_without_a_time() {
-        // Given a picker over two threads, one since gone from the sessions.
+    fn deleted_agent_row_is_dark3_without_a_time() {
+        // Given a picker over two agents, one since gone from the sessions.
         let picker = picker(&two());
-        let sessions = sessions(vec![thread(2, "Write docs", ThreadStatus::Idle)]);
+        let sessions = sessions(vec![agent(2, "Write docs", AgentStatus::Idle)]);
 
         // When drawing the stacked picker, the list above the preview.
         let (buf, _) = draw(&picker, &sessions, 100, 30);
 
-        // Then the gone thread's title is dim and its row has no time.
+        // Then the gone agent's title is dim and its row has no time.
         let fg = find(&buf, "Fix the bug")
             .and_then(|at| buf.cell(at))
             .map(|cell| cell.fg);
@@ -1101,7 +1101,7 @@ mod tests {
 
     #[rstest::rstest]
     fn nothing_matched_leaves_the_preview_untitled() {
-        // Given two threads, with `zzz` typed.
+        // Given two agents, with `zzz` typed.
         let sessions = two();
         let mut picker = picker(&sessions);
         typed(&mut picker, &['z', 'z', 'z']);
@@ -1123,24 +1123,24 @@ mod tests {
 
     #[rstest::rstest]
     fn preview_is_titled_with_the_selected_label() {
-        // Given one thread.
-        let sessions = sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]);
+        // Given one agent.
+        let sessions = sessions(vec![agent(1, "Fix the bug", AgentStatus::Idle)]);
 
         // When drawing the picker.
         let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
 
-        // Then the top border row holds the thread's label.
+        // Then the top border row holds the agent's label.
         let top = line_of(&buf, "╭");
         assert!(top.contains("orb/Fix the bug"), "top row was {top}");
     }
 
     #[rstest::rstest]
     fn meta_line_shows_the_branch_and_model() {
-        // Given a thread on `main` running `opus`.
-        let sessions = sessions(vec![Thread {
+        // Given an agent on `main` running `opus`.
+        let sessions = sessions(vec![Agent {
             branch: Some("main".to_owned()),
             model: Some("opus".to_owned()),
-            ..thread(1, "Fix the bug", ThreadStatus::Idle)
+            ..agent(1, "Fix the bug", AgentStatus::Idle)
         }]);
 
         // When drawing the stacked picker, the preview below the list.
@@ -1162,8 +1162,8 @@ mod tests {
 
     #[rstest::rstest]
     fn preview_without_exchanges_says_no_transcript_yet() {
-        // Given one thread with no preview loaded.
-        let sessions = sessions(vec![thread(1, "Fix the bug", ThreadStatus::Idle)]);
+        // Given one agent with no preview loaded.
+        let sessions = sessions(vec![agent(1, "Fix the bug", AgentStatus::Idle)]);
 
         // When drawing the picker.
         let (buf, _) = draw(&picker(&sessions), &sessions, 140, 30);
@@ -1310,7 +1310,7 @@ mod tests {
 
     #[rstest::rstest]
     fn hints_sit_on_the_popups_bottom_row() {
-        // Given two threads on a 140×30 screen.
+        // Given two agents on a 140×30 screen.
         let sessions = two();
 
         // When drawing the picker.
@@ -1328,7 +1328,7 @@ mod tests {
 
     #[rstest::rstest]
     fn hints_name_the_session_keys() {
-        // Given two threads.
+        // Given two agents.
         let sessions = two();
 
         // When drawing the picker.
@@ -1341,7 +1341,7 @@ mod tests {
 
     #[rstest::rstest]
     fn page_is_the_list_boxs_row_count() {
-        // Given two threads on a 140×30 screen.
+        // Given two agents on a 140×30 screen.
         let sessions = two();
 
         // When drawing the picker.
@@ -1356,8 +1356,8 @@ mod tests {
     #[case::wide(160, 40)]
     #[case::stacked(100, 40)]
     fn hit_map_maps_a_list_row_to_its_index(#[case] width: u16, #[case] height: u16) {
-        // Given the session picker over three threads.
-        let sessions = three_threads();
+        // Given the session picker over three agents.
+        let sessions = three_agents();
         let picker = picker(&sessions);
 
         // When drawing it on a `width`×`height` screen.
@@ -1373,8 +1373,8 @@ mod tests {
 
     #[rstest::rstest]
     fn hit_map_maps_the_preview_to_nothing() {
-        // Given the session picker over three threads.
-        let sessions = three_threads();
+        // Given the session picker over three agents.
+        let sessions = three_agents();
         let picker = picker(&sessions);
 
         // When drawing it wide, the preview beside the list.
@@ -1397,8 +1397,8 @@ mod tests {
         #[case] height: u16,
         #[case] preview: Position,
     ) {
-        // Given the session picker over three threads.
-        let sessions = three_threads();
+        // Given the session picker over three agents.
+        let sessions = three_agents();
         let picker = picker(&sessions);
 
         // When drawing it on a `width`×`height` screen.
@@ -1414,8 +1414,8 @@ mod tests {
 
     #[rstest::rstest]
     fn hit_map_maps_the_input_text_to_its_graphemes() {
-        // Given the session picker over three threads with "on" typed.
-        let sessions = three_threads();
+        // Given the session picker over three agents with "on" typed.
+        let sessions = three_agents();
         let mut picker = picker(&sessions);
         typed(&mut picker, &['o', 'n']);
 

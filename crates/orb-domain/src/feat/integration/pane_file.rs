@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use crate::feat::sessions::state::ThreadStatus;
+use crate::feat::sessions::state::AgentStatus;
 use crate::ids::PaneId;
 
 /// What the agent in a pane reported last.
@@ -40,11 +40,11 @@ pub enum AgentEvent {
 impl AgentEvent {
     /// The status a pane reporting this reads as: a fresh agent that hasn't
     /// run a turn is idle, and one that quit is stopped.
-    pub fn status(self) -> ThreadStatus {
+    pub fn status(self) -> AgentStatus {
         match self {
-            Self::Working => ThreadStatus::Working,
-            Self::Start | Self::Idle => ThreadStatus::Idle,
-            Self::End => ThreadStatus::Stopped,
+            Self::Working => AgentStatus::Working,
+            Self::Start | Self::Idle => AgentStatus::Idle,
+            Self::End => AgentStatus::Stopped,
         }
     }
 }
@@ -126,7 +126,7 @@ mod tests {
 
     use super::{AgentEvent, AgentReport, PaneFiles};
     use crate::feat::integration::IntegrationError;
-    use crate::feat::sessions::state::ThreadStatus;
+    use crate::feat::sessions::state::AgentStatus;
     use crate::ids::PaneId;
 
     type TestResult = Result<(), Report<IntegrationError>>;
@@ -259,11 +259,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(AgentEvent::Start, ThreadStatus::Idle)]
-    #[case(AgentEvent::Working, ThreadStatus::Working)]
-    #[case(AgentEvent::Idle, ThreadStatus::Idle)]
-    #[case(AgentEvent::End, ThreadStatus::Stopped)]
-    fn agent_event_reads_as_a_status(#[case] event: AgentEvent, #[case] expected: ThreadStatus) {
+    #[case(AgentEvent::Start, AgentStatus::Idle)]
+    #[case(AgentEvent::Working, AgentStatus::Working)]
+    #[case(AgentEvent::Idle, AgentStatus::Idle)]
+    #[case(AgentEvent::End, AgentStatus::Stopped)]
+    fn agent_event_reads_as_a_status(#[case] event: AgentEvent, #[case] expected: AgentStatus) {
         // Given a pane's latest event.
         // When reading it as a status.
         let status = event.status();

@@ -29,17 +29,17 @@ use crate::feat::layout::floats::{FloatLayout, FloatRect};
 use crate::feat::layout::state::{SessionLayout, Tab, test_entry};
 use crate::feat::layout::tree::{NavDirection, Split, SwapLayout};
 use crate::feat::sessions::state::{
-    FolderKind, Notice, NoticeKind, PaneLaunch, Project, ProjectKind, Session, SessionKind,
-    SidebarItem, Thread, ThreadStatus,
+    Agent, AgentStatus, FolderKind, Notice, NoticeKind, PaneLaunch, Project, ProjectKind, Session,
+    SessionKind, SidebarItem,
 };
 use crate::feat::sessions::store::{
-    FloatRow, NewPaneThread, SessionFloats, SessionRow, SettledOverride, Store, StoreError, TabRow,
-    ThreadRow, Ui, assert_every_pane_row_held,
+    AgentRow, FloatRow, NewPaneAgent, SessionFloats, SessionRow, SettledOverride, Store,
+    StoreError, TabRow, Ui, assert_every_pane_row_held,
 };
 use crate::feat::sidebar::state::{Rename, RenameTarget};
 use crate::feat::zmx::zmx_service::fake::FakeZmx;
 use crate::feat::zmx::zmx_service::{Zmx, ZmxError, ZmxOutput, ZmxService, ZmxSession};
-use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 use kameo::prelude::{ActorRef, Message};
 use std::ffi::OsString;
 
@@ -448,23 +448,23 @@ fn zmx_listing(stdout: &str) -> ZmxService {
     )
 }
 
-/// A thread and the one-pane session it runs in.
+/// An agent and the one-pane session it runs in.
 #[derive(Debug, Clone, Copy)]
 struct Seeded {
-    thread: ThreadId,
+    agent: AgentId,
     session: SessionId,
     pane: PaneId,
 }
 
-/// The process the fake zmx runs the pane of thread `short_id` as.
+/// The process the fake zmx runs the pane of agent `short_id` as.
 fn pid_of(short_id: &str) -> u32 {
     short_id.bytes().fold(7_u32, |pid, byte| {
         pid.wrapping_mul(31).wrapping_add(u32::from(byte)) % 1_000_000
     }) + 1_000
 }
 
-/// The Claude running in thread `short_id`'s pane, `status`.
-fn record(short_id: &str, status: ThreadStatus) -> RunningAgent {
+/// The Claude running in agent `short_id`'s pane, `status`.
+fn record(short_id: &str, status: AgentStatus) -> RunningAgent {
     RunningAgent {
         status,
         ancestry: vec![pid_of(short_id)],
@@ -476,7 +476,7 @@ fn listing(agents: Vec<RunningAgent>) -> Arc<FakeClaude> {
     Arc::new(FakeClaude::running(agents))
 }
 
-/// A zmx running the pane of every thread `store` has bound to one, as
+/// A zmx running the pane of every agent `store` has bound to one, as
 /// process [`pid_of`] its short id, on the pane socket dir /zmx.
 fn zmx_running(store: &Store) -> ZmxService {
     let panes = store.layouts().map(|saved| saved.panes).unwrap_or_default();
@@ -495,10 +495,10 @@ fn zmx_running(store: &Store) -> ZmxService {
     zmx_listing(&listed)
 }
 
-/// A store holding one thread in the orb project, created an hour ago.
-fn store_with_thread(short_id: &str) -> Result<(Store, ThreadId), Report<StoreError>> {
+/// A store holding one agent in the orb project, created an hour ago.
+fn store_with_agent(short_id: &str) -> Result<(Store, AgentId), Report<StoreError>> {
     let store = Store::open_in_memory()?;
-    let id = add_thread(&store, short_id, now_ms() - HOUR_MS)?;
+    let id = add_agent(&store, short_id, now_ms() - HOUR_MS)?;
     Ok((store, id))
 }
 
@@ -507,7 +507,7 @@ fn orb_project(store: &Store) -> Result<ProjectId, Report<StoreError>> {
     store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 0)
 }
 
-/// Saves thread `short_id` of `harness`, created at `created_at`, in a
+/// Saves agent `short_id` of `harness`, created at `created_at`, in a
 /// new `kind` session of project `project` in `dir`, one saved tab of one
 /// pane.
 fn seed_with(
@@ -535,7 +535,7 @@ fn seed_with(
         &SessionFloats::default(),
         &[(pane, None)],
     )?;
-    let (thread, _) = store.insert_pane_thread(&NewPaneThread {
+    let (agent, _) = store.insert_pane_agent(&NewPaneAgent {
         pane,
         session_id: short_id.to_owned(),
         transcript_path: None,
@@ -544,13 +544,13 @@ fn seed_with(
         created_at,
     })?;
     Ok(Seeded {
-        thread,
+        agent,
         session,
         pane,
     })
 }
 
-/// Saves thread `short_id` of `harness`, created at `created_at`, in a
+/// Saves agent `short_id` of `harness`, created at `created_at`, in a
 /// new session of the orb project of its own, one tab of one pane.
 fn seed(
     store: &Store,
@@ -570,25 +570,25 @@ fn seed(
     )
 }
 
-/// Saves a Claude thread created at `created_at` in the orb project.
-fn add_thread(
+/// Saves a Claude agent created at `created_at` in the orb project.
+fn add_agent(
     store: &Store,
     short_id: &str,
     created_at: i64,
-) -> Result<ThreadId, Report<StoreError>> {
-    seed(store, "claude", short_id, created_at).map(|seeded| seeded.thread)
+) -> Result<AgentId, Report<StoreError>> {
+    seed(store, "claude", short_id, created_at).map(|seeded| seeded.agent)
 }
 
-/// Saves `change` over the saved row of the thread `short_id`.
+/// Saves `change` over the saved row of the agent `short_id`.
 fn resave<F>(store: &Store, short_id: &str, change: F) -> Result<(), Report<StoreError>>
 where
-    F: FnOnce(ThreadRow) -> ThreadRow,
+    F: FnOnce(AgentRow) -> AgentRow,
 {
-    store.save_thread(&change(saved(store, short_id)?))
+    store.save_agent(&change(saved(store, short_id)?))
 }
 
-/// The saved row of the thread `short_id`.
-fn saved(store: &Store, short_id: &str) -> Result<ThreadRow, Report<StoreError>> {
+/// The saved row of the agent `short_id`.
+fn saved(store: &Store, short_id: &str) -> Result<AgentRow, Report<StoreError>> {
     store
         .load()?
         .1
@@ -622,7 +622,7 @@ fn start_with(
 
 /// Starts the actor on `store` with `git`, making worktrees under
 /// [`WORKTREES_ROOT`] and Research and Learn folders under `orb_root`.
-/// zmx runs every bound thread's pane (see [`zmx_running`]).
+/// zmx runs every bound agent's pane (see [`zmx_running`]).
 fn start_in(
     store: Store,
     claude: &Arc<FakeClaude>,
@@ -702,19 +702,19 @@ fn start_beside(
     (actor, state)
 }
 
-/// Saves a thread `short_id` of `harness` in the orb project, created an
+/// Saves an agent `short_id` of `harness` in the orb project, created an
 /// hour ago.
-fn add_thread_in(
+fn add_agent_in(
     store: &Store,
     harness: &str,
     short_id: &str,
-) -> Result<ThreadId, Report<StoreError>> {
-    seed(store, harness, short_id, now_ms() - HOUR_MS).map(|seeded| seeded.thread)
+) -> Result<AgentId, Report<StoreError>> {
+    seed(store, harness, short_id, now_ms() - HOUR_MS).map(|seeded| seeded.agent)
 }
 
-/// Saves a Claude thread `short_id` in the orb project, created an hour
+/// Saves a Claude agent `short_id` in the orb project, created an hour
 /// ago, in a session of its own.
-fn insert_thread(store: &Store, short_id: &str) -> Result<Seeded, Report<StoreError>> {
+fn insert_agent(store: &Store, short_id: &str) -> Result<Seeded, Report<StoreError>> {
     seed(store, "claude", short_id, now_ms() - HOUR_MS)
 }
 
@@ -728,10 +728,10 @@ fn zmx_of(state: &State, pane: PaneId) -> Option<ZmxSession> {
 }
 
 #[rstest::rstest]
-fn thread_pane_runs_in_its_pane_rows_zmx_session() -> Result<(), Report<StoreError>> {
-    // Given a saved thread whose harness runs no zmx session of its own.
+fn agent_pane_runs_in_its_pane_rows_zmx_session() -> Result<(), Report<StoreError>> {
+    // Given a saved agent whose harness runs no zmx session of its own.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
 
     // When restoring.
@@ -751,12 +751,12 @@ fn thread_pane_runs_in_its_pane_rows_zmx_session() -> Result<(), Report<StoreErr
 
 #[rstest::rstest]
 fn kept_pi_session_resolves_under_orbs_folder() -> Result<(), Report<StoreError>> {
-    // Given a thread whose pane keeps zmx session `orb-abc` on dir `pi`,
-    // as the migration leaves a pi thread's.
+    // Given an agent whose pane keeps zmx session `orb-abc` on dir `pi`,
+    // as the migration leaves a pi agent's.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     let store = Store::open(&path)?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     rusqlite::Connection::open(&path)
         .and_then(|conn| {
             conn.execute(
@@ -783,10 +783,10 @@ fn kept_pi_session_resolves_under_orbs_folder() -> Result<(), Report<StoreError>
 }
 
 #[rstest::rstest]
-fn thread_pane_starts_a_shell() -> Result<(), Report<StoreError>> {
-    // Given a saved thread in a pane.
+fn agent_pane_starts_a_shell() -> Result<(), Report<StoreError>> {
+    // Given a saved agent in a pane.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
 
     // When restoring.
@@ -795,21 +795,21 @@ fn thread_pane_starts_a_shell() -> Result<(), Report<StoreError>> {
     // Then it shows only its pane and session: nothing runs but the
     // shell zmx starts, where the user types the agent.
     assert_eq!(
-        shown(&state, inserted.thread).and_then(|thread| thread.pane),
+        shown(&state, inserted.agent).and_then(|agent| agent.pane),
         Some(PaneLaunch {
             pane: inserted.pane,
             session: inserted.session,
         }),
-        "a thread's pane should carry no command of its harness"
+        "an agent's pane should carry no command of its harness"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 fn restore_loads_each_sessions_tabs_into_layouts() -> Result<(), Report<StoreError>> {
-    // Given a thread's session saved with two tabs, the second shown.
+    // Given an agent's session saved with two tabs, the second shown.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
     let tab = |position, pane: PaneId| TabRow {
         session_id: inserted.session,
@@ -869,15 +869,15 @@ fn second_tab(store: &Store, seeded: &Seeded) -> Result<PaneId, Report<StoreErro
     Ok(second)
 }
 
-/// Saves thread `aa`'s session with a first tab on its pane, readable
+/// Saves agent `aa`'s session with a first tab on its pane, readable
 /// only when `first_reads`, and a second tab on a second pane, named
-/// [`UNREAD_PANE_NAME`], whose tree doesn't read. Returns the thread and
+/// [`UNREAD_PANE_NAME`], whose tree doesn't read. Returns the agent and
 /// the second pane.
 fn with_unread_tab(
     store: &Store,
     first_reads: bool,
 ) -> Result<(Seeded, PaneId), Report<StoreError>> {
-    let inserted = insert_thread(store, "aa")?;
+    let inserted = insert_agent(store, "aa")?;
     let second = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
     let tab = |position, layout: String, pane| TabRow {
         session_id: inserted.session,
@@ -936,7 +936,7 @@ fn restore_with_a_tab_that_doesnt_read_is_a_partial_load() -> Result<(), Report<
 fn restore_with_every_tab_read_is_not_a_partial_load() -> Result<(), Report<StoreError>> {
     // Given a session saved with one readable tab.
     let store = Store::open_in_memory()?;
-    insert_thread(&store, "aa")?;
+    insert_agent(&store, "aa")?;
 
     // When restoring.
     let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
@@ -956,7 +956,7 @@ fn restore_with_unreadable_layouts_is_a_partial_load() -> Result<(), Report<Stor
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     let store = Store::open(&path)?;
-    insert_thread(&store, "aa")?;
+    insert_agent(&store, "aa")?;
     rusqlite::Connection::open(&path)
         .and_then(|conn| conn.execute("DROP TABLE floats", []))
         .change_context(StoreError)?;
@@ -1046,21 +1046,21 @@ fn layout_save_keeps_the_name_of_a_pane_whose_tab_didnt_read() -> Result<(), Rep
 /// A seeded session and the panes of its tabs that don't read.
 type SeededSession = Result<(SessionId, Vec<PaneId>), Report<StoreError>>;
 
-/// Seeds thread `aa` in a session of its own; no tab is unread.
-fn one_thread(store: &Store) -> SeededSession {
-    insert_thread(store, "aa").map(|seeded| (seeded.session, Vec::new()))
+/// Seeds agent `aa` in a session of its own; no tab is unread.
+fn one_agent(store: &Store) -> SeededSession {
+    insert_agent(store, "aa").map(|seeded| (seeded.session, Vec::new()))
 }
 
-/// Seeds thread `aa` with a second tab whose tree doesn't read.
+/// Seeds agent `aa` with a second tab whose tree doesn't read.
 fn one_unread_tab(store: &Store) -> SeededSession {
     with_unread_tab(store, true).map(|(seeded, second)| (seeded.session, vec![second]))
 }
 
 #[rstest::rstest]
-#[case::split(one_thread, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Split(Split::Right)))]
-#[case::stack(one_thread, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Stack))]
-#[case::float(one_thread, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Float))]
-#[case::close(one_thread, |actor: &mut SessionsActor, state: &State, s| {
+#[case::split(one_agent, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Split(Split::Right)))]
+#[case::stack(one_agent, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Stack))]
+#[case::float(one_agent, |actor: &mut SessionsActor, _: &State, s| actor.add_pane(s, Placement::Float))]
+#[case::close(one_agent, |actor: &mut SessionsActor, state: &State, s| {
         actor.add_pane(s, Placement::Split(Split::Right));
         let added = state.read().layouts.get(s).and_then(SessionLayout::focused);
         if let Some(added) = added {
@@ -1145,9 +1145,9 @@ fn new_tab_of_a_session_with_no_tab_read_keeps_its_panes() -> Result<(), Report<
 
 #[rstest::rstest]
 fn restore_keeps_each_tabs_swap_layout_and_mark() -> Result<(), Report<StoreError>> {
-    // Given a thread's session saved with one horizontal tab changed by hand.
+    // Given an agent's session saved with one horizontal tab changed by hand.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let tab = TabRow {
         session_id: inserted.session,
         position: 0,
@@ -1186,9 +1186,9 @@ fn restore_keeps_each_tabs_swap_layout_and_mark() -> Result<(), Report<StoreErro
 
 #[rstest::rstest]
 fn restore_brings_floats_back_hidden() -> Result<(), Report<StoreError>> {
-    // Given a thread's session saved with a second pane as a float.
+    // Given an agent's session saved with a second pane as a float.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let float = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
     let tab = TabRow {
         session_id: inserted.session,
@@ -1246,9 +1246,9 @@ fn restore_brings_floats_back_hidden() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn restore_shows_each_saved_session() -> Result<(), Report<StoreError>> {
-    // Given a thread's session in the orb project.
+    // Given an agent's session in the orb project.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
 
     // When restoring.
@@ -1271,7 +1271,7 @@ fn restore_shows_each_saved_session() -> Result<(), Report<StoreError>> {
 }
 
 #[rstest::rstest]
-fn emptied_layout_gets_one_shell_in_the_threads_directory() -> Result<(), Report<StoreError>> {
+fn emptied_layout_gets_one_shell_in_the_agents_directory() -> Result<(), Report<StoreError>> {
     // Given a session whose last pane closed.
     let (mut actor, state, inserted) = emptied_session()?;
     let dir = actor
@@ -1340,16 +1340,16 @@ fn emptied_layout_asks_to_attach_its_session() -> Result<(), Report<StoreError>>
 
 #[rstest::rstest]
 fn saving_a_gone_sessions_layout_adds_nothing() -> Result<(), Report<StoreError>> {
-    // Given a store with one thread's session.
+    // Given a store with one agent's session.
     let store = Store::open_in_memory()?;
-    insert_thread(&store, "aa")?;
+    insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When saving the layout of a session that doesn't exist.
     actor.save_layout(SessionId(999));
 
-    // Then the store still holds only the thread's pane.
+    // Then the store still holds only the agent's pane.
     assert_eq!(
         actor.store.layouts()?.panes.len(),
         1,
@@ -1477,9 +1477,9 @@ fn saved_session_row(store: &Store, id: SessionId) -> Option<SessionRow> {
 
 #[rstest::rstest]
 fn pin_session_saves_its_pin() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session.
+    // Given agent aa's session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
@@ -1497,9 +1497,9 @@ fn pin_session_saves_its_pin() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn pin_on_a_settled_session_unsettles_it() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, settled.
+    // Given agent aa's session, settled.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.edit_session(inserted.session, settle_session_row);
@@ -1522,9 +1522,9 @@ fn pin_on_a_settled_session_unsettles_it() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn unpin_session_clears_its_pin() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, pinned.
+    // Given agent aa's session, pinned.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.pin_session(inserted.session);
@@ -1543,9 +1543,9 @@ fn unpin_session_clears_its_pin() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn rename_session_saves_the_name() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session.
+    // Given agent aa's session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
@@ -1563,9 +1563,9 @@ fn rename_session_saves_the_name() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn rename_session_shows_the_name_as_its_title() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session.
+    // Given agent aa's session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
@@ -1585,10 +1585,10 @@ fn rename_session_shows_the_name_as_its_title() -> Result<(), Report<StoreError>
 #[rstest::rstest]
 #[tokio::test]
 async fn settle_session_marks_it_settled() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, idle.
+    // Given agent aa's session, idle.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let inserted = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
 
@@ -1615,10 +1615,10 @@ async fn settle_session_marks_it_settled() -> Result<(), Report<StoreError>> {
 #[rstest::rstest]
 #[tokio::test]
 async fn settle_session_with_a_working_agent_is_ignored() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, its agent working.
+    // Given agent aa's session, its agent working.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    let inserted = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
 
@@ -1637,12 +1637,12 @@ async fn settle_session_with_a_working_agent_is_ignored() -> Result<(), Report<S
 #[rstest::rstest]
 #[tokio::test]
 async fn settle_session_kills_every_pane() -> Result<(), Report<StoreError>> {
-    // Given thread aa's idle session with a second pane, and thread bb's
+    // Given agent aa's idle session with a second pane, and agent bb's
     // session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let second = second_tab(&store, &inserted)?;
-    insert_thread(&store, "bb")?;
+    insert_agent(&store, "bb")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     let (zmx, service) = recording_zmx();
@@ -1663,10 +1663,10 @@ async fn settle_session_kills_every_pane() -> Result<(), Report<StoreError>> {
 #[rstest::rstest]
 #[tokio::test]
 async fn settling_kills_a_pane_no_saved_tab_holds() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, all of whose tabs read, with a second
+    // Given agent aa's session, all of whose tabs read, with a second
     // pane row that no saved tab or float holds.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let loose = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
     let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
     let (zmx, service) = recording_zmx();
@@ -1687,10 +1687,10 @@ async fn settling_kills_a_pane_no_saved_tab_holds() -> Result<(), Report<StoreEr
 #[rstest::rstest]
 #[tokio::test]
 async fn deleting_kills_a_pane_no_saved_tab_holds() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, all of whose tabs read, with a second
+    // Given agent aa's session, all of whose tabs read, with a second
     // pane row that no saved tab or float holds.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let loose = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
     let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
     let (zmx, service) = recording_zmx();
@@ -1710,10 +1710,10 @@ async fn deleting_kills_a_pane_no_saved_tab_holds() -> Result<(), Report<StoreEr
 
 #[rstest::rstest]
 fn layout_save_drops_the_row_of_a_pane_no_saved_tab_held() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, all of whose tabs read, with a second
+    // Given agent aa's session, all of whose tabs read, with a second
     // pane row that no saved tab or float held at start.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let loose = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
     let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
@@ -1738,7 +1738,7 @@ fn layout_save_drops_the_row_of_a_pane_no_saved_tab_held() -> Result<(), Report<
 async fn settling_a_partly_read_session_kills_its_unread_pane(
     #[case] first_reads: bool,
 ) -> Result<(), Report<StoreError>> {
-    // Given thread aa's session with a second pane whose tab didn't read.
+    // Given agent aa's session with a second pane whose tab didn't read.
     let store = Store::open_in_memory()?;
     let (inserted, second) = with_unread_tab(&store, first_reads)?;
     let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
@@ -1760,10 +1760,10 @@ async fn settling_a_partly_read_session_kills_its_unread_pane(
 #[rstest::rstest]
 #[tokio::test]
 async fn settle_session_unpins_it() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pinned idle session.
+    // Given agent aa's pinned idle session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let inserted = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
     actor.pin_session(inserted.session);
@@ -1782,9 +1782,9 @@ async fn settle_session_unpins_it() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn unsettle_session_keeps_it_active() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, settled.
+    // Given agent aa's session, settled.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.edit_session(inserted.session, settle_session_row);
@@ -1804,13 +1804,13 @@ fn unsettle_session_keeps_it_active() -> Result<(), Report<StoreError>> {
 #[rstest::rstest]
 #[tokio::test]
 async fn visit_marks_the_sessions_agents_seen() -> Result<(), Report<StoreError>> {
-    // Given thread aa whose turn ended unseen.
+    // Given agent aa whose turn ended unseen.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    let inserted = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, state) = start_unselected(store, &host);
     actor.poll().await;
-    host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
+    host.set_running(Ok(vec![record("aa", AgentStatus::Idle)]));
     actor.poll().await;
 
     // When visiting its session.
@@ -1818,7 +1818,7 @@ async fn visit_marks_the_sessions_agents_seen() -> Result<(), Report<StoreError>
 
     // Then aa is seen.
     assert_eq!(
-        shown(&state, inserted.thread).map(|thread| thread.unseen),
+        shown(&state, inserted.agent).map(|agent| agent.unseen),
         Some(false),
         "visiting a session should see its agents' turns"
     );
@@ -1828,12 +1828,12 @@ async fn visit_marks_the_sessions_agents_seen() -> Result<(), Report<StoreError>
 #[rstest::rstest]
 #[tokio::test]
 async fn delete_session_kills_every_pane() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session with a second pane, and thread bb's
+    // Given agent aa's session with a second pane, and agent bb's
     // session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let second = second_tab(&store, &inserted)?;
-    insert_thread(&store, "bb")?;
+    insert_agent(&store, "bb")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     let (zmx, service) = recording_zmx();
@@ -1858,7 +1858,7 @@ async fn delete_session_kills_every_pane() -> Result<(), Report<StoreError>> {
 async fn deleting_a_partly_read_session_kills_its_unread_pane(
     #[case] first_reads: bool,
 ) -> Result<(), Report<StoreError>> {
-    // Given thread aa's session with a second pane whose tab didn't read.
+    // Given agent aa's session with a second pane whose tab didn't read.
     let store = Store::open_in_memory()?;
     let (inserted, second) = with_unread_tab(&store, first_reads)?;
     let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
@@ -1879,17 +1879,17 @@ async fn deleting_a_partly_read_session_kills_its_unread_pane(
 
 #[rstest::rstest]
 #[tokio::test]
-async fn delete_session_removes_its_threads_tabs_panes_and_row() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session.
+async fn delete_session_removes_its_agents_tabs_panes_and_row() -> Result<(), Report<StoreError>> {
+    // Given agent aa's session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When deleting it.
     actor.delete_session(inserted.session);
 
-    // Then the store keeps no session, tab, pane or thread of it.
+    // Then the store keeps no session, tab, pane or agent of it.
     let layouts = actor.store.layouts()?;
     let left = (
         layouts.sessions.len(),
@@ -1903,11 +1903,11 @@ async fn delete_session_removes_its_threads_tabs_panes_and_row() -> Result<(), R
 
 #[rstest::rstest]
 #[tokio::test]
-async fn delete_threadless_session_removes_it() -> Result<(), Report<StoreError>> {
-    // Given a session whose agent has ended, so no thread runs in it.
+async fn delete_agentless_session_removes_it() -> Result<(), Report<StoreError>> {
+    // Given a session whose agent has ended, so no agent runs in it.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
-    resave(&store, "aa", |row| ThreadRow {
+    let inserted = insert_agent(&store, "aa")?;
+    resave(&store, "aa", |row| AgentRow {
         pane_id: None,
         ..row
     })?;
@@ -1922,17 +1922,17 @@ async fn delete_threadless_session_removes_it() -> Result<(), Report<StoreError>
         state.read().sessions.session(inserted.session).is_some(),
         saved_session_row(&actor.store, inserted.session).is_some(),
     );
-    assert_eq!(kept, (false, false), "a session without threads still goes");
+    assert_eq!(kept, (false, false), "a session without agents still goes");
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn delete_session_removes_its_ended_threads() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, aa having ended in it.
+async fn delete_session_removes_its_ended_agents() -> Result<(), Report<StoreError>> {
+    // Given agent aa's session, aa having ended in it.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
-    resave(&store, "aa", |row| ThreadRow {
+    let inserted = insert_agent(&store, "aa")?;
+    resave(&store, "aa", |row| AgentRow {
         pane_id: None,
         ..row
     })?;
@@ -1944,19 +1944,15 @@ async fn delete_session_removes_its_ended_threads() -> Result<(), Report<StoreEr
 
     // Then aa is neither shown nor saved.
     let kept = (
-        shown(&state, inserted.thread).is_some(),
+        shown(&state, inserted.agent).is_some(),
         actor.store.load()?.1.len(),
     );
-    assert_eq!(
-        kept,
-        (false, 0),
-        "a deleted session takes its ended threads"
-    );
+    assert_eq!(kept, (false, 0), "a deleted session takes its ended agents");
     Ok(())
 }
 
 /// A store holding two sessions of orb's Research project in `dir`, made
-/// for threads aa and, when `shared`, bb.
+/// for agents aa and, when `shared`, bb.
 fn research_sessions(
     orb_root: &Path,
     dir: &Path,
@@ -2084,17 +2080,17 @@ async fn delete_research_session_whose_folder_is_gone_shows_no_error()
 #[rstest::rstest]
 #[tokio::test]
 async fn delete_session_removes_its_pane_files() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pane has a report.
+    // Given agent aa's pane has a report.
     let mut fx = PaneReports::new()?;
-    fx.report(fx.thread.pane, "start", "aa", Some("startup"))?;
+    fx.report(fx.agent.pane, "start", "aa", Some("startup"))?;
     fx.actor.poll().await;
 
     // When deleting aa's session.
-    fx.actor.delete_session(fx.thread.session);
+    fx.actor.delete_session(fx.agent.session);
 
     // Then the pane's file is gone.
     assert!(
-        !fx.file(fx.thread.pane).exists(),
+        !fx.file(fx.agent.pane).exists(),
         "a deleted session's pane files should go"
     );
     Ok(())
@@ -2108,7 +2104,7 @@ fn layout_save_deletes_a_dropped_panes_report_file() -> Result<(), Report<StoreE
 
     // When the shell pane closes and the layout is saved.
     fx.state.write().layouts.close_pane(fx.shell);
-    fx.actor.save_layout(fx.thread.session);
+    fx.actor.save_layout(fx.agent.session);
 
     // Then the shell pane's report file is gone.
     assert!(
@@ -2121,9 +2117,9 @@ fn layout_save_deletes_a_dropped_panes_report_file() -> Result<(), Report<StoreE
 #[rstest::rstest]
 #[tokio::test]
 async fn delete_session_unhides_it() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, hidden as being deleted.
+    // Given agent aa's session, hidden as being deleted.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().sessions.deleting.insert(inserted.session);
@@ -2141,9 +2137,9 @@ async fn delete_session_unhides_it() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn restore_keeps_a_migrated_session_jump() -> Result<(), Report<StoreError>> {
-    // Given a saved jump to thread aa's session.
+    // Given a saved jump to agent aa's session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     store.save_jumps(&[SidebarItem::Session(inserted.session)])?;
 
     // When the actor starts.
@@ -2160,9 +2156,9 @@ fn restore_keeps_a_migrated_session_jump() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn split_pane_saves_a_new_focused_pane() -> Result<(), Report<StoreError>> {
-    // Given a thread's one-pane session.
+    // Given an agent's one-pane session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
@@ -2187,9 +2183,9 @@ fn split_pane_saves_a_new_focused_pane() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn float_add_pane_shows_a_float_with_the_keys() -> Result<(), Report<StoreError>> {
-    // Given a thread's one-pane session.
+    // Given an agent's one-pane session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
@@ -2213,9 +2209,9 @@ fn float_add_pane_shows_a_float_with_the_keys() -> Result<(), Report<StoreError>
 
 #[rstest::rstest]
 fn saving_a_layout_with_a_float_keeps_its_pane_row() -> Result<(), Report<StoreError>> {
-    // Given a thread's session with a pane added as a float.
+    // Given an agent's session with a pane added as a float.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.add_pane(inserted.session, Placement::Float);
@@ -2245,9 +2241,9 @@ fn saving_a_layout_with_a_float_keeps_its_pane_row() -> Result<(), Report<StoreE
 
 #[rstest::rstest]
 fn closing_the_last_tiled_pane_with_floats_adds_a_shell_tab() -> Result<(), Report<StoreError>> {
-    // Given a thread's session with a float whose only tiled pane closed.
+    // Given an agent's session with a float whose only tiled pane closed.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.add_pane(inserted.session, Placement::Float);
@@ -2273,9 +2269,9 @@ fn closing_the_last_tiled_pane_with_floats_adds_a_shell_tab() -> Result<(), Repo
 
 #[rstest::rstest]
 fn save_layout_writes_the_floats_mark() -> Result<(), Report<StoreError>> {
-    // Given a thread's session with a float moved by hand.
+    // Given an agent's session with a float moved by hand.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().layouts.fit_to(Rect::new(0, 0, 80, 24));
@@ -2301,9 +2297,9 @@ fn save_layout_writes_the_floats_mark() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn save_layout_writes_the_float_layout() -> Result<(), Report<StoreError>> {
-    // Given a thread's session with a float cycled to enlarged.
+    // Given an agent's session with a float cycled to enlarged.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().layouts.fit_to(Rect::new(0, 0, 80, 24));
@@ -2334,9 +2330,9 @@ fn save_layout_writes_the_float_layout() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn restore_brings_back_the_floats_mark() -> Result<(), Report<StoreError>> {
-    // Given a thread's session saved with a float and the floats marked.
+    // Given an agent's session saved with a float and the floats marked.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let float = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
     let tab = TabRow {
         session_id: inserted.session,
@@ -2387,9 +2383,9 @@ fn restore_brings_back_the_floats_mark() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn restore_brings_back_the_float_layout() -> Result<(), Report<StoreError>> {
-    // Given a thread's session saved with a float and the floats spread.
+    // Given an agent's session saved with a float and the floats spread.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let float = store.insert_pane(inserted.session, Path::new(PROJECT_ROOT))?;
     let tab = TabRow {
         session_id: inserted.session,
@@ -2444,9 +2440,9 @@ fn restore_brings_back_the_float_layout() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn new_tab_saves_a_new_tab() -> Result<(), Report<StoreError>> {
-    // Given a thread's one-pane session.
+    // Given an agent's one-pane session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
@@ -2464,11 +2460,11 @@ fn new_tab_saves_a_new_tab() -> Result<(), Report<StoreError>> {
     Ok(())
 }
 
-/// A thread's session whose last pane closed and wasn't saved yet, so it
+/// An agent's session whose last pane closed and wasn't saved yet, so it
 /// has no layout while the store still holds that one pane.
 fn emptied_session() -> Result<(SessionsActor, State, Seeded), Report<StoreError>> {
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().layouts.close_pane(inserted.pane);
@@ -2531,9 +2527,9 @@ fn split_on_a_session_without_a_layout_does_nothing() -> Result<(), Report<Store
 
 #[rstest::rstest]
 fn tiled_add_pane_lays_the_tab_out_by_count() -> Result<(), Report<StoreError>> {
-    // Given a thread's one-pane session.
+    // Given an agent's one-pane session.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
@@ -2582,9 +2578,9 @@ fn tiled_add_pane_on_a_session_without_a_layout_does_nothing() -> Result<(), Rep
 
 #[rstest::rstest]
 fn save_layout_writes_the_sessions_tabs() -> Result<(), Report<StoreError>> {
-    // Given a thread's session whose tab was renamed in the app state.
+    // Given an agent's session whose tab was renamed in the app state.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state
@@ -2613,9 +2609,9 @@ fn save_layout_writes_the_sessions_tabs() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn save_layout_writes_each_tabs_swap_layout_and_mark() -> Result<(), Report<StoreError>> {
-    // Given a thread's one-pane session moved to horizontal, then split.
+    // Given an agent's one-pane session moved to horizontal, then split.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().layouts.next_swap_layout(inserted.session);
@@ -2641,10 +2637,10 @@ fn save_layout_writes_each_tabs_swap_layout_and_mark() -> Result<(), Report<Stor
 }
 
 #[rstest::rstest]
-fn thread_of_an_unknown_harness_shows_gone() -> Result<(), Report<StoreError>> {
-    // Given a saved thread of a harness orb doesn't know.
+fn agent_of_an_unknown_harness_shows_gone() -> Result<(), Report<StoreError>> {
+    // Given a saved agent of a harness orb doesn't know.
     let store = Store::open_in_memory()?;
-    let id = add_thread_in(&store, "gone-harness", "aa")?;
+    let id = add_agent_in(&store, "gone-harness", "aa")?;
     let host = listing(Vec::new());
 
     // When restoring.
@@ -2653,61 +2649,61 @@ fn thread_of_an_unknown_harness_shows_gone() -> Result<(), Report<StoreError>> {
     // Then it shows gone.
     assert_eq!(
         status_of(&state, id),
-        Some(ThreadStatus::Gone),
-        "a thread of an unknown harness should be gone"
+        Some(AgentStatus::Gone),
+        "an agent of an unknown harness should be gone"
     );
     Ok(())
 }
 
-/// Claude's thread `aa` and the other harness's thread `bb`, both shown
+/// Claude's agent `aa` and the other harness's agent `bb`, both shown
 /// idle by one poll, after which the other harness's list fails while
 /// Claude lists `aa` working and polls again.
-async fn poll_with_a_failed_list() -> Result<(State, ThreadId, ThreadId), Report<StoreError>> {
+async fn poll_with_a_failed_list() -> Result<(State, AgentId, AgentId), Report<StoreError>> {
     let store = Store::open_in_memory()?;
-    let claude_thread = add_thread_in(&store, "claude", "aa")?;
-    let other_thread = add_thread_in(&store, OTHER, "bb")?;
-    let claude = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let claude_agent = add_agent_in(&store, "claude", "aa")?;
+    let other_agent = add_agent_in(&store, OTHER, "bb")?;
+    let claude = listing(vec![record("aa", AgentStatus::Idle)]);
     let other = Arc::new(FakeHarness::new(
         OTHER,
-        vec![record("bb", ThreadStatus::Idle)],
+        vec![record("bb", AgentStatus::Idle)],
     ));
     let (mut actor, state) = start_beside(store, &claude, &other);
     actor.poll().await;
     other.set_running(Err("supervisor down".to_owned()));
-    claude.set_running(Ok(vec![record("aa", ThreadStatus::Working)]));
+    claude.set_running(Ok(vec![record("aa", AgentStatus::Working)]));
     actor.poll().await;
-    Ok((state, claude_thread, other_thread))
+    Ok((state, claude_agent, other_agent))
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn failed_list_keeps_its_threads_statuses() -> Result<(), Report<StoreError>> {
-    // Given threads of two harnesses a poll showed idle.
+async fn failed_list_keeps_its_agents_statuses() -> Result<(), Report<StoreError>> {
+    // Given agents of two harnesses a poll showed idle.
     // When the other harness's list fails on the next poll.
-    let (state, _, other_thread) = poll_with_a_failed_list().await?;
+    let (state, _, other_agent) = poll_with_a_failed_list().await?;
 
-    // Then its thread keeps the status it had.
+    // Then its agent keeps the status it had.
     assert_eq!(
-        status_of(&state, other_thread),
-        Some(ThreadStatus::Idle),
-        "a failed list should leave its harness's threads as they were"
+        status_of(&state, other_agent),
+        Some(AgentStatus::Idle),
+        "a failed list should leave its harness's agents as they were"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn failed_list_of_one_harness_still_updates_the_others_threads()
+async fn failed_list_of_one_harness_still_updates_the_others_agents()
 -> Result<(), Report<StoreError>> {
-    // Given threads of two harnesses a poll showed idle.
-    // When the other harness's list fails while Claude lists its thread working.
-    let (state, claude_thread, _) = poll_with_a_failed_list().await?;
+    // Given agents of two harnesses a poll showed idle.
+    // When the other harness's list fails while Claude lists its agent working.
+    let (state, claude_agent, _) = poll_with_a_failed_list().await?;
 
-    // Then Claude's thread shows working.
+    // Then Claude's agent shows working.
     assert_eq!(
-        status_of(&state, claude_thread),
-        Some(ThreadStatus::Working),
-        "one harness's failed list shouldn't hold back the others' threads"
+        status_of(&state, claude_agent),
+        Some(AgentStatus::Working),
+        "one harness's failed list shouldn't hold back the others' agents"
     );
     Ok(())
 }
@@ -2793,53 +2789,53 @@ fn message_notices(actor: &SessionsActor) -> Vec<String> {
         .collect()
 }
 
-/// The thread `id` as the sidebar shows it.
-fn shown(state: &State, id: ThreadId) -> Option<Thread> {
+/// The agent `id` as the sidebar shows it.
+fn shown(state: &State, id: AgentId) -> Option<Agent> {
     state
         .read()
         .sessions
-        .threads()
-        .find(|thread| thread.id == id)
+        .all_agents()
+        .find(|agent| agent.id == id)
         .cloned()
 }
 
-fn status_of(state: &State, id: ThreadId) -> Option<ThreadStatus> {
+fn status_of(state: &State, id: AgentId) -> Option<AgentStatus> {
     state
         .read()
         .sessions
-        .threads()
-        .find(|thread| thread.id == id)
-        .map(|thread| thread.status)
+        .all_agents()
+        .find(|agent| agent.id == id)
+        .map(|agent| agent.status)
 }
 
-fn stamp_of(state: &State, id: ThreadId) -> Option<SystemTime> {
+fn stamp_of(state: &State, id: AgentId) -> Option<SystemTime> {
     state
         .read()
         .sessions
-        .threads()
-        .find(|thread| thread.id == id)
-        .and_then(|thread| thread.turn_started_at)
+        .all_agents()
+        .find(|agent| agent.id == id)
+        .and_then(|agent| agent.turn_started_at)
 }
 
-/// The orb worktree the rename tests' thread is in, and its branch.
+/// The orb worktree the rename tests' agent is in, and its branch.
 const HEX_WORKTREE: &str = "/nonexistent/worktrees/orb/orb-1a2b3c4d";
 const HEX_BRANCH: &str = "orb/1a2b3c4d";
 const PROMPT_LINE: &str = "{\"type\":\"user\",\"message\":{\"content\":\"Fix the parser\"}}\n";
 const AI_TITLE_LINE: &str = "{\"type\":\"ai-title\",\"aiTitle\":\"Parser fix\"}\n";
 
 /// A Claude directory holding `lines` as the transcript of conversation
-/// `aa` in [`HEX_WORKTREE`], and a store whose thread `aa` is there on
+/// `aa` in [`HEX_WORKTREE`], and a store whose agent `aa` is there on
 /// `branch`.
-fn worktree_thread(
+fn worktree_agent(
     lines: &str,
     branch: &str,
-) -> Result<(tempfile::TempDir, Store, ThreadId), Report<StoreError>> {
+) -> Result<(tempfile::TempDir, Store, AgentId), Report<StoreError>> {
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;
     let path = transcript_path(claude_dir.path(), Path::new(HEX_WORKTREE), "aa");
     fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
     fs::write(&path, lines).change_context(StoreError)?;
-    let (store, id) = store_with_thread("aa")?;
-    resave(&store, "aa", |row| ThreadRow {
+    let (store, id) = store_with_agent("aa")?;
+    resave(&store, "aa", |row| AgentRow {
         cwd: PathBuf::from(HEX_WORKTREE),
         branch: Some(branch.to_owned()),
         ..row
@@ -2847,55 +2843,55 @@ fn worktree_thread(
     Ok((claude_dir, store, id))
 }
 
-/// The Claude in thread `aa`'s pane, `status`.
-fn in_session(status: ThreadStatus) -> RunningAgent {
+/// The Claude in agent `aa`'s pane, `status`.
+fn in_session(status: AgentStatus) -> RunningAgent {
     record("aa", status)
 }
 
-/// Polls once while thread `aa` works, then once after its turn ended.
+/// Polls once while agent `aa` works, then once after its turn ended.
 async fn end_turn(actor: &mut SessionsActor, host: &FakeClaude) {
-    host.set_running(Ok(vec![in_session(ThreadStatus::Working)]));
+    host.set_running(Ok(vec![in_session(AgentStatus::Working)]));
     actor.poll().await;
-    host.set_running(Ok(vec![in_session(ThreadStatus::Idle)]));
+    host.set_running(Ok(vec![in_session(AgentStatus::Idle)]));
     actor.poll().await;
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn poll_shows_the_status_of_each_threads_record() -> Result<(), Report<StoreError>> {
-    // Given a saved thread and a host reporting it waiting for an approval.
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::NeedsApproval)]);
+async fn poll_shows_the_status_of_each_agents_record() -> Result<(), Report<StoreError>> {
+    // Given a saved agent and a host reporting it waiting for an approval.
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::NeedsApproval)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread shows that status.
+    // Then the agent shows that status.
     assert_eq!(
         status_of(&state, id),
-        Some(ThreadStatus::NeedsApproval),
-        "the thread should show its record's status"
+        Some(AgentStatus::NeedsApproval),
+        "the agent should show its record's status"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn poll_marks_a_claude_thread_without_a_record_stopped() -> Result<(), Report<StoreError>> {
-    // Given a saved thread the host doesn't list, its pane's zmx session gone.
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("bb", ThreadStatus::Idle)]);
+async fn poll_marks_a_claude_agent_without_a_record_stopped() -> Result<(), Report<StoreError>> {
+    // Given a saved agent the host doesn't list, its pane's zmx session gone.
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("bb", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread is stopped.
+    // Then the agent is stopped.
     assert_eq!(
         status_of(&state, id),
-        Some(ThreadStatus::Stopped),
-        "a thread with nothing running should be stopped"
+        Some(AgentStatus::Stopped),
+        "an agent with nothing running should be stopped"
     );
     Ok(())
 }
@@ -2903,9 +2899,9 @@ async fn poll_marks_a_claude_thread_without_a_record_stopped() -> Result<(), Rep
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_stamps_a_turn_when_it_starts() -> Result<(), Report<StoreError>> {
-    // Given an unstamped thread the host now reports busy.
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    // Given an unstamped agent the host now reports busy.
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When polling.
@@ -2922,16 +2918,16 @@ async fn poll_stamps_a_turn_when_it_starts() -> Result<(), Report<StoreError>> {
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_keeps_the_turn_stamp_while_the_turn_waits() -> Result<(), Report<StoreError>> {
-    // Given a thread a poll saw running.
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    // Given an agent a poll saw running.
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
     let stamp = stamp_of(&state, id)
         .ok_or_else(|| Report::new(StoreError).attach("the busy poll didn't stamp the turn"))?;
 
     // When a poll sees it waiting for input.
-    host.set_running(Ok(vec![record("aa", ThreadStatus::NeedsInput)]));
+    host.set_running(Ok(vec![record("aa", AgentStatus::NeedsInput)]));
     actor.poll().await;
 
     // Then the stamp is unchanged.
@@ -2946,21 +2942,21 @@ async fn poll_keeps_the_turn_stamp_while_the_turn_waits() -> Result<(), Report<S
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_clears_the_turn_stamp_when_the_turn_ends() -> Result<(), Report<StoreError>> {
-    // Given a thread a poll saw running.
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    // Given an agent a poll saw running.
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
 
     // When a poll sees it idle.
-    host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
+    host.set_running(Ok(vec![record("aa", AgentStatus::Idle)]));
     actor.poll().await;
 
     // Then the stamp is cleared.
     assert_eq!(
         stamp_of(&state, id),
         None,
-        "an idle thread has no turn running"
+        "an idle agent has no turn running"
     );
     Ok(())
 }
@@ -2969,8 +2965,8 @@ async fn poll_clears_the_turn_stamp_when_the_turn_ends() -> Result<(), Report<St
 #[tokio::test]
 async fn poll_keeps_an_earlier_error() -> Result<(), Report<StoreError>> {
     // Given a failure on the mode line.
-    let (store, _) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.report.report(Outcome::Failed(
         "A session is working in this directory".to_owned(),
@@ -2991,14 +2987,14 @@ async fn poll_keeps_an_earlier_error() -> Result<(), Report<StoreError>> {
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_keeps_a_saved_turn_stamp() -> Result<(), Report<StoreError>> {
-    // Given a thread saved mid-turn, stamped 1 s after the epoch, still busy.
-    let (store, id) = store_with_thread("aa")?;
-    let row = ThreadRow {
+    // Given an agent saved mid-turn, stamped 1 s after the epoch, still busy.
+    let (store, id) = store_with_agent("aa")?;
+    let row = AgentRow {
         turn_started_at: Some(1_000),
         ..saved(&store, "aa")?
     };
-    store.save_thread(&row)?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    store.save_agent(&row)?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When polling after the relaunch.
@@ -3016,9 +3012,9 @@ async fn poll_keeps_a_saved_turn_stamp() -> Result<(), Report<StoreError>> {
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_saves_a_new_turn_stamp() -> Result<(), Report<StoreError>> {
-    // Given an unstamped thread the host now reports busy.
-    let (store, _) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    // Given an unstamped agent the host now reports busy.
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When polling.
@@ -3035,9 +3031,9 @@ async fn poll_saves_a_new_turn_stamp() -> Result<(), Report<StoreError>> {
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_waits_five_seconds_when_nothing_is_underway() -> Result<(), Report<StoreError>> {
-    // Given an idle thread and orb detached.
-    let (store, _) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    // Given an idle agent and orb detached.
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When polling.
@@ -3050,10 +3046,10 @@ async fn poll_waits_five_seconds_when_nothing_is_underway() -> Result<(), Report
 
 #[rstest::rstest]
 #[tokio::test]
-async fn poll_waits_one_second_while_a_thread_is_busy() -> Result<(), Report<StoreError>> {
-    // Given a thread the host reports busy.
-    let (store, _) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+async fn poll_waits_one_second_while_an_agent_is_busy() -> Result<(), Report<StoreError>> {
+    // Given an agent the host reports busy.
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When polling.
@@ -3067,18 +3063,18 @@ async fn poll_waits_one_second_while_a_thread_is_busy() -> Result<(), Report<Sto
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_waits_five_seconds_while_no_turn_is_underway() -> Result<(), Report<StoreError>> {
-    // Given an idle thread and orb attached.
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    // Given an idle agent and orb attached.
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     {
         let mut app = state.write();
         app.focus = Focus::Sidebar;
         let session = app
             .sessions
-            .threads()
-            .find(|thread| thread.id == id)
-            .and_then(Thread::session);
+            .all_agents()
+            .find(|agent| agent.id == id)
+            .and_then(Agent::session);
         app.attached.extend(session);
     }
 
@@ -3096,9 +3092,9 @@ async fn poll_waits_five_seconds_while_no_turn_is_underway() -> Result<(), Repor
 #[rstest::rstest]
 #[tokio::test]
 async fn failed_poll_keeps_the_last_statuses() -> Result<(), Report<StoreError>> {
-    // Given a thread a poll saw idle.
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    // Given an agent a poll saw idle.
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
 
@@ -3106,10 +3102,10 @@ async fn failed_poll_keeps_the_last_statuses() -> Result<(), Report<StoreError>>
     host.set_running(Err("claude: command not found".to_owned()));
     actor.poll().await;
 
-    // Then the thread still shows idle.
+    // Then the agent still shows idle.
     assert_eq!(
         status_of(&state, id),
-        Some(ThreadStatus::Idle),
+        Some(AgentStatus::Idle),
         "a failed poll shouldn't change statuses"
     );
     Ok(())
@@ -3119,7 +3115,7 @@ async fn failed_poll_keeps_the_last_statuses() -> Result<(), Report<StoreError>>
 #[tokio::test]
 async fn failed_poll_shows_the_reason() -> Result<(), Report<StoreError>> {
     // Given a host that can't list sessions.
-    let (store, _) = store_with_thread("aa")?;
+    let (store, _) = store_with_agent("aa")?;
     let host = listing(Vec::new());
     host.set_running(Err("claude: command not found".to_owned()));
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -3138,12 +3134,12 @@ async fn failed_poll_shows_the_reason() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 #[tokio::test]
-async fn poll_doesnt_ask_claude_while_no_pane_holds_a_claude_thread()
+async fn poll_doesnt_ask_claude_while_no_pane_holds_a_claude_agent()
 -> Result<(), Report<StoreError>> {
-    // Given a Claude thread whose agent has ended, so no pane holds it.
+    // Given a Claude agent whose agent has ended, so no pane holds it.
     let store = Store::open_in_memory()?;
-    insert_thread(&store, "aa")?;
-    resave(&store, "aa", |row| ThreadRow {
+    insert_agent(&store, "aa")?;
+    resave(&store, "aa", |row| AgentRow {
         pane_id: None,
         ..row
     })?;
@@ -3157,7 +3153,7 @@ async fn poll_doesnt_ask_claude_while_no_pane_holds_a_claude_thread()
     assert_eq!(
         host.lists(),
         0,
-        "no pane holds a Claude thread, so the poll shouldn't ask claude"
+        "no pane holds a Claude agent, so the poll shouldn't ask claude"
     );
     Ok(())
 }
@@ -3616,7 +3612,7 @@ fn failed_save_removes_the_new_worktree_and_branch() -> Result<(), Report<StoreE
         title: "ghost".into(),
         root: PROJECT_ROOT.into(),
         created_at: SystemTime::UNIX_EPOCH,
-        threads: vec![],
+        agents: vec![],
         repo: true,
         removed: false,
         kind: ProjectKind::Normal,
@@ -3846,7 +3842,7 @@ fn failed_save_in_an_existing_worktree_removes_no_worktree() -> Result<(), Repor
         title: "ghost".into(),
         root: PROJECT_ROOT.into(),
         created_at: SystemTime::UNIX_EPOCH,
-        threads: vec![],
+        agents: vec![],
         repo: true,
         removed: false,
         kind: ProjectKind::Normal,
@@ -4330,8 +4326,8 @@ fn adding_a_missing_directory_leaves_no_notice() -> Result<(), Report<StoreError
 
 #[rstest::rstest]
 #[tokio::test]
-async fn poll_titles_a_thread_with_its_transcripts_prompt() -> Result<(), Report<StoreError>> {
-    // Given a thread whose session's transcript has a prompt.
+async fn poll_titles_an_agent_with_its_transcripts_prompt() -> Result<(), Report<StoreError>> {
+    // Given an agent whose session's transcript has a prompt.
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;
     let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
     fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
@@ -4340,24 +4336,24 @@ async fn poll_titles_a_thread_with_its_transcripts_prompt() -> Result<(), Report
         "{\"type\":\"user\",\"message\":{\"content\":\"Fix the sidebar\"}}\n",
     )
     .change_context(StoreError)?;
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, claude_dir.path());
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread is titled with the prompt.
+    // Then the agent is titled with the prompt.
     let title = state
         .read()
         .sessions
-        .threads()
-        .find(|thread| thread.id == id)
-        .and_then(|thread| thread.title.clone());
+        .all_agents()
+        .find(|agent| agent.id == id)
+        .and_then(|agent| agent.title.clone());
     assert_eq!(
         title.as_deref(),
         Some("Fix the sidebar"),
-        "the first prompt should title the thread"
+        "the first prompt should title the agent"
     );
     Ok(())
 }
@@ -4376,21 +4372,21 @@ const SOCRATIC_PLAN: &str = "{\"type\":\"user\",\"message\":{\"content\":\"<comm
 
 #[rstest::rstest]
 #[tokio::test]
-async fn poll_titles_a_thread_with_its_slash_commands_text() -> Result<(), Report<StoreError>> {
-    // Given a thread whose transcript starts with `/socratic-plan fix the sidebar`.
+async fn poll_titles_an_agent_with_its_slash_commands_text() -> Result<(), Report<StoreError>> {
+    // Given an agent whose transcript starts with `/socratic-plan fix the sidebar`.
     let claude_dir = claude_dir_with(SOCRATIC_PLAN)?;
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, claude_dir.path());
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread is titled with the text typed after the command.
+    // Then the agent is titled with the text typed after the command.
     assert_eq!(
-        shown(&state, id).and_then(|thread| thread.title).as_deref(),
+        shown(&state, id).and_then(|agent| agent.title).as_deref(),
         Some("fix the sidebar"),
-        "the command's text should title the thread"
+        "the command's text should title the agent"
     );
     Ok(())
 }
@@ -4398,20 +4394,20 @@ async fn poll_titles_a_thread_with_its_slash_commands_text() -> Result<(), Repor
 #[rstest::rstest]
 #[tokio::test]
 async fn custom_title_beats_a_slash_commands_text() -> Result<(), Report<StoreError>> {
-    // Given a thread whose transcript has a slash command with text, then a `/rename`.
+    // Given an agent whose transcript has a slash command with text, then a `/rename`.
     let claude_dir = claude_dir_with(&format!(
         "{SOCRATIC_PLAN}{{\"type\":\"custom-title\",\"customTitle\":\"orb-m1\"}}\n"
     ))?;
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, claude_dir.path());
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread shows the `/rename`.
+    // Then the agent shows the `/rename`.
     assert_eq!(
-        shown(&state, id).and_then(|thread| thread.title).as_deref(),
+        shown(&state, id).and_then(|agent| agent.title).as_deref(),
         Some("orb-m1"),
         "`/rename` should beat the command's text"
     );
@@ -4421,22 +4417,22 @@ async fn custom_title_beats_a_slash_commands_text() -> Result<(), Report<StoreEr
 #[rstest::rstest]
 #[tokio::test]
 async fn orb_name_beats_a_slash_commands_text() -> Result<(), Report<StoreError>> {
-    // Given a thread renamed with `r` whose transcript starts with a slash command with text.
+    // Given an agent renamed with `r` whose transcript starts with a slash command with text.
     let claude_dir = claude_dir_with(SOCRATIC_PLAN)?;
-    let (store, id) = store_with_thread("aa")?;
-    resave(&store, "aa", |row| ThreadRow {
+    let (store, id) = store_with_agent("aa")?;
+    resave(&store, "aa", |row| AgentRow {
         renamed_title: Some("Sidebar search".to_owned()),
         ..row
     })?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, claude_dir.path());
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread keeps the orb name.
+    // Then the agent keeps the orb name.
     assert_eq!(
-        shown(&state, id).and_then(|thread| thread.title).as_deref(),
+        shown(&state, id).and_then(|agent| agent.title).as_deref(),
         Some("Sidebar search"),
         "the `r` name should beat the command's text"
     );
@@ -4445,8 +4441,8 @@ async fn orb_name_beats_a_slash_commands_text() -> Result<(), Report<StoreError>
 
 #[rstest::rstest]
 #[tokio::test]
-async fn poll_titles_a_thread_with_its_custom_title() -> Result<(), Report<StoreError>> {
-    // Given a thread whose transcript has a prompt, an ai-title, then a `/rename`.
+async fn poll_titles_an_agent_with_its_custom_title() -> Result<(), Report<StoreError>> {
+    // Given an agent whose transcript has a prompt, an ai-title, then a `/rename`.
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;
     let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
     fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
@@ -4459,20 +4455,20 @@ async fn poll_titles_a_thread_with_its_custom_title() -> Result<(), Report<Store
         ),
     )
     .change_context(StoreError)?;
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, claude_dir.path());
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread is titled with the custom title.
+    // Then the agent is titled with the custom title.
     let title = state
         .read()
         .sessions
-        .threads()
-        .find(|thread| thread.id == id)
-        .and_then(|thread| thread.title.clone());
+        .all_agents()
+        .find(|agent| agent.id == id)
+        .and_then(|agent| agent.title.clone());
     assert_eq!(
         title.as_deref(),
         Some("orb-m1"),
@@ -4481,20 +4477,20 @@ async fn poll_titles_a_thread_with_its_custom_title() -> Result<(), Report<Store
     Ok(())
 }
 
-/// The directory of Claude's transcripts, holding session `s1` of thread
+/// The directory of Claude's transcripts, holding session `s1` of agent
 /// `aa` with `lines`, and a store where `aa` was given `custom_title`
 /// by `/rename` and `renamed` with `r`.
-fn renamed_thread(
+fn renamed_agent(
     lines: &str,
     custom_title: &str,
     renamed: &str,
-) -> Result<(tempfile::TempDir, Store, ThreadId), Report<StoreError>> {
+) -> Result<(tempfile::TempDir, Store, AgentId), Report<StoreError>> {
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;
     let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
     fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
     fs::write(&path, lines).change_context(StoreError)?;
-    let (store, id) = store_with_thread("aa")?;
-    resave(&store, "aa", |row| ThreadRow {
+    let (store, id) = store_with_agent("aa")?;
+    resave(&store, "aa", |row| AgentRow {
         custom_title: Some(custom_title.to_owned()),
         renamed_title: Some(renamed.to_owned()),
         ..row
@@ -4505,22 +4501,22 @@ fn renamed_thread(
 #[rstest::rstest]
 #[tokio::test]
 async fn new_custom_title_replaces_the_orb_name() -> Result<(), Report<StoreError>> {
-    // Given a thread renamed with `r` after a `/rename` to `orb-m1`,
+    // Given an agent renamed with `r` after a `/rename` to `orb-m1`,
     // whose transcript now has a `/rename` to `orb-m2`.
-    let (claude_dir, store, id) = renamed_thread(
+    let (claude_dir, store, id) = renamed_agent(
         "{\"type\":\"custom-title\",\"customTitle\":\"orb-m2\"}\n",
         "orb-m1",
         "Sidebar search",
     )?;
-    let host = listing(vec![in_session(ThreadStatus::Idle)]);
+    let host = listing(vec![in_session(AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, claude_dir.path());
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread shows the new `/rename`.
+    // Then the agent shows the new `/rename`.
     assert_eq!(
-        shown(&state, id).and_then(|thread| thread.title).as_deref(),
+        shown(&state, id).and_then(|agent| agent.title).as_deref(),
         Some("orb-m2"),
         "a different `/rename` should replace the orb name"
     );
@@ -4530,22 +4526,22 @@ async fn new_custom_title_replaces_the_orb_name() -> Result<(), Report<StoreErro
 #[rstest::rstest]
 #[tokio::test]
 async fn repeated_custom_title_keeps_the_orb_name() -> Result<(), Report<StoreError>> {
-    // Given a thread renamed with `r` after a `/rename` to `orb-m1`,
+    // Given an agent renamed with `r` after a `/rename` to `orb-m1`,
     // whose transcript has Claude writing `orb-m1` again.
-    let (claude_dir, store, id) = renamed_thread(
+    let (claude_dir, store, id) = renamed_agent(
         "{\"type\":\"custom-title\",\"customTitle\":\"orb-m1\"}\n",
         "orb-m1",
         "Sidebar search",
     )?;
-    let host = listing(vec![in_session(ThreadStatus::Idle)]);
+    let host = listing(vec![in_session(AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, claude_dir.path());
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread keeps the orb name.
+    // Then the agent keeps the orb name.
     assert_eq!(
-        shown(&state, id).and_then(|thread| thread.title).as_deref(),
+        shown(&state, id).and_then(|agent| agent.title).as_deref(),
         Some("Sidebar search"),
         "Claude re-writing its old name shouldn't replace the orb name"
     );
@@ -4555,9 +4551,9 @@ async fn repeated_custom_title_keeps_the_orb_name() -> Result<(), Report<StoreEr
 #[rstest::rstest]
 #[tokio::test]
 async fn saved_orb_name_is_the_title_after_a_restart() -> Result<(), Report<StoreError>> {
-    // Given a store holding a thread Claude titled and the user renamed.
-    let (store, id) = store_with_thread("aa")?;
-    resave(&store, "aa", |row| ThreadRow {
+    // Given a store holding an agent Claude titled and the user renamed.
+    let (store, id) = store_with_agent("aa")?;
+    resave(&store, "aa", |row| AgentRow {
         title: Some("Fix the sidebar".to_owned()),
         renamed_title: Some("Sidebar search".to_owned()),
         ..row
@@ -4569,7 +4565,7 @@ async fn saved_orb_name_is_the_title_after_a_restart() -> Result<(), Report<Stor
 
     // Then the sidebar shows the orb name.
     assert_eq!(
-        shown(&state, id).and_then(|thread| thread.title).as_deref(),
+        shown(&state, id).and_then(|agent| agent.title).as_deref(),
         Some("Sidebar search"),
         "the orb name should survive a restart"
     );
@@ -4578,10 +4574,10 @@ async fn saved_orb_name_is_the_title_after_a_restart() -> Result<(), Report<Stor
 
 #[rstest::rstest]
 #[tokio::test]
-async fn turn_end_notice_names_the_thread_by_its_orb_name() -> Result<(), Report<StoreError>> {
-    // Given a thread `/rename`d "Parser fix" and renamed "Lexer" with `r`.
-    let (store, _) = store_with_thread("aa")?;
-    resave(&store, "aa", |row| ThreadRow {
+async fn turn_end_notice_names_the_agent_by_its_orb_name() -> Result<(), Report<StoreError>> {
+    // Given an agent `/rename`d "Parser fix" and renamed "Lexer" with `r`.
+    let (store, _) = store_with_agent("aa")?;
+    resave(&store, "aa", |row| AgentRow {
         custom_title: Some("Parser fix".to_owned()),
         renamed_title: Some("Lexer".to_owned()),
         ..row
@@ -4592,50 +4588,49 @@ async fn turn_end_notice_names_the_thread_by_its_orb_name() -> Result<(), Report
     // When polls see its turn run and then end.
     end_turn(&mut actor, &host).await;
 
-    // Then the notice names the thread by its orb name.
+    // Then the notice names the agent by its orb name.
     let titles: Vec<_> = notices_of(&actor)
         .into_iter()
         .map(|notice| notice.title)
         .collect();
-    assert_eq!(titles, ["Lexer"], "the notice's thread title");
+    assert_eq!(titles, ["Lexer"], "the notice's agent title");
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn poll_shows_the_located_transcript_on_the_thread() -> Result<(), Report<StoreError>> {
-    // Given a thread whose session has a transcript.
+async fn poll_shows_the_located_transcript_on_the_agent() -> Result<(), Report<StoreError>> {
+    // Given an agent whose session has a transcript.
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;
     let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
     fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
     fs::write(&path, "").change_context(StoreError)?;
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, claude_dir.path());
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread carries the transcript's path.
+    // Then the agent carries the transcript's path.
     let transcript = state
         .read()
         .sessions
-        .threads()
-        .find(|thread| thread.id == id)
-        .and_then(|thread| thread.transcript.clone());
+        .all_agents()
+        .find(|agent| agent.id == id)
+        .and_then(|agent| agent.transcript.clone());
     assert_eq!(
         transcript,
         Some(path),
-        "a located transcript should be shown on its thread"
+        "a located transcript should be shown on its agent"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn restore_lists_projects_by_first_use_and_threads_newest_first() -> Result<(), Report<StoreError>>
-{
+fn restore_lists_projects_by_first_use_and_agents_newest_first() -> Result<(), Report<StoreError>> {
     // Given project B saved before project A but first used after it,
-    // with A's threads created at 10 and 30 and B's at 20.
+    // with A's agents created at 10 and 30 and B's at 20.
     let store = Store::open_in_memory()?;
     let b = store.add_project(Path::new("/b"), "b", ProjectKind::Normal, 2)?;
     let a = store.add_project(Path::new("/a"), "a", ProjectKind::Normal, 1)?;
@@ -4649,7 +4644,7 @@ fn restore_lists_projects_by_first_use_and_threads_newest_first() -> Result<(), 
             short_id,
             created_at,
         )
-        .map(|seeded| seeded.thread)
+        .map(|seeded| seeded.agent)
     };
     let a_old = insert(a, "a1", 10)?;
     let b_only = insert(b, "b1", 20)?;
@@ -4658,17 +4653,17 @@ fn restore_lists_projects_by_first_use_and_threads_newest_first() -> Result<(), 
     // When the actor starts.
     let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
-    // Then the sidebar lists A's threads newest first, then B's.
-    let order: Vec<ThreadId> = state
+    // Then the sidebar lists A's agents newest first, then B's.
+    let order: Vec<AgentId> = state
         .read()
         .sessions
-        .threads()
-        .map(|thread| thread.id)
+        .all_agents()
+        .map(|agent| agent.id)
         .collect();
     assert_eq!(
         order,
         vec![a_new, a_old, b_only],
-        "projects by first use, threads newest first"
+        "projects by first use, agents newest first"
     );
     Ok(())
 }
@@ -4677,8 +4672,8 @@ fn restore_lists_projects_by_first_use_and_threads_newest_first() -> Result<(), 
 fn restore_selects_the_first_sidebar_item() -> Result<(), Report<StoreError>> {
     // Given an old pinned session and a newer unpinned one.
     let store = Store::open_in_memory()?;
-    let pinned = add_thread(&store, "old", 10)?;
-    add_thread(&store, "new", 20)?;
+    let pinned = add_agent(&store, "old", 10)?;
+    add_agent(&store, "new", 20)?;
     store.save_session(&SessionRow {
         pinned_at: Some(30),
         ..saved_session(&store, "old")?
@@ -4707,28 +4702,28 @@ fn store_with_width(width: u16) -> Result<Store, Report<StoreError>> {
 }
 
 #[rstest::rstest]
-fn restore_drops_a_saved_jump_to_a_missing_thread() -> Result<(), Report<StoreError>> {
-    // Given a saved jump list naming thread aa and a thread that's gone.
-    let (store, id) = store_with_thread("aa")?;
+fn restore_drops_a_saved_jump_to_a_missing_agent() -> Result<(), Report<StoreError>> {
+    // Given a saved jump list naming agent aa and an agent that's gone.
+    let (store, id) = store_with_agent("aa")?;
     let gone = SidebarItem::Session(SessionId(id.0 + 1));
     store.save_jumps(&[SidebarItem::Session(SessionId(id.0)), gone])?;
 
     // When the actor starts.
     let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
-    // Then only thread aa is in the jump list.
+    // Then only agent aa is in the jump list.
     assert_eq!(
         state.read().jumps.entries(),
         [SidebarItem::Session(SessionId(id.0))],
-        "a saved jump to a missing thread should be dropped"
+        "a saved jump to a missing agent should be dropped"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 fn saving_jumps_writes_the_jump_list() -> Result<(), Report<StoreError>> {
-    // Given a started actor whose jump list holds thread aa.
-    let (store, id) = store_with_thread("aa")?;
+    // Given a started actor whose jump list holds agent aa.
+    let (store, id) = store_with_agent("aa")?;
     let (actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
     state.write().jumps = JumpList::from_saved(vec![SidebarItem::Session(SessionId(id.0))]);
 
@@ -4979,13 +4974,13 @@ fn adding_a_removed_project_restores_it() -> Result<(), Report<StoreError>> {
     Ok(())
 }
 
-/// A store with projects orb and web, each holding one thread, and its
-/// layout saved filtered to web. Returns web's id and thread.
-fn store_filtered_to_web() -> Result<(Store, ProjectId, ThreadId), Report<StoreError>> {
+/// A store with projects orb and web, each holding one agent, and its
+/// layout saved filtered to web. Returns web's id and agent.
+fn store_filtered_to_web() -> Result<(Store, ProjectId, AgentId), Report<StoreError>> {
     let store = Store::open_in_memory()?;
-    add_thread(&store, "aa", 1_000)?;
+    add_agent(&store, "aa", 1_000)?;
     let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
-    let thread = seed_with(
+    let agent = seed_with(
         &store,
         "claude",
         web,
@@ -4994,12 +4989,12 @@ fn store_filtered_to_web() -> Result<(Store, ProjectId, ThreadId), Report<StoreE
         "bb",
         500,
     )
-    .map(|seeded| seeded.thread)?;
+    .map(|seeded| seeded.agent)?;
     store.save_ui(&Ui {
         sidebar_width: None,
         project_filter: Some(web),
     })?;
-    Ok((store, web, thread))
+    Ok((store, web, agent))
 }
 
 #[rstest::rstest]
@@ -5021,17 +5016,17 @@ fn restore_applies_the_saved_filter() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn restore_selects_the_first_filtered_row() -> Result<(), Report<StoreError>> {
-    // Given a sidebar saved filtered to web, whose thread is older than
+    // Given a sidebar saved filtered to web, whose agent is older than
     // orb's, so it would otherwise be the second row.
-    let (store, _, thread) = store_filtered_to_web()?;
+    let (store, _, agent) = store_filtered_to_web()?;
 
     // When the actor starts.
     let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
-    // Then the cursor is on web's thread.
+    // Then the cursor is on web's agent.
     assert_eq!(
         state.read().sessions.cursor,
-        Some(SidebarItem::Session(SessionId(thread.0))),
+        Some(SidebarItem::Session(SessionId(agent.0))),
         "the cursor should start on the filtered sidebar's first row"
     );
     Ok(())
@@ -5102,8 +5097,8 @@ fn restore_shows_when_each_project_was_added() -> Result<(), Report<StoreError>>
 }
 
 #[rstest::rstest]
-fn restore_keeps_when_each_thread_was_created() -> Result<(), Report<StoreError>> {
-    // Given a thread created at 1.5 s.
+fn restore_keeps_when_each_agent_was_created() -> Result<(), Report<StoreError>> {
+    // Given an agent created at 1.5 s.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new(PROJECT_ROOT), "orb", ProjectKind::Normal, 1)?;
     seed_with(
@@ -5115,30 +5110,30 @@ fn restore_keeps_when_each_thread_was_created() -> Result<(), Report<StoreError>
         "t1",
         1_500,
     )
-    .map(|seeded| seeded.thread)?;
+    .map(|seeded| seeded.agent)?;
 
     // When the actor starts.
     let (_actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
 
-    // Then the thread shows it was created at 1.5 s.
+    // Then the agent shows it was created at 1.5 s.
     let created: Vec<SystemTime> = state
         .read()
         .sessions
-        .threads()
-        .map(|thread| thread.created_at)
+        .all_agents()
+        .map(|agent| agent.created_at)
         .collect();
     assert_eq!(
         created,
         vec![SystemTime::UNIX_EPOCH + Duration::from_millis(1_500)],
-        "a restored thread should keep when it was created"
+        "a restored agent should keep when it was created"
     );
     Ok(())
 }
 
-/// Makes the thread `short_id` idle since four days ago; returns that time.
+/// Makes the agent `short_id` idle since four days ago; returns that time.
 fn idle_for_four_days(store: &Store, short_id: &str) -> Result<i64, Report<StoreError>> {
     let since = now_ms() - 4 * DAY_MS;
-    resave(store, short_id, |row| ThreadRow {
+    resave(store, short_id, |row| AgentRow {
         last_activity_at: since,
         last_visited_at: since,
         ..row
@@ -5148,13 +5143,13 @@ fn idle_for_four_days(store: &Store, short_id: &str) -> Result<i64, Report<Store
 
 #[rstest::rstest]
 #[tokio::test]
-async fn turn_end_on_an_unselected_thread_is_unseen() -> Result<(), Report<StoreError>> {
-    // Given a working thread while another thread is selected.
-    let (store, id) = store_with_thread("aa")?;
-    let other = add_thread(&store, "bb", now_ms() - HOUR_MS)?;
+async fn turn_end_on_an_unselected_agent_is_unseen() -> Result<(), Report<StoreError>> {
+    // Given a working agent while another agent is selected.
+    let (store, id) = store_with_agent("aa")?;
+    let other = add_agent(&store, "bb", now_ms() - HOUR_MS)?;
     let host = listing(vec![
-        record("aa", ThreadStatus::Working),
-        record("bb", ThreadStatus::Idle),
+        record("aa", AgentStatus::Working),
+        record("bb", AgentStatus::Idle),
     ]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(other.0)));
@@ -5162,14 +5157,14 @@ async fn turn_end_on_an_unselected_thread_is_unseen() -> Result<(), Report<Store
 
     // When a poll sees its turn end.
     host.set_running(Ok(vec![
-        record("aa", ThreadStatus::Idle),
-        record("bb", ThreadStatus::Idle),
+        record("aa", AgentStatus::Idle),
+        record("bb", AgentStatus::Idle),
     ]));
     actor.poll().await;
 
     // Then it is unseen.
     assert_eq!(
-        shown(&state, id).map(|thread| thread.unseen),
+        shown(&state, id).map(|agent| agent.unseen),
         Some(true),
         "a turn that ended elsewhere should wait to be seen"
     );
@@ -5178,23 +5173,23 @@ async fn turn_end_on_an_unselected_thread_is_unseen() -> Result<(), Report<Store
 
 #[rstest::rstest]
 #[tokio::test]
-async fn turn_end_on_the_selected_thread_is_seen() -> Result<(), Report<StoreError>> {
-    // Given the selected thread working.
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+async fn turn_end_on_the_selected_agent_is_seen() -> Result<(), Report<StoreError>> {
+    // Given the selected agent working.
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().sessions.cursor = Some(SidebarItem::Session(SessionId(id.0)));
     actor.poll().await;
 
     // When a poll sees its turn end.
-    host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
+    host.set_running(Ok(vec![record("aa", AgentStatus::Idle)]));
     actor.poll().await;
 
     // Then it is seen.
     assert_eq!(
-        shown(&state, id).map(|thread| thread.unseen),
+        shown(&state, id).map(|agent| agent.unseen),
         Some(false),
-        "being on the thread when its turn ends counts as seeing it"
+        "being on the agent when its turn ends counts as seeing it"
     );
     Ok(())
 }
@@ -5202,21 +5197,21 @@ async fn turn_end_on_the_selected_thread_is_seen() -> Result<(), Report<StoreErr
 #[rstest::rstest]
 #[tokio::test]
 async fn turn_end_stamps_last_activity() -> Result<(), Report<StoreError>> {
-    // Given a thread a poll saw working.
-    let (store, _) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    // Given an agent a poll saw working.
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
     let before = now_ms();
 
     // When a poll sees its turn end.
-    host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
+    host.set_running(Ok(vec![record("aa", AgentStatus::Idle)]));
     actor.poll().await;
 
     // Then its last activity is the turn's end.
     assert!(
         saved(&actor.store, "aa")?.last_activity_at >= before,
-        "the turn end should be the thread's last activity"
+        "the turn end should be the agent's last activity"
     );
     Ok(())
 }
@@ -5225,25 +5220,25 @@ async fn turn_end_stamps_last_activity() -> Result<(), Report<StoreError>> {
 #[tokio::test]
 async fn turn_end_without_a_scanned_branch_takes_the_branch_from_git()
 -> Result<(), Report<StoreError>> {
-    // Given a branchless thread a poll saw working, whose transcript names no branch.
+    // Given a branchless agent a poll saw working, whose transcript names no branch.
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;
     let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
     fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
     fs::write(&path, PROMPT_LINE).change_context(StoreError)?;
-    let (store, _) = store_with_thread("aa")?;
-    let working = record("aa", ThreadStatus::Working);
+    let (store, _) = store_with_agent("aa")?;
+    let working = record("aa", AgentStatus::Working);
     let host = listing(vec![working.clone()]);
     let (mut actor, _state) = start(store, &host, claude_dir.path());
     actor.poll().await;
 
     // When a poll sees its turn end.
     host.set_running(Ok(vec![RunningAgent {
-        status: ThreadStatus::Idle,
+        status: AgentStatus::Idle,
         ..working
     }]));
     actor.poll().await;
 
-    // Then the thread takes the branch git has checked out there.
+    // Then the agent takes the branch git has checked out there.
     assert_eq!(
         saved(&actor.store, "aa")?.branch.as_deref(),
         Some(CURRENT_BRANCH),
@@ -5255,7 +5250,7 @@ async fn turn_end_without_a_scanned_branch_takes_the_branch_from_git()
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_shows_the_transcript_branch() -> Result<(), Report<StoreError>> {
-    // Given a thread whose transcript's prompt names a branch.
+    // Given an agent whose transcript's prompt names a branch.
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;
     let path = transcript_path(claude_dir.path(), Path::new(PROJECT_ROOT), "aa");
     fs::create_dir_all(path.parent().unwrap_or(claude_dir.path())).change_context(StoreError)?;
@@ -5264,32 +5259,32 @@ async fn poll_shows_the_transcript_branch() -> Result<(), Report<StoreError>> {
         "{\"type\":\"user\",\"gitBranch\":\"main\",\"message\":{\"content\":\"Fix it\"}}\n",
     )
     .change_context(StoreError)?;
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, claude_dir.path());
 
     // When polling.
     actor.poll().await;
 
-    // Then the thread shows the branch.
+    // Then the agent shows the branch.
     assert_eq!(
-        shown(&state, id).and_then(|thread| thread.branch),
+        shown(&state, id).and_then(|agent| agent.branch),
         Some("main".to_owned()),
-        "the transcript's branch should show on the thread"
+        "the transcript's branch should show on the agent"
     );
     Ok(())
 }
 
-/// A store whose session holds untitled thread `aa` in the orb project's
+/// A store whose session holds untitled agent `aa` in the orb project's
 /// checkout, with a second pane.
 fn movable() -> Result<(Store, Seeded, PaneId), Report<StoreError>> {
     let store = Store::open_in_memory()?;
-    let seeded = insert_thread(&store, "aa")?;
+    let seeded = insert_agent(&store, "aa")?;
     let second = second_tab(&store, &seeded)?;
     Ok((store, seeded, second))
 }
 
-/// What [`moved_to`] leaves: the actor, its state, the session's thread
+/// What [`moved_to`] leaves: the actor, its state, the session's agent
 /// and first pane, its second pane, and the zmx it called after start.
 type Moved = (SessionsActor, State, Seeded, PaneId, Arc<FakeZmx>);
 
@@ -5375,8 +5370,8 @@ fn change_workspace_saves_every_panes_cwd() -> Result<(), Report<StoreError>> {
 }
 
 #[rstest::rstest]
-fn change_workspace_unbinds_the_threads_in_its_panes() -> Result<(), Report<StoreError>> {
-    // Given thread aa in a session's pane, before any agent turn.
+fn change_workspace_unbinds_the_agents_in_its_panes() -> Result<(), Report<StoreError>> {
+    // Given agent aa in a session's pane, before any agent turn.
     let to = tempfile::tempdir().change_context(StoreError)?;
 
     // When moving the session.
@@ -5387,7 +5382,7 @@ fn change_workspace_unbinds_the_threads_in_its_panes() -> Result<(), Report<Stor
     assert_eq!(
         saved(&actor.store, "aa")?.pane_id,
         None,
-        "a killed agent's thread leaves its pane"
+        "a killed agent's agent leaves its pane"
     );
     Ok(())
 }
@@ -5412,9 +5407,9 @@ fn change_workspace_asks_the_frontend_to_attach() -> Result<(), Report<StoreErro
 
 #[rstest::rstest]
 fn change_workspace_after_a_turn_is_refused() -> Result<(), Report<StoreError>> {
-    // Given a session whose thread is titled, so a turn has run.
+    // Given a session whose agent is titled, so a turn has run.
     let (store, seeded, _) = movable()?;
-    resave(&store, "aa", |row| ThreadRow {
+    resave(&store, "aa", |row| AgentRow {
         title: Some("Fix the parser".to_owned()),
         ..row
     })?;
@@ -5487,11 +5482,11 @@ fn move_whose_session_was_deleted_meanwhile_shows_the_session_is_gone()
     Ok(())
 }
 
-/// Gives thread `thread` a title in the app state, as its first turn
+/// Gives agent `agent` a title in the app state, as its first turn
 /// does.
-fn title_in_state(state: &State, thread: ThreadId) {
-    if let Some(thread) = super::thread_mut(&mut state.write().sessions, thread) {
-        thread.title = Some("Fix the parser".to_owned());
+fn title_in_state(state: &State, agent: AgentId) {
+    if let Some(agent) = super::agent_mut(&mut state.write().sessions, agent) {
+        agent.title = Some("Fix the parser".to_owned());
     }
 }
 
@@ -5502,7 +5497,7 @@ fn move_whose_session_had_a_turn_meanwhile_is_refused() -> Result<(), Report<Sto
     let (store, seeded, _) = movable()?;
     let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
     let job = actor.change_workspace(seeded.session, new_worktree(), None);
-    title_in_state(&state, seeded.thread);
+    title_in_state(&state, seeded.agent);
 
     // When the worktree result is applied.
     finish(&mut actor, job);
@@ -5529,7 +5524,7 @@ fn move_whose_session_had_a_turn_meanwhile_removes_its_worktree() -> Result<(), 
     let (mut actor, state) =
         start_with(store, &listing(Vec::new()), &git, Path::new(NO_CLAUDE_DIR));
     let job = actor.change_workspace(seeded.session, new_worktree(), None);
-    title_in_state(&state, seeded.thread);
+    title_in_state(&state, seeded.agent);
 
     // When the worktree result is applied.
     finish(&mut actor, job);
@@ -5544,7 +5539,7 @@ fn move_whose_session_had_a_turn_meanwhile_removes_its_worktree() -> Result<(), 
 }
 
 /// A store holding sessions of the orb project in the orb worktree
-/// `old`, for threads aa and, when `shared`, bb.
+/// `old`, for agents aa and, when `shared`, bb.
 fn in_orb_worktree(old: &Path, shared: bool) -> Result<(Store, Seeded), Report<StoreError>> {
     let store = Store::open_in_memory()?;
     let project = orb_project(&store)?;
@@ -5624,7 +5619,7 @@ fn failed_change_workspace_removes_the_new_worktree() -> Result<(), Report<Store
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     let store = Store::open(&path)?;
-    let seeded = insert_thread(&store, "aa")?;
+    let seeded = insert_agent(&store, "aa")?;
     rusqlite::Connection::open(&path)
         .and_then(|conn| {
             conn.execute_batch(
@@ -5672,7 +5667,7 @@ fn failed_change_workspace_to_an_existing_worktree_removes_no_worktree()
     let worktree = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     let store = Store::open(&path)?;
-    let seeded = insert_thread(&store, "aa")?;
+    let seeded = insert_agent(&store, "aa")?;
     rusqlite::Connection::open(&path)
         .and_then(|conn| {
             conn.execute_batch(
@@ -5751,8 +5746,8 @@ fn branch_of(state: &State, id: SessionId) -> Option<String> {
 fn switch_branch_checks_out_in_the_sessions_dir() -> Result<(), Report<StoreError>> {
     // Given a session in the orb project's checkout.
     let store = Store::open_in_memory()?;
-    let seeded = insert_thread(&store, "aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let seeded = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When switching it to `feat`.
@@ -5772,8 +5767,8 @@ fn switch_branch_checks_out_in_the_sessions_dir() -> Result<(), Report<StoreErro
 async fn switch_branch_refused_after_the_directory_became_busy() -> Result<(), Report<StoreError>> {
     // Given a session whose agent's turn started after the picker opened.
     let store = Store::open_in_memory()?;
-    let seeded = insert_thread(&store, "aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    let seeded = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
 
@@ -5793,8 +5788,8 @@ async fn switch_branch_refused_after_the_directory_became_busy() -> Result<(), R
 fn switch_to_a_remote_ref_shows_the_local_branch_name() -> Result<(), Report<StoreError>> {
     // Given a session in the orb project's checkout.
     let store = Store::open_in_memory()?;
-    let seeded = insert_thread(&store, "aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let seeded = insert_agent(&store, "aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When switching it to `origin/feat`.
@@ -5841,20 +5836,18 @@ fn switch_branch_to_root_moves_the_session_to_the_checkout() -> Result<(), Repor
 #[rstest::rstest]
 #[tokio::test]
 async fn turn_end_renames_the_hex_branch_to_the_title_slug() -> Result<(), Report<StoreError>> {
-    // Given a thread in an orb worktree on its hex branch, titled by Claude.
+    // Given an agent in an orb worktree on its hex branch, titled by Claude.
     let (claude_dir, store, id) =
-        worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
+        worktree_agent(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
     let host = listing(Vec::new());
     let (mut actor, state) = start_with(store, &host, &FakeGit::local(), claude_dir.path());
 
     // When a poll sees its turn end.
     end_turn(&mut actor, &host).await;
 
-    // Then the thread shows the branch named after its title.
+    // Then the agent shows the branch named after its title.
     assert_eq!(
-        shown(&state, id)
-            .and_then(|thread| thread.branch)
-            .as_deref(),
+        shown(&state, id).and_then(|agent| agent.branch).as_deref(),
         Some("orb/parser-fix"),
         "the hex branch should be renamed to the title's slug"
     );
@@ -5864,10 +5857,10 @@ async fn turn_end_renames_the_hex_branch_to_the_title_slug() -> Result<(), Repor
 #[rstest::rstest]
 #[tokio::test]
 async fn turn_end_renames_the_hex_branch_to_the_orb_name_slug() -> Result<(), Report<StoreError>> {
-    // Given a thread on its hex branch titled only by its first prompt,
+    // Given an agent on its hex branch titled only by its first prompt,
     // then renamed with `r`.
-    let (claude_dir, store, id) = worktree_thread(PROMPT_LINE, HEX_BRANCH)?;
-    resave(&store, "aa", |row| ThreadRow {
+    let (claude_dir, store, id) = worktree_agent(PROMPT_LINE, HEX_BRANCH)?;
+    resave(&store, "aa", |row| AgentRow {
         renamed_title: Some("Sidebar search".to_owned()),
         ..row
     })?;
@@ -5877,11 +5870,9 @@ async fn turn_end_renames_the_hex_branch_to_the_orb_name_slug() -> Result<(), Re
     // When a poll sees its turn end.
     end_turn(&mut actor, &host).await;
 
-    // Then the thread shows the branch named after the orb name.
+    // Then the agent shows the branch named after the orb name.
     assert_eq!(
-        shown(&state, id)
-            .and_then(|thread| thread.branch)
-            .as_deref(),
+        shown(&state, id).and_then(|agent| agent.branch).as_deref(),
         Some("orb/sidebar-search"),
         "the hex branch should be renamed to the orb name's slug"
     );
@@ -5891,7 +5882,7 @@ async fn turn_end_renames_the_hex_branch_to_the_orb_name_slug() -> Result<(), Re
 #[rstest::rstest]
 #[tokio::test]
 async fn turn_end_rename_moves_the_session_to_the_new_branch() -> Result<(), Report<StoreError>> {
-    // Given a Claude-titled thread in its own session in an orb worktree,
+    // Given a Claude-titled agent in its own session in an orb worktree,
     // both on the hex branch.
     let claude_dir = tempfile::tempdir().change_context(StoreError)?;
     let path = transcript_path(claude_dir.path(), Path::new(HEX_WORKTREE), "aa");
@@ -5921,8 +5912,8 @@ async fn turn_end_rename_moves_the_session_to_the_new_branch() -> Result<(), Rep
 #[rstest::rstest]
 #[tokio::test]
 async fn no_rename_when_the_branch_is_not_the_hex_branch() -> Result<(), Report<StoreError>> {
-    // Given a Claude-titled thread in an orb worktree on another branch.
-    let (claude_dir, store, _) = worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), "main")?;
+    // Given a Claude-titled agent in an orb worktree on another branch.
+    let (claude_dir, store, _) = worktree_agent(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), "main")?;
     let host = listing(Vec::new());
     let git = FakeGit::local();
     let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
@@ -5938,8 +5929,8 @@ async fn no_rename_when_the_branch_is_not_the_hex_branch() -> Result<(), Report<
 #[rstest::rstest]
 #[tokio::test]
 async fn no_rename_with_only_a_prompt_title() -> Result<(), Report<StoreError>> {
-    // Given a thread on its hex branch titled only by its first prompt.
-    let (claude_dir, store, _) = worktree_thread(PROMPT_LINE, HEX_BRANCH)?;
+    // Given an agent on its hex branch titled only by its first prompt.
+    let (claude_dir, store, _) = worktree_agent(PROMPT_LINE, HEX_BRANCH)?;
     let host = listing(Vec::new());
     let git = FakeGit::local();
     let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
@@ -5955,9 +5946,9 @@ async fn no_rename_with_only_a_prompt_title() -> Result<(), Report<StoreError>> 
 #[rstest::rstest]
 #[tokio::test]
 async fn no_rename_when_the_slug_branch_exists() -> Result<(), Report<StoreError>> {
-    // Given a Claude-titled thread on its hex branch, and `orb/parser-fix` taken.
+    // Given a Claude-titled agent on its hex branch, and `orb/parser-fix` taken.
     let (claude_dir, store, _) =
-        worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
+        worktree_agent(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
     let host = listing(Vec::new());
     let git = FakeGit::having("orb/parser-fix");
     let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
@@ -5977,10 +5968,10 @@ async fn no_rename_when_the_slug_branch_exists() -> Result<(), Report<StoreError
 #[rstest::rstest]
 #[tokio::test]
 async fn no_rename_without_a_turn_end() -> Result<(), Report<StoreError>> {
-    // Given a Claude-titled thread on its hex branch.
+    // Given a Claude-titled agent on its hex branch.
     let (claude_dir, store, _) =
-        worktree_thread(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
-    let host = listing(vec![in_session(ThreadStatus::Working)]);
+        worktree_agent(&format!("{PROMPT_LINE}{AI_TITLE_LINE}"), HEX_BRANCH)?;
+    let host = listing(vec![in_session(AgentStatus::Working)]);
     let git = FakeGit::local();
     let (mut actor, _state) = start_with(store, &host, &git, claude_dir.path());
 
@@ -6007,36 +5998,36 @@ fn notices_of(actor: &SessionsActor) -> Vec<Notice> {
 }
 
 #[rstest::rstest]
-#[case(ThreadStatus::Unknown, ThreadStatus::Idle, None)]
-#[case(ThreadStatus::Unknown, ThreadStatus::NeedsApproval, None)]
-#[case(ThreadStatus::Working, ThreadStatus::Idle, Some(NoticeKind::Finished))]
+#[case(AgentStatus::Unknown, AgentStatus::Idle, None)]
+#[case(AgentStatus::Unknown, AgentStatus::NeedsApproval, None)]
+#[case(AgentStatus::Working, AgentStatus::Idle, Some(NoticeKind::Finished))]
 #[case(
-    ThreadStatus::NeedsApproval,
-    ThreadStatus::Idle,
+    AgentStatus::NeedsApproval,
+    AgentStatus::Idle,
     Some(NoticeKind::Finished)
 )]
 #[case(
-    ThreadStatus::Working,
-    ThreadStatus::NeedsApproval,
+    AgentStatus::Working,
+    AgentStatus::NeedsApproval,
     Some(NoticeKind::NeedsApproval)
 )]
 #[case(
-    ThreadStatus::Working,
-    ThreadStatus::NeedsInput,
+    AgentStatus::Working,
+    AgentStatus::NeedsInput,
     Some(NoticeKind::NeedsInput)
 )]
-#[case(ThreadStatus::NeedsApproval, ThreadStatus::NeedsApproval, None)]
+#[case(AgentStatus::NeedsApproval, AgentStatus::NeedsApproval, None)]
 #[case(
-    ThreadStatus::NeedsApproval,
-    ThreadStatus::NeedsInput,
+    AgentStatus::NeedsApproval,
+    AgentStatus::NeedsInput,
     Some(NoticeKind::NeedsInput)
 )]
-#[case(ThreadStatus::Idle, ThreadStatus::Idle, None)]
-#[case(ThreadStatus::Working, ThreadStatus::Failed, None)]
-#[case(ThreadStatus::Working, ThreadStatus::Stopped, None)]
+#[case(AgentStatus::Idle, AgentStatus::Idle, None)]
+#[case(AgentStatus::Working, AgentStatus::Failed, None)]
+#[case(AgentStatus::Working, AgentStatus::Stopped, None)]
 fn notice_kind_names_why_a_status_change_needs_the_user(
-    #[case] old: ThreadStatus,
-    #[case] new: ThreadStatus,
+    #[case] old: AgentStatus,
+    #[case] new: AgentStatus,
     #[case] expected: Option<NoticeKind>,
 ) {
     assert_eq!(notice_kind(old, new), expected, "{old:?} → {new:?}");
@@ -6045,9 +6036,9 @@ fn notice_kind_names_why_a_status_change_needs_the_user(
 #[rstest::rstest]
 #[tokio::test]
 async fn first_poll_after_restore_queues_no_notice() -> Result<(), Report<StoreError>> {
-    // Given a saved thread that was already waiting for an approval at launch.
-    let (store, _) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::NeedsApproval)]);
+    // Given a saved agent that was already waiting for an approval at launch.
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::NeedsApproval)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
 
     // When polling for the first time.
@@ -6064,11 +6055,11 @@ async fn first_poll_after_restore_queues_no_notice() -> Result<(), Report<StoreE
 
 #[rstest::rstest]
 #[tokio::test]
-async fn turn_end_queues_a_finished_notice_naming_project_and_thread()
+async fn turn_end_queues_a_finished_notice_naming_project_and_agent()
 -> Result<(), Report<StoreError>> {
-    // Given orb's thread titled "Parser fix".
-    let (store, id) = store_with_thread("aa")?;
-    resave(&store, "aa", |row| ThreadRow {
+    // Given orb's agent titled "Parser fix".
+    let (store, id) = store_with_agent("aa")?;
+    resave(&store, "aa", |row| AgentRow {
         custom_title: Some("Parser fix".to_owned()),
         ..row
     })?;
@@ -6078,11 +6069,11 @@ async fn turn_end_queues_a_finished_notice_naming_project_and_thread()
     // When polls see its turn run and then end.
     end_turn(&mut actor, &host).await;
 
-    // Then one Finished notice names the project and the thread.
+    // Then one Finished notice names the project and the agent.
     assert_eq!(
         notices_of(&actor),
         [Notice {
-            thread: id,
+            agent: id,
             kind: NoticeKind::Finished,
             project: "orb".to_owned(),
             title: "Parser fix".to_owned(),
@@ -6095,34 +6086,34 @@ async fn turn_end_queues_a_finished_notice_naming_project_and_thread()
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_reports_each_notice_as_an_announcement() -> Result<(), Report<StoreError>> {
-    // Given two threads whose turns are running.
-    let (store, aa) = store_with_thread("aa")?;
-    let bb = add_thread(&store, "bb", now_ms() - HOUR_MS)?;
+    // Given two agents whose turns are running.
+    let (store, aa) = store_with_agent("aa")?;
+    let bb = add_agent(&store, "bb", now_ms() - HOUR_MS)?;
     let host = listing(vec![
-        record("aa", ThreadStatus::Working),
-        record("bb", ThreadStatus::Working),
+        record("aa", AgentStatus::Working),
+        record("bb", AgentStatus::Working),
     ]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
 
     // When one poll sees both turns end.
     host.set_running(Ok(vec![
-        record("aa", ThreadStatus::Idle),
-        record("bb", ThreadStatus::Idle),
+        record("aa", AgentStatus::Idle),
+        record("bb", AgentStatus::Idle),
     ]));
     actor.poll().await;
 
     // Then each ended turn is reported for announcing on its own.
-    let mut announced: Vec<ThreadId> = actor
+    let mut announced: Vec<AgentId> = actor
         .report
         .outcomes()
         .into_iter()
         .filter_map(|outcome| match outcome {
-            Outcome::Announce(notice) => Some(notice.thread),
+            Outcome::Announce(notice) => Some(notice.agent),
             _ => None,
         })
         .collect();
-    announced.sort_by_key(|thread| thread.0);
+    announced.sort_by_key(|agent| agent.0);
     assert_eq!(announced, [aa, bb], "one announcement per ended turn");
     Ok(())
 }
@@ -6130,14 +6121,14 @@ async fn poll_reports_each_notice_as_an_announcement() -> Result<(), Report<Stor
 #[rstest::rstest]
 #[tokio::test]
 async fn a_wait_seen_by_two_polls_queues_one_notice() -> Result<(), Report<StoreError>> {
-    // Given a thread whose turn is running.
-    let (store, _) = store_with_thread("aa")?;
-    let host = listing(vec![in_session(ThreadStatus::Working)]);
+    // Given an agent whose turn is running.
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![in_session(AgentStatus::Working)]);
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
 
     // When two polls in a row see it waiting for an approval.
-    host.set_running(Ok(vec![in_session(ThreadStatus::NeedsApproval)]));
+    host.set_running(Ok(vec![in_session(AgentStatus::NeedsApproval)]));
     actor.poll().await;
     actor.poll().await;
 
@@ -6156,23 +6147,23 @@ async fn a_wait_seen_by_two_polls_queues_one_notice() -> Result<(), Report<Store
 
 #[rstest::rstest]
 #[tokio::test]
-async fn turn_end_of_a_thread_being_deleted_queues_no_notice() -> Result<(), Report<StoreError>> {
-    // Given a thread whose turn is running, then marked for deletion.
-    let (store, id) = store_with_thread("aa")?;
-    let host = listing(vec![in_session(ThreadStatus::Working)]);
+async fn turn_end_of_an_agent_being_deleted_queues_no_notice() -> Result<(), Report<StoreError>> {
+    // Given an agent whose turn is running, then marked for deletion.
+    let (store, id) = store_with_agent("aa")?;
+    let host = listing(vec![in_session(AgentStatus::Working)]);
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.poll().await;
     state.write().sessions.deleting.insert(SessionId(id.0));
 
     // When a poll sees its turn end.
-    host.set_running(Ok(vec![in_session(ThreadStatus::Idle)]));
+    host.set_running(Ok(vec![in_session(AgentStatus::Idle)]));
     actor.poll().await;
 
     // Then no notice is queued.
     assert_eq!(
         notices_of(&actor),
         [],
-        "a thread being deleted shouldn't notify"
+        "an agent being deleted shouldn't notify"
     );
     Ok(())
 }
@@ -6181,8 +6172,8 @@ async fn turn_end_of_a_thread_being_deleted_queues_no_notice() -> Result<(), Rep
 #[tokio::test]
 async fn turn_end_outside_the_project_filter_still_queues_a_notice()
 -> Result<(), Report<StoreError>> {
-    // Given orb's thread, with the sidebar filtered to another project.
-    let (store, id) = store_with_thread("aa")?;
+    // Given orb's agent, with the sidebar filtered to another project.
+    let (store, id) = store_with_agent("aa")?;
     let web = store.add_project(Path::new(WEB_ROOT), "web", ProjectKind::Normal, 0)?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -6192,9 +6183,9 @@ async fn turn_end_outside_the_project_filter_still_queues_a_notice()
     end_turn(&mut actor, &host).await;
 
     // Then its notice is queued anyway.
-    let notified: Vec<ThreadId> = notices_of(&actor)
+    let notified: Vec<AgentId> = notices_of(&actor)
         .into_iter()
-        .map(|notice| notice.thread)
+        .map(|notice| notice.agent)
         .collect();
     assert_eq!(notified, [id], "the filter shouldn't hide notices");
     Ok(())
@@ -6536,7 +6527,7 @@ fn refused_folder_session_keeps_the_filter() -> Result<(), Report<StoreError>> {
     Ok(())
 }
 
-/// Saves thread `short_id` in the orb project, created an hour ago, in a
+/// Saves agent `short_id` in the orb project, created an hour ago, in a
 /// session of its own in `cwd`, on `branch`.
 fn insert_in(
     store: &Store,
@@ -6554,16 +6545,16 @@ fn insert_in(
         short_id,
         now_ms() - HOUR_MS,
     )?;
-    resave(store, short_id, |row| ThreadRow {
+    resave(store, short_id, |row| AgentRow {
         branch: branch.map(str::to_owned),
         ..row
     })?;
     Ok(inserted)
 }
 
-/// A store whose thread `aa` has a session in [`HEX_WORKTREE`], now
+/// A store whose agent `aa` has a session in [`HEX_WORKTREE`], now
 /// gone, on `branch`.
-fn pruned_thread(branch: Option<&str>) -> Result<(Store, SessionId), Report<StoreError>> {
+fn pruned_agent(branch: Option<&str>) -> Result<(Store, SessionId), Report<StoreError>> {
     let store = Store::open_in_memory()?;
     let inserted = insert_in(&store, "aa", Path::new(HEX_WORKTREE), branch)?;
     Ok((store, inserted.session))
@@ -6580,8 +6571,8 @@ fn restore_calls(store: Store, git: &Arc<FakeGit>, id: SessionId) -> Vec<GitCall
 #[rstest::rstest]
 #[tokio::test]
 async fn restore_on_an_existing_branch_adds_the_worktree_on_it() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree, whose branch still exists.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+    // Given agent aa's pruned worktree, whose branch still exists.
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     let git = FakeGit::having("fix-parser");
 
     // When restoring its worktree.
@@ -6602,8 +6593,8 @@ async fn restore_on_an_existing_branch_adds_the_worktree_on_it() -> Result<(), R
 #[tokio::test]
 async fn restore_on_a_missing_branch_creates_it_from_the_default_branch()
 -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree, whose branch is gone.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+    // Given agent aa's pruned worktree, whose branch is gone.
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     let git = FakeGit::local();
 
     // When restoring its worktree.
@@ -6623,11 +6614,11 @@ async fn restore_on_a_missing_branch_creates_it_from_the_default_branch()
 
 #[rstest::rstest]
 #[tokio::test]
-async fn restore_with_a_gone_session_branch_uses_the_threads_existing_branch()
+async fn restore_with_a_gone_session_branch_uses_the_agents_existing_branch()
 -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree, the session recorded on a hex
-    // branch that is gone, the thread on fix-parser, which exists.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+    // Given agent aa's pruned worktree, the session recorded on a hex
+    // branch that is gone, the agent on fix-parser, which exists.
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     resave_sessions(&store, |row| SessionRow {
         branch: Some(HEX_BRANCH.to_owned()),
         ..row
@@ -6637,23 +6628,23 @@ async fn restore_with_a_gone_session_branch_uses_the_threads_existing_branch()
     // When restoring its worktree.
     let calls = restore_calls(store, &git, id);
 
-    // Then the worktree comes back on the thread's branch.
+    // Then the worktree comes back on the agent's branch.
     assert!(
         calls.contains(&GitCall::AddWorktreeOn {
             path: PathBuf::from(HEX_WORKTREE),
             branch: "fix-parser".to_owned(),
         }),
-        "the work lives on the thread's branch, so the worktree goes there"
+        "the work lives on the agent's branch, so the worktree goes there"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn restore_on_the_threads_branch_shows_it_on_the_session() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree, the session recorded on a hex
-    // branch that is gone, the thread on fix-parser, which exists.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+async fn restore_on_the_agents_branch_shows_it_on_the_session() -> Result<(), Report<StoreError>> {
+    // Given agent aa's pruned worktree, the session recorded on a hex
+    // branch that is gone, the agent on fix-parser, which exists.
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     resave_sessions(&store, |row| SessionRow {
         branch: Some(HEX_BRANCH.to_owned()),
         ..row
@@ -6681,9 +6672,9 @@ async fn restore_on_the_threads_branch_shows_it_on_the_session() -> Result<(), R
 #[rstest::rstest]
 #[tokio::test]
 async fn restore_on_a_missing_branch_starts_from_origin() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree, whose branch is gone, in a
+    // Given agent aa's pruned worktree, whose branch is gone, in a
     // project with an origin.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     let git = FakeGit::with_origin(Ok(true));
 
     // When restoring its worktree.
@@ -6704,8 +6695,8 @@ async fn restore_on_a_missing_branch_starts_from_origin() -> Result<(), Report<S
 #[rstest::rstest]
 #[tokio::test]
 async fn restore_without_a_recorded_branch_uses_the_hex_branch() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree, with no branch recorded.
-    let (store, id) = pruned_thread(None)?;
+    // Given agent aa's pruned worktree, with no branch recorded.
+    let (store, id) = pruned_agent(None)?;
     let git = FakeGit::local();
 
     // When restoring its worktree.
@@ -6718,7 +6709,7 @@ async fn restore_without_a_recorded_branch_uses_the_hex_branch() -> Result<(), R
             branch: HEX_BRANCH.to_owned(),
             base: "main".to_owned(),
         }),
-        "a thread with no branch should get orb/<hex> back"
+        "an agent with no branch should get orb/<hex> back"
     );
     Ok(())
 }
@@ -6726,8 +6717,8 @@ async fn restore_without_a_recorded_branch_uses_the_hex_branch() -> Result<(), R
 #[rstest::rstest]
 #[tokio::test]
 async fn restore_prunes_stale_worktree_metadata_first() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+    // Given agent aa's pruned worktree.
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     let git = FakeGit::local();
 
     // When restoring its worktree.
@@ -6746,8 +6737,8 @@ async fn restore_prunes_stale_worktree_metadata_first() -> Result<(), Report<Sto
 #[rstest::rstest]
 #[tokio::test]
 async fn restore_reports_ready_for_the_restored_session() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+    // Given agent aa's pruned worktree.
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     let (mut actor, _state) = start_with(
         store,
         &listing(vec![]),
@@ -6773,8 +6764,8 @@ async fn restore_reports_ready_for_the_restored_session() -> Result<(), Report<S
 #[rstest::rstest]
 #[tokio::test]
 async fn restore_failure_sets_the_error_and_no_attach() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree, in a project git can't read.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+    // Given agent aa's pruned worktree, in a project git can't read.
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     let (mut actor, _state) = start_with(
         store,
         &listing(vec![]),
@@ -6798,8 +6789,8 @@ async fn restore_failure_sets_the_error_and_no_attach() -> Result<(), Report<Sto
 #[rstest::rstest]
 #[tokio::test]
 async fn restore_ends_the_start() -> Result<(), Report<StoreError>> {
-    // Given thread aa's pruned worktree, its restore marked as starting.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+    // Given agent aa's pruned worktree, its restore marked as starting.
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     let (mut actor, state) = start_with(
         store,
         &listing(vec![]),
@@ -6823,7 +6814,7 @@ async fn restore_ends_the_start() -> Result<(), Report<StoreError>> {
 #[rstest::rstest]
 #[tokio::test]
 async fn restore_of_a_directory_that_exists_runs_no_git() -> Result<(), Report<StoreError>> {
-    // Given thread aa in a directory that is on disk.
+    // Given agent aa in a directory that is on disk.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let store = Store::open_in_memory()?;
     let id = insert_in(&store, "aa", dir.path(), Some("fix-parser"))?.session;
@@ -6840,12 +6831,12 @@ async fn restore_of_a_directory_that_exists_runs_no_git() -> Result<(), Report<S
     Ok(())
 }
 
-/// Claude thread `aa` in a pane of its own and a shell pane beside it in
+/// Claude agent `aa` in a pane of its own and a shell pane beside it in
 /// the same session, the actor reading pane files under a scratch orb
 /// folder.
 struct PaneReports {
     dir: tempfile::TempDir,
-    thread: Seeded,
+    agent: Seeded,
     shell: PaneId,
     actor: SessionsActor,
     state: State,
@@ -6863,9 +6854,9 @@ impl PaneReports {
     {
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
-        let thread = insert_thread(&store, "aa")?;
-        let shell = second_tab(&store, &thread)?;
-        setup(&store, &thread)?;
+        let agent = insert_agent(&store, "aa")?;
+        let shell = second_tab(&store, &agent)?;
+        setup(&store, &agent)?;
         let host = listing(Vec::new());
         let (actor, state) = start_in(
             store,
@@ -6877,7 +6868,7 @@ impl PaneReports {
         );
         Ok(Self {
             dir,
-            thread,
+            agent,
             shell,
             actor,
             state,
@@ -6913,17 +6904,17 @@ impl PaneReports {
         fs::write(self.file(pane), json.to_string()).change_context(StoreError)
     }
 
-    /// The saved threads.
-    fn rows(&self) -> Result<Vec<ThreadRow>, Report<StoreError>> {
+    /// The saved agents.
+    fn rows(&self) -> Result<Vec<AgentRow>, Report<StoreError>> {
         Ok(self.actor.store.load()?.1)
     }
 
-    /// The saved thread `id`.
-    fn row(&self, id: ThreadId) -> Result<ThreadRow, Report<StoreError>> {
+    /// The saved agent `id`.
+    fn row(&self, id: AgentId) -> Result<AgentRow, Report<StoreError>> {
         self.rows()?
             .into_iter()
             .find(|row| row.id == id)
-            .ok_or_else(|| Report::new(StoreError).attach("the thread isn't saved"))
+            .ok_or_else(|| Report::new(StoreError).attach("the agent isn't saved"))
     }
 
     /// Pane `pane`'s saved resume command.
@@ -6941,7 +6932,7 @@ impl PaneReports {
 
 #[rstest::rstest]
 #[tokio::test]
-async fn pane_report_start_creates_a_thread_in_that_pane() -> Result<(), Report<StoreError>> {
+async fn pane_report_start_creates_an_agent_in_that_pane() -> Result<(), Report<StoreError>> {
     // Given Claude started conversation s-new in the shell pane.
     let mut fx = PaneReports::new()?;
     fx.report(fx.shell, "start", "s-new", Some("startup"))?;
@@ -6949,7 +6940,7 @@ async fn pane_report_start_creates_a_thread_in_that_pane() -> Result<(), Report<
     // When polling.
     fx.actor.poll().await;
 
-    // Then a Claude thread for s-new runs in that pane, with its transcript.
+    // Then a Claude agent for s-new runs in that pane, with its transcript.
     let found: Vec<_> = fx
         .rows()?
         .into_iter()
@@ -6971,14 +6962,14 @@ async fn pane_report_start_creates_a_thread_in_that_pane() -> Result<(), Report<
     )];
     assert_eq!(
         found, expected,
-        "the report should start a thread in the pane"
+        "the report should start an agent in the pane"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn pane_report_start_shows_the_new_thread() -> Result<(), Report<StoreError>> {
+async fn pane_report_start_shows_the_new_agent() -> Result<(), Report<StoreError>> {
     // Given Claude started conversation s-new in the shell pane.
     let mut fx = PaneReports::new()?;
     fx.report(fx.shell, "start", "s-new", Some("startup"))?;
@@ -6986,32 +6977,32 @@ async fn pane_report_start_shows_the_new_thread() -> Result<(), Report<StoreErro
     // When polling.
     fx.actor.poll().await;
 
-    // Then the new thread is shown.
+    // Then the new agent is shown.
     let id = fx
         .rows()?
         .into_iter()
         .find(|row| row.short_id == "s-new")
         .map(|row| row.id)
-        .ok_or_else(|| Report::new(StoreError).attach("no thread for s-new"))?;
+        .ok_or_else(|| Report::new(StoreError).attach("no agent for s-new"))?;
     assert!(
         shown(&fx.state, id).is_some(),
-        "the new thread should be shown in its project"
+        "the new agent should be shown in its project"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn pane_report_resume_binds_the_thread_holding_that_session() -> Result<(), Report<StoreError>>
+async fn pane_report_resume_binds_the_agent_holding_that_session() -> Result<(), Report<StoreError>>
 {
-    // Given Claude resumed thread aa's conversation in the shell pane.
+    // Given Claude resumed agent aa's conversation in the shell pane.
     let mut fx = PaneReports::new()?;
     fx.report(fx.shell, "start", "aa", Some("resume"))?;
 
     // When polling.
     fx.actor.poll().await;
 
-    // Then aa, still the only thread, runs in the shell pane.
+    // Then aa, still the only agent, runs in the shell pane.
     let found: Vec<_> = fx
         .rows()?
         .into_iter()
@@ -7019,30 +7010,30 @@ async fn pane_report_resume_binds_the_thread_holding_that_session() -> Result<()
         .collect();
     assert_eq!(
         found,
-        vec![(fx.thread.thread, Some(fx.shell))],
-        "the thread holding the session should move into the pane"
+        vec![(fx.agent.agent, Some(fx.shell))],
+        "the agent holding the session should move into the pane"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn pane_report_resume_takes_the_pane_from_its_previous_thread()
+async fn pane_report_resume_takes_the_pane_from_its_previous_agent()
 -> Result<(), Report<StoreError>> {
-    // Given thread s-old runs in the shell pane, and Claude then resumed
+    // Given agent s-old runs in the shell pane, and Claude then resumed
     // aa's conversation there.
     let mut old = None;
-    let mut fx = PaneReports::with(|store, thread| {
+    let mut fx = PaneReports::with(|store, agent| {
         let shell = store
             .layouts()?
             .panes
             .into_iter()
             .map(|row| row.id)
-            .find(|&pane| pane != thread.pane)
+            .find(|&pane| pane != agent.pane)
             .ok_or_else(|| Report::new(StoreError).attach("no shell pane"))?;
         old = Some(
             store
-                .insert_pane_thread(&NewPaneThread {
+                .insert_pane_agent(&NewPaneAgent {
                     pane: shell,
                     session_id: "s-old".to_owned(),
                     transcript_path: None,
@@ -7060,11 +7051,11 @@ async fn pane_report_resume_takes_the_pane_from_its_previous_thread()
     // When polling.
     fx.actor.poll().await;
 
-    // Then s-old's thread no longer has a pane.
+    // Then s-old's agent no longer has a pane.
     assert_eq!(
         fx.row(old)?.pane_id,
         None,
-        "the pane's earlier thread should leave it"
+        "the pane's earlier agent should leave it"
     );
     Ok(())
 }
@@ -7073,21 +7064,21 @@ async fn pane_report_resume_takes_the_pane_from_its_previous_thread()
 #[case::claude_clear("clear")]
 #[case::pi_new("new")]
 #[tokio::test]
-async fn pane_report_after_clear_keeps_the_same_thread(
+async fn pane_report_after_clear_keeps_the_same_agent(
     #[case] source: &str,
 ) -> Result<(), Report<StoreError>> {
     // Given aa's pane started a fresh conversation s-2 in its place.
     let mut fx = PaneReports::new()?;
-    fx.report(fx.thread.pane, "start", "s-2", Some(source))?;
+    fx.report(fx.agent.pane, "start", "s-2", Some(source))?;
 
     // When polling.
     fx.actor.poll().await;
 
-    // Then thread aa holds s-2.
+    // Then agent aa holds s-2.
     assert_eq!(
-        fx.row(fx.thread.thread)?.session_id.as_deref(),
+        fx.row(fx.agent.agent)?.session_id.as_deref(),
         Some("s-2"),
-        "the same thread should take the new conversation"
+        "the same agent should take the new conversation"
     );
     Ok(())
 }
@@ -7097,35 +7088,35 @@ async fn pane_report_after_clear_keeps_the_same_thread(
 async fn pane_report_after_clear_swaps_the_transcript() -> Result<(), Report<StoreError>> {
     // Given aa's pane ran /clear into conversation s-2.
     let mut fx = PaneReports::new()?;
-    fx.report(fx.thread.pane, "start", "s-2", Some("clear"))?;
+    fx.report(fx.agent.pane, "start", "s-2", Some("clear"))?;
 
     // When polling.
     fx.actor.poll().await;
 
-    // Then thread aa reads s-2's transcript.
+    // Then agent aa reads s-2's transcript.
     assert_eq!(
-        fx.row(fx.thread.thread)?.transcript_path,
+        fx.row(fx.agent.agent)?.transcript_path,
         Some(PathBuf::from("/t/s-2.jsonl")),
-        "the thread should read the new conversation's transcript"
+        "the agent should read the new conversation's transcript"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn pane_report_end_unbinds_the_thread() -> Result<(), Report<StoreError>> {
+async fn pane_report_end_unbinds_the_agent() -> Result<(), Report<StoreError>> {
     // Given aa's conversation ended in its pane.
     let mut fx = PaneReports::new()?;
-    fx.report(fx.thread.pane, "end", "aa", None)?;
+    fx.report(fx.agent.pane, "end", "aa", None)?;
 
     // When polling.
     fx.actor.poll().await;
 
     // Then aa no longer has a pane.
     assert_eq!(
-        fx.row(fx.thread.thread)?.pane_id,
+        fx.row(fx.agent.agent)?.pane_id,
         None,
-        "an ended thread should leave its pane"
+        "an ended agent should leave its pane"
     );
     Ok(())
 }
@@ -7135,7 +7126,7 @@ async fn pane_report_end_unbinds_the_thread() -> Result<(), Report<StoreError>> 
 async fn end_report_leaves_the_session_listed() -> Result<(), Report<StoreError>> {
     // Given aa's conversation ended in its session's only agent pane.
     let mut fx = PaneReports::new()?;
-    fx.report(fx.thread.pane, "end", "aa", None)?;
+    fx.report(fx.agent.pane, "end", "aa", None)?;
 
     // When polling.
     fx.actor.poll().await;
@@ -7146,7 +7137,7 @@ async fn end_report_leaves_the_session_listed() -> Result<(), Report<StoreError>
         app.sessions
             .sidebar(&app.layouts)
             .iter()
-            .any(|row| row.item() == SidebarItem::Session(fx.thread.session))
+            .any(|row| row.item() == SidebarItem::Session(fx.agent.session))
     };
     assert!(listed, "a session whose agents all ended keeps its card");
     Ok(())
@@ -7158,17 +7149,17 @@ async fn settle_session_keeps_each_panes_resume_command() -> Result<(), Report<S
     // Given aa running in its pane, then its session settled, which ends
     // aa's conversation in the pane.
     let mut fx = PaneReports::new()?;
-    fx.report(fx.thread.pane, "start", "aa", Some("resume"))?;
+    fx.report(fx.agent.pane, "start", "aa", Some("resume"))?;
     fx.actor.poll().await;
-    fx.actor.settle_session(fx.thread.session);
-    fx.report(fx.thread.pane, "end", "aa", None)?;
+    fx.actor.settle_session(fx.agent.session);
+    fx.report(fx.agent.pane, "end", "aa", None)?;
 
     // When polling.
     fx.actor.poll().await;
 
     // Then the pane still resumes aa.
     assert_eq!(
-        fx.resume(fx.thread.pane)?.as_deref(),
+        fx.resume(fx.agent.pane)?.as_deref(),
         Some("claude --resume aa"),
         "a settled pane should keep its resume command"
     );
@@ -7177,12 +7168,12 @@ async fn settle_session_keeps_each_panes_resume_command() -> Result<(), Report<S
 
 #[rstest::rstest]
 #[tokio::test]
-async fn thread_resumed_in_another_session_takes_that_session() -> Result<(), Report<StoreError>> {
-    // Given thread bb's session, and aa's conversation resumed in bb's
+async fn agent_resumed_in_another_session_takes_that_session() -> Result<(), Report<StoreError>> {
+    // Given agent bb's session, and aa's conversation resumed in bb's
     // pane.
     let mut other = None;
     let mut fx = PaneReports::with(|store, _| {
-        other = Some(insert_thread(store, "bb")?);
+        other = Some(insert_agent(store, "bb")?);
         Ok(())
     })?;
     let other = other.ok_or_else(|| Report::new(StoreError).attach("bb wasn't made"))?;
@@ -7193,50 +7184,49 @@ async fn thread_resumed_in_another_session_takes_that_session() -> Result<(), Re
 
     // Then aa belongs to bb's session.
     assert_eq!(
-        fx.row(fx.thread.thread)?.orb_session,
+        fx.row(fx.agent.agent)?.orb_session,
         Some(other.session),
-        "a thread should take the session of the pane it is bound to"
+        "an agent should take the session of the pane it is bound to"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn end_report_keeps_the_threads_session() -> Result<(), Report<StoreError>> {
+async fn end_report_keeps_the_agents_session() -> Result<(), Report<StoreError>> {
     // Given aa's conversation ended in its pane.
     let mut fx = PaneReports::new()?;
-    fx.report(fx.thread.pane, "end", "aa", None)?;
+    fx.report(fx.agent.pane, "end", "aa", None)?;
 
     // When polling.
     fx.actor.poll().await;
 
     // Then aa still shows in its session.
     assert_eq!(
-        shown(&fx.state, fx.thread.thread).and_then(|thread| thread.home()),
-        Some(fx.thread.session),
-        "an ended thread should keep the session it ran in"
+        shown(&fx.state, fx.agent.agent).and_then(|agent| agent.home()),
+        Some(fx.agent.session),
+        "an ended agent should keep the session it ran in"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 #[tokio::test]
-async fn end_report_in_a_settled_session_keeps_the_thread_bound() -> Result<(), Report<StoreError>>
-{
+async fn end_report_in_a_settled_session_keeps_the_agent_bound() -> Result<(), Report<StoreError>> {
     // Given aa's session settled, then aa's conversation ending in its
     // pane.
     let mut fx = PaneReports::new()?;
-    fx.actor.edit_session(fx.thread.session, settle_session_row);
-    fx.report(fx.thread.pane, "end", "aa", None)?;
+    fx.actor.edit_session(fx.agent.session, settle_session_row);
+    fx.report(fx.agent.pane, "end", "aa", None)?;
 
     // When polling.
     fx.actor.poll().await;
 
     // Then aa keeps its pane.
     assert_eq!(
-        fx.row(fx.thread.thread)?.pane_id,
-        Some(fx.thread.pane),
-        "settling ended it, so the thread waits to come back"
+        fx.row(fx.agent.agent)?.pane_id,
+        Some(fx.agent.pane),
+        "settling ended it, so the agent waits to come back"
     );
     Ok(())
 }
@@ -7246,15 +7236,15 @@ async fn end_report_in_a_settled_session_keeps_the_thread_bound() -> Result<(), 
 async fn pane_report_end_of_another_session_changes_nothing() -> Result<(), Report<StoreError>> {
     // Given aa's pane reports the end of some other conversation.
     let mut fx = PaneReports::new()?;
-    fx.report(fx.thread.pane, "end", "zz", None)?;
+    fx.report(fx.agent.pane, "end", "zz", None)?;
 
     // When polling.
     fx.actor.poll().await;
 
     // Then aa keeps its pane.
     assert_eq!(
-        fx.row(fx.thread.thread)?.pane_id,
-        Some(fx.thread.pane),
+        fx.row(fx.agent.agent)?.pane_id,
+        Some(fx.agent.pane),
         "a stale end should change nothing"
     );
     Ok(())
@@ -7283,17 +7273,17 @@ async fn pane_report_start_sets_the_panes_resume_command() -> Result<(), Report<
 #[tokio::test]
 async fn pane_report_end_clears_the_panes_resume_command() -> Result<(), Report<StoreError>> {
     // Given aa's pane resumes aa, and aa's conversation ended.
-    let mut fx = PaneReports::with(|store, thread| {
-        store.set_pane_resume(thread.pane, Some("claude --resume aa"))
+    let mut fx = PaneReports::with(|store, agent| {
+        store.set_pane_resume(agent.pane, Some("claude --resume aa"))
     })?;
-    fx.report(fx.thread.pane, "end", "aa", None)?;
+    fx.report(fx.agent.pane, "end", "aa", None)?;
 
     // When polling.
     fx.actor.poll().await;
 
     // Then the pane has nothing to resume.
     assert_eq!(
-        fx.resume(fx.thread.pane)?,
+        fx.resume(fx.agent.pane)?,
         None,
         "an ended conversation shouldn't be resumed"
     );
@@ -7311,9 +7301,9 @@ fn layout_resume(state: &State, pane: PaneId) -> Option<String> {
 
 #[rstest::rstest]
 fn restored_pane_entry_carries_its_resume_command() -> Result<(), Report<StoreError>> {
-    // Given a saved thread whose pane resumes aa.
+    // Given a saved agent whose pane resumes aa.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     store.set_pane_resume(inserted.pane, Some("claude --resume aa"))?;
     let host = listing(Vec::new());
 
@@ -7339,7 +7329,7 @@ async fn pane_report_start_shows_the_resume_command_in_the_layout() -> Result<()
     fx.state
         .write()
         .layouts
-        .new_tab(fx.thread.session, test_entry(fx.shell.0));
+        .new_tab(fx.agent.session, test_entry(fx.shell.0));
     fx.report(fx.shell, "start", "s-new", Some("startup"))?;
 
     // When polling.
@@ -7359,17 +7349,17 @@ async fn pane_report_start_shows_the_resume_command_in_the_layout() -> Result<()
 async fn pane_report_end_clears_the_resume_command_in_the_layout() -> Result<(), Report<StoreError>>
 {
     // Given aa's pane resumes aa, and aa's conversation ended.
-    let mut fx = PaneReports::with(|store, thread| {
-        store.set_pane_resume(thread.pane, Some("claude --resume aa"))
+    let mut fx = PaneReports::with(|store, agent| {
+        store.set_pane_resume(agent.pane, Some("claude --resume aa"))
     })?;
-    fx.report(fx.thread.pane, "end", "aa", None)?;
+    fx.report(fx.agent.pane, "end", "aa", None)?;
 
     // When polling.
     fx.actor.poll().await;
 
     // Then the pane's layout entry has nothing to resume.
     assert_eq!(
-        layout_resume(&fx.state, fx.thread.pane),
+        layout_resume(&fx.state, fx.agent.pane),
         None,
         "an ended conversation shouldn't be resumed from the layout"
     );
@@ -7386,7 +7376,7 @@ async fn pane_report_from_an_unknown_pane_is_ignored() -> Result<(), Report<Stor
     // When polling.
     fx.actor.poll().await;
 
-    // Then no thread is added.
+    // Then no agent is added.
     assert_eq!(
         fx.rows()?.len(),
         1,
@@ -7395,14 +7385,14 @@ async fn pane_report_from_an_unknown_pane_is_ignored() -> Result<(), Report<Stor
     Ok(())
 }
 
-/// Thread `aa` in a pane of its own, its harness `claude` (status from
+/// Agent `aa` in a pane of its own, its harness `claude` (status from
 /// the agents it sees running) or `pi` (status from pane reports),
 /// polled through a harness seeing `records` and a zmx whose listing `zmx`
 /// makes from the pane, the actor reading pane files under a scratch orb
 /// folder.
 struct PaneStatus {
     dir: tempfile::TempDir,
-    thread: Seeded,
+    agent: Seeded,
     actor: SessionsActor,
     state: State,
 }
@@ -7414,10 +7404,10 @@ impl PaneStatus {
     {
         let dir = tempfile::tempdir().change_context(StoreError)?;
         let store = Store::open_in_memory()?;
-        let agent = if reports { "pi" } else { "claude" };
-        let thread = seed_with(
+        let harness_name = if reports { "pi" } else { "claude" };
+        let agent = seed_with(
             &store,
-            agent,
+            harness_name,
             orb_project(&store)?,
             SessionKind::Plain,
             Path::new(PROJECT_ROOT),
@@ -7425,9 +7415,9 @@ impl PaneStatus {
             now_ms() - HOUR_MS,
         )?;
         let harness: Arc<dyn Harness> = Arc::new(if reports {
-            FakeHarness::reporting(agent)
+            FakeHarness::reporting(harness_name)
         } else {
-            FakeHarness::new(agent, records)
+            FakeHarness::new(harness_name, records)
         });
         let state = State::default();
         let git = FakeGit::local();
@@ -7435,7 +7425,7 @@ impl PaneStatus {
             services: Services {
                 harnesses: Harnesses::new(vec![harness]),
                 git: GitService::new(git, Log::default()),
-                zmx: zmx(thread.pane),
+                zmx: zmx(agent.pane),
                 log: Log::default(),
             },
             state: state.clone(),
@@ -7448,13 +7438,13 @@ impl PaneStatus {
         });
         Ok(Self {
             dir,
-            thread,
+            agent,
             actor,
             state,
         })
     }
 
-    /// Writes pi's `event` report of conversation `aa` from the thread's pane.
+    /// Writes pi's `event` report of conversation `aa` from the agent's pane.
     fn report(&self, event: &str) -> Result<(), Report<StoreError>> {
         let panes = self.dir.path().join("panes");
         fs::create_dir_all(&panes).change_context(StoreError)?;
@@ -7467,14 +7457,14 @@ impl PaneStatus {
             "at": now_ms(),
         });
         fs::write(
-            panes.join(format!("{}.json", self.thread.pane.0)),
+            panes.join(format!("{}.json", self.agent.pane.0)),
             json.to_string(),
         )
         .change_context(StoreError)
     }
 
-    fn status(&self) -> Option<ThreadStatus> {
-        status_of(&self.state, self.thread.thread)
+    fn status(&self) -> Option<AgentStatus> {
+        status_of(&self.state, self.agent.agent)
     }
 }
 
@@ -7496,7 +7486,7 @@ fn unlistable(_pane: PaneId) -> ZmxService {
 }
 
 /// A Claude the user started, whose process and parents are `ancestry`.
-fn interactive(ancestry: &[u32], status: ThreadStatus) -> RunningAgent {
+fn interactive(ancestry: &[u32], status: AgentStatus) -> RunningAgent {
     RunningAgent {
         status,
         ancestry: ancestry.to_vec(),
@@ -7509,7 +7499,7 @@ async fn poll_shows_a_claude_panes_interactive_status() -> Result<(), Report<Sto
     // Given a Claude working under the shell of aa's running pane.
     let mut fx = PaneStatus::new(
         false,
-        vec![interactive(&[300, 100, 1], ThreadStatus::Working)],
+        vec![interactive(&[300, 100, 1], AgentStatus::Working)],
         running,
     )?;
 
@@ -7519,7 +7509,7 @@ async fn poll_shows_a_claude_panes_interactive_status() -> Result<(), Report<Sto
     // Then aa shows the Claude's status.
     assert_eq!(
         fx.status(),
-        Some(ThreadStatus::Working),
+        Some(AgentStatus::Working),
         "the record under the pane should give the status"
     );
     Ok(())
@@ -7531,7 +7521,7 @@ async fn poll_shows_a_claude_pane_without_a_record_stopped() -> Result<(), Repor
     // Given aa's pane runs, but no Claude runs under it.
     let mut fx = PaneStatus::new(
         false,
-        vec![interactive(&[400, 1], ThreadStatus::Working)],
+        vec![interactive(&[400, 1], AgentStatus::Working)],
         running,
     )?;
 
@@ -7541,7 +7531,7 @@ async fn poll_shows_a_claude_pane_without_a_record_stopped() -> Result<(), Repor
     // Then aa is stopped.
     assert_eq!(
         fx.status(),
-        Some(ThreadStatus::Stopped),
+        Some(AgentStatus::Stopped),
         "a pane with no Claude under it should be stopped"
     );
     Ok(())
@@ -7560,7 +7550,7 @@ async fn poll_shows_a_pi_panes_reported_status() -> Result<(), Report<StoreError
     // Then aa is working.
     assert_eq!(
         fx.status(),
-        Some(ThreadStatus::Working),
+        Some(AgentStatus::Working),
         "pi's latest report should give the status"
     );
     Ok(())
@@ -7568,8 +7558,7 @@ async fn poll_shows_a_pi_panes_reported_status() -> Result<(), Report<StoreError
 
 #[rstest::rstest]
 #[tokio::test]
-async fn poll_leaves_a_pane_thread_as_it_was_when_zmx_cant_list() -> Result<(), Report<StoreError>>
-{
+async fn poll_leaves_a_pane_agent_as_it_was_when_zmx_cant_list() -> Result<(), Report<StoreError>> {
     // Given zmx can't list aa's pane's socket dir.
     let mut fx = PaneStatus::new(false, Vec::new(), unlistable)?;
 
@@ -7579,13 +7568,13 @@ async fn poll_leaves_a_pane_thread_as_it_was_when_zmx_cant_list() -> Result<(), 
     // Then aa keeps its status from before the poll.
     assert_eq!(
         fx.status(),
-        Some(ThreadStatus::Unknown),
-        "an unlistable pane should leave its thread as it was"
+        Some(AgentStatus::Unknown),
+        "an unlistable pane should leave its agent as it was"
     );
     Ok(())
 }
 
-/// Leaves the saved thread `short_id` and every saved session idle for
+/// Leaves the saved agent `short_id` and every saved session idle for
 /// four days, and returns since when.
 fn session_idle_for_four_days(store: &Store, short_id: &str) -> Result<i64, Report<StoreError>> {
     let since = idle_for_four_days(store, short_id)?;
@@ -7609,7 +7598,7 @@ where
     Ok(())
 }
 
-/// The saved session thread `short_id` runs in.
+/// The saved session agent `short_id` runs in.
 fn saved_session(store: &Store, short_id: &str) -> Result<SessionRow, Report<StoreError>> {
     let pane = saved(store, short_id)?.pane_id;
     let layouts = store.layouts()?;
@@ -7636,10 +7625,10 @@ fn start_unselected(store: Store, host: &Arc<FakeClaude>) -> (SessionsActor, Sta
 #[tokio::test]
 async fn session_idle_for_four_days_stays_unsettled_after_a_poll() -> Result<(), Report<StoreError>>
 {
-    // Given thread aa's session idle for four days.
-    let (store, _) = store_with_thread("aa")?;
+    // Given agent aa's session idle for four days.
+    let (store, _) = store_with_agent("aa")?;
     session_idle_for_four_days(&store, "aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, _state) = start_unselected(store, &host);
 
     // When polling.
@@ -7658,10 +7647,10 @@ async fn session_idle_for_four_days_stays_unsettled_after_a_poll() -> Result<(),
 #[rstest::rstest]
 #[tokio::test]
 async fn poll_kills_no_pane_of_an_idle_session() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session idle for four days.
-    let (store, _) = store_with_thread("aa")?;
+    // Given agent aa's session idle for four days.
+    let (store, _) = store_with_agent("aa")?;
     session_idle_for_four_days(&store, "aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Idle)]);
+    let host = listing(vec![record("aa", AgentStatus::Idle)]);
     let (mut actor, _state) = start_unselected(store, &host);
     let (zmx, service) = recording_zmx();
     actor.services.zmx = service;
@@ -7680,14 +7669,14 @@ async fn poll_kills_no_pane_of_an_idle_session() -> Result<(), Report<StoreError
 #[rstest::rstest]
 #[tokio::test]
 async fn turn_in_a_pane_unsettles_its_session() -> Result<(), Report<StoreError>> {
-    // Given thread aa's settled session, and aa now working.
-    let (store, _) = store_with_thread("aa")?;
+    // Given agent aa's settled session, and aa now working.
+    let (store, _) = store_with_agent("aa")?;
     resave_sessions(&store, |row| SessionRow {
         settled_override: Some(SettledOverride::Settled),
         settled_at: Some(now_ms() - HOUR_MS),
         ..row
     })?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, _state) = start_unselected(store, &host);
 
     // When polling.
@@ -7706,13 +7695,13 @@ async fn turn_in_a_pane_unsettles_its_session() -> Result<(), Report<StoreError>
 #[rstest::rstest]
 #[tokio::test]
 async fn turn_in_a_pane_ends_its_sessions_kept_active_mark() -> Result<(), Report<StoreError>> {
-    // Given thread aa's kept-active session, and aa now working.
-    let (store, _) = store_with_thread("aa")?;
+    // Given agent aa's kept-active session, and aa now working.
+    let (store, _) = store_with_agent("aa")?;
     resave_sessions(&store, |row| SessionRow {
         settled_override: Some(SettledOverride::Active),
         ..row
     })?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, _state) = start_unselected(store, &host);
 
     // When polling.
@@ -7730,21 +7719,21 @@ async fn turn_in_a_pane_ends_its_sessions_kept_active_mark() -> Result<(), Repor
 #[rstest::rstest]
 #[tokio::test]
 async fn turn_end_is_its_sessions_latest_activity() -> Result<(), Report<StoreError>> {
-    // Given thread aa polled while working.
-    let (store, _) = store_with_thread("aa")?;
-    let host = listing(vec![record("aa", ThreadStatus::Working)]);
+    // Given agent aa polled while working.
+    let (store, _) = store_with_agent("aa")?;
+    let host = listing(vec![record("aa", AgentStatus::Working)]);
     let (mut actor, _state) = start_unselected(store, &host);
     actor.poll().await;
 
     // When polling after its turn ended.
-    host.set_running(Ok(vec![record("aa", ThreadStatus::Idle)]));
+    host.set_running(Ok(vec![record("aa", AgentStatus::Idle)]));
     actor.poll().await;
 
     // Then the turn's end is the session's latest activity.
     assert_eq!(
         saved_session(&actor.store, "aa")?.last_activity_at,
         saved(&actor.store, "aa")?.last_activity_at,
-        "the session's activity should follow its thread's turn end"
+        "the session's activity should follow its agent's turn end"
     );
     Ok(())
 }
@@ -7754,8 +7743,8 @@ fn kill_settled_kills_listed_panes_of_settled_sessions() -> Result<(), Report<St
     // Given settled session aa and unsettled session bb, zmx listing both
     // their panes.
     let store = Store::open_in_memory()?;
-    let settled = insert_thread(&store, "aa")?;
-    let active = insert_thread(&store, "bb")?;
+    let settled = insert_agent(&store, "aa")?;
+    let active = insert_agent(&store, "bb")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.edit_session(settled.session, settle_session_row);
@@ -7786,7 +7775,7 @@ fn kill_settled_kills_listed_panes_of_settled_sessions() -> Result<(), Report<St
 fn kill_settled_kills_nothing_when_zmx_cant_list() -> Result<(), Report<StoreError>> {
     // Given settled session aa, and a zmx that can't list its sessions.
     let store = Store::open_in_memory()?;
-    let settled = insert_thread(&store, "aa")?;
+    let settled = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     actor.edit_session(settled.session, settle_session_row);
@@ -7897,12 +7886,12 @@ where
 #[rstest::rstest]
 #[tokio::test]
 async fn layout_saved_through_the_mailbox_is_stored() -> Result<(), Report<StoreError>> {
-    // Given a store file with thread aa, the actor started through its
+    // Given a store file with agent aa, the actor started through its
     // mailbox, and aa's tab renamed in the app state.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     let store = Store::open(&path)?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let zmx = zmx_running(&store);
     let host = listing(Vec::new());
     let (actor, state) = spawned(store, &host, zmx).await?;
@@ -7932,12 +7921,12 @@ async fn layout_saved_through_the_mailbox_is_stored() -> Result<(), Report<Store
 #[rstest::rstest]
 #[tokio::test]
 async fn a_layout_save_sent_before_shutdown_is_stored_after_it() -> Result<(), Report<StoreError>> {
-    // Given a store file with thread aa, the actor started through its
+    // Given a store file with agent aa, the actor started through its
     // mailbox, and aa's tab renamed in the app state.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     let store = Store::open(&path)?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let zmx = zmx_running(&store);
     let host = listing(Vec::new());
     let (actor, state) = spawned(store, &host, zmx).await?;
@@ -7978,8 +7967,8 @@ async fn kill_settled_at_start_kills_only_settled_panes() -> Result<(), Report<S
     // Given session aa settled before start and session bb not, zmx
     // listing both their panes.
     let store = Store::open_in_memory()?;
-    let settled = insert_thread(&store, "aa")?;
-    let active = insert_thread(&store, "bb")?;
+    let settled = insert_agent(&store, "aa")?;
+    let active = insert_agent(&store, "bb")?;
     let mut row = store
         .layouts()?
         .sessions
@@ -8036,11 +8025,11 @@ where
 #[rstest::rstest]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_is_handled_while_a_new_worktree_is_being_made() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session, the actor started through its mailbox
+    // Given agent aa's session, the actor started through its mailbox
     // with a git whose worktree add waits until the test ends, and a new
     // session in a new worktree asked for and reaching that add.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let project = orb_project(&store)?;
     let zmx = zmx_running(&store);
     let (git, _open) = FakeGit::gated();
@@ -8080,11 +8069,11 @@ async fn split_is_handled_while_a_new_worktree_is_being_made() -> Result<(), Rep
 #[rstest::rstest]
 #[tokio::test]
 async fn split_is_handled_while_the_status_check_runs() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session and the actor started through its
+    // Given agent aa's session and the actor started through its
     // mailbox, its poll asking a claude whose listing waits until the
     // test ends.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let zmx = zmx_running(&store);
     let (claude, _open) = FakeClaude::gated(Vec::new());
     let claude = Arc::new(claude);
@@ -8114,9 +8103,9 @@ async fn split_is_handled_while_the_status_check_runs() -> Result<(), Report<Sto
 #[tokio::test]
 async fn restore_through_the_mailbox_asks_to_attach_after_its_job() -> Result<(), Report<StoreError>>
 {
-    // Given thread aa's pruned worktree and the actor started through
+    // Given agent aa's pruned worktree and the actor started through
     // its mailbox.
-    let (store, id) = pruned_thread(Some("fix-parser"))?;
+    let (store, id) = pruned_agent(Some("fix-parser"))?;
     let zmx = zmx_running(&store);
     let (actor, _state, report) =
         spawned_reporting(store, &listing(Vec::new()), FakeGit::local(), zmx).await?;
@@ -8298,7 +8287,7 @@ fn start_kill_takes_settled_sessions_off_the_right_side_before_killing_their_pan
 -> Result<(), Report<StoreError>> {
     // Given settled session aa on the right side, zmx listing its pane.
     let store = Store::open_in_memory()?;
-    let settled = insert_thread(&store, "aa")?;
+    let settled = insert_agent(&store, "aa")?;
     let (mut actor, state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
     actor.edit_session(settled.session, settle_session_row);
     let zmx = WatchingZmx::new(
@@ -8327,9 +8316,9 @@ fn start_kill_takes_settled_sessions_off_the_right_side_before_killing_their_pan
 #[rstest::rstest]
 #[tokio::test]
 async fn deleting_a_session_logs_it_and_its_panes() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session with a second pane, and a log.
+    // Given agent aa's session with a second pane, and a log.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let second = second_tab(&store, &inserted)?;
     let host = listing(Vec::new());
     let (mut actor, _state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
@@ -8340,11 +8329,11 @@ async fn deleting_a_session_logs_it_and_its_panes() -> Result<(), Report<StoreEr
     // When deleting aa's session.
     actor.delete_session(inserted.session);
 
-    // Then the log names the session, its thread and both panes.
+    // Then the log names the session, its agent and both panes.
     let content = fs::read_to_string(&path).unwrap_or_default();
     let expected = format!(
-        "delete session {} with threads [{}] and panes [{}, {}]: ok",
-        inserted.session.0, inserted.thread.0, inserted.pane.0, second.0
+        "delete session {} with agents [{}] and panes [{}, {}]: ok",
+        inserted.session.0, inserted.agent.0, inserted.pane.0, second.0
     );
     assert!(
         content.contains(&expected),
@@ -8355,10 +8344,10 @@ async fn deleting_a_session_logs_it_and_its_panes() -> Result<(), Report<StoreEr
 
 #[rstest::rstest]
 fn saving_a_layout_logs_each_dropped_pane_row() -> Result<(), Report<StoreError>> {
-    // Given thread aa's session split in two, its first pane closed, and
+    // Given agent aa's session split in two, its first pane closed, and
     // a log.
     let store = Store::open_in_memory()?;
-    let inserted = insert_thread(&store, "aa")?;
+    let inserted = insert_agent(&store, "aa")?;
     let host = listing(Vec::new());
     let (mut actor, state) = start(store, &host, Path::new(NO_CLAUDE_DIR));
     state.write().layouts.fit_to(Rect::new(0, 0, 80, 24));
@@ -8390,7 +8379,7 @@ fn failed_save_logs_the_cause_behind_the_message() -> Result<(), Report<StoreErr
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let db = dir.path().join("state.sqlite");
     let store = Store::open(&db)?;
-    insert_thread(&store, "aa")?;
+    insert_agent(&store, "aa")?;
     let (mut actor, _state) = start(store, &listing(Vec::new()), Path::new(NO_CLAUDE_DIR));
     rusqlite::Connection::open(&db)
         .and_then(|conn| conn.execute("DROP TABLE jumps", []))

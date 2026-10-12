@@ -14,11 +14,11 @@ use orb_domain::feat::picker::list::PickerItem;
 use orb_domain::feat::picker::state::PickerState;
 use orb_domain::feat::search::state::SearchProgress;
 use orb_domain::feat::sessions::state::{
-    PaneLaunch, Project, ProjectKind, Search, Sessions, SidebarItem, Thread, ThreadStatus,
+    Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Search, Sessions, SidebarItem,
 };
 use orb_domain::feat::sidebar::state::{Rename, RenameTarget, SidebarView};
 use orb_domain::feat::zmx::zmx_service::ZmxSession;
-use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
 use orb_domain::{AppState, Focus, PaneMode, TextInput};
 use orb_term::{Pane, PaneCommand, PaneSize};
 use ratatui::Terminal;
@@ -36,7 +36,7 @@ use crate::mouse::{self, Clicks, HitMap, MouseRoute};
 use crate::picker::PickerScroll;
 use crate::sidebar::SidebarScroll;
 
-/// `sessions` with the sessions its projects' threads run in.
+/// `sessions` with the sessions its projects' agents run in.
 fn fill(sessions: Sessions) -> Sessions {
     Sessions {
         sessions: sessions_for(&sessions.projects),
@@ -44,11 +44,11 @@ fn fill(sessions: Sessions) -> Sessions {
     }
 }
 
-fn thread(id: i64, status: ThreadStatus) -> Thread {
-    Thread {
+fn agent(id: i64, status: AgentStatus) -> Agent {
+    Agent {
         last_session: None,
         harness: HarnessId::new("claude"),
-        id: ThreadId(id),
+        id: AgentId(id),
         title: Some("Fix the bug".to_owned()),
         cwd: "/Users/me/dev/orb".into(),
         transcript: None,
@@ -66,7 +66,7 @@ fn thread(id: i64, status: ThreadStatus) -> Thread {
     }
 }
 
-fn sessions(threads: Vec<Thread>) -> Sessions {
+fn sessions(agents: Vec<Agent>) -> Sessions {
     fill(Sessions {
         projects: vec![Project {
             id: ProjectId(1),
@@ -75,7 +75,7 @@ fn sessions(threads: Vec<Thread>) -> Sessions {
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
             repo: true,
-            threads,
+            agents,
             kind: ProjectKind::Normal,
         }],
         ..Sessions::default()
@@ -153,8 +153,8 @@ fn pane_with_text() -> Option<Pane> {
     None
 }
 
-/// Thread 1's pane: a live pane that printed `PANE-TEXT`.
-fn thread_pane() -> Option<HashMap<PaneId, Pane>> {
+/// Agent 1's pane: a live pane that printed `PANE-TEXT`.
+fn agent_pane() -> Option<HashMap<PaneId, Pane>> {
     pane_with_text().map(|pane| HashMap::from([(PaneId(1), pane)]))
 }
 
@@ -188,13 +188,13 @@ fn draw_with_pane(state: &AppState, panes: &HashMap<PaneId, Pane>) -> Buffer {
     terminal.backend().buffer().clone()
 }
 
-/// Thread 1, selected, with the given focus.
+/// Agent 1, selected, with the given focus.
 fn selected(focus: Focus) -> AppState {
     AppState {
         focus,
         sessions: Sessions {
             cursor: Some(SidebarItem::Session(SessionId(1))),
-            ..sessions(vec![thread(1, ThreadStatus::Idle)])
+            ..sessions(vec![agent(1, AgentStatus::Idle)])
         },
         ..AppState::default()
     }
@@ -214,19 +214,19 @@ fn entry(id: i64) -> PaneEntry {
     }
 }
 
-/// Thread 1, selected, attached and active, running in pane 1, the one
+/// Agent 1, selected, attached and active, running in pane 1, the one
 /// tab of session 1, with the given focus.
 fn shown(focus: Focus) -> AppState {
     let mut state = selected(focus);
     state.attached.insert(SessionId(1));
     state.sessions.enter(SessionId(1));
-    if let Some(thread) = state
+    if let Some(agent) = state
         .sessions
         .projects
         .first_mut()
-        .and_then(|project| project.threads.first_mut())
+        .and_then(|project| project.agents.first_mut())
     {
-        thread.pane = Some(PaneLaunch {
+        agent.pane = Some(PaneLaunch {
             pane: PaneId(1),
             session: SessionId(1),
         });
@@ -276,7 +276,7 @@ fn mode_line(buffer: &Buffer) -> String {
 
 #[rstest::rstest]
 fn session_picker_is_drawn_by_its_own_renderer() {
-    // Given an open session picker with no threads.
+    // Given an open session picker with no agents.
     let state = AppState {
         focus: Focus::Picker,
         picker: Some(PickerState::sessions(vec![], Focus::Sidebar)),
@@ -434,8 +434,8 @@ fn click_on_a_list_row_behind_the_delete_confirm_cancels_the_confirm() {
 }
 
 #[rstest::rstest]
-fn selected_thread_shows_the_start_screen() {
-    // Given a selected thread that isn't attached.
+fn selected_agent_shows_the_start_screen() {
+    // Given a selected agent that isn't attached.
     let state = selected(Focus::Sidebar);
 
     // When drawing a frame.
@@ -451,7 +451,7 @@ fn selected_thread_shows_the_start_screen() {
 
 #[rstest::rstest]
 fn pane_error_shows_on_the_start_screen() {
-    // Given a selected thread whose session couldn't start.
+    // Given a selected agent whose session couldn't start.
     let state = selected(Focus::Sidebar);
 
     // When drawing a frame with the pane's error.
@@ -492,7 +492,7 @@ fn cells_without_a_background_get_orbs(#[case] state: AppState, #[case] at: (u16
 #[rstest::rstest]
 fn attached_pane_default_background_gets_orbs() {
     // Given a live pane that printed text with no background colour.
-    let panes = thread_pane();
+    let panes = agent_pane();
     let state = shown(Focus::Pane);
 
     // When drawing a frame while attached.
@@ -504,7 +504,7 @@ fn attached_pane_default_background_gets_orbs() {
     assert_eq!(bg, Some(BACKGROUND), "the pane's background");
 }
 
-/// Thread 1 selected, with the rename box open on it holding "Fix" and
+/// Agent 1 selected, with the rename box open on it holding "Fix" and
 /// the keys in `focus`.
 fn renaming(focus: Focus) -> AppState {
     AppState {
@@ -616,8 +616,8 @@ fn leader_popup_sits_above_the_mode_line() {
 
 #[rstest::rstest]
 fn attached_focus_draws_the_live_pane() {
-    // Given a live pane for the selected thread, attached.
-    let panes = thread_pane();
+    // Given a live pane for the selected agent, attached.
+    let panes = agent_pane();
     let state = shown(Focus::Pane);
 
     // When drawing a frame.
@@ -634,7 +634,7 @@ fn attached_focus_draws_the_live_pane() {
     );
 }
 
-/// Thread 1, selected in the sidebar, attached and active.
+/// Agent 1, selected in the sidebar, attached and active.
 fn left_pane() -> AppState {
     let mut state = AppState {
         attached: HashSet::from([SessionId(1)]),
@@ -646,8 +646,8 @@ fn left_pane() -> AppState {
 
 #[rstest::rstest]
 fn sidebar_focus_draws_the_shown_layouts_pane() {
-    // Given thread 1's live pane shown while the sidebar has the keys.
-    let panes = thread_pane();
+    // Given agent 1's live pane shown while the sidebar has the keys.
+    let panes = agent_pane();
     let state = shown(Focus::Sidebar);
 
     // When drawing a frame.
@@ -665,8 +665,8 @@ fn sidebar_focus_draws_the_shown_layouts_pane() {
 }
 
 #[rstest::rstest]
-fn attached_thread_without_a_layout_shows_the_start_screen() {
-    // Given thread 1 attached and selected in the sidebar, with no layout.
+fn attached_agent_without_a_layout_shows_the_start_screen() {
+    // Given agent 1 attached and selected in the sidebar, with no layout.
     let state = left_pane();
 
     // When drawing a frame.
@@ -682,8 +682,8 @@ fn attached_thread_without_a_layout_shows_the_start_screen() {
 
 #[rstest::rstest]
 fn sidebar_focus_puts_the_cursor_on_the_sidebar_not_the_left_pane() {
-    // Given thread 1's live pane shown, with the sidebar focused.
-    let panes = thread_pane();
+    // Given agent 1's live pane shown, with the sidebar focused.
+    let panes = agent_pane();
     let state = shown(Focus::Sidebar);
 
     // When drawing a frame.
@@ -779,7 +779,7 @@ fn search_focus_puts_the_cursor_after_the_search_text() {
 
 #[rstest::rstest]
 fn sidebar_focus_puts_the_cursor_on_the_selected_rows_first_cell() {
-    // Given thread 1 selected with the sidebar focused.
+    // Given agent 1 selected with the sidebar focused.
     let state = selected(Focus::Sidebar);
 
     // When drawing a frame.
@@ -791,15 +791,15 @@ fn sidebar_focus_puts_the_cursor_on_the_selected_rows_first_cell() {
 
 #[rstest::rstest]
 fn sidebar_cursor_follows_the_selection_to_a_later_row() {
-    // Given thread 1 and a settled thread, with the sidebar focused on
-    // the Settled header below thread 1's three-line node.
+    // Given agent 1 and a settled agent, with the sidebar focused on
+    // the Settled header below agent 1's three-line node.
     let mut state = AppState {
         focus: Focus::Sidebar,
         sessions: Sessions {
             cursor: Some(SidebarItem::SettledShelf),
             ..sessions(vec![
-                thread(1, ThreadStatus::Idle),
-                thread(2, ThreadStatus::Stopped),
+                agent(1, AgentStatus::Idle),
+                agent(2, AgentStatus::Stopped),
             ])
         },
         ..AppState::default()
@@ -817,8 +817,8 @@ fn sidebar_cursor_follows_the_selection_to_a_later_row() {
 
 #[rstest::rstest]
 fn attached_focus_puts_the_cursor_in_the_focused_pane() {
-    // Given a live pane for the selected thread, attached.
-    let panes = thread_pane();
+    // Given a live pane for the selected agent, attached.
+    let panes = agent_pane();
     let state = shown(Focus::Pane);
 
     // When drawing a frame.
@@ -904,8 +904,8 @@ fn hidden_sidebar_centres_the_start_screen_on_the_whole_width() {
 
 #[rstest::rstest]
 fn hidden_sidebar_draws_the_attached_pane_from_the_left_edge() {
-    // Given a live pane for the selected thread, attached, with the sidebar hidden.
-    let panes = thread_pane();
+    // Given a live pane for the selected agent, attached, with the sidebar hidden.
+    let panes = agent_pane();
     let state = hidden(shown(Focus::Pane));
 
     // When drawing a frame.
@@ -922,7 +922,7 @@ fn hidden_sidebar_draws_the_attached_pane_from_the_left_edge() {
     );
 }
 
-/// `shown(Focus::Sidebar)` after `edit` changed thread 1's layout.
+/// `shown(Focus::Sidebar)` after `edit` changed agent 1's layout.
 fn laid_out<F>(edit: F) -> AppState
 where
     F: FnOnce(&mut AppState),
@@ -1183,7 +1183,7 @@ fn tab_bar_keeps_the_tab_layout_while_the_keys_are_in_the_sidebar() {
     assert!(!bar.contains("Cmd <[]>"), "tab bar was '{bar}'");
 }
 
-/// Thread 1's session with ten tabs, tab `shown` (1-based) shown.
+/// Agent 1's session with ten tabs, tab `shown` (1-based) shown.
 fn ten_tabs(shown: usize) -> AppState {
     laid_out(|state| {
         for id in 2..=10 {
@@ -1349,7 +1349,7 @@ fn corner_fg(buffer: &Buffer, x: u16) -> Option<Color> {
 
 #[rstest::rstest]
 fn pane_with_the_keys_has_a_blue_frame() {
-    // Given thread 1's pane shown with the keys in it.
+    // Given agent 1's pane shown with the keys in it.
     let state = shown(Focus::Pane);
 
     // When drawing a frame.
@@ -1361,7 +1361,7 @@ fn pane_with_the_keys_has_a_blue_frame() {
 
 #[rstest::rstest]
 fn focused_pane_while_the_sidebar_has_the_keys_has_a_grey_frame() {
-    // Given thread 1's pane shown while the sidebar has the keys.
+    // Given agent 1's pane shown while the sidebar has the keys.
     let state = shown(Focus::Sidebar);
 
     // When drawing a frame.
@@ -1373,7 +1373,7 @@ fn focused_pane_while_the_sidebar_has_the_keys_has_a_grey_frame() {
 
 #[rstest::rstest]
 fn unfocused_pane_has_a_dim_frame() {
-    // Given thread 1's pane split right, the new right pane focused.
+    // Given agent 1's pane split right, the new right pane focused.
     let mut state = laid_out(|state| state.layouts.split(SessionId(1), Split::Right, entry(2)));
     state.focus = Focus::Pane;
 
@@ -1393,16 +1393,16 @@ fn named_pane() -> AppState {
     })
 }
 
-/// `shown(Focus::Sidebar)` with thread 1 no longer running in pane 1.
+/// `shown(Focus::Sidebar)` with agent 1 no longer running in pane 1.
 fn shell_pane() -> AppState {
     let mut state = shown(Focus::Sidebar);
-    for thread in state
+    for agent in state
         .sessions
         .projects
         .iter_mut()
-        .flat_map(|project| &mut project.threads)
+        .flat_map(|project| &mut project.agents)
     {
-        thread.pane = None;
+        agent.pane = None;
     }
     state
 }
@@ -1425,7 +1425,7 @@ fn frame_title_names_the_pane(#[case] state: AppState, #[case] title: &str) {
 
 #[rstest::rstest]
 fn zoomed_tab_draws_one_frame() {
-    // Given thread 1's pane split right, then zoomed.
+    // Given agent 1's pane split right, then zoomed.
     let state = laid_out(|state| {
         state.layouts.split(SessionId(1), Split::Right, entry(2));
         state.layouts.toggle_zoom(SessionId(1));
@@ -1443,8 +1443,8 @@ fn zoomed_tab_draws_one_frame() {
     assert_eq!(body.matches('╭').count(), 1, "body was\n{body}");
 }
 
-/// Thread 1's session showing one tab of panes 1 to 4 stacked, pane 3
-/// expanded and focused. Pane 1 runs thread 1 ("Fix the bug"), pane 2 is
+/// Agent 1's session showing one tab of panes 1 to 4 stacked, pane 3
+/// expanded and focused. Pane 1 runs agent 1 ("Fix the bug"), pane 2 is
 /// named `api` and pane 4 is a plain shell.
 fn stacked() -> AppState {
     laid_out(|state| {
@@ -1660,9 +1660,9 @@ fn click_on_a_stack_list_row_focuses_its_pane() {
     );
 }
 
-/// Thread 1's session showing one tab split right into two stacks: panes
+/// Agent 1's session showing one tab split right into two stacks: panes
 /// 1 and 2 on the left with pane 1 expanded, panes 3 and 4 on the right
-/// with pane 3 expanded and focused. Pane 1 runs thread 1 ("Fix the
+/// with pane 3 expanded and focused. Pane 1 runs agent 1 ("Fix the
 /// bug"), pane 2 is named `api`, pane 3 is a shell and pane 4 is named
 /// `web`.
 fn two_stacks() -> AppState {
@@ -1807,7 +1807,7 @@ fn click_on_the_shown_stack_row_does_nothing() {
 
 #[rstest::rstest]
 fn hidden_sidebar_returns_no_layout() {
-    // Given a selected thread with the sidebar hidden.
+    // Given a selected agent with the sidebar hidden.
     let state = hidden(selected(Focus::Sidebar));
 
     // When drawing a frame.
@@ -1881,7 +1881,7 @@ fn drawn_float(state: &AppState, buffer: &Buffer) -> Option<Rect> {
 
 #[rstest::rstest]
 fn press_on_a_drawn_float_border_starts_a_drag() {
-    // Given float 2 drawn over thread 1's pane with the keys.
+    // Given float 2 drawn over agent 1's pane with the keys.
     let state = laid_out(|state| {
         state.focus = Focus::Pane;
         state.layouts.add_float(SessionId(1), entry(2));

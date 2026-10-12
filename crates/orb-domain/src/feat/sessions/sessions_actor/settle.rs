@@ -33,8 +33,8 @@ impl SessionsActor {
             .collect()
     }
 
-    /// The saved threads running in session `id`'s panes.
-    pub(super) fn session_rows(&self, id: SessionId) -> impl Iterator<Item = &ThreadRow> {
+    /// The saved agents running in session `id`'s panes.
+    pub(super) fn session_rows(&self, id: SessionId) -> impl Iterator<Item = &AgentRow> {
         let panes = self.session_pane_ids(id);
         self.rows
             .iter()
@@ -47,7 +47,7 @@ impl SessionsActor {
     pub(super) fn settle_session(&mut self, id: SessionId) {
         if self
             .session_rows(id)
-            .any(|row| self.status(row.id).is_some_and(ThreadStatus::in_progress))
+            .any(|row| self.status(row.id).is_some_and(AgentStatus::in_progress))
         {
             return;
         }
@@ -61,13 +61,13 @@ impl SessionsActor {
 
     /// Marks the latest turn of each of session `id`'s agents seen.
     pub(super) fn visit(&mut self, id: SessionId) {
-        let unseen: Vec<ThreadId> = self
+        let unseen: Vec<AgentId> = self
             .session_rows(id)
             .filter(|row| row.last_activity_at > row.last_visited_at)
             .map(|row| row.id)
             .collect();
-        for thread in unseen {
-            self.edit(thread, |row, now| row.last_visited_at = now);
+        for agent in unseen {
+            self.edit(agent, |row, now| row.last_visited_at = now);
         }
     }
 
@@ -87,13 +87,13 @@ impl SessionsActor {
 
     /// Deletes session `id`: kills every pane, deletes a Research or Learn
     /// folder that is orb's own and no other session uses, then its tabs,
-    /// panes, threads (ended ones included) and row, and forgets them.
+    /// panes, agents (ended ones included) and row, and forgets them.
     /// Claude transcripts, pi session files and worktrees stay. However it
     /// ends, the session is no longer hidden as being deleted.
     pub(super) fn delete_session(&mut self, id: SessionId) {
         self.kill_panes(id, "session deleted");
         let cleared = self.clear_folder(id);
-        let threads: Vec<ThreadId> = self
+        let agents: Vec<AgentId> = self
             .session_rows(id)
             .chain(self.rows.iter().filter(|row| row.orb_session == Some(id)))
             .map(|row| row.id)
@@ -108,9 +108,9 @@ impl SessionsActor {
         let deleted = self.store.delete_session(id);
         {
             let what = format!(
-                "session {} with threads {:?} and panes {:?}",
+                "session {} with agents {:?} and panes {:?}",
                 id.0,
-                sorted_ids(threads.iter().map(|thread| thread.0)),
+                sorted_ids(agents.iter().map(|agent| agent.0)),
                 sorted_ids(panes.iter().map(|pane| pane.0))
             );
             match &deleted {
@@ -121,7 +121,7 @@ impl SessionsActor {
                     .error(&format!("delete {what}: failed"), report),
             }
         }
-        self.rows.retain(|row| !threads.contains(&row.id));
+        self.rows.retain(|row| !agents.contains(&row.id));
         for pane in panes {
             self.forget_pane_report(pane);
         }
@@ -134,9 +134,7 @@ impl SessionsActor {
             let sessions = &mut app.sessions;
             sessions.sessions.retain(|session| session.id != id);
             for project in &mut sessions.projects {
-                project
-                    .threads
-                    .retain(|thread| !threads.contains(&thread.id));
+                project.agents.retain(|agent| !agents.contains(&agent.id));
             }
             sessions.deleting.remove(&id);
         }

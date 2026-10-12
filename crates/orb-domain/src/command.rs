@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::tree::Split;
 use crate::feat::sessions::state::FolderKind;
-use crate::ids::{ProjectId, SessionId, ThreadId};
+use crate::ids::{AgentId, ProjectId, SessionId};
 
 /// Something that must happen in response to an intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,11 +29,8 @@ pub enum Command {
     ListBranches(PathBuf),
     /// List the directory's subdirectories into the open directory picker.
     ListDirectories(PathBuf),
-    /// Read the thread's transcript into the open session picker's preview.
-    LoadPreview {
-        thread: ThreadId,
-        transcript: PathBuf,
-    },
+    /// Read the agent's transcript into the open session picker's preview.
+    LoadPreview { agent: AgentId, transcript: PathBuf },
     /// Work for the sessions actor.
     Sessions(SessionsCommand),
     /// Work for the worktrees actor.
@@ -111,7 +108,7 @@ pub enum SessionsCommand {
     SettleSession(SessionId),
     /// Bring the session back from the Settled shelf and keep it active.
     UnsettleSession(SessionId),
-    /// Delete the session: its panes, tabs and threads.
+    /// Delete the session: its panes, tabs and agents.
     DeleteSession(SessionId),
     /// The user is looking at the session now.
     Visit(SessionId),

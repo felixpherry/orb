@@ -189,14 +189,14 @@ pub(crate) fn pane_title(state: &AppState, pane: PaneId) -> String {
         .or_else(|| {
             state
                 .sessions
-                .threads()
-                .find(|thread| {
-                    thread
+                .all_agents()
+                .find(|agent| {
+                    agent
                         .pane
                         .as_ref()
                         .is_some_and(|launch| launch.pane == pane)
                 })
-                .and_then(|thread| thread.title.clone())
+                .and_then(|agent| agent.title.clone())
         })
         .unwrap_or_else(|| "shell".to_owned())
 }

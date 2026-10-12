@@ -18,7 +18,7 @@ use tokio::time::timeout;
 
 use crate::common::{ancestry, parse_parents};
 use crate::feat::harness::{HarnessError, RunningAgent};
-use crate::feat::sessions::state::ThreadStatus;
+use crate::feat::sessions::state::AgentStatus;
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -176,16 +176,16 @@ fn parse_agents(json: &str) -> Result<Vec<RunningAgent>, Report<HarnessError>> {
         .collect())
 }
 
-fn status_of(record: &AgentRecord) -> ThreadStatus {
+fn status_of(record: &AgentRecord) -> AgentStatus {
     match (record.status.as_deref(), record.state.as_deref()) {
-        (Some("busy"), _) => ThreadStatus::Working,
+        (Some("busy"), _) => AgentStatus::Working,
         (Some("waiting"), _) => match record.waiting_for.as_deref() {
-            Some(waiting_for) if APPROVALS.contains(&waiting_for) => ThreadStatus::NeedsApproval,
-            _ => ThreadStatus::NeedsInput,
+            Some(waiting_for) if APPROVALS.contains(&waiting_for) => AgentStatus::NeedsApproval,
+            _ => AgentStatus::NeedsInput,
         },
-        (_, Some("failed")) => ThreadStatus::Failed,
-        (Some(_), _) => ThreadStatus::Idle,
-        (None, _) => ThreadStatus::Stopped,
+        (_, Some("failed")) => AgentStatus::Failed,
+        (Some(_), _) => AgentStatus::Idle,
+        (None, _) => AgentStatus::Stopped,
     }
 }
 
@@ -197,81 +197,78 @@ fn status_of(record: &AgentRecord) -> ThreadStatus {
 mod tests {
     use error_stack::Report;
 
-    use super::{HarnessError, RunningAgent, ThreadStatus, parse_agents};
+    use super::{AgentStatus, HarnessError, RunningAgent, parse_agents};
 
     #[rstest::rstest]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"busy","state":"working"}"#,
-        ThreadStatus::Working
+        AgentStatus::Working
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"waiting","waitingFor":"permission prompt"}"#,
-        ThreadStatus::NeedsApproval
+        AgentStatus::NeedsApproval
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"waiting","waitingFor":"sandbox request"}"#,
-        ThreadStatus::NeedsApproval
+        AgentStatus::NeedsApproval
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"waiting","waitingFor":"worker request"}"#,
-        ThreadStatus::NeedsApproval
+        AgentStatus::NeedsApproval
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"waiting","waitingFor":"input needed"}"#,
-        ThreadStatus::NeedsInput
+        AgentStatus::NeedsInput
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"waiting","waitingFor":"dialog open"}"#,
-        ThreadStatus::NeedsInput
+        AgentStatus::NeedsInput
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"waiting"}"#,
-        ThreadStatus::NeedsInput
+        AgentStatus::NeedsInput
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"idle","state":"failed"}"#,
-        ThreadStatus::Failed
+        AgentStatus::Failed
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"idle","state":"blocked"}"#,
-        ThreadStatus::Idle
+        AgentStatus::Idle
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","state":"failed"}"#,
-        ThreadStatus::Failed
+        AgentStatus::Failed
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","state":"stopped"}"#,
-        ThreadStatus::Stopped
+        AgentStatus::Stopped
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","state":"done"}"#,
-        ThreadStatus::Stopped
+        AgentStatus::Stopped
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","state":"blocked"}"#,
-        ThreadStatus::Stopped
+        AgentStatus::Stopped
     )]
-    #[case(r#"{"pid":1,"kind":"interactive"}"#, ThreadStatus::Stopped)]
+    #[case(r#"{"pid":1,"kind":"interactive"}"#, AgentStatus::Stopped)]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"busy"}"#,
-        ThreadStatus::Working
+        AgentStatus::Working
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"waiting","waitingFor":"permission prompt"}"#,
-        ThreadStatus::NeedsApproval
+        AgentStatus::NeedsApproval
     )]
     #[case(
         r#"{"pid":1,"kind":"interactive","status":"waiting","waitingFor":"dialog open"}"#,
-        ThreadStatus::NeedsInput
+        AgentStatus::NeedsInput
     )]
-    #[case(
-        r#"{"pid":1,"kind":"interactive","status":"idle"}"#,
-        ThreadStatus::Idle
-    )]
-    fn agent_record_maps_to_thread_status(
+    #[case(r#"{"pid":1,"kind":"interactive","status":"idle"}"#, AgentStatus::Idle)]
+    fn agent_record_maps_to_agent_status(
         #[case] record: &str,
-        #[case] expected: ThreadStatus,
+        #[case] expected: AgentStatus,
     ) -> Result<(), Report<HarnessError>> {
         // Given one `claude agents --json` record.
         let json = format!("[{record}]");
@@ -280,7 +277,7 @@ mod tests {
         let agents = parse_agents(&json)?;
 
         // Then its status maps per the approved table.
-        let statuses: Vec<ThreadStatus> = agents.iter().map(|agent| agent.status).collect();
+        let statuses: Vec<AgentStatus> = agents.iter().map(|agent| agent.status).collect();
         assert_eq!(statuses, [expected], "{record} should map to {expected:?}");
         Ok(())
     }
@@ -300,7 +297,7 @@ mod tests {
         assert_eq!(
             agents,
             [RunningAgent {
-                status: ThreadStatus::NeedsInput,
+                status: AgentStatus::NeedsInput,
                 ancestry: vec![63163],
             }],
             "the interactive record should be listed by its pid"

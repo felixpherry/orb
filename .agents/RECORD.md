@@ -46,6 +46,7 @@ Entries are added or amended **only with human approval**.
 - (pane) The pane's child runs with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=WezTerm`, and `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1`, with Claude session variables and the outer terminal's identity variables removed.
 - (pane) orb forwards the child's OSC 52 clipboard writes to its outer terminal.
 - (identity) A thread is one Claude Code or pi conversation the user runs in a pane; orb learns which conversation runs in which pane from the reports orb's Claude hook and pi extension write to `~/.orb/panes/<pane id>.json`.
+- (identity) orb's code and screens call each agent conversation an agent; the stored database keeps its older `threads` table and `thread` column names.
 - (arch) User input flows through a `Keymap` that produces an `Intent`; the `IntentHandler` mutates `AppState` synchronously and returns commands.
 - (arch) Domain commands go to the `kameo` actor that owns them; pane commands are carried out by the frontend loop.
 - (arch) The ids of agents, sessions, panes and projects live in one shared module, `orb_domain::ids`.
@@ -57,7 +58,7 @@ Entries are added or amended **only with human approval**.
 - (sessions) Agent status is polled every second while a turn is underway in any agent pane and every 5 seconds otherwise; a Claude agent's comes from `claude agents --json --all`, matched to its pane by process ancestry.
 - (sessions) The poll asks `claude agents` only while a pane holds a Claude thread.
 - (sessions) A thread's elapsed time counts from when orb first saw its turn running.
-- (sessions) A Claude thread's title is a name an older orb's `r` saved, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, where a prompt that starts with a slash command counts by the text typed after the command, else "New thread".
+- (sessions) A Claude thread's title is a name an older orb's `r` saved, else its transcript's latest `custom-title` (from `/rename`), else its latest `ai-title`, else its first prompt, where a prompt that starts with a slash command counts by the text typed after the command, else "New agent".
 - (sidebar) The sidebar lists orb's sessions as one list across projects, each a three-line card (its most urgent agent's status icon, title and time; its project and status word; its branch), followed by one row per agent pane.
 - (sidebar) The sidebar is drawn like LazyVim's snacks explorer in tokyonight-moon: an input box titled Sessions with an i badge lit while the sidebar search has the keys and a shown/total count of sessions, and the hovered row's first line highlighted.
 - (pane) Each pane is a `zmx attach orb-p<id>` client on `~/.orb/zmx`, in a PTY emulated by `alacritty_terminal`, drawn in the right-hand area.
@@ -183,7 +184,7 @@ Entries are added or amended **only with human approval**.
 - (keybinds) In the session picker's list, `d` closes the selected agent after the sidebar agent row's confirm and returns to the list.
 - (keybinds) In the session picker's list, `a`, `b`, `w`, `i` and `s` show all, blocked (needing approval or input), working or idle agents, or only the agents of settled sessions, one filter at a time, judging each agent by its own status, and pressing the active filter's key again shows all.
 - (picker) The session picker opens on all agents, agents of settled sessions hidden, and shows its active filter in its title.
-- (picker) A session picker row is labelled `<project>/<session>/<agent>`, where the agent is its pane's name, else its title, else `New thread`, and typed text fuzzy-matches the whole label.
+- (picker) A session picker row is labelled `<project>/<session>/<agent>`, where the agent is its pane's name, else its title, else `New agent`, and typed text fuzzy-matches the whole label.
 - (picker) The session picker's rows and their order are fixed when it opens, while their status, spinner and time update live, and `⏎` on an agent closed or deleted since, or one Claude no longer knows, only closes it.
 - (picker) `⏎` in the session picker reveals the agent's session in the sidebar and moves the keys into the agent's pane, like `⏎` on its agent row.
 - (picker) The session and worktree pickers are drawn like LazyVim's snacks picker in tokyonight-moon: a list box titled Sessions or Worktrees with `shown/total` on its input row, beside a preview box, side by side from 120 columns and stacked below that, the list on top.
@@ -238,7 +239,7 @@ Entries are added or amended **only with human approval**.
 - (tui) SIGTERM, SIGINT and SIGHUP quit orb the same way `<C-g> q` does, with the terminal restored.
 - (sessions) A pi agent's status is the latest report orb's pi extension wrote to its pane file, and it reads as stopped once its pane's zmx session is gone.
 - (sessions) A pi agent is only ever working, idle or stopped, because its pane reports carry only those states.
-- (sessions) A pi thread's title is a name an older orb's `r` saved, else its latest `/name`, else its first prompt, else "New thread".
+- (sessions) A pi thread's title is a name an older orb's `r` saved, else its latest `/name`, else its first prompt, else "New agent".
 - (sessions) A pi thread's branch is read from git in its directory after each turn.
 - (pane) An attach pane whose program exits within about a second of starting shows `session <title> exited at start`, naming its session, and writes that text to the log; with no title it shows `session exited at start`.
 - (sidebar) An agent row ends with its harness's mark: `✳` for Claude, `π` for pi.

@@ -386,8 +386,8 @@ mod tests {
     use crate::feat::sidebar::state::RenameTarget;
     use crate::ids::{PaneId, SessionId};
     use crate::intent_handler::test_support::{
-        agent, jumping, laid_out, on_thread, shown_focus, shown_tab_name, split_layout, two_agents,
-        with_layout,
+        agent_row, jumping, laid_out, on_agent, shown_focus, shown_tab_name, split_layout,
+        two_agents, with_layout,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler, PaneMode};
     use ratatui::layout::Rect;
@@ -504,7 +504,7 @@ mod tests {
 
     #[rstest::rstest]
     fn split_pane_asks_the_sessions_actor_for_a_pane() {
-        // Given thread 1's lone pane with the keys.
+        // Given agent 1's lone pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
         // When splitting it right.
@@ -523,7 +523,7 @@ mod tests {
 
     #[rstest::rstest]
     fn split_pane_outside_a_pane_does_nothing() {
-        // Given thread 1's layout shown while the sidebar has the keys.
+        // Given agent 1's layout shown while the sidebar has the keys.
         let mut state = with_layout(Focus::Sidebar);
 
         // When splitting.
@@ -535,7 +535,7 @@ mod tests {
 
     #[rstest::rstest]
     fn add_pane_asks_the_sessions_actor_for_a_pane() {
-        // Given thread 1's lone pane with the keys.
+        // Given agent 1's lone pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
         // When adding a pane.
@@ -568,7 +568,7 @@ mod tests {
 
     #[rstest::rstest]
     fn toggle_floats_with_no_floats_asks_for_a_float() {
-        // Given thread 1's lone pane with the keys and no floats.
+        // Given agent 1's lone pane with the keys and no floats.
         let mut state = with_layout(Focus::Pane);
 
         // When showing the floats.
@@ -618,7 +618,7 @@ mod tests {
 
     #[rstest::rstest]
     fn toggle_float_embed_on_a_lone_pane_does_nothing() {
-        // Given thread 1's lone pane with the keys.
+        // Given agent 1's lone pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
         // When turning the focused pane into a float.
@@ -650,7 +650,7 @@ mod tests {
 
     #[rstest::rstest]
     fn toggle_pin_float_without_a_float_does_nothing() {
-        // Given thread 1's lone pane with the keys.
+        // Given agent 1's lone pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
         // When pinning.
@@ -679,7 +679,7 @@ mod tests {
 
     #[rstest::rstest]
     fn toggle_floats_outside_a_pane_does_nothing() {
-        // Given thread 1's layout shown while the sidebar has the keys.
+        // Given agent 1's layout shown while the sidebar has the keys.
         let mut state = with_layout(Focus::Sidebar);
 
         // When showing the floats.
@@ -694,7 +694,7 @@ mod tests {
 
     #[rstest::rstest]
     fn add_pane_outside_a_pane_does_nothing() {
-        // Given thread 1's layout shown while the sidebar has the keys.
+        // Given agent 1's layout shown while the sidebar has the keys.
         let mut state = with_layout(Focus::Sidebar);
 
         // When adding a pane.
@@ -709,7 +709,7 @@ mod tests {
 
     #[rstest::rstest]
     fn stack_pane_asks_the_sessions_actor_for_a_stacked_pane() {
-        // Given thread 1's lone pane with the keys.
+        // Given agent 1's lone pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
         // When stacking a pane (`<C-g> p s`).
@@ -806,17 +806,17 @@ mod tests {
         // When closing the focused pane.
         IntentHandler::handle(&Intent::ClosePane, &mut state);
 
-        // Then only thread 1's pane is left, focused.
+        // Then only agent 1's pane is left, focused.
         assert_eq!(
             (pane_count(&state), shown_focus(&state)),
             (1, Some(PaneId(1))),
-            "closing the split leaves the thread's pane"
+            "closing the split leaves the agent's pane"
         );
     }
 
     #[rstest::rstest]
     fn close_pane_on_an_agents_pane_closes_it() {
-        // Given thread 1's lone pane with the keys.
+        // Given agent 1's lone pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
         // When closing it.
@@ -835,7 +835,7 @@ mod tests {
 
     #[rstest::rstest]
     fn move_focus_left_from_the_only_tabs_leftmost_pane_keeps_the_keys() {
-        // Given thread 1's lone pane in its only tab, with the keys.
+        // Given agent 1's lone pane in its only tab, with the keys.
         let mut state = with_layout(Focus::Pane);
 
         // When moving the focus left (`Cmd h`).
@@ -855,7 +855,7 @@ mod tests {
     #[case::up(NavDirection::Up)]
     #[case::right(NavDirection::Right)]
     fn move_focus_in_the_sidebar_does_nothing(#[case] nav: NavDirection) {
-        // Given thread 1's layout shown while the sidebar has the keys.
+        // Given agent 1's layout shown while the sidebar has the keys.
         let mut state = with_layout(Focus::Sidebar);
 
         // When moving the focus (`Cmd h/j/k/l`).
@@ -1204,7 +1204,7 @@ mod tests {
 
     #[rstest::rstest]
     fn new_tab_asks_the_sessions_actor_for_a_tab() {
-        // Given thread 1's one-tab layout.
+        // Given agent 1's one-tab layout.
         let mut state = with_layout(Focus::Pane);
 
         // When opening a tab.
@@ -1236,7 +1236,7 @@ mod tests {
 
     #[rstest::rstest]
     fn close_tab_holding_an_agents_pane_closes_it() {
-        // Given thread 1's one-tab layout.
+        // Given agent 1's one-tab layout.
         let mut state = with_layout(Focus::Pane);
 
         // When closing the tab.
@@ -1261,7 +1261,7 @@ mod tests {
         // When renaming the tab.
         IntentHandler::handle(&Intent::RenameTab, &mut state);
 
-        // Then the rename box names thread 1's second tab and has the keys.
+        // Then the rename box names agent 1's second tab and has the keys.
         assert_eq!(
             (
                 state.rename.as_ref().map(|rename| rename.target),
@@ -1462,10 +1462,10 @@ mod tests {
         let mut state = split_layout();
         state.focus = Focus::Sidebar;
 
-        // When clicking thread 1's pane.
+        // When clicking agent 1's pane.
         IntentHandler::handle(&Intent::FocusPane(PaneId(1)), &mut state);
 
-        // Then thread 1's pane has the focus.
+        // Then agent 1's pane has the focus.
         assert_eq!(
             shown_focus(&state),
             Some(PaneId(1)),
@@ -1475,10 +1475,10 @@ mod tests {
 
     #[rstest::rstest]
     fn focus_pane_moves_the_keys_into_the_panes() {
-        // Given thread 1's layout shown while the sidebar has the keys.
+        // Given agent 1's layout shown while the sidebar has the keys.
         let mut state = with_layout(Focus::Sidebar);
 
-        // When clicking thread 1's pane.
+        // When clicking agent 1's pane.
         IntentHandler::handle(&Intent::FocusPane(PaneId(1)), &mut state);
 
         // Then the keys are in the pane.
@@ -1491,10 +1491,10 @@ mod tests {
         let mut state = split_layout();
         state.focus = Focus::Sidebar;
 
-        // When the wheel shows thread 1's pane.
+        // When the wheel shows agent 1's pane.
         IntentHandler::handle(&Intent::ShowStacked(PaneId(1)), &mut state);
 
-        // Then thread 1's pane has the tab's focus.
+        // Then agent 1's pane has the tab's focus.
         assert_eq!(
             shown_focus(&state),
             Some(PaneId(1)),
@@ -1508,7 +1508,7 @@ mod tests {
         let mut state = split_layout();
         state.focus = Focus::Sidebar;
 
-        // When the wheel shows thread 1's pane.
+        // When the wheel shows agent 1's pane.
         IntentHandler::handle(&Intent::ShowStacked(PaneId(1)), &mut state);
 
         // Then the sidebar keeps the keys.
@@ -1574,11 +1574,11 @@ mod tests {
 
     #[rstest::rstest]
     fn focus_pane_on_a_tiled_pane_with_floats_shown_hides_them() {
-        // Given a shown float over thread 1's pane.
+        // Given a shown float over agent 1's pane.
         let mut state = with_layout(Focus::Pane);
         state.layouts.add_float(SessionId(1), test_entry(70));
 
-        // When clicking thread 1's pane.
+        // When clicking agent 1's pane.
         IntentHandler::handle(&Intent::FocusPane(PaneId(1)), &mut state);
 
         // Then the floats are hidden.
@@ -1692,7 +1692,7 @@ mod tests {
 
     #[rstest::rstest]
     fn drop_float_without_a_float_does_nothing() {
-        // Given thread 1's lone pane with the keys.
+        // Given agent 1's lone pane with the keys.
         let mut state = with_layout(Focus::Pane);
 
         // When releasing a drag.
@@ -1713,7 +1713,7 @@ mod tests {
         // Then the active row is agent 1's.
         assert_eq!(
             state.active_row(),
-            Some(agent(1, 1)),
+            Some(agent_row(1, 1)),
             "the active row should follow the focused agent"
         );
     }
@@ -1729,14 +1729,14 @@ mod tests {
         // Then the cursor is still on the card.
         assert_eq!(
             state.sessions.cursor,
-            Some(on_thread(1)),
+            Some(on_agent(1)),
             "a focus move in a pane should not move the hover"
         );
     }
 
     #[rstest::rstest]
     fn focusing_a_shell_pane_marks_the_card() {
-        // Given thread 1's agent pane focused, shell pane 50 to its right.
+        // Given agent 1's agent pane focused, shell pane 50 to its right.
         let mut state = split_layout();
         IntentHandler::handle(&Intent::MoveFocus(NavDirection::Left), &mut state);
 
@@ -1746,7 +1746,7 @@ mod tests {
         // Then the active row is session 1's card.
         assert_eq!(
             state.active_row(),
-            Some(on_thread(1)),
+            Some(on_agent(1)),
             "a shell pane should mark the card"
         );
     }
@@ -1763,7 +1763,7 @@ mod tests {
         // Then the active row is the card.
         assert_eq!(
             state.active_row(),
-            Some(on_thread(1)),
+            Some(on_agent(1)),
             "a folded session should mark its card"
         );
     }
@@ -1787,9 +1787,9 @@ mod tests {
     #[rstest::rstest]
     fn clicking_a_shown_pane_keeps_the_active_session() {
         // Given the keys in active session 2's pane, the cursor on attached
-        // thread 1.
+        // agent 1.
         let mut state = jumping(Focus::Pane, &[1, 2], &[]);
-        state.sessions.cursor = Some(on_thread(1));
+        state.sessions.cursor = Some(on_agent(1));
 
         // When clicking session 2's pane.
         IntentHandler::handle(&Intent::FocusPane(PaneId(2)), &mut state);

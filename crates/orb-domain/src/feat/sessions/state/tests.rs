@@ -3,15 +3,15 @@ use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use super::{
-    PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search, Session, SessionId, SessionKind,
-    Sessions, SidebarItem, SidebarRow, Thread, ThreadId, ThreadStatus, layouts_for, most_urgent,
+    Agent, AgentId, AgentStatus, PaneId, PaneLaunch, Project, ProjectId, ProjectKind, Search,
+    Session, SessionId, SessionKind, Sessions, SidebarItem, SidebarRow, layouts_for, most_urgent,
     sessions_for,
 };
 use crate::TextInput;
 use crate::feat::layout::state::Layouts;
 use crate::feat::sidebar::state::SidebarLayout;
 
-/// `sessions` with the sessions its projects' threads run in.
+/// `sessions` with the sessions its projects' agents run in.
 fn fill(sessions: Sessions) -> Sessions {
     Sessions {
         sessions: sessions_for(&sessions.projects),
@@ -35,15 +35,15 @@ fn at(secs: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
 }
 
-fn thread(id: i64) -> Thread {
-    Thread {
+fn idle_agent(id: i64) -> Agent {
+    Agent {
         last_session: None,
         harness: HarnessId::new("claude"),
-        id: ThreadId(id),
+        id: AgentId(id),
         title: None,
         cwd: "/tmp".into(),
         transcript: None,
-        status: ThreadStatus::Idle,
+        status: AgentStatus::Idle,
         turn_started_at: None,
         pane: Some(PaneLaunch {
             pane: PaneId(id),
@@ -75,37 +75,37 @@ fn session(id: i64) -> Session {
     }
 }
 
-/// Thread `id`, created at second `secs`, running in pane `id` of
+/// Agent `id`, created at second `secs`, running in pane `id` of
 /// session `session`.
-fn agent(id: i64, session: i64, secs: u64) -> Thread {
-    Thread {
+fn agent(id: i64, session: i64, secs: u64) -> Agent {
+    Agent {
         created_at: at(secs),
         pane: Some(PaneLaunch {
             pane: PaneId(id),
             session: SessionId(session),
         }),
-        ..thread(id)
+        ..idle_agent(id)
     }
 }
 
-/// Project 1 holding `threads`, with `shown` as its sessions.
-fn holding(threads: Vec<Thread>, shown: Vec<Session>) -> Sessions {
+/// Project 1 holding `agents`, with `shown` as its sessions.
+fn holding(agents: Vec<Agent>, shown: Vec<Session>) -> Sessions {
     fill(Sessions {
-        projects: vec![project(1, threads)],
+        projects: vec![project(1, agents)],
         sessions: shown,
         ..Sessions::default()
     })
 }
 
 #[rstest::rstest]
-fn turned_after_a_titled_thread() {
-    // Given session 1 whose ended thread was titled by its first prompt.
+fn turned_after_a_titled_agent() {
+    // Given session 1 whose ended agent was titled by its first prompt.
     let sessions = holding(
-        vec![Thread {
+        vec![Agent {
             title: Some("Fix the parser".into()),
             pane: None,
             last_session: Some(SessionId(1)),
-            ..thread(1)
+            ..idle_agent(1)
         }],
         vec![session(1)],
     );
@@ -114,58 +114,58 @@ fn turned_after_a_titled_thread() {
     let turned = sessions.turned(SessionId(1));
 
     // Then one has.
-    assert!(turned, "a titled thread means a turn ran");
+    assert!(turned, "a titled agent means a turn ran");
 }
 
 #[rstest::rstest]
-fn not_turned_with_only_untitled_idle_threads() {
-    // Given session 1 whose only thread is idle and untitled.
+fn not_turned_with_only_untitled_idle_agents() {
+    // Given session 1 whose only agent is idle and untitled.
     let sessions = holding(vec![agent(1, 1, 0)], vec![session(1)]);
 
     // When asking whether a turn has run in it.
     let turned = sessions.turned(SessionId(1));
 
     // Then none has.
-    assert!(!turned, "an untitled idle thread has had no turn");
+    assert!(!turned, "an untitled idle agent has had no turn");
 }
 
 #[rstest::rstest]
-fn thread_session_is_its_panes_session() {
-    // Given thread 1 running in a pane of session 4.
-    let thread = agent(1, 4, 0);
+fn agent_session_is_its_panes_session() {
+    // Given agent 1 running in a pane of session 4.
+    let agent = agent(1, 4, 0);
 
     // When asking for its session.
-    let session = thread.session();
+    let session = agent.session();
 
     // Then it is session 4.
     assert_eq!(
         session,
         Some(SessionId(4)),
-        "a thread belongs to its pane's session"
+        "an agent belongs to its pane's session"
     );
 }
 
 #[rstest::rstest]
-fn agents_are_a_sessions_threads_oldest_first() {
-    // Given threads 1 (second 5) and 2 (second 3) in session 1, and
-    // thread 3 in session 2.
+fn agents_are_a_sessions_agents_oldest_first() {
+    // Given agents 1 (second 5) and 2 (second 3) in session 1, and
+    // agent 3 in session 2.
     let sessions = holding(
         vec![agent(1, 1, 5), agent(2, 1, 3), agent(3, 2, 0)],
         vec![session(1), session(2)],
     );
 
     // When listing session 1's agents.
-    let agents: Vec<ThreadId> = sessions
+    let agents: Vec<AgentId> = sessions
         .agents(SessionId(1))
         .into_iter()
-        .map(|thread| thread.id)
+        .map(|agent| agent.id)
         .collect();
 
-    // Then they are threads 2 then 1.
+    // Then they are agents 2 then 1.
     assert_eq!(
         agents,
-        [ThreadId(2), ThreadId(1)],
-        "a session's agents are its panes' threads, oldest first"
+        [AgentId(2), AgentId(1)],
+        "a session's agents are its panes' agents, oldest first"
     );
 }
 
@@ -173,7 +173,7 @@ fn agents_are_a_sessions_threads_oldest_first() {
 #[case::no_layout(false)]
 #[case::pane_closed(true)]
 fn agent_row_needs_a_layout_holding_its_pane(#[case] held_then_closed: bool) {
-    // Given thread 1 in pane 1 of session 1, and layouts that never held
+    // Given agent 1 in pane 1 of session 1, and layouts that never held
     // the pane or held it until it closed.
     let sessions = holding(vec![agent(1, 1, 0)], vec![session(1)]);
     let layouts = if held_then_closed {
@@ -206,7 +206,7 @@ fn session_title_is_its_r_name() {
         name: Some("auth".into()),
         ..session(1)
     };
-    let titled = Thread {
+    let titled = Agent {
         title: Some("Fix login".into()),
         ..agent(1, 1, 0)
     };
@@ -223,7 +223,7 @@ fn session_title_is_its_r_name() {
 fn session_title_falls_back_to_the_first_agents_title() {
     // Given unnamed session 1 with an untitled agent and, created later,
     // one titled "Fix login".
-    let titled = Thread {
+    let titled = Agent {
         title: Some("Fix login".into()),
         ..agent(2, 1, 5)
     };
@@ -254,51 +254,51 @@ fn session_title_falls_back_to_the_directory_name() {
     );
 }
 
-/// Thread `id` with `status`, its latest turn `unseen` or not.
-fn with_status(id: i64, status: ThreadStatus, unseen: bool) -> Thread {
-    Thread {
+/// Agent `id` with `status`, its latest turn `unseen` or not.
+fn with_status(id: i64, status: AgentStatus, unseen: bool) -> Agent {
+    Agent {
         status,
         unseen,
-        ..thread(id)
+        ..idle_agent(id)
     }
 }
 
 #[rstest::rstest]
-#[case(ThreadStatus::NeedsApproval, false, ThreadStatus::Working, false)]
-#[case(ThreadStatus::NeedsInput, false, ThreadStatus::Failed, false)]
-#[case(ThreadStatus::Gone, false, ThreadStatus::Working, false)]
-#[case(ThreadStatus::Working, false, ThreadStatus::Idle, true)]
-#[case(ThreadStatus::Idle, true, ThreadStatus::Idle, false)]
-#[case(ThreadStatus::Idle, false, ThreadStatus::Stopped, false)]
+#[case(AgentStatus::NeedsApproval, false, AgentStatus::Working, false)]
+#[case(AgentStatus::NeedsInput, false, AgentStatus::Failed, false)]
+#[case(AgentStatus::Gone, false, AgentStatus::Working, false)]
+#[case(AgentStatus::Working, false, AgentStatus::Idle, true)]
+#[case(AgentStatus::Idle, true, AgentStatus::Idle, false)]
+#[case(AgentStatus::Idle, false, AgentStatus::Stopped, false)]
 fn most_urgent_follows_the_rank_order(
-    #[case] urgent: ThreadStatus,
+    #[case] urgent: AgentStatus,
     #[case] urgent_unseen: bool,
-    #[case] other: ThreadStatus,
+    #[case] other: AgentStatus,
     #[case] other_unseen: bool,
 ) {
-    // Given a thread that needs the user more than another, listed second.
-    let threads = [
+    // Given an agent that needs the user more than another, listed second.
+    let agents = [
         with_status(1, other, other_unseen),
         with_status(2, urgent, urgent_unseen),
     ];
 
     // When picking the most urgent.
-    let picked = most_urgent(&threads).map(|thread| thread.id);
+    let picked = most_urgent(&agents).map(|agent| agent.id);
 
     // Then it is the more urgent one.
     assert_eq!(
         picked,
-        Some(ThreadId(2)),
+        Some(AgentId(2)),
         "{urgent:?} should outrank {other:?}"
     );
 }
 
-/// Thread `id`, created at second `secs`, so its session is active
+/// Agent `id`, created at second `secs`, so its session is active
 /// since then.
-fn active(id: i64, secs: u64) -> Thread {
-    Thread {
+fn active(id: i64, secs: u64) -> Agent {
+    Agent {
         created_at: at(secs),
-        ..thread(id)
+        ..idle_agent(id)
     }
 }
 
@@ -326,11 +326,11 @@ fn settling(mut sessions: Sessions, settles: &[(i64, u64)]) -> Sessions {
     sessions
 }
 
-/// Thread `id`, last active at second `secs`.
-fn last_active(id: i64, secs: u64) -> Thread {
-    Thread {
+/// Agent `id`, last active at second `secs`.
+fn last_active(id: i64, secs: u64) -> Agent {
+    Agent {
         last_activity_at: at(secs),
-        ..thread(id)
+        ..idle_agent(id)
     }
 }
 
@@ -343,7 +343,7 @@ fn by_recency(sessions: &Sessions) -> Vec<i64> {
         .collect()
 }
 
-fn project(id: i64, threads: Vec<Thread>) -> Project {
+fn project(id: i64, agents: Vec<Agent>) -> Project {
     Project {
         id: ProjectId(id),
         title: format!("project-{id}"),
@@ -351,14 +351,14 @@ fn project(id: i64, threads: Vec<Thread>) -> Project {
         created_at: SystemTime::UNIX_EPOCH,
         removed: false,
         repo: true,
-        threads,
+        agents,
         kind: ProjectKind::Normal,
     }
 }
 
-/// One project holding `threads`, with the cursor on `cursor`.
-fn sessions(threads: Vec<Thread>, cursor: Option<SidebarItem>) -> Sessions {
-    let projects = vec![project(1, threads)];
+/// One project holding `agents`, with the cursor on `cursor`.
+fn sessions(agents: Vec<Agent>, cursor: Option<SidebarItem>) -> Sessions {
+    let projects = vec![project(1, agents)];
     Sessions {
         sessions: sessions_for(&projects),
         projects,
@@ -401,7 +401,7 @@ fn cards_in(rows: u16) -> SidebarLayout {
 }
 
 #[rstest::rstest]
-fn projects_by_recency_puts_newer_thread_activity_first() {
+fn projects_by_recency_puts_newer_agent_activity_first() {
     // Given project 1 last active at 10 s and project 2 at 20 s.
     let sessions = fill(Sessions {
         projects: vec![
@@ -415,12 +415,12 @@ fn projects_by_recency_puts_newer_thread_activity_first() {
     let ids = by_recency(&sessions);
 
     // Then the more recently active project comes first.
-    assert_eq!(ids, vec![2, 1], "newer thread activity should come first");
+    assert_eq!(ids, vec![2, 1], "newer agent activity should come first");
 }
 
 #[rstest::rstest]
-fn projects_by_recency_uses_created_at_without_threads() {
-    // Given project 1 last active at 10 s, and project 2 with no threads,
+fn projects_by_recency_uses_created_at_without_agents() {
+    // Given project 1 last active at 10 s, and project 2 with no agents,
     // added at 20 s.
     let sessions = fill(Sessions {
         projects: vec![
@@ -440,7 +440,7 @@ fn projects_by_recency_uses_created_at_without_threads() {
     assert_eq!(
         ids,
         vec![2, 1],
-        "a project without threads should rank by when it was added"
+        "a project without agents should rank by when it was added"
     );
 }
 
@@ -474,10 +474,10 @@ fn projects_by_recency_breaks_ties_by_title() {
 
 #[rstest::rstest]
 fn sidebar_orders_pinned_by_newest_pin() {
-    // Given threads 1 and 2 pinned at 10 s and 20 s, and thread 3 active
+    // Given agents 1 and 2 pinned at 10 s and 20 s, and agent 3 active
     // since 30 s.
     let sessions = pinning(
-        sessions(vec![thread(1), thread(2), active(3, 30)], None),
+        sessions(vec![idle_agent(1), idle_agent(2), active(3, 30)], None),
         &[(1, 10), (2, 20)],
     );
 
@@ -485,7 +485,7 @@ fn sidebar_orders_pinned_by_newest_pin() {
     let items = items(&sessions);
 
     // Then the newest pin comes first, and the pins come before the active
-    // thread.
+    // agent.
     assert_eq!(
         items,
         vec![on(2), on(1), on(3)],
@@ -495,14 +495,14 @@ fn sidebar_orders_pinned_by_newest_pin() {
 
 #[rstest::rstest]
 fn sidebar_orders_active_by_newest_created_or_unsettled() {
-    // Given old thread 1 un-settled at 50 s, and newer thread 2 created at
+    // Given old agent 1 un-settled at 50 s, and newer agent 2 created at
     // 20 s.
     let sessions = sessions(vec![active(1, 50), active(2, 20)], None);
 
     // When listing the sidebar.
     let items = items(&sessions);
 
-    // Then the un-settled thread comes first.
+    // Then the un-settled agent comes first.
     assert_eq!(
         items,
         vec![on(1), on(2)],
@@ -512,11 +512,11 @@ fn sidebar_orders_active_by_newest_created_or_unsettled() {
 
 #[rstest::rstest]
 fn sidebar_orders_settled_by_newest_settle() {
-    // Given threads settled at 10 s, 30 s and 20 s, with the shelf open.
+    // Given agents settled at 10 s, 30 s and 20 s, with the shelf open.
     let sessions = Sessions {
         shelf_open: true,
         ..settling(
-            sessions(vec![thread(1), thread(2), thread(3)], None),
+            sessions(vec![idle_agent(1), idle_agent(2), idle_agent(3)], None),
             &[(1, 10), (2, 30), (3, 20)],
         )
     };
@@ -533,10 +533,10 @@ fn sidebar_orders_settled_by_newest_settle() {
 }
 
 #[rstest::rstest]
-fn collapsed_shelf_hides_settled_threads() {
-    // Given two settled threads and the shelf collapsed.
+fn collapsed_shelf_hides_settled_agents() {
+    // Given two settled agents and the shelf collapsed.
     let sessions = settling(
-        sessions(vec![thread(1), thread(2)], None),
+        sessions(vec![idle_agent(1), idle_agent(2)], None),
         &[(1, 10), (2, 20)],
     );
 
@@ -553,27 +553,27 @@ fn collapsed_shelf_hides_settled_threads() {
 
 #[rstest::rstest]
 fn collapsed_shelf_keeps_the_selected_settled_session() {
-    // Given two settled threads, the shelf collapsed, and the cursor on
-    // thread 1.
+    // Given two settled agents, the shelf collapsed, and the cursor on
+    // agent 1.
     let sessions = settling(
-        sessions(vec![thread(1), thread(2)], Some(on(1))),
+        sessions(vec![idle_agent(1), idle_agent(2)], Some(on(1))),
         &[(1, 10), (2, 20)],
     );
 
     // When listing the sidebar.
     let items = items(&sessions);
 
-    // Then the header and the selected thread show.
+    // Then the header and the selected agent show.
     assert_eq!(
         items,
         vec![SidebarItem::SettledShelf, on(1)],
-        "a collapsed shelf should keep the cursor's settled thread"
+        "a collapsed shelf should keep the cursor's settled agent"
     );
 }
 
 #[rstest::rstest]
-fn sidebar_has_no_header_without_settled_threads() {
-    // Given two active threads.
+fn sidebar_has_no_header_without_settled_agents() {
+    // Given two active agents.
     let sessions = sessions(vec![active(1, 10), active(2, 20)], None);
 
     // When listing the sidebar.
@@ -583,17 +583,17 @@ fn sidebar_has_no_header_without_settled_threads() {
     assert_eq!(
         items,
         vec![on(2), on(1)],
-        "without settled threads there should be no shelf header"
+        "without settled agents there should be no shelf header"
     );
 }
 
 #[rstest::rstest]
 fn select_next_from_the_last_live_row_selects_the_shelf() {
-    // Given an active thread 1 with its agent row selected, and a
-    // settled thread 2.
+    // Given an active agent 1 with its agent row selected, and a
+    // settled agent 2.
     let mut sessions = settling(
         sessions(
-            vec![active(1, 10), thread(2)],
+            vec![active(1, 10), idle_agent(2)],
             Some(SidebarItem::Agent {
                 session: SessionId(1),
                 pane: PaneId(1),
@@ -615,11 +615,11 @@ fn select_next_from_the_last_live_row_selects_the_shelf() {
 
 #[rstest::rstest]
 fn select_next_on_a_collapsed_shelf_wraps_to_the_first_row() {
-    // Given an active thread, a settled thread, and the cursor on the
+    // Given an active agent, a settled agent, and the cursor on the
     // collapsed shelf's header.
     let mut sessions = settling(
         sessions(
-            vec![active(1, 10), thread(2)],
+            vec![active(1, 10), idle_agent(2)],
             Some(SidebarItem::SettledShelf),
         ),
         &[(2, 20)],
@@ -637,8 +637,8 @@ fn select_next_on_a_collapsed_shelf_wraps_to_the_first_row() {
 }
 
 #[rstest::rstest]
-fn select_next_lands_on_a_thread_across_projects() {
-    // Given project 1 with threads active since 30 s and 10 s, project 2
+fn select_next_lands_on_an_agent_across_projects() {
+    // Given project 1 with agents active since 30 s and 10 s, project 2
     // with one active since 20 s, and the newest one's agent row
     // selected.
     let mut sessions = fill(Sessions {
@@ -656,7 +656,7 @@ fn select_next_lands_on_a_thread_across_projects() {
     // When selecting the next row.
     sessions.select_next(&layouts_for(&sessions.projects));
 
-    // Then project 2's thread is selected, not project 1's older one.
+    // Then project 2's agent is selected, not project 1's older one.
     assert_eq!(
         sessions.cursor,
         Some(on(2)),
@@ -686,9 +686,9 @@ fn select_first_selects_the_top_row() {
 
 #[rstest::rstest]
 fn select_last_on_a_collapsed_shelf_selects_its_header() {
-    // Given an active thread, selected, and a collapsed shelf.
+    // Given an active agent, selected, and a collapsed shelf.
     let mut sessions = settling(
-        sessions(vec![active(1, 10), thread(2)], Some(on(1))),
+        sessions(vec![active(1, 10), idle_agent(2)], Some(on(1))),
         &[(2, 20)],
     );
 
@@ -842,8 +842,8 @@ fn half_page_down_without_a_cursor_selects_the_first_row() {
 }
 
 #[rstest::rstest]
-fn sidebar_skips_threads_being_deleted() {
-    // Given two active threads, one being deleted.
+fn sidebar_skips_agents_being_deleted() {
+    // Given two active agents, one being deleted.
     let sessions = Sessions {
         deleting: [SessionId(1)].into(),
         ..sessions(vec![active(1, 10), active(2, 20)], None)
@@ -852,64 +852,64 @@ fn sidebar_skips_threads_being_deleted() {
     // When listing the sidebar.
     let items = items(&sessions);
 
-    // Then only the other thread shows.
+    // Then only the other agent shows.
     assert_eq!(
         items,
         vec![on(2)],
-        "a thread being deleted should be hidden"
+        "an agent being deleted should be hidden"
     );
 }
 
 #[rstest::rstest]
-fn working_count_skips_threads_being_deleted() {
-    // Given two working threads, one being deleted.
-    let working = |id| Thread {
-        status: ThreadStatus::Working,
-        ..thread(id)
+fn working_count_skips_agents_being_deleted() {
+    // Given two working agents, one being deleted.
+    let working = |id| Agent {
+        status: AgentStatus::Working,
+        ..idle_agent(id)
     };
     let sessions = Sessions {
         deleting: [SessionId(1)].into(),
         ..sessions(vec![working(1), working(2)], None)
     };
 
-    // When counting the working threads.
+    // When counting the working agents.
     let count = sessions.working_count();
 
     // Then only the other one counts.
     assert_eq!(
         count, 1,
-        "a thread being deleted shouldn't count as running"
+        "an agent being deleted shouldn't count as running"
     );
 }
 
 #[rstest::rstest]
-fn status_count_skips_threads_being_deleted() {
-    // Given two threads needing approval, one being deleted.
-    let needs_approval = |id| Thread {
-        status: ThreadStatus::NeedsApproval,
-        ..thread(id)
+fn status_count_skips_agents_being_deleted() {
+    // Given two agents needing approval, one being deleted.
+    let needs_approval = |id| Agent {
+        status: AgentStatus::NeedsApproval,
+        ..idle_agent(id)
     };
     let sessions = Sessions {
         deleting: [SessionId(1)].into(),
         ..sessions(vec![needs_approval(1), needs_approval(2)], None)
     };
 
-    // When counting the threads needing approval.
-    let count = sessions.status_count(ThreadStatus::NeedsApproval);
+    // When counting the agents needing approval.
+    let count = sessions.status_count(AgentStatus::NeedsApproval);
 
     // Then only the other one counts.
     assert_eq!(
         count, 1,
-        "a thread being deleted shouldn't count toward its status"
+        "an agent being deleted shouldn't count toward its status"
     );
 }
 
 #[rstest::rstest]
 fn spinning_while_a_session_starts() {
-    // Given idle threads and a session being started.
+    // Given idle agents and a session being started.
     let sessions = Sessions {
         starting: true,
-        ..sessions(vec![thread(1)], None)
+        ..sessions(vec![idle_agent(1)], None)
     };
 
     // When asking whether anything spins.
@@ -920,12 +920,12 @@ fn spinning_while_a_session_starts() {
 }
 
 #[rstest::rstest]
-fn spinning_while_a_thread_works() {
-    // Given a working thread and no session starting.
+fn spinning_while_an_agent_works() {
+    // Given a working agent and no session starting.
     let sessions = sessions(
-        vec![Thread {
-            status: ThreadStatus::Working,
-            ..thread(1)
+        vec![Agent {
+            status: AgentStatus::Working,
+            ..idle_agent(1)
         }],
         None,
     );
@@ -934,33 +934,33 @@ fn spinning_while_a_thread_works() {
     let spinning = sessions.spinning();
 
     // Then it spins.
-    assert!(spinning, "a working thread should spin");
+    assert!(spinning, "a working agent should spin");
 }
 
 #[rstest::rstest]
 fn not_spinning_when_idle() {
-    // Given only idle threads and no session starting.
-    let sessions = sessions(vec![thread(1), thread(2)], None);
+    // Given only idle agents and no session starting.
+    let sessions = sessions(vec![idle_agent(1), idle_agent(2)], None);
 
     // When asking whether anything spins.
     let spinning = sessions.spinning();
 
     // Then nothing spins.
-    assert!(!spinning, "idle threads with no start shouldn't spin");
+    assert!(!spinning, "idle agents with no start shouldn't spin");
 }
 
 #[rstest::rstest]
-fn any_in_progress_skips_threads_being_deleted() {
-    // Given a working thread being deleted and an idle one.
+fn any_in_progress_skips_agents_being_deleted() {
+    // Given a working agent being deleted and an idle one.
     let sessions = Sessions {
         deleting: [SessionId(1)].into(),
         ..sessions(
             vec![
-                Thread {
-                    status: ThreadStatus::Working,
-                    ..thread(1)
+                Agent {
+                    status: AgentStatus::Working,
+                    ..idle_agent(1)
                 },
-                thread(2),
+                idle_agent(2),
             ],
             None,
         )
@@ -970,7 +970,7 @@ fn any_in_progress_skips_threads_being_deleted() {
     let busy = sessions.any_in_progress();
 
     // Then none is.
-    assert!(!busy, "a thread being deleted shouldn't keep the poll fast");
+    assert!(!busy, "an agent being deleted shouldn't keep the poll fast");
 }
 
 #[rstest::rstest]
@@ -995,13 +995,13 @@ fn projects_by_recency_skips_removed_projects() {
 }
 
 #[rstest::rstest]
-fn sidebar_lists_a_removed_projects_threads() {
-    // Given project 1 removed, with an active and a settled thread, the shelf open.
+fn sidebar_lists_a_removed_projects_agents() {
+    // Given project 1 removed, with an active and a settled agent, the shelf open.
     let sessions = settling(
         fill(Sessions {
             projects: vec![Project {
                 removed: true,
-                ..project(1, vec![active(1, 10), thread(2)])
+                ..project(1, vec![active(1, 10), idle_agent(2)])
             }],
             shelf_open: true,
             ..Sessions::default()
@@ -1012,19 +1012,19 @@ fn sidebar_lists_a_removed_projects_threads() {
     // When listing the sidebar.
     let rows = items(&sessions);
 
-    // Then both threads still show.
+    // Then both agents still show.
     assert_eq!(
         rows,
         vec![on(1), SidebarItem::SettledShelf, on(2)],
-        "removing a project should keep its threads listed"
+        "removing a project should keep its agents listed"
     );
 }
 
-/// Project 1 with card 1 and settled thread 2, and project 2 with card 3
-/// and settled thread 4, the shelf open, filtered to `filter`.
+/// Project 1 with card 1 and settled agent 2, and project 2 with card 3
+/// and settled agent 4, the shelf open, filtered to `filter`.
 fn two_projects(filter: Option<i64>) -> Sessions {
     let [first, second] = [(1, 1, 2), (2, 3, 4)]
-        .map(|(id, card, settled_id)| project(id, vec![thread(card), thread(settled_id)]));
+        .map(|(id, card, settled_id)| project(id, vec![idle_agent(card), idle_agent(settled_id)]));
     settling(
         fill(Sessions {
             projects: vec![first, second],
@@ -1044,7 +1044,7 @@ fn filtered_sidebar_lists_only_that_projects_rows() {
     // When listing the sidebar.
     let rows = items(&sessions);
 
-    // Then only project 2's card, shelf and settled thread show.
+    // Then only project 2's card, shelf and settled agent show.
     assert_eq!(
         rows,
         vec![on(3), SidebarItem::SettledShelf, on(4)],
@@ -1069,8 +1069,8 @@ fn unfiltered_sidebar_lists_every_project() {
 }
 
 #[rstest::rstest]
-fn filtered_shelf_counts_only_that_projects_settled_threads() {
-    // Given two projects with a settled thread each, filtered to project 1.
+fn filtered_shelf_counts_only_that_projects_settled_agents() {
+    // Given two projects with a settled agent each, filtered to project 1.
     let sessions = two_projects(Some(1));
 
     // When listing the sidebar.
@@ -1082,7 +1082,7 @@ fn filtered_shelf_counts_only_that_projects_settled_threads() {
             _ => None,
         });
 
-    // Then the shelf counts one thread.
+    // Then the shelf counts one agent.
     assert_eq!(count, Some(1), "the shelf should count project 1's only");
 }
 
@@ -1129,7 +1129,7 @@ fn filter_to_an_empty_project_leaves_no_cursor() {
     // Given project 1 with a card, empty project 2, and the cursor on the
     // card.
     let mut sessions = fill(Sessions {
-        projects: vec![project(1, vec![thread(1)]), project(2, vec![])],
+        projects: vec![project(1, vec![idle_agent(1)]), project(2, vec![])],
         cursor: Some(on(1)),
         ..Sessions::default()
     });
@@ -1144,10 +1144,13 @@ fn filter_to_an_empty_project_leaves_no_cursor() {
 #[rstest::rstest]
 fn row_neighbour_skips_a_shelf_the_filter_hides() {
     // Given project 1 with only card 1, project 2 with only settled
-    // thread 2, filtered to project 1.
+    // agent 2, filtered to project 1.
     let sessions = settling(
         fill(Sessions {
-            projects: vec![project(1, vec![thread(1)]), project(2, vec![thread(2)])],
+            projects: vec![
+                project(1, vec![idle_agent(1)]),
+                project(2, vec![idle_agent(2)]),
+            ],
             filter: Some(ProjectId(1)),
             ..Sessions::default()
         }),
@@ -1160,15 +1163,15 @@ fn row_neighbour_skips_a_shelf_the_filter_hides() {
     // Then nothing is left to select.
     assert_eq!(
         next, None,
-        "another project's settled thread shouldn't offer a hidden shelf"
+        "another project's settled agent shouldn't offer a hidden shelf"
     );
 }
 
-/// `thread`, titled `title`.
-fn titled(thread: Thread, title: &str) -> Thread {
-    Thread {
+/// `agent`, titled `title`.
+fn titled(agent: Agent, title: &str) -> Agent {
+    Agent {
         title: Some(title.to_owned()),
-        ..thread
+        ..agent
     }
 }
 
@@ -1192,7 +1195,7 @@ fn four_titles() -> Sessions {
                 titled(active(1, 10), "fix login bug"),
                 titled(active(2, 20), "add dark mode"),
                 titled(active(3, 30), "fix logout"),
-                titled(thread(4), "fix lint"),
+                titled(idle_agent(4), "fix lint"),
             ],
             None,
         ),
@@ -1202,7 +1205,7 @@ fn four_titles() -> Sessions {
 
 #[rstest::rstest]
 fn search_keeps_only_matching_titles_in_sidebar_order() {
-    // Given three active threads, two titled "fix log…", and the shelf
+    // Given three active agents, two titled "fix log…", and the shelf
     // empty of matches.
     let sessions = searching(
         sessions(
@@ -1244,14 +1247,14 @@ fn search_lists_settled_matches_while_the_shelf_is_closed() {
 }
 
 #[rstest::rstest]
-fn search_counts_only_matching_settled_threads_on_the_shelf() {
-    // Given two settled threads, one matching.
+fn search_counts_only_matching_settled_agents_on_the_shelf() {
+    // Given two settled agents, one matching.
     let sessions = searching(
         settling(
             sessions(
                 vec![
-                    titled(thread(1), "fix lint"),
-                    titled(thread(2), "add dark mode"),
+                    titled(idle_agent(1), "fix lint"),
+                    titled(idle_agent(2), "add dark mode"),
                 ],
                 None,
             ),
@@ -1276,14 +1279,14 @@ fn search_counts_only_matching_settled_threads_on_the_shelf() {
 #[rstest::rstest]
 #[case::searching("lint", true)]
 #[case::not_searching("", false)]
-fn shelf_header_reads_as_open_while_a_search_lists_settled_threads(
+fn shelf_header_reads_as_open_while_a_search_lists_settled_agents(
     #[case] text: &str,
     #[case] expected: bool,
 ) {
     // Given a closed shelf holding "fix lint", searching for `text`.
     let sessions = searching(
         settling(
-            sessions(vec![titled(thread(1), "fix lint")], None),
+            sessions(vec![titled(idle_agent(1), "fix lint")], None),
             &[(1, 10)],
         ),
         text,
@@ -1304,7 +1307,7 @@ fn shelf_header_reads_as_open_while_a_search_lists_settled_threads(
 
 #[rstest::rstest]
 fn search_without_a_settled_match_has_no_shelf_header() {
-    // Given a settled "fix lint" and a search only an active thread
+    // Given a settled "fix lint" and a search only an active agent
     // matches.
     let sessions = searching(four_titles(), "dark");
 
@@ -1360,7 +1363,7 @@ fn title_matches_returns_the_matched_byte_offsets() {
 
 #[rstest::rstest]
 fn select_first_match_without_a_match_clears_the_cursor() {
-    // Given the cursor on thread 1 and a search nothing matches.
+    // Given the cursor on agent 1 and a search nothing matches.
     let mut sessions = searching(
         Sessions {
             cursor: Some(on(1)),
@@ -1378,7 +1381,7 @@ fn select_first_match_without_a_match_clears_the_cursor() {
 
 #[rstest::rstest]
 fn select_first_match_with_blank_text_keeps_the_cursor() {
-    // Given the cursor on thread 1 and a blank search.
+    // Given the cursor on agent 1 and a blank search.
     let mut sessions = searching(
         Sessions {
             cursor: Some(on(1)),
@@ -1499,7 +1502,7 @@ fn select_next_match_stays_on_a_single_match() {
 
 #[rstest::rstest]
 fn cancel_search_restores_the_cursor_from_before() {
-    // Given a search begun on thread 2 that moved the cursor to thread 3.
+    // Given a search begun on agent 2 that moved the cursor to agent 3.
     let mut sessions = Sessions {
         cursor: Some(on(3)),
         ..searching(
@@ -1514,13 +1517,13 @@ fn cancel_search_restores_the_cursor_from_before() {
     // When cancelling the search.
     sessions.cancel_search(&layouts_for(&sessions.projects));
 
-    // Then the cursor is back on thread 2.
+    // Then the cursor is back on agent 2.
     assert_eq!(sessions.cursor, Some(on(2)), "Esc restores the cursor");
 }
 
 #[rstest::rstest]
 fn cancel_search_falls_back_to_the_first_row_when_the_old_one_is_gone() {
-    // Given a search begun on thread 9, which no longer exists.
+    // Given a search begun on agent 9, which no longer exists.
     let mut sessions = searching(
         Sessions {
             cursor: Some(on(9)),
@@ -1538,8 +1541,8 @@ fn cancel_search_falls_back_to_the_first_row_when_the_old_one_is_gone() {
 
 #[rstest::rstest]
 fn sidebar_lists_one_card_per_session() {
-    // Given threads 1 and 2 in session 1, and thread 3 in session 3.
-    let sessions = sessions(vec![agent(1, 1, 0), agent(2, 1, 1), thread(3)], None);
+    // Given agents 1 and 2 in session 1, and agent 3 in session 3.
+    let sessions = sessions(vec![agent(1, 1, 0), agent(2, 1, 1), idle_agent(3)], None);
 
     // When listing the sidebar.
     let cards: Vec<SessionId> = sessions
@@ -1584,7 +1587,10 @@ fn settled_session_is_listed_after_the_shelf_header() {
     // Given active session 2 and settled session 1, the shelf open.
     let sessions = Sessions {
         shelf_open: true,
-        ..settling(sessions(vec![thread(2), thread(1)], None), &[(1, 10)])
+        ..settling(
+            sessions(vec![idle_agent(2), idle_agent(1)], None),
+            &[(1, 10)],
+        )
     };
 
     // When listing the sidebar.
@@ -1602,7 +1608,10 @@ fn settled_session_is_listed_after_the_shelf_header() {
 fn search_lists_a_session_whose_agent_title_matches() {
     // Given session 1 named "auth" with an agent titled "Fix login",
     // and session 2, searched for "login".
-    let mut sessions = sessions(vec![titled(thread(1), "Fix login"), thread(2)], None);
+    let mut sessions = sessions(
+        vec![titled(idle_agent(1), "Fix login"), idle_agent(2)],
+        None,
+    );
     if let Some(first) = sessions.sessions.iter_mut().find(|s| s.id == SessionId(1)) {
         first.name = Some("auth".into());
     }
@@ -1618,7 +1627,7 @@ fn search_lists_a_session_whose_agent_title_matches() {
 #[rstest::rstest]
 fn search_lists_a_session_whose_title_matches() {
     // Given session 1 named "auth" and session 2, searched for "auth".
-    let mut sessions = sessions(vec![thread(1), thread(2)], None);
+    let mut sessions = sessions(vec![idle_agent(1), idle_agent(2)], None);
     if let Some(first) = sessions.sessions.iter_mut().find(|s| s.id == SessionId(1)) {
         first.name = Some("auth".into());
     }
@@ -1635,7 +1644,7 @@ fn search_lists_a_session_whose_title_matches() {
 fn sidebar_search_finds_an_agent_row_by_its_pane_name() {
     // Given session 1 named "api", its agent titled "fix login" in a pane
     // named "server", searched for "serv".
-    let mut sessions = sessions(vec![titled(thread(1), "fix login")], None);
+    let mut sessions = sessions(vec![titled(idle_agent(1), "fix login")], None);
     if let Some(first) = sessions.sessions.iter_mut().find(|s| s.id == SessionId(1)) {
         first.name = Some("api".into());
     }
@@ -1657,16 +1666,16 @@ fn sidebar_search_finds_an_agent_row_by_its_pane_name() {
 }
 
 #[rstest::rstest]
-fn selected_thread_is_the_sessions_oldest_agent() {
-    // Given session 1 holding threads 2 (second 5) and 3 (second 1),
+fn selected_agent_is_the_sessions_oldest_agent() {
+    // Given session 1 holding agents 2 (second 5) and 3 (second 1),
     // selected.
     let sessions = sessions(vec![agent(2, 1, 5), agent(3, 1, 1)], Some(on(1)));
 
-    // When reading the selected thread.
-    let selected = sessions.selected_thread().map(|thread| thread.id);
+    // When reading the selected agent.
+    let selected = sessions.selected_lead_agent().map(|agent| agent.id);
 
-    // Then it's thread 3.
-    assert_eq!(selected, Some(ThreadId(3)), "the lead thread is the oldest");
+    // Then it's agent 3.
+    assert_eq!(selected, Some(AgentId(3)), "the lead agent is the oldest");
 }
 
 #[rstest::rstest]
@@ -1707,30 +1716,30 @@ fn jumpable_skips_a_row_the_filter_hides(#[case] item: SidebarItem) {
 }
 
 #[rstest::rstest]
-fn jumpable_skips_a_thread_being_deleted() {
-    // Given thread 1 being deleted.
+fn jumpable_skips_an_agent_being_deleted() {
+    // Given agent 1 being deleted.
     let sessions = Sessions {
         deleting: HashSet::from([SessionId(1)]),
-        ..sessions(vec![thread(1)], None)
+        ..sessions(vec![idle_agent(1)], None)
     };
 
-    // When asking whether thread 1 is jumpable.
+    // When asking whether agent 1 is jumpable.
     let jumpable = sessions.jumpable(on(1), &layouts_for(&sessions.projects));
 
     // Then it isn't.
-    assert!(!jumpable, "a thread being deleted is gone");
+    assert!(!jumpable, "an agent being deleted is gone");
 }
 
 #[rstest::rstest]
-fn jumpable_accepts_a_listed_thread() {
-    // Given thread 1 listed.
-    let sessions = sessions(vec![thread(1)], None);
+fn jumpable_accepts_a_listed_agent() {
+    // Given agent 1 listed.
+    let sessions = sessions(vec![idle_agent(1)], None);
 
-    // When asking whether thread 1 is jumpable.
+    // When asking whether agent 1 is jumpable.
     let jumpable = sessions.jumpable(on(1), &layouts_for(&sessions.projects));
 
     // Then it is.
-    assert!(jumpable, "a listed thread is a jump target");
+    assert!(jumpable, "a listed agent is a jump target");
 }
 
 /// The agent row of pane `pane` in session `session`.
@@ -1741,8 +1750,8 @@ fn agent_row(session: i64, pane: i64) -> SidebarItem {
     }
 }
 
-/// Session 1 (newer) running thread 1 in pane 1, and session 2 running
-/// thread 2 in pane 2, with the cursor on `cursor`.
+/// Session 1 (newer) running agent 1 in pane 1, and session 2 running
+/// agent 2 in pane 2, with the cursor on `cursor`.
 fn two_sessions(cursor: SidebarItem) -> Sessions {
     sessions(vec![active(1, 20), active(2, 10)], Some(cursor))
 }
@@ -1981,15 +1990,15 @@ fn jumpable_accepts_an_agent_row_while_its_pane_runs_an_agent() {
 
 #[rstest::rstest]
 fn jumpable_skips_an_agent_row_whose_pane_no_longer_runs_an_agent() {
-    // Given session 1 whose thread 1 left pane 1.
+    // Given session 1 whose agent 1 left pane 1.
     let mut sessions = two_sessions(on(1));
-    for thread in sessions
+    for agent in sessions
         .projects
         .iter_mut()
-        .flat_map(|project| project.threads.iter_mut())
-        .filter(|thread| thread.id == ThreadId(1))
+        .flat_map(|project| project.agents.iter_mut())
+        .filter(|agent| agent.id == AgentId(1))
     {
-        thread.pane = None;
+        agent.pane = None;
     }
 
     // When asking whether pane 1's agent row is jumpable.
@@ -2041,10 +2050,10 @@ fn select_next_match_stops_on_agent_rows() {
 fn runs_agent_is_false_for_a_closed_pane() {
     // Given session 1 whose agent's pane 1 closed.
     let sessions = holding(
-        vec![Thread {
+        vec![Agent {
             pane: None,
             last_session: Some(SessionId(1)),
-            ..thread(1)
+            ..idle_agent(1)
         }],
         vec![session(1)],
     );

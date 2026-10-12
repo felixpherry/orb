@@ -395,12 +395,12 @@ mod tests {
     use crate::feat::layout::tree::NavDirection;
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::{PickerKind, PickerState};
-    use crate::feat::sessions::state::ThreadStatus;
+    use crate::feat::sessions::state::AgentStatus;
     use crate::ids::{PaneId, ProjectId, SessionId};
     use crate::intent_handler::test_support::{
-        ORPHAN, agent, choosing_workspace, highlight, in_root, jumping, left_pane_showing_1,
-        managing, on_thread, picked_worktree, project_row, removing_alpha, split_layout,
-        state_with, thread, two_agents, workspace_labels, worktree_picker_after,
+        ORPHAN, agent, agent_row, choosing_workspace, highlight, in_root, jumping,
+        left_pane_showing_1, managing, on_agent, picked_worktree, project_row, removing_alpha,
+        split_layout, state_with, two_agents, workspace_labels, worktree_picker_after,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
     use std::path::PathBuf;
@@ -419,14 +419,14 @@ mod tests {
 
     #[rstest::rstest]
     fn current_row_reads_current_worktree_inside_a_worktree() {
-        // Given / When opening the workspace picker on a thread in a worktree.
-        let state = choosing_workspace(vec![thread(1, ThreadStatus::Idle)]);
+        // Given / When opening the workspace picker on an agent in a worktree.
+        let state = choosing_workspace(vec![agent(1, AgentStatus::Idle)]);
 
         // Then the first row is the current worktree.
         assert_eq!(
             workspace_labels(&state).first().map(String::as_str),
             Some("Current worktree"),
-            "a worktree thread's current row names the worktree"
+            "a worktree agent's current row names the worktree"
         );
     }
 
@@ -446,13 +446,13 @@ mod tests {
         );
     }
 
-    /// Adds project gamma (3, `/gamma`), with no threads, to `state`.
+    /// Adds project gamma (3, `/gamma`), with no agents, to `state`.
     fn add_gamma(state: &mut AppState) {
         if let Some(mut gamma) = state.sessions.projects.first().cloned() {
             gamma.id = ProjectId(3);
             gamma.title = "gamma".to_owned();
             gamma.root = "/gamma".into();
-            gamma.threads = vec![];
+            gamma.agents = vec![];
             state.sessions.projects.push(gamma);
         }
     }
@@ -472,7 +472,7 @@ mod tests {
     #[rstest::rstest]
     fn relist_projects_lists_a_new_project() {
         // Given the projects screen, then project gamma added.
-        let mut state = managing(None, on_thread(21));
+        let mut state = managing(None, on_agent(21));
         add_gamma(&mut state);
 
         // When re-listing the projects.
@@ -489,7 +489,7 @@ mod tests {
     fn relist_projects_keeps_the_selected_project() {
         // Given the projects screen with beta highlighted, then project gamma
         // added.
-        let mut state = managing(None, on_thread(21));
+        let mut state = managing(None, on_agent(21));
         highlight(&mut state, &project_row(2, "beta"));
         add_gamma(&mut state);
 
@@ -508,7 +508,7 @@ mod tests {
     fn relist_projects_relists_the_projects_screen_under_a_confirm() {
         // Given the remove confirm over the projects screen, then project
         // gamma added.
-        let mut state = removing_alpha(None, on_thread(21));
+        let mut state = removing_alpha(None, on_agent(21));
         add_gamma(&mut state);
 
         // When re-listing the projects.
@@ -532,7 +532,7 @@ mod tests {
     #[case(Intent::SelectNext)]
     #[case(Intent::SelectHalfPageDown)]
     fn plain_cursor_moves_record_nothing(#[case] intent: Intent) {
-        // Given the cursor on thread 2, the first row.
+        // Given the cursor on agent 2, the first row.
         let mut state = jumping(Focus::Sidebar, &[], &[]);
 
         // When moving the cursor down.
@@ -569,24 +569,24 @@ mod tests {
         // Then agent 2, then agent 1, are recorded.
         assert_eq!(
             state.jumps.entries(),
-            [agent(1, 2), agent(1, 1)],
+            [agent_row(1, 2), agent_row(1, 1)],
             "a focus move between agents should record both"
         );
     }
 
     #[rstest::rstest]
     fn moving_focus_from_an_agent_to_a_shell_records_only_the_agent_left() {
-        // Given the keys in thread 1's pane, shell pane 50 to its right.
+        // Given the keys in agent 1's pane, shell pane 50 to its right.
         let mut state = split_layout();
         state.layouts.focus_pane(SessionId(1), PaneId(1));
 
         // When moving the focus right.
         IntentHandler::handle(&Intent::MoveFocus(NavDirection::Right), &mut state);
 
-        // Then only thread 1's agent is recorded.
+        // Then only agent 1's agent is recorded.
         assert_eq!(
             state.jumps.entries(),
-            [agent(1, 1)],
+            [agent_row(1, 1)],
             "a shell pane is never recorded"
         );
     }
@@ -602,7 +602,7 @@ mod tests {
         // Then agent 2, then agent 1, are recorded.
         assert_eq!(
             state.jumps.entries(),
-            [agent(1, 2), agent(1, 1)],
+            [agent_row(1, 2), agent_row(1, 1)],
             "a click between agents should record the agent left then the one entered"
         );
     }

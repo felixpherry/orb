@@ -1,4 +1,4 @@
-//! What orb asks of git: the branches a thread could switch to, a project's
+//! What orb asks of git: the branches an agent could switch to, a project's
 //! default branch, making, checking out, renaming, removing and pruning
 //! worktrees and branches, whether a branch is merged, a worktree's state and
 //! its size on disk, making a directory a repository, and the repository
@@ -20,7 +20,7 @@ use crate::Log;
 #[error(debug)]
 pub struct GitError;
 
-/// A branch a thread could be on: a local branch or a remote ref.
+/// A branch an agent could be on: a local branch or a remote ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitRef {
     /// `main` for a local branch, `origin/feature` for a remote ref.

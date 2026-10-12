@@ -227,16 +227,16 @@ fn detach_moving(state: &mut AppState, session: SessionId, command: Command) -> 
 mod tests {
 
     use crate::feat::picker::state::{PickTarget, PickerKind, PickerState};
-    use crate::feat::sessions::state::{Thread, ThreadStatus};
+    use crate::feat::sessions::state::{Agent, AgentStatus};
     use crate::ids::{ProjectId, SessionId};
     use crate::intent_handler::test_support::{
-        choosing_workspace, in_root, state_with, thread, workspace_labels,
+        agent, choosing_workspace, in_root, state_with, workspace_labels,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
     #[rstest::rstest]
     fn change_workspace_on_a_session_opens_the_workspace_picker() {
-        // Given a selected session whose thread has had no turn.
+        // Given a selected session whose agent has had no turn.
         let mut state = state_with(vec![in_root(1)], 1);
 
         // When handling ChangeWorkspace.
@@ -255,7 +255,7 @@ mod tests {
         );
     }
 
-    /// [`state_with`] thread 1 in the root, selected, its project outside
+    /// [`state_with`] agent 1 in the root, selected, its project outside
     /// git.
     fn outside_git() -> AppState {
         let mut state = state_with(vec![in_root(1)], 1);
@@ -303,10 +303,10 @@ mod tests {
 
     #[rstest::rstest]
     fn locked_workspace_shows_the_lock_message() {
-        // Given a selected session in the root checkout whose thread is
+        // Given a selected session in the root checkout whose agent is
         // titled, so a turn has run.
         let mut state = state_with(
-            vec![Thread {
+            vec![Agent {
                 title: Some("fix the tests".into()),
                 ..in_root(1)
             }],
@@ -329,7 +329,7 @@ mod tests {
         // Given another session of the project in a worktree on `orb/feat`.
         let mut state = AppState {
             focus: Focus::Sidebar,
-            ..state_with(vec![in_root(1), thread(2, ThreadStatus::Idle)], 1)
+            ..state_with(vec![in_root(1), agent(2, AgentStatus::Idle)], 1)
         };
         for session in &mut state.sessions.sessions {
             if session.id == SessionId(2) {
@@ -337,7 +337,7 @@ mod tests {
             }
         }
 
-        // When opening the workspace picker on a root thread.
+        // When opening the workspace picker on a root agent.
         IntentHandler::handle(&Intent::ChangeWorkspace, &mut state);
 
         // Then the last row offers that worktree by its branch.
@@ -354,7 +354,7 @@ mod tests {
 
     #[rstest::rstest]
     fn workspace_picker_omits_previous_worktree_without_a_seed() {
-        // Given / When opening the workspace picker on a project's only thread.
+        // Given / When opening the workspace picker on a project's only agent.
         let state = choosing_workspace(vec![in_root(1)]);
 
         // Then there is no previous-worktree row.
@@ -367,7 +367,7 @@ mod tests {
 
     #[rstest::rstest]
     fn switch_branch_opens_the_branch_picker() {
-        // Given a selected prompt-less thread in the root.
+        // Given a selected prompt-less agent in the root.
         let mut state = state_with(vec![in_root(1)], 1);
 
         // When handling SwitchBranch.
@@ -406,13 +406,13 @@ mod tests {
 
     #[rstest::rstest]
     fn busy_directory_shows_the_error() {
-        // Given a working sibling in the selected thread's directory.
+        // Given a working sibling in the selected agent's directory.
         let mut state = state_with(
             vec![
                 in_root(1),
-                Thread {
+                Agent {
                     cwd: "/work".into(),
-                    ..thread(2, ThreadStatus::Working)
+                    ..agent(2, AgentStatus::Working)
                 },
             ],
             1,

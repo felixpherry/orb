@@ -185,7 +185,7 @@ fn show_project(
             title,
             root,
             created_at: from_ms(now),
-            threads: Vec::new(),
+            agents: Vec::new(),
             repo,
             removed: false,
             kind,

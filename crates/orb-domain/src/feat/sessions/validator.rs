@@ -109,7 +109,7 @@ pub fn validate_toggle_settle(state: &AppState) -> Result<(), ToggleSettleError>
                 && sessions
                     .agents(session.id)
                     .into_iter()
-                    .any(|thread| thread.status.in_progress()) =>
+                    .any(|agent| agent.status.in_progress()) =>
         {
             Err(ToggleSettleError::InProgress)
         }
@@ -302,11 +302,11 @@ mod tests {
         validate_toggle_settle, validate_unfold,
     };
     use crate::feat::sessions::state::{
-        FolderKind, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus,
+        Agent, AgentStatus, FolderKind, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem,
         layouts_for, sessions_for,
     };
     use crate::feat::sidebar::state::{Rename, RenameTarget};
-    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
     use crate::{AppState, TextInput};
 
     #[rstest::rstest]
@@ -354,7 +354,7 @@ mod tests {
                     created_at: SystemTime::UNIX_EPOCH,
                     removed,
                     repo: true,
-                    threads: vec![],
+                    agents: vec![],
                     kind: ProjectKind::Incognito,
                 }],
                 ..Sessions::default()
@@ -380,9 +380,9 @@ mod tests {
         );
     }
 
-    /// One project holding session 1, whose agent thread 1 is `status`, with
+    /// One project holding session 1, whose agent agent 1 is `status`, with
     /// the cursor on it.
-    fn on_session(status: ThreadStatus) -> AppState {
+    fn on_session(status: AgentStatus) -> AppState {
         let mut state = AppState {
             sessions: Sessions {
                 projects: vec![Project {
@@ -392,10 +392,10 @@ mod tests {
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
                     repo: true,
-                    threads: vec![Thread {
+                    agents: vec![Agent {
                         last_session: None,
                         harness: HarnessId::new("claude"),
-                        id: ThreadId(1),
+                        id: AgentId(1),
                         title: None,
                         cwd: "/work".into(),
                         transcript: None,
@@ -426,7 +426,7 @@ mod tests {
     #[rstest::rstest]
     fn settle_is_refused_while_an_agent_works() {
         // Given a selected session whose agent is running a turn.
-        let state = on_session(ThreadStatus::Working);
+        let state = on_session(AgentStatus::Working);
 
         // When validating a settle.
         let result = validate_toggle_settle(&state);
@@ -443,7 +443,7 @@ mod tests {
     fn unsettling_is_allowed_while_an_agent_works() {
         // Given a settled session whose agent is running a turn.
         let state = {
-            let mut state = on_session(ThreadStatus::Working);
+            let mut state = on_session(AgentStatus::Working);
             if let Some(session) = state.sessions.sessions.first_mut() {
                 session.settled_at = Some(SystemTime::UNIX_EPOCH);
             }
@@ -476,7 +476,7 @@ mod tests {
     #[rstest::rstest]
     fn toggle_pin_allowed_on_a_session() {
         // Given a selected session.
-        let state = on_session(ThreadStatus::Idle);
+        let state = on_session(AgentStatus::Idle);
 
         // When validating a pin.
         let result = validate_toggle_pin(&state);
@@ -489,7 +489,7 @@ mod tests {
     fn toggle_pin_rejected_on_a_session_being_deleted() {
         // Given the selected session being deleted.
         let state = {
-            let mut state = on_session(ThreadStatus::Idle);
+            let mut state = on_session(AgentStatus::Idle);
             state.sessions.deleting.insert(SessionId(1));
             state
         };
@@ -507,7 +507,7 @@ mod tests {
 
     /// [`on_session`] with the cursor on session 1's agent row for pane 1.
     fn on_agent_row() -> AppState {
-        let mut state = on_session(ThreadStatus::Idle);
+        let mut state = on_session(AgentStatus::Idle);
         state.sessions.cursor = Some(SidebarItem::Agent {
             session: SessionId(1),
             pane: PaneId(1),
@@ -550,7 +550,7 @@ mod tests {
     #[rstest::rstest]
     fn delete_allowed_on_a_working_session() {
         // Given a selected session whose agent is running a turn.
-        let state = on_session(ThreadStatus::Working);
+        let state = on_session(AgentStatus::Working);
 
         // When validating a delete.
         let result = validate_delete(&state);
@@ -577,7 +577,7 @@ mod tests {
 
     /// `on_session` with its session settled and the shelf `open` or not.
     fn on_settled(open: bool) -> AppState {
-        let mut state = on_session(ThreadStatus::Idle);
+        let mut state = on_session(AgentStatus::Idle);
         state.sessions.shelf_open = open;
         if let Some(session) = state.sessions.sessions.first_mut() {
             session.settled_at = Some(SystemTime::UNIX_EPOCH);
@@ -620,7 +620,7 @@ mod tests {
     #[rstest::rstest]
     fn fold_on_a_card_with_agents_folds_the_card() {
         // Given an active session with an agent pane selected.
-        let state = on_session(ThreadStatus::Idle);
+        let state = on_session(AgentStatus::Idle);
 
         // When validating a fold.
         let result = validate_fold(&state);
@@ -636,7 +636,7 @@ mod tests {
     #[rstest::rstest]
     fn fold_on_an_agent_row_folds_its_card() {
         // Given session 1's agent row selected.
-        let mut state = on_session(ThreadStatus::Idle);
+        let mut state = on_session(AgentStatus::Idle);
         state.sessions.cursor = Some(SidebarItem::Agent {
             session: SessionId(1),
             pane: PaneId(1),
@@ -655,11 +655,11 @@ mod tests {
 
     #[rstest::rstest]
     fn fold_rejected_on_a_card_without_agents() {
-        // Given an active session whose only thread has no pane.
-        let mut state = on_session(ThreadStatus::Idle);
+        // Given an active session whose only agent has no pane.
+        let mut state = on_session(AgentStatus::Idle);
         for project in &mut state.sessions.projects {
-            for thread in &mut project.threads {
-                thread.pane = None;
+            for agent in &mut project.agents {
+                agent.pane = None;
             }
         }
 
@@ -677,7 +677,7 @@ mod tests {
     #[rstest::rstest]
     fn unfold_rejected_on_an_agent_row() {
         // Given session 1's agent row selected.
-        let mut state = on_session(ThreadStatus::Idle);
+        let mut state = on_session(AgentStatus::Idle);
         state.sessions.cursor = Some(SidebarItem::Agent {
             session: SessionId(1),
             pane: PaneId(1),

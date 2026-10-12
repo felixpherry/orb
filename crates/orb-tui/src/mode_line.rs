@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use orb_domain::feat::picker::state::PickerState;
-use orb_domain::feat::sessions::state::{Sessions, SidebarItem, ThreadStatus};
+use orb_domain::feat::sessions::state::{AgentStatus, Sessions, SidebarItem};
 use orb_domain::{AppState, Focus, PaneMode};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -92,7 +92,7 @@ fn left(state: &AppState, mode: &str, colour: Color) -> Line<'static> {
             };
             (
                 agent
-                    .and_then(|thread| thread.branch.as_deref())
+                    .and_then(|agent| agent.branch.as_deref())
                     .or(session.branch.as_deref()),
                 sessions
                     .project(session.project)
@@ -118,8 +118,8 @@ fn left(state: &AppState, mode: &str, colour: Color) -> Line<'static> {
 /// x · y: the activity and the counts, then the clock block.
 fn right(sessions: &Sessions, colour: Color, now: SystemTime, tz: &TimeZone) -> Line<'static> {
     let counts = [
-        (APPROVAL_ICON, ThreadStatus::NeedsApproval, YELLOW),
-        (INPUT_ICON, ThreadStatus::NeedsInput, CYAN),
+        (APPROVAL_ICON, AgentStatus::NeedsApproval, YELLOW),
+        (INPUT_ICON, AgentStatus::NeedsInput, CYAN),
     ];
     let mut spans: Vec<Span<'static>> = activity(sessions, now)
         .map(|activity| on(format!("{activity}  "), ORANGE, BG_DARK))
@@ -197,9 +197,9 @@ mod tests {
     use jiff::tz::{self, TimeZone};
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem,
     };
-    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
     use orb_domain::{AppState, Focus, PaneMode};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
@@ -211,7 +211,7 @@ mod tests {
     /// 2023-11-14 22:13:20 UTC, at spinner frame 0.
     const NOW: u64 = 1_700_000_000;
 
-    /// `sessions` with the sessions its projects' threads run in.
+    /// `sessions` with the sessions its projects' agents run in.
     fn fill(sessions: Sessions) -> Sessions {
         Sessions {
             sessions: sessions_for(&sessions.projects),
@@ -219,11 +219,11 @@ mod tests {
         }
     }
 
-    fn thread(id: i64, status: ThreadStatus) -> Thread {
-        Thread {
+    fn agent(id: i64, status: AgentStatus) -> Agent {
+        Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: Some("Fix the bug".to_owned()),
             cwd: "/Users/me/dev/orb".into(),
             transcript: None,
@@ -241,7 +241,7 @@ mod tests {
         }
     }
 
-    fn project(id: i64, title: &str, threads: Vec<Thread>) -> Project {
+    fn project(id: i64, title: &str, agents: Vec<Agent>) -> Project {
         Project {
             id: ProjectId(id),
             title: title.to_owned(),
@@ -249,14 +249,14 @@ mod tests {
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
             repo: true,
-            threads,
+            agents,
             kind: ProjectKind::Normal,
         }
     }
 
-    fn sessions(threads: Vec<Thread>) -> Sessions {
+    fn sessions(agents: Vec<Agent>) -> Sessions {
         fill(Sessions {
-            projects: vec![project(1, "orb", threads)],
+            projects: vec![project(1, "orb", agents)],
             ..Sessions::default()
         })
     }
@@ -268,14 +268,14 @@ mod tests {
         }
     }
 
-    /// Thread 1 (Idle) hovered and active, with the given focus.
+    /// Agent 1 (Idle) hovered and active, with the given focus.
     fn selected(focus: Focus) -> AppState {
         AppState {
             focus,
             sessions: Sessions {
                 cursor: Some(SidebarItem::Session(SessionId(1))),
                 active: Some(SessionId(1)),
-                ..sessions(vec![thread(1, ThreadStatus::Idle)])
+                ..sessions(vec![agent(1, AgentStatus::Idle)])
             },
             ..AppState::default()
         }
@@ -288,7 +288,7 @@ mod tests {
                 cursor: Some(SidebarItem::Session(SessionId(1))),
                 active: Some(SessionId(1)),
                 ..fill(Sessions {
-                    projects: vec![project(1, title, vec![thread(1, ThreadStatus::Idle)])],
+                    projects: vec![project(1, title, vec![agent(1, AgentStatus::Idle)])],
                     ..Sessions::default()
                 })
             },
@@ -331,7 +331,7 @@ mod tests {
 
     #[rstest::rstest]
     fn mode_line_starts_with_the_mode_block() {
-        // Given a selected thread in the sidebar.
+        // Given a selected agent in the sidebar.
         let state = selected(Focus::Sidebar);
 
         // When drawing the mode line.
@@ -349,7 +349,7 @@ mod tests {
     #[case::search(Focus::Search, GREEN)]
     #[case::rename(Focus::Rename, GREEN)]
     fn mode_block_takes_the_mode_colour(#[case] focus: Focus, #[case] colour: Color) {
-        // Given a selected thread with that focus.
+        // Given a selected agent with that focus.
         let state = selected(focus);
 
         // When drawing the mode line.
@@ -424,7 +424,7 @@ mod tests {
     #[case::pane(Focus::Pane, " PANE ")]
     #[case::picker(Focus::Picker, " PICKER ")]
     fn mode_line_names_the_focus_mode(#[case] focus: Focus, #[case] block: &str) {
-        // Given a selected thread with that focus.
+        // Given a selected agent with that focus.
         let state = selected(focus);
 
         // When drawing the mode line.
@@ -439,7 +439,7 @@ mod tests {
     #[case::resize(PaneMode::Resize, " RESIZE ")]
     #[case::move_(PaneMode::Move, " MOVE ")]
     fn mode_line_names_the_pane_mode(#[case] mode: PaneMode, #[case] block: &str) {
-        // Given a selected thread with the keys in a pane in that mode.
+        // Given a selected agent with the keys in a pane in that mode.
         let state = AppState {
             pane_mode: Some(mode),
             ..selected(Focus::Pane)
@@ -491,9 +491,9 @@ mod tests {
         // Given an active session whose agent is on branch orb/x.
         let state = with_sessions(Sessions {
             active: Some(SessionId(1)),
-            ..sessions(vec![Thread {
+            ..sessions(vec![Agent {
                 branch: Some("orb/x".to_owned()),
-                ..thread(1, ThreadStatus::Idle)
+                ..agent(1, AgentStatus::Idle)
             }])
         });
 
@@ -507,7 +507,7 @@ mod tests {
 
     #[rstest::rstest]
     fn no_branch_block_without_a_branch() {
-        // Given a selected thread with no branch.
+        // Given a selected agent with no branch.
         let state = selected(Focus::Sidebar);
 
         // When drawing the mode line.
@@ -520,7 +520,7 @@ mod tests {
 
     #[rstest::rstest]
     fn project_follows_the_branch_in_fg_dark() {
-        // Given a selected thread in project orb.
+        // Given a selected agent in project orb.
         let state = selected(Focus::Sidebar);
 
         // When drawing the mode line.
@@ -535,21 +535,21 @@ mod tests {
         );
     }
 
-    /// Threads 1 (branch `main`) and 2 (titled `Other`, branch `orb/z`),
+    /// Agents 1 (branch `main`) and 2 (titled `Other`, branch `orb/z`),
     /// the hover on session 2 and session 1 active.
     fn hover_on_two_active_one() -> AppState {
         with_sessions(Sessions {
             cursor: Some(SidebarItem::Session(SessionId(2))),
             active: Some(SessionId(1)),
             ..sessions(vec![
-                Thread {
+                Agent {
                     branch: Some("main".to_owned()),
-                    ..thread(1, ThreadStatus::Idle)
+                    ..agent(1, AgentStatus::Idle)
                 },
-                Thread {
+                Agent {
                     title: Some("Other".to_owned()),
                     branch: Some("orb/z".to_owned()),
-                    ..thread(2, ThreadStatus::Idle)
+                    ..agent(2, AgentStatus::Idle)
                 },
             ])
         })
@@ -586,12 +586,12 @@ mod tests {
 
     #[rstest::rstest]
     fn nothing_active_shows_only_the_mode_block() {
-        // Given a hovered thread on a branch, but no active session.
+        // Given a hovered agent on a branch, but no active session.
         let state = with_sessions(Sessions {
             cursor: Some(SidebarItem::Session(SessionId(1))),
-            ..sessions(vec![Thread {
+            ..sessions(vec![Agent {
                 branch: Some("orb/x".to_owned()),
-                ..thread(1, ThreadStatus::Idle)
+                ..agent(1, AgentStatus::Idle)
             }])
         });
 
@@ -623,12 +623,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn activity_counts_working_threads() {
-        // Given three working threads.
+    fn activity_counts_working_agents() {
+        // Given three working agents.
         let state = with_sessions(sessions(vec![
-            thread(1, ThreadStatus::Working),
-            thread(2, ThreadStatus::Working),
-            thread(3, ThreadStatus::Working),
+            agent(1, AgentStatus::Working),
+            agent(2, AgentStatus::Working),
+            agent(3, AgentStatus::Working),
         ]));
 
         // When drawing the mode line.
@@ -677,7 +677,7 @@ mod tests {
 
     #[rstest::rstest]
     fn activity_ignores_a_fetch_without_a_start() {
-        // Given a fetch left set with no session being started and no thread working.
+        // Given a fetch left set with no session being started and no agent working.
         let state = with_sessions(Sessions {
             fetching: Some("origin/main".to_owned()),
             ..sessions(vec![])
@@ -693,7 +693,7 @@ mod tests {
 
     #[rstest::rstest]
     fn starting_spinner_turns_a_frame_later() {
-        // Given a session being started and no thread working.
+        // Given a session being started and no agent working.
         let state = with_sessions(Sessions {
             starting: true,
             ..sessions(vec![])
@@ -717,10 +717,10 @@ mod tests {
 
     #[rstest::rstest]
     fn no_activity_when_idle() {
-        // Given only idle threads.
+        // Given only idle agents.
         let state = with_sessions(sessions(vec![
-            thread(1, ThreadStatus::Idle),
-            thread(2, ThreadStatus::Idle),
+            agent(1, AgentStatus::Idle),
+            agent(2, AgentStatus::Idle),
         ]));
 
         // When drawing the mode line.
@@ -736,10 +736,10 @@ mod tests {
 
     #[rstest::rstest]
     fn approval_count_follows_the_activity() {
-        // Given one working thread and one waiting for an approval.
+        // Given one working agent and one waiting for an approval.
         let state = with_sessions(sessions(vec![
-            thread(1, ThreadStatus::Working),
-            thread(2, ThreadStatus::NeedsApproval),
+            agent(1, AgentStatus::Working),
+            agent(2, AgentStatus::NeedsApproval),
         ]));
 
         // When drawing the mode line.
@@ -763,8 +763,8 @@ mod tests {
 
     #[rstest::rstest]
     fn input_count_shows_on_the_right() {
-        // Given one thread waiting for an answer.
-        let state = with_sessions(sessions(vec![thread(1, ThreadStatus::NeedsInput)]));
+        // Given one agent waiting for an answer.
+        let state = with_sessions(sessions(vec![agent(1, AgentStatus::NeedsInput)]));
 
         // When drawing the mode line.
         let buffer = draw(&state);
@@ -779,12 +779,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn counts_include_threads_the_filter_hides() {
-        // Given a working thread in jinn while the sidebar shows only orb.
+    fn counts_include_agents_the_filter_hides() {
+        // Given a working agent in jinn while the sidebar shows only orb.
         let state = with_sessions(fill(Sessions {
             projects: vec![
-                project(1, "orb", vec![thread(1, ThreadStatus::Idle)]),
-                project(2, "jinn", vec![thread(2, ThreadStatus::Working)]),
+                project(1, "orb", vec![agent(1, AgentStatus::Idle)]),
+                project(2, "jinn", vec![agent(2, AgentStatus::Working)]),
             ],
             filter: Some(ProjectId(1)),
             ..Sessions::default()
@@ -793,18 +793,18 @@ mod tests {
         // When drawing the mode line.
         let buffer = draw(&state);
 
-        // Then the hidden thread still counts.
+        // Then the hidden agent still counts.
         let text = text(&buffer);
         assert!(text.contains("1 running"), "mode line was '{text}'");
     }
 
     #[rstest::rstest]
     fn no_row_position_on_the_right() {
-        // Given seven threads, the hover and the active session on thread 5.
+        // Given seven agents, the hover and the active session on agent 5.
         let state = with_sessions(Sessions {
             cursor: Some(SidebarItem::Session(SessionId(5))),
             active: Some(SessionId(5)),
-            ..sessions((1..=7).map(|id| thread(id, ThreadStatus::Idle)).collect())
+            ..sessions((1..=7).map(|id| agent(id, AgentStatus::Idle)).collect())
         });
 
         // When drawing the mode line.
@@ -907,8 +907,8 @@ mod tests {
     #[case(0)]
     #[case(1)]
     fn tiny_line_draws_without_panicking(#[case] width: u16) {
-        // Given a working thread.
-        let state = with_sessions(sessions(vec![thread(1, ThreadStatus::Working)]));
+        // Given a working agent.
+        let state = with_sessions(sessions(vec![agent(1, AgentStatus::Working)]));
 
         // When drawing the mode line that narrow.
         let buffer = draw_in(&state, width, &TimeZone::UTC);

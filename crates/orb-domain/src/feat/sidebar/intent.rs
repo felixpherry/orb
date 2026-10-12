@@ -303,21 +303,21 @@ fn record_jump(state: &mut AppState, from: Option<SidebarItem>) -> Vec<Command> 
 #[cfg(test)]
 mod tests {
     use crate::command::SessionsCommand;
-    use crate::feat::sessions::state::{SidebarItem, Thread, ThreadStatus};
+    use crate::feat::sessions::state::{Agent, AgentStatus, SidebarItem};
     use crate::feat::sidebar::state::RenameTarget;
-    use crate::ids::{PaneId, SessionId, ThreadId};
+    use crate::ids::{AgentId, PaneId, SessionId};
     use crate::intent_handler::test_support::{
-        jumping, laid_out, left_pane, left_pane_showing_1, on_agent_in_another_tab, on_thread,
-        rename_text, searching, state_with, thread, three_titles, titled,
+        agent, jumping, laid_out, left_pane, left_pane_showing_1, on_agent,
+        on_agent_in_another_tab, rename_text, searching, state_with, three_titles, titled,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
     #[rstest::rstest]
-    fn select_next_on_last_thread_wraps_to_the_first() {
-        // Given threads 2 and 1 in sidebar order, with the last row (thread
+    fn select_next_on_last_agent_wraps_to_the_first() {
+        // Given agents 2 and 1 in sidebar order, with the last row (agent
         // 1's agent row) selected.
         let mut state = state_with(
-            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+            vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
             1,
         );
         state.sessions.cursor = Some(SidebarItem::Agent {
@@ -328,30 +328,30 @@ mod tests {
         // When handling SelectNext.
         IntentHandler::handle(&Intent::SelectNext, &mut state);
 
-        // Then the first thread is selected.
+        // Then the first agent is selected.
         assert_eq!(
-            state.sessions.selected_thread().map(|thread| thread.id),
-            Some(ThreadId(2)),
-            "SelectNext should wrap to the first thread"
+            state.sessions.selected_lead_agent().map(|agent| agent.id),
+            Some(AgentId(2)),
+            "SelectNext should wrap to the first agent"
         );
     }
 
     #[rstest::rstest]
-    fn select_prev_on_first_thread_wraps_to_the_last() {
-        // Given threads 2 and 1 in sidebar order, with the first one selected.
+    fn select_prev_on_first_agent_wraps_to_the_last() {
+        // Given agents 2 and 1 in sidebar order, with the first one selected.
         let mut state = state_with(
-            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+            vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
             2,
         );
 
         // When handling SelectPrev.
         IntentHandler::handle(&Intent::SelectPrev, &mut state);
 
-        // Then the last thread is selected.
+        // Then the last agent is selected.
         assert_eq!(
-            state.sessions.selected_thread().map(|thread| thread.id),
-            Some(ThreadId(1)),
-            "SelectPrev should wrap to the last thread"
+            state.sessions.selected_lead_agent().map(|agent| agent.id),
+            Some(AgentId(1)),
+            "SelectPrev should wrap to the last agent"
         );
     }
 
@@ -451,23 +451,23 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn selecting_another_thread_keeps_it_attached() {
-        // Given thread 1 attached and selected in the sidebar.
+    fn selecting_another_agent_keeps_it_attached() {
+        // Given agent 1 attached and selected in the sidebar.
         let mut state = left_pane(&[1], 1);
 
-        // When handling SelectNext onto another thread.
+        // When handling SelectNext onto another agent.
         IntentHandler::handle(&Intent::SelectNext, &mut state);
 
-        // Then thread 1 is still attached.
+        // Then agent 1 is still attached.
         assert!(
             state.attached.contains(&SessionId(1)),
-            "selecting another thread should keep thread 1 attached"
+            "selecting another agent should keep agent 1 attached"
         );
     }
 
     #[rstest::rstest]
-    fn hiding_the_sidebar_with_the_selected_thread_attached_focuses_the_pane() {
-        // Given thread 1 attached and selected in the sidebar.
+    fn hiding_the_sidebar_with_the_selected_agent_attached_focuses_the_pane() {
+        // Given agent 1 attached and selected in the sidebar.
         let mut state = left_pane(&[1], 1);
 
         // When handling ToggleSidebar.
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(
             state.focus,
             Focus::Pane,
-            "hiding the sidebar should focus the selected thread's pane"
+            "hiding the sidebar should focus the selected agent's pane"
         );
     }
 
@@ -486,16 +486,16 @@ mod tests {
     #[case(Intent::SelectLast, 1)]
     #[case(Intent::SelectHalfPageDown, 2)]
     #[case(Intent::SelectHalfPageUp, 3)]
-    fn sidebar_jumps_show_and_visit_the_thread_they_land_on(
+    fn sidebar_jumps_show_and_visit_the_agent_they_land_on(
         #[case] intent: Intent,
         #[case] expected: i64,
     ) {
-        // Given threads 3, 2 and 1 in sidebar order, with thread 2 selected.
+        // Given agents 3, 2 and 1 in sidebar order, with agent 2 selected.
         let mut state = state_with(
             vec![
-                thread(1, ThreadStatus::Idle),
-                thread(2, ThreadStatus::Idle),
-                thread(3, ThreadStatus::Idle),
+                agent(1, AgentStatus::Idle),
+                agent(2, AgentStatus::Idle),
+                agent(3, AgentStatus::Idle),
             ],
             2,
         );
@@ -503,21 +503,21 @@ mod tests {
         // When handling the jump.
         let commands = IntentHandler::handle(&intent, &mut state);
 
-        // Then the thread it lands on is visited.
+        // Then the agent it lands on is visited.
         assert!(
             commands.contains(&Command::Sessions(SessionsCommand::Visit(SessionId(
                 expected
             )))),
-            "{intent:?} should visit thread {expected}"
+            "{intent:?} should visit agent {expected}"
         );
     }
 
     #[rstest::rstest]
     fn select_next_returns_visit() {
-        // Given threads 2 and 1 in sidebar order, with thread 2's agent row
+        // Given agents 2 and 1 in sidebar order, with agent 2's agent row
         // selected.
         let mut state = state_with(
-            vec![thread(1, ThreadStatus::Idle), thread(2, ThreadStatus::Idle)],
+            vec![agent(1, AgentStatus::Idle), agent(2, AgentStatus::Idle)],
             2,
         );
         state.sessions.cursor = Some(SidebarItem::Agent {
@@ -528,16 +528,16 @@ mod tests {
         // When handling SelectNext.
         let commands = IntentHandler::handle(&Intent::SelectNext, &mut state);
 
-        // Then the newly selected thread is visited.
+        // Then the newly selected agent is visited.
         assert!(
             commands.contains(&Command::Sessions(SessionsCommand::Visit(SessionId(1)))),
-            "SelectNext should visit the thread it lands on"
+            "SelectNext should visit the agent it lands on"
         );
     }
 
     #[rstest::rstest]
     fn rename_opens_the_box_with_the_session_title() {
-        // Given a selected thread titled "Fix the sidebar".
+        // Given a selected agent titled "Fix the sidebar".
         let mut state = titled(Some("Fix the sidebar"));
 
         // When handling Rename.
@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(
             rename_text(&state),
             Some("Fix the sidebar"),
-            "the rename box should start from the thread's title"
+            "the rename box should start from the agent's title"
         );
     }
 
@@ -569,7 +569,7 @@ mod tests {
 
     #[rstest::rstest]
     fn rename_moves_the_keys_to_the_rename_box() {
-        // Given a selected thread with the sidebar focused.
+        // Given a selected agent with the sidebar focused.
         let mut state = titled(Some("Fix the sidebar"));
 
         // When handling Rename.
@@ -581,7 +581,7 @@ mod tests {
 
     #[rstest::rstest]
     fn search_moves_the_keys_to_the_input_box() {
-        // Given the sidebar focused on thread 2.
+        // Given the sidebar focused on agent 2.
         let mut state = three_titles();
 
         // When handling Search.
@@ -600,24 +600,24 @@ mod tests {
 
     #[rstest::rstest]
     fn select_first_records_the_row_left_then_the_first_row() {
-        // Given the cursor on thread 1, the last row.
+        // Given the cursor on agent 1, the last row.
         let mut state = jumping(Focus::Sidebar, &[], &[]);
-        state.sessions.cursor = Some(on_thread(1));
+        state.sessions.cursor = Some(on_agent(1));
 
         // When handling SelectFirst (`gg`).
         IntentHandler::handle(&Intent::SelectFirst, &mut state);
 
-        // Then thread 1, then thread 2, are recorded.
+        // Then agent 1, then agent 2, are recorded.
         assert_eq!(
             state.jumps.entries(),
-            [on_thread(1), on_thread(2)],
+            [on_agent(1), on_agent(2)],
             "gg should record where it left and where it landed"
         );
     }
 
     #[rstest::rstest]
     fn select_first_on_the_first_row_records_nothing() {
-        // Given the cursor on thread 2, the first row.
+        // Given the cursor on agent 2, the first row.
         let mut state = jumping(Focus::Sidebar, &[], &[]);
 
         // When handling SelectFirst (`gg`).
@@ -629,7 +629,7 @@ mod tests {
 
     #[rstest::rstest]
     fn select_last_returns_save_jumps() {
-        // Given the cursor on thread 2, the first row.
+        // Given the cursor on agent 2, the first row.
         let mut state = jumping(Focus::Sidebar, &[], &[]);
 
         // When handling SelectLast (`G`).
@@ -644,43 +644,43 @@ mod tests {
 
     #[rstest::rstest]
     fn select_row_selects_that_row() {
-        // Given threads listed 3, 2, 1 with the cursor on thread 2.
+        // Given agents listed 3, 2, 1 with the cursor on agent 2.
         let mut state = three_titles();
 
-        // When handling SelectRow on thread 3 (a click).
-        IntentHandler::handle(&Intent::SelectRow(on_thread(3)), &mut state);
+        // When handling SelectRow on agent 3 (a click).
+        IntentHandler::handle(&Intent::SelectRow(on_agent(3)), &mut state);
 
-        // Then the cursor is on thread 3.
+        // Then the cursor is on agent 3.
         assert_eq!(
             state.sessions.cursor,
-            Some(on_thread(3)),
+            Some(on_agent(3)),
             "a click should select its row"
         );
     }
 
     #[rstest::rstest]
     fn select_row_on_an_item_not_listed_changes_nothing() {
-        // Given threads listed 3, 2, 1 with the cursor on thread 2.
+        // Given agents listed 3, 2, 1 with the cursor on agent 2.
         let mut state = three_titles();
 
-        // When handling SelectRow on a thread that isn't listed.
-        IntentHandler::handle(&Intent::SelectRow(on_thread(99)), &mut state);
+        // When handling SelectRow on an agent that isn't listed.
+        IntentHandler::handle(&Intent::SelectRow(on_agent(99)), &mut state);
 
-        // Then the cursor stays on thread 2.
+        // Then the cursor stays on agent 2.
         assert_eq!(
             state.sessions.cursor,
-            Some(on_thread(2)),
+            Some(on_agent(2)),
             "a row that isn't listed shouldn't move the cursor"
         );
     }
 
     #[rstest::rstest]
     fn select_row_during_a_search_ends_the_search() {
-        // Given a search for "fix" started from thread 2, on match thread 3.
+        // Given a search for "fix" started from agent 2, on match agent 3.
         let mut state = searching("fix", Some(3));
 
-        // When handling SelectRow on thread 1.
-        IntentHandler::handle(&Intent::SelectRow(on_thread(1)), &mut state);
+        // When handling SelectRow on agent 1.
+        IntentHandler::handle(&Intent::SelectRow(on_agent(1)), &mut state);
 
         // Then the search is gone and the sidebar has the keys.
         assert_eq!(
@@ -692,16 +692,16 @@ mod tests {
 
     #[rstest::rstest]
     fn select_row_during_a_search_records_the_jump_from_where_it_started() {
-        // Given a search for "fix" started from thread 2, on match thread 3.
+        // Given a search for "fix" started from agent 2, on match agent 3.
         let mut state = searching("fix", Some(3));
 
-        // When handling SelectRow on thread 1.
-        IntentHandler::handle(&Intent::SelectRow(on_thread(1)), &mut state);
+        // When handling SelectRow on agent 1.
+        IntentHandler::handle(&Intent::SelectRow(on_agent(1)), &mut state);
 
-        // Then thread 2, then thread 1, are recorded.
+        // Then agent 2, then agent 1, are recorded.
         assert_eq!(
             state.jumps.entries(),
-            [on_thread(2), on_thread(1)],
+            [on_agent(2), on_agent(1)],
             "a click during a search should record where it left and where it landed"
         );
     }
@@ -733,12 +733,12 @@ mod tests {
 
     #[rstest::rstest]
     fn rename_on_an_unnamed_agent_row_starts_from_its_title() {
-        // Given the cursor on the agent row of unnamed pane 1, whose thread is
+        // Given the cursor on the agent row of unnamed pane 1, whose agent is
         // titled "fix login".
         let mut state = state_with(
-            vec![Thread {
+            vec![Agent {
                 title: Some("fix login".into()),
-                ..thread(1, ThreadStatus::Idle)
+                ..agent(1, AgentStatus::Idle)
             }],
             1,
         );
@@ -769,7 +769,7 @@ mod tests {
         // Then the hover moved and session 1 is still shown.
         assert_eq!(
             (
-                state.sessions.cursor == Some(on_thread(1)),
+                state.sessions.cursor == Some(on_agent(1)),
                 state.shown_session()
             ),
             (false, Some(SessionId(1))),
@@ -782,8 +782,8 @@ mod tests {
         // Given session 1 active, hovered in the sidebar.
         let mut state = left_pane_showing_1(&[1, 2], 1);
 
-        // When clicking thread 2's row.
-        IntentHandler::handle(&Intent::SelectRow(on_thread(2)), &mut state);
+        // When clicking agent 2's row.
+        IntentHandler::handle(&Intent::SelectRow(on_agent(2)), &mut state);
 
         // Then session 1 is still active.
         assert_eq!(

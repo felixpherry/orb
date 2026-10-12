@@ -5,13 +5,13 @@
 //! The list box is titled `Search`, with `indexing n/total` beside it while
 //! orb is still indexing transcripts at startup. Its input row holds the
 //! typed text and how many messages are listed, or `200+` when more matched,
-//! over an orange rule. Each row is one matching message: its thread's dim
+//! over an orange rule. Each row is one matching message: its agent's dim
 //! `<project>/` and bright title, then a dim one-line snippet of the
 //! message with the matches lit. When the search index can't be opened, the
 //! list says why instead.
 //!
 //! The preview box is titled with the selected row's label and shows its
-//! thread's status, branch and model, then the exchange the message is in:
+//! agent's status, branch and model, then the exchange the message is in:
 //! the prompt and every reply text block after it, each speaker named once.
 //! The matching message is plain text with its matches lit, scrolled so the
 //! first match sits about a third down; the rest render as Markdown. Until
@@ -44,7 +44,7 @@ use crate::sidebar::{
 
 /// Draws the search picker over `area`: `picker`'s hit rows, with the
 /// indexing progress and any index error from `state`, beside the selected
-/// hit's preview (`state`'s threads give its status line, drawn at `now`).
+/// hit's preview (`state`'s agents give its status line, drawn at `now`).
 /// Returns how many rows the list fits and where the terminal cursor goes in
 /// the input. Records the popup, the list box as the wheel's area and the
 /// list's rows in `hits`.
@@ -163,7 +163,7 @@ fn render_row(item: &PickerItem, area: Rect, buf: &mut Buffer) {
 }
 
 /// The preview box: untitled and empty with no hit selected, else titled
-/// with the hit's label, holding its thread's status line, a blank line, then
+/// with the hit's label, holding its agent's status line, a blank line, then
 /// the hit's exchange scrolled so its first match sits about a third down,
 /// or ` No transcript yet` until the exchange is loaded.
 fn render_preview(
@@ -175,7 +175,7 @@ fn render_preview(
 ) {
     let Some(PickerItem::Hit {
         id,
-        thread,
+        agent,
         label,
         text_lit,
         ..
@@ -187,7 +187,7 @@ fn render_preview(
     let block = boxed(Some(Line::from(span(format!(" {label} "), BLUE))));
     let inner = block.inner(area);
     block.render(area, buf);
-    let found = state.sessions.threads().find(|found| found.id == *thread);
+    let found = state.sessions.all_agents().find(|found| found.id == *agent);
     let info = found.and_then(|found| state.harness_info(&found.harness));
     let status = found.map_or_else(Line::default, |found| {
         meta(found, info, is_attached(&state.attached, found), now)
@@ -312,9 +312,9 @@ mod tests {
     use orb_domain::feat::picker::list::PickerItem;
     use orb_domain::feat::picker::state::PickerState;
     use orb_domain::feat::search::state::SearchProgress;
-    use orb_domain::feat::sessions::state::{Project, ProjectKind, Sessions, Thread, ThreadStatus};
+    use orb_domain::feat::sessions::state::{Agent, AgentStatus, Project, ProjectKind, Sessions};
     use orb_domain::feat::sessions::transcript::Role;
-    use orb_domain::ids::{ProjectId, ThreadId};
+    use orb_domain::ids::{AgentId, ProjectId};
     use orb_domain::{AppState, Focus};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
@@ -326,12 +326,12 @@ mod tests {
     use crate::picker::PickerScroll;
     use crate::sidebar::{BLUE1, COMMENT, DARK5, FG};
 
-    /// A hit in thread 1 labelled `label` (title from `split`) with
+    /// A hit in agent 1 labelled `label` (title from `split`) with
     /// `snippet`, `lit` its lit byte offsets.
     fn hit(label: &str, split: usize, snippet: &str, lit: Vec<usize>) -> PickerItem {
         PickerItem::Hit {
             id: 1,
-            thread: ThreadId(1),
+            agent: AgentId(1),
             label: label.to_owned(),
             split,
             snippet: snippet.to_owned(),
@@ -358,12 +358,12 @@ mod tests {
         UNIX_EPOCH + Duration::from_hours(240)
     }
 
-    /// Hit `id` in thread 1, labelled `orb/fix the bug`, with `snippet` and
+    /// Hit `id` in agent 1, labelled `orb/fix the bug`, with `snippet` and
     /// `text_lit` its lit byte offsets into the whole message.
     fn hit_with(id: i64, text_lit: Vec<usize>, snippet: &str) -> PickerItem {
         PickerItem::Hit {
             id,
-            thread: ThreadId(1),
+            agent: AgentId(1),
             label: "orb/fix the bug".to_owned(),
             split: 4,
             snippet: snippet.to_owned(),
@@ -696,8 +696,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn preview_starts_with_the_threads_branch_and_model() {
-        // Given thread 1 on `fix-parser` with `opus`, and its hit's exchange
+    fn preview_starts_with_the_agents_branch_and_model() {
+        // Given agent 1 on `fix-parser` with `opus`, and its hit's exchange
         // loaded.
         let picker = previewing(1, vec![], prompt_exchange());
         let app = AppState {
@@ -709,14 +709,14 @@ mod tests {
                     created_at: UNIX_EPOCH,
                     removed: false,
                     repo: true,
-                    threads: vec![Thread {
+                    agents: vec![Agent {
                         last_session: None,
                         harness: HarnessId::new("claude"),
-                        id: ThreadId(1),
+                        id: AgentId(1),
                         title: Some("fix the bug".to_owned()),
                         cwd: "/Users/me/dev/orb".into(),
                         transcript: None,
-                        status: ThreadStatus::Idle,
+                        status: AgentStatus::Idle,
                         turn_started_at: None,
                         pane: None,
                         branch: Some("fix-parser".to_owned()),
@@ -735,7 +735,7 @@ mod tests {
         // When drawing it.
         let buf = draw(&picker, &app);
 
-        // Then the preview shows the thread's branch and model.
+        // Then the preview shows the agent's branch and model.
         let screen = screen(&buf);
         assert!(
             screen.contains("fix-parser") && screen.contains("opus"),

@@ -12,10 +12,10 @@ use std::time::SystemTime;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::state::Layouts;
 use crate::feat::picker::list::{BranchRow, Matches, PickerItem, PickerList};
-use crate::feat::sessions::state::{NEW_THREAD, Project, Session, Sessions, Thread, ThreadStatus};
+use crate::feat::sessions::state::{Agent, AgentStatus, NEW_AGENT, Project, Session, Sessions};
 use crate::feat::sessions::transcript::{Exchange, Role};
 use crate::feat::worktrees::state::{User, order, users};
-use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 use crate::{AppState, Focus};
 
 /// Which agents the session picker lists (`a`/`b`/`w`/`i`/`s`).
@@ -37,7 +37,7 @@ impl SessionFilter {
     /// Whether `agent`, running in `session`, is listed under this filter,
     /// judged by its own status. Failed, stopped and gone agents show only
     /// under `All`.
-    fn lists(self, session: &Session, agent: &Thread) -> bool {
+    fn lists(self, session: &Session, agent: &Agent) -> bool {
         let settled = session.settled_at.is_some();
         match self {
             Self::All => !settled,
@@ -46,12 +46,12 @@ impl SessionFilter {
                 !settled
                     && matches!(
                         agent.status,
-                        ThreadStatus::NeedsApproval | ThreadStatus::NeedsInput
+                        AgentStatus::NeedsApproval | AgentStatus::NeedsInput
                     )
             }
-            Self::Working => !settled && agent.status == ThreadStatus::Working,
+            Self::Working => !settled && agent.status == AgentStatus::Working,
             Self::Idle => {
-                !settled && matches!(agent.status, ThreadStatus::Idle | ThreadStatus::Unknown)
+                !settled && matches!(agent.status, AgentStatus::Idle | AgentStatus::Unknown)
             }
         }
     }
@@ -108,7 +108,7 @@ pub enum PickerKind {
     DeleteSession { session: SessionId, folder: bool },
     /// `d` on an agent row: confirm closing its pane.
     ClosePane { pane: PaneId, session: SessionId },
-    /// `<C-g> Space`: pick a thread to jump into, listing the threads
+    /// `<C-g> Space`: pick an agent to jump into, listing the agents
     /// `filter` lets through.
     Sessions { filter: SessionFilter },
     /// `<C-g> W`: orb's worktrees, to look over and delete.
@@ -116,16 +116,16 @@ pub enum PickerKind {
     /// `d` in the worktree picker: confirm force-removing the worktree at
     /// `path`. `dirty` is whether it has uncommitted changes.
     DeleteWorktree { path: PathBuf, dirty: bool },
-    /// `<C-g> /`: messages across every thread's transcripts that match the typed
+    /// `<C-g> /`: messages across every agent's transcripts that match the typed
     /// text. `overflow` is whether more matched than are listed.
     Search { overflow: bool },
 }
 
-/// What the session picker's preview shows for a thread: its transcript's
+/// What the session picker's preview shows for an agent: its transcript's
 /// last exchanges, and the transcript's length when they were read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPreview {
-    pub thread: ThreadId,
+    pub agent: AgentId,
     pub len: u64,
     pub exchanges: Vec<Exchange>,
 }
@@ -533,7 +533,7 @@ impl PickerState {
 
     /// Shows `refs`, listed in `cwd`, filtered by the typed text. Ignored
     /// unless this is `cwd`'s branch or base picker. A branch picker selects
-    /// the wanted branch when nothing is typed and, once the thread has had a
+    /// the wanted branch when nothing is typed and, once the agent has had a
     /// prompt, disables a branch checked out in another worktree. A base
     /// picker lists the default branch first and disables none.
     pub fn show_branches(&mut self, cwd: &Path, refs: Vec<GitRef>) {
@@ -601,12 +601,12 @@ impl PickerState {
         self.list.set_items(items, &pattern);
     }
 
-    /// The selected row's thread: a session row's agent's, or a
+    /// The selected row's agent: a session row's agent's, or a
     /// search hit's. `None` for any other row.
-    pub fn selected_thread(&self) -> Option<ThreadId> {
+    pub fn selected_agent_id(&self) -> Option<AgentId> {
         match self.list.selected() {
-            Some(&(PickerItem::Session { thread, .. } | PickerItem::Hit { thread, .. })) => {
-                Some(thread)
+            Some(&(PickerItem::Session { agent, .. } | PickerItem::Hit { agent, .. })) => {
+                Some(agent)
             }
             _ => None,
         }
@@ -622,14 +622,14 @@ impl PickerState {
     }
 
     /// The session the selected row opens: a session row's, or the one a
-    /// hit's thread runs or last ran in. `None` for any other row.
+    /// hit's agent runs or last ran in. `None` for any other row.
     pub fn picked_session(&self, sessions: &Sessions) -> Option<SessionId> {
         match *self.list.selected()? {
             PickerItem::Session { id, .. } => Some(id),
-            PickerItem::Hit { thread, .. } => sessions
-                .threads()
-                .find(|shown| shown.id == thread)
-                .and_then(Thread::home),
+            PickerItem::Hit { agent, .. } => sessions
+                .all_agents()
+                .find(|shown| shown.id == agent)
+                .and_then(Agent::home),
             _ => None,
         }
     }
@@ -648,25 +648,25 @@ impl PickerState {
         self.list.remove_selected();
     }
 
-    /// Keeps `exchanges`, read from `thread`'s transcript at `len` bytes, as
-    /// the preview. Dropped unless `thread` is still the selected row, so a
+    /// Keeps `exchanges`, read from `agent`'s transcript at `len` bytes, as
+    /// the preview. Dropped unless `agent` is still the selected row, so a
     /// late read for an old selection never shows.
-    pub fn show_preview(&mut self, thread: ThreadId, len: u64, exchanges: Vec<Exchange>) {
-        if self.selected_thread() == Some(thread) {
+    pub fn show_preview(&mut self, agent: AgentId, len: u64, exchanges: Vec<Exchange>) {
+        if self.selected_agent_id() == Some(agent) {
             self.preview = Some(SessionPreview {
-                thread,
+                agent,
                 len,
                 exchanges,
             });
         }
     }
 
-    /// The selected thread's preview; `None` until it's read, or with no
-    /// thread selected.
+    /// The selected agent's preview; `None` until it's read, or with no
+    /// agent selected.
     pub fn preview(&self) -> Option<&SessionPreview> {
         self.preview
             .as_ref()
-            .filter(|preview| Some(preview.thread) == self.selected_thread())
+            .filter(|preview| Some(preview.agent) == self.selected_agent_id())
     }
 
     /// Forgets both the session and the search picker's preview.
@@ -725,11 +725,12 @@ impl PickerState {
         self.list.set_items(items, "");
     }
 
-    /// Whether the selected thread's transcript, now `len` bytes long, needs
+    /// Whether the selected agent's transcript, now `len` bytes long, needs
     /// reading for the preview: nothing was read for it yet, or it was read
     /// at another length.
     pub fn wants_preview(&self, len: u64) -> bool {
-        self.selected_thread().is_some() && self.preview().is_none_or(|preview| preview.len != len)
+        self.selected_agent_id().is_some()
+            && self.preview().is_none_or(|preview| preview.len != len)
     }
 
     /// Selects the shown row holding `item`; stays put when none does.
@@ -971,7 +972,7 @@ pub fn expand(dir_text: &str, home: &Path) -> PathBuf {
 
 /// The session picker's rows: one per agent running in a pane of a session
 /// inside the project filter (removed projects too), newest chat first by
-/// the agent's latest chat, ties to the higher thread id. Sessions being
+/// the agent's latest chat, ties to the higher agent id. Sessions being
 /// deleted, sessions with no agent panes, and agents `filter` leaves out are
 /// left out.
 pub fn session_items(
@@ -1001,7 +1002,7 @@ pub fn session_items(
                         agent.id.0,
                         PickerItem::Session {
                             id: session.id,
-                            thread: agent.id,
+                            agent: agent.id,
                             pane,
                             label: format!("{prefix}/{}", layouts.agent_name(pane, Some(agent))),
                             split,
@@ -1024,13 +1025,13 @@ pub fn session_label(sessions: &Sessions, project: &Project, session: &Session) 
     )
 }
 
-/// A search hit's label in `thread`: its session's label while that session
-/// exists, else `<project>/<thread title>`.
-pub fn hit_label(sessions: &Sessions, project: &Project, thread: &Thread) -> (String, usize) {
-    match thread.home().and_then(|id| sessions.session(id)) {
+/// A search hit's label in `agent`: its session's label while that session
+/// exists, else `<project>/<agent title>`.
+pub fn hit_label(sessions: &Sessions, project: &Project, agent: &Agent) -> (String, usize) {
+    match agent.home().and_then(|id| sessions.session(id)) {
         Some(session) => session_label(sessions, project, session),
         None => {
-            let title = thread.title.as_deref().unwrap_or(NEW_THREAD);
+            let title = agent.title.as_deref().unwrap_or(NEW_AGENT);
             (
                 format!("{}/{title}", project.title),
                 project.title.len() + 1,

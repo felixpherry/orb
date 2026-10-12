@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use super::state::ThreadStatus;
+use super::state::AgentStatus;
 use crate::feat::harness::RunningAgent;
 use crate::feat::integration::pane_file::AgentEvent;
 use crate::feat::zmx::zmx_service::ZmxEntry;
@@ -25,8 +25,8 @@ pub struct PaneReport {
 pub fn match_records(
     records: &[RunningAgent],
     roots: &HashMap<u32, PaneId>,
-) -> HashMap<PaneId, ThreadStatus> {
-    let mut nearest: HashMap<PaneId, (usize, ThreadStatus)> = HashMap::new();
+) -> HashMap<PaneId, AgentStatus> {
+    let mut nearest: HashMap<PaneId, (usize, AgentStatus)> = HashMap::new();
     for record in records {
         let found = record
             .ancestry
@@ -54,13 +54,13 @@ pub fn pane_status(
     running: Option<&ZmxEntry>,
     reads_reports: bool,
     report: Option<PaneReport>,
-    matched: Option<ThreadStatus>,
-) -> ThreadStatus {
+    matched: Option<AgentStatus>,
+) -> AgentStatus {
     let Some(session) = running else {
-        return ThreadStatus::Stopped;
+        return AgentStatus::Stopped;
     };
     if !reads_reports {
-        return matched.unwrap_or(ThreadStatus::Stopped);
+        return matched.unwrap_or(AgentStatus::Stopped);
     }
     // ponytail: a pi that crashes inside a live session keeps its last report
     // until the pane reports again; a process check would catch it.
@@ -70,7 +70,7 @@ pub fn pane_status(
                 .created
                 .is_none_or(|created| report.at >= created.saturating_mul(1000))
         })
-        .map_or(ThreadStatus::Stopped, |report| report.event.status())
+        .map_or(AgentStatus::Stopped, |report| report.event.status())
 }
 
 #[cfg(test)]
@@ -80,12 +80,12 @@ mod tests {
     use super::{PaneReport, match_records, pane_status};
     use crate::feat::harness::RunningAgent;
     use crate::feat::integration::pane_file::AgentEvent;
-    use crate::feat::sessions::state::ThreadStatus;
+    use crate::feat::sessions::state::AgentStatus;
     use crate::feat::zmx::zmx_service::ZmxEntry;
     use crate::ids::PaneId;
 
     /// A Claude the user started, whose process and parents are `ancestry`.
-    fn interactive(ancestry: &[u32], status: ThreadStatus) -> RunningAgent {
+    fn interactive(ancestry: &[u32], status: AgentStatus) -> RunningAgent {
         RunningAgent {
             status,
             ancestry: ancestry.to_vec(),
@@ -109,7 +109,7 @@ mod tests {
     #[rstest::rstest]
     fn record_under_a_panes_shell_matches_that_pane() {
         // Given a Claude under pane 7's shell.
-        let records = [interactive(&[300, 100, 1], ThreadStatus::Working)];
+        let records = [interactive(&[300, 100, 1], AgentStatus::Working)];
 
         // When matching records to panes.
         let matched = match_records(&records, &roots());
@@ -117,7 +117,7 @@ mod tests {
         // Then pane 7 takes its status.
         assert_eq!(
             matched,
-            HashMap::from([(PaneId(7), ThreadStatus::Working)]),
+            HashMap::from([(PaneId(7), AgentStatus::Working)]),
             "the record should belong to pane 7"
         );
     }
@@ -125,7 +125,7 @@ mod tests {
     #[rstest::rstest]
     fn record_that_is_the_zmx_program_matches_its_pane() {
         // Given a Claude that is pane 8's zmx program itself.
-        let records = [interactive(&[200, 50, 1], ThreadStatus::Idle)];
+        let records = [interactive(&[200, 50, 1], AgentStatus::Idle)];
 
         // When matching records to panes.
         let matched = match_records(&records, &roots());
@@ -133,7 +133,7 @@ mod tests {
         // Then pane 8 takes its status.
         assert_eq!(
             matched,
-            HashMap::from([(PaneId(8), ThreadStatus::Idle)]),
+            HashMap::from([(PaneId(8), AgentStatus::Idle)]),
             "depth 0 should match"
         );
     }
@@ -141,7 +141,7 @@ mod tests {
     #[rstest::rstest]
     fn record_outside_every_pane_matches_nothing() {
         // Given a Claude in some other terminal.
-        let records = [interactive(&[400, 1], ThreadStatus::Working)];
+        let records = [interactive(&[400, 1], AgentStatus::Working)];
 
         // When matching records to panes.
         let matched = match_records(&records, &roots());
@@ -154,8 +154,8 @@ mod tests {
     fn nearest_record_in_a_pane_wins() {
         // Given a Claude in pane 7 and another started from its `!` shell.
         let records = [
-            interactive(&[500, 400, 300, 100], ThreadStatus::Idle),
-            interactive(&[300, 100], ThreadStatus::NeedsApproval),
+            interactive(&[500, 400, 300, 100], AgentStatus::Idle),
+            interactive(&[300, 100], AgentStatus::NeedsApproval),
         ];
 
         // When matching records to panes.
@@ -164,7 +164,7 @@ mod tests {
         // Then the outer Claude, fewest parents from the pane, gives its status.
         assert_eq!(
             matched,
-            HashMap::from([(PaneId(7), ThreadStatus::NeedsApproval)]),
+            HashMap::from([(PaneId(7), AgentStatus::NeedsApproval)]),
             "the nearest record should win"
         );
     }
@@ -178,27 +178,22 @@ mod tests {
         };
 
         // When reading its status.
-        let status = pane_status(None, true, Some(report), Some(ThreadStatus::Working));
+        let status = pane_status(None, true, Some(report), Some(AgentStatus::Working));
 
         // Then it's Stopped.
-        assert_eq!(status, ThreadStatus::Stopped, "no session, no agent");
+        assert_eq!(status, AgentStatus::Stopped, "no session, no agent");
     }
 
     #[rstest::rstest]
     fn claude_pane_takes_its_matched_status() {
         // Given a running pane with a matched record.
         // When reading its status.
-        let status = pane_status(
-            Some(&running()),
-            false,
-            None,
-            Some(ThreadStatus::NeedsInput),
-        );
+        let status = pane_status(Some(&running()), false, None, Some(AgentStatus::NeedsInput));
 
         // Then it's the record's.
         assert_eq!(
             status,
-            ThreadStatus::NeedsInput,
+            AgentStatus::NeedsInput,
             "the matched record gives the status"
         );
     }
@@ -210,15 +205,15 @@ mod tests {
         let status = pane_status(Some(&running()), false, None, None);
 
         // Then it's Stopped.
-        assert_eq!(status, ThreadStatus::Stopped, "no Claude runs in the pane");
+        assert_eq!(status, AgentStatus::Stopped, "no Claude runs in the pane");
     }
 
     #[rstest::rstest]
-    #[case(AgentEvent::Working, ThreadStatus::Working)]
-    #[case(AgentEvent::Idle, ThreadStatus::Idle)]
-    #[case(AgentEvent::Start, ThreadStatus::Idle)]
-    #[case(AgentEvent::End, ThreadStatus::Stopped)]
-    fn pi_pane_reads_its_latest_report(#[case] event: AgentEvent, #[case] expected: ThreadStatus) {
+    #[case(AgentEvent::Working, AgentStatus::Working)]
+    #[case(AgentEvent::Idle, AgentStatus::Idle)]
+    #[case(AgentEvent::Start, AgentStatus::Idle)]
+    #[case(AgentEvent::End, AgentStatus::Stopped)]
+    fn pi_pane_reads_its_latest_report(#[case] event: AgentEvent, #[case] expected: AgentStatus) {
         // Given a running pane whose pi reported after the session was made.
         let report = PaneReport { event, at: 20_000 };
 
@@ -243,7 +238,7 @@ mod tests {
         // Then it's Stopped.
         assert_eq!(
             status,
-            ThreadStatus::Stopped,
+            AgentStatus::Stopped,
             "a report from before the session is stale"
         );
     }
@@ -255,6 +250,6 @@ mod tests {
         let status = pane_status(Some(&running()), true, None, None);
 
         // Then it's Stopped.
-        assert_eq!(status, ThreadStatus::Stopped, "no report, no pi");
+        assert_eq!(status, AgentStatus::Stopped, "no report, no pi");
     }
 }

@@ -13,7 +13,7 @@ use crate::{AppState, Focus};
 pub enum PaneActionError {
     /// The keys aren't in a pane.
     NotInPane,
-    /// The selected thread has no layout.
+    /// The selected agent has no layout.
     NoLayout,
 }
 
@@ -95,7 +95,7 @@ pub fn validate_tiled_action(state: &AppState) -> Result<(), TiledActionError> {
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum TabActionError {
-    /// The selected thread has no layout.
+    /// The selected agent has no layout.
     NoLayout,
 }
 
@@ -115,7 +115,7 @@ pub fn validate_tab_action(state: &AppState) -> Result<(), TabActionError> {
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(debug)]
 pub enum FocusPaneError {
-    /// The selected thread has no layout.
+    /// The selected agent has no layout.
     NoLayout,
     /// The pane isn't in the shown tab or a drawn float.
     NotShown,
@@ -149,20 +149,20 @@ mod tests {
     use crate::feat::layout::state::{SessionLayout, test_entry};
     use crate::feat::layout::tree::Split;
     use crate::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus, sessions_for,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, sessions_for,
     };
-    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
     use crate::{AppState, Focus};
 
-    fn thread(id: i64) -> Thread {
-        Thread {
+    fn agent(id: i64) -> Agent {
+        Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: None,
             cwd: "/tmp".into(),
             transcript: None,
-            status: ThreadStatus::Idle,
+            status: AgentStatus::Idle,
             turn_started_at: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
@@ -176,7 +176,7 @@ mod tests {
         }
     }
 
-    /// Thread 1 selected, running in pane 1 of session 1, with the keys at
+    /// Agent 1 selected, running in pane 1 of session 1, with the keys at
     /// `focus`; attached and active, so its session is shown, when `open`.
     fn selected(focus: Focus, open: bool) -> AppState {
         let mut state = AppState {
@@ -188,7 +188,7 @@ mod tests {
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
                     repo: true,
-                    threads: vec![thread(1)],
+                    agents: vec![agent(1)],
                     kind: ProjectKind::Normal,
                 }],
                 cursor: Some(SidebarItem::Session(SessionId(1))),
@@ -332,7 +332,7 @@ mod tests {
         let mut state = selected(Focus::Sidebar, true);
         state.layouts.new_tab(SessionId(1), test_entry(2));
 
-        // When validating a click on the thread's own pane in the first tab.
+        // When validating a click on the agent's own pane in the first tab.
         let result = validate_focus_pane(&state, PaneId(1));
 
         // Then it is refused.

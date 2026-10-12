@@ -1,6 +1,6 @@
 //! The transcript search index, kept in `search.sqlite`.
 //!
-//! It holds every thread's prompts and the text replies, read from the
+//! It holds every agent's prompts and the text replies, read from the
 //! transcripts, and finds the ones containing case-insensitive substrings of 3
 //! or more characters. It is a disposable copy of the transcripts: when the
 //! file is missing, can't be opened, or was written by another schema, it is
@@ -17,15 +17,15 @@ use unicode_segmentation::UnicodeSegmentation;
 use wherror::Error;
 
 use crate::feat::sessions::transcript::{MessageRead, Role};
-use crate::ids::ThreadId;
+use crate::ids::AgentId;
 
 #[derive(Debug, Error)]
 #[error(debug)]
 pub struct SearchIndexError;
 
-/// A thread as the index knows it: its id and its `created_at` in unix ms.
-/// The pair tells a thread apart from a later one that reuses its id.
-pub type ThreadKey = (ThreadId, i64);
+/// An agent as the index knows it: its id and its `created_at` in unix ms.
+/// The pair tells an agent apart from a later one that reuses its id.
+pub type AgentKey = (AgentId, i64);
 
 /// How many rows a query returns at most.
 pub const MAX_HITS: usize = 200;
@@ -74,8 +74,8 @@ CREATE TABLE transcripts (
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
     pub id: i64,
-    pub thread: ThreadId,
-    /// The thread's `created_at` in unix ms; with `thread` it names the thread.
+    pub agent: AgentId,
+    /// The agent's `created_at` in unix ms; with `agent` it names the agent.
     pub born: i64,
     pub path: PathBuf,
     pub prompt_offset: u64,
@@ -143,7 +143,7 @@ impl SearchIndex {
     }
 
     /// Adds the messages written to the transcript at `path` since it was
-    /// last indexed, under the thread `key`, as `read` (the thread's
+    /// last indexed, under the agent `key`, as `read` (the agent's
     /// harness's reader) reads them from an offset and a prompt offset. A
     /// transcript shorter than what was read before was replaced, so its old
     /// messages are dropped and it is read from the start.
@@ -156,7 +156,7 @@ impl SearchIndex {
     /// or the index can't be read or written.
     pub fn index_transcript<F>(
         &mut self,
-        key: ThreadKey,
+        key: AgentKey,
         path: &Path,
         read: F,
     ) -> Result<bool, Report<SearchIndexError>>
@@ -249,15 +249,15 @@ impl SearchIndex {
             .attach_with(|| format!("failed to read the offset of {text_path}"))
     }
 
-    /// Drops every message and transcript of a thread not in `live`. A thread
+    /// Drops every message and transcript of an agent not in `live`. An agent
     /// whose id was reused has a newer `created_at`, so its old rows go too.
     ///
     /// # Errors
     ///
     /// Returns an error if the index can't be read or written.
-    pub fn retain_threads(
+    pub fn retain_agents(
         &mut self,
-        live: &HashSet<ThreadKey>,
+        live: &HashSet<AgentKey>,
     ) -> Result<(), Report<SearchIndexError>> {
         let gone: Vec<(i64, i64)> = {
             let mut select = self
@@ -266,15 +266,15 @@ impl SearchIndex {
                     "SELECT thread, born FROM messages UNION SELECT thread, born FROM transcripts",
                 )
                 .change_context(SearchIndexError)
-                .attach("failed to prepare the thread list")?;
+                .attach("failed to prepare the agent list")?;
             let indexed = select
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
                 .and_then(Iterator::collect::<rusqlite::Result<Vec<(i64, i64)>>>)
                 .change_context(SearchIndexError)
-                .attach("failed to list the indexed threads")?;
+                .attach("failed to list the indexed agents")?;
             indexed
                 .into_iter()
-                .filter(|&(thread, born)| !live.contains(&(ThreadId(thread), born)))
+                .filter(|&(agent, born)| !live.contains(&(AgentId(agent), born)))
                 .collect()
         };
         if gone.is_empty() {
@@ -285,23 +285,23 @@ impl SearchIndex {
             .transaction()
             .change_context(SearchIndexError)
             .attach("failed to start the retain transaction")?;
-        for (thread, born) in gone {
+        for (agent, born) in gone {
             tx.execute(
                 "DELETE FROM messages WHERE thread = ?1 AND born = ?2",
-                params![thread, born],
+                params![agent, born],
             )
             .and_then(|_| {
                 tx.execute(
                     "DELETE FROM transcripts WHERE thread = ?1 AND born = ?2",
-                    params![thread, born],
+                    params![agent, born],
                 )
             })
             .change_context(SearchIndexError)
-            .attach_with(|| format!("failed to drop thread {thread} born {born}"))?;
+            .attach_with(|| format!("failed to drop agent {agent} born {born}"))?;
         }
         tx.commit()
             .change_context(SearchIndexError)
-            .attach("failed to commit the dropped threads")
+            .attach("failed to commit the dropped agents")
     }
 
     /// The messages containing every term of `text` that is 3 or more
@@ -334,7 +334,7 @@ impl SearchIndex {
                     let (text, lit) = unmark(&row.get::<_, String>(7)?);
                     Ok(Hit {
                         id: row.get(0)?,
-                        thread: ThreadId(row.get(1)?),
+                        agent: AgentId(row.get(1)?),
                         born: row.get(2)?,
                         path: PathBuf::from(row.get::<_, String>(3)?),
                         prompt_offset: row.get(4)?,
@@ -539,12 +539,12 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{SCHEMA, SearchIndex, SearchIndexError, ThreadKey, snippet};
+    use super::{AgentKey, SCHEMA, SearchIndex, SearchIndexError, snippet};
     use crate::feat::harness::claude::transcript::read_messages;
     use crate::feat::sessions::transcript::Role;
-    use crate::ids::ThreadId;
+    use crate::ids::AgentId;
 
-    const KEY: ThreadKey = (ThreadId(1), 1_000);
+    const KEY: AgentKey = (AgentId(1), 1_000);
 
     /// The `timestamp` of a line written `second` seconds into 2026.
     fn stamp(second: u32) -> String {
@@ -624,7 +624,7 @@ mod tests {
 
         // When opening the index there and indexing the transcript.
         let indexed = SearchIndex::open(&path)?.index_transcript(
-            (ThreadId(1), 1_000),
+            (AgentId(1), 1_000),
             &transcript,
             read_messages,
         )?;
@@ -843,38 +843,38 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn retain_threads_drops_a_missing_threads_rows() -> Result<(), Report<SearchIndexError>> {
-        // Given two threads' transcripts indexed.
+    fn retain_agents_drops_a_missing_agents_rows() -> Result<(), Report<SearchIndexError>> {
+        // Given two agents' transcripts indexed.
         let dir = tempdir().change_context(SearchIndexError)?;
         let kept = write(dir.path(), "kept.jsonl", &[prompt("Fix the parser", 1)])?;
         let gone = write(dir.path(), "gone.jsonl", &[prompt("Fix the lexer", 2)])?;
         let mut index = SearchIndex::open_in_memory()?;
         index.index_transcript(KEY, &kept, read_messages)?;
-        index.index_transcript((ThreadId(2), 2_000), &gone, read_messages)?;
+        index.index_transcript((AgentId(2), 2_000), &gone, read_messages)?;
 
-        // When retaining only the first thread.
-        index.retain_threads(&HashSet::from([KEY]))?;
+        // When retaining only the first agent.
+        index.retain_agents(&HashSet::from([KEY]))?;
 
-        // Then the second thread's messages are gone.
+        // Then the second agent's messages are gone.
         assert!(
             found(&index, "lexer")?.is_empty(),
-            "a thread missing from the live set should lose its rows"
+            "an agent missing from the live set should lose its rows"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn retain_threads_drops_rows_of_a_reused_thread_id() -> Result<(), Report<SearchIndexError>> {
-        // Given a thread's transcript indexed.
+    fn retain_agents_drops_rows_of_a_reused_agent_id() -> Result<(), Report<SearchIndexError>> {
+        // Given an agent's transcript indexed.
         let mut index = indexed(&[prompt("Fix the parser", 1)])?;
 
-        // When retaining a thread with the same id but a newer created_at.
-        index.retain_threads(&HashSet::from([(KEY.0, KEY.1 + 1)]))?;
+        // When retaining an agent with the same id but a newer created_at.
+        index.retain_agents(&HashSet::from([(KEY.0, KEY.1 + 1)]))?;
 
-        // Then the old thread's messages are gone.
+        // Then the old agent's messages are gone.
         assert!(
             found(&index, "parser")?.is_empty(),
-            "a reused thread id should not keep the old thread's rows"
+            "a reused agent id should not keep the old agent's rows"
         );
         Ok(())
     }
@@ -984,7 +984,7 @@ mod tests {
         let older = write(dir.path(), "older.jsonl", &[prompt("older parser", 1)])?;
         let mut index = SearchIndex::open_in_memory()?;
         index.index_transcript(KEY, &newer, read_messages)?;
-        index.index_transcript((ThreadId(2), 2_000), &older, read_messages)?;
+        index.index_transcript((AgentId(2), 2_000), &older, read_messages)?;
 
         // When querying both.
         let texts = found(&index, "parser")?;

@@ -31,7 +31,7 @@ mod tests {
 
     #[rstest::rstest]
     fn attach_rejected_without_selection() {
-        // Given no selected thread.
+        // Given no selected agent.
         let state = AppState::default();
 
         // When validating attach.
@@ -41,7 +41,7 @@ mod tests {
         assert_eq!(
             result,
             Err(AttachError::NoSelection),
-            "attach needs a selected thread"
+            "attach needs a selected agent"
         );
     }
 }

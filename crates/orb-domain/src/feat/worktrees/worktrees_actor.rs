@@ -129,11 +129,11 @@ impl WorktreesActor {
 
     /// Removes, without forcing, every worktree whose verdict is to prune
     /// now, keeping its branch. The verdict is worked out from the state read
-    /// right before each removal, so a thread attached meanwhile saves it.
+    /// right before each removal, so an agent attached meanwhile saves it.
     /// Prunes nothing while no projects are loaded, or after some saved
     /// layouts couldn't be read at start, since then a worktree in use could
     /// read as unused, nor while a session is starting, since
-    /// a worktree made for it has no thread until the start ends. Returns how
+    /// a worktree made for it has no agent until the start ends. Returns how
     /// many were removed.
     fn prune(&self) -> usize {
         {
@@ -553,7 +553,7 @@ mod tests {
         Ok(path)
     }
 
-    /// One project with no threads.
+    /// One project with no agents.
     fn one_project() -> AppState {
         AppState {
             sessions: Sessions {
@@ -562,7 +562,7 @@ mod tests {
                     title: "orb".to_owned(),
                     root: PathBuf::from(REPO),
                     created_at: UNIX_EPOCH,
-                    threads: Vec::new(),
+                    agents: Vec::new(),
                     repo: true,
                     removed: false,
                     kind: ProjectKind::Normal,
@@ -795,7 +795,7 @@ mod tests {
             !git.calls()
                 .iter()
                 .any(|call| matches!(call, Call::Remove { .. })),
-            "a worktree made for a starting session has no thread yet, so none is pruned"
+            "a worktree made for a starting session has no agent yet, so none is pruned"
         );
         Ok(())
     }

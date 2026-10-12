@@ -30,14 +30,14 @@ fn below_100(n: i64) -> i64 {
     n
 }
 
-/// Layouts holding every pane `projects`' threads run in: one tab per pane,
-/// in its thread's session.
+/// Layouts holding every pane `projects`' agents run in: one tab per pane,
+/// in its agent's session.
 pub(crate) fn layouts_for(projects: &[Project]) -> Layouts {
     let mut layouts = Layouts::default();
     for launch in projects
         .iter()
-        .flat_map(|project| &project.threads)
-        .filter_map(|thread| thread.pane.as_ref())
+        .flat_map(|project| &project.agents)
+        .filter_map(|agent| agent.pane.as_ref())
     {
         let entry = PaneEntry {
             id: launch.pane,
@@ -232,14 +232,14 @@ impl Git for NoGit {
     }
 }
 
-/// The sessions `projects`' threads run in, one per pane session, as the
-/// sessions actor would show them: each in its first thread's directory,
-/// neither pinned nor settled, active since the thread's creation.
+/// The sessions `projects`' agents run in, one per pane session, as the
+/// sessions actor would show them: each in its first agent's directory,
+/// neither pinned nor settled, active since the agent's creation.
 pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
     let mut shown: Vec<Session> = Vec::new();
     for project in projects {
-        for thread in &project.threads {
-            let Some(id) = thread.session() else {
+        for agent in &project.agents {
+            let Some(id) = agent.session() else {
                 continue;
             };
             if shown.iter().any(|session| session.id == id) {
@@ -254,14 +254,14 @@ pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
                     ProjectKind::Learn => SessionKind::Learn,
                     ProjectKind::Incognito => SessionKind::Incognito,
                 },
-                dir: thread.cwd.clone(),
+                dir: agent.cwd.clone(),
                 name: None,
                 branch: None,
-                created_at: thread.created_at,
+                created_at: agent.created_at,
                 pinned_at: None,
                 settled_at: None,
-                active_since: thread.created_at,
-                last_activity_at: thread.last_activity_at,
+                active_since: agent.created_at,
+                last_activity_at: agent.last_activity_at,
             });
         }
     }

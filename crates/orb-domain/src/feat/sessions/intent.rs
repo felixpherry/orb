@@ -333,13 +333,13 @@ mod tests {
     use crate::command::{SessionsCommand, Workspace};
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerKind;
-    use crate::feat::sessions::state::{FolderKind, SidebarItem, ThreadStatus};
+    use crate::feat::sessions::state::{AgentStatus, FolderKind, SidebarItem};
     use crate::feat::sessions::validator::SETTLE_IN_PROGRESS;
     use crate::feat::sidebar::state::RenameTarget;
     use crate::ids::{PaneId, ProjectId, SessionId};
     use crate::intent_handler::test_support::{
-        at, incognito, on_agent_in_another_tab, rename_text, settle, state_at, state_with, stopped,
-        thread,
+        agent, at, incognito, on_agent_in_another_tab, rename_text, settle, state_at, state_with,
+        stopped,
     };
     use crate::{AppState, Command, Focus, Intent, IntentHandler};
 
@@ -359,8 +359,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn h_on_a_settled_thread_closes_the_shelf_and_selects_it() {
-        // Given the shelf open and the cursor on settled thread 1.
+    fn h_on_a_settled_agent_closes_the_shelf_and_selects_it() {
+        // Given the shelf open and the cursor on settled agent 1.
         let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
         state.sessions.shelf_open = true;
 
@@ -377,9 +377,9 @@ mod tests {
 
     #[rstest::rstest]
     fn h_on_an_active_card_keeps_the_shelf_open() {
-        // Given the shelf open and the cursor on active thread 1.
+        // Given the shelf open and the cursor on active agent 1.
         let mut state = settle(
-            state_with(vec![thread(1, ThreadStatus::Idle), stopped(2)], 1),
+            state_with(vec![agent(1, AgentStatus::Idle), stopped(2)], 1),
             &[2],
         );
         state.sessions.shelf_open = true;
@@ -396,8 +396,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn settle_on_a_settled_thread_returns_unsettle() {
-        // Given a selected settled thread.
+    fn settle_on_a_settled_agent_returns_unsettle() {
+        // Given a selected settled agent.
         let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
 
         // When handling ToggleSettle.
@@ -409,13 +409,13 @@ mod tests {
             vec![Command::Sessions(SessionsCommand::UnsettleSession(
                 SessionId(1)
             ))],
-            "ToggleSettle on a settled thread should return Unsettle"
+            "ToggleSettle on a settled agent should return Unsettle"
         );
     }
 
     #[rstest::rstest]
-    fn settle_on_a_settled_thread_keeps_the_cursor() {
-        // Given a selected settled thread.
+    fn settle_on_a_settled_agent_keeps_the_cursor() {
+        // Given a selected settled agent.
         let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
 
         // When handling ToggleSettle.
@@ -425,14 +425,14 @@ mod tests {
         assert_eq!(
             state.sessions.cursor,
             Some(SidebarItem::Session(SessionId(1))),
-            "un-settle should keep the cursor on the thread"
+            "un-settle should keep the cursor on the agent"
         );
     }
 
     #[rstest::rstest]
     fn toggle_pin_on_a_session_returns_pin_session() {
         // Given a selected unpinned session.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
         // When handling TogglePin.
         let commands = IntentHandler::handle(&Intent::TogglePin, &mut state);
@@ -446,9 +446,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn toggle_pin_on_a_pinned_thread_returns_unpin() {
-        // Given a selected pinned thread.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+    fn toggle_pin_on_a_pinned_agent_returns_unpin() {
+        // Given a selected pinned agent.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
         if let Some(session) = state.sessions.sessions.get_mut(0) {
             session.pinned_at = Some(at(1));
         }
@@ -462,7 +462,7 @@ mod tests {
             vec![Command::Sessions(SessionsCommand::UnpinSession(SessionId(
                 1
             )))],
-            "TogglePin on a pinned thread should return Unpin"
+            "TogglePin on a pinned agent should return Unpin"
         );
     }
 
@@ -476,8 +476,8 @@ mod tests {
 
     #[rstest::rstest]
     fn toggle_settle_on_a_session_opens_its_confirm() {
-        // Given a selected idle thread.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        // Given a selected idle agent.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
         // When handling ToggleSettle.
         IntentHandler::handle(&Intent::ToggleSettle, &mut state);
@@ -491,13 +491,13 @@ mod tests {
                 },
                 Some(&PickerItem::Confirm(false))
             )),
-            "s should ask to settle the thread"
+            "s should ask to settle the agent"
         );
     }
 
     #[rstest::rstest]
-    fn settle_on_a_settled_thread_opens_no_confirm() {
-        // Given a selected settled thread.
+    fn settle_on_a_settled_agent_opens_no_confirm() {
+        // Given a selected settled agent.
         let mut state = settle(state_with(vec![stopped(1)], 1), &[1]);
 
         // When handling ToggleSettle.
@@ -509,8 +509,8 @@ mod tests {
 
     #[rstest::rstest]
     fn settle_is_refused_while_an_agent_works() {
-        // Given a selected thread Claude is working in.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Working)], 1);
+        // Given a selected agent Claude is working in.
+        let mut state = state_with(vec![agent(1, AgentStatus::Working)], 1);
 
         // When handling ToggleSettle.
         IntentHandler::handle(&Intent::ToggleSettle, &mut state);
@@ -519,14 +519,14 @@ mod tests {
         assert_eq!(
             state.sessions.error.as_deref(),
             Some(SETTLE_IN_PROGRESS),
-            "s on a working thread should say why it can't settle"
+            "s on a working agent should say why it can't settle"
         );
     }
 
     #[rstest::rstest]
-    fn settle_on_a_working_thread_opens_no_confirm() {
-        // Given a selected thread Claude is working in.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Working)], 1);
+    fn settle_on_a_working_agent_opens_no_confirm() {
+        // Given a selected agent Claude is working in.
+        let mut state = state_with(vec![agent(1, AgentStatus::Working)], 1);
 
         // When handling ToggleSettle.
         IntentHandler::handle(&Intent::ToggleSettle, &mut state);
@@ -534,16 +534,16 @@ mod tests {
         // Then no confirm opens.
         assert!(
             state.picker.is_none(),
-            "a thread that can't be settled should not ask to settle"
+            "an agent that can't be settled should not ask to settle"
         );
     }
 
     #[rstest::rstest]
     fn delete_opens_the_delete_confirm_with_no_selected() {
-        // Given a selected thread.
-        let mut state = state_with(vec![thread(1, ThreadStatus::Idle)], 1);
+        // Given a selected agent.
+        let mut state = state_with(vec![agent(1, AgentStatus::Idle)], 1);
 
-        // When handling DeleteThread.
+        // When handling DeleteAgent.
         IntentHandler::handle(&Intent::Delete, &mut state);
 
         // Then its delete confirm is open with No selected.
@@ -556,7 +556,7 @@ mod tests {
                 },
                 Some(&PickerItem::Confirm(false))
             )),
-            "d should ask to delete the thread"
+            "d should ask to delete the agent"
         );
     }
 
@@ -685,7 +685,7 @@ mod tests {
     /// Session 1's card with its agent row, the cursor on `cursor`, folded
     /// or not.
     fn card_at(cursor: SidebarItem, folded: bool) -> AppState {
-        let mut state = state_at(vec![thread(1, ThreadStatus::Idle)], cursor);
+        let mut state = state_at(vec![agent(1, AgentStatus::Idle)], cursor);
         if folded {
             state.sessions.folded.insert(SessionId(1));
         }
@@ -781,8 +781,8 @@ mod tests {
         // Given session 1's card whose agent pane has closed.
         let mut state = card_at(SidebarItem::Session(SessionId(1)), false);
         for project in &mut state.sessions.projects {
-            for thread in &mut project.threads {
-                thread.pane = None;
+            for agent in &mut project.agents {
+                agent.pane = None;
             }
         }
 

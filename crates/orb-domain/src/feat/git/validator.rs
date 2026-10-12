@@ -57,7 +57,7 @@ pub enum SwitchBranchError {
     NoSelection,
     /// A session is already being made, or a workspace changed.
     Starting,
-    /// A thread in the directory the checkout would change is working or
+    /// An agent in the directory the checkout would change is working or
     /// waiting.
     Busy,
 }
@@ -69,7 +69,7 @@ pub enum SwitchBranchError {
 ///
 /// Returns [`SwitchBranchError::NoSelection`] without a keyed session,
 /// [`SwitchBranchError::Starting`] while a start is in flight, and
-/// [`SwitchBranchError::Busy`] while any thread in its directory is in
+/// [`SwitchBranchError::Busy`] while any agent in its directory is in
 /// progress.
 pub fn validate_switch_branch(state: &AppState) -> Result<(), SwitchBranchError> {
     let sessions = &state.sessions;
@@ -80,11 +80,11 @@ pub fn validate_switch_branch(state: &AppState) -> Result<(), SwitchBranchError>
     }
 }
 
-/// [`SwitchBranchError::Busy`] while any thread in `dir` is in progress.
+/// [`SwitchBranchError::Busy`] while any agent in `dir` is in progress.
 fn not_busy(sessions: &Sessions, dir: &Path) -> Result<(), SwitchBranchError> {
     if sessions
-        .threads()
-        .any(|thread| thread.cwd == dir && thread.status.in_progress())
+        .all_agents()
+        .any(|agent| agent.cwd == dir && agent.status.in_progress())
     {
         Err(SwitchBranchError::Busy)
     } else {
@@ -102,12 +102,12 @@ mod tests {
     };
     use crate::AppState;
     use crate::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus, sessions_for,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, sessions_for,
     };
-    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
     /// One project at `/work` whose only session, selected, runs in the
-    /// root with one thread titled `title`.
+    /// root with one agent titled `title`.
     fn selected(title: Option<&str>) -> AppState {
         let mut state = AppState {
             sessions: Sessions {
@@ -118,14 +118,14 @@ mod tests {
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
                     repo: true,
-                    threads: vec![Thread {
+                    agents: vec![Agent {
                         last_session: None,
                         harness: HarnessId::new("claude"),
-                        id: ThreadId(1),
+                        id: AgentId(1),
                         title: title.map(Into::into),
                         cwd: "/work".into(),
                         transcript: None,
-                        status: ThreadStatus::Idle,
+                        status: AgentStatus::Idle,
                         turn_started_at: None,
                         pane: Some(PaneLaunch {
                             pane: PaneId(1),
@@ -150,7 +150,7 @@ mod tests {
 
     #[rstest::rstest]
     fn change_workspace_rejected_after_an_agent_turn() {
-        // Given a selected session in the root checkout whose thread has a
+        // Given a selected session in the root checkout whose agent has a
         // title, so a turn has run.
         let state = selected(Some("fix the tests"));
 
@@ -187,7 +187,7 @@ mod tests {
 
     #[rstest::rstest]
     fn change_workspace_allowed_before_the_first_agent_turn() {
-        // Given a selected session whose thread has had no turn.
+        // Given a selected session whose agent has had no turn.
         let state = selected(None);
 
         // When validating a workspace change.
@@ -201,25 +201,25 @@ mod tests {
         );
     }
 
-    /// [`selected`] plus thread 2, working in `cwd`.
-    fn with_working_thread(cwd: &str) -> AppState {
+    /// [`selected`] plus agent 2, working in `cwd`.
+    fn with_working_agent(cwd: &str) -> AppState {
         let mut state = selected(None);
         if let Some(project) = state.sessions.projects.first_mut() {
-            let working = project.threads.first().map(|thread| Thread {
-                id: ThreadId(2),
+            let working = project.agents.first().map(|agent| Agent {
+                id: AgentId(2),
                 cwd: cwd.into(),
-                status: ThreadStatus::Working,
-                ..thread.clone()
+                status: AgentStatus::Working,
+                ..agent.clone()
             });
-            project.threads.extend(working);
+            project.agents.extend(working);
         }
         state
     }
 
     #[rstest::rstest]
     fn switch_branch_rejected_while_the_sessions_dir_is_busy() {
-        // Given another thread working in the selected session's directory.
-        let state = with_working_thread("/work");
+        // Given another agent working in the selected session's directory.
+        let state = with_working_agent("/work");
 
         // When validating a branch switch.
         let result = validate_switch_branch(&state);
@@ -233,9 +233,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn switch_branch_allowed_while_a_thread_elsewhere_works() {
-        // Given another thread working in a different directory.
-        let state = with_working_thread("/work-tree");
+    fn switch_branch_allowed_while_an_agent_elsewhere_works() {
+        // Given another agent working in a different directory.
+        let state = with_working_agent("/work-tree");
 
         // When validating a branch switch.
         let result = validate_switch_branch(&state);

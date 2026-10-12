@@ -10,11 +10,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use orb_domain::TextInput;
 use orb_domain::feat::sessions::state::{
-    PaneLaunch, Project, ProjectKind, Search, SessionKind, Sessions, SidebarItem, Thread,
-    ThreadStatus,
+    Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Search, SessionKind, Sessions,
+    SidebarItem,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
-use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
 use orb_domain::{Focus, Intent};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -38,13 +38,13 @@ fn at(secs: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
 }
 
-/// A thread titled "Thread <id>" whose turn started at 866 s.
-fn thread(id: i64, status: ThreadStatus) -> Thread {
-    Thread {
+/// An agent titled "Agent <id>" whose turn started at 866 s.
+fn agent(id: i64, status: AgentStatus) -> Agent {
+    Agent {
         last_session: None,
         harness: HarnessId::new("claude"),
-        id: ThreadId(id),
-        title: Some(format!("Thread {id}")),
+        id: AgentId(id),
+        title: Some(format!("Agent {id}")),
         cwd: "/Users/me/dev/orb".into(),
         transcript: None,
         status,
@@ -61,8 +61,8 @@ fn thread(id: i64, status: ThreadStatus) -> Thread {
     }
 }
 
-fn stopped(id: i64) -> Thread {
-    thread(id, ThreadStatus::Stopped)
+fn stopped(id: i64) -> Agent {
+    agent(id, AgentStatus::Stopped)
 }
 
 /// `sessions` with each session `(id, secs)` settled at second `secs`.
@@ -77,7 +77,7 @@ fn settling(mut sessions: Sessions, settles: &[(i64, u64)]) -> Sessions {
     sessions
 }
 
-fn project(id: i64, title: &str, threads: Vec<Thread>) -> Project {
+fn project(id: i64, title: &str, agents: Vec<Agent>) -> Project {
     Project {
         id: ProjectId(id),
         title: title.to_owned(),
@@ -85,13 +85,13 @@ fn project(id: i64, title: &str, threads: Vec<Thread>) -> Project {
         created_at: SystemTime::UNIX_EPOCH,
         removed: false,
         repo: true,
-        threads,
+        agents,
         kind: ProjectKind::Normal,
     }
 }
 
-fn sessions(threads: Vec<Thread>) -> Sessions {
-    let projects = vec![project(1, "orb", threads)];
+fn sessions(agents: Vec<Agent>) -> Sessions {
+    let projects = vec![project(1, "orb", agents)];
     Sessions {
         sessions: sessions_for(&projects),
         projects,
@@ -99,11 +99,11 @@ fn sessions(threads: Vec<Thread>) -> Sessions {
     }
 }
 
-/// orb's thread 1 and web's thread 2, filtered to orb.
+/// orb's agent 1 and web's agent 2, filtered to orb.
 fn filtered() -> Sessions {
     let projects = vec![
-        project(1, "orb", vec![thread(1, ThreadStatus::Idle)]),
-        project(2, "web", vec![thread(2, ThreadStatus::Idle)]),
+        project(1, "orb", vec![agent(1, AgentStatus::Idle)]),
+        project(2, "web", vec![agent(2, AgentStatus::Idle)]),
     ];
     Sessions {
         sessions: sessions_for(&projects),
@@ -113,7 +113,7 @@ fn filtered() -> Sessions {
     }
 }
 
-/// `sessions` with `id`'s thread under the cursor.
+/// `sessions` with `id`'s agent under the cursor.
 fn select(sessions: Sessions, id: i64) -> Sessions {
     Sessions {
         cursor: Some(SidebarItem::Session(SessionId(id))),
@@ -152,7 +152,7 @@ fn draw(sessions: &Sessions, now: SystemTime, height: u16) -> Buffer {
     render_sized(sessions, now, 32, height).0
 }
 
-/// Draws a 32-column sidebar `height` lines tall at `now`, with `attached`'s threads attached.
+/// Draws a 32-column sidebar `height` lines tall at `now`, with `attached`'s agents attached.
 fn draw_attached(sessions: &Sessions, attached: &[i64], now: SystemTime, height: u16) -> Buffer {
     let mut buf = Buffer::empty(Rect::new(0, 0, 32, height));
     let attached = attached
@@ -249,8 +249,8 @@ fn ago_label_is_t3s_relative_time(#[case] secs: u64, #[case] expected: &str) {
 
 #[rstest::rstest]
 fn sidebar_background_is_tokyonights_bg_dark() {
-    // Given one thread.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+    // Given one agent.
+    let sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
 
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000), 10);
@@ -327,17 +327,17 @@ fn prompt_is_a_cyan_chevron() {
 }
 
 #[rstest::rstest]
-fn count_reads_listed_out_of_every_thread() {
-    // Given one active and two settled threads, with the shelf closed.
+fn count_reads_listed_out_of_every_agent() {
+    // Given one active and two settled agents, with the shelf closed.
     let sessions = settling(
-        sessions(vec![thread(1, ThreadStatus::Idle), stopped(2), stopped(3)]),
+        sessions(vec![agent(1, AgentStatus::Idle), stopped(2), stopped(3)]),
         &[(2, 10), (3, 20)],
     );
 
     // When rendering the sidebar.
     let prompt = line(&draw(&sessions, at(1000), 10), 1);
 
-    // Then the count is the one listed thread out of three.
+    // Then the count is the one listed agent out of three.
     assert!(prompt.trim_end().ends_with("1/3│"), "line was '{prompt}'");
 }
 
@@ -357,14 +357,14 @@ fn filtered_prompt_shows_the_project() {
 }
 
 #[rstest::rstest]
-fn filtered_count_is_out_of_every_projects_threads() {
-    // Given orb's and web's threads, filtered to orb.
+fn filtered_count_is_out_of_every_projects_agents() {
+    // Given orb's and web's agents, filtered to orb.
     let sessions = filtered();
 
     // When rendering the sidebar.
     let prompt = line(&draw(&sessions, at(1000), 10), 1);
 
-    // Then the count is orb's thread out of both.
+    // Then the count is orb's agent out of both.
     assert!(prompt.trim_end().ends_with("1/2│"), "line was '{prompt}'");
 }
 
@@ -397,7 +397,7 @@ fn search_text_follows_the_filtered_project() {
 #[rstest::rstest]
 fn search_text_follows_the_chevron() {
     // Given no filter, searching for "thr".
-    let sessions = searching(sessions(vec![thread(1, ThreadStatus::Idle)]), "thr");
+    let sessions = searching(sessions(vec![agent(1, AgentStatus::Idle)]), "thr");
 
     // When rendering the sidebar.
     let prompt = line(&draw(&sessions, at(1000), 10), 1);
@@ -471,11 +471,8 @@ fn long_search() -> String {
 
 #[rstest::rstest]
 fn long_search_text_shows_its_end_before_the_whole_count() {
-    // Given one thread, searching for a text wider than the box.
-    let sessions = searching(
-        sessions(vec![thread(1, ThreadStatus::Idle)]),
-        &long_search(),
-    );
+    // Given one agent, searching for a text wider than the box.
+    let sessions = searching(sessions(vec![agent(1, AgentStatus::Idle)]), &long_search());
 
     // When rendering the sidebar.
     let prompt = line(&draw(&sessions, at(1000), 10), 1);
@@ -505,11 +502,8 @@ fn long_search_text_keeps_the_filtered_project_whole() {
 
 #[rstest::rstest]
 fn long_search_cursor_is_after_the_texts_end() {
-    // Given one thread, searching for a text wider than the box.
-    let sessions = searching(
-        sessions(vec![thread(1, ThreadStatus::Idle)]),
-        &long_search(),
-    );
+    // Given one agent, searching for a text wider than the box.
+    let sessions = searching(sessions(vec![agent(1, AgentStatus::Idle)]), &long_search());
 
     // When rendering the sidebar.
     let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
@@ -537,13 +531,13 @@ fn long_search_cursor_is_after_the_texts_end() {
 }
 
 #[rstest::rstest]
-fn search_count_reads_matches_out_of_every_thread() {
-    // Given three threads, searching for "2".
+fn search_count_reads_matches_out_of_every_agent() {
+    // Given three agents, searching for "2".
     let sessions = searching(
         sessions(vec![
-            thread(1, ThreadStatus::Idle),
-            thread(2, ThreadStatus::Idle),
-            thread(3, ThreadStatus::Idle),
+            agent(1, AgentStatus::Idle),
+            agent(2, AgentStatus::Idle),
+            agent(3, AgentStatus::Idle),
         ]),
         "2",
     );
@@ -557,8 +551,8 @@ fn search_count_reads_matches_out_of_every_thread() {
 
 #[rstest::rstest]
 fn search_highlights_the_matched_title_characters() {
-    // Given "Thread 7", searching for "7".
-    let sessions = searching(sessions(vec![thread(7, ThreadStatus::Idle)]), "7");
+    // Given "Agent 7", searching for "7".
+    let sessions = searching(sessions(vec![agent(7, AgentStatus::Idle)]), "7");
 
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000), 8);
@@ -572,8 +566,8 @@ fn search_highlights_the_matched_title_characters() {
 }
 
 #[rstest::rstest]
-fn search_highlights_the_matched_characters_of_a_settled_thread() {
-    // Given settled "Thread 7" with the shelf closed, searching for "7".
+fn search_highlights_the_matched_characters_of_a_settled_agent() {
+    // Given settled "Agent 7" with the shelf closed, searching for "7".
     let sessions = searching(settling(sessions(vec![stopped(7)]), &[(7, 10)]), "7");
 
     // When rendering the sidebar.
@@ -581,7 +575,7 @@ fn search_highlights_the_matched_characters_of_a_settled_thread() {
 
     // Then the settled row's `7` is blue and bold.
     let seven = (0..buf.area.height)
-        .find(|&y| line(&buf, usize::from(y)).contains("Thread 7"))
+        .find(|&y| line(&buf, usize::from(y)).contains("Agent 7"))
         .and_then(|y| {
             (0..buf.area.width)
                 .filter_map(|x| buf.cell((x, y)))
@@ -593,38 +587,38 @@ fn search_highlights_the_matched_characters_of_a_settled_thread() {
 
 #[rstest::rstest]
 fn node_first_line_is_the_status_icon_and_title() {
-    // Given an idle thread.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+    // Given an idle agent.
+    let sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
 
     // When rendering the sidebar.
     let heading = line(&draw(&sessions, at(1000), 8), 3);
 
     // Then its first line is the icon, then the title.
     assert!(
-        heading.starts_with(&format!(" {IDLE_ICON} Thread 1 ")),
+        heading.starts_with(&format!(" {IDLE_ICON} Agent 1 ")),
         "line was '{heading}'"
     );
 }
 
 #[rstest::rstest]
-#[case::approval(ThreadStatus::NeedsApproval, false, APPROVAL_ICON, YELLOW)]
-#[case::input(ThreadStatus::NeedsInput, false, INPUT_ICON, MAGENTA)]
-#[case::failed(ThreadStatus::Failed, false, FAILED_ICON, RED)]
-#[case::gone(ThreadStatus::Gone, false, GONE_ICON, RED)]
-#[case::completed(ThreadStatus::Idle, true, COMPLETED_ICON, GREEN)]
-#[case::stopped(ThreadStatus::Stopped, false, STOPPED_ICON, COMMENT)]
-#[case::idle(ThreadStatus::Idle, false, IDLE_ICON, DARK3)]
-#[case::unknown(ThreadStatus::Unknown, false, IDLE_ICON, DARK3)]
-fn status_icon_shows_the_threads_status(
-    #[case] status: ThreadStatus,
+#[case::approval(AgentStatus::NeedsApproval, false, APPROVAL_ICON, YELLOW)]
+#[case::input(AgentStatus::NeedsInput, false, INPUT_ICON, MAGENTA)]
+#[case::failed(AgentStatus::Failed, false, FAILED_ICON, RED)]
+#[case::gone(AgentStatus::Gone, false, GONE_ICON, RED)]
+#[case::completed(AgentStatus::Idle, true, COMPLETED_ICON, GREEN)]
+#[case::stopped(AgentStatus::Stopped, false, STOPPED_ICON, COMMENT)]
+#[case::idle(AgentStatus::Idle, false, IDLE_ICON, DARK3)]
+#[case::unknown(AgentStatus::Unknown, false, IDLE_ICON, DARK3)]
+fn status_icon_shows_the_agents_status(
+    #[case] status: AgentStatus,
     #[case] unseen: bool,
     #[case] icon: &str,
     #[case] colour: Color,
 ) {
-    // Given a thread in `status`, not attached.
-    let sessions = sessions(vec![Thread {
+    // Given an agent in `status`, not attached.
+    let sessions = sessions(vec![Agent {
         unseen,
-        ..thread(1, status)
+        ..agent(1, status)
     }]);
 
     // When rendering the sidebar.
@@ -639,11 +633,11 @@ fn status_icon_shows_the_threads_status(
 }
 
 #[rstest::rstest]
-#[case::idle(ThreadStatus::Idle)]
-#[case::unknown(ThreadStatus::Unknown)]
-fn status_icon_of_an_attached_idle_thread_is_a_filled_circle(#[case] status: ThreadStatus) {
-    // Given an attached thread in `status`.
-    let sessions = sessions(vec![thread(1, status)]);
+#[case::idle(AgentStatus::Idle)]
+#[case::unknown(AgentStatus::Unknown)]
+fn status_icon_of_an_attached_idle_agent_is_a_filled_circle(#[case] status: AgentStatus) {
+    // Given an attached agent in `status`.
+    let sessions = sessions(vec![agent(1, status)]);
 
     // When rendering the sidebar.
     let buf = draw_attached(&sessions, &[1], at(1000), 8);
@@ -652,14 +646,14 @@ fn status_icon_of_an_attached_idle_thread_is_a_filled_circle(#[case] status: Thr
     assert_eq!(
         glyph(&buf, 1, 3),
         Some((ATTACHED_ICON.to_owned(), FG)),
-        "the icon for an attached {status:?} thread"
+        "the icon for an attached {status:?} agent"
     );
 }
 
 #[rstest::rstest]
-fn attached_working_thread_keeps_the_spinner() {
-    // Given an attached Working thread whose turn started 134.3 s before now.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
+fn attached_working_agent_keeps_the_spinner() {
+    // Given an attached Working agent whose turn started 134.3 s before now.
+    let sessions = sessions(vec![agent(1, AgentStatus::Working)]);
 
     // When rendering the sidebar.
     let buf = draw_attached(&sessions, &[1], at(1000) + Duration::from_millis(300), 8);
@@ -668,14 +662,14 @@ fn attached_working_thread_keeps_the_spinner() {
     assert_eq!(
         glyph(&buf, 1, 3),
         Some(("⠸".to_owned(), BLUE)),
-        "the spinner of an attached Working thread"
+        "the spinner of an attached Working agent"
     );
 }
 
 #[rstest::rstest]
 fn working_icon_is_the_spinner_frame_for_its_elapsed_tenths() {
-    // Given a Working thread whose turn started 134.3 s before now.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
+    // Given a Working agent whose turn started 134.3 s before now.
+    let sessions = sessions(vec![agent(1, AgentStatus::Working)]);
 
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000) + Duration::from_millis(300), 8);
@@ -689,9 +683,9 @@ fn working_icon_is_the_spinner_frame_for_its_elapsed_tenths() {
 }
 
 #[rstest::rstest]
-fn working_thread_shows_its_elapsed_time() {
-    // Given a Working thread whose turn started 134 s before now.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
+fn working_agent_shows_its_elapsed_time() {
+    // Given a Working agent whose turn started 134 s before now.
+    let sessions = sessions(vec![agent(1, AgentStatus::Working)]);
 
     // When rendering the sidebar.
     let heading = line(&draw(&sessions, at(1000), 8), 3);
@@ -701,9 +695,9 @@ fn working_thread_shows_its_elapsed_time() {
 }
 
 #[rstest::rstest]
-fn idle_thread_shows_time_since_last_activity() {
-    // Given an idle thread whose last turn ended 3 h before now.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+fn idle_agent_shows_time_since_last_activity() {
+    // Given an idle agent whose last turn ended 3 h before now.
+    let sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
 
     // When rendering the sidebar.
     let heading = line(&draw(&sessions, at(10_800), 8), 3);
@@ -713,24 +707,24 @@ fn idle_thread_shows_time_since_last_activity() {
 }
 
 #[rstest::rstest]
-fn untitled_agent_row_is_a_new_thread() {
+fn untitled_agent_row_is_a_new_agent() {
     // Given a session whose agent has no title yet.
-    let sessions = sessions(vec![Thread {
+    let sessions = sessions(vec![Agent {
         title: None,
-        ..thread(1, ThreadStatus::Idle)
+        ..agent(1, AgentStatus::Idle)
     }]);
 
     // When rendering the sidebar.
     let row = line(&draw(&sessions, at(1000), 8), 6);
 
-    // Then its agent row says "New thread".
-    assert!(row.contains(" New thread"), "line was '{row}'");
+    // Then its agent row says "New agent".
+    assert!(row.contains(" New agent"), "line was '{row}'");
 }
 
 #[rstest::rstest]
-fn pinned_thread_shows_an_orange_pin() {
-    // Given a pinned thread.
-    let mut sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+fn pinned_agent_shows_an_orange_pin() {
+    // Given a pinned agent.
+    let mut sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
     if let Some(session) = sessions.sessions.get_mut(0) {
         session.pinned_at = Some(at(5));
     }
@@ -747,8 +741,8 @@ fn pinned_thread_shows_an_orange_pin() {
 
 #[rstest::rstest]
 fn node_second_line_shows_the_project() {
-    // Given an idle thread in orb.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+    // Given an idle agent in orb.
+    let sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
 
     // When rendering the sidebar.
     let place = line(&draw(&sessions, at(1000), 8), 4);
@@ -764,8 +758,8 @@ fn node_second_line_shows_the_project() {
 
 #[rstest::rstest]
 fn project_folder_takes_the_badge_colour() {
-    // Given a thread in orb, whose badge is rose-400.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+    // Given an agent in orb, whose badge is rose-400.
+    let sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
 
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000), 8);
@@ -779,22 +773,22 @@ fn project_folder_takes_the_badge_colour() {
 }
 
 #[rstest::rstest]
-#[case(ThreadStatus::NeedsApproval, false, "approval")]
-#[case(ThreadStatus::NeedsInput, false, "input")]
-#[case(ThreadStatus::Working, false, "working")]
-#[case(ThreadStatus::Failed, false, "failed")]
-#[case(ThreadStatus::Gone, false, "gone")]
-#[case(ThreadStatus::Idle, true, "done")]
-#[case(ThreadStatus::Stopped, false, "stopped")]
+#[case(AgentStatus::NeedsApproval, false, "approval")]
+#[case(AgentStatus::NeedsInput, false, "input")]
+#[case(AgentStatus::Working, false, "working")]
+#[case(AgentStatus::Failed, false, "failed")]
+#[case(AgentStatus::Gone, false, "gone")]
+#[case(AgentStatus::Idle, true, "done")]
+#[case(AgentStatus::Stopped, false, "stopped")]
 fn node_second_line_ends_with_the_status_word(
-    #[case] status: ThreadStatus,
+    #[case] status: AgentStatus,
     #[case] unseen: bool,
     #[case] word: &str,
 ) {
-    // Given a thread in `status`.
-    let sessions = sessions(vec![Thread {
+    // Given an agent in `status`.
+    let sessions = sessions(vec![Agent {
         unseen,
-        ..thread(1, status)
+        ..agent(1, status)
     }]);
 
     // When rendering the sidebar.
@@ -838,8 +832,8 @@ fn pi_like() -> HarnessInfo {
 
 #[rstest::rstest]
 fn untagged_harness_shows_no_tag() {
-    // Given a Working Claude thread.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Working)]);
+    // Given a Working Claude agent.
+    let sessions = sessions(vec![agent(1, AgentStatus::Working)]);
 
     // When rendering the sidebar.
     let place = line(&draw_with(&sessions, &[info(), pi_like()]), 4);
@@ -853,10 +847,10 @@ fn untagged_harness_shows_no_tag() {
 
 #[rstest::rstest]
 fn node_third_line_shows_the_branch() {
-    // Given a thread on `main`.
-    let sessions = sessions(vec![Thread {
+    // Given an agent on `main`.
+    let sessions = sessions(vec![Agent {
         branch: Some("main".to_owned()),
-        ..thread(1, ThreadStatus::Idle)
+        ..agent(1, AgentStatus::Idle)
     }]);
 
     // When rendering the sidebar.
@@ -885,7 +879,7 @@ fn shelf_header_is_a_folder_open_while_the_shelf_is(
     #[case] shelf_open: bool,
     #[case] folder: &str,
 ) {
-    // Given a settled thread, with the shelf open or closed.
+    // Given a settled agent, with the shelf open or closed.
     let sessions = Sessions {
         shelf_open,
         ..settling(sessions(vec![stopped(1)]), &[(1, 10)])
@@ -902,25 +896,25 @@ fn shelf_header_is_a_folder_open_while_the_shelf_is(
 }
 
 #[rstest::rstest]
-fn shelf_header_counts_settled_threads() {
-    // Given one active and two settled threads, with the shelf closed.
+fn shelf_header_counts_settled_agents() {
+    // Given one active and two settled agents, with the shelf closed.
     let sessions = settling(
-        sessions(vec![thread(1, ThreadStatus::Idle), stopped(2), stopped(3)]),
+        sessions(vec![agent(1, AgentStatus::Idle), stopped(2), stopped(3)]),
         &[(2, 10), (3, 20)],
     );
 
     // When rendering the sidebar.
     let header = shelf_line(&draw(&sessions, at(1000), 10));
 
-    // Then the header counts both settled threads.
+    // Then the header counts both settled agents.
     assert!(header.trim_end().ends_with(" 2"), "line was '{header}'");
 }
 
 #[rstest::rstest]
 fn short_list_keeps_the_shelf_header_on_the_bottom_line() {
-    // Given one active and one settled thread on a 10-line sidebar.
+    // Given one active and one settled agent on a 10-line sidebar.
     let sessions = settling(
-        sessions(vec![thread(1, ThreadStatus::Idle), stopped(2)]),
+        sessions(vec![agent(1, AgentStatus::Idle), stopped(2)]),
         &[(2, 10)],
     );
 
@@ -931,7 +925,7 @@ fn short_list_keeps_the_shelf_header_on_the_bottom_line() {
     assert!(bottom.contains(" Settled "), "line was '{bottom}'");
 }
 
-/// orb's two settled threads, 2 settled at 10 s and 3 at 20 s, with the
+/// orb's two settled agents, 2 settled at 10 s and 3 at 20 s, with the
 /// shelf open.
 fn open_shelf() -> Sessions {
     Sessions {
@@ -950,19 +944,19 @@ fn settled_lines(buf: &Buffer) -> Vec<String> {
 }
 
 #[rstest::rstest]
-fn open_shelf_lists_settled_threads_newest_first() {
-    // Given two settled threads, with the shelf open.
+fn open_shelf_lists_settled_agents_newest_first() {
+    // Given two settled agents, with the shelf open.
     let sessions = open_shelf();
 
     // When rendering the sidebar.
     let settled = settled_lines(&draw(&sessions, at(1000), 6));
 
-    // Then the header is followed by one line per settled thread, newest
+    // Then the header is followed by one line per settled agent, newest
     // settle first.
     assert!(
         matches!(
             settled.as_slice(),
-            [first, second] if first.contains("Thread 3") && second.contains("Thread 2")
+            [first, second] if first.contains("Agent 3") && second.contains("Agent 2")
         ),
         "lines were {settled:#?}"
     );
@@ -970,7 +964,7 @@ fn open_shelf_lists_settled_threads_newest_first() {
 
 #[rstest::rstest]
 fn settled_rows_hang_off_the_shelf_on_tree_guides() {
-    // Given two settled threads, with the shelf open.
+    // Given two settled agents, with the shelf open.
     let sessions = open_shelf();
 
     // When rendering the sidebar.
@@ -994,7 +988,7 @@ fn settled_rows_hang_off_the_shelf_on_tree_guides() {
 
 #[rstest::rstest]
 fn settled_row_ends_with_the_time_since_it_settled() {
-    // Given a thread settled 5 minutes before now, with the shelf open.
+    // Given an agent settled 5 minutes before now, with the shelf open.
     let sessions = Sessions {
         shelf_open: true,
         ..settling(sessions(vec![stopped(2)]), &[(2, 700)])
@@ -1013,19 +1007,19 @@ fn settled_row_ends_with_the_time_since_it_settled() {
 }
 
 #[rstest::rstest]
-#[case::failed(ThreadStatus::Failed, FAILED_ICON, RED)]
-#[case::gone(ThreadStatus::Gone, GONE_ICON, RED)]
-#[case::stopped(ThreadStatus::Stopped, COMPLETED_ICON, DARK3)]
-#[case::idle(ThreadStatus::Idle, COMPLETED_ICON, DARK3)]
+#[case::failed(AgentStatus::Failed, FAILED_ICON, RED)]
+#[case::gone(AgentStatus::Gone, GONE_ICON, RED)]
+#[case::stopped(AgentStatus::Stopped, COMPLETED_ICON, DARK3)]
+#[case::idle(AgentStatus::Idle, COMPLETED_ICON, DARK3)]
 fn settled_row_icon_marks_only_failures(
-    #[case] status: ThreadStatus,
+    #[case] status: AgentStatus,
     #[case] icon: &str,
     #[case] colour: Color,
 ) {
-    // Given a thread settled in `status`, with the shelf open.
+    // Given an agent settled in `status`, with the shelf open.
     let sessions = Sessions {
         shelf_open: true,
-        ..settling(sessions(vec![thread(1, status)]), &[(1, 10)])
+        ..settling(sessions(vec![agent(1, status)]), &[(1, 10)])
     };
 
     // When rendering a 5-line sidebar, its row on the last line.
@@ -1041,8 +1035,8 @@ fn settled_row_icon_marks_only_failures(
 
 #[rstest::rstest]
 fn selected_node_first_line_has_the_cursorline() {
-    // Given a selected thread.
-    let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+    // Given a selected agent.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
 
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000), 8);
@@ -1056,8 +1050,8 @@ fn selected_node_first_line_has_the_cursorline() {
 
 #[rstest::rstest]
 fn selected_node_other_lines_keep_the_sidebar_background() {
-    // Given a selected thread.
-    let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+    // Given a selected agent.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
 
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000), 8);
@@ -1076,8 +1070,8 @@ fn selected_node_other_lines_keep_the_sidebar_background() {
 
 #[rstest::rstest]
 fn render_returns_the_selected_nodes_first_line() {
-    // Given a selected thread.
-    let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+    // Given a selected agent.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
 
     // When rendering a 10-line sidebar.
     let (_, selected_y, _) = render_sized(&sessions, at(1000), 32, 10);
@@ -1088,11 +1082,11 @@ fn render_returns_the_selected_nodes_first_line() {
 
 #[rstest::rstest]
 fn render_reports_the_list_height_and_each_rows_height() {
-    // Given two threads and a collapsed shelf.
+    // Given two agents and a collapsed shelf.
     let sessions = settling(
         sessions(vec![
-            thread(1, ThreadStatus::Idle),
-            thread(2, ThreadStatus::Idle),
+            agent(1, AgentStatus::Idle),
+            agent(2, AgentStatus::Idle),
             stopped(3),
         ]),
         &[(3, 10)],
@@ -1115,13 +1109,13 @@ fn render_reports_the_list_height_and_each_rows_height() {
 
 #[rstest::rstest]
 fn sidebar_scrolls_to_show_the_whole_selected_node() {
-    // Given three threads on an 8-line sidebar, with the last one (thread
+    // Given three agents on an 8-line sidebar, with the last one (agent
     // 1) selected.
     let sessions = select(
         sessions(vec![
-            thread(1, ThreadStatus::Idle),
-            thread(2, ThreadStatus::Idle),
-            thread(3, ThreadStatus::Idle),
+            agent(1, AgentStatus::Idle),
+            agent(2, AgentStatus::Idle),
+            agent(3, AgentStatus::Idle),
         ]),
         1,
     );
@@ -1133,21 +1127,21 @@ fn sidebar_scrolls_to_show_the_whole_selected_node() {
     assert_eq!(selected_y, Some(5), "the selected node's first line");
 }
 
-/// `active` idle threads, 1 to `active`, and the threads `settled_ids`
-/// settled at 10 s, with `selected`'s thread selected.
+/// `active` idle agents, 1 to `active`, and the agents `settled_ids`
+/// settled at 10 s, with `selected`'s agent selected.
 fn overflowing(active: i64, settled_ids: &[i64], selected: i64) -> Sessions {
-    let threads = (1..=active)
-        .map(|id| thread(id, ThreadStatus::Idle))
+    let agents = (1..=active)
+        .map(|id| agent(id, AgentStatus::Idle))
         .chain(settled_ids.iter().map(|&id| stopped(id)))
         .collect();
     let settles: Vec<(i64, u64)> = settled_ids.iter().map(|&id| (id, 10)).collect();
-    select(settling(sessions(threads), &settles), selected)
+    select(settling(sessions(agents), &settles), selected)
 }
 
 #[rstest::rstest]
 fn overflowing_list_holds_the_shelf_header_on_the_bottom_line() {
-    // Given four threads and a settled one on a 10-line sidebar, with the
-    // first node (thread 4) selected.
+    // Given four agents and a settled one on a 10-line sidebar, with the
+    // first node (agent 4) selected.
     let sessions = overflowing(4, &[5], 4);
 
     // When rendering the sidebar.
@@ -1161,7 +1155,7 @@ fn overflowing_list_holds_the_shelf_header_on_the_bottom_line() {
 #[case::next_to_the_header(1)]
 #[case::far_from_the_header(2)]
 fn selected_node_stays_whole_above_the_held_shelf_header(#[case] selected: i64) {
-    // Given five threads and a settled one on a 10-line sidebar, with a
+    // Given five agents and a settled one on a 10-line sidebar, with a
     // node near the list's end selected.
     let sessions = overflowing(5, &[6], selected);
 
@@ -1172,14 +1166,14 @@ fn selected_node_stays_whole_above_the_held_shelf_header(#[case] selected: i64) 
     assert_eq!(
         (selected_y, line(&buf, 9).contains(" Settled ")),
         (Some(6), true),
-        "thread {selected}'s first line, and the header on the last"
+        "agent {selected}'s first line, and the header on the last"
     );
 }
 
 #[rstest::rstest]
 fn shelf_header_in_view_scrolls_with_the_list() {
-    // Given four threads and an open shelf of two on a 10-line sidebar,
-    // with the last settled thread selected.
+    // Given four agents and an open shelf of two on a 10-line sidebar,
+    // with the last settled agent selected.
     let sessions = Sessions {
         shelf_open: true,
         ..overflowing(4, &[5, 6], 5)
@@ -1188,7 +1182,7 @@ fn shelf_header_in_view_scrolls_with_the_list() {
     // When rendering the sidebar.
     let buf = draw(&sessions, at(1000), 10);
 
-    // Then the header is on its own line, the settled threads below it.
+    // Then the header is on its own line, the settled agents below it.
     let header = lines(&buf)
         .iter()
         .position(|line| line.contains(" Settled "));
@@ -1201,13 +1195,13 @@ fn shelf_header_in_view_scrolls_with_the_list() {
 #[case(80, 3)]
 #[case(0, 0)]
 fn sidebar_draws_at_any_size(#[case] width: u16, #[case] height: u16) {
-    // Given a pinned thread, an active one and an open shelf, filtered to
-    // orb, with the settled thread selected.
+    // Given a pinned agent, an active one and an open shelf, filtered to
+    // orb, with the settled agent selected.
     let sessions = {
         let mut sessions = settling(
             sessions(vec![
-                thread(1, ThreadStatus::Working),
-                thread(2, ThreadStatus::NeedsApproval),
+                agent(1, AgentStatus::Working),
+                agent(2, AgentStatus::NeedsApproval),
                 stopped(3),
             ]),
             &[(3, 10)],
@@ -1233,18 +1227,18 @@ fn sidebar_draws_at_any_size(#[case] width: u16, #[case] height: u16) {
     );
 }
 
-/// orb holding session 1 with `threads` as its agents, oldest first.
-fn one_session(threads: Vec<Thread>) -> Sessions {
-    let agents: Vec<Thread> = threads
+/// orb holding session 1 with `agents` as its agents, oldest first.
+fn one_session(agents: Vec<Agent>) -> Sessions {
+    let agents: Vec<Agent> = agents
         .into_iter()
         .enumerate()
-        .map(|(at_secs, thread)| Thread {
+        .map(|(at_secs, agent)| Agent {
             created_at: at(u64::try_from(at_secs).unwrap_or_default()),
-            pane: thread.pane.map(|launch| PaneLaunch {
+            pane: agent.pane.map(|launch| PaneLaunch {
                 session: SessionId(1),
                 ..launch
             }),
-            ..thread
+            ..agent
         })
         .collect();
     sessions(agents)
@@ -1252,10 +1246,10 @@ fn one_session(threads: Vec<Thread>) -> Sessions {
 
 #[rstest::rstest]
 fn session_card_lists_one_row_per_agent_pane() {
-    // Given session 1 with agent threads 1 and 2.
+    // Given session 1 with agent agents 1 and 2.
     let sessions = one_session(vec![
-        thread(1, ThreadStatus::Idle),
-        thread(2, ThreadStatus::Idle),
+        agent(1, AgentStatus::Idle),
+        agent(2, AgentStatus::Idle),
     ]);
 
     // When drawing the sidebar.
@@ -1263,8 +1257,8 @@ fn session_card_lists_one_row_per_agent_pane() {
 
     // Then the card's fourth and fifth lines are the agents.
     assert!(
-        lines.get(6).is_some_and(|line| line.contains("Thread 1"))
-            && lines.get(7).is_some_and(|line| line.contains("Thread 2")),
+        lines.get(6).is_some_and(|line| line.contains("Agent 1"))
+            && lines.get(7).is_some_and(|line| line.contains("Agent 2")),
         "lines were {lines:#?}"
     );
 }
@@ -1272,9 +1266,9 @@ fn session_card_lists_one_row_per_agent_pane() {
 #[rstest::rstest]
 fn agent_row_ends_with_its_harness_mark() {
     // Given session 1 with a pi agent.
-    let sessions = one_session(vec![Thread {
+    let sessions = one_session(vec![Agent {
         harness: HarnessId::new("pi"),
-        ..thread(1, ThreadStatus::Idle)
+        ..agent(1, AgentStatus::Idle)
     }]);
 
     // When drawing the sidebar with pi's mark, π.
@@ -1296,8 +1290,8 @@ fn agent_row_ends_with_its_harness_mark() {
 fn session_card_shows_its_most_urgent_agents_status() {
     // Given session 1 with a working agent and one needing approval.
     let sessions = one_session(vec![
-        thread(1, ThreadStatus::Working),
-        thread(2, ThreadStatus::NeedsApproval),
+        agent(1, AgentStatus::Working),
+        agent(2, AgentStatus::NeedsApproval),
     ]);
 
     // When drawing the sidebar.
@@ -1315,13 +1309,13 @@ fn session_card_shows_its_most_urgent_agents_status() {
 #[rstest::rstest]
 fn session_without_agents_shows_its_folder_as_title() {
     // Given session 1 whose agent has ended.
-    let mut sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
-    if let Some(thread) = sessions
+    let mut sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
+    if let Some(agent) = sessions
         .projects
         .first_mut()
-        .and_then(|project| project.threads.first_mut())
+        .and_then(|project| project.agents.first_mut())
     {
-        thread.pane = None;
+        agent.pane = None;
     }
 
     // When drawing the sidebar.
@@ -1351,7 +1345,7 @@ fn settled_session_is_one_line() {
         settled.len() == 1
             && settled
                 .first()
-                .is_some_and(|row| row.contains("Thread 1") && row.trim_end().ends_with("5m")),
+                .is_some_and(|row| row.contains("Agent 1") && row.trim_end().ends_with("5m")),
         "lines were {settled:#?}"
     );
 }
@@ -1361,7 +1355,7 @@ fn settled_session_is_one_line() {
 #[case::learn(SessionKind::Learn, PURPLE)]
 fn own_folder_session_shows_its_kind_icon(#[case] kind: SessionKind, #[case] colour: Color) {
     // Given a `kind` session.
-    let mut sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+    let mut sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
     if let Some(session) = sessions.sessions.first_mut() {
         session.kind = kind;
     }
@@ -1383,8 +1377,8 @@ fn own_folder_session_shows_its_kind_icon(#[case] kind: SessionKind, #[case] col
 /// Session 1 holding `count` stopped agents, each in its own pane, its
 /// card `folded` or not.
 fn card_of(count: i64, folded: bool) -> Sessions {
-    let threads = (1..=count)
-        .map(|id| Thread {
+    let agents = (1..=count)
+        .map(|id| Agent {
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
                 session: SessionId(1),
@@ -1392,7 +1386,7 @@ fn card_of(count: i64, folded: bool) -> Sessions {
             ..stopped(id)
         })
         .collect();
-    let mut sessions = sessions(threads);
+    let mut sessions = sessions(agents);
     if folded {
         sessions.folded.insert(SessionId(1));
     }
@@ -1488,8 +1482,8 @@ fn card_without_agents_shows_no_chevron() {
     // Given session 1 whose agent has ended.
     let mut sessions = card_of(1, false);
     for project in &mut sessions.projects {
-        for thread in &mut project.threads {
-            thread.pane = None;
+        for agent in &mut project.agents {
+            agent.pane = None;
         }
     }
 
@@ -1570,13 +1564,13 @@ fn render_with(
     (selected_y, hits)
 }
 
-/// Threads 1 to 3, thread 3's node on top, with `selected`'s selected.
-fn three_threads(selected: i64) -> Sessions {
+/// Agents 1 to 3, agent 3's node on top, with `selected`'s selected.
+fn three_agents(selected: i64) -> Sessions {
     select(
         sessions(vec![
-            thread(1, ThreadStatus::Idle),
-            thread(2, ThreadStatus::Idle),
-            thread(3, ThreadStatus::Idle),
+            agent(1, AgentStatus::Idle),
+            agent(2, AgentStatus::Idle),
+            agent(3, AgentStatus::Idle),
         ]),
         selected,
     )
@@ -1587,7 +1581,7 @@ fn hit_map_maps_a_scrolled_rows_last_line_to_it() {
     // Given three sessions on an 8-line sidebar scrolled to the last one
     // (session 1), so session 2's last line tops the list.
     let y = 3;
-    let sessions = three_threads(1);
+    let sessions = three_agents(1);
 
     // When rendering the sidebar.
     let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 8);
@@ -1602,7 +1596,7 @@ fn hit_map_maps_a_scrolled_rows_last_line_to_it() {
 
 #[rstest::rstest]
 fn hit_map_maps_the_sticky_header_row_to_the_shelf() {
-    // Given four threads and a settled one on a 10-line sidebar, with
+    // Given four agents and a settled one on a 10-line sidebar, with
     // the shelf header held on the bottom line.
     let sessions = overflowing(4, &[5], 4);
 
@@ -1619,13 +1613,13 @@ fn hit_map_maps_the_sticky_header_row_to_the_shelf() {
 
 #[rstest::rstest]
 fn hit_map_maps_the_shelf_gap_to_nothing() {
-    // Given thread 1 and a settled thread 2 on a 12-line sidebar.
+    // Given agent 1 and a settled agent 2 on a 12-line sidebar.
     let sessions = overflowing(1, &[2], 1);
 
     // When rendering the sidebar.
     let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 12);
 
-    // Then a blank line between thread 1 and the shelf header, held at
+    // Then a blank line between agent 1 and the shelf header, held at
     // the bottom, lands on no row.
     assert_eq!(
         hits.row_at(Position::new(1, 7)),
@@ -1651,9 +1645,9 @@ fn hit_map_records_the_input_box() {
 
 #[rstest::rstest]
 fn free_scroll_leaves_the_selected_row_off_screen() {
-    // Given three threads on an 8-line sidebar with the top one (thread
+    // Given three agents on an 8-line sidebar with the top one (agent
     // 3) selected, and the view wheeled 3 lines down.
-    let sessions = three_threads(3);
+    let sessions = three_agents(3);
     let mut scroll = SidebarScroll::default();
     scroll.scroll_free(3, sessions.cursor);
 
@@ -1666,16 +1660,16 @@ fn free_scroll_leaves_the_selected_row_off_screen() {
 
 #[rstest::rstest]
 fn free_scroll_stops_at_the_lists_end() {
-    // Given three threads on an 8-line sidebar with thread 3 selected,
+    // Given three agents on an 8-line sidebar with agent 3 selected,
     // and the view wheeled 30 lines down.
-    let sessions = three_threads(3);
+    let sessions = three_agents(3);
     let mut scroll = SidebarScroll::default();
     scroll.scroll_free(30, sessions.cursor);
 
     // When rendering the sidebar.
     let (_, hits) = render_with(&sessions, &mut scroll, 8);
 
-    // Then the last line shows the list's last row, thread 1's agent
+    // Then the last line shows the list's last row, agent 1's agent
     // row.
     assert_eq!(
         hits.row_at(Position::new(1, 7)),
@@ -1689,9 +1683,9 @@ fn free_scroll_stops_at_the_lists_end() {
 
 #[rstest::rstest]
 fn free_scroll_snaps_back_once_the_selection_moved() {
-    // Given the view wheeled down while thread 2 was selected, and
-    // thread 3 selected since.
-    let sessions = three_threads(3);
+    // Given the view wheeled down while agent 2 was selected, and
+    // agent 3 selected since.
+    let sessions = three_agents(3);
     let mut scroll = SidebarScroll::default();
     scroll.scroll_free(3, Some(SidebarItem::Session(SessionId(2))));
 
@@ -1704,8 +1698,8 @@ fn free_scroll_snaps_back_once_the_selection_moved() {
 
 #[rstest::rstest]
 fn free_scroll_stays_while_the_keys_stay_in_the_sidebar() {
-    // Given the keys in the sidebar and the view wheeled down on thread 3.
-    let sessions = three_threads(3);
+    // Given the keys in the sidebar and the view wheeled down on agent 3.
+    let sessions = three_agents(3);
     let mut scroll = SidebarScroll::default();
     scroll.follow_keys(true);
     scroll.scroll_free(3, sessions.cursor);
@@ -1724,8 +1718,8 @@ fn free_scroll_stays_while_the_keys_stay_in_the_sidebar() {
 
 #[rstest::rstest]
 fn keys_moving_into_the_sidebar_bring_the_view_back() {
-    // Given the keys in a pane and the view wheeled down on thread 3.
-    let sessions = three_threads(3);
+    // Given the keys in a pane and the view wheeled down on agent 3.
+    let sessions = three_agents(3);
     let mut scroll = SidebarScroll::default();
     scroll.follow_keys(false);
     scroll.scroll_free(3, sessions.cursor);
@@ -1738,7 +1732,7 @@ fn keys_moving_into_the_sidebar_bring_the_view_back() {
     assert_eq!(selected_y, Some(3), "the selected row's first line");
 }
 
-/// Thread 1's agent row.
+/// Agent 1's agent row.
 fn agent_one() -> SidebarItem {
     SidebarItem::Agent {
         session: SessionId(1),
@@ -1747,7 +1741,7 @@ fn agent_one() -> SidebarItem {
 }
 
 /// Draws a 32-column sidebar 10 lines tall with pane names from
-/// `layouts`. Thread 1's card takes lines 3 to 5, its agent row line 6.
+/// `layouts`. Agent 1's card takes lines 3 to 5, its agent row line 6.
 fn draw_with_layouts(sessions: &Sessions, layouts: &Layouts) -> Buffer {
     let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
     render(
@@ -1768,8 +1762,8 @@ fn draw_with_layouts(sessions: &Sessions, layouts: &Layouts) -> Buffer {
 
 #[rstest::rstest]
 fn agent_row_reads_its_panes_name() {
-    // Given thread 1 running in pane 1, named "api".
-    let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+    // Given agent 1 running in pane 1, named "api".
+    let sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
     let layouts = {
         let mut layouts = Layouts::default();
         layouts.insert(
@@ -1796,9 +1790,9 @@ fn agent_row_reads_its_panes_name() {
 }
 
 #[rstest::rstest]
-fn agent_row_falls_back_to_its_threads_title() {
-    // Given thread 1 running in an unnamed pane.
-    let sessions = sessions(vec![thread(1, ThreadStatus::Idle)]);
+fn agent_row_falls_back_to_its_agents_title() {
+    // Given agent 1 running in an unnamed pane.
+    let sessions = sessions(vec![agent(1, AgentStatus::Idle)]);
 
     // When rendering the sidebar.
     let agent = line(
@@ -1806,8 +1800,8 @@ fn agent_row_falls_back_to_its_threads_title() {
         6,
     );
 
-    // Then the agent row shows the thread's title.
-    assert!(agent.contains("Thread 1"), "line was '{agent}'");
+    // Then the agent row shows the agent's title.
+    assert!(agent.contains("Agent 1"), "line was '{agent}'");
 }
 
 #[rstest::rstest]
@@ -1817,10 +1811,10 @@ fn agent_name_is_the_same_in_sidebar_picker_and_search(
     #[case] pane_name: Option<&str>,
     #[case] expected: &str,
 ) {
-    // Given thread 1 titled "fix login" in pane 1, named per the case.
-    let sessions = sessions(vec![Thread {
+    // Given agent 1 titled "fix login" in pane 1, named per the case.
+    let sessions = sessions(vec![Agent {
         title: Some("fix login".into()),
-        ..thread(1, ThreadStatus::Idle)
+        ..agent(1, AgentStatus::Idle)
     }]);
     let layouts = {
         let mut layouts = layouts_for(&sessions.projects);
@@ -1872,10 +1866,10 @@ fn agent_name_is_the_same_in_sidebar_picker_and_search(
 
 #[rstest::rstest]
 fn selected_agent_row_has_the_visual_background() {
-    // Given the cursor on thread 1's agent row.
+    // Given the cursor on agent 1's agent row.
     let sessions = Sessions {
         cursor: Some(agent_one()),
-        ..sessions(vec![thread(1, ThreadStatus::Idle)])
+        ..sessions(vec![agent(1, AgentStatus::Idle)])
     };
 
     // When rendering the sidebar.
@@ -1897,7 +1891,7 @@ fn vanished_agent_cursor_highlights_its_card() {
             session: SessionId(1),
             pane: PaneId(99),
         }),
-        ..sessions(vec![thread(1, ThreadStatus::Idle)])
+        ..sessions(vec![agent(1, AgentStatus::Idle)])
     };
 
     // When rendering the sidebar.
@@ -1913,8 +1907,8 @@ fn vanished_agent_cursor_highlights_its_card() {
 
 #[rstest::rstest]
 fn agent_line_records_its_row_in_the_hit_map() {
-    // Given thread 1 on a 10-line sidebar.
-    let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+    // Given agent 1 on a 10-line sidebar.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
 
     // When rendering the sidebar.
     let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 10);
@@ -1929,8 +1923,8 @@ fn agent_line_records_its_row_in_the_hit_map() {
 
 #[rstest::rstest]
 fn click_on_an_agent_line_selects_its_row() {
-    // Given thread 1 drawn on a 10-line sidebar that has the keys.
-    let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+    // Given agent 1 drawn on a 10-line sidebar that has the keys.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
     let (_, hits) = render_with(&sessions, &mut SidebarScroll::default(), 10);
 
     // When clicking the agent's line.
@@ -1960,8 +1954,8 @@ fn click_on_an_agent_line_selects_its_row() {
 fn input_box_counts_sessions_not_agent_rows() {
     // Given two sessions, each running one agent.
     let sessions = sessions(vec![
-        thread(1, ThreadStatus::Idle),
-        thread(2, ThreadStatus::Idle),
+        agent(1, AgentStatus::Idle),
+        agent(2, AgentStatus::Idle),
     ]);
 
     // When rendering the sidebar.
@@ -1972,7 +1966,7 @@ fn input_box_counts_sessions_not_agent_rows() {
 }
 
 /// Draws a 32-column sidebar 10 lines tall with `active` the active row.
-/// Thread 1's card takes lines 3 to 5, its agent row line 6.
+/// Agent 1's card takes lines 3 to 5, its agent row line 6.
 fn draw_active(sessions: &Sessions, active: SidebarItem) -> Buffer {
     let mut buf = Buffer::empty(Rect::new(0, 0, 32, 10));
     render(
@@ -1993,8 +1987,8 @@ fn draw_active(sessions: &Sessions, active: SidebarItem) -> Buffer {
 
 #[rstest::rstest]
 fn active_row_starts_with_a_blue_bar() {
-    // Given the hover on thread 1's card and its agent row active.
-    let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+    // Given the hover on agent 1's card and its agent row active.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
 
     // When rendering the sidebar.
     let buf = draw_active(&sessions, agent_one());
@@ -2009,8 +2003,8 @@ fn active_row_starts_with_a_blue_bar() {
 
 #[rstest::rstest]
 fn active_rows_first_line_is_bold() {
-    // Given the hover on thread 1's card and its agent row active.
-    let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+    // Given the hover on agent 1's card and its agent row active.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
 
     // When rendering the sidebar.
     let buf = draw_active(&sessions, agent_one());
@@ -2026,8 +2020,8 @@ fn active_rows_first_line_is_bold() {
 
 #[rstest::rstest]
 fn hovered_row_keeps_the_visual_background_beside_the_active_row() {
-    // Given the hover on thread 1's card and its agent row active.
-    let sessions = select(sessions(vec![thread(1, ThreadStatus::Idle)]), 1);
+    // Given the hover on agent 1's card and its agent row active.
+    let sessions = select(sessions(vec![agent(1, AgentStatus::Idle)]), 1);
 
     // When rendering the sidebar.
     let buf = draw_active(&sessions, agent_one());

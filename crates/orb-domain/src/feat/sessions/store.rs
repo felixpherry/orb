@@ -1,8 +1,8 @@
-//! orb's saved projects, threads and sessions, kept in SQLite across
+//! orb's saved projects, agents and sessions, kept in SQLite across
 //! launches.
 //!
 //! For each project it keeps the directory its sessions start in. For each
-//! thread it keeps the session ids, the titles, the git branch, how far the
+//! agent it keeps the session ids, the titles, the git branch, how far the
 //! transcript has been read, when the running turn started, when it last had
 //! activity and was last visited, and the model its session started with.
 //! It also keeps the sidebar's width and project filter. For each project it
@@ -12,7 +12,7 @@
 //! keeps its directory and its tabs in order, each tab its split tree,
 //! focused pane, swap layout and whether it was changed by hand, and each
 //! pane its directory, zmx session, name and the command that brings its
-//! agent back; a thread keeps the pane it runs in.
+//! agent back; an agent keeps the pane it runs in.
 //! The schema grows through an ordered list of migrations. Before any
 //! upgrade the database is copied aside to `<file>.bak-v<old version>`, and
 //! only the three newest copies are kept. A database from a newer orb is
@@ -37,7 +37,7 @@ use crate::common::Log;
 use crate::feat::harness::HarnessId;
 use crate::feat::layout::floats::{FloatLayout, FloatRect};
 use crate::feat::layout::tree::{Node, SwapLayout, TileLayout};
-use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
 #[derive(Debug, Error)]
 #[error(debug)]
@@ -56,10 +56,10 @@ pub struct ProjectRow {
     pub kind: ProjectKind,
 }
 
-/// A saved thread.
+/// A saved agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ThreadRow {
-    pub id: ThreadId,
+pub struct AgentRow {
+    pub id: AgentId,
     pub project_id: ProjectId,
     /// The id the harness gave the session when it started it.
     pub short_id: String,
@@ -81,11 +81,11 @@ pub struct ThreadRow {
     pub turn_started_at: Option<i64>,
     /// The git branch the transcript last named.
     pub branch: Option<String>,
-    /// When orb last saw a turn end, else when the thread was created.
+    /// When orb last saw a turn end, else when the agent was created.
     pub last_activity_at: i64,
-    /// When the user last selected the thread.
+    /// When the user last selected the agent.
     pub last_visited_at: i64,
-    /// Whether the harness has generated a title for the thread.
+    /// Whether the harness has generated a title for the agent.
     pub ai_titled: bool,
     /// The `--model` a session from before the overhaul started with;
     /// `None` = unknown.
@@ -99,7 +99,7 @@ pub struct ThreadRow {
     pub orb_session: Option<SessionId>,
 }
 
-/// A thread's settle state as set by the user or by activity.
+/// An agent's settle state as set by the user or by activity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettledOverride {
     /// Settled onto the shelf.
@@ -125,9 +125,9 @@ impl SettledOverride {
     }
 }
 
-/// A thread an agent report started in an existing pane.
+/// An agent an agent report started in an existing pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewPaneThread {
+pub struct NewPaneAgent {
     pub pane: PaneId,
     /// The harness's id for the conversation; also its short id.
     pub session_id: String,
@@ -242,10 +242,10 @@ pub struct Ui {
     pub project_filter: Option<ProjectId>,
 }
 
-/// Everything [`Store::load`] returns: projects and threads.
-pub type Saved = (Vec<ProjectRow>, Vec<ThreadRow>);
+/// Everything [`Store::load`] returns: projects and agents.
+pub type Saved = (Vec<ProjectRow>, Vec<AgentRow>);
 
-/// orb's database of projects, threads and sessions.
+/// orb's database of projects, agents and sessions.
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
@@ -507,7 +507,7 @@ impl Store {
         Ok(Self { conn })
     }
 
-    /// Every saved project (oldest first) and thread (newest first).
+    /// Every saved project (oldest first) and agent (newest first).
     ///
     /// # Errors
     ///
@@ -520,17 +520,17 @@ impl Store {
                 project_row,
             )
             .attach("failed to load projects")?;
-        let threads = self
+        let agents = self
             .query(
                 "SELECT id, project_id, short_id, session_id, title, cwd, transcript_path,
                         transcript_offset, created_at, turn_started_at, custom_title,
                         branch, last_activity_at, last_visited_at, ai_titled, model,
                         renamed_title, harness, pane_id, orb_session_id
                  FROM threads ORDER BY created_at DESC, id DESC",
-                thread_row,
+                agent_row,
             )
-            .attach("failed to load threads")?;
-        Ok((projects, threads))
+            .attach("failed to load agents")?;
+        Ok((projects, agents))
     }
 
     /// Saves the project rooted at `root` unless one is already saved there,
@@ -798,7 +798,7 @@ impl Store {
     /// position of its active tab, its float layout and whether its floats
     /// were changed by hand, and the names of `panes`, which are every pane
     /// its tabs and floats hold. Its other panes are deleted, and a
-    /// thread running in one of them no longer has a pane. Returns the
+    /// agent running in one of them no longer has a pane. Returns the
     /// deleted panes.
     ///
     /// # Errors
@@ -897,7 +897,7 @@ impl Store {
         Ok(dropped)
     }
 
-    /// Deletes `session` with its tabs, floats and panes, and the threads that run
+    /// Deletes `session` with its tabs, floats and panes, and the agents that run
     /// or ran in it.
     ///
     /// # Errors
@@ -927,18 +927,18 @@ impl Store {
             .attach("failed to commit deleting the session")
     }
 
-    /// Saves a thread running in `row.pane`, in the project of that pane's
+    /// Saves an agent running in `row.pane`, in the project of that pane's
     /// session, last active and visited when created. Returns it and its
     /// project.
     ///
     /// # Errors
     ///
     /// Returns an error if a path isn't UTF-8, the pane doesn't exist, the id
-    /// is already a thread's short id, or the database can't be written.
-    pub fn insert_pane_thread(
+    /// is already an agent's short id, or the database can't be written.
+    pub fn insert_pane_agent(
         &self,
-        row: &NewPaneThread,
-    ) -> Result<(ThreadId, ProjectId), Report<StoreError>> {
+        row: &NewPaneAgent,
+    ) -> Result<(AgentId, ProjectId), Report<StoreError>> {
         let transcript_path = row.transcript_path.as_deref().map(utf8).transpose()?;
         self.conn
             .query_row(
@@ -957,10 +957,10 @@ impl Store {
                     row.created_at,
                     row.harness.as_str(),
                 ],
-                |found| Ok((ThreadId(found.get(0)?), ProjectId(found.get(1)?))),
+                |found| Ok((AgentId(found.get(0)?), ProjectId(found.get(1)?))),
             )
             .change_context(StoreError)
-            .attach("failed to save the pane's thread")
+            .attach("failed to save the pane's agent")
     }
 
     /// Sets the command typed into pane `pane`'s fresh shell; `None` = none.
@@ -983,16 +983,16 @@ impl Store {
         Ok(())
     }
 
-    /// Updates everything about a thread that changes after it's created: its
-    /// session and directory (a thread can move to another workspace), titles,
+    /// Updates everything about an agent that changes after it's created: its
+    /// session and directory (an agent can move to another workspace), titles,
     /// branch, transcript position, turn start, activity and visit stamps,
     /// and the pane it runs in. Its model stays as inserted.
     ///
     /// # Errors
     ///
     /// Returns an error if the cwd or transcript path isn't UTF-8, the short
-    /// id belongs to another thread, or the database can't be written.
-    pub fn save_thread(&self, row: &ThreadRow) -> Result<(), Report<StoreError>> {
+    /// id belongs to another agent, or the database can't be written.
+    pub fn save_agent(&self, row: &AgentRow) -> Result<(), Report<StoreError>> {
         let transcript_path = row.transcript_path.as_deref().map(utf8).transpose()?;
         self.conn
             .execute(
@@ -1022,7 +1022,7 @@ impl Store {
                 ],
             )
             .change_context(StoreError)
-            .attach("failed to update the thread")?;
+            .attach("failed to update the agent")?;
         Ok(())
     }
 
@@ -1304,12 +1304,12 @@ fn prune_copies(path: &Path, kept: usize, log: &Log) {
     }
 }
 
-/// Turns every group into a session with a tab for each of its threads,
-/// newest first, and every thread outside a group (or in a group that is
-/// gone) into a session with one tab. Each thread gets a pane of its own,
-/// alone in its tab. Thread ids don't change. Pane
-/// ids start above every thread id, since earlier versions named zmx sessions
-/// `orb-p<thread id>`. The `groups` and `drafts` tables and the threads' old
+/// Turns every group into a session with a tab for each of its agents,
+/// newest first, and every agent outside a group (or in a group that is
+/// gone) into a session with one tab. Each agent gets a pane of its own,
+/// alone in its tab. Agent ids don't change. Pane
+/// ids start above every agent id, since earlier versions named zmx sessions
+/// `orb-p<agent id>`. The `groups` and `drafts` tables and the agents' old
 /// columns stay until v14 drops them.
 fn v11(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -1349,22 +1349,22 @@ fn v11(conn: &Connection) -> rusqlite::Result<()> {
         |row| Ok((row.get::<_, i64>(0)?, migrated_session(row, 1)?)),
     )?;
     for (group, session) in groups {
-        let threads = collect(
+        let agents = collect(
             conn,
             "SELECT id, cwd, harness, short_id, session_id FROM threads
              WHERE group_id = ?1 ORDER BY created_at DESC, id DESC",
             [group],
             migrated_pane,
         )?;
-        let panes: Vec<NewPane> = if threads.is_empty() {
+        let panes: Vec<NewPane> = if agents.is_empty() {
             vec![NewPane::shell(session.dir.clone())]
         } else {
-            threads
+            agents
         };
         let (id, _) = insert_session(conn, &session, &panes)?;
         group_sessions.insert(group, id);
     }
-    let mut thread_sessions = HashMap::new();
+    let mut agent_sessions = HashMap::new();
     let lone = collect(
         conn,
         "SELECT t.id, t.project_id,
@@ -1384,9 +1384,9 @@ fn v11(conn: &Connection) -> rusqlite::Result<()> {
             ))
         },
     )?;
-    for (thread, session, pane) in lone {
+    for (agent, session, pane) in lone {
         let (id, _) = insert_session(conn, &session, &[pane])?;
-        thread_sessions.insert(thread, id);
+        agent_sessions.insert(agent, id);
     }
     let grouped = collect(
         conn,
@@ -1394,19 +1394,19 @@ fn v11(conn: &Connection) -> rusqlite::Result<()> {
         [],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     )?;
-    for (thread, group) in grouped {
+    for (agent, group) in grouped {
         if let Some(session) = group_sessions.get(&group) {
-            thread_sessions.insert(thread, *session);
+            agent_sessions.insert(agent, *session);
         }
     }
-    rewrite_jumps(conn, &thread_sessions, &group_sessions)
+    rewrite_jumps(conn, &agent_sessions, &group_sessions)
 }
 
-/// Points thread and group jump rows at their sessions and deletes the rest
-/// (drafts, rows whose thread or group is gone).
+/// Points agent and group jump rows at their sessions and deletes the rest
+/// (drafts, rows whose agent or group is gone).
 fn rewrite_jumps(
     conn: &Connection,
-    thread_sessions: &HashMap<i64, SessionId>,
+    agent_sessions: &HashMap<i64, SessionId>,
     group_sessions: &HashMap<i64, SessionId>,
 ) -> rusqlite::Result<()> {
     let jumps = collect(
@@ -1423,7 +1423,7 @@ fn rewrite_jumps(
     )?;
     for (position, kind, item) in jumps {
         let session = match kind.as_str() {
-            "thread" => thread_sessions.get(&item),
+            "thread" => agent_sessions.get(&item),
             "group" | "group_draft" => group_sessions.get(&item),
             _ => None,
         };
@@ -1464,9 +1464,9 @@ struct NewSession {
     last_visited_at: i64,
 }
 
-/// A pane to create in a new session, and the thread that runs in it.
+/// A pane to create in a new session, and the agent that runs in it.
 struct NewPane {
-    thread: Option<i64>,
+    agent: Option<i64>,
     cwd: String,
     zmx_name: Option<String>,
     zmx_dir: Option<String>,
@@ -1475,10 +1475,10 @@ struct NewPane {
 }
 
 impl NewPane {
-    /// A pane running a shell in `cwd`, with no thread.
+    /// A pane running a shell in `cwd`, with no agent.
     fn shell(cwd: String) -> Self {
         Self {
-            thread: None,
+            agent: None,
             cwd,
             zmx_name: None,
             zmx_dir: None,
@@ -1517,7 +1517,7 @@ fn migrated_pane(row: &Row<'_>) -> rusqlite::Result<NewPane> {
     migrated_pane_at(row, 0)
 }
 
-/// A migrated thread's pane from the 5 columns starting at `at`: thread id,
+/// A migrated agent's pane from the 5 columns starting at `at`: agent id,
 /// cwd, harness, short id and session id. A Claude pane starts as a shell
 /// that will resume the session, its `--bg` session still to stop; a pi pane
 /// keeps the zmx session pi already runs in, under `~/.orb/pi`.
@@ -1525,7 +1525,7 @@ fn migrated_pane_at(row: &Row<'_>, at: usize) -> rusqlite::Result<NewPane> {
     let short_id: String = row.get(at + 3)?;
     let session_id: Option<String> = row.get(at + 4)?;
     let shell = NewPane {
-        thread: Some(row.get(at)?),
+        agent: Some(row.get(at)?),
         ..NewPane::shell(row.get(at + 1)?)
     };
     Ok(match row.get::<_, String>(at + 2)?.as_str() {
@@ -1545,7 +1545,7 @@ fn migrated_pane_at(row: &Row<'_>, at: usize) -> rusqlite::Result<NewPane> {
 }
 
 /// Inserts `session` with a tab for each of `panes`, in order, the first tab
-/// active, and points each pane's thread at its pane.
+/// active, and points each pane's agent at its pane.
 fn insert_session(
     conn: &Connection,
     session: &NewSession,
@@ -1587,10 +1587,10 @@ fn insert_session(
             ],
             |row| row.get(0),
         )?);
-        if let Some(thread) = pane.thread {
+        if let Some(agent) = pane.agent {
             conn.execute(
                 "UPDATE threads SET pane_id = ?2, orb_session_id = ?3 WHERE id = ?1",
-                params![thread, pane_id.0, id.0],
+                params![agent, pane_id.0, id.0],
             )?;
         }
         conn.execute(
@@ -1644,9 +1644,9 @@ fn project_kind(text: Option<&str>) -> ProjectKind {
     }
 }
 
-fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
-    Ok(ThreadRow {
-        id: ThreadId(row.get(0)?),
+fn agent_row(row: &Row<'_>) -> rusqlite::Result<AgentRow> {
+    Ok(AgentRow {
+        id: AgentId(row.get(0)?),
         project_id: ProjectId(row.get(1)?),
         short_id: row.get(2)?,
         session_id: row.get(3)?,

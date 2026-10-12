@@ -2,7 +2,7 @@
 //!
 //! Each session in the sidebar is a directory with tabs of panes, where the
 //! user runs shells and agents. This feature tracks which sessions exist,
-//! the threads (agent conversations) running in their panes and what each is
+//! the agents (agent conversations) running in their panes and what each is
 //! doing, and which session is selected. The user can make a session in a
 //! project's checkout or a worktree, or a Research, Learn or Incognito one;
 //! move it to another workspace before its first agent turn; pin it to the

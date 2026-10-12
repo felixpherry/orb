@@ -290,8 +290,8 @@ mod tests {
         keys
     }
 
-    /// orb's keymap on a thread with `<C-g>` pressed.
-    fn leader_on_thread() -> Keys {
+    /// orb's keymap on an agent with `<C-g>` pressed.
+    fn leader_on_agent() -> Keys {
         leader(Keys::new(keymap(), Scope::Sidebar))
     }
 
@@ -345,8 +345,8 @@ mod tests {
 
     #[rstest::rstest]
     fn popup_top_border_shows_the_pending_path() {
-        // Given `<C-g>` pressed on a thread.
-        let keys = leader_on_thread();
+        // Given `<C-g>` pressed on an agent.
+        let keys = leader_on_agent();
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
@@ -362,8 +362,8 @@ mod tests {
 
     #[rstest::rstest]
     fn leaf_row_reads_key_arrow_icon_desc() {
-        // Given `<C-g>` pressed on a thread.
-        let keys = leader_on_thread();
+        // Given `<C-g>` pressed on an agent.
+        let keys = leader_on_agent();
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
@@ -408,8 +408,8 @@ mod tests {
 
     #[rstest::rstest]
     fn popup_foot_shows_the_help() {
-        // Given `<C-g>` pressed on a thread.
-        let keys = leader_on_thread();
+        // Given `<C-g>` pressed on an agent.
+        let keys = leader_on_agent();
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
@@ -428,8 +428,8 @@ mod tests {
 
     #[rstest::rstest]
     fn popup_sits_bottom_right_on_the_area_bottom() {
-        // Given `<C-g>` pressed on a thread, and an area smaller than the screen.
-        let keys = leader_on_thread();
+        // Given `<C-g>` pressed on an agent, and an area smaller than the screen.
+        let keys = leader_on_agent();
         let area = Rect::new(0, 0, 60, 16);
 
         // When drawing the popup inside the area.
@@ -445,8 +445,8 @@ mod tests {
 
     #[rstest::rstest]
     fn too_tall_popup_is_cut_off_keeping_the_foot() {
-        // Given `<C-g>` pressed on a thread, and an area 7 rows tall.
-        let keys = leader_on_thread();
+        // Given `<C-g>` pressed on an agent, and an area 7 rows tall.
+        let keys = leader_on_agent();
         let area = Rect::new(0, 0, 80, 7);
 
         // When drawing the popup inside the area.
@@ -479,8 +479,8 @@ mod tests {
 
     #[rstest::rstest]
     fn leader_popup_shows_g_as_the_new_group() {
-        // Given `<C-g>` pressed on a thread.
-        let keys = leader_on_thread();
+        // Given `<C-g>` pressed on an agent.
+        let keys = leader_on_agent();
 
         // When drawing the popup.
         let buffer = draw(&keys, SCREEN);
@@ -548,9 +548,9 @@ mod tests {
         #[case] icon: &str,
         #[case] colour: Color,
     ) {
-        // Given `<C-g>` and `g` pressed on a thread.
+        // Given `<C-g>` and `g` pressed on an agent.
         let keys = {
-            let mut keys = leader_on_thread();
+            let mut keys = leader_on_agent();
             press(
                 &mut keys,
                 KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),

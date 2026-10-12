@@ -170,10 +170,10 @@ mod tests {
     use crate::feat::harness::HarnessId;
     use crate::feat::layout::state::{PaneEntry, SessionLayout};
     use crate::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus, sessions_for,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, sessions_for,
     };
     use crate::feat::zmx::zmx_service::ZmxSession;
-    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
     /// One project.
     fn one_project() -> AppState {
@@ -186,7 +186,7 @@ mod tests {
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
                     repo: true,
-                    threads: vec![],
+                    agents: vec![],
                     kind: ProjectKind::Normal,
                 }],
                 ..Sessions::default()
@@ -195,16 +195,16 @@ mod tests {
         }
     }
 
-    /// Idle thread `id`, running in pane `pane` of session 1 when it has one.
-    fn thread_in(id: i64, pane: Option<i64>) -> Thread {
-        Thread {
+    /// Idle agent `id`, running in pane `pane` of session 1 when it has one.
+    fn agent_in(id: i64, pane: Option<i64>) -> Agent {
+        Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: None,
             cwd: "/tmp".into(),
             transcript: None,
-            status: ThreadStatus::Idle,
+            status: AgentStatus::Idle,
             turn_started_at: None,
             pane: pane.map(|pane| PaneLaunch {
                 pane: PaneId(pane),
@@ -218,12 +218,12 @@ mod tests {
         }
     }
 
-    /// Thread 1 selected, running in pane 10 of session 1; attached and
+    /// Agent 1 selected, running in pane 10 of session 1; attached and
     /// active when `attached`.
-    fn selecting_thread(attached: bool) -> AppState {
+    fn selecting_agent(attached: bool) -> AppState {
         let mut state = one_project();
         if let Some(project) = state.sessions.projects.first_mut() {
-            project.threads = vec![thread_in(1, Some(10))];
+            project.agents = vec![agent_in(1, Some(10))];
         }
         state.sessions.cursor = Some(SidebarItem::Session(SessionId(1)));
         state.sessions.sessions = sessions_for(&state.sessions.projects);
@@ -248,9 +248,9 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn shown_layout_is_the_active_attached_threads_session() {
-        // Given thread 1 attached and active, running in session 1.
-        let state = selecting_thread(true);
+    fn shown_layout_is_the_active_attached_agents_session() {
+        // Given agent 1 attached and active, running in session 1.
+        let state = selecting_agent(true);
 
         // When asking for the shown layout.
         let shown = state.shown_layout();
@@ -258,14 +258,14 @@ mod tests {
         // Then it is session 1's.
         assert!(
             shown.is_some() && shown == state.layouts.get(SessionId(1)),
-            "the active attached thread's session is shown"
+            "the active attached agent's session is shown"
         );
     }
 
     #[rstest::rstest]
-    fn shown_layout_is_none_for_an_unattached_thread() {
-        // Given selected thread 1, not attached.
-        let state = selecting_thread(false);
+    fn shown_layout_is_none_for_an_unattached_agent() {
+        // Given selected agent 1, not attached.
+        let state = selecting_agent(false);
 
         // When asking for the shown layout.
         let shown = state.shown_layout();
@@ -273,7 +273,7 @@ mod tests {
         // Then nothing is shown.
         assert!(
             shown.is_none(),
-            "an unattached thread shows the start screen"
+            "an unattached agent shows the start screen"
         );
     }
 

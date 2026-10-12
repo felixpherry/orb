@@ -9,7 +9,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use crate::TextInput;
 use crate::feat::git::git_service::GitRef;
 use crate::feat::sessions::state::ProjectKind;
-use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
 /// One row a picker can show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub enum PickerItem {
     },
     /// A subdirectory, matched on its name.
     Directory { name: String },
-    /// Where a thread's session could run, matched on its label.
+    /// Where an agent's session could run, matched on its label.
     Workspace(WorkspaceChoice),
     /// A branch to switch to, matched on its name.
     Branch(BranchRow),
@@ -34,14 +34,14 @@ pub enum PickerItem {
     AllProjects,
     /// A confirm picker's answer: `Yes` or `No`. Matched on its label.
     Confirm(bool),
-    /// An agent in the session picker: the agent `thread` running in pane
+    /// An agent in the session picker: the agent `agent` running in pane
     /// `pane` of session `id`, labelled `<project>/<session>/<agent>` and
     /// matched on the whole label. `split` is the byte offset where the
-    /// session title starts. The preview reads `thread`'s transcript.
+    /// session title starts. The preview reads `agent`'s transcript.
     /// `settled` is whether its session is settled.
     Session {
         id: SessionId,
-        thread: ThreadId,
+        agent: AgentId,
         pane: PaneId,
         label: String,
         split: usize,
@@ -57,7 +57,7 @@ pub enum PickerItem {
         split: usize,
         extra: String,
     },
-    /// A message the search picker's query matched, in thread `thread`,
+    /// A message the search picker's query matched, in agent `agent`,
     /// labelled `<project|group>/title` (`split` is where the title starts).
     /// `snippet` is the one-line cut of the message with `lit` its matched
     /// graphemes; `text_lit` are the matched graphemes in the whole message,
@@ -65,7 +65,7 @@ pub enum PickerItem {
     /// every filter and lights nothing: the search index chose it.
     Hit {
         id: i64,
-        thread: ThreadId,
+        agent: AgentId,
         label: String,
         split: usize,
         snippet: String,
@@ -98,7 +98,7 @@ impl PickerItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchRow {
     pub git_ref: GitRef,
-    /// The branch is checked out in another worktree and the thread can no
+    /// The branch is checked out in another worktree and the agent can no
     /// longer follow it there.
     pub disabled: bool,
 }
@@ -106,7 +106,7 @@ pub struct BranchRow {
 /// A row of the workspace picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceChoice {
-    /// Stay where the thread is: the root checkout, or a worktree.
+    /// Stay where the agent is: the root checkout, or a worktree.
     Current { worktree: bool },
     /// A new worktree of the project.
     NewWorktree,

@@ -1,7 +1,7 @@
 //! `osascript` as orb's [`Notifier`].
 //!
 //! Each notification runs one `osascript` whose script reads the title and
-//! body from its arguments, so no thread title can change what the script
+//! body from its arguments, so no agent title can change what the script
 //! does. It runs with no stdin, stdout or stderr, so it never writes into
 //! orb's screen, and a thread of its own waits for it to exit.
 
@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use error_stack::Report;
 
 use super::notifier::{Notifier, NotifyError, Urgency, spawn_detached};
-use crate::ids::ThreadId;
+use crate::ids::AgentId;
 
 /// Shows notifications with `osascript … display notification`, which macOS
 /// attributes to Script Editor: a click opens Script Editor, and a later
@@ -28,7 +28,7 @@ impl Notifier for OsascriptNotifier {
         title: &str,
         body: &str,
         _urgency: Urgency,
-        _thread: ThreadId,
+        _agent: AgentId,
     ) -> Result<(), Report<NotifyError>> {
         spawn_detached("osascript", osascript_args(title, body), || {})
     }

@@ -3,7 +3,7 @@
 use error_stack::Report;
 
 use super::notifier::{Notifier, NotifyError, Urgency};
-use crate::ids::ThreadId;
+use crate::ids::AgentId;
 
 /// Shows nothing, and always succeeds.
 #[derive(Debug, Clone, Copy, Default)]
@@ -19,7 +19,7 @@ impl Notifier for NoneNotifier {
         _title: &str,
         _body: &str,
         _urgency: Urgency,
-        _thread: ThreadId,
+        _agent: AgentId,
     ) -> Result<(), Report<NotifyError>> {
         Ok(())
     }
@@ -29,15 +29,15 @@ impl Notifier for NoneNotifier {
 mod tests {
     use super::NoneNotifier;
     use crate::feat::notify::notifier::{Notifier, Urgency};
-    use crate::ids::ThreadId;
+    use crate::ids::AgentId;
 
     #[rstest::rstest]
     fn none_notifier_shows_nothing_and_succeeds() {
         // Given the notifier for a desktop orb can't notify on.
         let notifier = NoneNotifier;
 
-        // When notifying that thread 1 finished.
-        let result = notifier.notify("orb · x", "Finished", Urgency::Normal, ThreadId(1));
+        // When notifying that agent 1 finished.
+        let result = notifier.notify("orb · x", "Finished", Urgency::Normal, AgentId(1));
 
         // Then it succeeds.
         assert!(result.is_ok(), "the none notifier should always succeed");

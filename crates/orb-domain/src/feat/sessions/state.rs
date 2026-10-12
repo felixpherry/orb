@@ -1,4 +1,4 @@
-//! The sidebar's contents: projects, their sessions and threads, the
+//! The sidebar's contents: projects, their sessions and agents, the
 //! sidebar's order, and its cursor.
 
 use std::cmp::Reverse;
@@ -13,12 +13,12 @@ use crate::feat::harness::HarnessId;
 use crate::feat::layout::state::Layouts;
 use crate::feat::picker::list::fuzzy_match;
 use crate::feat::sidebar::state::SidebarLayout;
-use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
-/// What a thread is called before its transcript names it.
-pub const NEW_THREAD: &str = "New thread";
+/// What an agent is called before its transcript names it.
+pub const NEW_AGENT: &str = "New agent";
 
-/// The pane a thread runs in.
+/// The pane an agent runs in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneLaunch {
     pub pane: PaneId,
@@ -91,9 +91,9 @@ pub enum ProjectKind {
     Incognito,
 }
 
-/// What a thread's session is doing.
+/// What an agent's session is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ThreadStatus {
+pub enum AgentStatus {
     /// Not polled yet since orb started.
     Unknown,
     /// The session is running a turn.
@@ -112,14 +112,14 @@ pub enum ThreadStatus {
     Gone,
 }
 
-impl ThreadStatus {
+impl AgentStatus {
     /// Whether a turn is underway: running, or paused waiting on the user.
     pub fn in_progress(self) -> bool {
         matches!(self, Self::Working | Self::NeedsApproval | Self::NeedsInput)
     }
 }
 
-/// Why a thread needs the user, as a notification says it.
+/// Why an agent needs the user, as a notification says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
     /// A turn ended.
@@ -144,39 +144,39 @@ impl NoticeKind {
 /// A status change the frontend announces as a notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
-    pub thread: ThreadId,
+    pub agent: AgentId,
     pub kind: NoticeKind,
-    /// The thread's project's title.
+    /// The agent's project's title.
     pub project: String,
-    /// The thread's title, else "New thread".
+    /// The agent's title, else "New agent".
     pub title: String,
 }
 
 /// One session orb started.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Thread {
-    pub id: ThreadId,
-    /// `None` until the transcript names the thread.
+pub struct Agent {
+    pub id: AgentId,
+    /// `None` until the transcript names the agent.
     pub title: Option<String>,
     /// Where the session runs.
     pub cwd: PathBuf,
     /// The session's transcript, once located.
     pub transcript: Option<PathBuf>,
-    pub status: ThreadStatus,
+    pub status: AgentStatus,
     /// When orb first saw the current turn running; `None` between turns.
     pub turn_started_at: Option<SystemTime>,
     /// How its pane runs; `None` for a harness orb doesn't know.
     pub pane: Option<PaneLaunch>,
     /// The session it runs in, or ran in before its pane ended; `None` for
-    /// a thread that never ran in one.
+    /// an agent that never ran in one.
     pub last_session: Option<SessionId>,
     /// The git branch the transcript last named.
     pub branch: Option<String>,
-    /// When the thread was created (its store row's `created_at`).
+    /// When the agent was created (its store row's `created_at`).
     pub created_at: SystemTime,
-    /// When orb last saw a turn end, else when the thread was created.
+    /// When orb last saw a turn end, else when the agent was created.
     pub last_activity_at: SystemTime,
-    /// A turn ended after the user last selected the thread.
+    /// A turn ended after the user last selected the agent.
     pub unseen: bool,
     /// The `--model` a session from before the overhaul started with;
     /// `None` = unknown.
@@ -185,8 +185,8 @@ pub struct Thread {
     pub harness: HarnessId,
 }
 
-impl Thread {
-    /// When the user last chatted in the thread: the later of the current
+impl Agent {
+    /// When the user last chatted in the agent: the later of the current
     /// turn's start and the last turn's end.
     pub fn last_chat(&self) -> SystemTime {
         self.turn_started_at
@@ -204,29 +204,29 @@ impl Thread {
         self.session().or(self.last_session)
     }
 
-    /// How urgently the thread needs the user, lowest first: an approval,
+    /// How urgently the agent needs the user, lowest first: an approval,
     /// an answer, a failure or lost session, a running turn, a turn done
     /// since the user last looked, then idle, then stopped.
     pub fn urgency(&self) -> u8 {
         match self.status {
-            ThreadStatus::NeedsApproval => 0,
-            ThreadStatus::NeedsInput => 1,
-            ThreadStatus::Failed | ThreadStatus::Gone => 2,
-            ThreadStatus::Working => 3,
-            ThreadStatus::Idle if self.unseen => 4,
-            ThreadStatus::Idle | ThreadStatus::Unknown => 5,
-            ThreadStatus::Stopped => 6,
+            AgentStatus::NeedsApproval => 0,
+            AgentStatus::NeedsInput => 1,
+            AgentStatus::Failed | AgentStatus::Gone => 2,
+            AgentStatus::Working => 3,
+            AgentStatus::Idle if self.unseen => 4,
+            AgentStatus::Idle | AgentStatus::Unknown => 5,
+            AgentStatus::Stopped => 6,
         }
     }
 }
 
-/// The thread among `threads` that most needs the user (see
-/// [`Thread::urgency`]); a session's status is its.
-pub fn most_urgent<'a, I>(threads: I) -> Option<&'a Thread>
+/// The agent among `agents` that most needs the user (see
+/// [`Agent::urgency`]); a session's status is its.
+pub fn most_urgent<'a, I>(agents: I) -> Option<&'a Agent>
 where
-    I: IntoIterator<Item = &'a Thread>,
+    I: IntoIterator<Item = &'a Agent>,
 {
-    threads.into_iter().min_by_key(|thread| thread.urgency())
+    agents.into_iter().min_by_key(|agent| agent.urgency())
 }
 
 /// A directory the user starts sessions in.
@@ -238,7 +238,7 @@ pub struct Project {
     /// When the project was added.
     pub created_at: SystemTime,
     /// Newest first.
-    pub threads: Vec<Thread>,
+    pub agents: Vec<Agent>,
     /// Whether its root is in a git repository, as the sessions actor last
     /// found; never for orb's own projects. Not saved.
     pub repo: bool,
@@ -283,7 +283,7 @@ pub enum SidebarRow<'a> {
     /// last agent.
     Agent {
         session: &'a Session,
-        thread: &'a Thread,
+        agent: &'a Agent,
         pane: PaneId,
         last: bool,
     },
@@ -313,7 +313,7 @@ pub struct Search {
     pub return_to: Option<SidebarItem>,
 }
 
-/// orb's projects, sessions and threads, and where the sidebar's cursor is.
+/// orb's projects, sessions and agents, and where the sidebar's cursor is.
 ///
 /// Written by the sessions actor (projects, `sessions`, `starting` when a
 /// start ends, `fetching`, the cursor and `filter` after a restore, the
@@ -369,7 +369,7 @@ pub struct Sessions {
 
 impl Sessions {
     /// The projects the user added and didn't remove, most recently active
-    /// first: by their threads' latest activity, else when they were added.
+    /// first: by their agents' latest activity, else when they were added.
     /// Ties go by title, then id. orb's own projects (Research, Learn,
     /// Incognito) aren't listed.
     pub fn projects_by_recency(&self) -> Vec<&Project> {
@@ -380,9 +380,9 @@ impl Sessions {
             .collect();
         projects.sort_by_key(|&project| {
             let latest = project
-                .threads
+                .agents
                 .iter()
-                .map(|thread| thread.last_activity_at)
+                .map(|agent| agent.last_activity_at)
                 .max()
                 .unwrap_or(project.created_at);
             (Reverse(latest), &project.title, project.id.0)
@@ -408,17 +408,17 @@ impl Sessions {
         self.projects.iter().find(|project| project.id == id)
     }
 
-    /// The threads running in session `id`'s panes (its agent panes'
+    /// The agents running in session `id`'s panes (its agent panes'
     /// conversations), oldest first; none while it is being deleted.
-    pub fn agents(&self, id: SessionId) -> Vec<&Thread> {
+    pub fn agents(&self, id: SessionId) -> Vec<&Agent> {
         if self.deleting.contains(&id) {
             return Vec::new();
         }
-        let mut agents: Vec<&Thread> = self
-            .threads()
-            .filter(|thread| thread.session() == Some(id))
+        let mut agents: Vec<&Agent> = self
+            .all_agents()
+            .filter(|agent| agent.session() == Some(id))
             .collect();
-        agents.sort_by_key(|thread| (thread.created_at, thread.id.0));
+        agents.sort_by_key(|agent| (agent.created_at, agent.id.0));
         agents
     }
 
@@ -431,7 +431,7 @@ impl Sessions {
             .or_else(|| {
                 self.agents(session.id)
                     .into_iter()
-                    .find_map(|thread| thread.title.clone())
+                    .find_map(|agent| agent.title.clone())
             })
             .unwrap_or_else(|| {
                 session.dir.file_name().map_or_else(
@@ -441,21 +441,21 @@ impl Sessions {
             })
     }
 
-    /// Whether an agent turn has run in session `id`: one of its threads,
+    /// Whether an agent turn has run in session `id`: one of its agents,
     /// ended ones included, has a title (its first prompt or an agent's
     /// title) or a turn underway.
     pub fn turned(&self, id: SessionId) -> bool {
-        self.threads().any(|thread| {
-            thread.home() == Some(id) && (thread.title.is_some() || thread.status.in_progress())
+        self.all_agents().any(|agent| {
+            agent.home() == Some(id) && (agent.title.is_some() || agent.status.in_progress())
         })
     }
 
     /// Session `id`'s agent rows: its agents whose pane a tab or float of
     /// its layout holds, with the pane.
-    pub fn agent_rows(&self, id: SessionId, layouts: &Layouts) -> Vec<(&Thread, PaneId)> {
+    pub fn agent_rows(&self, id: SessionId, layouts: &Layouts) -> Vec<(&Agent, PaneId)> {
         self.agents(id)
             .into_iter()
-            .filter_map(|thread| Some((thread, thread.pane.as_ref()?.pane)))
+            .filter_map(|agent| Some((agent, agent.pane.as_ref()?.pane)))
             .filter(|&(_, pane)| layouts.owner_of(pane) == Some(id))
             .collect()
     }
@@ -474,18 +474,18 @@ impl Sessions {
         self.folded.contains(&id) && !self.searching()
     }
 
-    /// Whether `thread` runs in a session being deleted.
-    pub fn is_deleting(&self, thread: &Thread) -> bool {
-        thread
+    /// Whether `agent` runs in a session being deleted.
+    pub fn is_deleting(&self, agent: &Agent) -> bool {
+        agent
             .session()
             .is_some_and(|session| self.deleting.contains(&session))
     }
 
-    /// Every thread in sidebar order: project by project, newest first.
-    pub fn threads(&self) -> impl Iterator<Item = &Thread> {
+    /// Every agent in sidebar order: project by project, newest first.
+    pub fn all_agents(&self) -> impl Iterator<Item = &Agent> {
         self.projects
             .iter()
-            .flat_map(|project| project.threads.iter())
+            .flat_map(|project| project.agents.iter())
     }
 
     /// The sidebar's rows: pinned sessions (newest pin first), active sessions (newest created or
@@ -518,10 +518,10 @@ impl Sessions {
             }
             let agents = self.agent_rows(session.id, layouts);
             let count = agents.len();
-            rows.extend(agents.into_iter().enumerate().map(|(at, (thread, pane))| {
+            rows.extend(agents.into_iter().enumerate().map(|(at, (agent, pane))| {
                 SidebarRow::Agent {
                     session,
-                    thread,
+                    agent,
                     pane,
                     last: at + 1 == count,
                 }
@@ -664,18 +664,18 @@ impl Sessions {
         }
     }
 
-    /// The thread running in pane `pane`, if any.
-    pub fn agent_in(&self, pane: PaneId) -> Option<&Thread> {
-        self.threads().find(|thread| {
-            thread
+    /// The agent running in pane `pane`, if any.
+    pub fn agent_in(&self, pane: PaneId) -> Option<&Agent> {
+        self.all_agents().find(|agent| {
+            agent
                 .pane
                 .as_ref()
                 .is_some_and(|launch| launch.pane == pane)
         })
     }
 
-    /// The selected session's lead thread: its oldest agent pane's.
-    pub fn selected_thread(&self) -> Option<&Thread> {
+    /// The selected session's lead agent: its oldest agent pane's.
+    pub fn selected_lead_agent(&self) -> Option<&Agent> {
         self.agents(self.selected_session()?.id).into_iter().next()
     }
 
@@ -845,29 +845,28 @@ impl Sessions {
         }
     }
 
-    /// How many threads have `status`, not counting those being deleted.
-    pub fn status_count(&self, status: ThreadStatus) -> usize {
-        self.shown_threads()
-            .filter(|thread| thread.status == status)
+    /// How many agents have `status`, not counting those being deleted.
+    pub fn status_count(&self, status: AgentStatus) -> usize {
+        self.shown_agents()
+            .filter(|agent| agent.status == status)
             .count()
     }
 
-    /// How many threads are running a turn right now, not counting those
+    /// How many agents are running a turn right now, not counting those
     /// being deleted.
     pub fn working_count(&self) -> usize {
-        self.status_count(ThreadStatus::Working)
+        self.status_count(AgentStatus::Working)
     }
 
     /// Whether something shows a spinner: a session is being started or a
-    /// thread is working.
+    /// agent is working.
     pub fn spinning(&self) -> bool {
         self.starting || self.working_count() > 0
     }
 
-    /// Whether any thread not being deleted has a turn underway.
+    /// Whether any agent not being deleted has a turn underway.
     pub fn any_in_progress(&self) -> bool {
-        self.shown_threads()
-            .any(|thread| thread.status.in_progress())
+        self.shown_agents().any(|agent| agent.status.in_progress())
     }
 
     /// The projects the filter lets the sidebar list.
@@ -896,17 +895,17 @@ impl Sessions {
                     || self
                         .agent_rows(session.id, layouts)
                         .into_iter()
-                        .any(|(thread, pane)| {
-                            self.title_matches(layouts.agent_name(pane, Some(thread)))
+                        .any(|(agent, pane)| {
+                            self.title_matches(layouts.agent_name(pane, Some(agent)))
                                 .is_some()
                         })
             })
             .collect()
     }
 
-    /// Every thread but those being deleted.
-    fn shown_threads(&self) -> impl Iterator<Item = &Thread> {
-        self.threads().filter(|thread| !self.is_deleting(thread))
+    /// Every agent but those being deleted.
+    fn shown_agents(&self) -> impl Iterator<Item = &Agent> {
+        self.all_agents().filter(|agent| !self.is_deleting(agent))
     }
 
     /// Whether a search with text is filtering the sidebar.
@@ -979,15 +978,15 @@ where
         .max(1)
 }
 
-/// The sessions `projects`' threads run in, one per pane session, as the
-/// sessions actor would show them: each in its first thread's directory,
-/// neither pinned nor settled, active since the thread's creation.
+/// The sessions `projects`' agents run in, one per pane session, as the
+/// sessions actor would show them: each in its first agent's directory,
+/// neither pinned nor settled, active since the agent's creation.
 #[cfg(test)]
 pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
     let mut shown: Vec<Session> = Vec::new();
     for project in projects {
-        for thread in &project.threads {
-            let Some(id) = thread.session() else {
+        for agent in &project.agents {
+            let Some(id) = agent.session() else {
                 continue;
             };
             if shown.iter().any(|session| session.id == id) {
@@ -1002,30 +1001,30 @@ pub(crate) fn sessions_for(projects: &[Project]) -> Vec<Session> {
                     ProjectKind::Learn => SessionKind::Learn,
                     ProjectKind::Incognito => SessionKind::Incognito,
                 },
-                dir: thread.cwd.clone(),
+                dir: agent.cwd.clone(),
                 name: None,
                 branch: None,
-                created_at: thread.created_at,
+                created_at: agent.created_at,
                 pinned_at: None,
                 settled_at: None,
-                active_since: thread.created_at,
-                last_activity_at: thread.last_activity_at,
+                active_since: agent.created_at,
+                last_activity_at: agent.last_activity_at,
             });
         }
     }
     shown
 }
 
-/// Layouts holding every pane `projects`' threads run in: one tab per pane,
-/// in its thread's session.
+/// Layouts holding every pane `projects`' agents run in: one tab per pane,
+/// in its agent's session.
 #[cfg(test)]
 pub(crate) fn layouts_for(projects: &[Project]) -> Layouts {
     use crate::feat::layout::state::{SessionLayout, test_entry};
     let mut layouts = Layouts::default();
     for launch in projects
         .iter()
-        .flat_map(|project| &project.threads)
-        .filter_map(|thread| thread.pane.as_ref())
+        .flat_map(|project| &project.agents)
+        .filter_map(|agent| agent.pane.as_ref())
     {
         let entry = test_entry(launch.pane.0);
         match layouts.get(launch.session) {

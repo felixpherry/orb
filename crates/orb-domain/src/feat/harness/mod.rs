@@ -1,9 +1,9 @@
-//! Harnesses, the programs a thread runs in.
+//! Harnesses, the programs an agent runs in.
 //!
 //! Everything orb does differently per harness (the agents it sees running,
 //! reading transcripts, how to resume a conversation, and where its status
 //! comes from) lives in that harness's implementation. Each
-//! thread stores the id of its harness, and shared code picks the harness by
+//! agent stores the id of its harness, and shared code picks the harness by
 //! it.
 
 pub mod claude;
@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use error_stack::Report;
 use wherror::Error;
 
-use super::sessions::state::ThreadStatus;
+use super::sessions::state::AgentStatus;
 use super::sessions::transcript::{Exchange, MessageRead};
 
 /// The id a harness is stored and looked up by.
@@ -106,11 +106,11 @@ pub struct HarnessError;
 /// from its own up to the root, which tell the pane it runs in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningAgent {
-    pub status: ThreadStatus,
+    pub status: AgentStatus,
     pub ancestry: Vec<u32>,
 }
 
-/// A program a thread runs in, which writes the transcripts.
+/// A program an agent runs in, which writes the transcripts.
 #[async_trait]
 pub trait Harness: TranscriptFormat {
     /// The name its service shows in debug output.

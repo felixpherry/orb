@@ -22,7 +22,7 @@ use crate::feat::sessions::intent::{
 };
 use crate::feat::sessions::state::{ProjectKind, SidebarItem};
 use crate::feat::sidebar;
-use crate::ids::{PaneId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, SessionId};
 use crate::intent_handler::{new_session, open_picker, project_item, show_pane, with_visit};
 use crate::{AppState, Command, Focus, Intent};
 
@@ -483,23 +483,23 @@ fn list(dir: Option<PathBuf>) -> Vec<Command> {
     dir.map(Command::ListDirectories).into_iter().collect()
 }
 
-/// The open picker's selected thread, and the selected hit's id when the row
+/// The open picker's selected agent, and the selected hit's id when the row
 /// is a search hit.
-pub(crate) fn picked(state: &AppState) -> (Option<ThreadId>, Option<i64>) {
+pub(crate) fn picked(state: &AppState) -> (Option<AgentId>, Option<i64>) {
     let picker = state.picker.as_ref();
     (
-        picker.and_then(PickerState::selected_thread),
+        picker.and_then(PickerState::selected_agent_id),
         picker
             .and_then(PickerState::selected_hit)
             .map(|(id, ..)| id),
     )
 }
 
-/// `commands`, then [`preview_command`] when the picker's selected thread or
+/// `commands`, then [`preview_command`] when the picker's selected agent or
 /// hit is no longer `before`.
 fn with_preview(
     state: &mut AppState,
-    before: (Option<ThreadId>, Option<i64>),
+    before: (Option<AgentId>, Option<i64>),
     commands: Vec<Command>,
 ) -> Vec<Command> {
     if picked(state) == before {
@@ -523,8 +523,8 @@ fn with_search(state: &AppState, commands: Vec<Command>) -> Vec<Command> {
 }
 
 /// Asks for the picker's selected row to be read into its preview: a search
-/// hit's exchange from the search index, or a thread's transcript. With
-/// nothing selected, or a thread with no transcript yet, it clears the
+/// hit's exchange from the search index, or an agent's transcript. With
+/// nothing selected, or an agent with no transcript yet, it clears the
 /// preview instead and asks for nothing.
 fn preview_command(state: &mut AppState) -> Vec<Command> {
     let Some(picker) = &mut state.picker else {
@@ -537,12 +537,12 @@ fn preview_command(state: &mut AppState) -> Vec<Command> {
             prompt_offset,
         })];
     }
-    let load = picker.selected_thread().and_then(|id| {
-        let thread = state.sessions.threads().find(|thread| thread.id == id)?;
-        Some((id, thread.transcript.clone()?))
+    let load = picker.selected_agent_id().and_then(|id| {
+        let agent = state.sessions.all_agents().find(|agent| agent.id == id)?;
+        Some((id, agent.transcript.clone()?))
     });
     match load {
-        Some((thread, transcript)) => vec![Command::LoadPreview { thread, transcript }],
+        Some((agent, transcript)) => vec![Command::LoadPreview { agent, transcript }],
         None => {
             picker.clear_preview();
             vec![]
@@ -672,8 +672,8 @@ fn leave_close_listed_agent(
 fn ask_delete_worktree(state: &mut AppState) -> Vec<Command> {
     let why = match validate_delete_worktree(state) {
         Ok(()) => None,
-        Err(DeleteWorktreeError::Attached) => Some("a thread in it is attached"),
-        Err(DeleteWorktreeError::MidTurn) => Some("a thread in it is mid-turn"),
+        Err(DeleteWorktreeError::Attached) => Some("an agent in it is attached"),
+        Err(DeleteWorktreeError::MidTurn) => Some("an agent in it is mid-turn"),
         Err(DeleteWorktreeError::NoPicker | DeleteWorktreeError::NoSelection) => return vec![],
     };
     let Some(path) = state

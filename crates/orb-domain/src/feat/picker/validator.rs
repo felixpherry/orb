@@ -139,10 +139,10 @@ pub enum PickSessionError {
     NoPicker,
     /// No session or hit is highlighted.
     NoSelection,
-    /// The session, or the hit's thread, was deleted or is being deleted
+    /// The session, or the hit's agent, was deleted or is being deleted
     /// since the picker opened.
     Deleted,
-    /// The hit's thread never ran in a session.
+    /// The hit's agent never ran in a session.
     NoSession,
     /// The agent row's pane closed or no longer runs an agent since the
     /// picker opened.
@@ -156,9 +156,9 @@ pub enum PickSessionError {
 ///
 /// Returns [`PickSessionError::NoPicker`] unless the session or search
 /// picker is open, [`PickSessionError::NoSelection`] when no session or hit
-/// is highlighted, [`PickSessionError::NoSession`] when the hit's thread
+/// is highlighted, [`PickSessionError::NoSession`] when the hit's agent
 /// never ran in a session, [`PickSessionError::Deleted`] when the
-/// session or the hit's thread is gone or being deleted, and
+/// session or the hit's agent is gone or being deleted, and
 /// [`PickSessionError::PaneGone`] when the agent row's pane no longer runs
 /// one of its session's agents.
 pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
@@ -175,11 +175,11 @@ pub fn validate_pick_session(state: &AppState) -> Result<(), PickSessionError> {
     };
     let (session, pane) = match picker.selected() {
         Some(&PickerItem::Session { id, pane, .. }) => (id, Some(pane)),
-        Some(&PickerItem::Hit { thread, .. }) => (
+        Some(&PickerItem::Hit { agent, .. }) => (
             state
                 .sessions
-                .threads()
-                .find(|shown| shown.id == thread)
+                .all_agents()
+                .find(|shown| shown.id == agent)
                 .ok_or(PickSessionError::Deleted)?
                 .home()
                 .ok_or(PickSessionError::NoSession)?,
@@ -298,9 +298,9 @@ mod tests {
     use crate::feat::picker::list::PickerItem;
     use crate::feat::picker::state::PickerState;
     use crate::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus, sessions_for,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, sessions_for,
     };
-    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
     use crate::{AppState, Focus};
 
     const HOME: &str = "/home/me";
@@ -314,14 +314,14 @@ mod tests {
         }
     }
 
-    /// The session picker over one row, session 1 running thread 1.
-    fn picking_thread_1() -> PickerState {
+    /// The session picker over one row, session 1 running agent 1.
+    fn picking_agent_1() -> PickerState {
         PickerState::sessions(
             vec![PickerItem::Session {
                 id: SessionId(1),
-                thread: ThreadId(1),
+                agent: AgentId(1),
                 pane: PaneId(1),
-                label: "work/New thread".into(),
+                label: "work/New agent".into(),
                 split: 5,
                 settled: false,
             }],
@@ -495,12 +495,12 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn pick_session_is_refused_for_a_thread_being_deleted() {
-        // Given thread 1 highlighted in the session picker while it's being
+    fn pick_session_is_refused_for_an_agent_being_deleted() {
+        // Given agent 1 highlighted in the session picker while it's being
         // deleted.
         let state = {
-            let mut state = deleting(ThreadStatus::Idle);
-            state.picker = Some(picking_thread_1());
+            let mut state = deleting(AgentStatus::Idle);
+            state.picker = Some(picking_agent_1());
             state.sessions.deleting.insert(SessionId(1));
             state
         };
@@ -512,13 +512,13 @@ mod tests {
         assert_eq!(
             result,
             Err(PickSessionError::Deleted),
-            "a thread being deleted can't be jumped into"
+            "an agent being deleted can't be jumped into"
         );
     }
 
     #[rstest::rstest]
-    fn pick_session_checks_a_hits_thread_in_the_search_picker() {
-        // Given the search picker over one hit in thread 1, and no threads in
+    fn pick_session_checks_a_hits_agent_in_the_search_picker() {
+        // Given the search picker over one hit in agent 1, and no agents in
         // the sidebar.
         let picker = {
             let mut picker = PickerState::search(Focus::Sidebar);
@@ -526,8 +526,8 @@ mod tests {
                 "",
                 vec![PickerItem::Hit {
                     id: 1,
-                    thread: ThreadId(1),
-                    label: "work/New thread".into(),
+                    agent: AgentId(1),
+                    label: "work/New agent".into(),
                     split: 5,
                     snippet: "fix the bug".into(),
                     lit: vec![],
@@ -547,23 +547,23 @@ mod tests {
         // When validating a pick.
         let result = validate_pick_session(&state);
 
-        // Then the hit's thread is looked up, and it's gone.
+        // Then the hit's agent is looked up, and it's gone.
         assert_eq!(
             result,
             Err(PickSessionError::Deleted),
-            "a hit's thread is checked like a session row's"
+            "a hit's agent is checked like a session row's"
         );
     }
 
-    /// The search picker over one hit, in thread 1, over `state`.
-    fn searching_thread_1(state: AppState) -> AppState {
+    /// The search picker over one hit, in agent 1, over `state`.
+    fn searching_agent_1(state: AppState) -> AppState {
         let mut picker = PickerState::search(Focus::Sidebar);
         picker.show_hits(
             "",
             vec![PickerItem::Hit {
                 id: 1,
-                thread: ThreadId(1),
-                label: "alpha/New thread".into(),
+                agent: AgentId(1),
+                label: "alpha/New agent".into(),
                 split: 6,
                 snippet: "fix the bug".into(),
                 lit: vec![],
@@ -579,36 +579,36 @@ mod tests {
         }
     }
 
-    /// `state` with thread 1 out of its pane, as `last_session` left it.
+    /// `state` with agent 1 out of its pane, as `last_session` left it.
     fn ended(mut state: AppState, last_session: Option<SessionId>) -> AppState {
-        for thread in state
+        for agent in state
             .sessions
             .projects
             .iter_mut()
-            .flat_map(|project| project.threads.iter_mut())
+            .flat_map(|project| project.agents.iter_mut())
         {
-            thread.pane = None;
-            thread.last_session = last_session;
+            agent.pane = None;
+            agent.last_session = last_session;
         }
         state
     }
 
     #[rstest::rstest]
-    fn pick_session_allows_a_hit_in_an_ended_thread() {
-        // Given a hit in thread 1, which ended in session 1.
-        let state = searching_thread_1(ended(deleting(ThreadStatus::Idle), Some(SessionId(1))));
+    fn pick_session_allows_a_hit_in_an_ended_agent() {
+        // Given a hit in agent 1, which ended in session 1.
+        let state = searching_agent_1(ended(deleting(AgentStatus::Idle), Some(SessionId(1))));
 
         // When validating a pick.
         let result = validate_pick_session(&state);
 
         // Then it is allowed: the pick opens session 1.
-        assert_eq!(result, Ok(()), "an ended thread's session can be opened");
+        assert_eq!(result, Ok(()), "an ended agent's session can be opened");
     }
 
     #[rstest::rstest]
     fn pick_session_is_refused_for_a_hit_without_a_session() {
-        // Given a hit in thread 1, which never ran in a session.
-        let state = searching_thread_1(ended(deleting(ThreadStatus::Idle), None));
+        // Given a hit in agent 1, which never ran in a session.
+        let state = searching_agent_1(ended(deleting(AgentStatus::Idle), None));
 
         // When validating a pick.
         let result = validate_pick_session(&state);
@@ -622,11 +622,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn pick_session_is_refused_for_a_thread_no_longer_listed() {
-        // Given thread 1 highlighted in the session picker, but no longer in
+    fn pick_session_is_refused_for_an_agent_no_longer_listed() {
+        // Given agent 1 highlighted in the session picker, but no longer in
         // the sidebar.
         let state = AppState {
-            picker: Some(picking_thread_1()),
+            picker: Some(picking_agent_1()),
             ..AppState::default()
         };
 
@@ -637,16 +637,16 @@ mod tests {
         assert_eq!(
             result,
             Err(PickSessionError::Deleted),
-            "a deleted thread can't be jumped into"
+            "a deleted agent can't be jumped into"
         );
     }
 
     #[rstest::rstest]
     fn close_listed_agent_rejected_when_session_gone() {
-        // Given thread 1's session highlighted in the session picker, but no
+        // Given agent 1's session highlighted in the session picker, but no
         // longer in the sidebar.
         let state = AppState {
-            picker: Some(picking_thread_1()),
+            picker: Some(picking_agent_1()),
             ..AppState::default()
         };
 
@@ -682,11 +682,11 @@ mod tests {
 
     #[rstest::rstest]
     fn close_listed_agent_rejected_when_pane_gone() {
-        // Given thread 1 highlighted in the session picker, its pane closed
+        // Given agent 1 highlighted in the session picker, its pane closed
         // since.
         let state = AppState {
-            picker: Some(picking_thread_1()),
-            ..ended(deleting(ThreadStatus::Idle), Some(SessionId(1)))
+            picker: Some(picking_agent_1()),
+            ..ended(deleting(AgentStatus::Idle), Some(SessionId(1)))
         };
 
         // When validating `d`.
@@ -702,11 +702,11 @@ mod tests {
 
     #[rstest::rstest]
     fn pick_session_rejected_when_pane_gone() {
-        // Given thread 1 highlighted in the session picker, its pane closed
+        // Given agent 1 highlighted in the session picker, its pane closed
         // since.
         let state = AppState {
-            picker: Some(picking_thread_1()),
-            ..ended(deleting(ThreadStatus::Idle), Some(SessionId(1)))
+            picker: Some(picking_agent_1()),
+            ..ended(deleting(AgentStatus::Idle), Some(SessionId(1)))
         };
 
         // When validating a pick.
@@ -722,12 +722,12 @@ mod tests {
 
     const WORKTREE: &str = "/home/me/.orb/worktrees/alpha/orb-ffff";
 
-    /// The worktree picker over `WORKTREE`, where thread 1, `status`, runs.
-    fn deleting(status: ThreadStatus) -> AppState {
-        let thread = Thread {
+    /// The worktree picker over `WORKTREE`, where agent 1, `status`, runs.
+    fn deleting(status: AgentStatus) -> AppState {
+        let agent = Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(1),
+            id: AgentId(1),
             title: None,
             cwd: WORKTREE.into(),
             transcript: None,
@@ -756,7 +756,7 @@ mod tests {
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
             repo: true,
-            threads: vec![thread],
+            agents: vec![agent],
             kind: ProjectKind::Normal,
         }];
         AppState {
@@ -774,7 +774,7 @@ mod tests {
     fn delete_worktree_rejected_without_selection() {
         // Given the worktree picker with `x` typed, which matches nothing.
         let state = {
-            let mut state = deleting(ThreadStatus::Idle);
+            let mut state = deleting(AgentStatus::Idle);
             if let Some(picker) = &mut state.picker {
                 picker.insert('x');
             }
@@ -793,11 +793,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn delete_worktree_rejected_while_a_thread_in_it_is_attached() {
-        // Given a worktree whose thread is attached.
+    fn delete_worktree_rejected_while_an_agent_in_it_is_attached() {
+        // Given a worktree whose agent is attached.
         let state = AppState {
             attached: [SessionId(1)].into(),
-            ..deleting(ThreadStatus::Idle)
+            ..deleting(AgentStatus::Idle)
         };
 
         // When validating a delete.
@@ -807,14 +807,14 @@ mod tests {
         assert_eq!(
             result,
             Err(DeleteWorktreeError::Attached),
-            "an attached thread's worktree can't be deleted"
+            "an attached agent's worktree can't be deleted"
         );
     }
 
     #[rstest::rstest]
-    fn delete_worktree_rejected_while_a_thread_in_it_is_mid_turn() {
-        // Given a worktree whose thread is working.
-        let state = deleting(ThreadStatus::Working);
+    fn delete_worktree_rejected_while_an_agent_in_it_is_mid_turn() {
+        // Given a worktree whose agent is working.
+        let state = deleting(AgentStatus::Working);
 
         // When validating a delete.
         let result = validate_delete_worktree(&state);
@@ -823,14 +823,14 @@ mod tests {
         assert_eq!(
             result,
             Err(DeleteWorktreeError::MidTurn),
-            "a mid-turn thread's worktree can't be deleted"
+            "a mid-turn agent's worktree can't be deleted"
         );
     }
 
     #[rstest::rstest]
     fn delete_worktree_allowed_on_an_active_idle_row() {
-        // Given a worktree whose active thread is idle and detached.
-        let state = deleting(ThreadStatus::Idle);
+        // Given a worktree whose active agent is idle and detached.
+        let state = deleting(AgentStatus::Idle);
 
         // When validating a delete.
         let result = validate_delete_worktree(&state);
@@ -839,7 +839,7 @@ mod tests {
         assert_eq!(
             result,
             Ok(()),
-            "an active idle thread's worktree can be deleted"
+            "an active idle agent's worktree can be deleted"
         );
     }
 }

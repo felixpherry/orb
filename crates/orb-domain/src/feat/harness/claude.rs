@@ -15,7 +15,7 @@ use self::supervisor::ClaudeAgents;
 use super::{Harness, HarnessError, HarnessId, HarnessInfo, RunningAgent, Scan, TranscriptFormat};
 use crate::feat::sessions::transcript::{Exchange, MessageRead};
 
-/// The id Claude Code threads are stored under.
+/// The id Claude Code agents are stored under.
 pub const ID: &str = "claude";
 
 /// The name the user sees for Claude Code.

@@ -10,7 +10,7 @@ use super::floats::Floats;
 use super::tree::{
     Grow, NavDirection, PaneInfo, Split, SwapLayout, TileLayout, find_in_direction, stack_list_rows,
 };
-use crate::feat::sessions::state::{NEW_THREAD, Thread};
+use crate::feat::sessions::state::{Agent, NEW_AGENT};
 use crate::feat::zmx::zmx_service::ZmxSession;
 use crate::ids::{PaneId, SessionId};
 
@@ -636,14 +636,14 @@ impl Layouts {
             .find_map(|layout| layout.panes.get(&pane))
     }
 
-    /// What agent pane `pane` is called: its name, else `thread`'s title,
-    /// else `New thread`. The sidebar's agent row, the close confirm and the
+    /// What agent pane `pane` is called: its name, else `agent`'s title,
+    /// else `New agent`. The sidebar's agent row, the close confirm and the
     /// session picker all use it.
-    pub fn agent_name<'a>(&'a self, pane: PaneId, thread: Option<&'a Thread>) -> &'a str {
+    pub fn agent_name<'a>(&'a self, pane: PaneId, agent: Option<&'a Agent>) -> &'a str {
         self.entry(pane)
             .and_then(|entry| entry.name.as_deref())
-            .or_else(|| thread?.title.as_deref())
-            .unwrap_or(NEW_THREAD)
+            .or_else(|| agent?.title.as_deref())
+            .unwrap_or(NEW_AGENT)
     }
 
     /// Every pane of every tab and float of `owner`'s layout.

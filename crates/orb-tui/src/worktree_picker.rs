@@ -462,10 +462,10 @@ mod tests {
     use orb_domain::feat::git::git_service::WorktreeFacts;
     use orb_domain::feat::picker::state::{PickerState, worktree_items};
     use orb_domain::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions,
     };
     use orb_domain::feat::worktrees::state::{Worktree, Worktrees};
-    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
     use orb_domain::{AppState, Focus};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
@@ -488,17 +488,17 @@ mod tests {
         PathBuf::from("/Users/me/.orb/worktrees/orb").join(name)
     }
 
-    /// Idle thread `id` titled `title` in the worktree `name`, last active
+    /// Idle agent `id` titled `title` in the worktree `name`, last active
     /// five minutes before [`now`].
-    fn thread(id: i64, title: &str, name: &str) -> Thread {
-        Thread {
+    fn agent(id: i64, title: &str, name: &str) -> Agent {
+        Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: Some(title.to_owned()),
             cwd: path(name),
             transcript: None,
-            status: ThreadStatus::Idle,
+            status: AgentStatus::Idle,
             turn_started_at: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
@@ -512,11 +512,11 @@ mod tests {
         }
     }
 
-    /// `thread`, last active `days` before [`now`].
-    fn idle_for(thread: Thread, days: u64) -> Thread {
-        Thread {
+    /// `agent`, last active `days` before [`now`].
+    fn idle_for(agent: Agent, days: u64) -> Agent {
+        Agent {
             last_activity_at: now() - Duration::from_hours(24 * days),
-            ..thread
+            ..agent
         }
     }
 
@@ -549,9 +549,9 @@ mod tests {
         }
     }
 
-    /// `threads` in one project, `orb`, each in its own session, over
+    /// `agents` in one project, `orb`, each in its own session, over
     /// `worktrees`.
-    fn app(threads: Vec<Thread>, worktrees: Vec<Worktree>) -> AppState {
+    fn app(agents: Vec<Agent>, worktrees: Vec<Worktree>) -> AppState {
         let projects = vec![Project {
             id: ProjectId(1),
             title: "orb".to_owned(),
@@ -559,7 +559,7 @@ mod tests {
             created_at: UNIX_EPOCH,
             removed: false,
             repo: true,
-            threads,
+            agents,
             kind: ProjectKind::Normal,
         }];
         AppState {
@@ -580,9 +580,9 @@ mod tests {
     fn fixture() -> AppState {
         let app = app(
             vec![
-                thread(1, "Fix the bug", "orb-aaaa"),
-                idle_for(thread(2, "Write docs", "orb-bbbb"), 9),
-                idle_for(thread(3, "Refactor", "orb-cccc"), 10),
+                agent(1, "Fix the bug", "orb-aaaa"),
+                idle_for(agent(2, "Write docs", "orb-bbbb"), 9),
+                idle_for(agent(3, "Refactor", "orb-cccc"), 10),
             ],
             vec![
                 worktree("orb-aaaa", Some(facts(0)), Some(1024 * 1024 * 3 / 2)),
@@ -704,7 +704,7 @@ mod tests {
 
     #[rstest::rstest]
     fn active_row_shows_active_and_the_lead_title() {
-        // Given the fixture, `orb-aaaa` used by an open thread.
+        // Given the fixture, `orb-aaaa` used by an open agent.
 
         // When drawing the picker.
         let buf = stacked();
@@ -719,7 +719,7 @@ mod tests {
 
     #[rstest::rstest]
     fn settled_row_shows_settled_and_its_age() {
-        // Given the fixture, `orb-bbbb`'s thread settled 9 days ago.
+        // Given the fixture, `orb-bbbb`'s agent settled 9 days ago.
 
         // When drawing the picker.
         let buf = stacked();
@@ -802,12 +802,12 @@ mod tests {
         assert!(missing.is_empty(), "missing {missing:?} in\n{screen}");
     }
 
-    /// `orb-aaaa` used by two open threads.
+    /// `orb-aaaa` used by two open agents.
     fn shared() -> AppState {
         app(
             vec![
-                thread(1, "Fix the bug", "orb-aaaa"),
-                thread(2, "Plan it", "orb-aaaa"),
+                agent(1, "Fix the bug", "orb-aaaa"),
+                agent(2, "Plan it", "orb-aaaa"),
             ],
             vec![worktree("orb-aaaa", Some(facts(0)), Some(512))],
         )
@@ -815,7 +815,7 @@ mod tests {
 
     #[rstest::rstest]
     fn preview_counts_its_users() {
-        // Given a worktree used by two threads.
+        // Given a worktree used by two agents.
         let app = shared();
 
         // When drawing the picker.
@@ -827,13 +827,13 @@ mod tests {
 
     #[rstest::rstest]
     fn preview_lists_one_line_per_user_under_used_by() {
-        // Given a worktree used by two threads.
+        // Given a worktree used by two agents.
         let app = shared();
 
         // When drawing the picker.
         let buf = draw(&picker(&app, 0), &app, 140, 40);
 
-        // Then each thread has its own line under `Used by`.
+        // Then each agent has its own line under `Used by`.
         let rows = ["Used by", "orb/Fix the bug", "orb/Plan it"]
             .map(|text| find(&buf, text).map(|(_, y)| y));
         let listed =
@@ -871,20 +871,20 @@ mod tests {
         assert_eq!(size.as_deref(), Some("…"), "the size field");
     }
 
-    /// One thread, `Solo`, in `orb-eeee`.
-    fn solo() -> Thread {
-        thread(1, "Solo", "orb-eeee")
+    /// One agent, `Solo`, in `orb-eeee`.
+    fn solo() -> Agent {
+        agent(1, "Solo", "orb-eeee")
     }
 
-    /// `orb-eeee` with `facts`, used by `thread` if any.
-    fn lone(thread: Option<Thread>, facts: Option<WorktreeFacts>) -> AppState {
+    /// `orb-eeee` with `facts`, used by `agent` if any.
+    fn lone(agent: Option<Agent>, facts: Option<WorktreeFacts>) -> AppState {
         app(
-            thread.into_iter().collect(),
+            agent.into_iter().collect(),
             vec![worktree("orb-eeee", facts, Some(512))],
         )
     }
 
-    /// `app` with thread 1 attached.
+    /// `app` with agent 1 attached.
     fn attached(app: AppState) -> AppState {
         AppState {
             attached: HashSet::from([SessionId(1)]),
@@ -905,7 +905,7 @@ mod tests {
         DARK5
     )]
     #[case::mid_turn(
-        lone(Some(Thread { status: ThreadStatus::Working, ..solo() }), Some(facts(0))),
+        lone(Some(Agent { status: AgentStatus::Working, ..solo() }), Some(facts(0))),
         "kept: an agent in it is mid-turn",
         DARK5
     )]

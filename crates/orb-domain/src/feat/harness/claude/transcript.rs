@@ -2,7 +2,7 @@
 //!
 //! Claude appends one JSON object per line to `<sessionId>.jsonl` under its
 //! projects directory. orb reads only the lines added since its last look, so
-//! each line is parsed once, and titles a thread by the latest title the user
+//! each line is parsed once, and titles an agent by the latest title the user
 //! gave with `/rename`, else Claude's latest generated title, else the first
 //! real prompt, counting the text typed after a slash command. The same pass
 //! notes the git branch the latest prompt ran on.
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn first_prompt_titles_the_thread_by_its_first_line() -> io::Result<()> {
+    fn first_prompt_titles_the_agent_by_its_first_line() -> io::Result<()> {
         // Given a transcript whose first prompt spans two lines.
         // When scanning it.
         let title = title_of(&[PROMPT])?;
@@ -474,7 +474,7 @@ mod tests {
         // When scanning it.
         let scan = scan_title(&path, 0, None, None, None)?;
 
-        // Then the scan notes that Claude titled the thread.
+        // Then the scan notes that Claude titled the agent.
         assert!(scan.ai_titled, "an ai-title line should mark the scan");
         Ok(())
     }
@@ -506,7 +506,7 @@ mod tests {
 
     #[rstest::rstest]
     fn later_prompt_keeps_the_existing_title() -> io::Result<()> {
-        // Given a titled thread whose transcript gains another prompt.
+        // Given a titled agent whose transcript gains another prompt.
         let dir = tempdir()?;
         let path = write_transcript(
             dir.path(),
@@ -551,7 +551,7 @@ mod tests {
 
     #[rstest::rstest]
     fn scan_ignores_an_empty_git_branch() -> io::Result<()> {
-        // Given a thread on `main` whose transcript gains a prompt with no branch.
+        // Given an agent on `main` whose transcript gains a prompt with no branch.
         let dir = tempdir()?;
         let path = write_transcript(
             dir.path(),
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn text_block_of_a_prompt_array_titles_the_thread() -> io::Result<()> {
+    fn text_block_of_a_prompt_array_titles_the_agent() -> io::Result<()> {
         // Given a prompt made of an image block and a text block.
         // When scanning it.
         let title = title_of(&[
@@ -615,7 +615,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn command_args_title_the_thread() -> io::Result<()> {
+    fn command_args_title_the_agent() -> io::Result<()> {
         // Given a transcript that starts with a slash command and its args.
         // When scanning it.
         let title = title_of(&[COMMAND])?;
@@ -624,13 +624,13 @@ mod tests {
         assert_eq!(
             title.as_deref(),
             Some("fix parser"),
-            "the command's args should title the thread"
+            "the command's args should title the agent"
         );
         Ok(())
     }
 
     #[rstest::rstest]
-    fn command_args_title_the_thread_by_their_first_line_only() -> io::Result<()> {
+    fn command_args_title_the_agent_by_their_first_line_only() -> io::Result<()> {
         // Given a slash command whose args span two lines.
         // When scanning it.
         let title = title_of(&[COMMAND])?;
@@ -640,7 +640,7 @@ mod tests {
             title
                 .as_deref()
                 .is_some_and(|title| !title.contains("lexer")),
-            "only the args' first line should title the thread, got {title:?}"
+            "only the args' first line should title the agent, got {title:?}"
         );
         Ok(())
     }
@@ -678,7 +678,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn text_block_of_a_command_array_titles_the_thread() -> io::Result<()> {
+    fn text_block_of_a_command_array_titles_the_agent() -> io::Result<()> {
         // Given a slash command stored as a text block in a content array.
         // When scanning it.
         let title = title_of(&[
@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(
             title.as_deref(),
             Some("fix parser"),
-            "a command text block should title the thread"
+            "a command text block should title the agent"
         );
         Ok(())
     }
@@ -755,7 +755,7 @@ mod tests {
         // When scanning them.
         let title = title_of(&[r#"{"type":"user","message":{"content":"Bro"#, PROMPT])?;
 
-        // Then the malformed line is ignored and the prompt still titles the thread.
+        // Then the malformed line is ignored and the prompt still titles the agent.
         assert_eq!(
             title.as_deref(),
             Some("Fix the parser"),

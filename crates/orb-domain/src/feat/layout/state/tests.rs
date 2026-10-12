@@ -6,9 +6,9 @@ use super::{FocusMove, Layouts, Placed, Placement, SessionLayout, Tab, test_entr
 use crate::feat::harness::HarnessId;
 use crate::feat::layout::floats::{Float, FloatLayout, FloatRect, Floats};
 use crate::feat::layout::tree::{NavDirection, Node, Split, SwapLayout, TileLayout};
-use crate::feat::sessions::state::{Thread, ThreadStatus};
+use crate::feat::sessions::state::{Agent, AgentStatus};
 use crate::feat::sessions::test_ids::{pane, session};
-use crate::ids::{PaneId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, SessionId};
 use std::time::UNIX_EPOCH;
 
 const OWNER: SessionId = SessionId(1);
@@ -2964,15 +2964,15 @@ fn move_float_to_after_a_move_the_next_add_does_not_relay() {
     );
 }
 
-/// Thread 7 titled `title`, for naming pane 7.
-fn titled(title: Option<&str>) -> Thread {
-    Thread {
+/// Agent 7 titled `title`, for naming pane 7.
+fn titled(title: Option<&str>) -> Agent {
+    Agent {
         harness: HarnessId::new("claude"),
-        id: ThreadId(7),
+        id: AgentId(7),
         title: title.map(str::to_owned),
         cwd: "/work".into(),
         transcript: None,
-        status: ThreadStatus::Idle,
+        status: AgentStatus::Idle,
         turn_started_at: None,
         pane: None,
         last_session: None,
@@ -2987,19 +2987,19 @@ fn titled(title: Option<&str>) -> Thread {
 #[rstest::rstest]
 #[case::pane_name(Some("api"), Some("fix"), "api")]
 #[case::title(None, Some("fix"), "fix")]
-#[case::new_thread(None, None, "New thread")]
-fn agent_name_prefers_pane_name_then_title_then_new_thread(
+#[case::new_agent(None, None, "New agent")]
+fn agent_name_prefers_pane_name_then_title_then_new_agent(
     #[case] pane_name: Option<&str>,
     #[case] title: Option<&str>,
     #[case] expected: &str,
 ) {
-    // Given pane 7 named `pane_name`, running a thread titled `title`.
+    // Given pane 7 named `pane_name`, running an agent titled `title`.
     let mut layouts = opened();
     layouts.rename_pane(PaneId(7), pane_name.map(str::to_owned));
-    let thread = titled(title);
+    let agent = titled(title);
 
     // When naming its agent.
-    let name = layouts.agent_name(PaneId(7), Some(&thread));
+    let name = layouts.agent_name(PaneId(7), Some(&agent));
 
     // Then it is `expected`.
     assert_eq!(name, expected, "pane {pane_name:?}, title {title:?}");

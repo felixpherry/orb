@@ -12,10 +12,10 @@ use crate::feat::git::git_service::GitRef;
 use crate::feat::layout::state::{Layouts, SessionLayout};
 use crate::feat::picker::list::PickerItem;
 use crate::feat::sessions::state::{
-    PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus, layouts_for, sessions_for,
+    Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, layouts_for, sessions_for,
 };
 use crate::feat::sessions::transcript::Exchange;
-use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 use std::time::Duration;
 
 const HOME: &str = "/home/u";
@@ -326,27 +326,27 @@ fn branches_listing(unstarted: bool, refs: Vec<GitRef>) -> PickerState {
 
 #[rstest::rstest]
 fn branch_elsewhere_is_disabled_after_the_first_prompt() {
-    // Given / When listing a branch checked out elsewhere for a prompted thread.
+    // Given / When listing a branch checked out elsewhere for a prompted agent.
     let picker = branches_listing(false, vec![feat_elsewhere()]);
 
     // Then its row is disabled.
     assert_eq!(
         disabled_rows(&picker),
         [true],
-        "a prompted thread can't follow a branch into another worktree"
+        "a prompted agent can't follow a branch into another worktree"
     );
 }
 
 #[rstest::rstest]
 fn branch_elsewhere_is_enabled_before_the_first_prompt() {
-    // Given / When listing a branch checked out elsewhere for a prompt-less thread.
+    // Given / When listing a branch checked out elsewhere for a prompt-less agent.
     let picker = branches_listing(true, vec![feat_elsewhere()]);
 
     // Then its row is enabled.
     assert_eq!(
         disabled_rows(&picker),
         [false],
-        "a prompt-less thread can move to the branch's worktree"
+        "a prompt-less agent can move to the branch's worktree"
     );
 }
 
@@ -596,12 +596,12 @@ fn settle_session_confirm_starts_on_no() {
 }
 
 /// The session picker over sessions 1 (`work/alpha`) and 2
-/// (`work/zulu`), each previewing its own thread, with session 1
+/// (`work/zulu`), each previewing its own agent, with session 1
 /// selected.
-fn two_threads() -> PickerState {
+fn two_agent_picker() -> PickerState {
     let row = |id, title: &str| PickerItem::Session {
         id: SessionId(id),
-        thread: ThreadId(id),
+        agent: AgentId(id),
         pane: PaneId(id),
         label: format!("work/{title}"),
         split: 5,
@@ -618,31 +618,31 @@ fn reply(text: &str) -> Vec<Exchange> {
 }
 
 #[rstest::rstest]
-fn show_preview_for_the_selected_thread_is_shown() {
-    // Given the session picker with thread 1 selected.
-    let mut picker = two_threads();
+fn show_preview_for_the_selected_agent_is_shown() {
+    // Given the session picker with agent 1 selected.
+    let mut picker = two_agent_picker();
 
-    // When showing a preview read from thread 1's transcript.
-    picker.show_preview(ThreadId(1), 10, reply("Done"));
+    // When showing a preview read from agent 1's transcript.
+    picker.show_preview(AgentId(1), 10, reply("Done"));
 
     // Then the picker's preview is that read.
     assert_eq!(
         picker
             .preview()
-            .map(|preview| (preview.thread, preview.len, preview.exchanges.clone())),
-        Some((ThreadId(1), 10, reply("Done"))),
-        "the selected thread's preview should be shown"
+            .map(|preview| (preview.agent, preview.len, preview.exchanges.clone())),
+        Some((AgentId(1), 10, reply("Done"))),
+        "the selected agent's preview should be shown"
     );
 }
 
 #[rstest::rstest]
-fn show_preview_for_a_thread_no_longer_selected_is_dropped() {
-    // Given the session picker moved from thread 1 to thread 2.
-    let mut picker = two_threads();
+fn show_preview_for_an_agent_no_longer_selected_is_dropped() {
+    // Given the session picker moved from agent 1 to agent 2.
+    let mut picker = two_agent_picker();
     picker.next();
 
-    // When a late read for thread 1 arrives.
-    picker.show_preview(ThreadId(1), 10, reply("Done"));
+    // When a late read for agent 1 arrives.
+    picker.show_preview(AgentId(1), 10, reply("Done"));
 
     // Then no preview is shown.
     assert!(
@@ -659,10 +659,10 @@ fn wants_preview_when_the_read_length_differs(
     #[case] read_at: Option<u64>,
     #[case] expected: bool,
 ) {
-    // Given the session picker on thread 1, its preview read at `read_at`.
-    let mut picker = two_threads();
+    // Given the session picker on agent 1, its preview read at `read_at`.
+    let mut picker = two_agent_picker();
     if let Some(len) = read_at {
-        picker.show_preview(ThreadId(1), len, vec![]);
+        picker.show_preview(AgentId(1), len, vec![]);
     }
 
     // When asking whether a 10-byte transcript needs reading.
@@ -672,17 +672,17 @@ fn wants_preview_when_the_read_length_differs(
     assert_eq!(wants, expected, "preview read at {read_at:?}");
 }
 
-/// A hit row with message id `id` in thread `thread`.
-fn hit(id: i64, thread: i64) -> PickerItem {
+/// A hit row with message id `id` in agent `agent`.
+fn hit(id: i64, agent: i64) -> PickerItem {
     PickerItem::Hit {
         id,
-        thread: ThreadId(thread),
-        label: format!("orb/thread-{thread}"),
+        agent: AgentId(agent),
+        label: format!("orb/agent-{agent}"),
         split: 4,
         snippet: "the IntentHandler match".to_owned(),
         lit: Vec::new(),
         text_lit: Vec::new(),
-        path: PathBuf::from(format!("/t/{thread}.jsonl")),
+        path: PathBuf::from(format!("/t/{agent}.jsonl")),
         prompt_offset: 0,
     }
 }
@@ -705,15 +705,15 @@ fn hit_ids(picker: &PickerState) -> Vec<i64> {
 }
 
 #[rstest::rstest]
-fn selected_thread_is_the_selected_hits_thread() {
-    // Given the search picker over a hit in thread 7.
+fn selected_agent_is_the_selected_hits_agent() {
+    // Given the search picker over a hit in agent 7.
     let picker = searching(vec![hit(1, 7)]);
 
-    // When asking for the selected thread.
-    let thread = picker.selected_thread();
+    // When asking for the selected agent.
+    let agent = picker.selected_agent_id();
 
-    // Then it is the hit's thread.
-    assert_eq!(thread, Some(ThreadId(7)), "a hit should select its thread");
+    // Then it is the hit's agent.
+    assert_eq!(agent, Some(AgentId(7)), "a hit should select its agent");
 }
 
 #[rstest::rstest]
@@ -747,17 +747,17 @@ fn show_hits_for_a_query_no_longer_typed_is_ignored() {
     assert_eq!(picker.total(), 0, "a stale result should be ignored");
 }
 
-/// Thread `id` titled `title`, in session `id`, its last chat at second
+/// Agent `id` titled `title`, in session `id`, its last chat at second
 /// `secs`.
-fn agent(id: i64, title: &str, secs: u64) -> Thread {
+fn agent(id: i64, title: &str, secs: u64) -> Agent {
     let at = UNIX_EPOCH + Duration::from_secs(secs);
-    Thread {
+    Agent {
         harness: HarnessId::new("claude"),
-        id: ThreadId(id),
+        id: AgentId(id),
         title: Some(title.to_owned()),
         cwd: PathBuf::from(format!("/code/{id}")),
         transcript: None,
-        status: ThreadStatus::Idle,
+        status: AgentStatus::Idle,
         turn_started_at: None,
         pane: Some(PaneLaunch {
             pane: PaneId(id),
@@ -772,14 +772,14 @@ fn agent(id: i64, title: &str, secs: u64) -> Thread {
     }
 }
 
-/// Project `orb` holding `threads`, each in its own session.
-fn orb_sessions(threads: Vec<Thread>) -> Sessions {
+/// Project `orb` holding `agents`, each in its own session.
+fn orb_sessions(agents: Vec<Agent>) -> Sessions {
     let projects = vec![Project {
         id: ProjectId(1),
         title: "orb".to_owned(),
         root: PathBuf::from("/code/orb"),
         created_at: UNIX_EPOCH,
-        threads,
+        agents,
         repo: true,
         removed: false,
         kind: ProjectKind::Normal,
@@ -802,26 +802,26 @@ fn session_ids(items: &[PickerItem]) -> Vec<SessionId> {
         .collect()
 }
 
-/// The thread ids of `items`, in order.
-fn thread_ids(items: &[PickerItem]) -> Vec<ThreadId> {
+/// The agent ids of `items`, in order.
+fn agent_ids(items: &[PickerItem]) -> Vec<AgentId> {
     items
         .iter()
         .filter_map(|item| match item {
-            PickerItem::Session { thread, .. } => Some(*thread),
+            PickerItem::Session { agent, .. } => Some(*agent),
             _ => None,
         })
         .collect()
 }
 
-/// `thread`, moved into pane `thread`'s id of session `session`.
-fn in_session(thread: Thread, session: i64) -> Thread {
-    Thread {
+/// `agent`, moved into pane `agent`'s id of session `session`.
+fn in_session(agent: Agent, session: i64) -> Agent {
+    Agent {
         pane: Some(PaneLaunch {
-            pane: PaneId(thread.id.0),
+            pane: PaneId(agent.id.0),
             session: SessionId(session),
         }),
         last_session: Some(SessionId(session)),
-        ..thread
+        ..agent
     }
 }
 
@@ -830,7 +830,7 @@ fn in_session(thread: Thread, session: i64) -> Thread {
 fn two_agents() -> Sessions {
     orb_sessions(vec![
         agent(1, "api", 10),
-        in_session(with_status(agent(2, "ui", 20), ThreadStatus::Working), 1),
+        in_session(with_status(agent(2, "ui", 20), AgentStatus::Working), 1),
     ])
 }
 
@@ -855,7 +855,7 @@ fn shell_only_session_lists_no_row() {
     // Given session 1 with only a shell left.
     let mut sessions = orb_sessions(vec![agent(1, "api", 10)]);
     for project in &mut sessions.projects {
-        project.threads.clear();
+        project.agents.clear();
     }
 
     // When listing the session picker's rows.
@@ -929,9 +929,9 @@ fn agent_row_ends_in_its_panes_name() {
 }
 
 #[rstest::rstest]
-fn untitled_agent_row_ends_in_new_thread() {
+fn untitled_agent_row_ends_in_new_agent() {
     // Given an untitled agent in an unnamed pane.
-    let sessions = orb_sessions(vec![Thread {
+    let sessions = orb_sessions(vec![Agent {
         title: None,
         ..agent(1, "fix", 10)
     }]);
@@ -943,10 +943,10 @@ fn untitled_agent_row_ends_in_new_thread() {
         SessionFilter::All,
     );
 
-    // Then its row ends in `New thread`.
+    // Then its row ends in `New agent`.
     assert!(
-        first_label(&items).is_some_and(|label| label.ends_with("/New thread")),
-        "an untitled agent's row ends in New thread: {:?}",
+        first_label(&items).is_some_and(|label| label.ends_with("/New agent")),
+        "an untitled agent's row ends in New agent: {:?}",
         first_label(&items)
     );
 }
@@ -965,8 +965,8 @@ fn agent_rows_list_newest_chat_first() {
 
     // Then agent 2 comes first.
     assert_eq!(
-        thread_ids(&items),
-        vec![ThreadId(2), ThreadId(1)],
+        agent_ids(&items),
+        vec![AgentId(2), AgentId(1)],
         "the newest chat should lead"
     );
 }
@@ -985,8 +985,8 @@ fn working_filter_leaves_out_an_idle_sibling() {
 
     // Then only agent 2 is listed.
     assert_eq!(
-        thread_ids(&items),
-        vec![ThreadId(2)],
+        agent_ids(&items),
+        vec![AgentId(2)],
         "only the working agent should be listed"
     );
 }
@@ -1005,8 +1005,8 @@ fn idle_filter_lists_an_idle_agent_beside_a_working_sibling() {
 
     // Then agent 1 is listed.
     assert_eq!(
-        thread_ids(&items),
-        vec![ThreadId(1)],
+        agent_ids(&items),
+        vec![AgentId(1)],
         "the idle agent should be listed by its own status"
     );
 }
@@ -1028,8 +1028,8 @@ fn settled_filter_lists_a_settled_sessions_agents() {
 
     // Then both agents are listed.
     assert_eq!(
-        thread_ids(&items),
-        vec![ThreadId(2), ThreadId(1)],
+        agent_ids(&items),
+        vec![AgentId(2), AgentId(1)],
         "a settled session's agents should all be listed"
     );
 }
@@ -1070,8 +1070,8 @@ fn typing_a_session_name_shows_only_its_agents() {
     // Then only `auth`'s agents are shown.
     let shown: Vec<PickerItem> = picker.shown().map(|(item, _)| item.clone()).collect();
     assert_eq!(
-        thread_ids(&shown),
-        vec![ThreadId(2), ThreadId(1)],
+        agent_ids(&shown),
+        vec![AgentId(2), AgentId(1)],
         "only the typed session's agents should show"
     );
 }
@@ -1079,7 +1079,7 @@ fn typing_a_session_name_shows_only_its_agents() {
 #[rstest::rstest]
 fn selected_agent_is_the_rows_session_and_pane() {
     // Given the session picker on session 1's agent in pane 1.
-    let picker = two_threads();
+    let picker = two_agent_picker();
 
     // When asking for the selected agent.
     let agent = picker.selected_agent();
@@ -1112,33 +1112,33 @@ fn session_items_list_settled_sessions_only_under_settled(
     assert_eq!(session_ids(&items), expected, "filter: {filter:?}");
 }
 
-/// `thread` with status `status`.
-fn with_status(thread: Thread, status: ThreadStatus) -> Thread {
-    Thread { status, ..thread }
+/// `agent` with status `status`.
+fn with_status(agent: Agent, status: AgentStatus) -> Agent {
+    Agent { status, ..agent }
 }
 
 #[rstest::rstest]
-#[case::approval_blocked(ThreadStatus::NeedsApproval, SessionFilter::Blocked, true)]
-#[case::input_blocked(ThreadStatus::NeedsInput, SessionFilter::Blocked, true)]
-#[case::working(ThreadStatus::Working, SessionFilter::Working, true)]
-#[case::idle(ThreadStatus::Idle, SessionFilter::Idle, true)]
-#[case::unknown_idle(ThreadStatus::Unknown, SessionFilter::Idle, true)]
-#[case::idle_not_working(ThreadStatus::Idle, SessionFilter::Working, false)]
-#[case::working_not_blocked(ThreadStatus::Working, SessionFilter::Blocked, false)]
-#[case::failed_not_blocked(ThreadStatus::Failed, SessionFilter::Blocked, false)]
-#[case::failed_not_working(ThreadStatus::Failed, SessionFilter::Working, false)]
-#[case::failed_not_idle(ThreadStatus::Failed, SessionFilter::Idle, false)]
-#[case::failed_all(ThreadStatus::Failed, SessionFilter::All, true)]
-#[case::stopped_not_blocked(ThreadStatus::Stopped, SessionFilter::Blocked, false)]
-#[case::stopped_not_working(ThreadStatus::Stopped, SessionFilter::Working, false)]
-#[case::stopped_not_idle(ThreadStatus::Stopped, SessionFilter::Idle, false)]
-#[case::stopped_all(ThreadStatus::Stopped, SessionFilter::All, true)]
-#[case::gone_not_blocked(ThreadStatus::Gone, SessionFilter::Blocked, false)]
-#[case::gone_not_working(ThreadStatus::Gone, SessionFilter::Working, false)]
-#[case::gone_not_idle(ThreadStatus::Gone, SessionFilter::Idle, false)]
-#[case::gone_all(ThreadStatus::Gone, SessionFilter::All, true)]
+#[case::approval_blocked(AgentStatus::NeedsApproval, SessionFilter::Blocked, true)]
+#[case::input_blocked(AgentStatus::NeedsInput, SessionFilter::Blocked, true)]
+#[case::working(AgentStatus::Working, SessionFilter::Working, true)]
+#[case::idle(AgentStatus::Idle, SessionFilter::Idle, true)]
+#[case::unknown_idle(AgentStatus::Unknown, SessionFilter::Idle, true)]
+#[case::idle_not_working(AgentStatus::Idle, SessionFilter::Working, false)]
+#[case::working_not_blocked(AgentStatus::Working, SessionFilter::Blocked, false)]
+#[case::failed_not_blocked(AgentStatus::Failed, SessionFilter::Blocked, false)]
+#[case::failed_not_working(AgentStatus::Failed, SessionFilter::Working, false)]
+#[case::failed_not_idle(AgentStatus::Failed, SessionFilter::Idle, false)]
+#[case::failed_all(AgentStatus::Failed, SessionFilter::All, true)]
+#[case::stopped_not_blocked(AgentStatus::Stopped, SessionFilter::Blocked, false)]
+#[case::stopped_not_working(AgentStatus::Stopped, SessionFilter::Working, false)]
+#[case::stopped_not_idle(AgentStatus::Stopped, SessionFilter::Idle, false)]
+#[case::stopped_all(AgentStatus::Stopped, SessionFilter::All, true)]
+#[case::gone_not_blocked(AgentStatus::Gone, SessionFilter::Blocked, false)]
+#[case::gone_not_working(AgentStatus::Gone, SessionFilter::Working, false)]
+#[case::gone_not_idle(AgentStatus::Gone, SessionFilter::Idle, false)]
+#[case::gone_all(AgentStatus::Gone, SessionFilter::All, true)]
 fn session_items_filter_by_status(
-    #[case] status: ThreadStatus,
+    #[case] status: AgentStatus,
     #[case] filter: SessionFilter,
     #[case] listed: bool,
 ) {
@@ -1158,7 +1158,7 @@ fn session_items_filter_by_status(
 
 #[rstest::rstest]
 fn set_filter_twice_goes_back_to_all() {
-    // Given the session picker filtered to working threads.
+    // Given the session picker filtered to working agents.
     let sessions = orb_sessions(vec![agent(1, "api", 10)]);
     let mut picker = PickerState::sessions(
         session_items(
@@ -1207,7 +1207,7 @@ fn set_filter_keeps_the_typed_text() {
         picker.insert(ch);
     }
 
-    // When filtering to idle threads.
+    // When filtering to idle agents.
     picker.set_filter(
         SessionFilter::Idle,
         &sessions,
@@ -1228,7 +1228,7 @@ fn set_filter_in_another_picker_changes_nothing() {
     let sessions = orb_sessions(vec![agent(1, "api", 10)]);
     let mut picker = PickerState::worktrees(vec![], Focus::Sidebar);
 
-    // When filtering to settled threads.
+    // When filtering to settled agents.
     picker.set_filter(
         SessionFilter::Settled,
         &sessions,
@@ -1245,7 +1245,7 @@ fn set_filter_in_another_picker_changes_nothing() {
 
 #[rstest::rstest]
 fn session_row_previews_its_agent() {
-    // Given session 1 running thread 1.
+    // Given session 1 running agent 1.
     let sessions = orb_sessions(vec![agent(1, "api", 10)]);
 
     // When opening the session picker over its rows.
@@ -1258,28 +1258,28 @@ fn session_row_previews_its_agent() {
         Focus::Sidebar,
     );
 
-    // Then the selected row previews thread 1.
+    // Then the selected row previews agent 1.
     assert_eq!(
-        picker.selected_thread(),
-        Some(ThreadId(1)),
+        picker.selected_agent_id(),
+        Some(AgentId(1)),
         "a session row should preview its agent"
     );
 }
 
 #[rstest::rstest]
-fn hit_label_names_a_threads_session() {
-    // Given thread 1 in session 1, which the user named `login`.
+fn hit_label_names_an_agents_session() {
+    // Given agent 1 in session 1, which the user named `login`.
     let mut sessions = orb_sessions(vec![agent(1, "api", 10)]);
     if let Some(session) = sessions.sessions.first_mut() {
         session.name = Some("login".to_owned());
     }
 
-    // When labelling a hit in thread 1.
+    // When labelling a hit in agent 1.
     let label = sessions
         .projects
         .first()
-        .zip(sessions.threads().next())
-        .map(|(project, thread)| hit_label(&sessions, project, thread));
+        .zip(sessions.all_agents().next())
+        .map(|(project, agent)| hit_label(&sessions, project, agent));
 
     // Then the session names it and the title starts after its slash.
     assert_eq!(
@@ -1290,41 +1290,41 @@ fn hit_label_names_a_threads_session() {
 }
 
 #[rstest::rstest]
-fn hit_label_falls_back_to_the_threads_title() {
-    // Given thread 1 that never ran in a session.
-    let sessions = orb_sessions(vec![Thread {
+fn hit_label_falls_back_to_the_agents_title() {
+    // Given agent 1 that never ran in a session.
+    let sessions = orb_sessions(vec![Agent {
         pane: None,
         last_session: None,
         ..agent(1, "api", 10)
     }]);
 
-    // When labelling a hit in thread 1.
+    // When labelling a hit in agent 1.
     let label = sessions
         .projects
         .first()
-        .zip(sessions.threads().next())
-        .map(|(project, thread)| hit_label(&sessions, project, thread));
+        .zip(sessions.all_agents().next())
+        .map(|(project, agent)| hit_label(&sessions, project, agent));
 
-    // Then the thread's title names it.
+    // Then the agent's title names it.
     assert_eq!(
         label,
         Some(("orb/api".to_owned(), 4)),
-        "a hit without a session should be labelled by its thread"
+        "a hit without a session should be labelled by its agent"
     );
 }
 
 #[rstest::rstest]
-fn picked_session_of_a_hit_is_its_ended_threads_session() {
-    // Given thread 1 that ended in session 1, and the search picker over a
+fn picked_session_of_a_hit_is_its_ended_agents_session() {
+    // Given agent 1 that ended in session 1, and the search picker over a
     // hit in it.
     let sessions = {
         let mut sessions = orb_sessions(vec![agent(1, "api", 10)]);
-        if let Some(thread) = sessions
+        if let Some(agent) = sessions
             .projects
             .first_mut()
-            .and_then(|p| p.threads.first_mut())
+            .and_then(|p| p.agents.first_mut())
         {
-            thread.pane = None;
+            agent.pane = None;
         }
         sessions
     };
@@ -1333,11 +1333,11 @@ fn picked_session_of_a_hit_is_its_ended_threads_session() {
     // When asking which session the pick opens.
     let session = picker.picked_session(&sessions);
 
-    // Then it is the session the thread ran in.
+    // Then it is the session the agent ran in.
     assert_eq!(
         session,
         Some(SessionId(1)),
-        "a hit on an ended thread should open its session"
+        "a hit on an ended agent should open its session"
     );
 }
 

@@ -8,9 +8,9 @@ use crate::feat::layout::floats::{FloatLayout, FloatRect};
 use crate::feat::layout::tree::SwapLayout;
 
 use super::{
-    FloatRow, MIGRATIONS, NewPaneThread, PaneId, ProjectId, ProjectKind, SavedLayouts,
+    AgentRow, FloatRow, MIGRATIONS, NewPaneAgent, PaneId, ProjectId, ProjectKind, SavedLayouts,
     SessionFloats, SessionId, SessionKind, SessionRow, SettledOverride, SidebarItem, Store,
-    StoreError, TabRow, ThreadRow, Ui, Upgrade, lock, upgrade_policy,
+    StoreError, TabRow, Ui, Upgrade, lock, upgrade_policy,
 };
 use crate::common::Log;
 
@@ -20,17 +20,17 @@ fn user_version(path: &Path) -> Result<usize, Report<StoreError>> {
         .change_context(StoreError)
 }
 
-/// A thread and the one-pane session it runs in.
+/// An agent and the one-pane session it runs in.
 struct Seeded {
-    thread: super::ThreadId,
+    agent: super::AgentId,
     session: SessionId,
     pane: PaneId,
 }
 
-/// Saves thread `28bf38e2` of Claude, created at 1000, in a new plain
+/// Saves agent `28bf38e2` of Claude, created at 1000, in a new plain
 /// session of project `project_id` in `/tmp/orb`, one saved tab of one
 /// pane.
-fn insert_thread(store: &Store, project_id: ProjectId) -> Result<Seeded, Report<StoreError>> {
+fn insert_agent(store: &Store, project_id: ProjectId) -> Result<Seeded, Report<StoreError>> {
     let (session, pane) = store.insert_session(
         project_id,
         SessionKind::Plain,
@@ -46,7 +46,7 @@ fn insert_thread(store: &Store, project_id: ProjectId) -> Result<Seeded, Report<
         &SessionFloats::default(),
         &[(pane, None)],
     )?;
-    let (thread, _) = store.insert_pane_thread(&NewPaneThread {
+    let (agent, _) = store.insert_pane_agent(&NewPaneAgent {
         pane,
         session_id: "28bf38e2".to_owned(),
         transcript_path: None,
@@ -55,7 +55,7 @@ fn insert_thread(store: &Store, project_id: ProjectId) -> Result<Seeded, Report<
         created_at: 1_000,
     })?;
     Ok(Seeded {
-        thread,
+        agent,
         session,
         pane,
     })
@@ -146,7 +146,7 @@ fn migrating_a_v1_database_adds_the_custom_title_column() -> Result<(), Report<S
 #[rstest::rstest]
 fn migrating_a_v2_database_seeds_activity_and_visit_from_created_at()
 -> Result<(), Report<StoreError>> {
-    // Given a database at schema version 2 holding a thread created at 1 s.
+    // Given a database at schema version 2 holding an agent created at 1 s.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     {
@@ -167,10 +167,10 @@ fn migrating_a_v2_database_seeds_activity_and_visit_from_created_at()
     }
 
     // When opening the store and loading.
-    let (_, threads) = Store::open(&path)?.load()?;
+    let (_, agents) = Store::open(&path)?.load()?;
 
     // Then it's at the latest version and both stamps are the creation time.
-    let stamps: Vec<(i64, i64)> = threads
+    let stamps: Vec<(i64, i64)> = agents
         .iter()
         .map(|row| (row.last_activity_at, row.last_visited_at))
         .collect();
@@ -184,7 +184,7 @@ fn migrating_a_v2_database_seeds_activity_and_visit_from_created_at()
 
 #[rstest::rstest]
 fn migrating_a_v3_database_adds_ai_titled() -> Result<(), Report<StoreError>> {
-    // Given a database at schema version 3 holding a thread.
+    // Given a database at schema version 3 holding an agent.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     {
@@ -205,22 +205,22 @@ fn migrating_a_v3_database_adds_ai_titled() -> Result<(), Report<StoreError>> {
     }
 
     // When opening the store and loading.
-    let (_, threads) = Store::open(&path)?.load()?;
+    let (_, agents) = Store::open(&path)?.load()?;
 
-    // Then it's at the latest version and the thread isn't AI-titled.
-    let ai_titled: Vec<bool> = threads.iter().map(|row| row.ai_titled).collect();
+    // Then it's at the latest version and the agent isn't AI-titled.
+    let ai_titled: Vec<bool> = agents.iter().map(|row| row.ai_titled).collect();
     assert_eq!(
         (user_version(&path)?, ai_titled),
         (MIGRATIONS.len(), vec![false]),
-        "migration v4 should add ai_titled, false for existing threads"
+        "migration v4 should add ai_titled, false for existing agents"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn migrating_a_v4_database_adds_the_thread_model_and_keeps_its_threads()
+fn migrating_a_v4_database_adds_the_agent_model_and_keeps_its_agents()
 -> Result<(), Report<StoreError>> {
-    // Given a database at schema version 4 holding a thread.
+    // Given a database at schema version 4 holding an agent.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     {
@@ -241,24 +241,24 @@ fn migrating_a_v4_database_adds_the_thread_model_and_keeps_its_threads()
     }
 
     // When opening the store.
-    let (_, threads) = Store::open(&path)?.load()?;
+    let (_, agents) = Store::open(&path)?.load()?;
 
-    // Then it's at the latest version, the thread survives, and the
-    // thread model column exists.
+    // Then it's at the latest version, the agent survives, and the
+    // agent model column exists.
     let conn = Connection::open(&path).change_context(StoreError)?;
     let has_schema = conn.prepare("SELECT model FROM threads").is_ok();
-    let short_ids: Vec<String> = threads.into_iter().map(|row| row.short_id).collect();
+    let short_ids: Vec<String> = agents.into_iter().map(|row| row.short_id).collect();
     assert_eq!(
         (user_version(&path)?, short_ids, has_schema),
         (MIGRATIONS.len(), vec!["28bf38e2".to_owned()], true),
-        "migration v5 should keep threads and add the thread model column"
+        "migration v5 should keep agents and add the agent model column"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 fn migrating_a_v5_database_adds_ui_and_removed_at() -> Result<(), Report<StoreError>> {
-    // Given a database at schema version 5 holding a project, a thread and
+    // Given a database at schema version 5 holding a project, an agent and
     // a draft.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
@@ -281,9 +281,9 @@ fn migrating_a_v5_database_adds_ui_and_removed_at() -> Result<(), Report<StoreEr
     }
 
     // When opening the store.
-    let (projects, threads) = Store::open(&path)?.load()?;
+    let (projects, agents) = Store::open(&path)?.load()?;
 
-    // Then it's at the latest version, the project and thread survive, and
+    // Then it's at the latest version, the project and agent survive, and
     // the ui table and removed_at column exist.
     let conn = Connection::open(&path).change_context(StoreError)?;
     let has_schema = [
@@ -296,19 +296,19 @@ fn migrating_a_v5_database_adds_ui_and_removed_at() -> Result<(), Report<StoreEr
         (
             user_version(&path)?,
             projects.len(),
-            threads.len(),
+            agents.len(),
             has_schema
         ),
         (MIGRATIONS.len(), 1, 1, true),
-        "migration v6 should keep projects and threads and add ui and projects.removed_at"
+        "migration v6 should keep projects and agents and add ui and projects.removed_at"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn migrating_a_v7_database_adds_the_project_kind_and_keeps_its_threads()
+fn migrating_a_v7_database_adds_the_project_kind_and_keeps_its_agents()
 -> Result<(), Report<StoreError>> {
-    // Given a database at schema version 7 holding a project and a thread.
+    // Given a database at schema version 7 holding a project and an agent.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     {
@@ -329,23 +329,23 @@ fn migrating_a_v7_database_adds_the_project_kind_and_keeps_its_threads()
     }
 
     // When opening the store and loading.
-    let threads = Store::open(&path)?.load()?.1;
+    let agents = Store::open(&path)?.load()?.1;
 
-    // Then it's at the latest version, the thread survives, and the
+    // Then it's at the latest version, the agent survives, and the
     // project kind column exists.
     let conn = Connection::open(&path).change_context(StoreError)?;
     let has_schema = conn.prepare("SELECT kind FROM projects").is_ok();
     assert_eq!(
-        (user_version(&path)?, threads.len(), has_schema),
+        (user_version(&path)?, agents.len(), has_schema),
         (MIGRATIONS.len(), 1, true),
-        "migration v8 should keep threads and add projects.kind"
+        "migration v8 should keep agents and add projects.kind"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn migrating_a_v8_database_adds_jumps_and_keeps_its_threads() -> Result<(), Report<StoreError>> {
-    // Given a database at schema version 8 holding a project and a thread.
+fn migrating_a_v8_database_adds_jumps_and_keeps_its_agents() -> Result<(), Report<StoreError>> {
+    // Given a database at schema version 8 holding a project and an agent.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     {
@@ -367,20 +367,20 @@ fn migrating_a_v8_database_adds_jumps_and_keeps_its_threads() -> Result<(), Repo
 
     // When opening the store and loading.
     let store = Store::open(&path)?;
-    let threads = store.load()?.1;
+    let agents = store.load()?.1;
 
-    // Then it's at the latest version, the thread survives, and the jump
+    // Then it's at the latest version, the agent survives, and the jump
     // list reads back empty.
     assert_eq!(
-        (user_version(&path)?, threads.len(), store.jumps()?),
+        (user_version(&path)?, agents.len(), store.jumps()?),
         (MIGRATIONS.len(), 1, Vec::new()),
-        "migration v9 should keep threads and add an empty jumps table"
+        "migration v9 should keep agents and add an empty jumps table"
     );
     Ok(())
 }
 
 /// A database at schema version 9 holding the orb project with a draft,
-/// the groups `with-thread` (holding thread `28bf38e2`) and `empty`.
+/// the groups `with-agent` (holding agent `28bf38e2`) and `empty`.
 fn v9_database(path: &Path) -> Result<(), Report<StoreError>> {
     let conn = Connection::open(path).change_context(StoreError)?;
     for sql in MIGRATIONS
@@ -404,16 +404,16 @@ fn v9_database(path: &Path) -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn migrating_a_v9_database_backfills_claude_as_every_harness() -> Result<(), Report<StoreError>> {
-    // Given a v9 database with a thread, a draft and groups.
+    // Given a v9 database with an agent, a draft and groups.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     v9_database(&path)?;
 
     // When opening the store and loading.
-    let (_, threads) = Store::open(&path)?.load()?;
+    let (_, agents) = Store::open(&path)?.load()?;
 
-    // Then the thread runs in claude.
-    let harnesses: Vec<String> = threads.iter().map(|row| row.harness.to_string()).collect();
+    // Then the agent runs in claude.
+    let harnesses: Vec<String> = agents.iter().map(|row| row.harness.to_string()).collect();
     assert_eq!(
         harnesses,
         vec!["claude"],
@@ -674,8 +674,8 @@ fn schema(path: &Path) -> Result<Vec<(String, Vec<String>)>, Report<StoreError>>
 /// values; group 41 and a draft of project 1; settled session 11 and
 /// pinned, named session 12; panes 101 (session 11, named, resumes a
 /// Claude session, marked as a `--bg` session), 102 and float pane 103
-/// (session 12); a tab of each session; Claude thread 301 in pane 101,
-/// every column set and in group 41; pi thread 302 in pane 102; two jumps;
+/// (session 12); a tab of each session; Claude agent 301 in pane 101,
+/// every column set and in group 41; pi agent 302 in pane 102; two jumps;
 /// the ui row. Panes up to 150 were made once, so the pane sequence is at 150.
 fn v13_database(path: &Path) -> Result<(), Report<StoreError>> {
     database_at(path, 13)?;
@@ -884,24 +884,24 @@ fn reopening_a_migrated_database_keeps_its_schema_version() -> Result<(), Report
 }
 
 #[rstest::rstest]
-fn inserted_thread_loads_back_after_reopening() -> Result<(), Report<StoreError>> {
-    // Given a thread saved in a store that was then closed.
+fn inserted_agent_loads_back_after_reopening() -> Result<(), Report<StoreError>> {
+    // Given an agent saved in a store that was then closed.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     let (project_id, inserted) = {
         let store = Store::open(&path)?;
         let project_id =
             store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-        (project_id, insert_thread(&store, project_id)?)
+        (project_id, insert_agent(&store, project_id)?)
     };
 
     // When reopening the store and loading.
-    let (_, threads) = Store::open(&path)?.load()?;
+    let (_, agents) = Store::open(&path)?.load()?;
 
-    // Then the thread comes back with the fields it was saved with.
-    let expected = ThreadRow {
+    // Then the agent comes back with the fields it was saved with.
+    let expected = AgentRow {
         harness: HarnessId::new("claude"),
-        id: inserted.thread,
+        id: inserted.agent,
         pane_id: Some(inserted.pane),
         orb_session: Some(inserted.session),
         project_id,
@@ -921,7 +921,7 @@ fn inserted_thread_loads_back_after_reopening() -> Result<(), Report<StoreError>
         model: None,
         renamed_title: None,
     };
-    assert_eq!(threads, vec![expected], "the saved thread should load back");
+    assert_eq!(agents, vec![expected], "the saved agent should load back");
     Ok(())
 }
 
@@ -1080,20 +1080,20 @@ fn removed_project_loads_with_when_it_was_removed() -> Result<(), Report<StoreEr
 }
 
 #[rstest::rstest]
-fn removing_a_project_keeps_its_threads() -> Result<(), Report<StoreError>> {
-    // Given a store with a project that has a thread.
+fn removing_a_project_keeps_its_agents() -> Result<(), Report<StoreError>> {
+    // Given a store with a project that has an agent.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    insert_thread(&store, project_id)?;
+    insert_agent(&store, project_id)?;
 
     // When removing the project.
     store.remove_project(project_id, 2_000)?;
 
-    // Then the thread still loads.
+    // Then the agent still loads.
     assert_eq!(
         store.load()?.1.len(),
         1,
-        "a removed project's threads should stay"
+        "a removed project's agents should stay"
     );
     Ok(())
 }
@@ -1135,17 +1135,17 @@ fn adding_a_removed_root_keeps_its_id() -> Result<(), Report<StoreError>> {
 }
 
 #[rstest::rstest]
-fn saved_thread_updates_load_back() -> Result<(), Report<StoreError>> {
-    // Given a store with one thread.
+fn saved_agent_updates_load_back() -> Result<(), Report<StoreError>> {
+    // Given a store with one agent.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
 
     // When saving its session id, titles, transcript cursor, and turn start.
-    let updated = ThreadRow {
+    let updated = AgentRow {
         orb_session: None,
         harness: HarnessId::new("claude"),
-        id: inserted.thread,
+        id: inserted.agent,
         pane_id: Some(inserted.pane),
         project_id,
         short_id: "28bf38e2".to_owned(),
@@ -1166,28 +1166,28 @@ fn saved_thread_updates_load_back() -> Result<(), Report<StoreError>> {
         model: None,
         renamed_title: None,
     };
-    store.save_thread(&updated)?;
+    store.save_agent(&updated)?;
 
     // Then loading returns the updated values.
-    let (_, threads) = store.load()?;
-    assert_eq!(threads, vec![updated], "the updates should load back");
+    let (_, agents) = store.load()?;
+    assert_eq!(agents, vec![updated], "the updates should load back");
     Ok(())
 }
 
 #[rstest::rstest]
 fn renamed_title_loads_back_after_saving() -> Result<(), Report<StoreError>> {
-    // Given a store with one thread.
+    // Given a store with one agent.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    insert_thread(&store, project_id)?;
+    insert_agent(&store, project_id)?;
     let inserted = store
         .load()?
         .1
         .pop()
-        .ok_or_else(|| Report::new(StoreError).attach("the thread wasn't saved"))?;
+        .ok_or_else(|| Report::new(StoreError).attach("the agent wasn't saved"))?;
 
     // When saving the name the user gave it with `r`.
-    store.save_thread(&ThreadRow {
+    store.save_agent(&AgentRow {
         renamed_title: Some("Sidebar search".to_owned()),
         ..inserted
     })?;
@@ -1208,24 +1208,24 @@ fn renamed_title_loads_back_after_saving() -> Result<(), Report<StoreError>> {
 }
 
 #[rstest::rstest]
-fn inserted_thread_starts_seen_and_active_at_creation() -> Result<(), Report<StoreError>> {
+fn inserted_agent_starts_seen_and_active_at_creation() -> Result<(), Report<StoreError>> {
     // Given a store with a project.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
 
-    // When inserting a thread created at 1 s.
-    insert_thread(&store, project_id)?;
+    // When inserting an agent created at 1 s.
+    insert_agent(&store, project_id)?;
 
     // Then its last activity and last visit are its creation time.
-    let (_, threads) = store.load()?;
-    let stamps: Vec<(i64, i64)> = threads
+    let (_, agents) = store.load()?;
+    let stamps: Vec<(i64, i64)> = agents
         .iter()
         .map(|row| (row.last_activity_at, row.last_visited_at))
         .collect();
     assert_eq!(
         stamps,
         vec![(1_000, 1_000)],
-        "a new thread should start seen and active at its creation"
+        "a new agent should start seen and active at its creation"
     );
     Ok(())
 }
@@ -1499,15 +1499,15 @@ fn saving_jumps_again_replaces_them() -> Result<(), Report<StoreError>> {
     Ok(())
 }
 
-/// The pi thread's short id in the v10 fixture.
+/// The pi agent's short id in the v10 fixture.
 const PI_SHORT_ID: &str = "orb-0123456789abcdef0123456789abcdef";
 
 /// A v10 database: project 1 `/work/orb` with a draft, project 2 the
-/// Incognito folder; lone Claude thread 3 (`aa11`, pinned, renamed), lone
-/// pi thread 4, Incognito thread 5, Feature group 1 in `/wt/x` holding
-/// threads 6, 7 and 8 (created in that order), settled Research group 2
-/// holding thread 9, threadless Feature group 3 with no dir, settled lone
-/// thread 10; jumps to thread 3, group 1, the draft and thread 9.
+/// Incognito folder; lone Claude agent 3 (`aa11`, pinned, renamed), lone
+/// pi agent 4, Incognito agent 5, Feature group 1 in `/wt/x` holding
+/// agents 6, 7 and 8 (created in that order), settled Research group 2
+/// holding agent 9, agentless Feature group 3 with no dir, settled lone
+/// agent 10; jumps to agent 3, group 1, the draft and agent 9.
 fn v10_database(path: &Path) -> Result<(), Report<StoreError>> {
     let conn = Connection::open(path).change_context(StoreError)?;
     for migration in MIGRATIONS
@@ -1589,7 +1589,7 @@ where
         .change_context(StoreError)
 }
 
-/// The session thread `id` runs in, after migrating.
+/// The session agent `id` runs in, after migrating.
 fn session_of(path: &Path, thread: i64) -> Result<i64, Report<StoreError>> {
     value(
         path,
@@ -1600,7 +1600,7 @@ fn session_of(path: &Path, thread: i64) -> Result<i64, Report<StoreError>> {
     )
 }
 
-/// The pane thread `id` runs in, after migrating.
+/// The pane agent `id` runs in, after migrating.
 fn pane_of(path: &Path, thread: i64) -> Result<i64, Report<StoreError>> {
     value(
         path,
@@ -1999,7 +1999,7 @@ const THREAD_COLUMNS: &str = "SELECT * FROM threads ORDER BY id";
 
 #[rstest::rstest]
 fn migrating_v10_writes_the_backup_before_changing_anything() -> Result<(), Report<StoreError>> {
-    // Given a v10 database and its threads as they were.
+    // Given a v10 database and its agents as they were.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     v10_database(&path)?;
@@ -2008,7 +2008,7 @@ fn migrating_v10_writes_the_backup_before_changing_anything() -> Result<(), Repo
     // When opening the store.
     drop(Store::open(&path)?);
 
-    // Then the backup is a v10 database holding the same threads.
+    // Then the backup is a v10 database holding the same agents.
     let backup = backup_path(&path);
     assert_eq!(
         (user_version(&backup)?, rows(&backup, THREAD_COLUMNS)?),
@@ -2086,57 +2086,57 @@ fn opening_a_fresh_database_writes_no_backup() -> Result<(), Report<StoreError>>
 }
 
 #[rstest::rstest]
-fn migrating_v10_keeps_every_thread_id() -> Result<(), Report<StoreError>> {
+fn migrating_v10_keeps_every_agent_id() -> Result<(), Report<StoreError>> {
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading its threads.
-    let threads = rows(
+    // When reading its agents.
+    let agents = rows(
         &path,
         "SELECT id, pane_id IS NOT NULL FROM threads ORDER BY id",
     )?;
 
-    // Then threads 3 to 10 are there, each in a pane.
+    // Then agents 3 to 10 are there, each in a pane.
     let expected: Vec<Vec<String>> = (3..=10)
         .map(|id| vec![format!("Integer({id})"), "Integer(1)".to_owned()])
         .collect();
     assert_eq!(
-        threads, expected,
-        "every thread should keep its id and get a pane"
+        agents, expected,
+        "every agent should keep its id and get a pane"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn migrating_v10_records_each_threads_session() -> Result<(), Report<StoreError>> {
+fn migrating_v10_records_each_agents_session() -> Result<(), Report<StoreError>> {
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading which threads' session differs from their pane's.
+    // When reading which agents' session differs from their pane's.
     let mismatched = rows(
         &path,
         "SELECT t.id FROM threads t LEFT JOIN panes p ON p.id = t.pane_id
              WHERE t.orb_session_id IS NOT p.session_id OR t.orb_session_id IS NULL",
     )?;
 
-    // Then every thread records the session of its pane.
+    // Then every agent records the session of its pane.
     assert!(
         mismatched.is_empty(),
-        "every migrated thread should record its pane's session: {mismatched:?}"
+        "every migrated agent should record its pane's session: {mismatched:?}"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn migrating_v10_gives_a_lone_claude_thread_one_session_tab_and_pane()
+fn migrating_v10_gives_a_lone_claude_agent_one_session_tab_and_pane()
 -> Result<(), Report<StoreError>> {
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading thread 3's session and its tabs.
+    // When reading agent 3's session and its tabs.
     let session = session_of(&path, 3)?;
     let pane = pane_of(&path, 3)?;
     let found = rows(
@@ -2148,7 +2148,7 @@ fn migrating_v10_gives_a_lone_claude_thread_one_session_tab_and_pane()
         ),
     )?;
 
-    // Then it has one tab of its one pane, in the thread's directory.
+    // Then it has one tab of its one pane, in the agent's directory.
     let expected = vec![vec![
         "Text(\"/work/orb\")".to_owned(),
         "Text(\"Fix login\")".to_owned(),
@@ -2160,7 +2160,7 @@ fn migrating_v10_gives_a_lone_claude_thread_one_session_tab_and_pane()
     ]];
     assert_eq!(
         found, expected,
-        "a lone thread should become a one-pane session"
+        "a lone agent should become a one-pane session"
     );
     Ok(())
 }
@@ -2171,7 +2171,7 @@ fn migrating_v10_records_a_claude_panes_resume() -> Result<(), Report<StoreError
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading thread 3's pane.
+    // When reading agent 3's pane.
     let pane = pane_of(&path, 3)?;
     let found = rows(
         &path,
@@ -2195,7 +2195,7 @@ fn migrating_v10_keeps_a_pi_panes_zmx_session() -> Result<(), Report<StoreError>
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading pi thread 4's pane.
+    // When reading pi agent 4's pane.
     let pane = pane_of(&path, 4)?;
     let found = rows(
         &path,
@@ -2213,28 +2213,28 @@ fn migrating_v10_keeps_a_pi_panes_zmx_session() -> Result<(), Report<StoreError>
 }
 
 #[rstest::rstest]
-fn migrating_v10_puts_a_groups_threads_in_one_session() -> Result<(), Report<StoreError>> {
+fn migrating_v10_puts_a_groups_agents_in_one_session() -> Result<(), Report<StoreError>> {
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading the sessions of group 1's threads.
+    // When reading the sessions of group 1's agents.
     let sessions: Vec<i64> = [6, 7, 8]
         .into_iter()
-        .map(|thread| session_of(&path, thread))
+        .map(|agent| session_of(&path, agent))
         .collect::<Result<_, _>>()?;
 
     // Then all three are in the same session.
     assert!(
         sessions.windows(2).all(|pair| pair.first() == pair.last()),
-        "a group's threads should share one session, got {sessions:?}"
+        "a group's agents should share one session, got {sessions:?}"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn migrating_v10_gives_each_of_a_groups_threads_a_tab_newest_first()
--> Result<(), Report<StoreError>> {
+fn migrating_v10_gives_each_of_a_groups_agents_a_tab_newest_first() -> Result<(), Report<StoreError>>
+{
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
@@ -2249,12 +2249,12 @@ fn migrating_v10_gives_each_of_a_groups_threads_a_tab_newest_first()
         ),
     )?;
 
-    // Then each thread's pane is alone in its own unnamed tab, newest thread first.
+    // Then each agent's pane is alone in its own unnamed tab, newest agent first.
     let expected: Vec<Vec<String>> = [8, 7, 6]
         .into_iter()
         .enumerate()
-        .map(|(position, thread)| {
-            pane_of(&path, thread).map(|pane| {
+        .map(|(position, agent)| {
+            pane_of(&path, agent).map(|pane| {
                 vec![
                     format!("Integer({position})"),
                     "Null".to_owned(),
@@ -2266,7 +2266,7 @@ fn migrating_v10_gives_each_of_a_groups_threads_a_tab_newest_first()
         .collect::<Result<_, _>>()?;
     assert_eq!(
         found, expected,
-        "a group should become one tab per thread, newest first"
+        "a group should become one tab per agent, newest first"
     );
     Ok(())
 }
@@ -2284,7 +2284,7 @@ fn migrating_v10_opens_a_groups_session_on_its_first_tab() -> Result<(), Report<
         &format!("SELECT active_tab FROM sessions WHERE id = {session}"),
     )?;
 
-    // Then it is the first tab, the newest thread's.
+    // Then it is the first tab, the newest agent's.
     assert_eq!(active, 0, "a group's session should open on its first tab");
     Ok(())
 }
@@ -2295,7 +2295,7 @@ fn migrating_v10_copies_a_settled_groups_settle_state() -> Result<(), Report<Sto
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading the session of settled group 2's thread.
+    // When reading the session of settled group 2's agent.
     let session = session_of(&path, 9)?;
     let found = rows(
         &path,
@@ -2315,38 +2315,37 @@ fn migrating_v10_copies_a_settled_groups_settle_state() -> Result<(), Report<Sto
 }
 
 #[rstest::rstest]
-fn migrating_v10_copies_a_settled_threads_settle_state() -> Result<(), Report<StoreError>> {
+fn migrating_v10_copies_a_settled_agents_settle_state() -> Result<(), Report<StoreError>> {
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading settled thread 10's session.
+    // When reading settled agent 10's session.
     let session = session_of(&path, 10)?;
     let found = rows(
         &path,
         &format!("SELECT settled_override, settled_at FROM sessions WHERE id = {session}"),
     )?;
 
-    // Then it is settled when the thread was.
+    // Then it is settled when the agent was.
     let expected = vec![vec![
         "Text(\"settled\")".to_owned(),
         "Integer(9000)".to_owned(),
     ]];
     assert_eq!(
         found, expected,
-        "a settled thread's session should stay settled"
+        "a settled agent's session should stay settled"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn migrating_v10_copies_a_pinned_threads_pin_activity_and_visit() -> Result<(), Report<StoreError>>
-{
+fn migrating_v10_copies_a_pinned_agents_pin_activity_and_visit() -> Result<(), Report<StoreError>> {
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading pinned thread 3's session.
+    // When reading pinned agent 3's session.
     let session = session_of(&path, 3)?;
     let found = rows(
         &path,
@@ -2356,7 +2355,7 @@ fn migrating_v10_copies_a_pinned_threads_pin_activity_and_visit() -> Result<(), 
         ),
     )?;
 
-    // Then it has the thread's pin, activity and visit times.
+    // Then it has the agent's pin, activity and visit times.
     let expected = vec![vec![
         "Integer(5000)".to_owned(),
         "Integer(6000)".to_owned(),
@@ -2364,18 +2363,18 @@ fn migrating_v10_copies_a_pinned_threads_pin_activity_and_visit() -> Result<(), 
     ]];
     assert_eq!(
         found, expected,
-        "a thread's pin, activity and visit should carry over"
+        "an agent's pin, activity and visit should carry over"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn migrating_v10_makes_an_incognito_threads_session_incognito() -> Result<(), Report<StoreError>> {
+fn migrating_v10_makes_an_incognito_agents_session_incognito() -> Result<(), Report<StoreError>> {
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading Incognito thread 5's session.
+    // When reading Incognito agent 5's session.
     let session = session_of(&path, 5)?;
     let kind: String = value(
         &path,
@@ -2385,7 +2384,7 @@ fn migrating_v10_makes_an_incognito_threads_session_incognito() -> Result<(), Re
     // Then it is an Incognito session.
     assert_eq!(
         kind, "incognito",
-        "an Incognito thread's session should be Incognito"
+        "an Incognito agent's session should be Incognito"
     );
     Ok(())
 }
@@ -2394,15 +2393,15 @@ fn migrating_v10_makes_an_incognito_threads_session_incognito() -> Result<(), Re
 #[case::feature(6, "plain")]
 #[case::research(9, "research")]
 fn migrating_v10_maps_group_kinds(
-    #[case] thread: i64,
+    #[case] agent: i64,
     #[case] expected: &str,
 ) -> Result<(), Report<StoreError>> {
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading the kind of the session the group's thread is in.
-    let session = session_of(&path, thread)?;
+    // When reading the kind of the session the group's agent is in.
+    let session = session_of(&path, agent)?;
     let kind: String = value(
         &path,
         &format!("SELECT kind FROM sessions WHERE id = {session}"),
@@ -2417,13 +2416,13 @@ fn migrating_v10_maps_group_kinds(
 }
 
 #[rstest::rstest]
-fn migrating_v10_gives_a_threadless_group_one_pane_in_the_project_root()
+fn migrating_v10_gives_an_agentless_group_one_pane_in_the_project_root()
 -> Result<(), Report<StoreError>> {
     // Given a migrated v10 database.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
-    // When reading threadless group 3's session and panes.
+    // When reading agentless group 3's session and panes.
     let found = rows(
         &path,
         "SELECT s.dir, p.cwd, p.resume FROM sessions s JOIN panes p ON p.session_id = s.id
@@ -2438,7 +2437,7 @@ fn migrating_v10_gives_a_threadless_group_one_pane_in_the_project_root()
     ]];
     assert_eq!(
         found, expected,
-        "a threadless group should get one shell pane"
+        "an agentless group should get one shell pane"
     );
     Ok(())
 }
@@ -2452,7 +2451,7 @@ fn migrating_v10_rewrites_jumps_to_sessions() -> Result<(), Report<StoreError>> 
     // When reading its jump rows.
     let jumps = rows(&path, "SELECT kind, item_id FROM jumps ORDER BY position")?;
 
-    // Then thread and group rows point at their sessions and the draft's row is gone.
+    // Then agent and group rows point at their sessions and the draft's row is gone.
     let expected: Vec<Vec<String>> = [
         session_of(&path, 3)?,
         session_of(&path, 6)?,
@@ -2471,26 +2470,26 @@ fn migrating_v10_rewrites_jumps_to_sessions() -> Result<(), Report<StoreError>> 
 }
 
 #[rstest::rstest]
-fn migrating_v10_numbers_panes_above_every_thread_id() -> Result<(), Report<StoreError>> {
-    // Given a migrated v10 database whose highest thread id is 10.
+fn migrating_v10_numbers_panes_above_every_agent_id() -> Result<(), Report<StoreError>> {
+    // Given a migrated v10 database whose highest agent id is 10.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = migrated_v10(dir.path())?;
 
     // When reading the lowest pane id.
     let lowest: i64 = value(&path, "SELECT MIN(id) FROM panes")?;
 
-    // Then it is above every thread id.
+    // Then it is above every agent id.
     assert!(
         lowest > 10,
-        "pane ids should start above thread ids, got {lowest}"
+        "pane ids should start above agent ids, got {lowest}"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn migrating_v10_gives_a_thread_of_a_missing_group_its_own_session()
+fn migrating_v10_gives_an_agent_of_a_missing_group_its_own_session()
 -> Result<(), Report<StoreError>> {
-    // Given a v10 database with a thread whose group row is gone.
+    // Given a v10 database with an agent whose group row is gone.
     let dir = tempfile::tempdir().change_context(StoreError)?;
     let path = dir.path().join("state.sqlite");
     v10_database(&path)?;
@@ -2506,7 +2505,7 @@ fn migrating_v10_gives_a_thread_of_a_missing_group_its_own_session()
     // When opening the store.
     drop(Store::open(&path)?);
 
-    // Then that thread runs in a one-pane session of its own.
+    // Then that agent runs in a one-pane session of its own.
     let panes: i64 = value(
         &path,
         &format!(
@@ -2514,7 +2513,7 @@ fn migrating_v10_gives_a_thread_of_a_missing_group_its_own_session()
             session_of(&path, 11)?
         ),
     )?;
-    assert_eq!(panes, 1, "a thread of a missing group should get a session");
+    assert_eq!(panes, 1, "an agent of a missing group should get a session");
     Ok(())
 }
 
@@ -2553,13 +2552,13 @@ fn reopening_a_migrated_v10_database_makes_no_more_sessions() -> Result<(), Repo
 }
 
 #[rstest::rstest]
-fn inserted_thread_gets_a_session_with_one_pane() -> Result<(), Report<StoreError>> {
+fn inserted_agent_gets_a_session_with_one_pane() -> Result<(), Report<StoreError>> {
     // Given a store with a project.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
 
-    // When inserting a thread.
-    let inserted = insert_thread(&store, project_id)?;
+    // When inserting an agent.
+    let inserted = insert_agent(&store, project_id)?;
 
     // Then its session has one tab holding its one pane, in its directory.
     let layouts = store.layouts()?;
@@ -2583,17 +2582,17 @@ fn inserted_thread_gets_a_session_with_one_pane() -> Result<(), Report<StoreErro
             )],
             vec![(inserted.pane, inserted.session, PathBuf::from("/tmp/orb"))]
         ),
-        "a new thread should get a one-pane session"
+        "a new agent should get a one-pane session"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 fn saved_layout_loads_back() -> Result<(), Report<StoreError>> {
-    // Given a thread's session with a second pane.
+    // Given an agent's session with a second pane.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let second = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
     // When saving two tabs, the second active, and a name for the second pane.
@@ -2639,10 +2638,10 @@ fn saved_layout_loads_back() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn saved_tab_keeps_its_swap_layout_and_mark() -> Result<(), Report<StoreError>> {
-    // Given a thread's session.
+    // Given an agent's session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
 
     // When saving its tab half-stacked and changed by hand.
     let tab = TabRow {
@@ -2679,10 +2678,10 @@ fn saved_tab_keeps_its_swap_layout_and_mark() -> Result<(), Report<StoreError>> 
 
 #[rstest::rstest]
 fn saved_session_lifecycle_is_loaded_back() -> Result<(), Report<StoreError>> {
-    // Given a thread's session.
+    // Given an agent's session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let before = store
         .layouts()?
         .sessions
@@ -2713,13 +2712,13 @@ fn saved_session_lifecycle_is_loaded_back() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn saving_a_layout_without_a_pane_deletes_its_row() -> Result<(), Report<StoreError>> {
-    // Given a thread's session with a second pane.
+    // Given an agent's session with a second pane.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let second = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
-    // When saving a layout holding only the thread's pane.
+    // When saving a layout holding only the agent's pane.
     let tab = TabRow {
         session_id: inserted.session,
         position: 0,
@@ -2754,10 +2753,10 @@ fn saving_a_layout_without_a_pane_deletes_its_row() -> Result<(), Report<StoreEr
 
 #[rstest::rstest]
 fn deleted_session_takes_its_tabs_and_panes() -> Result<(), Report<StoreError>> {
-    // Given a thread's session.
+    // Given an agent's session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
 
     // When deleting the session.
     store.delete_session(inserted.session)?;
@@ -2802,10 +2801,10 @@ fn float_row(session: SessionId, position: usize, pane: PaneId, pinned: bool) ->
 
 #[rstest::rstest]
 fn saved_floats_load_back_in_order_with_their_pins() -> Result<(), Report<StoreError>> {
-    // Given a thread's session with two more panes.
+    // Given an agent's session with two more panes.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let first = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
     let second = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
@@ -2836,10 +2835,10 @@ fn saved_floats_load_back_in_order_with_their_pins() -> Result<(), Report<StoreE
 
 #[rstest::rstest]
 fn saving_a_layout_keeps_its_float_panes_rows() -> Result<(), Report<StoreError>> {
-    // Given a thread's session with a second pane.
+    // Given an agent's session with a second pane.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let float = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
     // When saving a layout holding the second pane only as a float.
@@ -2871,10 +2870,10 @@ fn saving_a_layout_keeps_its_float_panes_rows() -> Result<(), Report<StoreError>
 
 #[rstest::rstest]
 fn saved_floats_mark_loads_back() -> Result<(), Report<StoreError>> {
-    // Given a thread's session.
+    // Given an agent's session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
 
     // When saving its layout with the floats marked changed by hand.
     store.save_layout(
@@ -2900,10 +2899,10 @@ fn saved_floats_mark_loads_back() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn saved_float_layout_loads_back() -> Result<(), Report<StoreError>> {
-    // Given a thread's session.
+    // Given an agent's session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
 
     // When saving its layout with the floats spread.
     store.save_layout(
@@ -2933,10 +2932,10 @@ fn saved_float_layout_loads_back() -> Result<(), Report<StoreError>> {
 
 #[rstest::rstest]
 fn saving_without_a_closed_float_drops_its_pane() -> Result<(), Report<StoreError>> {
-    // Given a thread's session saved with a float.
+    // Given an agent's session saved with a float.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let float = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
     store.save_layout(
         inserted.session,
@@ -2969,10 +2968,10 @@ fn saving_without_a_closed_float_drops_its_pane() -> Result<(), Report<StoreErro
 
 #[rstest::rstest]
 fn deleted_session_takes_its_floats() -> Result<(), Report<StoreError>> {
-    // Given a thread's session saved with a float.
+    // Given an agent's session saved with a float.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let float = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
     store.save_layout(
         inserted.session,
@@ -2997,59 +2996,59 @@ fn deleted_session_takes_its_floats() -> Result<(), Report<StoreError>> {
 }
 
 #[rstest::rstest]
-fn deleted_session_takes_its_threads() -> Result<(), Report<StoreError>> {
-    // Given a thread's session.
+fn deleted_session_takes_its_agents() -> Result<(), Report<StoreError>> {
+    // Given an agent's session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
 
     // When deleting the session.
     store.delete_session(inserted.session)?;
 
-    // Then the thread that ran in it is gone too.
-    let (_, threads, ..) = store.load()?;
+    // Then the agent that ran in it is gone too.
+    let (_, agents, ..) = store.load()?;
     assert!(
-        threads.is_empty(),
-        "a deleted session should take the threads in its panes"
+        agents.is_empty(),
+        "a deleted session should take the agents in its panes"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn deleted_session_takes_its_ended_threads() -> Result<(), Report<StoreError>> {
-    // Given a thread whose pane ended, out of its session.
+fn deleted_session_takes_its_ended_agents() -> Result<(), Report<StoreError>> {
+    // Given an agent whose pane ended, out of its session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let mut row = store
         .load()?
         .1
         .into_iter()
-        .find(|row| row.id == inserted.thread)
+        .find(|row| row.id == inserted.agent)
         .ok_or_else(|| Report::new(StoreError))?;
     row.pane_id = None;
-    store.save_thread(&row)?;
+    store.save_agent(&row)?;
 
     // When deleting the session.
     store.delete_session(inserted.session)?;
 
-    // Then the ended thread is gone too.
-    let (_, threads, ..) = store.load()?;
+    // Then the ended agent is gone too.
+    let (_, agents, ..) = store.load()?;
     assert!(
-        threads.is_empty(),
-        "a deleted session should take the threads that ended in it"
+        agents.is_empty(),
+        "a deleted session should take the agents that ended in it"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn inserted_thread_loads_its_session() -> Result<(), Report<StoreError>> {
+fn inserted_agent_loads_its_session() -> Result<(), Report<StoreError>> {
     // Given a project.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
 
-    // When inserting a thread.
-    let inserted = insert_thread(&store, project_id)?;
+    // When inserting an agent.
+    let inserted = insert_agent(&store, project_id)?;
 
     // Then it loads back in its new session.
     let sessions: Vec<Option<SessionId>> = store
@@ -3061,27 +3060,27 @@ fn inserted_thread_loads_its_session() -> Result<(), Report<StoreError>> {
     assert_eq!(
         sessions,
         vec![Some(inserted.session)],
-        "a new thread should know its session"
+        "a new agent should know its session"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn ended_thread_keeps_its_session() -> Result<(), Report<StoreError>> {
-    // Given a thread in its session.
+fn ended_agent_keeps_its_session() -> Result<(), Report<StoreError>> {
+    // Given an agent in its session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let mut row = store
         .load()?
         .1
         .into_iter()
-        .find(|row| row.id == inserted.thread)
+        .find(|row| row.id == inserted.agent)
         .ok_or_else(|| Report::new(StoreError))?;
 
     // When its pane ends.
     row.pane_id = None;
-    store.save_thread(&row)?;
+    store.save_agent(&row)?;
 
     // Then it still loads with that session.
     let sessions: Vec<Option<SessionId>> = store
@@ -3093,21 +3092,21 @@ fn ended_thread_keeps_its_session() -> Result<(), Report<StoreError>> {
     assert_eq!(
         sessions,
         vec![Some(inserted.session)],
-        "an ended thread should keep its session"
+        "an ended agent should keep its session"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn pane_thread_loads_the_session_of_its_pane() -> Result<(), Report<StoreError>> {
+fn pane_agent_loads_the_session_of_its_pane() -> Result<(), Report<StoreError>> {
     // Given a pane in a session of the orb project.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let pane = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
-    // When a report starts a thread in that pane.
-    let (thread, _) = store.insert_pane_thread(&NewPaneThread {
+    // When a report starts an agent in that pane.
+    let (agent, _) = store.insert_pane_agent(&NewPaneAgent {
         pane,
         session_id: "s-new".to_owned(),
         transcript_path: None,
@@ -3121,22 +3120,22 @@ fn pane_thread_loads_the_session_of_its_pane() -> Result<(), Report<StoreError>>
         .load()?
         .1
         .into_iter()
-        .find(|row| row.id == thread)
+        .find(|row| row.id == agent)
         .and_then(|row| row.orb_session);
     assert_eq!(
         session,
         Some(inserted.session),
-        "a pane's thread should know the pane's session"
+        "a pane's agent should know the pane's session"
     );
     Ok(())
 }
 
 #[rstest::rstest]
-fn inserted_threads_session_loads_its_project_and_creation() -> Result<(), Report<StoreError>> {
-    // Given a thread inserted at 1000 in project orb.
+fn inserted_agents_session_loads_its_project_and_creation() -> Result<(), Report<StoreError>> {
+    // Given an agent inserted at 1000 in project orb.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    insert_thread(&store, project_id)?;
+    insert_agent(&store, project_id)?;
 
     // When loading the sessions.
     let found: Vec<(ProjectId, SessionKind, i64)> = store
@@ -3157,10 +3156,10 @@ fn inserted_threads_session_loads_its_project_and_creation() -> Result<(), Repor
 
 #[rstest::rstest]
 fn inserted_pane_loads_back_in_its_session() -> Result<(), Report<StoreError>> {
-    // Given a thread's session.
+    // Given an agent's session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
 
     // When inserting a pane in /tmp/logs.
     let pane = store.insert_pane(inserted.session, Path::new("/tmp/logs"))?;
@@ -3182,39 +3181,39 @@ fn inserted_pane_loads_back_in_its_session() -> Result<(), Report<StoreError>> {
 }
 
 #[rstest::rstest]
-fn save_thread_saves_its_pane() -> Result<(), Report<StoreError>> {
-    // Given a thread and a second pane in its session.
+fn save_agent_saves_its_pane() -> Result<(), Report<StoreError>> {
+    // Given an agent and a second pane in its session.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let pane = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
     let mut row = store
         .load()?
         .1
         .into_iter()
-        .find(|row| row.id == inserted.thread)
+        .find(|row| row.id == inserted.agent)
         .ok_or_else(|| Report::new(StoreError))?;
 
-    // When saving the thread in that pane.
+    // When saving the agent in that pane.
     row.pane_id = Some(pane);
-    store.save_thread(&row)?;
+    store.save_agent(&row)?;
 
     // Then it loads back in that pane.
     let panes: Vec<Option<PaneId>> = store.load()?.1.into_iter().map(|row| row.pane_id).collect();
-    assert_eq!(panes, vec![Some(pane)], "the thread's pane should be saved");
+    assert_eq!(panes, vec![Some(pane)], "the agent's pane should be saved");
     Ok(())
 }
 
 #[rstest::rstest]
-fn insert_pane_thread_joins_the_project_of_the_panes_session() -> Result<(), Report<StoreError>> {
+fn insert_pane_agent_joins_the_project_of_the_panes_session() -> Result<(), Report<StoreError>> {
     // Given a pane in a session of the orb project.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
     let pane = store.insert_pane(inserted.session, Path::new("/tmp/orb"))?;
 
-    // When a report starts a thread in that pane.
-    let (thread, project) = store.insert_pane_thread(&NewPaneThread {
+    // When a report starts an agent in that pane.
+    let (agent, project) = store.insert_pane_agent(&NewPaneAgent {
         pane,
         session_id: "s-new".to_owned(),
         transcript_path: Some(PathBuf::from("/t/s-new.jsonl")),
@@ -3228,7 +3227,7 @@ fn insert_pane_thread_joins_the_project_of_the_panes_session() -> Result<(), Rep
         .load()?
         .1
         .into_iter()
-        .find(|row| row.id == thread)
+        .find(|row| row.id == agent)
         .map(|row| (row.project_id, row.pane_id, row.session_id));
     assert_eq!(
         (project, found),
@@ -3236,17 +3235,17 @@ fn insert_pane_thread_joins_the_project_of_the_panes_session() -> Result<(), Rep
             project_id,
             Some((project_id, Some(pane), Some("s-new".to_owned())))
         ),
-        "the thread should join the pane's project and run in the pane"
+        "the agent should join the pane's project and run in the pane"
     );
     Ok(())
 }
 
 #[rstest::rstest]
 fn set_pane_resume_is_loaded_back_with_the_pane() -> Result<(), Report<StoreError>> {
-    // Given a thread's pane.
+    // Given an agent's pane.
     let store = Store::open_in_memory()?;
     let project_id = store.add_project(Path::new("/tmp/orb"), "orb", ProjectKind::Normal, 500)?;
-    let inserted = insert_thread(&store, project_id)?;
+    let inserted = insert_agent(&store, project_id)?;
 
     // When setting its resume command.
     store.set_pane_resume(inserted.pane, Some("claude --resume s-1"))?;

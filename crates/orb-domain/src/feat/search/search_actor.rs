@@ -1,7 +1,7 @@
 //! The search actor — owns `AppState.search` and the search index's only
 //! connection.
 //!
-//! At startup it indexes every live thread's transcript, newest chat first,
+//! At startup it indexes every live agent's transcript, newest chat first,
 //! one transcript per message so queries run in between. Before each query it
 //! reads what each transcript gained since the last read, and it answers
 //! previews from the index.
@@ -15,7 +15,7 @@ use error_stack::Report;
 use kameo::mailbox;
 use kameo::prelude::{Actor, ActorRef, Context, Message, Spawn};
 
-use super::index::{Hit, SearchIndex, SearchIndexError, ThreadKey, snippet};
+use super::index::{AgentKey, Hit, SearchIndex, SearchIndexError, snippet};
 use super::state::SearchProgress;
 use crate::AppState;
 use crate::command::SearchCommand;
@@ -24,12 +24,12 @@ use crate::feat::harness::{HarnessId, Harnesses};
 use crate::feat::picker::list::PickerItem;
 use crate::feat::picker::state::{PickerState, hit_label};
 use crate::feat::sessions::sessions_actor::to_ms;
-use crate::feat::sessions::state::{Project, Sessions, Thread};
+use crate::feat::sessions::state::{Agent, Project, Sessions};
 
 /// What the search actor needs to start.
 pub struct SearchActorDeps {
     pub state: State,
-    /// Every harness, to read each thread's transcript in its own format.
+    /// Every harness, to read each agent's transcript in its own format.
     pub harnesses: Harnesses,
     /// `~/.orb/userdata/search.sqlite`.
     pub index_path: PathBuf,
@@ -49,8 +49,8 @@ pub struct SearchActor {
     report: Reporter,
     log: Log,
     /// Transcripts the startup indexing hasn't read yet, newest chat first,
-    /// with the harness each thread runs in.
-    queue: VecDeque<(ThreadKey, HarnessId, PathBuf)>,
+    /// with the harness each agent runs in.
+    queue: VecDeque<(AgentKey, HarnessId, PathBuf)>,
 }
 
 /// Index the next queued transcript. The actor sends it to itself.
@@ -58,7 +58,7 @@ pub struct SearchActor {
 pub struct IndexNext;
 
 /// Spawns the search actor with a mailbox that never refuses a message.
-/// Must be called inside a tokio runtime, once `AppState` holds the threads.
+/// Must be called inside a tokio runtime, once `AppState` holds the agents.
 pub fn spawn_search_actor(deps: SearchActorDeps) -> ActorRef<SearchActor> {
     SearchActor::spawn_with_mailbox(deps, mailbox::unbounded())
 }
@@ -112,7 +112,7 @@ impl Message<SearchCommand> for SearchActor {
 }
 
 impl SearchActor {
-    /// Opens the index, drops the threads that are gone, queues every live
+    /// Opens the index, drops the agents that are gone, queues every live
     /// transcript newest chat first and reports the indexing as not started.
     /// When the index can't be opened, says why in `AppState.search` and
     /// leaves the queue empty.
@@ -142,26 +142,22 @@ impl SearchActor {
         };
         let (keys, queue) = {
             let app = state.read();
-            let mut threads: Vec<&Thread> = live(&app.sessions).map(|(_, thread)| thread).collect();
-            threads.sort_by_key(|thread| Reverse((thread.last_chat(), thread.id.0)));
-            let keys: HashSet<ThreadKey> = threads.iter().map(|thread| key(thread)).collect();
-            let queue: VecDeque<(ThreadKey, HarnessId, PathBuf)> = threads
+            let mut agents: Vec<&Agent> = live(&app.sessions).map(|(_, agent)| agent).collect();
+            agents.sort_by_key(|agent| Reverse((agent.last_chat(), agent.id.0)));
+            let keys: HashSet<AgentKey> = agents.iter().map(|agent| key(agent)).collect();
+            let queue: VecDeque<(AgentKey, HarnessId, PathBuf)> = agents
                 .iter()
-                .filter_map(|thread| {
-                    Some((
-                        key(thread),
-                        thread.harness.clone(),
-                        thread.transcript.clone()?,
-                    ))
+                .filter_map(|agent| {
+                    Some((key(agent), agent.harness.clone(), agent.transcript.clone()?))
                 })
                 .collect();
             (keys, queue)
         };
         // A failure leaves the rows; the next catch-up retries.
-        if let Err(report) = index.retain_threads(&keys) {
+        if let Err(report) = index.retain_agents(&keys) {
             log.error_on_change(
                 "search: retain",
-                "couldn't drop gone threads from the search index",
+                "couldn't drop gone agents from the search index",
                 &report,
             );
         }
@@ -183,7 +179,7 @@ impl SearchActor {
 
     /// Indexes the next queued transcript and counts it, then asks for the
     /// one after while any are left. A failure leaves that transcript's saved
-    /// offset alone, so the next catch-up retries it. A thread whose harness
+    /// offset alone, so the next catch-up retries it. An agent whose harness
     /// orb doesn't know, or whose transcript file is gone, is counted but not
     /// read.
     fn index_next(&mut self, me: &ActorRef<Self>) {
@@ -281,35 +277,31 @@ impl SearchActor {
     }
 }
 
-/// Drops the rows of threads gone from `state`, then reads what each live
-/// thread's current transcript gained since the last read. Transcripts still
+/// Drops the rows of agents gone from `state`, then reads what each live
+/// agent's current transcript gained since the last read. Transcripts still
 /// in the startup `queue` are left to it, and a missing file, or one whose
-/// thread's harness orb doesn't know, is skipped.
+/// agent's harness orb doesn't know, is skipped.
 fn catch_up(
     index: &mut SearchIndex,
     state: &State,
     harnesses: &Harnesses,
-    queue: &VecDeque<(ThreadKey, HarnessId, PathBuf)>,
+    queue: &VecDeque<(AgentKey, HarnessId, PathBuf)>,
     log: &Log,
 ) {
     let (keys, current) = {
         let app = state.read();
-        let keys: HashSet<ThreadKey> = live(&app.sessions).map(|(_, thread)| key(thread)).collect();
-        let current: Vec<(ThreadKey, HarnessId, PathBuf)> = live(&app.sessions)
-            .filter_map(|(_, thread)| {
-                Some((
-                    key(thread),
-                    thread.harness.clone(),
-                    thread.transcript.clone()?,
-                ))
+        let keys: HashSet<AgentKey> = live(&app.sessions).map(|(_, agent)| key(agent)).collect();
+        let current: Vec<(AgentKey, HarnessId, PathBuf)> = live(&app.sessions)
+            .filter_map(|(_, agent)| {
+                Some((key(agent), agent.harness.clone(), agent.transcript.clone()?))
             })
             .collect();
         (keys, current)
     };
-    if let Err(report) = index.retain_threads(&keys) {
+    if let Err(report) = index.retain_agents(&keys) {
         log.error_on_change(
             "search: retain",
-            "couldn't drop gone threads from the search index",
+            "couldn't drop gone agents from the search index",
             &report,
         );
     }
@@ -339,19 +331,19 @@ fn catch_up(
     }
 }
 
-/// `hits` as picker rows, labelled from `app`. A hit whose thread (by id and
+/// `hits` as picker rows, labelled from `app`. A hit whose agent (by id and
 /// creation time) isn't live any more is left out.
 fn rows(app: &AppState, hits: Vec<Hit>) -> Vec<PickerItem> {
-    let labels: HashMap<ThreadKey, (String, usize)> = live(&app.sessions)
-        .map(|(project, thread)| (key(thread), hit_label(&app.sessions, project, thread)))
+    let labels: HashMap<AgentKey, (String, usize)> = live(&app.sessions)
+        .map(|(project, agent)| (key(agent), hit_label(&app.sessions, project, agent)))
         .collect();
     hits.into_iter()
         .filter_map(|hit| {
-            let (label, split) = labels.get(&(hit.thread, hit.born))?.clone();
+            let (label, split) = labels.get(&(hit.agent, hit.born))?.clone();
             let (snippet, lit) = snippet(&hit.text, &hit.lit);
             Some(PickerItem::Hit {
                 id: hit.id,
-                thread: hit.thread,
+                agent: hit.agent,
                 label,
                 split,
                 snippet,
@@ -364,19 +356,19 @@ fn rows(app: &AppState, hits: Vec<Hit>) -> Vec<PickerItem> {
         .collect()
 }
 
-/// How the index names `thread`.
-fn key(thread: &Thread) -> ThreadKey {
-    (thread.id, to_ms(thread.created_at))
+/// How the index names `agent`.
+fn key(agent: &Agent) -> AgentKey {
+    (agent.id, to_ms(agent.created_at))
 }
 
-/// Every thread with its project, minus those being deleted. Settled and
-/// `Gone` threads count: their messages stay searchable.
-fn live(sessions: &Sessions) -> impl Iterator<Item = (&Project, &Thread)> {
+/// Every agent with its project, minus those being deleted. Settled and
+/// `Gone` agents count: their messages stay searchable.
+fn live(sessions: &Sessions) -> impl Iterator<Item = (&Project, &Agent)> {
     sessions
         .projects
         .iter()
-        .flat_map(|project| project.threads.iter().map(move |thread| (project, thread)))
-        .filter(|(_, thread)| !sessions.is_deleting(thread))
+        .flat_map(|project| project.agents.iter().map(move |agent| (project, agent)))
+        .filter(|(_, agent)| !sessions.is_deleting(agent))
 }
 
 /// What went wrong opening the index, for the picker's error line.
@@ -415,10 +407,10 @@ mod tests {
     use crate::feat::picker::state::PickerState;
     use crate::feat::search::index::SearchIndex;
     use crate::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus, sessions_for,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, sessions_for,
     };
     use crate::feat::sessions::transcript::Role;
-    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
     use crate::{AppState, Focus};
 
     /// A prompt line the user typed.
@@ -444,17 +436,17 @@ mod tests {
         Ok(path)
     }
 
-    /// Thread `id`, created at unix ms `born_ms`, last chatted in at second
+    /// Agent `id`, created at unix ms `born_ms`, last chatted in at second
     /// `last_chat_secs`.
-    fn thread(id: i64, born_ms: u64, transcript: Option<PathBuf>, last_chat_secs: u64) -> Thread {
-        Thread {
+    fn agent(id: i64, born_ms: u64, transcript: Option<PathBuf>, last_chat_secs: u64) -> Agent {
+        Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: None,
             cwd: "/tmp".into(),
             transcript,
-            status: ThreadStatus::Idle,
+            status: AgentStatus::Idle,
             turn_started_at: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
@@ -468,8 +460,8 @@ mod tests {
         }
     }
 
-    /// One project `orb` holding `threads`.
-    fn app(threads: Vec<Thread>) -> AppState {
+    /// One project `orb` holding `agents`.
+    fn app(agents: Vec<Agent>) -> AppState {
         AppState {
             sessions: Sessions {
                 projects: vec![Project {
@@ -477,7 +469,7 @@ mod tests {
                     title: "orb".to_owned(),
                     root: PathBuf::from("/repo"),
                     created_at: UNIX_EPOCH,
-                    threads,
+                    agents,
                     repo: true,
                     removed: false,
                     kind: ProjectKind::Normal,
@@ -520,13 +512,13 @@ mod tests {
         })
     }
 
-    /// The threads whose messages a second connection to the index at `path`
+    /// The agents whose messages a second connection to the index at `path`
     /// finds for `query`, in result order.
-    fn indexed(path: &Path, query: &str) -> io::Result<Vec<ThreadId>> {
+    fn indexed(path: &Path, query: &str) -> io::Result<Vec<AgentId>> {
         let found = SearchIndex::open(path)
             .and_then(|index| index.query(query))
             .map_err(|report| io::Error::other(format!("{report:?}")))?;
-        Ok(found.hits.into_iter().map(|hit| hit.thread).collect())
+        Ok(found.hits.into_iter().map(|hit| hit.agent).collect())
     }
 
     /// Opens the search picker with `text` typed into it.
@@ -538,16 +530,14 @@ mod tests {
         state.write().picker = Some(picker);
     }
 
-    /// The thread and snippet of each hit row the search picker shows.
-    fn hit_rows(state: &State) -> Vec<(ThreadId, String)> {
+    /// The agent and snippet of each hit row the search picker shows.
+    fn hit_rows(state: &State) -> Vec<(AgentId, String)> {
         let app = state.read();
         app.picker
             .iter()
             .flat_map(PickerState::shown)
             .filter_map(|(item, _)| match item {
-                PickerItem::Hit {
-                    thread, snippet, ..
-                } => Some((*thread, snippet.clone())),
+                PickerItem::Hit { agent, snippet, .. } => Some((*agent, snippet.clone())),
                 _ => None,
             })
             .collect()
@@ -625,14 +615,14 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
-    async fn startup_indexes_every_live_threads_transcript() -> io::Result<()> {
-        // Given two threads whose transcripts say `alpha` and `bravo`.
+    async fn startup_indexes_every_live_agents_transcript() -> io::Result<()> {
+        // Given two agents whose transcripts say `alpha` and `bravo`.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("alpha words")])?;
         let b = transcript(dir.path(), "b.jsonl", &[prompt("bravo words")])?;
         let state = State::new(app(vec![
-            thread(1, 1_000, Some(a), 20),
-            thread(2, 2_000, Some(b), 10),
+            agent(1, 1_000, Some(a), 20),
+            agent(2, 2_000, Some(b), 10),
         ]));
         let index_path = dir.path().join("search.sqlite");
 
@@ -650,7 +640,7 @@ mod tests {
             indexed(&index_path, "bravo")?,
         );
         assert!(
-            done && found == (vec![ThreadId(1)], vec![ThreadId(2)]),
+            done && found == (vec![AgentId(1)], vec![AgentId(2)]),
             "both transcripts should be indexed, saw {found:?}"
         );
         Ok(())
@@ -659,10 +649,10 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
     async fn startup_skips_a_deleted_transcript_without_logging() -> io::Result<()> {
-        // Given a thread whose transcript file was deleted.
+        // Given an agent whose transcript file was deleted.
         let dir = tempfile::tempdir()?;
         let gone = dir.path().join("gone.jsonl");
-        let state = State::new(app(vec![thread(1, 1_000, Some(gone), 10)]));
+        let state = State::new(app(vec![agent(1, 1_000, Some(gone), 10)]));
         let log_path = dir.path().join("orb.log");
         let deps = SearchActorDeps {
             log: Log::new(log_path.clone()),
@@ -704,32 +694,32 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test]
     async fn query_during_backfill_lists_only_indexed_transcripts() -> io::Result<()> {
-        // Given threads 1 and 2 both saying `shared`, only thread 1's
+        // Given agents 1 and 2 both saying `shared`, only agent 1's
         // transcript indexed by an earlier run, and the picker searching it.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("shared words")])?;
         let b = transcript(dir.path(), "b.jsonl", &[prompt("shared words")])?;
         let index_path = dir.path().join("search.sqlite");
         SearchIndex::open(&index_path)
-            .and_then(|mut index| index.index_transcript((ThreadId(1), 1_000), &a, read_messages))
+            .and_then(|mut index| index.index_transcript((AgentId(1), 1_000), &a, read_messages))
             .map_err(|report| io::Error::other(format!("{report:?}")))?;
         let state = State::new(app(vec![
-            thread(1, 1_000, Some(a), 20),
-            thread(2, 2_000, Some(b), 10),
+            agent(1, 1_000, Some(a), 20),
+            agent(2, 2_000, Some(b), 10),
         ]));
         searching(&state, "shared");
 
         // When the query reaches the actor ahead of its startup indexing (a
-        // current-thread runtime runs the actor only once the test awaits).
+        // current-agent runtime runs the actor only once the test awaits).
         let actor = spawn_search_actor(deps(&state, index_path));
         search(&actor, "shared").await?;
 
-        // Then only the already indexed thread is listed; thread 2 waits for
+        // Then only the already indexed agent is listed; agent 2 waits for
         // the backfill.
         let rows = hit_rows(&state);
         assert_eq!(
             rows,
-            vec![(ThreadId(1), "shared words".to_owned())],
+            vec![(AgentId(1), "shared words".to_owned())],
             "only indexed transcripts should be listed during backfill"
         );
         Ok(())
@@ -741,7 +731,7 @@ mod tests {
         // Given a backfilled transcript that then gains a prompt.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("old words")])?;
-        let state = State::new(app(vec![thread(1, 1_000, Some(a.clone()), 20)]));
+        let state = State::new(app(vec![agent(1, 1_000, Some(a.clone()), 20)]));
         let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
         let done = backfilled(&state).await;
         transcript(
@@ -757,7 +747,7 @@ mod tests {
         // Then it is listed.
         let rows = hit_rows(&state);
         assert!(
-            done && rows == vec![(ThreadId(1), "fresh words".to_owned())],
+            done && rows == vec![(AgentId(1), "fresh words".to_owned())],
             "a prompt added since the backfill should be found, saw {rows:?}"
         );
         Ok(())
@@ -765,32 +755,32 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
-    async fn query_drops_the_rows_of_a_thread_gone_from_state() -> io::Result<()> {
-        // Given threads 1 and 2 saying `shared`, backfilled, then thread 2
+    async fn query_drops_the_rows_of_an_agent_gone_from_state() -> io::Result<()> {
+        // Given agents 1 and 2 saying `shared`, backfilled, then agent 2
         // gone from the app state.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("shared words")])?;
         let b = transcript(dir.path(), "b.jsonl", &[prompt("shared words")])?;
         let state = State::new(app(vec![
-            thread(1, 1_000, Some(a), 20),
-            thread(2, 2_000, Some(b), 10),
+            agent(1, 1_000, Some(a), 20),
+            agent(2, 2_000, Some(b), 10),
         ]));
         let index_path = dir.path().join("search.sqlite");
         let actor = spawn_search_actor(deps(&state, index_path.clone()));
         let done = backfilled(&state).await;
         for project in &mut state.write().sessions.projects {
-            project.threads.retain(|thread| thread.id != ThreadId(2));
+            project.agents.retain(|agent| agent.id != AgentId(2));
         }
         searching(&state, "shared");
 
         // When searching.
         search(&actor, "shared").await?;
 
-        // Then the index holds `shared` only for thread 1.
+        // Then the index holds `shared` only for agent 1.
         let found = indexed(&index_path, "shared")?;
         assert!(
-            done && found == vec![ThreadId(1)],
-            "a gone thread's rows should leave the index, saw {found:?}"
+            done && found == vec![AgentId(1)],
+            "a gone agent's rows should leave the index, saw {found:?}"
         );
         Ok(())
     }
@@ -798,17 +788,17 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
     async fn query_still_matches_the_transcript_before_clear() -> io::Result<()> {
-        // Given a backfilled transcript, then `/clear` moving the thread to a
+        // Given a backfilled transcript, then `/clear` moving the agent to a
         // new one.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("before words")])?;
         let b = transcript(dir.path(), "b.jsonl", &[prompt("after words")])?;
-        let state = State::new(app(vec![thread(1, 1_000, Some(a), 20)]));
+        let state = State::new(app(vec![agent(1, 1_000, Some(a), 20)]));
         let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
         let done = backfilled(&state).await;
         for project in &mut state.write().sessions.projects {
-            for thread in &mut project.threads {
-                thread.transcript = Some(b.clone());
+            for agent in &mut project.agents {
+                agent.transcript = Some(b.clone());
             }
         }
         searching(&state, "before");
@@ -819,7 +809,7 @@ mod tests {
         // Then it is still listed.
         let rows = hit_rows(&state);
         assert!(
-            done && rows == vec![(ThreadId(1), "before words".to_owned())],
+            done && rows == vec![(AgentId(1), "before words".to_owned())],
             "the transcript before /clear should still match, saw {rows:?}"
         );
         Ok(())
@@ -835,7 +825,7 @@ mod tests {
             "a.jsonl",
             &[prompt("alpha words"), prompt("bravo words")],
         )?;
-        let state = State::new(app(vec![thread(1, 1_000, Some(a), 20)]));
+        let state = State::new(app(vec![agent(1, 1_000, Some(a), 20)]));
         let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
         let done = backfilled(&state).await;
         searching(&state, "alpha");
@@ -847,7 +837,7 @@ mod tests {
         // Then the rows are still the `alpha` ones.
         let rows = hit_rows(&state);
         assert!(
-            done && rows == vec![(ThreadId(1), "alpha words".to_owned())],
+            done && rows == vec![(AgentId(1), "alpha words".to_owned())],
             "a stale query should leave the rows alone, saw {rows:?}"
         );
         Ok(())
@@ -856,13 +846,13 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
     async fn query_labels_a_hit_with_its_project_and_session_title() -> io::Result<()> {
-        // Given a backfilled thread titled `fix` in project `orb`, running in
+        // Given a backfilled agent titled `fix` in project `orb`, running in
         // a session the user named `login`.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("some words")])?;
-        let mut app = app(vec![Thread {
+        let mut app = app(vec![Agent {
             title: Some("fix".to_owned()),
-            ..thread(1, 1_000, Some(a), 20)
+            ..agent(1, 1_000, Some(a), 20)
         }]);
         app.sessions.sessions = sessions_for(&app.sessions.projects);
         for session in &mut app.sessions.sessions {
@@ -904,7 +894,7 @@ mod tests {
             "a.jsonl",
             &[prompt("shared one"), prompt("shared two")],
         )?;
-        let state = State::new(app(vec![thread(1, 1_000, Some(a), 20)]));
+        let state = State::new(app(vec![agent(1, 1_000, Some(a), 20)]));
         let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
         let done = backfilled(&state).await;
         searching(&state, "shared");
@@ -937,7 +927,7 @@ mod tests {
             "a.jsonl",
             &[prompt("question words"), reply("answer text")],
         )?;
-        let state = State::new(app(vec![thread(1, 1_000, Some(a), 20)]));
+        let state = State::new(app(vec![agent(1, 1_000, Some(a), 20)]));
         let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
         let done = backfilled(&state).await;
         searching(&state, "question");
@@ -968,7 +958,7 @@ mod tests {
             "a.jsonl",
             &[prompt("question words"), reply("answer text")],
         )?;
-        let state = State::new(app(vec![thread(1, 1_000, Some(a), 20)]));
+        let state = State::new(app(vec![agent(1, 1_000, Some(a), 20)]));
         let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
         let done = backfilled(&state).await;
         searching(&state, "question");
@@ -993,14 +983,14 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
     async fn backfill_counts_up_one_transcript_at_a_time() -> io::Result<()> {
-        // Given two threads with transcripts, and a reporter that records
+        // Given two agents with transcripts, and a reporter that records
         // the indexing progress each time the actor reports to the frontend.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("alpha words")])?;
         let b = transcript(dir.path(), "b.jsonl", &[prompt("bravo words")])?;
         let state = State::new(app(vec![
-            thread(1, 1_000, Some(a), 20),
-            thread(2, 2_000, Some(b), 10),
+            agent(1, 1_000, Some(a), 20),
+            agent(2, 2_000, Some(b), 10),
         ]));
         let seen: Arc<Mutex<Vec<(usize, usize)>>> = Arc::default();
         let report = {
@@ -1038,11 +1028,11 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
-    async fn query_lists_a_settled_threads_messages() -> io::Result<()> {
-        // Given a backfilled settled thread.
+    async fn query_lists_a_settled_agents_messages() -> io::Result<()> {
+        // Given a backfilled settled agent.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("settled words")])?;
-        let mut app = app(vec![thread(1, 1_000, Some(a), 20)]);
+        let mut app = app(vec![agent(1, 1_000, Some(a), 20)]);
         app.sessions.sessions = sessions_for(&app.sessions.projects);
         if let Some(session) = app.sessions.sessions.get_mut(0) {
             session.settled_at = Some(UNIX_EPOCH + Duration::from_secs(30));
@@ -1058,8 +1048,8 @@ mod tests {
         // Then its message is listed.
         let rows = hit_rows(&state);
         assert!(
-            done && rows == vec![(ThreadId(1), "settled words".to_owned())],
-            "a settled thread's messages should match, saw {rows:?}"
+            done && rows == vec![(AgentId(1), "settled words".to_owned())],
+            "a settled agent's messages should match, saw {rows:?}"
         );
         Ok(())
     }
@@ -1067,11 +1057,11 @@ mod tests {
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
     async fn query_ignores_the_project_filter() -> io::Result<()> {
-        // Given a backfilled thread in `orb` and the sidebar filtered to
+        // Given a backfilled agent in `orb` and the sidebar filtered to
         // another project.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("global words")])?;
-        let state = State::new(app(vec![thread(1, 1_000, Some(a), 20)]));
+        let state = State::new(app(vec![agent(1, 1_000, Some(a), 20)]));
         state.write().sessions.filter = Some(ProjectId(2));
         let actor = spawn_search_actor(deps(&state, dir.path().join("search.sqlite")));
         let done = backfilled(&state).await;
@@ -1080,10 +1070,10 @@ mod tests {
         // When searching.
         search(&actor, "global").await?;
 
-        // Then the `orb` thread's message is still listed.
+        // Then the `orb` agent's message is still listed.
         let rows = hit_rows(&state);
         assert!(
-            done && rows == vec![(ThreadId(1), "global words".to_owned())],
+            done && rows == vec![(AgentId(1), "global words".to_owned())],
             "the project filter should not narrow search, saw {rows:?}"
         );
         Ok(())
@@ -1091,15 +1081,15 @@ mod tests {
 
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
-    async fn query_drops_the_rows_of_a_thread_being_deleted() -> io::Result<()> {
-        // Given threads 1 and 2 saying `shared`, backfilled, then thread 2
+    async fn query_drops_the_rows_of_an_agent_being_deleted() -> io::Result<()> {
+        // Given agents 1 and 2 saying `shared`, backfilled, then agent 2
         // being deleted.
         let dir = tempfile::tempdir()?;
         let a = transcript(dir.path(), "a.jsonl", &[prompt("shared words")])?;
         let b = transcript(dir.path(), "b.jsonl", &[prompt("shared words")])?;
         let state = State::new(app(vec![
-            thread(1, 1_000, Some(a), 20),
-            thread(2, 2_000, Some(b), 10),
+            agent(1, 1_000, Some(a), 20),
+            agent(2, 2_000, Some(b), 10),
         ]));
         let index_path = dir.path().join("search.sqlite");
         let actor = spawn_search_actor(deps(&state, index_path.clone()));
@@ -1110,11 +1100,11 @@ mod tests {
         // When searching.
         search(&actor, "shared").await?;
 
-        // Then the index holds `shared` only for thread 1.
+        // Then the index holds `shared` only for agent 1.
         let found = indexed(&index_path, "shared")?;
         assert!(
-            done && found == vec![ThreadId(1)],
-            "a thread being deleted should leave the index, saw {found:?}"
+            done && found == vec![AgentId(1)],
+            "an agent being deleted should leave the index, saw {found:?}"
         );
         Ok(())
     }

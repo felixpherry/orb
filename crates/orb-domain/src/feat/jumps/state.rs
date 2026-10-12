@@ -177,7 +177,7 @@ mod tests {
         }
     }
 
-    /// A list holding threads `ids`, oldest first.
+    /// A list holding agents `ids`, oldest first.
     fn list_of(ids: &[i64]) -> JumpList {
         JumpList::from_saved(ids.iter().copied().map(on).collect())
     }
@@ -188,13 +188,13 @@ mod tests {
 
     #[rstest::rstest]
     fn recording_past_the_limit_drops_the_oldest() {
-        // Given a full list of threads 1 to 20.
+        // Given a full list of agents 1 to 20.
         let mut list = list_of(&(1..=20).collect::<Vec<_>>());
 
         // When recording a 21st row.
         list.record(on(21));
 
-        // Then thread 1 is gone and 20 rows remain.
+        // Then agent 1 is gone and 20 rows remain.
         assert_eq!(
             (list.entries().len(), list.entries().first().copied()),
             (JUMP_LIMIT, Some(on(2))),
@@ -204,10 +204,10 @@ mod tests {
 
     #[rstest::rstest]
     fn recording_a_listed_row_moves_it_to_the_newest() {
-        // Given threads 1, 2 and 3.
+        // Given agents 1, 2 and 3.
         let mut list = list_of(&[1, 2, 3]);
 
-        // When recording thread 1 again.
+        // When recording agent 1 again.
         list.record(on(1));
 
         // Then it's the newest, listed once.
@@ -220,7 +220,7 @@ mod tests {
 
     #[rstest::rstest]
     fn recording_the_settled_header_changes_nothing() {
-        // Given threads 1 and 2.
+        // Given agents 1 and 2.
         let mut list = list_of(&[1, 2]);
 
         // When recording the Settled header.
@@ -232,44 +232,44 @@ mod tests {
 
     #[rstest::rstest]
     fn back_then_forward_returns_to_the_starting_row() {
-        // Given threads 1 and 2, with the cursor on thread 3.
+        // Given agents 1 and 2, with the cursor on agent 3.
         let mut list = list_of(&[1, 2]);
         let back = list.back(Some(on(3)), anywhere);
 
         // When going forward from where back landed.
         let forward = list.forward(back, anywhere);
 
-        // Then it's back on thread 3.
+        // Then it's back on agent 3.
         assert_eq!(forward, Some(on(3)), "<C-]> should undo <C-[>");
     }
 
     #[rstest::rstest]
     fn back_skips_an_unreachable_row() {
-        // Given threads 1 and 2, with thread 2 unreachable.
+        // Given agents 1 and 2, with agent 2 unreachable.
         let mut list = list_of(&[1, 2]);
 
-        // When going back from thread 3.
+        // When going back from agent 3.
         let target = list.back(Some(on(3)), |item| item != on(2));
 
-        // Then it lands on thread 1.
+        // Then it lands on agent 1.
         assert_eq!(target, Some(on(1)), "unreachable rows should be skipped");
     }
 
     #[rstest::rstest]
     fn back_skips_the_current_row() {
-        // Given threads 1 and 2, with the cursor on thread 2.
+        // Given agents 1 and 2, with the cursor on agent 2.
         let mut list = list_of(&[1, 2]);
 
         // When going back.
         let target = list.back(Some(on(2)), anywhere);
 
-        // Then it lands on thread 1.
+        // Then it lands on agent 1.
         assert_eq!(target, Some(on(1)), "<C-[> should never land in place");
     }
 
     #[rstest::rstest]
     fn forward_while_not_moving_through_the_list_finds_nothing() {
-        // Given threads 1 and 2, and no <C-[> yet.
+        // Given agents 1 and 2, and no <C-[> yet.
         let mut list = list_of(&[1, 2]);
 
         // When going forward.
@@ -281,7 +281,7 @@ mod tests {
 
     #[rstest::rstest]
     fn back_without_an_older_row_changes_nothing() {
-        // Given only thread 1, with the cursor on it.
+        // Given only agent 1, with the cursor on it.
         let mut list = list_of(&[1]);
 
         // When going back.
@@ -293,26 +293,26 @@ mod tests {
 
     #[rstest::rstest]
     fn back_from_an_unlisted_row_skips_the_row_recording_it_drops() {
-        // Given a full list of threads 1 to 20, with only thread 1 reachable.
+        // Given a full list of agents 1 to 20, with only agent 1 reachable.
         let mut list = list_of(&(1..=20).collect::<Vec<_>>());
 
-        // When going back from unlisted thread 21.
+        // When going back from unlisted agent 21.
         let target = list.back(Some(on(21)), |item| item == on(1));
 
-        // Then there's nowhere to go: recording thread 21 drops thread 1.
+        // Then there's nowhere to go: recording agent 21 drops agent 1.
         assert_eq!(target, None, "<C-[> must not land on a dropped row");
     }
 
     #[rstest::rstest]
     fn entering_the_row_back_landed_on_keeps_forward() {
-        // Given threads 1 and 2, gone back from thread 3 to thread 2.
+        // Given agents 1 and 2, gone back from agent 3 to agent 2.
         let mut list = list_of(&[1, 2]);
         list.back(Some(on(3)), anywhere);
 
-        // When entering thread 2's pane again.
+        // When entering agent 2's pane again.
         list.enter(on(2));
 
-        // Then going forward from thread 2 still lands on thread 3.
+        // Then going forward from agent 2 still lands on agent 3.
         assert_eq!(
             list.forward(Some(on(2)), anywhere),
             Some(on(3)),
@@ -322,11 +322,11 @@ mod tests {
 
     #[rstest::rstest]
     fn entering_an_agent_of_the_landed_session_records_nothing() {
-        // Given threads 1 and 2, gone back from thread 3 to thread 2's card.
+        // Given agents 1 and 2, gone back from agent 3 to agent 2's card.
         let mut list = list_of(&[1, 2]);
         list.back(Some(on(3)), anywhere);
 
-        // When entering thread 2's session through its agent in pane 2.
+        // When entering agent 2's session through its agent in pane 2.
         let recorded = list.enter(agent(2, 2));
 
         // Then nothing is recorded.
@@ -338,13 +338,13 @@ mod tests {
 
     #[rstest::rstest]
     fn removing_a_session_drops_its_agent_rows() {
-        // Given thread 1's card, its agents in panes 1 and 5, and thread 2.
+        // Given agent 1's card, its agents in panes 1 and 5, and agent 2.
         let mut list = JumpList::from_saved(vec![on(1), agent(1, 1), on(2), agent(1, 5)]);
 
-        // When removing thread 1's session.
+        // When removing agent 1's session.
         list.remove(on(1));
 
-        // Then only thread 2 remains.
+        // Then only agent 2 remains.
         assert_eq!(
             list.entries(),
             [on(2)],
@@ -354,26 +354,26 @@ mod tests {
 
     #[rstest::rstest]
     fn remove_drops_the_row() {
-        // Given threads 1, 2 and 3.
+        // Given agents 1, 2 and 3.
         let mut list = list_of(&[1, 2, 3]);
 
-        // When removing thread 2.
+        // When removing agent 2.
         list.remove(on(2));
 
-        // Then threads 1 and 3 remain.
+        // Then agents 1 and 3 remain.
         assert_eq!(list.entries(), [on(1), on(3)], "the deleted row should go");
     }
 
     #[rstest::rstest]
     fn removing_an_older_row_keeps_the_place_in_the_list() {
-        // Given threads 1, 2 and 3, gone back from thread 4 to thread 3.
+        // Given agents 1, 2 and 3, gone back from agent 4 to agent 3.
         let mut list = list_of(&[1, 2, 3]);
         list.back(Some(on(4)), anywhere);
 
-        // When removing thread 1.
+        // When removing agent 1.
         list.remove(on(1));
 
-        // Then going forward from thread 3 still lands on thread 4.
+        // Then going forward from agent 3 still lands on agent 4.
         assert_eq!(
             list.forward(Some(on(3)), anywhere),
             Some(on(4)),
@@ -383,13 +383,13 @@ mod tests {
 
     #[rstest::rstest]
     fn from_saved_drops_the_settled_header() {
-        // Given a saved list holding the Settled header between two threads.
+        // Given a saved list holding the Settled header between two agents.
         let saved = vec![on(1), SidebarItem::SettledShelf, on(2)];
 
         // When restoring it.
         let list = JumpList::from_saved(saved);
 
-        // Then only the threads are listed.
+        // Then only the agents are listed.
         assert_eq!(list.entries(), [on(1), on(2)], "the header is never kept");
     }
 }

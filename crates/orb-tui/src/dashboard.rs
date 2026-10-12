@@ -175,16 +175,16 @@ mod tests {
     use orb_domain::AppState;
     use orb_domain::feat::harness::claude::info;
     use orb_domain::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, SidebarItem, Thread, ThreadStatus,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, SidebarItem,
     };
-    use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::{Position, Rect};
 
     use super::{SHADOW, render};
     use crate::sidebar::ORANGE;
 
-    /// `sessions` with the sessions its projects' threads run in.
+    /// `sessions` with the sessions its projects' agents run in.
     fn fill(sessions: Sessions) -> Sessions {
         Sessions {
             sessions: sessions_for(&sessions.projects),
@@ -192,15 +192,15 @@ mod tests {
         }
     }
 
-    fn thread(id: i64) -> Thread {
-        Thread {
+    fn agent(id: i64) -> Agent {
+        Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: Some("Fix the bug".to_owned()),
             cwd: "/Users/me/dev/orb".into(),
             transcript: None,
-            status: ThreadStatus::Idle,
+            status: AgentStatus::Idle,
             turn_started_at: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
@@ -214,8 +214,8 @@ mod tests {
         }
     }
 
-    /// orb holding `threads`, thread 1 selected.
-    fn state(threads: Vec<Thread>) -> AppState {
+    /// orb holding `agents`, agent 1 selected.
+    fn state(agents: Vec<Agent>) -> AppState {
         AppState {
             sessions: fill(Sessions {
                 projects: vec![Project {
@@ -225,7 +225,7 @@ mod tests {
                     created_at: SystemTime::UNIX_EPOCH,
                     removed: false,
                     repo: true,
-                    threads,
+                    agents,
                     kind: ProjectKind::Normal,
                 }],
                 cursor: Some(SidebarItem::Session(SessionId(1))),
@@ -236,9 +236,9 @@ mod tests {
         }
     }
 
-    /// orb's thread 1, selected.
-    fn selected_thread() -> AppState {
-        state(vec![thread(1)])
+    /// orb's agent 1, selected.
+    fn selected_agent() -> AppState {
+        state(vec![agent(1)])
     }
 
     /// Draws `state`'s start screen on a `width`×`height` buffer with
@@ -269,8 +269,8 @@ mod tests {
 
     #[rstest::rstest]
     fn wide_area_draws_the_orb_banner() {
-        // Given a selected thread.
-        let state = selected_thread();
+        // Given a selected agent.
+        let state = selected_agent();
 
         // When drawing the start screen 80×40.
         let buf = draw(&state, None, 80, 40);
@@ -285,8 +285,8 @@ mod tests {
 
     #[rstest::rstest]
     fn start_screen_has_no_menu() {
-        // Given a selected thread.
-        let state = selected_thread();
+        // Given a selected agent.
+        let state = selected_agent();
 
         // When drawing the start screen 80×40.
         let buf = draw(&state, None, 80, 40);
@@ -305,7 +305,7 @@ mod tests {
         // Given orb with two sessions, the first selected.
         let state = AppState {
             harnesses: vec![info()],
-            ..state(vec![thread(1), thread(2)])
+            ..state(vec![agent(1), agent(2)])
         };
 
         // When drawing the start screen 80×40.
@@ -323,7 +323,7 @@ mod tests {
     #[rstest::rstest]
     fn one_session_and_one_project_are_counted_in_the_singular() {
         // Given orb with one session.
-        let state = selected_thread();
+        let state = selected_agent();
 
         // When drawing the start screen 80×40.
         let buf = draw(&state, None, 80, 40);
@@ -338,8 +338,8 @@ mod tests {
 
     #[rstest::rstest]
     fn pane_error_shows_one_line_under_the_footer() {
-        // Given a selected thread whose session couldn't start.
-        let state = selected_thread();
+        // Given a selected agent whose session couldn't start.
+        let state = selected_agent();
 
         // When drawing the start screen 80×40 with the pane's error.
         let buf = draw(&state, Some("zmx attach failed"), 80, 40);
@@ -359,8 +359,8 @@ mod tests {
 
     #[rstest::rstest]
     fn small_area_draws_nothing_outside_itself() {
-        // Given a selected thread and a 4×3 area inside a 40×20 buffer.
-        let state = selected_thread();
+        // Given a selected agent and a 4×3 area inside a 40×20 buffer.
+        let state = selected_agent();
         let area = Rect::new(10, 10, 4, 3);
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
 

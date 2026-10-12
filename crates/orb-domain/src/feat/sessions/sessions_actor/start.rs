@@ -266,7 +266,7 @@ impl SessionsActor {
     /// checkout, an existing worktree, or a new one made by the returned job
     /// (moved to once its result arrives, see [`Self::worktree_ready`]).
     /// Saves the session and its panes at the new directory, kills every
-    /// pane, unbinds the threads in them and clears their resume commands,
+    /// pane, unbinds the agents in them and clears their resume commands,
     /// and points the layout at the new directory. The worktree it left is
     /// removed with its branch when orb made it and no other session uses it
     /// (git refuses one with changes). However it ends, the session is
@@ -393,7 +393,7 @@ impl SessionsActor {
             for row in self.rows.iter_mut().filter(|row| row.pane_id == Some(pane)) {
                 row.pane_id = None;
                 unbound.push(row.id);
-                if let Err(report) = self.store.save_thread(row) {
+                if let Err(report) = self.store.save_agent(row) {
                     saved = Err(save_failed(&self.services.log, &report));
                 }
             }
@@ -429,10 +429,10 @@ impl SessionsActor {
                 *session = shown;
             }
             for row in self.rows.iter().filter(|row| unbound.contains(&row.id)) {
-                if let Some(thread) = thread_mut(sessions, row.id) {
-                    let status = thread.status;
+                if let Some(agent) = agent_mut(sessions, row.id) {
+                    let status = agent.status;
                     show(
-                        thread,
+                        agent,
                         row,
                         status,
                         pane_launch(row, &app.layouts, &self.unread),
@@ -506,7 +506,7 @@ impl SessionsActor {
 
     /// Session `id`'s project root, its directory, and the branches its
     /// worktree may have been on, likeliest first: the session's recorded
-    /// branch, then its threads', else orb's `orb/<hex>` for the directory.
+    /// branch, then its agents', else orb's `orb/<hex>` for the directory.
     fn restore_target(&self, id: SessionId) -> Option<(PathBuf, PathBuf, Vec<String>)> {
         let session = self.sessions.get(&id)?;
         let mut branches: Vec<String> = session.branch.iter().cloned().collect();
@@ -607,13 +607,13 @@ impl SessionsActor {
         }
     }
 
-    /// Saves and shows `branch` on every thread and every session in `cwd`.
+    /// Saves and shows `branch` on every agent and every session in `cwd`.
     /// The saves run before the state is locked.
     pub(super) fn show_branch(&mut self, cwd: &Path, branch: &str) -> Result<(), String> {
         let mut saved = Ok(());
         for row in self.rows.iter_mut().filter(|row| row.cwd == cwd) {
             row.branch = Some(branch.to_owned());
-            if let Err(report) = self.store.save_thread(row) {
+            if let Err(report) = self.store.save_agent(row) {
                 saved = Err(save_failed(&self.services.log, &report));
             }
         }
@@ -626,10 +626,10 @@ impl SessionsActor {
         let mut guard = self.state.write();
         let app = &mut *guard;
         for row in self.rows.iter().filter(|row| row.cwd == cwd) {
-            if let Some(thread) = thread_mut(&mut app.sessions, row.id) {
-                let status = thread.status;
+            if let Some(agent) = agent_mut(&mut app.sessions, row.id) {
+                let status = agent.status;
                 show(
-                    thread,
+                    agent,
                     row,
                     status,
                     pane_launch(row, &app.layouts, &self.unread),
@@ -644,13 +644,13 @@ impl SessionsActor {
         saved
     }
 
-    /// Whether a turn is underway in any thread in `cwd`.
+    /// Whether a turn is underway in any agent in `cwd`.
     fn busy_in(&self, cwd: &Path) -> bool {
         self.state
             .read()
             .sessions
-            .threads()
-            .any(|thread| thread.cwd == cwd && thread.status.in_progress())
+            .all_agents()
+            .any(|agent| agent.cwd == cwd && agent.status.in_progress())
     }
 }
 
@@ -677,7 +677,7 @@ pub(super) fn answer_name_box(app: &mut AppState, made: bool) {
 pub(super) fn rename_hex_branch(
     git: &GitService,
     worktrees_root: &Path,
-    row: &mut ThreadRow,
+    row: &mut AgentRow,
 ) -> Option<String> {
     if let Some(old) = hex_branch(worktrees_root, &row.cwd)
         && row.branch.as_deref() == Some(old.as_str())

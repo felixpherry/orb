@@ -1,9 +1,9 @@
-//! Bringing back orb's saved projects, threads, sessions and layouts at start.
+//! Bringing back orb's saved projects, agents, sessions and layouts at start.
 
 use super::*;
 
 impl SessionsActor {
-    /// Shows the saved projects and threads, sizes the sidebar as it
+    /// Shows the saved projects and agents, sizes the sidebar as it
     /// was saved, kept within its bounds, filters it to the saved project if
     /// that's still shown and not removed, and selects its first row. Each
     /// project learns whether it is a git repository. The saved jump list comes back
@@ -72,7 +72,7 @@ impl SessionsActor {
                 app.layouts.insert(session, layout);
             }
         }
-        let threads: Vec<Thread> = {
+        let agents: Vec<Agent> = {
             let app = state.read();
             rows.iter()
                 .map(|row| unpolled(&services, row, &app.layouts, &unread))
@@ -81,11 +81,11 @@ impl SessionsActor {
         let projects: Vec<Project> = projects
             .into_iter()
             .map(|project| Project {
-                threads: rows
+                agents: rows
                     .iter()
-                    .zip(&threads)
+                    .zip(&agents)
                     .filter(|(row, _)| row.project_id == project.id)
-                    .map(|(_, thread)| thread.clone())
+                    .map(|(_, agent)| agent.clone())
                     .collect(),
                 // ponytail: one git call per project at start; cache it if
                 // many projects make start-up slow.
@@ -152,25 +152,25 @@ impl SessionsActor {
     }
 }
 
-/// How a saved thread looks before its first poll; one whose harness orb
+/// How a saved agent looks before its first poll; one whose harness orb
 /// doesn't know is Gone.
 pub(super) fn unpolled(
     services: &Services,
-    row: &ThreadRow,
+    row: &AgentRow,
     layouts: &Layouts,
     unread: &HashMap<SessionId, Unread>,
-) -> Thread {
+) -> Agent {
     let status = match services.harnesses.get(&row.harness) {
-        Some(_) => ThreadStatus::Unknown,
-        None => ThreadStatus::Gone,
+        Some(_) => AgentStatus::Unknown,
+        None => AgentStatus::Gone,
     };
-    thread(row, status, pane_launch(row, layouts, unread))
+    agent(row, status, pane_launch(row, layouts, unread))
 }
 
-/// `row`'s pane and its session; `None` for a thread with no pane, or one
+/// `row`'s pane and its session; `None` for an agent with no pane, or one
 /// whose pane no layout or unread tab holds.
 pub(super) fn pane_launch(
-    row: &ThreadRow,
+    row: &AgentRow,
     layouts: &Layouts,
     unread: &HashMap<SessionId, Unread>,
 ) -> Option<PaneLaunch> {

@@ -11,9 +11,9 @@ use orb_domain::feat::layout::tree::Split;
 use orb_domain::feat::picker::list::PickerItem;
 use orb_domain::feat::picker::state::{PickerState, SessionFilter, session_items, worktree_items};
 use orb_domain::feat::sessions::state::{
-    PaneLaunch, Project, ProjectKind, Session, SessionKind, Sessions, Thread, ThreadStatus,
+    Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Session, SessionKind, Sessions,
 };
-use orb_domain::ids::{PaneId, ProjectId, SessionId, ThreadId};
+use orb_domain::ids::{AgentId, PaneId, ProjectId, SessionId};
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -240,55 +240,55 @@ fn cursor_shape_follows_where_the_keys_are(
 }
 
 #[rstest::rstest]
-fn preview_of_a_newly_selected_thread_is_due_at_once() {
-    // Given thread 1's preview was just read.
+fn preview_of_a_newly_selected_agent_is_due_at_once() {
+    // Given agent 1's preview was just read.
     let now = Instant::now();
-    let last = Some((ThreadId(1), now));
+    let last = Some((AgentId(1), now));
 
-    // When asking when thread 2's preview is due.
-    let due = preview_due(last, ThreadId(2), now);
+    // When asking when agent 2's preview is due.
+    let due = preview_due(last, AgentId(2), now);
 
     // Then it is due at once.
-    assert_eq!(due, now, "another thread's preview should be due at once");
+    assert_eq!(due, now, "another agent's preview should be due at once");
 }
 
 #[rstest::rstest]
-fn preview_of_the_same_thread_waits_a_second_after_its_last_read() {
-    // Given thread 1's preview was read at `read_at`.
+fn preview_of_the_same_agent_waits_a_second_after_its_last_read() {
+    // Given agent 1's preview was read at `read_at`.
     let read_at = Instant::now();
-    let last = Some((ThreadId(1), read_at));
+    let last = Some((AgentId(1), read_at));
 
-    // When asking 300 ms later when thread 1's preview is due.
+    // When asking 300 ms later when agent 1's preview is due.
     let asked = read_at + Duration::from_millis(300);
-    let due = preview_due(last, ThreadId(1), asked);
+    let due = preview_due(last, AgentId(1), asked);
 
     // Then it is due a second after the last read, later than the ask.
     assert!(
         due == read_at + PREVIEW_EVERY && due > asked,
-        "the same thread should wait a second after its last read, due {due:?}"
+        "the same agent should wait a second after its last read, due {due:?}"
     );
 }
 
 #[rstest::rstest]
-fn preview_of_the_same_thread_is_due_once_a_second_has_passed() {
-    // Given thread 1's preview was read at `read_at`.
+fn preview_of_the_same_agent_is_due_once_a_second_has_passed() {
+    // Given agent 1's preview was read at `read_at`.
     let read_at = Instant::now();
-    let last = Some((ThreadId(1), read_at));
+    let last = Some((AgentId(1), read_at));
 
-    // When asking a second later when thread 1's preview is due.
+    // When asking a second later when agent 1's preview is due.
     let asked = read_at + PREVIEW_EVERY;
-    let due = preview_due(last, ThreadId(1), asked);
+    let due = preview_due(last, AgentId(1), asked);
 
     // Then it is due by then.
     assert!(
         due <= asked,
-        "the same thread should be due once a second has passed"
+        "the same agent should be due once a second has passed"
     );
 }
 
 #[rstest::rstest]
 fn stale_preview_leaves_the_search_picker_alone() -> io::Result<()> {
-    // Given thread 1 with a transcript on disk, and the search picker
+    // Given agent 1 with a transcript on disk, and the search picker
     // showing a hit in it.
     let dir = tempfile::tempdir()?;
     let transcript = dir.path().join("1.jsonl");
@@ -300,14 +300,14 @@ fn stale_preview_leaves_the_search_picker_alone() -> io::Result<()> {
                 title: "orb".to_owned(),
                 root: PathBuf::from("/repo"),
                 created_at: UNIX_EPOCH,
-                threads: vec![Thread {
+                agents: vec![Agent {
                     last_session: None,
                     harness: HarnessId::new("claude"),
-                    id: ThreadId(1),
+                    id: AgentId(1),
                     title: None,
                     cwd: "/tmp".into(),
                     transcript: Some(transcript.clone()),
-                    status: ThreadStatus::Idle,
+                    status: AgentStatus::Idle,
                     turn_started_at: None,
                     pane: None,
                     branch: None,
@@ -328,7 +328,7 @@ fn stale_preview_leaves_the_search_picker_alone() -> io::Result<()> {
                 "",
                 vec![PickerItem::Hit {
                     id: 1,
-                    thread: ThreadId(1),
+                    agent: AgentId(1),
                     label: "orb/fix".to_owned(),
                     split: 4,
                     snippet: "the parser".to_owned(),
@@ -496,11 +496,11 @@ fn search_typed_ab() -> AppState {
     }
 }
 
-/// A hit row in thread 1.
+/// A hit row in agent 1.
 fn hit(id: i64) -> PickerItem {
     PickerItem::Hit {
         id,
-        thread: ThreadId(1),
+        agent: AgentId(1),
         label: "orb/fix".to_owned(),
         split: 4,
         snippet: "the parser".to_owned(),
@@ -673,7 +673,7 @@ fn worktrees_changed_relists_the_open_worktree_picker() {
     );
 }
 
-/// Project `id` titled `title`, with one thread last active `secs`
+/// Project `id` titled `title`, with one agent last active `secs`
 /// seconds after the epoch.
 fn project_active_at(id: i64, title: &str, secs: u64) -> Project {
     Project {
@@ -681,14 +681,14 @@ fn project_active_at(id: i64, title: &str, secs: u64) -> Project {
         title: title.to_owned(),
         root: PathBuf::from(format!("/{title}")),
         created_at: UNIX_EPOCH,
-        threads: vec![Thread {
+        agents: vec![Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: None,
             cwd: PathBuf::from(format!("/{title}")),
             transcript: None,
-            status: ThreadStatus::Idle,
+            status: AgentStatus::Idle,
             turn_started_at: None,
             pane: None,
             branch: None,
@@ -719,11 +719,11 @@ fn alpha_and_beta_after(opened: &Intent) -> AppState {
     state
 }
 
-/// Beta's thread gets busier than alpha's.
+/// Beta's agent gets busier than alpha's.
 fn make_beta_busier(state: &mut AppState) {
     if let Some(beta) = state.sessions.projects.get_mut(1) {
-        for thread in &mut beta.threads {
-            thread.last_activity_at = UNIX_EPOCH + Duration::from_secs(30);
+        for agent in &mut beta.agents {
+            agent.last_activity_at = UNIX_EPOCH + Duration::from_secs(30);
         }
     }
 }
@@ -1057,7 +1057,7 @@ fn start_leaves_a_session_with_its_directory_gone_and_nothing_running() {
 }
 
 #[rstest::rstest]
-fn stale_sessions_takes_old_thread_and_split_names() {
+fn stale_sessions_takes_old_agent_and_split_names() {
     // Given zmx listing phase-era names no pane owns.
     let listed = vec!["orb-p3".to_owned(), "orb-p-1".to_owned()];
 
@@ -1068,7 +1068,7 @@ fn stale_sessions_takes_old_thread_and_split_names() {
     assert_eq!(
         stale,
         vec!["orb-p3".to_owned(), "orb-p-1".to_owned()],
-        "leftover thread and split sessions go"
+        "leftover agent and split sessions go"
     );
 }
 
@@ -1594,7 +1594,7 @@ fn a_quit_event_ends_the_loop() -> io::Result<()> {
 
 #[rstest::rstest]
 fn deadline_wakes_the_loop_for_a_pending_preview_read() -> io::Result<()> {
-    // Given the session picker on thread 1, its preview just read, and
+    // Given the session picker on agent 1, its preview just read, and
     // its transcript grown since.
     let mut test = loop_app(FakeZmx::listing(""), keeps_running)?;
     let transcript = test.dir.path().join("1.jsonl");
@@ -1606,14 +1606,14 @@ fn deadline_wakes_the_loop_for_a_pending_preview_read() -> io::Result<()> {
             title: "orb".to_owned(),
             root: PathBuf::from("/repo"),
             created_at: UNIX_EPOCH,
-            threads: vec![Thread {
+            agents: vec![Agent {
                 last_session: None,
                 harness: HarnessId::new("claude"),
-                id: ThreadId(1),
+                id: AgentId(1),
                 title: None,
                 cwd: "/tmp".into(),
                 transcript: Some(transcript.clone()),
-                status: ThreadStatus::Idle,
+                status: AgentStatus::Idle,
                 turn_started_at: None,
                 pane: Some(PaneLaunch {
                     pane: PaneId(1),
@@ -1643,7 +1643,7 @@ fn deadline_wakes_the_loop_for_a_pending_preview_read() -> io::Result<()> {
             Focus::Sidebar,
         ));
     }
-    test.app.load_preview(ThreadId(1), &transcript);
+    test.app.load_preview(AgentId(1), &transcript);
     let read_at = Instant::now();
     fs::write(&transcript, "{}\n{}\n")?;
 

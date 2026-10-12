@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::AppState;
 use crate::feat::git::git_service::WorktreeFacts;
-use crate::feat::sessions::state::{Project, Session, Thread};
+use crate::feat::sessions::state::{Agent, Project, Session};
 use crate::ids::SessionId;
 
 /// How long after the newest settle a worktree is pruned.
@@ -39,7 +39,7 @@ pub struct Worktree {
 #[derive(Debug, Clone)]
 pub enum User<'a> {
     /// A session whose directory it is, with its agents.
-    Session(&'a Project, &'a Session, Vec<&'a Thread>),
+    Session(&'a Project, &'a Session, Vec<&'a Agent>),
 }
 
 /// What the next sweep does with a worktree, and why.
@@ -110,7 +110,7 @@ pub fn verdict(
     if sessions().any(|(session, _)| attached.contains(&session.id)) {
         return Verdict::Attached;
     }
-    if sessions().any(|(_, agents)| agents.iter().any(|thread| thread.status.in_progress())) {
+    if sessions().any(|(_, agents)| agents.iter().any(|agent| agent.status.in_progress())) {
         return Verdict::MidTurn;
     }
     let settles: Vec<Option<SystemTime>> =
@@ -160,7 +160,7 @@ pub fn last_used(users: &[User<'_>], facts: Option<&WorktreeFacts>) -> Option<Sy
             .map(|user| match user {
                 User::Session(_, session, agents) => agents
                     .iter()
-                    .map(|thread| thread.last_chat())
+                    .map(|agent| agent.last_chat())
                     .max()
                     .unwrap_or(session.last_activity_at),
             })
@@ -201,9 +201,9 @@ mod tests {
     use crate::AppState;
     use crate::feat::git::git_service::WorktreeFacts;
     use crate::feat::sessions::state::{
-        PaneLaunch, Project, ProjectKind, Sessions, Thread, ThreadStatus, sessions_for,
+        Agent, AgentStatus, PaneLaunch, Project, ProjectKind, Sessions, sessions_for,
     };
-    use crate::ids::{PaneId, ProjectId, SessionId, ThreadId};
+    use crate::ids::{AgentId, PaneId, ProjectId, SessionId};
 
     const WT: &str = "/w/orb/orb-1";
 
@@ -216,16 +216,16 @@ mod tests {
         UNIX_EPOCH + days(100)
     }
 
-    /// An idle, unsettled thread outside any group, running in `cwd`.
-    fn thread(id: i64, cwd: &str) -> Thread {
-        Thread {
+    /// An idle, unsettled agent outside any group, running in `cwd`.
+    fn agent(id: i64, cwd: &str) -> Agent {
+        Agent {
             last_session: None,
             harness: HarnessId::new("claude"),
-            id: ThreadId(id),
+            id: AgentId(id),
             title: None,
             cwd: PathBuf::from(cwd),
             transcript: None,
-            status: ThreadStatus::Idle,
+            status: AgentStatus::Idle,
             turn_started_at: None,
             pane: Some(PaneLaunch {
                 pane: PaneId(id),
@@ -251,28 +251,28 @@ mod tests {
         app
     }
 
-    /// `thread`, last chatted in `secs` seconds after the epoch.
-    fn chatted(thread: Thread, secs: u64) -> Thread {
-        Thread {
+    /// `agent`, last chatted in `secs` seconds after the epoch.
+    fn chatted(agent: Agent, secs: u64) -> Agent {
+        Agent {
             last_activity_at: UNIX_EPOCH + Duration::from_secs(secs),
-            ..thread
+            ..agent
         }
     }
 
-    fn project(threads: Vec<Thread>) -> Project {
+    fn project(agents: Vec<Agent>) -> Project {
         Project {
             id: ProjectId(1),
             title: "orb".to_owned(),
             root: PathBuf::from("/code/orb"),
             created_at: UNIX_EPOCH,
-            threads,
+            agents,
             repo: true,
             removed: false,
             kind: ProjectKind::Normal,
         }
     }
 
-    /// `projects`, each thread's session in its directory.
+    /// `projects`, each agent's session in its directory.
     fn app(projects: Vec<Project>) -> AppState {
         AppState {
             sessions: Sessions {
@@ -311,8 +311,8 @@ mod tests {
 
     #[rstest::rstest]
     fn worktree_whose_sessions_settled_four_days_ago_is_prunable() {
-        // Given a thread in the worktree settled four days ago.
-        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 4)]);
+        // Given an agent in the worktree settled four days ago.
+        let app = settle(app(vec![project(vec![agent(1, WT)])]), &[(1, 4)]);
 
         // When judging it with clean facts.
         let verdict = verdict_at(&app, Some(&facts(0)));
@@ -327,8 +327,8 @@ mod tests {
 
     #[rstest::rstest]
     fn verdict_after_two_settled_days_is_prune_in_one_day() {
-        // Given a thread in the worktree settled two days ago.
-        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 2)]);
+        // Given an agent in the worktree settled two days ago.
+        let app = settle(app(vec![project(vec![agent(1, WT)])]), &[(1, 2)]);
 
         // When judging it with clean facts.
         let verdict = verdict_at(&app, Some(&facts(0)));
@@ -343,9 +343,9 @@ mod tests {
 
     #[rstest::rstest]
     fn verdict_of_two_users_counts_from_the_newest_settle() {
-        // Given two threads in the worktree, settled ten and two days ago.
+        // Given two agents in the worktree, settled ten and two days ago.
         let app = settle(
-            app(vec![project(vec![thread(1, WT), thread(2, WT)])]),
+            app(vec![project(vec![agent(1, WT), agent(2, WT)])]),
             &[(1, 10), (2, 2)],
         );
 
@@ -362,37 +362,37 @@ mod tests {
 
     #[rstest::rstest]
     fn worktree_of_an_unsettled_session_is_kept() {
-        // Given an unsettled, idle thread in the worktree.
-        let app = app(vec![project(vec![thread(1, WT)])]);
+        // Given an unsettled, idle agent in the worktree.
+        let app = app(vec![project(vec![agent(1, WT)])]);
 
         // When judging it with clean facts.
         let verdict = verdict_at(&app, Some(&facts(0)));
 
         // Then it's kept as active.
-        assert_eq!(verdict, Verdict::Active, "an unsettled thread keeps it");
+        assert_eq!(verdict, Verdict::Active, "an unsettled agent keeps it");
     }
 
     #[rstest::rstest]
     fn worktree_of_an_attached_session_is_kept() {
-        // Given a thread settled eight days ago that is attached.
+        // Given an agent settled eight days ago that is attached.
         let app = AppState {
             attached: HashSet::from([SessionId(1)]),
-            ..settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 8)])
+            ..settle(app(vec![project(vec![agent(1, WT)])]), &[(1, 8)])
         };
 
         // When judging it with clean facts.
         let verdict = verdict_at(&app, Some(&facts(0)));
 
         // Then it's kept as attached.
-        assert_eq!(verdict, Verdict::Attached, "an attached thread keeps it");
+        assert_eq!(verdict, Verdict::Attached, "an attached agent keeps it");
     }
 
     #[rstest::rstest]
-    fn verdict_with_a_mid_turn_thread_is_mid_turn() {
-        // Given a thread in the worktree running a turn.
-        let working = Thread {
-            status: ThreadStatus::Working,
-            ..thread(1, WT)
+    fn verdict_with_a_mid_turn_agent_is_mid_turn() {
+        // Given an agent in the worktree running a turn.
+        let working = Agent {
+            status: AgentStatus::Working,
+            ..agent(1, WT)
         };
         let app = app(vec![project(vec![working])]);
 
@@ -405,8 +405,8 @@ mod tests {
 
     #[rstest::rstest]
     fn verdict_with_changes_is_dirty() {
-        // Given a thread settled eight days ago.
-        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 8)]);
+        // Given an agent settled eight days ago.
+        let app = settle(app(vec![project(vec![agent(1, WT)])]), &[(1, 8)]);
 
         // When judging it with three uncommitted files.
         let verdict = verdict_at(&app, Some(&facts(3)));
@@ -417,8 +417,8 @@ mod tests {
 
     #[rstest::rstest]
     fn verdict_without_facts_is_unknown() {
-        // Given a thread settled eight days ago.
-        let app = settle(app(vec![project(vec![thread(1, WT)])]), &[(1, 8)]);
+        // Given an agent settled eight days ago.
+        let app = settle(app(vec![project(vec![agent(1, WT)])]), &[(1, 8)]);
 
         // When judging it before its facts are read.
         let verdict = verdict_at(&app, None);
@@ -429,15 +429,15 @@ mod tests {
 
     #[rstest::rstest]
     fn users_list_a_session_once_with_its_agents() {
-        // Given threads 1 and 2 both running in session 1 in the worktree.
-        let second = Thread {
+        // Given agents 1 and 2 both running in session 1 in the worktree.
+        let second = Agent {
             pane: Some(PaneLaunch {
                 pane: PaneId(2),
                 session: SessionId(1),
             }),
-            ..thread(2, WT)
+            ..agent(2, WT)
         };
-        let app = app(vec![project(vec![thread(1, WT), second])]);
+        let app = app(vec![project(vec![agent(1, WT), second])]);
 
         // When listing the worktree's users.
         let users = users(&app, Path::new(WT));
@@ -453,7 +453,7 @@ mod tests {
     #[rstest::rstest]
     fn order_puts_newest_use_first_and_orphans_last() {
         // Given an orphan with a recent commit, and two worktrees whose
-        // threads last chatted at 10 s and 20 s.
+        // agents last chatted at 10 s and 20 s.
         let worktree = |path: &str, last_commit: Option<u64>| Worktree {
             path: PathBuf::from(path),
             repo: None,
@@ -473,8 +473,8 @@ mod tests {
                 ],
             },
             ..app(vec![project(vec![
-                chatted(thread(1, "/w/orb/orb-b"), 10),
-                chatted(thread(2, "/w/orb/orb-c"), 20),
+                chatted(agent(1, "/w/orb/orb-b"), 10),
+                chatted(agent(2, "/w/orb/orb-c"), 20),
             ])])
         };
 
@@ -509,8 +509,8 @@ mod tests {
             },
             ..settle(
                 app(vec![project(vec![
-                    chatted(thread(1, "/w/orb/orb-a"), 20),
-                    chatted(thread(2, "/w/orb/orb-b"), 10),
+                    chatted(agent(1, "/w/orb/orb-a"), 20),
+                    chatted(agent(2, "/w/orb/orb-b"), 10),
                 ])]),
                 &[(1, 1)],
             )
@@ -536,9 +536,9 @@ mod tests {
         #[case] verdict: Verdict,
         #[case] expected: RowState,
     ) {
-        // Given a worktree with or without a settled thread in it.
-        let threads = if used { vec![thread(1, WT)] } else { vec![] };
-        let app = settle(app(vec![project(threads)]), &[(1, 6)]);
+        // Given a worktree with or without a settled agent in it.
+        let agents = if used { vec![agent(1, WT)] } else { vec![] };
+        let app = settle(app(vec![project(agents)]), &[(1, 6)]);
 
         // When working out its row state.
         let state = row_state(&users(&app, Path::new(WT)), verdict);
@@ -552,7 +552,7 @@ mod tests {
         // Given a removed project with a session in the worktree.
         let app = app(vec![Project {
             removed: true,
-            ..project(vec![thread(1, WT)])
+            ..project(vec![agent(1, WT)])
         }]);
 
         // When listing the worktree's users.

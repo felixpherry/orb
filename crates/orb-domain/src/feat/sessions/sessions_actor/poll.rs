@@ -1,4 +1,4 @@
-//! Polling the panes and harnesses, and showing each thread's status and title.
+//! Polling the panes and harnesses, and showing each agent's status and title.
 
 use super::*;
 
@@ -11,7 +11,7 @@ impl SessionsActor {
     }
 
     /// Starts a poll: applies the agents' pane reports, then says what to
-    /// ask outside the actor. A harness no pane holds a thread of isn't
+    /// ask outside the actor. A harness no pane holds an agent of isn't
     /// asked and counts as running nothing.
     pub(super) fn poll_plan(&mut self) -> Probe {
         self.follow_pane_files();
@@ -35,7 +35,7 @@ impl SessionsActor {
     }
 
     /// Shows what the poll saw. A harness that couldn't be asked leaves its
-    /// threads as they were; the others still update, and the failure shows
+    /// agents as they were; the others still update, and the failure shows
     /// after. Returns how long to wait before the next poll: a second while
     /// any agent pane has a turn underway.
     pub(super) fn poll_seen(&mut self, seen: PollSeen) -> Duration {
@@ -76,18 +76,18 @@ impl SessionsActor {
         }
     }
 
-    /// What `report` from `pane` means for the threads:
-    /// - `end` of the pane's current conversation: the thread leaves the pane,
+    /// What `report` from `pane` means for the agents:
+    /// - `end` of the pane's current conversation: the agent leaves the pane,
     ///   and the pane has nothing to resume;
-    /// - anything else names the conversation now in the pane: its thread
-    ///   keeps the pane (transcript refreshed), or the current thread takes
-    ///   the new id after Claude's `/clear` or pi's `/new`, or the thread
-    ///   holding that id moves in, or a new thread starts; the pane's resume
+    /// - anything else names the conversation now in the pane: its agent
+    ///   keeps the pane (transcript refreshed), or the current agent takes
+    ///   the new id after Claude's `/clear` or pi's `/new`, or the agent
+    ///   holding that id moves in, or a new agent starts; the pane's resume
     ///   command then names it.
     ///
     /// Reports from an agent orb has no harness for, or a pane orb has no row
     /// for, are ignored, and so is an `end` from a settled session's pane:
-    /// settling ended it, and its thread and resume command stay for the
+    /// settling ended it, and its agent and resume command stay for the
     /// session to come back.
     fn follow_report(
         &mut self,
@@ -107,7 +107,7 @@ impl SessionsActor {
             return Ok(());
         };
         let sid = report.session_id.as_str();
-        let holds = |row: &ThreadRow| row.short_id == sid || row.session_id.as_deref() == Some(sid);
+        let holds = |row: &AgentRow| row.short_id == sid || row.session_id.as_deref() == Some(sid);
         let current = self.rows.iter().position(|row| row.pane_id == Some(pane));
         let settled = self
             .sessions
@@ -120,7 +120,7 @@ impl SessionsActor {
             let ended = match current.and_then(|i| self.rows.get_mut(i)) {
                 Some(row) if holds(row) => {
                     row.pane_id = None;
-                    self.store.save_thread(row)?;
+                    self.store.save_agent(row)?;
                     true
                 }
                 _ => false,
@@ -142,7 +142,7 @@ impl SessionsActor {
                     let before = row.clone();
                     take_transcript(row, report.transcript.as_ref());
                     if *row != before {
-                        self.store.save_thread(row)?;
+                        self.store.save_agent(row)?;
                     }
                 }
             }
@@ -151,7 +151,7 @@ impl SessionsActor {
                     take_session(row, sid);
                     row.transcript_path.clone_from(&report.transcript);
                     row.transcript_offset = 0;
-                    self.store.save_thread(row)?;
+                    self.store.save_agent(row)?;
                 }
             }
             (current, Some(j)) => {
@@ -166,7 +166,7 @@ impl SessionsActor {
                     row.orb_session = Some(session);
                     take_session(row, sid);
                     take_transcript(row, report.transcript.as_ref());
-                    self.store.save_thread(row)?;
+                    self.store.save_agent(row)?;
                 }
                 if let Some(old) = old_pane {
                     self.set_resume(old, None)?;
@@ -174,24 +174,24 @@ impl SessionsActor {
             }
             (current, None) => {
                 self.unbind(current)?;
-                self.start_pane_thread(pane, session, cwd, id, report)?;
+                self.start_pane_agent(pane, session, cwd, id, report)?;
             }
         }
         Ok(())
     }
 
-    /// Takes the thread at `index` in the rows, if any, out of its pane.
+    /// Takes the agent at `index` in the rows, if any, out of its pane.
     fn unbind(&mut self, index: Option<usize>) -> Result<(), Report<StoreError>> {
         if let Some(row) = index.and_then(|i| self.rows.get_mut(i)) {
             row.pane_id = None;
-            self.store.save_thread(row)?;
+            self.store.save_agent(row)?;
         }
         Ok(())
     }
 
-    /// Saves and shows a thread `report` started in `pane` of `session`, in
-    /// the project of the pane's session, at the top of its threads.
-    fn start_pane_thread(
+    /// Saves and shows an agent `report` started in `pane` of `session`, in
+    /// the project of the pane's session, at the top of its agents.
+    fn start_pane_agent(
         &mut self,
         pane: PaneId,
         session: SessionId,
@@ -200,7 +200,7 @@ impl SessionsActor {
         report: &AgentReport,
     ) -> Result<(), Report<StoreError>> {
         let now = now_ms();
-        let (id, project_id) = self.store.insert_pane_thread(&NewPaneThread {
+        let (id, project_id) = self.store.insert_pane_agent(&NewPaneAgent {
             pane,
             session_id: report.session_id.clone(),
             transcript_path: report.transcript.clone(),
@@ -208,7 +208,7 @@ impl SessionsActor {
             cwd: cwd.clone(),
             created_at: now,
         })?;
-        let row = ThreadRow {
+        let row = AgentRow {
             id,
             project_id,
             short_id: report.session_id.clone(),
@@ -230,7 +230,7 @@ impl SessionsActor {
             pane_id: Some(pane),
             orb_session: Some(session),
         };
-        let thread = {
+        let agent = {
             let app = self.state.read();
             unpolled(&self.services, &row, &app.layouts, &self.unread)
         };
@@ -243,7 +243,7 @@ impl SessionsActor {
             .iter_mut()
             .find(|project| project.id == project_id)
         {
-            project.threads.insert(0, thread);
+            project.agents.insert(0, agent);
         }
         self.report.changed();
         Ok(())
@@ -282,7 +282,7 @@ impl SessionsActor {
         Ok(())
     }
 
-    /// Every pane a saved thread is bound to, with its zmx session.
+    /// Every pane a saved agent is bound to, with its zmx session.
     pub(super) fn bound(&self) -> Vec<(PaneId, ZmxSession)> {
         let app = self.state.read();
         self.rows
@@ -292,7 +292,7 @@ impl SessionsActor {
             .collect()
     }
 
-    /// What the poll sees of the panes threads run in now: each one's zmx
+    /// What the poll sees of the panes agents run in now: each one's zmx
     /// session from its socket dir's listing (a dir not listed leaves its
     /// panes out) and the agents matched to the panes their processes run
     /// under.
@@ -323,9 +323,9 @@ impl SessionsActor {
         }
     }
 
-    /// Updates every saved thread from its pane and transcript, follows its
+    /// Updates every saved agent from its pane and transcript, follows its
     /// activity and its session's settle lifecycle, saves the ones that
-    /// changed, then shows them all in one write. A thread whose harness
+    /// changed, then shows them all in one write. An agent whose harness
     /// wasn't `listed` (it couldn't be asked) is left as it was; one whose
     /// harness orb doesn't know is Gone.
     fn apply(&mut self, listed: &HashMap<HarnessId, Vec<RunningAgent>>, live: &Live) {
@@ -365,11 +365,11 @@ impl SessionsActor {
                 && row.pane_id.and_then(|pane| owners.get(&pane).copied()) == selected;
             follow_activity(row, status, was_in_progress, in_selected, now);
             if *row != before
-                && let Err(report) = self.store.save_thread(row)
+                && let Err(report) = self.store.save_agent(row)
             {
                 self.services
                     .log
-                    .error_on_change("poll: thread save", SAVE_FAILED, &report);
+                    .error_on_change("poll: agent save", SAVE_FAILED, &report);
                 error = Some(SAVE_FAILED.to_owned());
             }
             statuses.push(Some(status));
@@ -395,9 +395,9 @@ impl SessionsActor {
                 if let Some(notice) = notice(sessions, row, status) {
                     notices.push(notice);
                 }
-                if let Some(thread) = thread_mut(sessions, row.id) {
+                if let Some(agent) = agent_mut(sessions, row.id) {
                     changed |= show(
-                        thread,
+                        agent,
                         row,
                         status,
                         pane_launch(row, &app.layouts, &self.unread),
@@ -426,7 +426,7 @@ impl SessionsActor {
         }
     }
 
-    /// The session of each saved thread's pane that a layout or unread tab
+    /// The session of each saved agent's pane that a layout or unread tab
     /// holds.
     fn row_pane_owners(&self) -> HashMap<PaneId, SessionId> {
         let app = self.state.read();
@@ -440,14 +440,14 @@ impl SessionsActor {
     }
 
     /// Follows each session's settle lifecycle (see [`follow_session`]) from
-    /// its agent threads' polled rows and `statuses` (index-aligned with the
-    /// rows; `None` where a thread wasn't polled, which leaves its session as
+    /// its agent agents' polled rows and `statuses` (index-aligned with the
+    /// rows; `None` where an agent wasn't polled, which leaves its session as
     /// it was) and `owners` (each row's pane's session), saving the ones that
     /// changed. Sets `error` when a save fails. Returns the sessions that
     /// changed.
     fn follow_sessions(
         &mut self,
-        statuses: &[Option<ThreadStatus>],
+        statuses: &[Option<AgentStatus>],
         owners: &HashMap<PaneId, SessionId>,
         now: i64,
         error: &mut Option<String>,
@@ -462,7 +462,7 @@ impl SessionsActor {
                     row.pane_id.and_then(|pane| owners.get(&pane)) == Some(&session.id)
                 })
                 .map(|(row, status)| Some((row, (*status)?)))
-                .collect::<Option<Vec<(&ThreadRow, ThreadStatus)>>>()
+                .collect::<Option<Vec<(&AgentRow, AgentStatus)>>>()
             else {
                 continue;
             };
@@ -494,30 +494,30 @@ impl SessionsActor {
     }
 }
 
-/// What one poll saw of the panes threads run in.
+/// What one poll saw of the panes agents run in.
 struct Live {
     /// Each bound pane's zmx session, `None` when it isn't running. A pane
     /// whose socket dir couldn't be listed is missing.
     sessions: HashMap<PaneId, Option<ZmxEntry>>,
     /// The status of each pane an agent's process runs under.
-    matched: HashMap<PaneId, ThreadStatus>,
+    matched: HashMap<PaneId, AgentStatus>,
 }
 
-/// What a saved thread is doing now, if this poll can tell: Gone for a
+/// What a saved agent is doing now, if this poll can tell: Gone for a
 /// harness orb doesn't know; Stopped with no pane; else its pane's status
 /// (see [`pane_status`]). `None` (left as it was) when its pane's socket dir
 /// couldn't be listed.
 fn status_now(
-    row: &ThreadRow,
+    row: &AgentRow,
     harness: Option<&Arc<dyn Harness>>,
     live: &Live,
     reports: &HashMap<PaneId, PaneReport>,
-) -> Option<ThreadStatus> {
+) -> Option<AgentStatus> {
     let Some(harness) = harness else {
-        return Some(ThreadStatus::Gone);
+        return Some(AgentStatus::Gone);
     };
     let Some(pane) = row.pane_id else {
-        return Some(ThreadStatus::Stopped);
+        return Some(AgentStatus::Stopped);
     };
     let running = live.sessions.get(&pane)?;
     Some(pane_status(
@@ -530,13 +530,13 @@ fn status_now(
 
 /// Follows a polled row's activity, given its `status` now and whether a
 /// turn was underway before this poll:
-/// - a turn that ended is the thread's latest activity;
-/// - the latest turn of a thread in the selected session is seen.
+/// - a turn that ended is the agent's latest activity;
+/// - the latest turn of an agent in the selected session is seen.
 ///
 /// Settling and un-settling are its session's (see [`follow_session`]).
 fn follow_activity(
-    row: &mut ThreadRow,
-    status: ThreadStatus,
+    row: &mut AgentRow,
+    status: AgentStatus,
     was_in_progress: bool,
     selected: bool,
     now: i64,
@@ -574,22 +574,22 @@ fn follow_session(row: &mut SessionRow, activity: Activity, now: i64) {
     }
 }
 
-/// The shown thread with id `id`.
-pub(super) fn thread_mut(sessions: &mut Sessions, id: ThreadId) -> Option<&mut Thread> {
+/// The shown agent with id `id`.
+pub(super) fn agent_mut(sessions: &mut Sessions, id: AgentId) -> Option<&mut Agent> {
     sessions
         .projects
         .iter_mut()
-        .flat_map(|project| &mut project.threads)
-        .find(|thread| thread.id == id)
+        .flat_map(|project| &mut project.agents)
+        .find(|agent| agent.id == id)
 }
 
-/// Brings a saved thread up to date with `status`: the turn stamp, and the
+/// Brings a saved agent up to date with `status`: the turn stamp, and the
 /// title and branch from any new transcript lines, read in its harness's
 /// `format`. Returns whether a scan ran and named no branch, which leaves
 /// the branch to git.
 fn update_row(
-    row: &mut ThreadRow,
-    status: ThreadStatus,
+    row: &mut AgentRow,
+    status: AgentStatus,
     now_ms: i64,
     format: Option<&dyn TranscriptFormat>,
 ) -> bool {
@@ -634,15 +634,15 @@ fn update_row(
     }
 }
 
-/// Makes `row` the thread of conversation `session_id`.
-fn take_session(row: &mut ThreadRow, session_id: &str) {
+/// Makes `row` the agent of conversation `session_id`.
+fn take_session(row: &mut AgentRow, session_id: &str) {
     session_id.clone_into(&mut row.short_id);
     row.session_id = Some(session_id.to_owned());
 }
 
 /// Points `row` at `transcript` when the report names a different one, read
 /// from its start.
-fn take_transcript(row: &mut ThreadRow, transcript: Option<&PathBuf>) {
+fn take_transcript(row: &mut AgentRow, transcript: Option<&PathBuf>) {
     if let Some(path) = transcript
         && row.transcript_path.as_ref() != Some(path)
     {
@@ -651,63 +651,63 @@ fn take_transcript(row: &mut ThreadRow, transcript: Option<&PathBuf>) {
     }
 }
 
-/// Shows a saved thread and `status` on `thread`, its pane run as `pane`.
+/// Shows a saved agent and `status` on `agent`, its pane run as `pane`.
 /// Returns whether anything visible changed.
 pub(super) fn show(
-    thread: &mut Thread,
-    row: &ThreadRow,
-    status: ThreadStatus,
+    agent: &mut Agent,
+    row: &AgentRow,
+    status: AgentStatus,
     pane: Option<PaneLaunch>,
 ) -> bool {
-    let shown = self::thread(row, status, pane);
-    let changed = *thread != shown;
-    *thread = shown;
+    let shown = self::agent(row, status, pane);
+    let changed = *agent != shown;
+    *agent = shown;
     changed
 }
 
-/// Why a thread that was `old` and is now `new` needs the user, if it does:
+/// Why an agent that was `old` and is now `new` needs the user, if it does:
 /// a turn ended, or the session started waiting for an approval or an answer. A
-/// thread not polled since orb started never does, so states that existed at
+/// agent not polled since orb started never does, so states that existed at
 /// launch don't notify.
-pub(super) fn notice_kind(old: ThreadStatus, new: ThreadStatus) -> Option<NoticeKind> {
+pub(super) fn notice_kind(old: AgentStatus, new: AgentStatus) -> Option<NoticeKind> {
     match (old, new) {
-        (ThreadStatus::Unknown, _) => None,
-        (old, ThreadStatus::Idle) if old.in_progress() => Some(NoticeKind::Finished),
-        (old, ThreadStatus::NeedsApproval) if old != ThreadStatus::NeedsApproval => {
+        (AgentStatus::Unknown, _) => None,
+        (old, AgentStatus::Idle) if old.in_progress() => Some(NoticeKind::Finished),
+        (old, AgentStatus::NeedsApproval) if old != AgentStatus::NeedsApproval => {
             Some(NoticeKind::NeedsApproval)
         }
-        (old, ThreadStatus::NeedsInput) if old != ThreadStatus::NeedsInput => {
+        (old, AgentStatus::NeedsInput) if old != AgentStatus::NeedsInput => {
             Some(NoticeKind::NeedsInput)
         }
         _ => None,
     }
 }
 
-/// The notice for the saved thread `row` now being `status`, if its shown
-/// status changes in a way that needs the user; never for a thread being
+/// The notice for the saved agent `row` now being `status`, if its shown
+/// status changes in a way that needs the user; never for an agent being
 /// deleted. The title is the row's, already updated by this poll.
-pub(super) fn notice(sessions: &Sessions, row: &ThreadRow, status: ThreadStatus) -> Option<Notice> {
-    let (project, thread) = sessions.projects.iter().find_map(|project| {
+pub(super) fn notice(sessions: &Sessions, row: &AgentRow, status: AgentStatus) -> Option<Notice> {
+    let (project, agent) = sessions.projects.iter().find_map(|project| {
         project
-            .threads
+            .agents
             .iter()
-            .find(|thread| thread.id == row.id)
-            .map(|thread| (project, thread))
+            .find(|agent| agent.id == row.id)
+            .map(|agent| (project, agent))
     })?;
-    if sessions.is_deleting(thread) {
+    if sessions.is_deleting(agent) {
         return None;
     }
     Some(Notice {
-        thread: row.id,
-        kind: notice_kind(thread.status, status)?,
+        agent: row.id,
+        kind: notice_kind(agent.status, status)?,
         project: project.title.clone(),
-        title: display_title(row).unwrap_or_else(|| NEW_THREAD.to_owned()),
+        title: display_title(row).unwrap_or_else(|| NEW_AGENT.to_owned()),
     })
 }
 
 /// The title the sidebar shows: the user's `r` name, else their `/rename`,
 /// else the transcript's.
-pub(super) fn display_title(row: &ThreadRow) -> Option<String> {
+pub(super) fn display_title(row: &AgentRow) -> Option<String> {
     row.renamed_title
         .clone()
         .or_else(|| row.custom_title.clone())

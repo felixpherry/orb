@@ -4,12 +4,12 @@
 
 use super::*;
 
-/// What `Command::Attach` does for a thread without a live pane.
+/// What `Command::Attach` does for an agent without a live pane.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum AttachPlan {
-    /// Start the attach command in the thread's directory.
+    /// Start the attach command in the agent's directory.
     Spawn,
-    /// The thread's orb worktree is gone: have the sessions actor recreate it.
+    /// The agent's orb worktree is gone: have the sessions actor recreate it.
     Restore,
 }
 

@@ -30,8 +30,8 @@ use std::time::{Duration, SystemTime};
 use orb_domain::feat::harness::HarnessInfo;
 use orb_domain::feat::layout::state::Layouts;
 use orb_domain::feat::sessions::state::{
-    FolderKind, Project, Session, SessionKind, Sessions, SidebarItem, SidebarRow, Thread,
-    ThreadStatus, most_urgent,
+    Agent, AgentStatus, FolderKind, Project, Session, SessionKind, Sessions, SidebarItem,
+    SidebarRow, most_urgent,
 };
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::ids::SessionId;
@@ -46,9 +46,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::mouse::HitMap;
 use crate::picker::{highlight, visible};
 
-/// Whether `thread`'s session is among the `attached` ones.
-pub(crate) fn is_attached(attached: &HashSet<SessionId>, thread: &Thread) -> bool {
-    thread
+/// Whether `agent`'s session is among the `attached` ones.
+pub(crate) fn is_attached(attached: &HashSet<SessionId>, agent: &Agent) -> bool {
+    agent
         .session()
         .is_some_and(|session| attached.contains(&session))
 }
@@ -471,15 +471,15 @@ fn render_row(
         }
         SidebarRow::Agent {
             session,
-            thread,
+            agent,
             pane,
             last,
         } => {
-            let label = layouts.agent_name(*pane, Some(thread));
+            let label = layouts.agent_name(*pane, Some(agent));
             render_agent(
                 sessions,
                 harnesses,
-                thread,
+                agent,
                 label,
                 *last,
                 attached.contains(&session.id),
@@ -519,7 +519,7 @@ fn render_card(
     let (glyph, word, colour) = session_status(&agents, attached, now);
     let pin = if session.pinned_at.is_some() { PIN } else { "" };
     let time = match urgent {
-        Some(thread) if thread.status == ThreadStatus::Working => when(thread, now),
+        Some(agent) if agent.status == AgentStatus::Working => when(agent, now),
         _ => ago_label(since(now, session.last_activity_at)),
     };
     let title = sessions.title(session);
@@ -550,7 +550,7 @@ fn render_card(
         None => {
             let branch = agents
                 .first()
-                .and_then(|thread| thread.branch.as_deref())
+                .and_then(|agent| agent.branch.as_deref())
                 .or(session.branch.as_deref())
                 .unwrap_or("—");
             format!("{BRANCH} {branch}")
@@ -558,7 +558,7 @@ fn render_card(
     };
     let icons: Vec<_> = rows
         .iter()
-        .map(|(thread, _)| status(thread, attached, now))
+        .map(|(agent, _)| status(agent, attached, now))
         .collect();
     let rest = icons.len().saturating_sub(AGENT_ICONS);
     let chevron = match (rows.is_empty(), folded) {
@@ -593,7 +593,7 @@ fn render_card(
 fn render_agent(
     sessions: &Sessions,
     harnesses: &[HarnessInfo],
-    thread: &Thread,
+    agent: &Agent,
     label: &str,
     last: bool,
     attached: bool,
@@ -602,11 +602,11 @@ fn render_agent(
     buf: &mut Buffer,
 ) {
     let guide = if last { LAST_CHILD_GUIDE } else { CHILD_GUIDE };
-    let (glyph, _, colour) = status(thread, attached, now);
+    let (glyph, _, colour) = status(agent, attached, now);
     let matched = sessions.title_matches(label).unwrap_or_default();
     let mark = harnesses
         .iter()
-        .find(|info| info.id == thread.harness)
+        .find(|info| info.id == agent.harness)
         .and_then(|info| info.icon.clone());
     render_split(
         Line::from(
@@ -680,8 +680,8 @@ fn render_settled(
     let guide = if ends_shelf { LAST_GUIDE } else { GUIDE };
     let agents = sessions.agents(session.id);
     let (glyph, colour) = match most_urgent(agents.iter().copied()) {
-        Some(thread) if matches!(thread.status, ThreadStatus::Failed | ThreadStatus::Gone) => {
-            let (glyph, _, colour) = status(thread, false, now);
+        Some(agent) if matches!(agent.status, AgentStatus::Failed | AgentStatus::Gone) => {
+            let (glyph, _, colour) = status(agent, false, now);
             (glyph, colour)
         }
         _ => (COMPLETED_ICON, DARK3),
@@ -708,41 +708,41 @@ fn render_settled(
 /// A session's status from its `agents`: its most urgent agent's, else the
 /// idle circle, filled while `attached`.
 pub(crate) fn session_status(
-    agents: &[&Thread],
+    agents: &[&Agent],
     attached: bool,
     now: SystemTime,
 ) -> (&'static str, Option<&'static str>, Color) {
     match most_urgent(agents.iter().copied()) {
-        Some(thread) => status(thread, attached, now),
+        Some(agent) => status(agent, attached, now),
         None if attached => (ATTACHED_ICON, None, FG),
         None => (IDLE_ICON, None, DARK3),
     }
 }
 
-/// A thread's status as its icon, its short word (none while idle), and
+/// An agent's status as its icon, its short word (none while idle), and
 /// their colour; `attached` fills the idle circle.
 pub(crate) fn status(
-    thread: &Thread,
+    agent: &Agent,
     attached: bool,
     now: SystemTime,
 ) -> (&'static str, Option<&'static str>, Color) {
-    match thread.status {
-        ThreadStatus::NeedsApproval => (APPROVAL_ICON, Some("approval"), YELLOW),
-        ThreadStatus::NeedsInput => (INPUT_ICON, Some("input"), MAGENTA),
-        ThreadStatus::Working => (spinner(thread, now), Some("working"), BLUE),
-        ThreadStatus::Failed => (FAILED_ICON, Some("failed"), RED),
-        ThreadStatus::Gone => (GONE_ICON, Some("gone"), RED),
-        ThreadStatus::Idle if thread.unseen => (COMPLETED_ICON, Some("done"), GREEN),
-        ThreadStatus::Stopped => (STOPPED_ICON, Some("stopped"), COMMENT),
-        ThreadStatus::Idle | ThreadStatus::Unknown if attached => (ATTACHED_ICON, None, FG),
-        ThreadStatus::Idle | ThreadStatus::Unknown => (IDLE_ICON, None, DARK3),
+    match agent.status {
+        AgentStatus::NeedsApproval => (APPROVAL_ICON, Some("approval"), YELLOW),
+        AgentStatus::NeedsInput => (INPUT_ICON, Some("input"), MAGENTA),
+        AgentStatus::Working => (spinner(agent, now), Some("working"), BLUE),
+        AgentStatus::Failed => (FAILED_ICON, Some("failed"), RED),
+        AgentStatus::Gone => (GONE_ICON, Some("gone"), RED),
+        AgentStatus::Idle if agent.unseen => (COMPLETED_ICON, Some("done"), GREEN),
+        AgentStatus::Stopped => (STOPPED_ICON, Some("stopped"), COMMENT),
+        AgentStatus::Idle | AgentStatus::Unknown if attached => (ATTACHED_ICON, None, FG),
+        AgentStatus::Idle | AgentStatus::Unknown => (IDLE_ICON, None, DARK3),
     }
 }
 
 /// The working spinner's frame: one per [`SPINNER_FRAME`] since the turn
-/// started, so it moves with the loop's redraw while a thread works.
-fn spinner(thread: &Thread, now: SystemTime) -> &'static str {
-    let frames = thread
+/// started, so it moves with the loop's redraw while an agent works.
+fn spinner(agent: &Agent, now: SystemTime) -> &'static str {
+    let frames = agent
         .turn_started_at
         .map(|at| since(now, at).as_millis() / SPINNER_FRAME.as_millis())
         .unwrap_or_default();
@@ -754,10 +754,10 @@ fn spinner(thread: &Thread, now: SystemTime) -> &'static str {
 
 /// How long the turn has run while working, else how long ago the last turn
 /// ended.
-fn when(thread: &Thread, now: SystemTime) -> String {
-    match (thread.status, thread.turn_started_at) {
-        (ThreadStatus::Working, Some(at)) => working_label(since(now, at)),
-        _ => ago_label(since(now, thread.last_activity_at)),
+fn when(agent: &Agent, now: SystemTime) -> String {
+    match (agent.status, agent.turn_started_at) {
+        (AgentStatus::Working, Some(at)) => working_label(since(now, at)),
+        _ => ago_label(since(now, agent.last_activity_at)),
     }
 }
 
@@ -916,7 +916,7 @@ pub(crate) const VISUAL: Color = Color::Rgb(0x2d, 0x3f, 0x76);
 /// The tree guides, behind the lit shelf badge, and behind the mode line's
 /// branch and position blocks (`fg_gutter`).
 pub(crate) const GUTTER: Color = Color::Rgb(0x3b, 0x42, 0x61);
-/// Titles, the filtered project's name and an attached idle thread's
+/// Titles, the filtered project's name and an attached idle agent's
 /// circle; the picker's input and rows, and the rename box's text (`fg`).
 pub(crate) const FG: Color = Color::Rgb(0xc8, 0xd3, 0xf5);
 /// Project names, and the keys in the picker's hints (`fg_dark`).
@@ -973,7 +973,7 @@ pub(crate) const INPUT_ICON: &str = "\u{f059}";
 pub(crate) const FAILED_ICON: &str = "\u{f057}";
 /// Gone (`nf-fa-ban`).
 const GONE_ICON: &str = "\u{f05e}";
-/// A completed turn, and a settled thread that didn't fail
+/// A completed turn, and a settled agent that didn't fail
 /// (`nf-fa-check_circle`).
 pub(crate) const COMPLETED_ICON: &str = "\u{f058}";
 /// Stopped (`nf-fa-stop`).
@@ -983,11 +983,11 @@ pub(crate) const IDLE_ICON: &str = "\u{f10c}";
 /// Idle while orb is attached (`nf-fa-circle`).
 const ATTACHED_ICON: &str = "\u{f111}";
 /// How long each spinner frame shows; the loop redraws this often while a
-/// thread works or a session starts.
+/// agent works or a session starts.
 pub(crate) const SPINNER_FRAME: Duration = Duration::from_millis(100);
 /// The spinner's frames, here and in the mode line's activity.
 pub(crate) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/// A pinned thread (`nf-fa-thumb_tack`).
+/// A pinned agent (`nf-fa-thumb_tack`).
 pub(crate) const PIN: &str = "\u{f08d}";
 /// Before a branch, here and in the picker (`nf-pl-branch`).
 pub(crate) const BRANCH: &str = "\u{e0a0}";

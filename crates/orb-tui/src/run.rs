@@ -4,8 +4,8 @@
 //! changes all feed one channel. The loop sleeps until something arrives,
 //! handles everything pending, and then draws a single frame, so bursts of
 //! output cost one redraw. The only tick is every spinner frame (100 ms)
-//! while a thread is working or a session is starting, so the spinners turn
-//! and a working thread's elapsed time counts up.
+//! while an agent is working or a session is starting, so the spinners turn
+//! and a working agent's elapsed time counts up.
 //!
 //! Each pane is a `zmx attach` client: its program runs in a zmx session, so
 //! dropping the pane (a detach of its session) leaves the program running.
@@ -30,7 +30,7 @@
 //! `<C-[>`/`<C-]>` and a `<C-g>` sequence (see [`keymap::route`]). The loop
 //! itself reads the directory picker's listings, the branch picker's refs
 //! and the session picker's preview, re-reading the preview whenever the
-//! selected thread's transcript changes length, since each takes
+//! selected agent's transcript changes length, since each takes
 //! milliseconds.
 //!
 //! A click on the sidebar, `<C-S-h>` or `<C-g> e` from a pane moves the keys
@@ -41,7 +41,7 @@
 //! within a second of attaching leaves `session <title> exited at start` on
 //! the start screen.
 //!
-//! When a thread finishes a turn or starts needing an approval or an answer
+//! When an agent finishes a turn or starts needing an approval or an answer
 //! while orb's terminal isn't focused, the loop sends it as a desktop
 //! notification; notices that arrive while it is focused are dropped, since
 //! the sidebar already shows them.
@@ -93,7 +93,7 @@ use orb_domain::feat::sessions::validator::validate_new_session;
 use orb_domain::feat::sidebar::state::SidebarLayout;
 use orb_domain::feat::worktrees::worktrees_actor::WorktreesActor;
 use orb_domain::feat::zmx::zmx_service::{ZmxService, ZmxSession, attach_argv};
-use orb_domain::ids::{PaneId, SessionId, ThreadId};
+use orb_domain::ids::{AgentId, PaneId, SessionId};
 use orb_domain::{
     AppState, Command, Focus, Intent, IntentHandler, Log, Outcome, Reporter, SessionsCommand, State,
 };
@@ -124,7 +124,7 @@ use self::report::Ready;
 /// failed start.
 const EARLY_EXIT: Duration = Duration::from_secs(1);
 
-/// How often the session picker re-reads the same thread's growing transcript.
+/// How often the session picker re-reads the same agent's growing transcript.
 const PREVIEW_EVERY: Duration = Duration::from_secs(1);
 
 /// What the start screen says after an attached program exits within
@@ -170,7 +170,7 @@ impl Frontend {
 
     /// Runs orb's TUI until the user quits or [`Frontend::quitter`] is called.
     /// Session commands go to `sessions`; worktree commands go to
-    /// `worktrees`; search commands go to `search`; a thread whose worktree
+    /// `worktrees`; search commands go to `search`; an agent whose worktree
     /// under `worktrees_root` is gone has it recreated before attaching; the
     /// branch picker's refs come from `git`; panes run with `env` and attach
     /// through `zmx`; notices are
@@ -279,17 +279,17 @@ struct App {
     sessions: ActorRef<SessionsActor>,
     /// Refreshes and deletes orb's worktrees.
     worktrees: ActorRef<WorktreesActor>,
-    /// Where orb makes worktrees; a thread's missing worktree there is
+    /// Where orb makes worktrees; an agent's missing worktree there is
     /// recreated on attach.
     worktrees_root: PathBuf,
     /// Runs transcript searches and loads their previews.
     search: ActorRef<SearchActor>,
     git: GitService,
-    /// Every harness, to read a thread's transcript in its own format.
+    /// Every harness, to read an agent's transcript in its own format.
     harnesses: Harnesses,
     keys: Keys,
     /// Every pane orb holds a `zmx attach` client for, kept while other
-    /// threads are selected.
+    /// agents are selected.
     panes: HashMap<PaneId, Pane>,
     /// The zmx session each held pane's client attached to, for killing it
     /// once its layout no longer says, also for a broken pane.
@@ -337,8 +337,8 @@ struct App {
     /// orb's pane has the outer terminal's focus, as its last focus event
     /// said; `true` until one arrives.
     focused: bool,
-    /// The thread the session picker's preview was last read for, and when.
-    last_preview: Option<(ThreadId, Instant)>,
+    /// The agent the session picker's preview was last read for, and when.
+    last_preview: Option<(AgentId, Instant)>,
 }
 
 impl App {
@@ -472,7 +472,7 @@ impl App {
     }
 
     /// When the loop must wake without an event: a pane's synchronized
-    /// update times out, a spinner frame passes while a thread is working
+    /// update times out, a spinner frame passes while an agent is working
     /// or a session is starting, so the spinners and elapsed time tick, or
     /// the message box runs out, so it hides, or the session picker's preview
     /// waits to be read again, so a transcript that stopped growing still
@@ -487,7 +487,7 @@ impl App {
         let sync = self.panes.values().filter_map(Pane::sync_deadline);
         let toast = self.toasts.deadline(Instant::now());
         let preview = stale_preview(&self.state.read())
-            .map(|(thread, _)| preview_due(self.last_preview, thread, Instant::now()));
+            .map(|(agent, _)| preview_due(self.last_preview, agent, Instant::now()));
         tick.into_iter()
             .chain(sync)
             .chain(toast)
@@ -689,7 +689,7 @@ impl App {
                 }
             }
             // Resize and the rest: the next iteration lays out and redraws;
-            // `reconcile` sweeps exited thread panes.
+            // `reconcile` sweeps exited agent panes.
             LoopEvent::Pane(id, PaneEvent::Output) => self.type_resume(id),
             LoopEvent::Input(_) => {}
             LoopEvent::Pane(id, PaneEvent::Broken) => self.drop_broken(id),
@@ -775,8 +775,8 @@ impl App {
                     picker.show_directories(dir, names);
                 }
             }
-            Command::LoadPreview { thread, transcript } => {
-                self.load_preview(*thread, transcript);
+            Command::LoadPreview { agent, transcript } => {
+                self.load_preview(*agent, transcript);
             }
             Command::Sessions(command) => {
                 let _ = self.sessions.tell(command.clone()).try_send();
@@ -790,38 +790,38 @@ impl App {
         }
     }
 
-    /// Reads `thread`'s transcript, in its harness's format, into the open
+    /// Reads `agent`'s transcript, in its harness's format, into the open
     /// picker's preview. An unreadable transcript, or one whose harness orb
     /// doesn't know, gives an empty preview, which shows as no transcript.
-    fn load_preview(&mut self, thread: ThreadId, transcript: &Path) {
+    fn load_preview(&mut self, agent: AgentId, transcript: &Path) {
         let harness = self
             .state
             .read()
             .sessions
-            .threads()
-            .find(|candidate| candidate.id == thread)
+            .all_agents()
+            .find(|candidate| candidate.id == agent)
             .and_then(|found| self.harnesses.get(&found.harness).cloned());
         let (len, exchanges) = harness
             .and_then(|harness| harness.exchanges(transcript).ok())
             .unwrap_or_default();
         if let Some(picker) = &mut self.state.write().picker {
-            picker.show_preview(thread, len, exchanges);
+            picker.show_preview(agent, len, exchanges);
         }
-        self.last_preview = Some((thread, Instant::now()));
+        self.last_preview = Some((agent, Instant::now()));
     }
 
-    /// Reads the session picker's preview again when the selected thread's
-    /// transcript isn't the length it was read at: it grew while the thread
-    /// works, or it was found or replaced (`/clear`) since. The same thread
+    /// Reads the session picker's preview again when the selected agent's
+    /// transcript isn't the length it was read at: it grew while the agent
+    /// works, or it was found or replaced (`/clear`) since. The same agent
     /// is read at most once every [`PREVIEW_EVERY`]; the loop's deadline
     /// wakes it for the next read.
     fn refresh_preview(&mut self) {
         let now = Instant::now();
         let stale = stale_preview(&self.state.read());
-        if let Some((thread, transcript)) = stale
-            && preview_due(self.last_preview, thread, now) <= now
+        if let Some((agent, transcript)) = stale
+            && preview_due(self.last_preview, agent, now) <= now
         {
-            self.load_preview(thread, &transcript);
+            self.load_preview(agent, &transcript);
         }
     }
 
@@ -894,31 +894,31 @@ fn list_directories(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The session picker's selected thread and its transcript, when the
+/// The session picker's selected agent and its transcript, when the
 /// transcript's length isn't the one its preview was read at. A transcript
 /// that can't be measured is left alone, and so is every other picker: the
 /// search picker's previews come from the search index.
-fn stale_preview(state: &AppState) -> Option<(ThreadId, PathBuf)> {
+fn stale_preview(state: &AppState) -> Option<(AgentId, PathBuf)> {
     let picker = state
         .picker
         .as_ref()
         .filter(|picker| matches!(picker.kind(), PickerKind::Sessions { .. }))?;
-    let id = picker.selected_thread()?;
+    let id = picker.selected_agent_id()?;
     let transcript = state
         .sessions
-        .threads()
-        .find(|thread| thread.id == id)?
+        .all_agents()
+        .find(|agent| agent.id == id)?
         .transcript
         .as_ref()?;
     let len = fs::metadata(transcript).ok()?.len();
     picker.wants_preview(len).then(|| (id, transcript.clone()))
 }
 
-/// When the preview of `thread` may be read: at once for a thread other than
+/// When the preview of `agent` may be read: at once for an agent other than
 /// the one `last` read, else [`PREVIEW_EVERY`] after that read.
-fn preview_due(last: Option<(ThreadId, Instant)>, thread: ThreadId, now: Instant) -> Instant {
+fn preview_due(last: Option<(AgentId, Instant)>, agent: AgentId, now: Instant) -> Instant {
     match last {
-        Some((read, at)) if read == thread => at + PREVIEW_EVERY,
+        Some((read, at)) if read == agent => at + PREVIEW_EVERY,
         _ => now,
     }
 }

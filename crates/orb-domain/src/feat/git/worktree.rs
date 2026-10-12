@@ -1,6 +1,6 @@
 //! Where orb puts worktrees and how it names them: a new worktree lives at
 //! `<worktrees root>/<repo>/orb-<hex>` on branch `orb/<hex>`, and that branch
-//! is later renamed after the thread's title. Also finds the project's
+//! is later renamed after the agent's title. Also finds the project's
 //! previous worktree, the one the workspace picker offers.
 
 use std::hash::{BuildHasher, RandomState};
@@ -129,7 +129,7 @@ mod tests {
             root: PathBuf::from(ROOT),
             created_at: SystemTime::UNIX_EPOCH,
             removed: false,
-            threads: vec![],
+            agents: vec![],
             repo: true,
             kind: ProjectKind::Normal,
         }
